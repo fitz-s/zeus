@@ -380,7 +380,61 @@ _MAKER_FILL_SAMPLE_WINDOW_DAYS = 30
 _MAKER_FILL_MIN_SAMPLE_SIZE = {"BUY": 30, "SELL": 30}
 _MAKER_FILL_DKW_DELTA = Decimal("0.01")
 _MAKER_FILL_SAMPLE_SOURCE = "canonical_trade_db_actual_maker_outcomes_v1"
-_MAKER_FILL_SAMPLE_MODEL = "empirical_price_improved_gtc_deadline_dkw99_v1"
+_MAKER_FILL_SAMPLE_MODEL = "empirical_distance_conditioned_gtc_deadline_dkw99_v2"
+# A maker rest fills when the counterparty side comes to it, so the one variable that
+# decides the outcome is how far the quote sits from that side. Pooling every rest into a
+# single rate hides that entirely: it hands the unreachable quote the same probability as the
+# one a tick away, and since EV = p_fill x edge, a constant p_fill makes the objective a pure
+# edge sort that always prefers the most extreme longshot. Measured over our own 30-day maker
+# sample the separation is total and monotone (n=478):
+#     ask - limit <= 0.02 -> 0.236 | <= 0.05 -> 0.223 | <= 0.15 -> 0.137
+#                  <= 0.50 -> 0.028 | >  0.50 -> 0.000  (62 rests, zero fills)
+# The band edges are those measurement buckets; each keeps its own DKW bound so a thin band
+# is penalised for being thin rather than borrowing the pooled rate.
+_MAKER_FILL_DISTANCE_BAND_EDGES: tuple[Decimal, ...] = (
+    Decimal("0.02"),
+    Decimal("0.05"),
+    Decimal("0.15"),
+    Decimal("0.50"),
+)
+# A band that has not seen this many rests cannot state its own rate and falls back to the
+# pooled one, which is the pre-2026-09-17 behaviour for that band alone.
+_MAKER_FILL_BAND_MIN_SAMPLE_SIZE = 20
+# Per-band bounds use Wilson rather than the pooled DKW. DKW is a distribution-free bound on a
+# whole CDF, so its radius (0.15-0.23 at these band sizes) erases the very ordering the bands
+# exist to express — it flattened three of five bands to zero while their measured rates were
+# 0.223, 0.137 and 0.028. Wilson bounds a single proportion, which is exactly what a band is,
+# and preserves the ordering: 0.180 / 0.156 / 0.068 / 0.008 / 0.000. The furthest band reaching
+# zero is a measurement, not an artefact: 62 rests, no fills. Same 95 % basis as the
+# OOF_WILSON_95 bounds already used elsewhere in the decision path.
+_MAKER_FILL_BAND_WILSON_Z = 1.959963984540054
+
+
+def _maker_fill_band_wilson_lower_bound(successes: int, trials: int) -> Decimal:
+    """Wilson 95 % lower bound on one band's fill proportion."""
+
+    if trials <= 0:
+        return Decimal("0")
+    z = _MAKER_FILL_BAND_WILSON_Z
+    p = successes / trials
+    denominator = 1.0 + z * z / trials
+    centre = (p + z * z / (2.0 * trials)) / denominator
+    margin = (
+        z * math.sqrt(p * (1.0 - p) / trials + z * z / (4.0 * trials * trials))
+    ) / denominator
+    lower = centre - margin
+    if not math.isfinite(lower) or lower <= 0.0:
+        return Decimal("0")
+    return Decimal(str(min(lower, 1.0)))
+
+
+def _maker_fill_distance_band(distance_to_ask: Decimal) -> int:
+    """Index of the band this quote-to-counterparty distance belongs to."""
+
+    for index, edge in enumerate(_MAKER_FILL_DISTANCE_BAND_EDGES):
+        if distance_to_ask <= edge:
+            return index
+    return len(_MAKER_FILL_DISTANCE_BAND_EDGES)
 
 
 @dataclass(frozen=True)
@@ -393,6 +447,18 @@ class _CurrentMakerFillSample:
     sample_identity: str
     training_cutoff_at_utc: datetime
     rest_deadline_minutes: float
+    # Per-distance-band DKW lower bounds, keyed by _maker_fill_distance_band. A band absent
+    # here had too few rests to state its own rate; the pooled bound stands in for it.
+    fill_probability_lcb_by_band: tuple[tuple[int, Decimal], ...] = ()
+
+    def band_fill_probability_lcb(self, distance_to_ask: Decimal) -> Decimal:
+        """The bound this quote's own distance earns, or the pooled one when it has none."""
+
+        band = _maker_fill_distance_band(distance_to_ask)
+        for index, bound in self.fill_probability_lcb_by_band:
+            if index == band:
+                return bound
+        return self.fill_probability_lcb
 
     def __post_init__(self) -> None:
         minimum = _MAKER_FILL_MIN_SAMPLE_SIZE.get(self.action)
@@ -1795,6 +1861,9 @@ def _load_current_maker_fill_samples(
                 "size": size,
                 "price": price,
                 "matched": Decimal("0"),
+                # The counterparty side this rest had to be reached from. Validation above
+                # already proved ask > bid and price == bid + tick, so this is positive.
+                "distance_to_ask": ask - price,
             },
         )
         if (
@@ -1809,7 +1878,9 @@ def _load_current_maker_fill_samples(
         if observed_at <= deadline_at:
             command["matched"] = max(Decimal(command["matched"]), matched)
 
-    samples_by_action: dict[str, list[tuple[str, Decimal, Decimal, Decimal]]] = {
+    samples_by_action: dict[
+        str, list[tuple[str, Decimal, Decimal, Decimal, Decimal]]
+    ] = {
         "BUY": [],
         "SELL": [],
     }
@@ -1819,7 +1890,13 @@ def _load_current_maker_fill_samples(
         size = Decimal(row["size"])
         fraction = min(Decimal("1"), Decimal(row["matched"]) / size)
         samples_by_action[str(row["action"])].append(
-            (command_id, fraction, size, Decimal(row["price"]))
+            (
+                command_id,
+                fraction,
+                size,
+                Decimal(row["price"]),
+                Decimal(row["distance_to_ask"]),
+            )
         )
 
     samples: dict[str, _CurrentMakerFillSample] = {}
@@ -1843,10 +1920,31 @@ def _load_current_maker_fill_samples(
         )
         if fill_probability_lcb <= 0:
             continue
+        # Each distance band earns its own bound from its own rests. A band is allowed to
+        # reach zero — a quote 0.9 away from the counterparty side genuinely never filled in
+        # 62 attempts, and a pooled rate that says otherwise is what sent every winner there.
+        band_rows: dict[int, list[Decimal]] = {}
+        for _cid, fraction, _size, _price, distance in action_rows:
+            band_rows.setdefault(
+                _maker_fill_distance_band(distance), []
+            ).append(fraction)
+        band_bounds: list[tuple[int, Decimal]] = []
+        for band, fractions in sorted(band_rows.items()):
+            if len(fractions) < _MAKER_FILL_BAND_MIN_SAMPLE_SIZE:
+                continue
+            band_bounds.append(
+                (
+                    band,
+                    _maker_fill_band_wilson_lower_bound(
+                        sum(1 for fraction in fractions if fraction > 0),
+                        len(fractions),
+                    ),
+                )
+            )
         canonical_rows = tuple(
             sorted(
-                (command_id, str(fraction), str(size), str(price))
-                for command_id, fraction, size, price in action_rows
+                (command_id, str(fraction), str(size), str(price), str(distance))
+                for command_id, fraction, size, price, distance in action_rows
             )
         )
         sample_identity = hashlib.sha256(
@@ -1859,6 +1957,9 @@ def _load_current_maker_fill_samples(
                     "rest_deadline_minutes": deadline_minutes,
                     "dkw_delta": str(_MAKER_FILL_DKW_DELTA),
                     "fill_probability_lcb": str(fill_probability_lcb),
+                    "fill_probability_lcb_by_band": [
+                        [band, str(bound)] for band, bound in band_bounds
+                    ],
                     "rows": canonical_rows,
                 },
                 sort_keys=True,
@@ -1872,6 +1973,7 @@ def _load_current_maker_fill_samples(
             sample_identity=sample_identity,
             training_cutoff_at_utc=cut,
             rest_deadline_minutes=deadline_minutes,
+            fill_probability_lcb_by_band=tuple(band_bounds),
         )
     return samples
 
@@ -1880,7 +1982,15 @@ def _maker_fill_outcomes(
     sample: _CurrentMakerFillSample,
     *,
     limit_price: Decimal,
+    counterparty_price: Decimal | None = None,
 ) -> tuple[MakerFillOutcome, ...]:
+    """Outcome distribution for one maker proposal.
+
+    ``counterparty_price`` is the price this rest must be reached from — the best ask for a
+    BUY. It selects the distance band whose own rests measured this quote's fill rate. Without
+    it the pooled rate stands in, which is the behaviour every quote used to get and which
+    made the ranking a pure edge sort.
+    """
     counts: dict[Decimal, int] = {}
     for fraction in sample.fill_fractions:
         counts[fraction] = counts.get(fraction, 0) + 1
@@ -1888,7 +1998,12 @@ def _maker_fill_outcomes(
         (fraction, count) for fraction, count in sorted(counts.items()) if fraction > 0
     )
     positive_count = Decimal(sum(count for _, count in positive_rows))
-    no_fill_probability = Decimal("1") - sample.fill_probability_lcb
+    fill_probability = (
+        sample.fill_probability_lcb
+        if counterparty_price is None
+        else sample.band_fill_probability_lcb(counterparty_price - limit_price)
+    )
+    no_fill_probability = Decimal("1") - fill_probability
     outcomes = (
         [
             MakerFillOutcome(
@@ -1900,12 +2015,12 @@ def _maker_fill_outcomes(
         if no_fill_probability > 0
         else []
     )
-    remaining = sample.fill_probability_lcb
+    remaining = fill_probability
     for index, (fraction, count) in enumerate(positive_rows):
         probability = (
             remaining
             if index == len(positive_rows) - 1
-            else sample.fill_probability_lcb * Decimal(count) / positive_count
+            else fill_probability * Decimal(count) / positive_count
         )
         remaining -= probability
         outcomes.append(
@@ -1972,6 +2087,7 @@ def _bind_current_maker_fill_witnesses(
         position_id: str | None,
         held_shares: Decimal | None,
         proposal: object,
+        counterparty_price: Decimal | None = None,
     ) -> None:
         sample = samples.get(action)
         event_id = event_by_family.get(family_key)
@@ -1999,11 +2115,26 @@ def _bind_current_maker_fill_witnesses(
             proposal_identity=proposal_identity,
         )
         limit_price = Decimal(levels[0].price)
-        outcomes = _maker_fill_outcomes(sample, limit_price=limit_price)
+        outcomes = _maker_fill_outcomes(
+            sample,
+            limit_price=limit_price,
+            counterparty_price=counterparty_price,
+        )
+        band_label = (
+            "pooled"
+            if counterparty_price is None
+            else str(_maker_fill_distance_band(counterparty_price - limit_price))
+        )
+        band_lcb = (
+            sample.fill_probability_lcb
+            if counterparty_price is None
+            else sample.band_fill_probability_lcb(counterparty_price - limit_price)
+        )
         source_identity = (
             f"{_MAKER_FILL_SAMPLE_SOURCE}:action={action}:"
             f"window={_MAKER_FILL_SAMPLE_WINDOW_DAYS}d:n={len(sample.fill_fractions)}:"
-            f"dkw99_lcb={sample.fill_probability_lcb}"
+            f"dkw99_lcb={sample.fill_probability_lcb}:"
+            f"distance_band={band_label}:band_dkw99_lcb={band_lcb}"
         )
         witness_identity = current_maker_fill_witness_identity(
             candidate_binding_identity=binding,
@@ -2046,6 +2177,7 @@ def _bind_current_maker_fill_witnesses(
                 native_bid_levels=asset.bid_levels,
             )
             if proposal is not None:
+                ask_levels = tuple(getattr(asset.curve, "levels", ()) or ())
                 attach(
                     action="BUY",
                     family_key=asset.family_key,
@@ -2056,6 +2188,9 @@ def _bind_current_maker_fill_witnesses(
                     position_id=None,
                     held_shares=None,
                     proposal=proposal,
+                    counterparty_price=(
+                        Decimal(ask_levels[0].price) if ask_levels else None
+                    ),
                 )
     if "SELL" in samples:
         sell_asset_by_key = {
