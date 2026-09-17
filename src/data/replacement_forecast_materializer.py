@@ -5695,7 +5695,14 @@ def _apply_fast_residual_likelihood_to_probability_carrier(
     for bin_id in bin_ids:
         lower = float(np.percentile(samples_out[bin_id], 5.0))
         upper = float(np.percentile(samples_out[bin_id], 95.0))
-        q_lcb[bin_id] = min(max(lower, 0.0), q_out[bin_id])
+        if lower > q_out[bin_id]:
+            # Same resolution collapse as the fused-center route: bound the draw RATE
+            # rather than flattening a resolution-free percentile onto the point estimate.
+            q_lcb[bin_id] = _finite_draw_lower_bound(
+                samples_out[bin_id], q_point=q_out[bin_id]
+            )
+        else:
+            q_lcb[bin_id] = min(max(lower, 0.0), q_out[bin_id])
         q_ucb[bin_id] = max(upper, q_out[bin_id])
     payload = {
         **dict(getattr(likelihood, "as_payload")()),
@@ -5825,6 +5832,44 @@ def served_settlement_log_probability(
             rounding_rule=rounding_rule,
         )
     return math.log(max(float(p), 1e-300))
+
+
+def _finite_draw_lower_bound(samples, *, q_point: float) -> float:
+    """A 95 % lower bound that still has resolution when the 5th percentile has none.
+
+    The bootstrap's 5th percentile is the right bound while the draws disagree. Once
+    q_point climbs past ~0.95 they stop disagreeing: more than 95 % of the draws put the mass
+    in the same bin, the sample vector collapses to two-to-four distinct values, and the
+    percentile IS 1.0 — above the point estimate it is meant to bound. Clipping it back to
+    q_point makes q_lcb exactly equal q_point, which
+    ``day0_authority._assert_remaining_day_lcb_is_supported_by_transform`` then refuses as
+    degenerate. The refusal therefore lands on our strongest evidence and on nothing else:
+    over 1,247 live bins, every bin below q_point 0.95 was unaffected while 76.6 % of the bins
+    above it self-rejected.
+
+    What the collapsed vector still carries is a RATE — the share of draws that landed in the
+    bin — whose only uncertainty is the finiteness of the draw count. A Clopper-Pearson lower
+    bound on that rate expresses exactly that, and is strictly below the rate for any finite
+    number of draws. Applying it as a relative haircut, ``q_point * cp_lower(rate) / rate``,
+    keeps the bound on the point estimate's own scale (the rate and q_point agree to a median
+    of 0.003 but are not the same number) and is uniformly more conservative than the clipped
+    percentile: on those same bins it lowered 54 and raised none.
+    """
+    import numpy as np  # noqa: PLC0415
+    from scipy.stats import beta  # noqa: PLC0415
+
+    draws = np.asarray(samples, dtype=float)
+    n = int(draws.size)
+    if n <= 0 or not math.isfinite(q_point) or q_point <= 0.0:
+        return 0.0
+    rate = float(draws.mean())
+    if not math.isfinite(rate) or rate <= 0.0:
+        return 0.0
+    successes = min(rate * n, float(n))
+    cp_lower = float(beta.ppf(0.05, successes, n - successes + 1))
+    if not math.isfinite(cp_lower) or cp_lower <= 0.0:
+        return 0.0
+    return max(0.0, min(q_point * (cp_lower / rate), q_point))
 
 
 def _build_fused_q_bounds(
@@ -6002,7 +6047,13 @@ def _build_fused_q_bounds(
         if not (math.isfinite(lcb) and math.isfinite(ucb)):
             raise ValueError(f"non-finite q-bound for bin {bin_id}: lcb={lcb} ucb={ucb}")
         # Defensive ordering clips: q_lcb in [0, q_point], q_ucb >= q_point.
-        lcb = min(max(lcb, 0.0), max(q_pt, 0.0))
+        # A percentile ABOVE q_point is not a bound that needs clipping — it is a
+        # percentile that ran out of resolution (see _finite_draw_lower_bound), so the
+        # finite-draw rate bound replaces it rather than being flattened onto q_point.
+        if lcb > q_pt:
+            lcb = _finite_draw_lower_bound(probs[:, idx], q_point=q_pt)
+        else:
+            lcb = min(max(lcb, 0.0), max(q_pt, 0.0))
         ucb = max(ucb, q_pt)
         # FAR-TAIL q_lcb HONESTY (2026-06-22) — legacy/non-source-clock only.
         # Authority: docs/evidence/live_order_pathology/2026-06-22_qlcb_lowerbound_honesty.md
