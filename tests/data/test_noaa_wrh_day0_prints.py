@@ -144,3 +144,46 @@ def test_the_published_reading_is_an_absorbing_day0_fact():
         {"settlement_source": noaa_wrh_source_tag("KHOU")}
     )
     assert finality in DAY0_ABSORBING_FINALITIES
+
+
+def test_publishes_into_the_world_schema_when_it_is_attached(tmp_path):
+    """observation_prints is world-class; a bare name does not resolve live.
+
+    The live tick and the backfill both run on a forecasts connection with
+    world ATTACHed, so the writer must target `world.observation_prints`. Before
+    this was resolved the write raised "no such table" on every row, the error
+    was swallowed into print_errors, and the ledger stayed empty while the daily
+    settlement row committed normally — the failure was invisible.
+    """
+    import sqlite3
+
+    from src.state.schema.observation_prints_schema import ensure_table
+
+    world_path = tmp_path / "world.db"
+    world = sqlite3.connect(world_path)
+    ensure_table(world)
+    world.commit()
+    world.close()
+
+    conn = sqlite3.connect(tmp_path / "forecasts.db")
+    conn.row_factory = sqlite3.Row
+    conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+    # Deliberately NO main-schema observation_prints: this is the live shape.
+
+    written = _append_noaa_wrh_prints(
+        conn,
+        city_name="Houston",
+        station="KHOU",
+        unit="F",
+        rows=_rows_for("2026-09-11"),
+        target_date_local=date(2026, 9, 11),
+        view="hourly",
+        fetch_utc=datetime(2026, 9, 12, 6, 0, tzinfo=timezone.utc),
+    )
+    assert written == 2
+    rows = conn.execute(
+        "SELECT source_channel, value_native FROM world.observation_prints "
+        "ORDER BY publish_ts_utc"
+    ).fetchall()
+    assert [float(r["value_native"]) for r in rows] == [78.08, 93.92]
+    assert {r["source_channel"] for r in rows} == {noaa_wrh_source_tag("KHOU")}

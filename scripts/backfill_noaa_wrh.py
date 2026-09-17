@@ -71,6 +71,7 @@ from src.config import cities_by_name, settlement_source_type_for_city  # noqa: 
 from src.contracts.settlement_semantics import SettlementSemantics  # noqa: E402
 from src.data.daily_obs_append import (  # noqa: E402
     NOAA_WRH_DATA_SOURCE_VERSION,
+    _append_noaa_wrh_prints,
     _build_atom_pair,
     _write_atom_with_coverage,
     noaa_wrh_source_tag,
@@ -270,6 +271,8 @@ def backfill(
         "days_no_rows": 0,
         "days_changed_value": 0,
         "days_changed_containment": 0,
+        "prints_written": 0,
+        "print_errors": 0,
         "refused_at": None,
         "lines": [],
     }
@@ -415,6 +418,29 @@ def backfill(
             _write_atom_with_coverage(
                 conn, atom_high, atom_low, data_source=noaa_wrh_source_tag(station),
             )
+            # Publish the readings the extreme was taken over, exactly as the
+            # live daily tick does. A backfilled day and a live day must leave
+            # the same two surfaces behind — the settlement atom pair AND the
+            # Day0 print ledger — or a rebuilt day silently loses the intraday
+            # evidence the running bound is derived from.
+            try:
+                summary["prints_written"] = summary.get("prints_written", 0) + (
+                    _append_noaa_wrh_prints(
+                        conn,
+                        city_name=city_name,
+                        station=station,
+                        unit=unit,
+                        rows=rows,
+                        target_date_local=target_date,
+                        view=view,
+                        fetch_utc=fetch_utc,
+                    )
+                )
+            except Exception as print_exc:  # noqa: BLE001
+                summary["print_errors"] = summary.get("print_errors", 0) + 1
+                summary["lines"].append(
+                    f"PRINT_LEDGER_FAILED {city_name} {iso}: {print_exc}"
+                )
             conn.commit()
             summary["days_written"] += 1
 
