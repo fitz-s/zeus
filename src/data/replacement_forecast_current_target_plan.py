@@ -1251,9 +1251,20 @@ def _latest_authorized_day0_fact(
                 settlement_channels = set()
                 physical_channels = {"hko_rhrread_spot"}
             elif source_type == "noaa" and expected_station:
+                # The page is the product the venue resolves off, so it is the
+                # settlement channel. The METAR reconstruction stays CURRENT
+                # PHYSICAL evidence — it may advance refresh/redecision — but it
+                # cannot alone create absorbing certainty, because a whole-degree
+                # Celsius report converts onto a fixed grid of Fahrenheit values
+                # that straddles the market's integer bin edges: measured over
+                # 1,153 paired city-days it rounds to a different settlement
+                # integer on 17-58% of days per city (Denver 58.3%, SF 45.8%,
+                # Chicago 41.7%, Houston 37.5%), p99 |delta| = 1 full degree.
+                # This mirrors the HKO split directly above, for the same reason.
                 ogimet_channel = f"ogimet_metar_{expected_station.lower()}"
-                settlement_channels = {ogimet_channel}
-                physical_channels = {ogimet_channel}
+                page_channel = f"noaa_wrh_{expected_station.lower()}"
+                settlement_channels = {page_channel}
+                physical_channels = {page_channel, ogimet_channel}
             else:
                 settlement_channels = set()
                 physical_channels = set()
