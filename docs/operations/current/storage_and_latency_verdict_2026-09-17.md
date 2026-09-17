@@ -43,6 +43,30 @@ Note on level choice: use `zstd-3` on the write path. `zstd-19` is the best rati
 **432 ms/call — 6.6x slower than production** and must never go on the hot path; reserve
 it for offline archival rewrites.
 
+### 1a. CORRECTION — the real pre-submit cost is 516 ms, not 65 ms
+
+The 65 ms above is only the compression slice. Production already logs the whole
+operation at `global_batch_runtime.py:9430` ("global auction receipt store completed:
+elapsed_s="), and the live log is unambiguous — **n=3,269 real calls over
+2026-09-16 05:54 → 2026-09-17 17:45: min 0.007 s, p50 0.516 s, p90 0.965 s,
+p99 2.291 s, max 21.313 s** (verified independently by me from `logs/zeus-live.log`).
+
+Ordering is now **proven**, not inferred: `receipt_store_started = time.monotonic()`
+(`:9329`) → `_store_global_auction_receipt` (`:9333`, the sole call site; every cited
+zlib+base64 site lives inside it) → completion log (`:9430`) → `trade_conn.commit()`
+(fsync) → only later `checkpoint("final_actuation:before_submit")` (`:10481`) →
+`actuate_winner` (`~:10498`). The only paths between receipt-store and actuation are
+early `reject(...)` returns, which abort submission entirely. So whenever an order is
+submitted, this completes first.
+
+**So a median of 516 ms sits between "decided to trade" and "submit," with a p99 of
+2.3 s.** That is 8-40x my micro-benchmark and reframes the priority: the codec swap
+addresses only part of it. The remainder is the delta-compute against the prior receipt,
+the reads it performs, the serialization and the fsync commit. **UNVERIFIED: the split
+between compression, DB I/O and delta-compute.** Profile `_store_global_auction_receipt`
+internals before assuming the codec swap alone recovers the 516 ms — but note the
+instrumentation to do so already half-exists, so this is cheap to settle.
+
 Applies to `candidate_evaluations_zlib_b64`, `book_native_side_states_zlib_b64`,
 `audit_context_zlib_b64` and their `_delta_` siblings. Measured on the 25 biggest recent
 `decision_log` rows: 72.33 MB stored, 66.62 MB (**92% of the row**) is those base64
@@ -153,7 +177,12 @@ existing `token_meta` removes essentially all of it, and shrinks the two
 
 Two hypotheses of mine that the data **refuted**: only 0.4% of `book_depth` rows are the
 empty book, and consecutive-identical-hash (no-change) ticks are **0%**. This is dense
-real order-book data, not redundant polling.
+real order-book data, not redundant polling — and the code explains why:
+`maybe_checkpoint_depth()` (`family_book_capture.py:402-419`) already hash-dedupes
+`book_depth` by `ladder.state_hash()`. Its own docstring records that an earlier version
+*did* have the bug I suspected ("Measured 2026-09-07: unconditional 60s checkpoints of
+5,324 tokens were ~18 GB/day, >90% identical to the prior row") and it is fixed. So the
+remaining waste is purely the denormalization above, which `token_meta` already holds.
 
 Written by `scripts/research/family_book_capture.py`, which exists **only on unmerged
 branch `research/family-book-capture`** and whose live instance (pid 90803) runs from an
@@ -211,47 +240,83 @@ connection (`src/state/db.py:356,368`), `journal_size_limit` 64 MB (`:96`).
 
 ---
 
-## 5. Recommended order — respects the 44 GiB free-space constraint
+## 5. Recommended order
 
-The sequencing matters: `VACUUM INTO` of `zeus_trades.db` needs ~144 GB for its output
-and **cannot run today**. Free space must be earned first.
+### CORRECTION — a local VACUUM of `zeus_trades.db` is impossible, not just "later"
 
-**Phase 1 — free space, no code, no risk (~30-35 GB, hours)**
+I originally framed this as a sequencing problem. It is not. `diskutil` confirms
+**one APFS container** (`disk3`, physical store `disk0s2`): `/`,
+`/System/Volumes/Data` and every `disk3sN` mount share **one 44 GiB free pool**. There
+is no second local volume, so "VACUUM INTO another path" draws from the same pool.
+
+`VACUUM`/`VACUUM INTO` needs the original file intact until the copy is verified, so
+peak = original + final = 199.5 GB + ~144 GB ≈ **344 GB against 44 GiB available**.
+And because `auto_vacuum=NONE` means DELETEs never shrink the file, **no amount of
+retention run first reduces the 199.5 GB original term.** Reclaiming the 55.7 GB
+freelist in trades requires genuinely external storage (≥150 GB), exactly as
+`vacuum_reset_trades_db.py`'s three-phase design already assumes. That is an infra
+decision, not something DB-side ordering can solve.
+
+The same arithmetic kills an in-place `family_books.db` VACUUM: 55.5 GB original +
+~32.6 GB final ≈ 88 GB peak > 44 GiB. **Deleting that file outright returns all
+55.5 GB immediately** with no scratch space at all — see step 3.
+
+**Phase 1 — free space now, no code, no headroom needed**
 1. Delete the dead MN2T6/MX2T6 dirs (**1.4 GB**) and `oracle_shadow_snapshots` (**76 MB**).
 2. Sweep orphaned ECMWF `.partial` + `.ranges.json` (**4.1 GB**), then add the sweep to
    the existing retention so it stops recurring.
-3. `VACUUM` `family_books.db` → reclaims **~23-30 GB**, fits in current free space, and
-   the DB has no live consumer so the exclusive lock is harmless. Then set
-   `auto_vacuum=INCREMENTAL` so its hourly deletes self-reclaim forever.
+3. **`family_books.db` (55.5 GB) — operator decision, the single biggest lever on this
+   host.** Zero confirmed readers anywhere in the repo; producer is on an unmerged branch
+   running from an orphaned worktree scratchpad. Deleting the file reclaims **all
+   55.5 GB instantly** — which alone takes the disk from 96% to ~90%. Either abandon the
+   research capture or relaunch it properly from `live` with `auto_vacuum=INCREMENTAL`
+   set from the start. Do not VACUUM it in place; the peak does not fit.
 4. Decide on `family_books-*.db.zst` (**6.0 GB**) and the 1.017M `seed_processed` receipts.
 
-**Phase 2 — install the retention that already exists (~15-20 GB)**
-5. Install the three launchd retention plists (run once manually with `--apply` first and
-   read the output). `decision_log` alone releases **13.2 GB** of >30-day rows.
-   Gap to close first: none of the three has an explicit WAL-size gate, and repo law
-   requires bulk deletes be WAL-bounded (`-wal` ≤ 1 GB). The trades WAL was observed
-   touching 998 MB during this audit, so add the gate before unsupervised scheduling.
-6. Wire `prune_terminal_opportunity_events.py` to a schedule.
+**Phase 2 — run the retention that already exists (no headroom needed)**
+5. Run `prune_terminal_opportunity_events.py` against world **without `--vacuum`**.
+   Frees the `opportunity_events`/`opportunity_event_processing` dead weight into the
+   freelist, which world's constant insert pressure recycles organically — no VACUUM
+   needed to get the benefit. Safest high-value action available: the reactor reads these
+   only by JOIN to a live `opportunity_event_processing` row
+   (`src/events/reactor.py:7066,10389,10672,11416,14432`), which is exactly the script's
+   KEEP set. Then wire it to a schedule.
+6. Run the three dormant trades retention scripts once, manually, with `--apply`. This
+   does **not** shrink the file (auto_vacuum=0) but stops the bleeding and shrinks the
+   eventual VACUUM target. Close one gap first: none has an explicit WAL-size gate, and
+   repo law requires bulk deletes be WAL-bounded (≤1 GB); the trades WAL was observed at
+   998 MB during this audit.
+7. Drop the 12.98M frozen world `execution_feasibility_evidence` rows — **after** the
+   read-path check in §6.
 
-**Phase 3 — the encode fix (latency + storage, needs code)**
-7. `zlib-9`+base64 → `zstd-3` BLOB on the auction receipt path. **~59 ms off every
-   decision write** and 46% fewer bytes. Keep a decoder that accepts both encodings so
-   existing rows stay readable — the field already carries an explicit
-   `"zlib+base64+canonical-json-v1"` encoding tag, so version it there.
-8. `provenance_json` in `forecast_posteriors` → zstd-19 + trained dictionary as an
-   **offline** rewrite: **46.8 GB → ~8 GB**, no forecast value touched.
-9. Compress `orderbook_depth_json` (3.49x) and `depth_before_json` (5.04x).
-10. `family_books` schema: `token_id`/`condition_id`/`event_slug` → INTEGER FK into
-    `token_meta` (removes ~64% of both row and index bytes).
+**Phase 3 — latency + stop future growth (code, no headroom needed)**
+8. The receipt-store path (§1, §1a): **p50 516 ms / p99 2.3 s sits before every submit.**
+   Profile `_store_global_auction_receipt` internals first to split compression from
+   DB I/O and delta-compute, then fix the dominant term. The codec swap (zlib-9+base64 →
+   zstd-3 BLOB) is the known-good part: 46% smaller, 11.4x faster on that slice. Version
+   it via the existing `"zlib+base64+canonical-json-v1"` tag and keep a decoder for both.
+   Blast radius is confined to `decision_log.artifact_json` and 4 files.
+9. Re-encode **new writes only** — no migration needed to get the benefit:
+   `orderbook_depth_json` (3.49x), `opportunity_events.payload_json` (2.03x),
+   `depth_before_json` (5.04x).
+10. Add `ENTRY_ORDER_POSTED` to the existing partial index
+    `idx_position_events_entry_execution_occurred_at`, which currently excludes it —
+    cheap, additive, and it makes "when did we post for family X" answerable without a
+    199 GB scan.
+11. Retention owners for the true orphans: `book_hash_transitions` (10M rows, no script
+    exists at all), `no_trade_regret_events` and `edli_no_submit_receipts`. RiskGuard
+    reads the regret table only through a bounded recent window
+    (`src/riskguard/riskguard.py:2416-2454`), so time-window retention is safe there.
 
-**Phase 4 — only once ~150 GB is free**
-11. `scripts/ops/vacuum_reset_trades_db.py --check`, then `--vacuum-into`, then `--swap`,
-    converting to `auto_vacuum=INCREMENTAL` so the 55.7 GB freelist problem cannot
-    return. This has never run against a live DB — read `--check` output carefully, take
-    the backup it demands, and fence the writers as its header requires.
+**Phase 4 — blocked on external storage, not on sequencing**
+12. Attach ≥150 GB of external/network storage, then
+    `vacuum_reset_trades_db.py --check` → `--vacuum-into DEST` → `--swap`, converting to
+    `auto_vacuum=INCREMENTAL` so the freelist problem cannot return. Never run live
+    before; read `--check` output, take the backup it demands, fence the writers.
+13. `provenance_json` offline rewrite (**46.8 GB → ~8 GB**) belongs here too — it
+    rewrites already-written bytes, so it needs the same headroom.
 
-Nothing in Phases 1-3 requires trading downtime except the `family_books` VACUUM (no
-consumer) and a daemon restart for the encode change.
+Only step 3 and the encode change (daemon restart) touch running services.
 
 ---
 
@@ -265,9 +330,27 @@ consumer) and a daemon restart for the encode change.
 - `zeus-forecasts.db` table sizes are sampled estimates; `dbstat` timed out at 600 s on
   both large DBs (it walks the whole file before filtering, so scoping by `name=` does
   not help).
-- Latency beyond the §1 encode is **not instrumented**: there is no stored
-  observation→decision→`ENTRY_ORDER_POSTED` timestamp chain to compute stage percentiles
-  from. Adding those checkpoints is the prerequisite for any further latency work — what
-  is not measured cannot be optimized, and I will not guess at it.
+- Latency beyond §1/§1a is **largely not instrumented**, and two columns that look like
+  the answer are traps: `execution_feasibility_evidence.latency_ms` /
+  `.order_intent_time` / `.submit_time` exist with 3 supporting indexes but are
+  **0% populated across 47,220 rows in 24h**; and `edli_live_order_events.occurred_at`
+  carries **one identical batch-write microsecond stamp across every lifecycle stage**,
+  so it cannot time preflight. Fixing both is the prerequisite for further latency work.
+- **A second, larger latency finding needs verification before it is acted on.** The
+  price-move → redecision-available delay measured from `opportunity_events` in a quiet
+  window gave n=228, **p50 592 s, p90 2,057 s, max 5,932 s (99 min)** — attributed to
+  `_PriceChannelRedecisionSink.__call__`
+  (`src/events/price_channel_redecision_router.py:1071`) running synchronously on the WS
+  asyncio event loop, opening 3 fresh connections per call, yielding to WORLD-writer
+  contention, and retrying only when the next quote for that same token arrives. If real,
+  it dwarfs everything else here and refutes the "well inside the freshness window"
+  assumption behind the 90 s screen cadence (`src/main.py:11038`). **I have not
+  independently verified it**, and `received_at` vs `available_at` could carry a
+  labelling artifact. Verify before building on it. Also note: zero
+  `ENTRY_ORDER_POSTED` events and 5/5 `SubmitRejected` in that window — genuinely no
+  completed entries today, so the sample is thin.
+- `state/zeus_world.db` and `state/zeus_forecasts.db` (underscore) are **0-byte decoys**;
+  the live files are `zeus-world.db` and `zeus-forecasts.db` (hyphen). Do not measure the
+  wrong file.
 - The orphaned-worktree `family_book_capture.py` process (pid 90803, 531 CPU-min) is
   writing 55 GB from an unmerged branch. Decide: promote it to `live`, or stop it.
