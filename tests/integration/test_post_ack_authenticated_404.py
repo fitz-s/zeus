@@ -112,6 +112,58 @@ class TestAuthenticated404Terminalises:
         assert summary["advanced"] >= 1
         assert _get_state(conn, "cmd-001") == "EXPIRED"
 
+    def test_a_none_return_is_absence_on_the_live_client(self, conn, mock_client):
+        """The live client RETURNS None for a missing order; it does not raise.
+
+        PolymarketClient.get_order catches VenueOrderNotFound itself and returns
+        None (polymarket_client.py:1387-1388) — only the adapter raises. Keying
+        the branch on the exception alone left it unreachable in production,
+        which is how a provably-absent order held the restart gate shut.
+        """
+        order_id = "ord-gone-at-venue"
+        _insert(
+            conn,
+            size=135.02,
+            price=0.15,
+            event_slug="lowest-temperature-in-zhengzhou-on-september-16-2026-17c",
+        )
+        _advance_to_acked(conn, venue_order_id=order_id)
+        _arm_post_ack_review(conn, order_id=order_id)
+
+        mock_client.get_order.return_value = None          # the live behaviour
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+        if hasattr(type(mock_client), "venue_reads_are_complete"):
+            delattr(type(mock_client), "venue_reads_are_complete")
+        type(mock_client).authenticated_point_absence_returns_none = True
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["advanced"] >= 1
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
+
+    def test_a_none_return_without_the_absence_flag_stays(self, conn, mock_client):
+        """A client that does not declare None-means-absent proves nothing."""
+        order_id = "ord-gone-at-venue"
+        _insert(conn, size=135.02, price=0.15)
+        _advance_to_acked(conn, venue_order_id=order_id)
+        _arm_post_ack_review(conn, order_id=order_id)
+
+        mock_client.get_order.return_value = None
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+        if hasattr(type(mock_client), "venue_reads_are_complete"):
+            delattr(type(mock_client), "venue_reads_are_complete")
+        type(mock_client).authenticated_point_absence_returns_none = False
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-001") == "REVIEW_REQUIRED"
+
     def test_an_incomplete_account_read_does_not_terminalise(
         self, conn, mock_client
     ):

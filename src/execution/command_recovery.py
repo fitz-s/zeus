@@ -22934,7 +22934,17 @@ def _review_required_post_ack_terminal_no_fill_recovery(
     point_order_matched = "0"
     point_order_authenticated_absent = False
     try:
-        point_order = _venue_order_payload(client.get_order(venue_order_id)) or None
+        raw_point_order = client.get_order(venue_order_id)
+        point_order = _venue_order_payload(raw_point_order) or None
+        # PolymarketClient.get_order CATCHES VenueOrderNotFound itself and
+        # returns None (polymarket_client.py:1387-1388); only the adapter
+        # raises. So on the live path absence arrives as a None return, never as
+        # the exception below, and keying solely on the exception left this
+        # branch unreachable in production.
+        if raw_point_order is None and getattr(
+            client, "authenticated_point_absence_returns_none", False
+        ) is True:
+            point_order_authenticated_absent = True
     except VenueOrderNotFound:
         # An authenticated 404 is positive proof the order does not exist, not a
         # read failure. Collapsing it into the bare except below left this lane
