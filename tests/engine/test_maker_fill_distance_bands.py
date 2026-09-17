@@ -81,3 +81,53 @@ def test_no_trials_is_no_bound(trials):
 
 def test_min_band_sample_size_is_enforced_as_a_constant():
     assert _MAKER_FILL_BAND_MIN_SAMPLE_SIZE >= 20
+
+
+def _sample(bands):
+    import datetime as _dt
+
+    return _CurrentMakerFillSample(
+        action="BUY",
+        fill_fractions=tuple(Decimal("1") for _ in range(40)),
+        fill_probability_lcb=Decimal("0.0699"),
+        sample_identity="test",
+        training_cutoff_at_utc=_dt.datetime.now(_dt.timezone.utc),
+        rest_deadline_minutes=20.0,
+        fill_probability_lcb_by_band=bands,
+    )
+
+
+def test_a_zero_rate_band_withdraws_the_maker_proposal_instead_of_stating_zero():
+    """A zero-probability outcome is rejected by MakerFillOutcome and would fail the auction.
+
+    The honest statement for a distance that never filled is that no maker witness exists, so
+    the taker competes alone. Live 2026-09-17: emitting the zero instead produced 32
+    `GLOBAL_AUCTION_FAILED:ValueError:maker fill outcome is invalid` in 30 minutes.
+    """
+    from src.engine.global_batch_runtime import _maker_fill_outcomes
+
+    sample = _sample(((0, Decimal("0.1775")), (4, Decimal("0"))))
+    assert _maker_fill_outcomes(
+        sample, limit_price=Decimal("0.09"), counterparty_price=Decimal("0.99")
+    ) == ()
+
+
+def test_a_reachable_band_still_states_its_distribution():
+    from src.engine.global_batch_runtime import _maker_fill_outcomes
+
+    sample = _sample(((0, Decimal("0.1775")), (4, Decimal("0"))))
+    outcomes = _maker_fill_outcomes(
+        sample, limit_price=Decimal("0.50"), counterparty_price=Decimal("0.51")
+    )
+    assert outcomes
+    assert sum(row.probability for row in outcomes) == Decimal("1")
+    assert all(row.probability > 0 for row in outcomes)
+
+
+def test_without_a_counterparty_price_the_pooled_bound_still_applies():
+    from src.engine.global_batch_runtime import _maker_fill_outcomes
+
+    sample = _sample(((4, Decimal("0")),))
+    outcomes = _maker_fill_outcomes(sample, limit_price=Decimal("0.50"))
+    assert outcomes
+    assert sum(row.probability for row in outcomes) == Decimal("1")

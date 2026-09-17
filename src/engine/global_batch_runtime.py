@@ -2003,6 +2003,12 @@ def _maker_fill_outcomes(
         if counterparty_price is None
         else sample.band_fill_probability_lcb(counterparty_price - limit_price)
     )
+    if fill_probability <= 0:
+        # This distance measured no fills at all, so there is no distribution to state and
+        # no maker proposal to make. Returning an empty tuple withdraws the maker sibling and
+        # leaves the taker to compete on its own terms; a zero-probability outcome would be
+        # rejected by MakerFillOutcome and take the whole auction down with it.
+        return ()
     no_fill_probability = Decimal("1") - fill_probability
     outcomes = (
         [
@@ -2120,6 +2126,12 @@ def _bind_current_maker_fill_witnesses(
             limit_price=limit_price,
             counterparty_price=counterparty_price,
         )
+        if not outcomes:
+            # No measured fill at this distance means no maker witness exists for it. Leaving
+            # the witness unattached is what the selector already treats as "no maker sibling"
+            # (CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE), so the taker competes alone rather than
+            # against a proposal nothing supports.
+            return
         band_label = (
             "pooled"
             if counterparty_price is None
