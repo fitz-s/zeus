@@ -1042,7 +1042,12 @@ def _source_matches_config(source: str, settlement_source_type: str) -> bool:
     if source_type == "wu_icao":
         return src == "wu_icao_history" or src.startswith("wu_icao_history_")
     if source_type == "noaa":
-        return src.startswith("ogimet_metar_")
+        # The settlement page is the product these markets resolve against; the
+        # Ogimet METAR reconstruction is the continuous intraday mirror kept as
+        # the fallback. Both are authorised Day0 evidence for a NOAA city, and
+        # the page row must be admitted or Day0 can never see the number the
+        # market will settle on.
+        return src.startswith("ogimet_metar_") or src.startswith("noaa_wrh_")
     if source_type == "hko":
         return (
             src == "hko_hourly_accumulator"

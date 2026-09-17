@@ -1912,6 +1912,67 @@ def _fetch_wrh_rows_with_token_refresh(station: str, **kwargs):
         return fetch_wrh_timeseries(station, **{**kwargs, "token": refreshed})
 
 
+def _append_noaa_wrh_prints(
+    conn,
+    *,
+    city_name: str,
+    station: str,
+    unit: str,
+    rows,
+    target_date_local: date,
+    view: str,
+    fetch_utc: datetime,
+) -> int:
+    """Append the page's own rows to the observation_prints ledger.
+
+    The daily atom pair records the settlement extreme; Day0 needs the readings
+    the extreme was taken over, because the intraday lane derives its running
+    bound as MAX/MIN across published prints at read time. The rows are already
+    in hand from the same request that produced the daily value, so this costs
+    no additional Synoptic call against the per-IP token quota.
+
+    Only rows the contract's view shows are published, keyed on the page's own
+    publication clock, so the ledger carries exactly the surface the market
+    resolves against. INSERT OR IGNORE makes a re-fetch a no-op.
+    """
+    from src.state.schema.observation_prints_schema import append_print
+
+    source_channel = noaa_wrh_source_tag(station)
+    wanted = target_date_local.isoformat()
+    fetched_at = fetch_utc.isoformat()
+    written = 0
+    for row in rows:
+        # The view law that selects which rows the page shows is the same one
+        # daily_extreme applies; an all-data city publishes every row.
+        if view == "hourly" and not getattr(row, "is_official_report", False):
+            continue
+        local_timestamp = str(getattr(row, "local_timestamp", "") or "")
+        if local_timestamp[:10] != wanted:
+            continue
+        published_at = getattr(row, "utc", None)
+        if published_at is None:
+            continue
+        try:
+            value = float(getattr(row, "air_temp"))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(value):
+            continue
+        if append_print(
+            conn,
+            city=city_name,
+            station_id=station,
+            source_channel=source_channel,
+            publish_ts_utc=published_at.astimezone(timezone.utc).isoformat(),
+            value_native=value,
+            unit=unit,
+            fetched_at_utc=fetched_at,
+            raw_report=getattr(row, "raw_metar", None),
+        ):
+            written += 1
+    return written
+
+
 def append_noaa_wrh_city(
     city_name: str,
     target_dates: list[date],
@@ -1963,7 +2024,7 @@ def append_noaa_wrh_city(
     unit = city_cfg.settlement_unit
     stats = {
         "inserted": 0, "guard_rejected": 0, "fetch_errors": 0, "no_rows": 0,
-        "window_too_old": 0,
+        "window_too_old": 0, "prints_written": 0, "print_errors": 0,
     }
 
     try:
@@ -2120,6 +2181,31 @@ def append_noaa_wrh_city(
         try:
             _write_atom_with_coverage(conn, atom_high, atom_low, data_source=source_tag)
             stats["inserted"] += 1
+            # The settlement extreme is durable; now publish the readings it was
+            # taken over so the Day0 intraday lane can derive its running bound
+            # from the market's own feed instead of the whole-degree METAR
+            # reconstruction. A ledger failure must not discard the settlement
+            # row that already succeeded, so it is logged and counted, never
+            # raised.
+            try:
+                stats["prints_written"] = stats.get("prints_written", 0) + (
+                    _append_noaa_wrh_prints(
+                        conn,
+                        city_name=city_name,
+                        station=station,
+                        unit=unit,
+                        rows=rows,
+                        target_date_local=target_d,
+                        view=view,
+                        fetch_utc=fetch_utc,
+                    )
+                )
+            except Exception as print_exc:  # noqa: BLE001
+                stats["print_errors"] = stats.get("print_errors", 0) + 1
+                logger.warning(
+                    "noaa_wrh print ledger failed %s/%s: %s",
+                    city_name, target_d, print_exc,
+                )
         except Exception as e:
             logger.error("noaa_wrh insert failed %s/%s: %s", city_name, target_d, e)
             record_failed(
