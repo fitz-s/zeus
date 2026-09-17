@@ -2217,6 +2217,9 @@ def main() -> None:
     _root.addHandler(_stdout_h)
     _root.addHandler(_stderr_h)
     logger.info("Zeus forecast-live daemon starting")
+    from src.runtime.host_idle_sleep import hold_system_awake
+
+    hold_system_awake("Zeus forecast-live: model cycles arrive on the provider's clock")
 
     from src.data.proxy_health import bypass_dead_proxy_env_vars
     from src.state.db import (

@@ -4864,6 +4864,9 @@ def main() -> None:
     _root.addHandler(_stdout_h)
     _root.addHandler(_stderr_h)
     logger.info("Zeus data-ingest daemon starting (pid=%d)", os.getpid())
+    from src.runtime.host_idle_sleep import hold_system_awake
+
+    hold_system_awake("Zeus data-ingest: observations arrive on the station's clock")
 
     # §4.5(a): control_plane.json dual consumer — boot-time read of ingest directives.
     # Reads paused_sources from state/control_plane.json. Per-tick enforcement is

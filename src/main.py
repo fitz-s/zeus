@@ -10931,6 +10931,9 @@ def main():
         if BlockingScheduler is None or getattr(BlockingScheduler, "__module__", "").startswith("apscheduler"):
             raise
 
+    from src.runtime.host_idle_sleep import hold_system_awake
+
+    hold_system_awake("Zeus live-trading: markets resolve on the venue's clock")
     scheduler = BlockingScheduler(**scheduler_kwargs)
     try:
         from apscheduler.events import EVENT_JOB_MAX_INSTANCES
