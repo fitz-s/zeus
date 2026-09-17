@@ -78,7 +78,11 @@ def _is_canonical_daily_observation(
         family_match = src == "wu_icao_history" or src.startswith("wu_icao_history_")
         expected_station = str(city.wu_station or "").strip().upper()
     elif source_type == "noaa":
-        family_match = src.startswith("ogimet_metar_")
+        # Both the settlement page and the Ogimet mirror are the NOAA family for
+        # the same station. Matching only the mirror silently drops the rows the
+        # market actually resolves off, and the day-over-day distribution this
+        # ETL feeds is what widens ENS confidence intervals.
+        family_match = src.startswith("ogimet_metar_") or src.startswith("noaa_wrh_")
         expected_station = str(city.wu_station or "").strip().upper()
     elif source_type == "hko":
         family_match = src == "hko_daily_api" or src.startswith("hko_daily_api_")
@@ -101,12 +105,17 @@ def run_etl() -> dict:
             FROM observations
             WHERE high_temp IS NOT NULL
               AND authority = 'VERIFIED'
-            ORDER BY city, target_date, source
+            ORDER BY city, target_date,
+                     CASE WHEN source LIKE 'noaa_wrh_%' THEN 0 ELSE 1 END,
+                     source
         """).fetchall()
     finally:
         source.close()
 
-    # The executable source contract admits at most one finalized row per city-date.
+    # The executable source contract admits at most one finalized row per
+    # city-date, and the first row wins. A NOAA city now has two matching
+    # families, so the ORDER BY above ranks the settlement page ahead of the
+    # Ogimet mirror explicitly rather than relying on the source tag's alphabet.
     daily_temps = {}
     for r in rows:
         if not _is_canonical_daily_observation(
