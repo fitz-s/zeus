@@ -166,8 +166,18 @@ def day0_evidence_finality(payload: Mapping[str, object]) -> str:
         source.startswith("ogimet_metar_")
         or source.startswith("aviationweather_metar")
         or source.startswith("same_station_fast_tail")
+        # The NOAA settlement page is the product the 48 NOAA markets resolve
+        # against, read from the market's own feed rather than reconstructed
+        # from METAR bodies. Within a running local day it reports the extreme
+        # of the rows shown so far, so it bounds settlement monotonically
+        # exactly as the reconstruction it replaced did — it is not a final
+        # daily value like hko_daily_api. Omitting it left the most
+        # authoritative source classified UNKNOWN and therefore weaker than
+        # the Ogimet lane it superseded.
+        or source.startswith("noaa_wrh_")
         or source.startswith("observation_prints:ogimet_metar_")
         or source.startswith("observation_prints:aviationweather_metar")
+        or source.startswith("observation_prints:noaa_wrh_")
     )
     if not monotone_source:
         return DAY0_UNKNOWN_FINALITY
