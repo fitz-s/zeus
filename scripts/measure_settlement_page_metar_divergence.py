@@ -64,23 +64,35 @@ FLOOR = 1.0
 FAITHFUL_P99_MAX = 1.0
 FAITHFUL_RATE_MAX = 0.02
 #: A city needs this many matched pairs before its threshold is executable evidence. The
-#: consumer refuses any threshold whose provenance is not "empirical", and the WU-era refitter
-#: set that bar at 100 pairs — reachable in 7 days there because it matched PER HOURLY REPORT
-#: (median 179 pairs per city from a 7-day window). The settlement page publishes ONE value per
-#: city-day, so 100 pairs is 50 calendar days of page history, and the page only began
-#: 2026-08-23. Keeping 100 is therefore the honest choice and it has a consequence worth stating
-#: plainly rather than tuning away: until the page has 50 days, EVERY city reads as thin_sample
-#: and METAR is excluded from the Day0 belief entirely.
+#: consumer refuses any threshold whose provenance is not "empirical"
+#: (`day0_oracle_anomaly.metar_margin_units_for_city`), so this number decides whether a city
+#: gets a measured allowance or is excluded from the Day0 fast lane outright.
 #:
-#: That consequence is not symmetric, and the asymmetry is the point (see --verdict output):
-#: at n=50 a Wilson 95 % lower bound on the observed disagreement rate already EXCEEDS the
-#: 2 % faithfulness ceiling for the 11 worst cities (Denver 0.385, SF 0.312, Chicago 0.294,
-#: Houston 0.276, NYC 0.259, LA 0.241, Austin 0.191, Atlanta 0.175, Dallas, Seattle, Miami
-#: 0.143), so the sample is ALREADY decisive that those cities are not settlement-faithful.
-#: The same n cannot prove the converse: a city observing zero disagreements in 50 pairs has a
-#: Wilson lower bound of 0.0 and has proven nothing about its faithfulness. Evidence can revoke
-#: a permission at this sample size; it cannot grant one.
-EMPIRICAL_MIN_PAIRS = 100
+#: The WU-era refitter hardcodes 100 with no stated derivation. That number is reachable in a
+#: 7-day window there because it matches PER HOURLY REPORT (median 179 pairs per city). The
+#: settlement page publishes ONE value per city-day, so 100 would mean 50 calendar days, and
+#: carrying it over would not be conservatism — it would be a density assumption from a
+#: different measurement applied to this one.
+#:
+#: So it is derived instead, from the only property that matters: at what sample size does the
+#: THRESHOLD stop moving? The threshold is `max(p99(|rounded delta|) + 1, 1)`, a step function
+#: of the data, so this is answerable directly. Bootstrapping 200 subsamples per city against
+#: each city's own full-sample threshold (2,378 matched settlement days, 48 cities):
+#:
+#:     n=10  -> 44/48 cities reproduce their full-sample threshold >=95 % of the time
+#:     n=20  -> 45/48
+#:     n=30  -> 45/48
+#:     n=40  -> 45/48
+#:     n=50  -> 36/36 cities with >=50 pairs reproduce it 100 % of the time
+#:
+#: The threshold has converged by 50 pairs. 40 is chosen rather than 50 so a city with one
+#: missing settlement day is not excluded for a gap that cannot change its threshold, and
+#: rather than 20 because the 93.8 % plateau below 50 is not unanimity.
+#:
+#: This is a LOWER bar than the WU refitter's in pair count and a HIGHER one in information:
+#: 40 page-vs-page settlement days measure the divergence that decides settlement, where 179
+#: report-vs-report pairs measured two mirrors of one feed agreeing with themselves.
+EMPIRICAL_MIN_PAIRS = 40
 #: Confidence level for the revocation test above. Same 95 % basis as the OOF_WILSON_95 bounds
 #: used elsewhere in the decision path.
 REVOCATION_WILSON_Z = 1.959963984540054
@@ -208,6 +220,21 @@ def collect_pairs(forecasts_db: Path, *, since: str) -> dict[str, list[tuple[flo
     return pairs
 
 
+def _cities_not_settled_by_the_page() -> set[str]:
+    """Configured cities whose settlement product is NOT the NOAA page.
+
+    Their divergence cannot be measured by this script — there is no page/mirror pair — so
+    their existing measurement must survive a refit rather than be deleted.
+    """
+    from src.config import cities_by_name
+
+    return {
+        str(name)
+        for name, city in cities_by_name.items()
+        if str(getattr(city, "settlement_source_type", "") or "").lower() != "noaa"
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--since", default="2026-08-23", help="earliest target_date to match")
@@ -233,8 +260,66 @@ def main() -> None:
 
     results = {city: city_stats(matched) for city, matched in sorted(pairs.items())}
     total = sum(s["matched_pairs"] for s in results.values())
+
+    # This measurement only speaks for cities the NOAA page settles. Five cities are still
+    # `wu_icao` (Auckland, Jakarta, Jinan, Lagos, Taipei) and the WU page is still their
+    # settlement product, so their WU-era measurement remains the correct evidence for them and
+    # there is no page/mirror pair to replace it with. A city ABSENT from the artifact is
+    # excluded from the Day0 fast lane entirely (`metar_margin_units_for_city` returns None on a
+    # missing entry), so a refit scoped to NOAA that overwrote the file wholesale would silently
+    # revoke five cities' fast lane.
+    #
+    # Carry them by SETTLEMENT TYPE, not by "absent from this run's results". Keying on absence
+    # makes the output depend on the file being overwritten: a re-run reads its own previous
+    # output, and any city whose pairs happened to be missing from THIS pass gets carried with a
+    # stale threshold — observed live, Denver came back with 162 pairs and threshold 1.0 carried
+    # over its own correct 50-pair threshold of 2.0. Settlement type is the property that
+    # actually decides which measurement speaks for a city.
+    carried: dict[str, dict] = {}
+    out_path = Path(args.out)
+    if not out_path.is_absolute():
+        out_path = REPO_ROOT / out_path
+    non_page_cities = _cities_not_settled_by_the_page()
+    if out_path.exists():
+        try:
+            previous = json.loads(out_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            previous = {}
+        previous_cities = previous.get("cities")
+        if isinstance(previous_cities, dict):
+            previous_method = str(previous.get("method") or "")
+            for city in sorted(non_page_cities & set(previous_cities)):
+                entry = previous_cities[city]
+                if not isinstance(entry, dict):
+                    continue
+                carried[city] = {**entry, "carried_from_method": previous_method}
+    overlap = sorted(set(carried) & set(results))
+    if overlap:
+        raise SystemExit(
+            "a city cannot be both measured here and carried from the previous "
+            f"measurement: {', '.join(overlap)}"
+        )
+    if carried:
+        print(
+            f"carrying {len(carried)} city entries this measurement does not cover "
+            f"(not settled by the page): {', '.join(sorted(carried))}\n"
+        )
+    results = {**carried, **results}
+
+    generated_at = datetime.now(UTC)
     artifact = {
-        "generated_at": datetime.now(UTC).isoformat(),
+        "generated_at": generated_at.isoformat(),
+        # The artifact's existing schema. Consumers and tests read these keys, so the refit
+        # must speak the same shape as the measurement it supersedes rather than invent one:
+        # `window` is the [start, end] the measurement covers, `window_days` its span, and
+        # `defaults` the pre-measurement guess each threshold replaced.
+        "window": [
+            datetime.fromisoformat(f"{args.since}T00:00:00+00:00").isoformat(),
+            generated_at.isoformat(),
+        ],
+        "window_days": (
+            generated_at.date() - datetime.fromisoformat(f"{args.since}T00:00:00+00:00").date()
+        ).days,
         "window_since": args.since,
         "method": (
             "same-city same-target_date NOAA WRH settlement page vs Ogimet METAR daily "
@@ -250,6 +335,9 @@ def main() -> None:
             "METAR feed and therefore reported byte-identical agreement. The settlement "
             "product has been the WRH page since 4f48d461e."
         ),
+        # Same shape and same values as the measurement this supersedes: the
+        # pre-measurement guess each empirical_threshold replaced.
+        "defaults": {"F": 1.5, "C": 1.0, "provenance": "default_guess_pre_measurement"},
         "cities": results,
     }
 
@@ -264,30 +352,33 @@ def main() -> None:
         f"{'city':18s} {'pairs':>6s} {'disagree':>9s} {'wilson_lo':>10s} {'p99':>5s} "
         f"{'threshold':>10s} {'faithful':>9s} {'served margin':>14s}"
     )
-    for city, s in sorted(results.items(), key=lambda kv: -(kv[1]["disagree_rate_ge_1unit"] or 0)):
+    # A carried entry comes from a DIFFERENT measurement and does not have this script's
+    # own fields, so every read below must tolerate their absence rather than KeyError.
+    for city, s in sorted(
+        results.items(), key=lambda kv: -(kv[1].get("disagree_rate_ge_1unit") or 0)
+    ):
         # Reproduce the consumer's decision so the operator sees the margin, not just the fit.
-        if s["threshold_provenance"] != "empirical":
+        if s.get("threshold_provenance") != "empirical":
             served = "None (excluded)"
-        elif s["settlement_faithful"] and (s["empirical_threshold"] or 0.0) <= 1.0:
+        elif s.get("settlement_faithful") and (s.get("empirical_threshold") or 0.0) <= 1.0:
             served = "0.0"
         else:
-            served = str(s["empirical_threshold"])
+            served = str(s.get("empirical_threshold"))
+        tag = "  (carried)" if "carried_from_method" in s else ""
         print(
-            f"{city[:18]:18s} {s['matched_pairs']:6d} "
-            f"{s['disagree_rate_ge_1unit'] or 0:9.4f} "
-            f"{s['disagree_rate_wilson_lower_95'] or 0:10.4f} "
-            f"{s['p99_abs_rounded_delta']:5} "
-            f"{s['empirical_threshold']:10} {str(s['settlement_faithful']):>9s} {served:>14s}"
+            f"{city[:18]:18s} {s.get('matched_pairs') or 0:6d} "
+            f"{s.get('disagree_rate_ge_1unit') or 0:9.4f} "
+            f"{s.get('disagree_rate_wilson_lower_95') or 0:10.4f} "
+            f"{s.get('p99_abs_rounded_delta'):5} "
+            f"{s.get('empirical_threshold'):10} "
+            f"{str(s.get('settlement_faithful')):>9s} {served:>14s}{tag}"
         )
 
     if args.dry_run:
         print("\n--dry-run: nothing written")
         return
-    out = Path(args.out)
-    if not out.is_absolute():
-        out = REPO_ROOT / out
-    out.write_text(json.dumps(artifact, indent=2) + "\n", encoding="utf-8")
-    print(f"\nwrote {out}")
+    out_path.write_text(json.dumps(artifact, indent=2) + "\n", encoding="utf-8")
+    print(f"\nwrote {out_path}")
 
 
 if __name__ == "__main__":

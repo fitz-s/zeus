@@ -33,7 +33,7 @@ def test_wmo_half_up_is_the_settlement_law_including_negative_halves():
 
 
 def test_identical_feeds_are_faithful_with_a_floor_threshold():
-    stats = mod.city_stats([(20.0, 20.0)] * 120)
+    stats = mod.city_stats([(20.0, 20.0)] * (mod.EMPIRICAL_MIN_PAIRS + 20))
     assert stats["disagree_rate_ge_1unit"] == 0.0
     assert stats["empirical_threshold"] == 1.0
     assert stats["settlement_faithful"] is True
@@ -43,7 +43,8 @@ def test_identical_feeds_are_faithful_with_a_floor_threshold():
 
 def test_a_one_degree_disagreement_half_the_time_is_not_faithful():
     """The Denver case: same tenths-level feed, different settlement integer."""
-    matched = [(20.0, 20.0)] * 60 + [(21.0, 20.0)] * 60
+    half = mod.EMPIRICAL_MIN_PAIRS
+    matched = [(20.0, 20.0)] * half + [(21.0, 20.0)] * half
     stats = mod.city_stats(matched)
     assert stats["disagree_rate_ge_1unit"] == 0.5
     assert stats["p99_abs_rounded_delta"] == 1.0
@@ -57,14 +58,19 @@ def test_rounding_happens_on_both_sides_before_the_delta():
     This is the whole reason the measurement rounds first: the question is whether the two
     sources name the same settlement integer, not whether they agree to a tenth.
     """
-    stats = mod.city_stats([(20.4, 20.1)] * 120)
+    stats = mod.city_stats([(20.4, 20.1)] * (mod.EMPIRICAL_MIN_PAIRS + 20))
     assert stats["disagree_rate_ge_1unit"] == 0.0
     assert stats["median_abs_raw_delta"] > 0.0, "the raw difference is still recorded"
 
 
 def test_thin_sample_is_not_executable_evidence():
-    """A city cannot earn a margin from a handful of days, however clean they look."""
-    stats = mod.city_stats([(20.0, 20.0)] * 50)
+    """A city cannot earn a margin from a handful of days, however clean they look.
+
+    The bar is `EMPIRICAL_MIN_PAIRS`, derived from the sample size at which the threshold
+    stops moving (see the constant's own derivation), so this test asks for one pair fewer
+    than the bar rather than pinning a number that the derivation may revise.
+    """
+    stats = mod.city_stats([(20.0, 20.0)] * (mod.EMPIRICAL_MIN_PAIRS - 1))
     assert stats["threshold_provenance"] == "thin_sample"
     assert stats["settlement_faithful"] is True, "the verdict is computable..."
     # ...but the consumer refuses any non-empirical provenance, so nothing is served.
@@ -77,12 +83,15 @@ def test_revocation_is_possible_at_a_thin_sample_but_permission_is_not():
     sample can REVOKE a city's METAR permission. The same 50 pairs showing zero disagreement
     prove nothing, so they cannot GRANT one.
     """
-    unfaithful = mod.city_stats([(21.0, 20.0)] * 26 + [(20.0, 20.0)] * 24)
+    thin = mod.EMPIRICAL_MIN_PAIRS - 1
+    unfaithful = mod.city_stats(
+        [(21.0, 20.0)] * (thin // 2 + 1) + [(20.0, 20.0)] * (thin - thin // 2 - 1)
+    )
     assert unfaithful["threshold_provenance"] == "thin_sample"
     assert unfaithful["unfaithful_proven_at_95"] is True
     assert unfaithful["disagree_rate_wilson_lower_95"] > mod.FAITHFUL_RATE_MAX
 
-    clean = mod.city_stats([(20.0, 20.0)] * 50)
+    clean = mod.city_stats([(20.0, 20.0)] * thin)
     assert clean["unfaithful_proven_at_95"] is False
     assert clean["disagree_rate_wilson_lower_95"] == 0.0
 
@@ -117,7 +126,7 @@ def test_thresholds_match_the_wu_era_refitter():
 
 def test_output_schema_matches_what_the_consumer_reads():
     """day0_oracle_anomaly reads these exact keys; a rename silently disables the margin."""
-    stats = mod.city_stats([(20.0, 20.0)] * 120)
+    stats = mod.city_stats([(20.0, 20.0)] * (mod.EMPIRICAL_MIN_PAIRS + 20))
     for key in (
         "matched_pairs",
         "empirical_threshold",

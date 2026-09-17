@@ -736,12 +736,53 @@ def fast_obs_source_for_city(
     source_type = settlement_source_type_for_city(city, target_date)
     station = str(getattr(city, "wu_station", "") or "").strip().upper()
     if source_type == "noaa" and station:
+        # SETTLEMENT-FAITHFULNESS MARGIN for the NOAA lane (2026-09-17). This branch
+        # previously omitted margin_units entirely and so took the dataclass default of
+        # 0.0, whose documented meaning is "settlement-faithful station" — i.e. it
+        # asserted by omission that the METAR integer always names the same settlement
+        # integer as the NOAA page. Measured over 2,376 matched settlement days since the
+        # page became the settlement product (4f48d461e), that is false: page and mirror
+        # round to a different integer on 7.6 % of HIGH and 9.3 % of LOW city-days, and on
+        # Denver 52 %, San Francisco 44 %, Chicago 42 %, Houston 40 %, NYC 38 %. Eleven
+        # cities are proven not settlement-faithful at 95 % confidence.
+        #
+        # The protection was inverted: the wu_icao branch below DOES consult the margin
+        # and can exclude a city, and its stations agree byte-for-byte (the WU-era
+        # artifact measured two mirrors of one METAR feed, p99 |delta| = 0.0 on 49 of 50
+        # cities). The branch with the guard was the branch that did not need it.
+        #
+        # This uses the SAME lookup and the SAME exclusion rule as the WU branch — one
+        # margin mechanism, not two — so what each NOAA city serves is decided entirely by
+        # config/wu_metar_divergence.json. Against the WU-era artifact every NOAA city
+        # still resolves to 0.0 and behaviour is byte-identical; against an artifact refit
+        # by scripts/measure_settlement_page_metar_divergence.py the measured allowance
+        # applies. The fix and the refit are a pair: either alone changes nothing.
+        margin_units = 0.0
+        try:
+            from src.data.day0_oracle_anomaly import metar_margin_units_for_city
+
+            city_name = str(getattr(city, "name", "") or "")
+            unit = str(getattr(city, "settlement_unit", "C") or "C").upper()
+            margin = metar_margin_units_for_city(city_name, unit)
+            if margin is None:
+                logger.warning(
+                    "DAY0_FAST_OBS_CITY_EXCLUDED city=%s station=%s "
+                    "reason=metar_divergence_measurement_too_thin "
+                    "(no empirical page-vs-METAR divergence measurement to absorb; see "
+                    "config/wu_metar_divergence.json)",
+                    city_name, station,
+                )
+                return None
+            margin_units = margin
+        except ImportError:
+            pass  # faithfulness model unavailable -> registry behaves as before (margin 0)
         return FastObsSource(
             source_id=FAST_OBS_SOURCE_ID,
             station_id=station,
             authority="ICAO_STATION_NATIVE",
             settlement_source_type="noaa",
             notes="same physical NOAA settlement station; direct NOAA/NWS distribution",
+            margin_units=margin_units,
         )
     if source_type == "wu_icao" and station:
         # SETTLEMENT-FAITHFULNESS MARGIN (operator correction 2026-06-10,

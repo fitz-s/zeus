@@ -2157,10 +2157,16 @@ class TestEmpiricalThresholds:
             metar_margin_units_for_city,
         )
 
+        # 2026-09-17: these assertions used to pin threshold 1.0 / margin 0.0. That pinned
+        # the WU-era values; refit against the NOAA settlement page, Wellington disagrees on
+        # 2 % of settlement days and carries 2.0. The property under test is that the fast
+        # lane serves EXACTLY what the measurement says for a measured city — the number is
+        # the measurement's to set.
         threshold, provenance = divergence_threshold_for_city(city_name, "C")
         assert provenance == "empirical"
-        assert threshold == pytest.approx(1.0)
-        assert metar_margin_units_for_city(city_name, "C") == pytest.approx(0.0)
+        assert threshold >= 1.0
+        expected_margin = metar_margin_units_for_city(city_name, "C")
+        assert expected_margin is not None, f"{city_name} must stay measured, not excluded"
 
         source = fast_obs_source_for_city(SimpleNamespace(
             name=city_name,
@@ -2171,7 +2177,7 @@ class TestEmpiricalThresholds:
         ))
         assert source is not None
         assert source.station_id == station_id
-        assert source.margin_units == pytest.approx(0.0)
+        assert source.margin_units == pytest.approx(expected_margin)
 
     def test_recent_measurements_match_city_contract_and_record_window(self):
         from pathlib import Path
@@ -2201,16 +2207,35 @@ class TestEmpiricalThresholds:
                 )
             )
         }
-        assert set(divergence) == wu_cities
-        assert model["window_days"] == 7
-        for city_name in sorted(wu_cities):
+        # 2026-09-17: the artifact is no longer a single WU measurement. The settlement
+        # product for 48 cities became the NOAA page (4f48d461e) and those cities are now
+        # measured page-vs-mirror by scripts/measure_settlement_page_metar_divergence.py,
+        # while the five still-wu_icao cities keep their WU measurement and are carried
+        # through tagged `carried_from_method`. So the artifact's city set is no longer
+        # equal to the WU city set, and the per-city WU provenance fields below exist only
+        # on WU-measured rows. Production reads exactly three keys from any row
+        # (empirical_threshold, settlement_faithful, threshold_provenance — see
+        # day0_oracle_anomaly._load_divergence_model consumers); the rest is measurement
+        # provenance, so this contract applies to the WU rows it was written for.
+        wu_measured = {
+            name
+            for name in wu_cities
+            if name in divergence and "measurement_window" in divergence[name]
+        }
+        assert wu_measured, "no WU-measured rows remain in the artifact"
+        assert wu_measured <= set(divergence)
+        for city_name in sorted(wu_measured):
             measurement = divergence[city_name]
             city = cities[city_name]
             assert measurement["station_id"] == city["wu_station"]
             assert measurement["unit"] == city["unit"]
             assert measurement["measurement_window_days"] == 7
-            assert measurement["measurement_window"] == model["window"]
-            assert measurement["measurement_generated_at"] == model["generated_at"]
+            # A carried row's window/generated_at belong to the measurement that produced
+            # it, not to this artifact's header, so they are self-consistent rather than
+            # equal to the header.
+            assert datetime.fromisoformat(measurement["measurement_generated_at"]) >= (
+                datetime.fromisoformat(measurement["measurement_window"][1])
+            )
             assert datetime.fromisoformat(measurement["measurement_generated_at"]) >= (
                 datetime.fromisoformat(measurement["measurement_window"][1])
             )
@@ -2254,29 +2279,58 @@ class TestEmpiricalThresholds:
         assert city_metar_settlement_faithful("Seoul", path=bogus) is False
 
     def test_settlement_faithfulness_verdicts(self):
+        """The verdict must follow the measurement, and absence must not read as trust.
+
+        2026-09-17: this used to assert NYC faithful. Refit against the NOAA settlement
+        page NYC disagrees on 38 % of settlement days and is correctly not faithful, so
+        pinning it asserted a fact the measurement contradicts. What the artifact says
+        about a city is the artifact's to say; what this test guards is that the verdict
+        is READ from it and that an unmeasured city is not trusted by default.
+        """
+        import json
+        from pathlib import Path
+
         from src.data.day0_oracle_anomaly import city_metar_settlement_faithful
 
-        assert city_metar_settlement_faithful("Seoul") is True
-        assert city_metar_settlement_faithful("Tokyo") is True
-        assert city_metar_settlement_faithful("NYC") is True
+        artifact = json.loads(
+            (Path(__file__).resolve().parents[1] / "config" / "wu_metar_divergence.json")
+            .read_text(encoding="utf-8")
+        )
+        entries = artifact.get("cities") or {}
+        checked = 0
+        for name, entry in entries.items():
+            if not isinstance(entry, dict) or entry.get("settlement_faithful") is None:
+                continue
+            checked += 1
+            assert city_metar_settlement_faithful(str(name)) is bool(
+                entry["settlement_faithful"]
+            ), name
+        assert checked >= 40, f"expected the measured city set, saw {checked}"
         # 2026-07-26 (Shenzhen class): a city with NO entry at all is no
         # longer assumed faithful — an unmeasured city carries LESS evidence
         # than a measured-thin sample, not more trust than one.
         assert city_metar_settlement_faithful("UnmeasuredCity") is False
 
     def test_well_measured_city_uses_current_empirical_margin(self):
-        """The live source resolves the current bounded empirical margin."""
-        seoul_source = fast_obs_source_for_city(_seoul())
-        assert seoul_source is not None
-        assert seoul_source.margin_units == pytest.approx(0.0)
+        """The live source resolves the current bounded empirical margin.
 
-        tokyo_source = fast_obs_source_for_city(_tokyo())
-        assert tokyo_source is not None
-        assert tokyo_source.margin_units == pytest.approx(0.0)
+        2026-09-17: the three cities here were pinned at 0.0. That pinned the WU-era
+        artifact's values rather than this property — NYC now carries its measured 2.0
+        against the settlement page. The property is that the source serves EXACTLY what
+        the lookup returns, whatever that is.
+        """
+        from src.data.day0_oracle_anomaly import metar_margin_units_for_city
 
-        nyc_source = fast_obs_source_for_city(_nyc())
-        assert nyc_source is not None
-        assert nyc_source.margin_units == pytest.approx(0.0)
+        for city in (_seoul(), _tokyo(), _nyc()):
+            name = str(getattr(city, "name", "") or "")
+            unit = str(getattr(city, "settlement_unit", "C") or "C").upper()
+            expected = metar_margin_units_for_city(name, unit)
+            source = fast_obs_source_for_city(city)
+            if expected is None:
+                assert source is None, f"{name}: unmeasured city must be excluded"
+                continue
+            assert source is not None, name
+            assert source.margin_units == pytest.approx(expected), name
 
     def test_guard_verdict_records_threshold_provenance(self):
         verdict = check_wu_metar_divergence(
@@ -2300,12 +2354,33 @@ class TestEmpiricalThresholds:
     def test_empirical_tightening_one_unit_divergence_now_flags_for_clean_city(self):
         """For a measured-identical city the threshold tightened from the 1.5F
         guess to 1.0 — a 1.4F rounded-extreme divergence that the guess would
-        have ignored now flags (sharper tamper detector). Use NYC (F)."""
-        from src.data.day0_oracle_anomaly import divergence_threshold_for_city
+        have ignored now flags (sharper tamper detector).
 
-        threshold, provenance = divergence_threshold_for_city("NYC", "F")
-        assert provenance == "empirical" and threshold == pytest.approx(1.0)
-        assert 1.4 > threshold  # would NOT have exceeded the old 1.5F guess
+        2026-09-17: this used to name NYC as the identical city. NYC is no longer
+        one — refit against the NOAA settlement page (the product the market now
+        resolves against) it disagrees on 38 % of settlement days and carries a
+        threshold of 2.0. The property under test is the TIGHTENING, not NYC, so
+        the city is now taken from the artifact's own verdict: any city the
+        measurement calls identical must sit at the 1.0 floor, strictly below the
+        1.5F guess it replaced. If no city is identical the premise is gone and the
+        test says so rather than passing vacuously.
+        """
+        from src.data.day0_oracle_anomaly import divergence_threshold_for_city
+        from src.config import cities_by_name
+
+        identical = []
+        for name, city in cities_by_name.items():
+            unit = str(getattr(city, "settlement_unit", "C") or "C").upper()
+            threshold, provenance = divergence_threshold_for_city(str(name), unit)
+            if provenance == "empirical" and threshold == pytest.approx(1.0):
+                identical.append((str(name), unit, threshold))
+        assert identical, (
+            "no city is measured identical to its settlement product; the "
+            "tightening this test guards has no subject left"
+        )
+        for name, _unit, threshold in identical:
+            # 1.0 is the floor, and it is strictly sharper than the 1.5F guess.
+            assert 1.4 > threshold, name
 
 
 # ===========================================================================
@@ -2458,27 +2533,35 @@ class TestMetarMarginAbsorption:
     def test_previously_measured_cities_keep_executable_margin(self):
         """Regression: the (b) default-direction fix changes behavior for
         UNMEASURED cities only. Every already-measured city in the real
-        config/wu_metar_divergence.json (no path override) must keep its
-        expected margin, including Seoul (measured-unfaithful, adequate
-        sample -> absorbed at its measured 2.0C, not excluded) and the three
-        2026-07-27 bounded seven-day measurements."""
+        config/wu_metar_divergence.json must keep an EXECUTABLE margin — a
+        real number the fast lane can absorb, never None (exclusion).
+
+        2026-09-17: this assertion used to pin each city at 0.0. That pinned the
+        WU-era artifact's VALUES, not this fix's invariant. The artifact has since
+        been refit against the NOAA settlement page (the product the 48 markets now
+        resolve against) instead of against a second METAR mirror, so a city whose
+        METAR genuinely disagrees with the page now carries its measured allowance
+        (Denver/Dallas/NYC 2.0, Lucknow 7.0) rather than 0.0. A measured city
+        keeping an executable margin is the property this regression guards; the
+        specific number is the measurement's to decide, and pinning it made this
+        test fail for a refit rather than for the regression it exists to catch.
+        """
         from src.data.day0_oracle_anomaly import metar_margin_units_for_city
 
         f_cities = {
             "NYC", "Chicago", "Miami", "Dallas", "Denver", "Atlanta",
             "Los Angeles", "Houston", "Austin", "San Francisco", "Seattle",
         }
-        expected_margin = {name: 0.0 for name in (
-            f_cities | {
-                "London", "Paris", "Amsterdam", "Milan", "Munich", "Madrid",
-                "Tokyo", "Singapore", "Taipei", "Toronto", "Beijing",
-                "Guangzhou", "Wellington", "Ankara", "Karachi",
-            }
-        )}
-        expected_margin["Seoul"] = 0.0
-        for city_name, margin in expected_margin.items():
+        measured_cities = f_cities | {
+            "London", "Paris", "Amsterdam", "Milan", "Munich", "Madrid",
+            "Tokyo", "Singapore", "Taipei", "Toronto", "Beijing",
+            "Guangzhou", "Wellington", "Ankara", "Karachi", "Seoul",
+        }
+        for city_name in sorted(measured_cities):
             unit = "F" if city_name in f_cities else "C"
-            assert metar_margin_units_for_city(city_name, unit) == pytest.approx(margin), city_name
+            margin = metar_margin_units_for_city(city_name, unit)
+            assert margin is not None, f"{city_name}: measured city must not be excluded"
+            assert margin >= 0.0, f"{city_name}: a margin is never negative"
 
 
 # ===========================================================================
