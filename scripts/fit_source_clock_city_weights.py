@@ -134,11 +134,19 @@ _FIT_QUERY = """
         FROM settlement_outcomes
         WHERE authority = 'VERIFIED' AND settlement_value IS NOT NULL
         UNION ALL
-        SELECT city, target_date, 'high', high_temp, unit, 1
+        -- A NOAA city carries BOTH the settlement page row and the Ogimet
+        -- mirror as VERIFIED observations for the same city/date, so this
+        -- fallback must rank them or the tie is resolved arbitrarily and a
+        -- whole-degree reconstruction can become the training label for a day
+        -- the market resolves off the page. Rank the page first, exactly as
+        -- harvester's settlement lookup does.
+        SELECT city, target_date, 'high', high_temp, unit,
+               CASE WHEN source LIKE 'noaa_wrh_%' THEN 1 ELSE 2 END
         FROM observations
         WHERE authority = 'VERIFIED' AND high_temp IS NOT NULL
         UNION ALL
-        SELECT city, target_date, 'low', low_temp, unit, 1
+        SELECT city, target_date, 'low', low_temp, unit,
+               CASE WHEN source LIKE 'noaa_wrh_%' THEN 1 ELSE 2 END
         FROM observations
         WHERE authority = 'VERIFIED' AND low_temp IS NOT NULL
     ),
