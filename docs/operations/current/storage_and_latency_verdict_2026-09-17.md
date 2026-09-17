@@ -336,19 +336,32 @@ Only step 3 and the encode change (daemon restart) touch running services.
   **0% populated across 47,220 rows in 24h**; and `edli_live_order_events.occurred_at`
   carries **one identical batch-write microsecond stamp across every lifecycle stage**,
   so it cannot time preflight. Fixing both is the prerequisite for further latency work.
-- **A second, larger latency finding needs verification before it is acted on.** The
-  price-move → redecision-available delay measured from `opportunity_events` in a quiet
-  window gave n=228, **p50 592 s, p90 2,057 s, max 5,932 s (99 min)** — attributed to
-  `_PriceChannelRedecisionSink.__call__`
+- **A second, larger latency finding — now verified, and corrected down ~3x.**
+  Attributed to `_PriceChannelRedecisionSink.__call__`
   (`src/events/price_channel_redecision_router.py:1071`) running synchronously on the WS
-  asyncio event loop, opening 3 fresh connections per call, yielding to WORLD-writer
-  contention, and retrying only when the next quote for that same token arrives. If real,
-  it dwarfs everything else here and refutes the "well inside the freshness window"
-  assumption behind the 90 s screen cadence (`src/main.py:11038`). **I have not
-  independently verified it**, and `received_at` vs `available_at` could carry a
-  labelling artifact. Verify before building on it. Also note: zero
-  `ENTRY_ORDER_POSTED` events and 5/5 `SubmitRejected` in that window — genuinely no
-  completed entries today, so the sample is thin.
+  asyncio event loop, opening 3 fresh connections per call
+  (`reuse_read_connections=False` wired at `src/ingest/price_channel_ingest.py:5012`),
+  yielding to WORLD-writer contention, and retrying only when the next quote for that
+  same token arrives.
+
+  I reproduced the reported query (n=320, p50 715 s, p90 2,332 s, max 5,932 s) — **but
+  it overstates the delay.** The labelling artifact I suspected is real: rows are not
+  one-per-observation. Those 320 rows cover only **119 distinct observations** (avg 2.7
+  each, one re-queued **36 times**); a single `received_at` carries three different
+  `available_at`, and one `available_at` recurs at three different `received_at`. So
+  measuring across all rows times the last retry, not the wait.
+
+  Honest metric — observation to **first** durable queue, grouped by `available_at`:
+  **n=119, min 11.3 s, p50 224.6 s, p90 952.2 s, max 1,386.5 s.**
+
+  Still a severe defect: **p50 3.7 minutes** to react to a price move on the
+  probability-flip path, against a 90 s screen cadence whose comment claims it sits
+  "well inside the executable-price freshness window" (`src/main.py:11038`). The
+  re-queue count is a second finding in itself — 36 retries for one observation is the
+  debounce-without-timer behaviour burning work.
+
+  Caveat: zero `ENTRY_ORDER_POSTED` and 5/5 `SubmitRejected` in the window — genuinely
+  no completed entries today, so this measures queueing, not fills.
 - `state/zeus_world.db` and `state/zeus_forecasts.db` (underscore) are **0-byte decoys**;
   the live files are `zeus-world.db` and `zeus-forecasts.db` (hyphen). Do not measure the
   wrong file.
