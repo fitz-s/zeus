@@ -2441,7 +2441,7 @@ def daily_tick(
     ogimet_stats = {"inserted": 0, "guard_rejected": 0, "fetch_errors": 0}
     noaa_wrh_stats = {
         "inserted": 0, "guard_rejected": 0, "fetch_errors": 0, "no_rows": 0,
-        "window_too_old": 0,
+        "window_too_old": 0, "prints_written": 0, "print_errors": 0,
     }
     for city_name, target_d in _noaa_daily_target_dates_due(now_utc).items():
         city_cfg = cities_by_name.get(city_name)
