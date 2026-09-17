@@ -6826,8 +6826,20 @@ def _compute_posterior_payload(
                     key: float(np.percentile(values, 95.0))
                     for key, values in carrier_samples_by_bin.items()
                 }
+                # The shared Day0 carrier hits the same resolution collapse as the
+                # fused-center route: once the observation pins the extreme, nearly every
+                # carrier sample lands in one bin and its 5th percentile is 1.0. Bound the
+                # draw rate there instead of flattening q_lcb onto q (see
+                # _finite_draw_lower_bound); every bin whose percentile still has
+                # resolution keeps the ordinary clip.
                 q_lcb_map = {
-                    key: min(max(value, 0.0), q[key])
+                    key: (
+                        _finite_draw_lower_bound(
+                            carrier_samples_by_bin[key], q_point=q[key]
+                        )
+                        if value > q[key]
+                        else min(max(value, 0.0), q[key])
+                    )
                     for key, value in q_lcb_map.items()
                 }
                 q_ucb_map = {
