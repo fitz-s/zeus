@@ -22932,13 +22932,40 @@ def _review_required_post_ack_terminal_no_fill_recovery(
     point_order: dict | None = None
     point_order_status = ""
     point_order_matched = "0"
+    point_order_authenticated_absent = False
     try:
         point_order = _venue_order_payload(client.get_order(venue_order_id)) or None
+    except VenueOrderNotFound:
+        # An authenticated 404 is positive proof the order does not exist, not a
+        # read failure. Collapsing it into the bare except below left this lane
+        # with no point order, so it could never append the terminal fact and the
+        # command stayed REVIEW_REQUIRED forever while its venue side was long
+        # gone. Lane 6 already draws this distinction; draw it here too.
+        point_order = None
+        point_order_authenticated_absent = True
     except Exception:
         point_order = None
     if point_order:
         point_order_status = _order_status(point_order)
         point_order_matched = _point_order_matched_size(point_order, side=command.get("side"))
+    elif (
+        point_order_authenticated_absent
+        and getattr(client, "venue_reads_are_complete", False) is True
+        and not matching_open_orders
+        and not matching_trades
+        and _trade_fact_count(conn, cmd.command_id) == 0
+    ):
+        # Absent at the venue, absent from a COMPLETE account read, and no local
+        # fill evidence: the order is terminal with zero fill. VENUE_WIPED is the
+        # state _terminal_fact_state_for_venue_status assigns when the venue
+        # carries no response for the order.
+        point_order = {
+            "orderID": venue_order_id,
+            "status": "UNKNOWN",
+            "source_error": "authenticated_point_order_absence",
+        }
+        point_order_status = "UNKNOWN"
+        point_order_matched = "0"
 
     latest_fact_is_live = (
         latest_fact is not None
@@ -23027,9 +23054,11 @@ def _review_required_post_ack_terminal_no_fill_recovery(
         return "advanced"
 
     if point_order:
+        # An authenticated absence carries no venue response for the order, so
+        # it maps to VENUE_WIPED rather than a status-derived terminal state.
         fact_state = _terminal_fact_state_for_venue_status(
             point_order_status,
-            venue_resp_present=True,
+            venue_resp_present=not point_order_authenticated_absent,
         )
         if (
             fact_state is not None
@@ -23044,7 +23073,14 @@ def _review_required_post_ack_terminal_no_fill_recovery(
                 point_order=point_order,
                 matching_open_orders=matching_open_orders,
                 matching_trades=matching_trades,
-                source_reason="acked_submit_point_order_terminal_no_fill",
+                source_reason=(
+                    "acked_submit_authenticated_point_order_absence_terminal_no_fill"
+                    if point_order_authenticated_absent
+                    else "acked_submit_point_order_terminal_no_fill"
+                ),
+                venue_resp_present_for_terminal_state=(
+                    False if point_order_authenticated_absent else None
+                ),
             )
             latest_fact = _latest_order_fact_for_command(conn, cmd.command_id)
             if latest_fact is not None:
