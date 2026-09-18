@@ -127,7 +127,35 @@ _HELD_MONITOR_FULL_DEPTH_ACTION_AUTHORITY_ATTR = (
 )
 HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS = 5.0
 HELD_MONITOR_QUOTE_READ_MAX_SECONDS = 1.0
+#: How far back a confirming sample may be sought. This is a FRESHNESS bound and
+#: must stay tight: widening it to 600 s let a 10-minute-stale quote confirm a
+#: collapse, which is exactly the staleness
+#: tests/test_flash_crash_evidence_gate.py::test_causal_catastrophe_confirmation_refuses_quote_gap
+#: exists to refuse. Persistence is enforced separately, by
+#: _FLASH_CRASH_CONFIRMATION_MIN_SPAN_SECONDS.
 _FLASH_CRASH_CONFIRMATION_MAX_GAP_SECONDS = 120.0
+
+#: Minimum separation between the current quote and a confirming sample before
+#: an adverse move counts as persistent. The freshness bound above only limits
+#: how far back confirmations may be sought; it never required them to be
+#: SEPARATED, so two quotes seconds apart satisfied "persistent catastrophe".
+#: Measured on the two 2026-09-17/18 false panics the confirming pair was 15 s
+#: apart (Wellington 00:59:44 / 00:59:59) and 7 s apart (Seattle 22:53:51 /
+#: 22:53:58); in Wellington's case ZERO of the 82 quotes in the preceding 20
+#: minutes were at or below the 0.31 bid it sold on, and the final 5 minutes
+#: were flat at 0.54 while our own posterior was 0.787. Both bins then settled
+#: in our favour (Wellington observed 14.0 C against a 15 C bin, Seattle 71.96 F
+#: against a 74-75 F bin), so the trigger liquidated two winners on sub-minute
+#: quote excursions. 30 s sits above both observed pairs and well inside the
+#: 120 s freshness bound, so a move that genuinely persists across quote cycles
+#: still confirms while a single-cycle excursion cannot.
+_FLASH_CRASH_CONFIRMATION_MIN_SPAN_SECONDS = 30.0
+
+#: Distinct causal instants to consider as confirmation candidates. Must cover
+#: the discarded recent span plus enough older instants to confirm with; a dense
+#: stream publishes every few seconds, so a small cap saw only the excursion
+#: itself.
+_FLASH_CRASH_CONFIRMATION_CANDIDATE_LIMIT = 400
 HELD_MONITOR_PROBABILITY_PREPARE_MAX_SECONDS = 2.5
 HELD_MONITOR_RAW_HWM_READ_MAX_SECONDS = 2.5
 _MONITOR_DAY0_FAMILY_CACHE_ATTR = "_zeus_monitor_day0_family_cache"
@@ -1438,7 +1466,12 @@ def _causal_deep_market_catastrophe_evidence(
                 str(token_id),
                 confirmation_start,
                 as_of.isoformat(),
-                required * 8,
+                # The separation rule below discards everything inside the most
+                # recent _FLASH_CRASH_CONFIRMATION_MIN_SPAN_SECONDS, so the
+                # candidate set must be deep enough to still contain older
+                # instants on a dense quote stream. required*8 covered only the
+                # last few minutes and left nothing to confirm with.
+                _FLASH_CRASH_CONFIRMATION_CANDIDATE_LIMIT,
             ),
         ).fetchall()
         seen_times = {as_of.isoformat()}
@@ -1450,6 +1483,18 @@ def _causal_deep_market_catastrophe_evidence(
             seen_times.add(evidence_at)
             if row["bid"] is None:
                 continue
+            # A confirmation must be SEPARATED from the current quote:
+            # "persisted for at least N consecutive causal quote samples" is a
+            # claim about time, and two prints seconds apart are one market
+            # event observed twice. Filtering here rather than after the list
+            # is capped keeps deeper instants available to confirm with.
+            sample_instant = _parse_utc_datetime(evidence_at)
+            if sample_instant is None:
+                continue
+            if (
+                as_of - sample_instant
+            ).total_seconds() < _FLASH_CRASH_CONFIRMATION_MIN_SPAN_SECONDS:
+                continue
             samples.append((float(row["bid"]), evidence_at))
             if len(samples) >= required - 1:
                 break
@@ -1458,6 +1503,11 @@ def _causal_deep_market_catastrophe_evidence(
         # live quote channel appends another causal sample and the recurring
         # monitor re-evaluates it. RESET: no latch exists; every decision
         # recomputes this bounded window and a gap/recovery returns zero/one.
+        #
+        # A confirmation must also be SEPARATED from the current quote by
+        # _FLASH_CRASH_CONFIRMATION_MIN_SPAN_SECONDS: "persisted for at least N
+        # consecutive causal quote samples" is a statement about time, and two
+        # prints seconds apart are one market event observed twice.
         count = 1
         for price, sample_at in samples:
             velocity = _causal_market_velocity_1h(

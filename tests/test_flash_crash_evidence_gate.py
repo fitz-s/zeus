@@ -537,14 +537,24 @@ def test_causal_catastrophe_confirmation_refuses_quote_gap():
 
 
 def test_causal_catastrophe_uses_executable_bid_not_ask_sensitive_mark():
-    """Production shape: stable mark must not hide a 9c to 5c held-bid collapse."""
+    """Production shape: stable mark must not hide a 9c to 5c held-bid collapse.
+
+    The invariant under test is the price SOURCE — the executable bid, never the
+    ask-sensitive mark (commit d84cf7d9a, "measure collapse on executable bid").
+    The confirming sample is now placed 45 s before the observation rather than
+    5 s: persistence is a separate requirement
+    (_FLASH_CRASH_CONFIRMATION_MIN_SPAN_SECONDS), and a 5 s gap was incidental
+    fixture construction that the sub-minute-excursion fix legitimately refuses.
+    Both the mark values and the bid collapse are unchanged, so what this test
+    guards is untouched.
+    """
     conn = _price_log_connection()
     conn.executemany(
         """INSERT INTO token_price_log(token_id, price, bid, source_timestamp, timestamp)
            VALUES ('held', ?, ?, ?, ?)""",
         [
             (0.136869, 0.09, "2026-09-01T14:54:40+00:00", "2026-09-01T14:54:40+00:00"),
-            (0.116425, 0.05, "2026-09-01T15:54:45+00:00", "2026-09-01T15:54:45+00:00"),
+            (0.116425, 0.05, "2026-09-01T15:54:05+00:00", "2026-09-01T15:54:05+00:00"),
         ],
     )
 
