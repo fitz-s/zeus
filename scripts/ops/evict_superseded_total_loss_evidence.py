@@ -74,8 +74,15 @@ def _current_generation(incident_dir: Path) -> str | None:
     return pointer
 
 
-def _plan(runtime: Path) -> tuple[list[Path], list[Path], dict[str, int]]:
-    """Return (superseded generation dirs, redundant legacy files, retention counts)."""
+def _plan(
+    runtime: Path, *, hold_legacy_for: frozenset[str] = frozenset()
+) -> tuple[list[Path], list[Path], dict[str, int]]:
+    """Return (superseded generation dirs, redundant legacy files, retention counts).
+
+    `hold_legacy_for` names incidents whose legacy file is retained even though a
+    CURRENT generation exists — used to stay safe against a daemon still running
+    pre-47da51eee code, which would still resolve the legacy path.
+    """
     incidents = runtime / "incidents"
     superseded: list[Path] = []
     legacy: list[Path] = []
@@ -83,6 +90,7 @@ def _plan(runtime: Path) -> tuple[list[Path], list[Path], dict[str, int]]:
         "no_pointer": 0,
         "legacy_is_only_evidence": 0,
         "current_generations": 0,
+        "held_for_running_daemon": 0,
     }
     if not incidents.is_dir():
         return superseded, legacy, kept
@@ -113,7 +121,9 @@ def _plan(runtime: Path) -> tuple[list[Path], list[Path], dict[str, int]]:
 
         legacy_file = incident_dir / "evidence.db"
         if legacy_file.is_file() and not legacy_file.is_symlink():
-            if live_is_usable:
+            if live_is_usable and incident_dir.name in hold_legacy_for:
+                kept["held_for_running_daemon"] += 1
+            elif live_is_usable:
                 legacy.append(legacy_file)
             else:
                 # The `_start_repair` fallback still names this path, so it is this
@@ -134,30 +144,54 @@ def _directory_bytes(path: Path) -> int:
     return total
 
 
-def _live_incident_count(runtime: Path) -> int | None:
+def _incident_states(runtime: Path) -> tuple[int | None, frozenset[str]]:
+    """Return (live incident count, incidents a pre-fix daemon could still dispatch).
+
+    The second set is `repair_waiting`/`queued`: `_dispatch_repair_waiting` selects
+    exactly that pair, and a daemon running pre-47da51eee code resolves the legacy
+    path for them. Everything else is unreachable regardless of daemon version.
+    """
     memory_db = runtime / "memory.db"
     if not memory_db.is_file():
-        return None
+        return None, frozenset()
     assert _LOOP_SPEC and _LOOP_SPEC.loader
     loop = importlib.util.module_from_spec(_LOOP_SPEC)
     try:
         _LOOP_SPEC.loader.exec_module(loop)
     except Exception:
-        return None
+        return None, frozenset()
     try:
         with loop.open_ro(memory_db) as conn:
             row = conn.execute(
                 "SELECT COUNT(*) FROM incidents "
                 "WHERE status IN ('queued','retry_pending','observing')"
             ).fetchone()
-            return int(row[0]) if row else None
+            live = int(row[0]) if row else None
+            dispatchable = frozenset(
+                str(candidate[0])
+                for candidate in conn.execute(
+                    "SELECT incident_id FROM incidents "
+                    "WHERE stage='repair_waiting' AND status='queued'"
+                )
+            )
+            return live, dispatchable
     except (sqlite3.Error, OSError):
-        return None
+        return None, frozenset()
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true", help="perform the unlinks")
+    parser.add_argument(
+        "--daemon-restarted",
+        action="store_true",
+        help=(
+            "the running daemon carries 47da51eee or later, so the legacy path is "
+            "unreachable for every incident. Without this flag, the legacy file of an "
+            "incident queued at repair_waiting is retained, because a pre-fix daemon "
+            "would still resolve it."
+        ),
+    )
     parser.add_argument(
         "--runtime",
         default=str(ROOT / ".total_loss"),
@@ -170,7 +204,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"runtime directory not found: {runtime}", file=sys.stderr)
         return 2
 
-    superseded, legacy, kept = _plan(runtime)
+    live, dispatchable = _incident_states(runtime)
+    hold = frozenset() if args.daemon_restarted else dispatchable
+    superseded, legacy, kept = _plan(runtime, hold_legacy_for=hold)
     superseded_bytes = sum(_directory_bytes(path) for path in superseded)
     legacy_bytes = 0
     for path in legacy:
@@ -179,7 +215,6 @@ def main(argv: list[str] | None = None) -> int:
         except OSError:
             continue
 
-    live = _live_incident_count(runtime)
     mode = "APPLY" if args.apply else "DRY RUN"
     print(f"[{mode}] runtime={runtime}")
     if live is not None:
@@ -195,6 +230,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  retained, live CURRENT generation      : {kept['current_generations']}")
     print(f"  retained, legacy file is only evidence : {kept['legacy_is_only_evidence']}")
     print(f"  retained, no usable CURRENT pointer    : {kept['no_pointer']}")
+    if not args.daemon_restarted:
+        print(
+            f"  retained, running daemon may dispatch  : "
+            f"{kept['held_for_running_daemon']}"
+            "  (pass --daemon-restarted once the daemon carries 47da51eee)"
+        )
     print(f"  total reclaimable: {(superseded_bytes + legacy_bytes) / 1e9:.2f} GB")
 
     if not args.apply:
