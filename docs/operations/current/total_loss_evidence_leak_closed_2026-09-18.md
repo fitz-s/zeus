@@ -118,3 +118,36 @@ Standing corrections to `family_books_compacted_and_total_loss_audit_2026-09-18.
   of unreachable files, which needs no codec and no schema change.
 - §2 "DO NOT mass-delete" — stands, and is the reason this eviction is keyed on
   unreachability rather than on incident state.
+
+## 6. Applied: 8 GB reclaimed, every metric unchanged
+
+The restart-independent portion ran at 2026-09-18T19:44Z: **234 generation dirs and
+58 legacy files removed**, `.total_loss` **20 GB -> 12 GB**, and a re-plan reports
+0.00 GB remaining. Verified against the pre-run baseline (`/tmp/tl_baseline.json`):
+
+```
+incidents_total       2184 -> 2184        transitions   72310 -> 72310
+current_gen_evidence   402 ->  402        diagnosis_json  184 ->   184
+incident_dirs         1804 -> 1804        roots            42 ->    42
+by_status   observing 1933, retry_pending 164, queued 84, blocked 3  (all identical)
+by_stage    blind 1619, repair_waiting 106, observing 451, ...        (all identical)
+```
+
+Every one of the 402 surviving snapshots opens, queries, and passes `quick_check`
+(0 failures). 17 legacy files (2.07 GB) were retained rather than the 11 predicted:
+11 by the running-daemon hold, and 6 more by the no-usable-pointer rule, which the
+hold count does not include. Both rules held, so the outcome is more conservative
+than the plan, not less.
+
+`df` did not move (91% before, 92% after) because the three live databases were
+absorbing the freed space as it was released — all three are stamped within the same
+minute as the eviction, and their WALs are healthy at 53-67 MB. The reclaim is
+measured by `du` on the store, not by free space on a volume with concurrent writers.
+
+Still outstanding: the daemon (pid 46677, started 2026-09-04) has not been restarted,
+so it carries pre-47da51eee code and the remaining 11 files stay held. Its
+`controller.err` last wrote on 2026-08-28 and ends in repeated
+`EVIDENCE_CONTROLLER_DEGRADED / evidence_snapshot_deferred:time_budget`, while the
+process is demonstrably alive (33% CPU, newest incident detected 2026-09-18T14:41).
+Evidence builds failing on their time budget is a separate open question, not a
+consequence of this work; watch whether it recurs after the restart.
