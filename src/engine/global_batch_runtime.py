@@ -2372,7 +2372,25 @@ def _book_native_side_receipt(
             not row[5] or row[5] not in _BOOK_NATIVE_SIDE_STATUSES
             for row in rows
         )
-        or {row[0] for row in rows} != set(probability_keys)
+        or {row[0] for row in rows}.difference(probability_keys)
+        # Every bound side must be a candidate OR a typed current-book
+        # exclusion — the contract this function's own docstring states. A
+        # family in the manifest that produced NO rows is the exclusion case:
+        # `actionable_family_payoff_bindings` (solver.py:1305) yields nothing
+        # for a DeterministicBinPayoffWitness whose `exact_yes_payoffs` covers
+        # none of its bindings, so the selection loop never scored it and the
+        # caller records it in `excluded_by_family` for exactly this reason
+        # (see the merge of `materialization_excluded_by_family` at the call
+        # site). Demanding strict set equality instead raised here, INSIDE
+        # `select_once`, and aborted the whole economic cut before any winner
+        # was claimed — 20 lost cuts on 2026-09-17. Rows present but absent
+        # from the manifest remain invalid: that direction is unexplained.
+        or any(
+            family_key not in excluded_by_family
+            for family_key in set(probability_keys).difference(
+                {row[0] for row in rows}
+            )
+        )
     ):
         raise ValueError("GLOBAL_AUCTION_RECEIPT_BOOK_SIDE_COVERAGE_INVALID")
 
