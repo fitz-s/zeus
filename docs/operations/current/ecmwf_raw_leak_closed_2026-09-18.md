@@ -6,11 +6,20 @@ been dead for 9 days and the test suite could not see it.
 
 ## What actually reclaimed the space
 
-**19.14 GB, 482 files, zero errors.** The GRIB store went 19 GB → 1.0 GB and the disk
-from 35 → 41 GB free. Forecast data verified intact afterwards: 1,342,477
-`ensemble_snapshots`, 597,659 `forecast_posteriors`, newest posterior one minute old.
+**`51 source data` total: 72 GB → 1.0 GB**, in three proof-gated steps, zero errors:
 
-The config change alone would have freed nothing.
+| step | reclaimed | detail |
+|---|---|---|
+| GRIB eviction | **19.14 GB** | 482 files; store 19 GB → 1.0 GB |
+| dead MN2T6/MX2T6 dirs + oracle_shadow | 1.5 GB | no producer since 2026-09-09, no consumer |
+| manifest cycle prune | **169.1 MB** | 3,456 dirs; `coordinate_manifests` 234 MB → 7.2 MB |
+
+Forecast data verified intact after each step: 1,342,477 `ensemble_snapshots` (unchanged),
+597,659 `forecast_posteriors`, newest posterior seconds old, zero `Traceback` or
+`extract_failed` in `logs/zeus-forecast-live.log`. Exactly one cycle dir per city
+survived the prune (`20260917_cycle18z`), which is the one the next ingest needs.
+
+**The config change alone would have freed nothing** — see the root cause below.
 
 ## Root cause: identity drift across a writer/reader pair
 
@@ -91,12 +100,27 @@ on `status == "ok"`, after the canonical commit, outside the BULK writer lock, f
   hand.
 - `coordinate_manifests` "inherited NO retention" stands and is now fixed.
 
+## Deployment state
+
+`forecast-live` restarted at 01:25 (pid 26652), **after** all three fixes landed
+(00:44–01:03), so the running daemon carries the identity fix, the sidecar sweep and the
+manifest prune. Verified: 7 fix markers present in the live module. The in-daemon
+retention logs only after a completed ingest cycle, so the next `raw_retention=` /
+`coordinate_manifest_prune=` line is the confirmation to watch for.
+
+`scripts/ops/evict_proven_ecmwf_raw.py` remains the out-of-process path for when a fix
+has landed but the daemon has not reloaded, or a mesh restart is refused (a refusal
+leaves entries paused — see the deploy note). It reuses the module's own plan/apply, adds
+no delete authority, needs no writer lock, and `--prune-manifests` counts rather than
+no-ops in a dry run.
+
 ## Still open
 
-- `scripts/ops/evict_proven_ecmwf_raw.py` exists for the case where retention's fix has
-  landed but the daemon has not reloaded, or a mesh restart is refused. It reuses the
-  module's own plan/apply, adds no delete authority, and needs no writer lock.
-- The in-daemon prune and sidecar sweep only take effect after `forecast-live` reloads.
-  As of writing the daemon predates both, so the one-shot script is the interim path.
-- `family_books.db` (26.8 GB) is unrelated to this path — see
-  `plans/family_books_compaction_runbook_2026-09-18.md`.
+- **Sidecars**: 350 `.partial`/`.ranges.json` are on disk with **zero** canonical
+  `.grib2`, so the sweep correctly leaves them alone — they are in-flight or resumable
+  downloads. They will be swept as their steps complete. Do not hand-delete them; that is
+  what produced the false "fixed" reading the first time.
+- `family_books.db` (26.8 GB freelist, 48% of the file) is unrelated to this path — see
+  `plans/family_books_compaction_runbook_2026-09-18.md`. Blocked on stopping pid 90803.
+- The ~2.3 min/cycle download and the per-track subprocess decode are untouched and, per
+  `ecmwf_latency_probe_2026-09-17.md`, not worth work against 400+ min of provider lag.
