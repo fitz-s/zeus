@@ -202,13 +202,14 @@ DAY0_EXECUTABLE_OBSERVATION_SOURCES_BY_SETTLEMENT_TYPE = {
     "hko": frozenset({"hko_hourly_accumulator"}),
     # NOAA-settled cities consume the exact configured ICAO station. Direct
     # AviationWeather publications are the low-latency current-state channel;
-    # Ogimet remains the canonical hourly/history mirror of the same station.
-    "noaa": frozenset({
-        "aviationweather_metar",
-        "ogimet_metar_ltfm",
-        "ogimet_metar_uuww",
-        "ogimet_metar_llbg",
-    }),
+    # Ogimet remains the canonical hourly/history mirror of the same station,
+    # and noaa_wrh_<icao> is the settlement page itself. The per-station
+    # channels are DERIVED from the city's own station by
+    # ``_day0_station_scoped_observation_sources`` below, never enumerated:
+    # this set was written when Istanbul/Moscow/Tel-Aviv were the only NOAA
+    # cities, so after the migration it authorized 3 stations and rejected the
+    # other 45 for the identical source shape.
+    "noaa": frozenset({"aviationweather_metar"}),
 }
 DAY0_EXECUTABLE_OBSERVATION_MAX_AGE_HOURS = 1.0
 DAY0_HOURLY_SOURCE_PUBLICATION_GRACE_HOURS = 1.0
@@ -814,6 +815,34 @@ def _read_snapshot_metadata(
     return {}
 
 
+def _day0_station_scoped_observation_sources(
+    settlement_source_type: str,
+    station: str,
+) -> frozenset[str]:
+    """Channels named after THIS city's own settlement station.
+
+    A per-station channel name is a function of the city's station, so
+    enumerating them in a literal set makes the authorization depend on which
+    cities existed when the set was written. The NOAA family's mirror
+    (``ogimet_metar_<icao>``) and its settlement page (``noaa_wrh_<icao>``)
+    are both derived here instead; ``day0_authority.day0_evidence_finality``
+    already classifies both as monotone settlement bounds, so the two layers
+    would otherwise disagree about the same reading.
+    """
+
+    normalized_station = str(station or "").strip().lower()
+    if not normalized_station:
+        return frozenset()
+    if str(settlement_source_type or "").strip() != "noaa":
+        return frozenset()
+    return frozenset(
+        {
+            f"ogimet_metar_{normalized_station}",
+            f"noaa_wrh_{normalized_station}",
+        }
+    )
+
+
 def _day0_observation_source_rejection_reason(
     city: City,
     observation: "Day0ObservationContext",
@@ -831,6 +860,13 @@ def _day0_observation_source_rejection_reason(
     allowed_sources = DAY0_EXECUTABLE_OBSERVATION_SOURCES_BY_SETTLEMENT_TYPE.get(
         settlement_source_type
     )
+    if allowed_sources is not None:
+        allowed_sources = allowed_sources.union(
+            _day0_station_scoped_observation_sources(
+                settlement_source_type,
+                str(getattr(city, "wu_station", "") or ""),
+            )
+        )
     if allowed_sources is None:
         return (
             f"Day0 observation source role is not authorized for {consumer_label}: "
