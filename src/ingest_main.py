@@ -2002,7 +2002,7 @@ def _day0_oracle_anomaly_tick():
     from src.config import runtime_cities
     from src.data.day0_oracle_anomaly import (
         apply_day0_oracle_anomaly_action,
-        wu_metar_anomaly_action,
+        settlement_metar_anomaly_action,
     )
     from src.state.db import (
         get_world_connection,
@@ -2060,7 +2060,7 @@ def _day0_oracle_anomaly_tick():
     actions = _day0_metar_emitter().cached_anomaly_actions(
         cities=cities,
         decision_time=decision_time,
-        anomaly_check=wu_metar_anomaly_action,
+        anomaly_check=settlement_metar_anomaly_action,
         max_cities=1 + min(2, len(priority_city_names)),
         priority_city_names=priority_city_names,
     )

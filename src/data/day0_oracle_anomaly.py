@@ -592,6 +592,241 @@ _WU_CHECK_FAILURE_MEMO: dict[str, float] = {}
 _WU_CHECK_MEMO_LOCK = threading.Lock()
 
 
+#: The page publishes hourly, so its running extreme advances far more slowly
+#: than the WU live API the original detector polled. A throttle shorter than
+#: the publication cadence spends checks re-reading the same row; one hour plus
+#: a margin is the shortest interval at which the comparand can actually have
+#: changed. The failure retry stays short so a transient gap does not silence
+#: the cross-check for a whole publication cycle.
+_PAGE_CHECK_INTERVAL_S = 900.0
+
+
+def _page_running_extremes_from_ledger(
+    city: Any,
+    target_date: str,
+    *,
+    conn=None,
+) -> Optional[tuple[Optional[float], Optional[float], datetime, str, int]]:
+    """Running page extremes for the city-local day, read from the print ledger.
+
+    Returns ``(high_so_far, low_so_far, last_publish_utc, coverage_status,
+    sample_count)`` or None when the ledger cannot support a comparison.
+
+    The page's own fetcher is per-IP quota limited with an unretryable 403
+    (src/data/noaa_wrh_timeseries.py: ``_MIN_REQUEST_INTERVAL_SECONDS`` = 2.0),
+    so this supplier never issues a request. Every page reading the daily tick
+    already fetched is durable in ``observation_prints``; the comparand is a
+    read over rows we hold, which is also what the divergence artifact was
+    refit against. Absence of rows is a NONE verdict upstream, never a pause —
+    the module's absence-is-not-anomaly doctrine (header lines 27-28).
+    """
+
+    from zoneinfo import ZoneInfo
+
+    station = str(getattr(city, "wu_station", "") or "").strip().upper()
+    city_name = str(getattr(city, "name", "") or "")
+    if not station or not city_name:
+        return None
+    try:
+        target_day = datetime.fromisoformat(str(target_date)[:10]).date()
+        zone = ZoneInfo(str(getattr(city, "timezone", "") or ""))
+    except (TypeError, ValueError, KeyError):
+        return None
+    day_start = datetime.combine(
+        target_day, datetime.min.time(), tzinfo=zone
+    ).astimezone(timezone.utc)
+    day_end = day_start + timedelta(days=1)
+    channel = f"noaa_wrh_{station.lower()}"
+
+    owned = conn is None
+    if owned:
+        from src.state.db import get_world_connection_read_only
+
+        conn = get_world_connection_read_only()
+    try:
+        rows = None
+        for table_ref in ("world.observation_prints", "observation_prints"):
+            try:
+                rows = conn.execute(
+                    f"""
+                    SELECT publish_ts_utc, value_native, unit
+                      FROM {table_ref}
+                     WHERE city = ?
+                       AND upper(station_id) = ?
+                       AND source_channel = ?
+                       AND publish_ts_utc >= ?
+                       AND publish_ts_utc < ?
+                     ORDER BY publish_ts_utc
+                    """,
+                    (
+                        city_name,
+                        station,
+                        channel,
+                        day_start.isoformat(),
+                        day_end.isoformat(),
+                    ),
+                ).fetchall()
+                break
+            except Exception:  # noqa: BLE001 - try the unqualified name next
+                rows = None
+        if not rows:
+            return None
+    finally:
+        if owned:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001 - read-only close is advisory
+                pass
+
+    expected_unit = str(getattr(city, "settlement_unit", "") or "").strip().upper()
+    values: list[tuple[datetime, float]] = []
+    for row in rows:
+        try:
+            published = datetime.fromisoformat(
+                str(row[0]).replace("Z", "+00:00")
+            )
+        except (TypeError, ValueError):
+            continue
+        if published.tzinfo is None:
+            continue
+        if str(row[2] or "").strip().upper() != expected_unit:
+            # A unit the city does not settle in is not a comparable reading;
+            # converting here would invent precision the page never published.
+            continue
+        try:
+            value = float(row[1])
+        except (TypeError, ValueError):
+            continue
+        values.append((published.astimezone(timezone.utc), value))
+    if not values:
+        return None
+
+    last_publish = max(instant for instant, _value in values)
+    highs = [value for _instant, value in values]
+    from src.data.observation_client import _compute_day0_coverage_status
+
+    first_local = min(
+        instant for instant, _value in values
+    ).astimezone(zone)
+    coverage_status = _compute_day0_coverage_status(first_local, len(values))
+    return (
+        max(highs),
+        min(highs),
+        last_publish,
+        coverage_status,
+        len(values),
+    )
+
+
+def page_metar_anomaly_action(
+    city: Any,
+    extremes: Any,
+    metar_reports: list,
+    *,
+    conn=None,
+) -> Optional[Day0OracleAnomalyAction]:
+    """Throttled page-vs-METAR divergence check for a noaa-settled city.
+
+    The sibling of :func:`wu_metar_anomaly_action` for the family whose
+    settlement product is the weather.gov station page. Both feeds read the
+    SAME ICAO station, which is the premise the whole detector rests on (module
+    header), so the comparison logic is shared verbatim via
+    :func:`check_wu_metar_divergence` — only the comparand's supplier differs.
+    """
+
+    import time as _time
+
+    city_name = str(getattr(city, "name", "") or "")
+    target_date = str(getattr(extremes, "target_date", "") or "")
+    if not city_name or not target_date:
+        return None
+    now_monotonic = _time.monotonic()
+    with _WU_CHECK_MEMO_LOCK:
+        last_success = _WU_CHECK_MEMO.get(city_name, 0.0)
+        last_failure = _WU_CHECK_FAILURE_MEMO.get(city_name, 0.0)
+        if now_monotonic - last_success < _PAGE_CHECK_INTERVAL_S:
+            return None
+        if now_monotonic - last_failure < _WU_CHECK_FAILURE_RETRY_S:
+            return None
+
+    page = _page_running_extremes_from_ledger(city, target_date, conn=conn)
+    if page is None:
+        with _WU_CHECK_MEMO_LOCK:
+            _WU_CHECK_FAILURE_MEMO[city_name] = now_monotonic
+        logger.warning(
+            "DAY0_ORACLE_ANOMALY_PAGE_SIDE_UNAVAILABLE city=%s date=%s "
+            "(no comparable page print in the ledger; retry in %ss; "
+            "success memo NOT consumed)",
+            city_name, target_date, _WU_CHECK_FAILURE_RETRY_S,
+        )
+        return None
+    page_high, page_low, last_publish, coverage_status, _samples = page
+
+    verdict = check_wu_metar_divergence(
+        city=city,
+        target_date=target_date,
+        metar_reports=metar_reports,
+        wu_high_so_far=page_high,
+        wu_low_so_far=page_low,
+        wu_last_obs_time=last_publish,
+        wu_coverage_status=coverage_status,
+    )
+    if not verdict.compared:
+        with _WU_CHECK_MEMO_LOCK:
+            _WU_CHECK_FAILURE_MEMO[city_name] = now_monotonic
+        logger.warning(
+            "DAY0_ORACLE_ANOMALY_COMPARISON_INCONCLUSIVE city=%s date=%s detail=%s "
+            "(page side; retry in %ss; success memo NOT consumed)",
+            city_name, target_date, verdict.detail, _WU_CHECK_FAILURE_RETRY_S,
+        )
+        return None
+    with _WU_CHECK_MEMO_LOCK:
+        _WU_CHECK_MEMO[city_name] = now_monotonic
+        _WU_CHECK_FAILURE_MEMO.pop(city_name, None)
+    if verdict.diverged:
+        flag_day0_oracle_anomaly(
+            city_name, target_date, detail=verdict.detail, persist=False
+        )
+        return Day0OracleAnomalyAction(
+            action="flag",
+            city=city_name,
+            target_date=target_date,
+            detail=verdict.detail,
+        )
+    # A compared, non-diverged verdict clears a stale flag for the same reason
+    # the WU sibling does (false-pause TTL fix): agreement now is positive
+    # evidence, and waiting out the 24 h TTL would keep the day0 lane shut.
+    clear_day0_oracle_anomaly(city_name, target_date, persist=False)
+    return Day0OracleAnomalyAction(
+        action="clear",
+        city=city_name,
+        target_date=target_date,
+        detail=verdict.detail,
+    )
+
+
+def settlement_metar_anomaly_action(
+    city: Any, extremes: Any, metar_reports: list
+) -> Optional[Day0OracleAnomalyAction]:
+    """Route the divergence check to the supplier that settles this city.
+
+    ``Day0FastObsEmitter.cached_anomaly_actions(anomaly_check=...)`` calls this
+    for every rotation-eligible city regardless of family; the settlement
+    product decides which feed is the comparand. A family with no settlement
+    comparand of its own (hko publishes its own products and names no ICAO
+    station) is not checkable here and returns None, which is inert.
+    """
+
+    source_type = str(
+        getattr(city, "settlement_source_type", "") or ""
+    ).strip().lower()
+    if source_type == "wu_icao":
+        return wu_metar_anomaly_action(city, extremes, metar_reports)
+    if source_type == "noaa":
+        return page_metar_anomaly_action(city, extremes, metar_reports)
+    return None
+
+
 def wu_metar_anomaly_action(
     city: Any, extremes: Any, metar_reports: list
 ) -> Optional[Day0OracleAnomalyAction]:

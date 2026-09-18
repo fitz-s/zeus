@@ -3238,7 +3238,16 @@ class Day0FastObsEmitter:
 
         eligible: list[tuple[Any, FastObsSource, str]] = []
         for city in cities:
-            if str(getattr(city, "settlement_source_type", "") or "") != "wu_icao":
+            # Every family whose settlement product reads the SAME ICAO station
+            # as this METAR cache is checkable; the callback picks the comparand
+            # (WU history page vs weather.gov station page). Restricting the
+            # rotation to wu_icao left the 48 noaa cities with a pause that
+            # nothing could arm, while that pause gates q construction, the
+            # hard-fact exit lane, and the resting-order cancel sweep.
+            if (
+                str(getattr(city, "settlement_source_type", "") or "").strip().lower()
+                not in _FAST_LANE_SETTLEMENT_SOURCE_TYPES
+            ):
                 continue
             source = fast_obs_source_for_city(city)
             if source is None:
