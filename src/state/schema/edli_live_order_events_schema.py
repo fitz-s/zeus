@@ -125,6 +125,33 @@ CREATE INDEX IF NOT EXISTS idx_edli_live_order_events_execution_command
     WHERE event_type = 'ExecutionCommandCreated'
 """
 
+#: The terminal-no-fill recovery projection matches an order lifecycle by
+#: command id OR venue order id (command_recovery._project_edli_terminal_no_fill_order_lifecycle).
+#: Both are json_extract predicates, so without an index the OR resolves as a
+#: full table SCAN: measured 124-2374 ms against the recovery lane's own
+#: _LIVE_TICK_DB_BUDGET_SECONDS = 0.1, which means the read is interrupted every
+#: time and a cancelled order can never terminalise — it stays ACKED forever and
+#: permanently blocks the live-trading restart gate. With these two indexes the
+#: same query plans as MULTI-INDEX OR with two seeks and returns in under a
+#: millisecond on the same data.
+CREATE_COMMAND_ID_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_edli_live_order_events_command_id
+    ON edli_live_order_events(
+        json_extract(payload_json, '$.command_id'),
+        aggregate_id
+    )
+    WHERE json_extract(payload_json, '$.command_id') IS NOT NULL
+"""
+
+CREATE_VENUE_ORDER_ID_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_edli_live_order_events_venue_order_id
+    ON edli_live_order_events(
+        json_extract(payload_json, '$.venue_order_id'),
+        aggregate_id
+    )
+    WHERE json_extract(payload_json, '$.venue_order_id') IS NOT NULL
+"""
+
 _EXECUTION_COMMAND_INDEX_NAME = "idx_edli_live_order_events_execution_command"
 _EXECUTION_COMMAND_INDEX_SAVEPOINT = "edli_execution_command_index_repair"
 
@@ -236,6 +263,8 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_INDEX_SQL)
     conn.execute(CREATE_TYPE_INDEX_SQL)
     _ensure_execution_command_index(conn)
+    conn.execute(CREATE_COMMAND_ID_INDEX_SQL)
+    conn.execute(CREATE_VENUE_ORDER_ID_INDEX_SQL)
     conn.execute(CREATE_USER_MESSAGE_DEDUP_INDEX_SQL)
     conn.execute(CREATE_USER_MESSAGE_DEDUP_AGGREGATE_INDEX_SQL)
     conn.execute(CREATE_USER_CHANNEL_INBOX_STATUS_INDEX_SQL)
