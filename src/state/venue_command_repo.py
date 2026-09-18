@@ -2676,25 +2676,38 @@ def append_event(
                 restore_reservation_for_late_fill,
             )
 
-            try:
-                restored = restore_reservation_for_late_fill(
-                    conn,
-                    command_id,
-                    filled_size=Decimal(str(payload["canonical_filled_size"])),
-                    partial=terminal_late_partial,
-                    remainder_retired=(
-                        str(payload.get("reason") or "")
-                        == "authenticated_fill_after_genuine_cancel"
-                    ),
-                )
-            except CollateralInsufficient as exc:
-                raise ValueError(
-                    "terminal late-fill correction collateral restore failed"
-                ) from exc
-            if not restored:
-                raise ValueError(
-                    "terminal late-fill correction collateral was not restored"
-                )
+            if (
+                str(payload.get("reason") or "")
+                == "authenticated_fill_after_genuine_cancel"
+            ):
+                # Nothing to restore. The other two categories exist because a
+                # terminal no-fill conclusion RELEASED the reservation, so a
+                # later proven fill has to rebuild it. A genuine cancel never
+                # released anything: the venue matched part of the order and the
+                # reservation was already converted on that fill
+                # (release_reason CONVERTED_ON_FILL, converted_amount equal to
+                # filled x price — live row: $21.60 = 72 x 0.30). Calling the
+                # restore here asks it to advance a conversion that is already
+                # complete, which it correctly refuses. The ONLY thing this
+                # category is missing is the execution_fact provenance row, and
+                # the event append below writes it.
+                pass
+            else:
+                try:
+                    restored = restore_reservation_for_late_fill(
+                        conn,
+                        command_id,
+                        filled_size=Decimal(str(payload["canonical_filled_size"])),
+                        partial=terminal_late_partial,
+                    )
+                except CollateralInsufficient as exc:
+                    raise ValueError(
+                        "terminal late-fill correction collateral restore failed"
+                    ) from exc
+                if not restored:
+                    raise ValueError(
+                        "terminal late-fill correction collateral was not restored"
+                    )
 
         state_after = _TRANSITIONS[key]
 
