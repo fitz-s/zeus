@@ -27,8 +27,11 @@ _plan_decoded_open_data_raw_retention says so, which requires, per cycle+track:
     authority='VERIFIED'.
 
 Unknown filenames, symlinks, and anything the regex does not recognise are never
-candidates. `.partial` / `.ranges.json` sidecars are invisible to that plan by
-construction — this script does not touch them either; sweep those separately.
+candidates.
+
+The plan also sweeps spent transport sidecars (`.partial`, `.ranges.json`) — but only
+those whose canonical `.grib2` already exists or is being evicted in the same plan. A
+sidecar with no canonical is an in-flight or resumable download and is left alone.
 
 Usage:
     python3 scripts/ops/evict_proven_ecmwf_raw.py              # dry run, prints the plan
@@ -38,7 +41,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,6 +50,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from src.data import ecmwf_open_data as eod  # noqa: E402
+from src.state.db import get_connection_read_only  # noqa: E402
 
 
 def _forecasts_db_path() -> Path:
@@ -91,9 +94,11 @@ def main() -> int:
         print(f"FORECASTS_DB_MISSING {db_path}", file=sys.stderr)
         return 2
 
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA query_only=ON")
+    # get_connection_read_only, not a bare sqlite3.connect(): the writer-lock
+    # antibody fails CI on direct connects, and this helper is the sanctioned
+    # read-only open (query_only, bounded lock wait, no DB creation, no
+    # write-oriented pragmas).
+    conn = get_connection_read_only(db_path)
     try:
         plan = eod._plan_decoded_open_data_raw_retention(
             conn,

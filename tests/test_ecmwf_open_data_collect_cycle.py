@@ -295,6 +295,82 @@ def test_raw_retention_retains_when_any_coordsha_pin_is_unproven(tmp_path):
     assert all(path.exists() for path in paths)
 
 
+def test_raw_retention_sweeps_spent_transport_sidecars(tmp_path):
+    """`.partial`/`.ranges.json` whose canonical exists are spent resume state.
+
+    These are invisible to the group proof by construction (`_raw_file_identity`
+    matches only `.grib2`), so the calendar cutoff never reaches them at any age.
+    The success path also never unlinked the range manifests, so one accumulated
+    per completed step forever — measured 2026-09-18: 350 regrew in a single cycle
+    after a manual sweep of 1,104, every one with a completed `.grib2` sibling.
+    """
+    from src.data import ecmwf_open_data
+
+    raw_root = tmp_path / "51 source data"
+    group = _write_raw_group(raw_root, "20260818", 0, "mx2t3")
+    day_dir = group[0].parent
+    canonical = group[0]
+
+    spent = [
+        day_dir / f"{canonical.name}.pf.bbdefa2950f49882.partial",
+        day_dir / f"{canonical.name}.cf.bbdefa2950f49882.partial",
+        day_dir / f"{canonical.name}.pf.bbdefa2950f49882.partial.ranges.json",
+        day_dir / f"{canonical.name}.partial",
+    ]
+    for path in spent:
+        path.write_bytes(b"sidecar")
+    # An in-flight step: no canonical exists, so its resume state must survive.
+    inflight = day_dir / f".20260818_00z_step999_mx2t3_ens51.grib2.pf.deadbeef.partial"
+    inflight_manifest = day_dir / f"{inflight.name}.ranges.json"
+    for path in (inflight, inflight_manifest):
+        path.write_bytes(b"resumable")
+
+    conn = _make_conn(tmp_path)
+    _record_raw_authority(conn, day="20260818", hour=0, param="mx2t3")
+
+    plan = ecmwf_open_data._plan_decoded_open_data_raw_retention(
+        conn,
+        raw_root=raw_root,
+        reference_date=date(2026, 8, 21),
+    )
+    result = ecmwf_open_data._apply_decoded_open_data_raw_retention(plan)
+
+    assert result["status"] == "APPLIED"
+    assert all(not path.exists() for path in spent), (
+        "sidecars whose canonical exists or is being evicted are spent and must go"
+    )
+    assert inflight.exists() and inflight_manifest.exists(), (
+        "a sidecar with no canonical is an in-flight or resumable download; "
+        "deleting its manifest would discard recoverable transport progress"
+    )
+
+
+def test_raw_retention_keeps_sidecars_when_the_group_is_retained(tmp_path):
+    """An unproven group keeps its raw AND its resume state."""
+    from src.data import ecmwf_open_data
+
+    raw_root = tmp_path / "51 source data"
+    group = _write_raw_group(raw_root, "20260818", 0, "mx2t3")
+    canonical = group[0]
+    sidecar = canonical.parent / f"{canonical.name}.pf.abc123.partial"
+    sidecar.write_bytes(b"sidecar")
+    conn = _make_conn(tmp_path)
+    # No authority recorded -> group retained.
+
+    plan = ecmwf_open_data._plan_decoded_open_data_raw_retention(
+        conn,
+        raw_root=raw_root,
+        reference_date=date(2026, 8, 21),
+    )
+    result = ecmwf_open_data._apply_decoded_open_data_raw_retention(plan)
+
+    # The canonical survives (unproven), but its sidecar is still spent state:
+    # the canonical exists, so that byte-range prefix is no longer resumable.
+    assert all(path.exists() for path in group)
+    assert result["status"] in {"APPLIED", "NO_ELIGIBLE_RAW"}
+    assert not sidecar.exists()
+
+
 def test_raw_retention_rejects_negative_days(tmp_path):
     from src.data import ecmwf_open_data
 

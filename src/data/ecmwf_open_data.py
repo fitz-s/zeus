@@ -294,6 +294,61 @@ def _raw_file_identity(path: Path) -> tuple[str, int, str] | None:
     return match.group("date"), hour, match.group("param")
 
 
+def _canonical_for_transport_sidecar(path: Path) -> Path | None:
+    """Return the completed ``.grib2`` a ``.partial``/``.ranges.json`` belongs to.
+
+    Transport names are ``<canonical>.<pf|cf>.<hash>.partial`` and that name plus
+    ``.ranges.json``. Returns None for anything that is not one of those, so an
+    unrecognised file is never treated as a sidecar.
+    """
+
+    name = path.name
+    if name.endswith(_RANGE_RESUME_MANIFEST_SUFFIX):
+        name = name[: -len(_RANGE_RESUME_MANIFEST_SUFFIX)]
+    if not name.endswith(".partial"):
+        return None
+    name = name[: -len(".partial")]
+    # Strip the ``.<pf|cf>.<hexhash>`` transport namespace, when present.
+    match = re.fullmatch(r"(?P<base>.+?)\.(?:pf|cf)\.[0-9a-f]+", name)
+    if match is not None:
+        name = match.group("base")
+    return path.with_name(name)
+
+
+def _orphaned_transport_sidecars(
+    root: Path,
+    *,
+    planned_canonical: set[Path],
+) -> list[Path]:
+    """Plan `.partial` / `.ranges.json` files whose download is demonstrably over.
+
+    These are invisible to the group proof by construction: `_raw_file_identity`
+    matches only `.grib2` names, so the calendar cutoff never reaches a sidecar at
+    any age. Measured 2026-09-18: 350 regrew in one cycle after a manual sweep, and
+    every one of 1,104 swept earlier had a completed `.grib2` sibling.
+
+    A sidecar is planned ONLY when its canonical target already exists (the step
+    finished, so the resume state is spent) or that canonical is being evicted in
+    this same plan. A sidecar whose canonical is absent is left alone — that is an
+    in-flight or resumable download, and deleting its manifest would discard
+    recoverable transport progress.
+    """
+
+    orphans: list[Path] = []
+    for day_dir in sorted(root.iterdir()):
+        if day_dir.is_symlink() or not day_dir.is_dir():
+            continue
+        for candidate in day_dir.iterdir():
+            if candidate.is_symlink() or not candidate.is_file():
+                continue
+            canonical = _canonical_for_transport_sidecar(candidate)
+            if canonical is None:
+                continue
+            if canonical in planned_canonical or canonical.exists():
+                orphans.append(candidate)
+    return orphans
+
+
 def _sql_like_escape(value: str) -> str:
     """Escape LIKE wildcards so a literal prefix cannot match more than itself.
 
@@ -443,6 +498,8 @@ def _plan_decoded_open_data_raw_retention(
             continue
         eligible_groups += 1
         planned.extend(paths)
+
+    planned.extend(_orphaned_transport_sidecars(root, planned_canonical=set(planned)))
 
     return _RawRetentionPlan(
         root=root,
@@ -698,10 +755,13 @@ _RANGE_RESUME_VERSION = 1
 _RANGE_RESUME_CHUNK_BYTES = 8 * 1024 * 1024
 
 
+_RANGE_RESUME_MANIFEST_SUFFIX = ".ranges.json"
+
+
 def _range_resume_manifest_path(target: Path) -> Path:
     """Return the sidecar that proves which byte-range prefix is reusable."""
 
-    return target.with_name(f"{target.name}.ranges.json")
+    return target.with_name(f"{target.name}{_RANGE_RESUME_MANIFEST_SUFFIX}")
 
 
 def _resume_source_namespace(source: str) -> str:
@@ -2340,6 +2400,17 @@ def _fetch_one_step(
                 os.replace(str(partial), str(canonical))   # atomic rename
                 pf_partial.unlink(missing_ok=True)
                 cf_partial.unlink(missing_ok=True)
+                # The range-resume manifests must go with their partials. Only
+                # _reset_range_resume (checksum/ETag mismatch mid-retry) and the
+                # weak-ETag discard path unlinked these, never the success path, so
+                # every completed step left one behind — and because
+                # _raw_file_identity recognises neither `.partial` nor
+                # `.ranges.json`, the retention plan can never reach them at any
+                # age. Measured 2026-09-18: 350 sidecar files regrew within a single
+                # cycle after a manual sweep. Unbounded in file count.
+                _range_resume_manifest_path(pf_partial).unlink(missing_ok=True)
+                _range_resume_manifest_path(cf_partial).unlink(missing_ok=True)
+                _range_resume_manifest_path(partial).unlink(missing_ok=True)
                 return ("OK", canonical)
             except requests.HTTPError as exc:
                 code = getattr(exc.response, "status_code", None)
