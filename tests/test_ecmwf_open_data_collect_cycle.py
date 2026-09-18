@@ -371,6 +371,63 @@ def test_raw_retention_keeps_sidecars_when_the_group_is_retained(tmp_path):
     assert not sidecar.exists()
 
 
+def test_coordinate_manifest_prune_removes_only_superseded_cycles(tmp_path):
+    """Decoded-JSON cycle views older than the ingested cycle are write-only.
+
+    `_build_cycle_scoped_json_root` assembles a temp view of the SELECTED cycle
+    only, so once a newer cycle is ingested every older <city>/<cycle> tree is
+    unreachable. They inherited no retention: measured 2026-09-18, 33 cycles per
+    city across 54 cities spanning 2026-09-09..09-17 — 234 MB, ~26 MB/day,
+    unbounded at ~9.5 GB/year.
+    """
+    from src.data import ecmwf_open_data
+
+    root = tmp_path / "coordsha"
+    subdir = "open_ens_mx2t6_localday_max"
+    names = ("20260909_cycle12z", "20260910", "20260917_cycle12z", "20260917_cycle18z")
+    for city in ("paris", "tokyo"):
+        for name in names:
+            d = root / subdir / city / name
+            d.mkdir(parents=True)
+            (d / "payload.json").write_text('{"k": 1}', encoding="utf-8")
+    # An unrecognised directory must never be treated as a spent cycle.
+    stray = root / subdir / "paris" / "scratch-notes"
+    stray.mkdir(parents=True)
+    (stray / "keep.txt").write_text("keep", encoding="utf-8")
+
+    summary = ecmwf_open_data._prune_superseded_coordinate_manifest_cycles(
+        coordinate_raw_root=root,
+        extract_subdir=subdir,
+        keep_run_date=date(2026, 9, 17),
+        keep_run_hour=18,
+    )
+
+    assert summary["status"] == "PRUNED"
+    assert summary["removed_cycle_dirs"] == 6, summary  # 3 superseded x 2 cities
+    assert summary["removed_bytes"] > 0
+    assert summary["errors"] == []
+    for city in ("paris", "tokyo"):
+        assert (root / subdir / city / "20260917_cycle18z").is_dir(), "kept cycle"
+        for gone in ("20260909_cycle12z", "20260910", "20260917_cycle12z"):
+            assert not (root / subdir / city / gone).exists()
+    assert stray.is_dir() and (stray / "keep.txt").exists()
+
+
+def test_coordinate_manifest_prune_is_a_noop_on_a_missing_subdir(tmp_path):
+    """Cleanup must fail soft: a missing tree is not an error."""
+    from src.data import ecmwf_open_data
+
+    summary = ecmwf_open_data._prune_superseded_coordinate_manifest_cycles(
+        coordinate_raw_root=tmp_path / "absent",
+        extract_subdir="open_ens_mn2t6_localday_min",
+        keep_run_date=date(2026, 9, 17),
+        keep_run_hour=0,
+    )
+    assert summary["status"] == "NO_SUPERSEDED_CYCLES"
+    assert summary["removed_cycle_dirs"] == 0
+    assert summary["errors"] == []
+
+
 def test_raw_retention_rejects_negative_days(tmp_path):
     from src.data import ecmwf_open_data
 

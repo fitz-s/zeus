@@ -1576,6 +1576,91 @@ def _cycle_extract_dir_name(*, run_date: date, run_hour: int) -> str:
     return f"{base}_cycle{run_hour:02d}z"
 
 
+def _parse_cycle_extract_dir_name(name: str) -> tuple[date, int] | None:
+    """Inverse of `_cycle_extract_dir_name`; None when the name is not one of ours.
+
+    Keeps the pruner from ever treating an unrecognised directory as a spent cycle.
+    """
+
+    match = re.fullmatch(r"(?P<date>\d{8})(?:_cycle(?P<hour>\d{2})z)?", name)
+    if match is None:
+        return None
+    try:
+        day = datetime.strptime(match.group("date"), "%Y%m%d").date()
+    except ValueError:
+        return None
+    hour = int(match.group("hour") or 0)
+    if hour not in {0, 6, 12, 18}:
+        return None
+    return day, hour
+
+
+def _prune_superseded_coordinate_manifest_cycles(
+    *,
+    coordinate_raw_root: Path,
+    extract_subdir: str,
+    keep_run_date: date,
+    keep_run_hour: int,
+) -> dict[str, object]:
+    """Delete decoded-JSON cycle views the ingest can no longer consume.
+
+    `_build_cycle_scoped_json_root` assembles a temp view of the SELECTED cycle only
+    ("stale raw directories cannot satisfy a new source_run"), so once a newer cycle
+    is ingested every older `<city>/<cycle>` tree under the manifest sha is
+    write-only. Nothing pruned them: the dirs inherited none of the grib cache's
+    retention, and measured 2026-09-18 they held 33 cycles per city across 54
+    cities spanning 2026-09-09..09-17 — 234 MB, ~26 MB/day, unbounded (~9.5 GB/yr).
+
+    Only cycles STRICTLY OLDER than the one just ingested are removed, and only
+    directories whose name parses as one of ours. The kept cycle is never touched,
+    so a retry of the same cycle still finds its view. Best-effort by design: a
+    failure here must never fail an ingest that already committed its canonical
+    truth, so errors are counted and returned rather than raised.
+    """
+
+    source_subdir = coordinate_raw_root / extract_subdir
+    summary: dict[str, object] = {
+        "status": "NO_SUPERSEDED_CYCLES",
+        "removed_cycle_dirs": 0,
+        "removed_bytes": 0,
+        "errors": [],
+    }
+    if source_subdir.is_symlink() or not source_subdir.is_dir():
+        return summary
+
+    keep = (keep_run_date, keep_run_hour)
+    removed = 0
+    removed_bytes = 0
+    errors: list[str] = []
+    for city_dir in sorted(source_subdir.iterdir()):
+        if city_dir.is_symlink() or not city_dir.is_dir():
+            continue
+        for cycle_dir in sorted(city_dir.iterdir()):
+            if cycle_dir.is_symlink() or not cycle_dir.is_dir():
+                continue
+            parsed = _parse_cycle_extract_dir_name(cycle_dir.name)
+            if parsed is None or parsed >= keep:
+                continue
+            try:
+                size = sum(
+                    path.stat().st_size
+                    for path in cycle_dir.rglob("*")
+                    if path.is_file() and not path.is_symlink()
+                )
+                shutil.rmtree(cycle_dir)
+            except OSError as exc:
+                errors.append(f"{cycle_dir.name}:{type(exc).__name__}")
+                continue
+            removed += 1
+            removed_bytes += size
+
+    summary["status"] = "PRUNED" if removed else "NO_SUPERSEDED_CYCLES"
+    summary["removed_cycle_dirs"] = removed
+    summary["removed_bytes"] = removed_bytes
+    summary["errors"] = errors
+    return summary
+
+
 def _build_cycle_scoped_json_root(
     *,
     raw_root: Path,
@@ -3239,6 +3324,30 @@ def collect_open_ens_cycle(
     if retention_plan is not None:
         retention_summary = _apply_decoded_open_data_raw_retention(retention_plan)
         logger.info("ecmwf_open_data raw_retention=%s", retention_summary)
+
+    # Same placement rationale as the raw retention above: after the canonical
+    # commit and outside the BULK writer lock, so filesystem cleanup can never
+    # stall probability writers, and a cleanup failure never rewrites an
+    # already-truthful source_run result. Only runs for an ok ingest — a failed
+    # cycle's predecessor view is the one a retry would still want.
+    if status == "ok":
+        try:
+            manifest_prune_summary = _prune_superseded_coordinate_manifest_cycles(
+                coordinate_raw_root=coordinate_raw_root,
+                extract_subdir=cfg["extract_subdir"],
+                keep_run_date=cycle_date,
+                keep_run_hour=cycle_hour,
+            )
+        except Exception as exc:  # noqa: BLE001 - cleanup must fail soft
+            logger.warning(
+                "ecmwf_open_data coordinate_manifest_prune failed: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+        else:
+            logger.info(
+                "ecmwf_open_data coordinate_manifest_prune=%s", manifest_prune_summary
+            )
 
     stages = [
         *stages,
