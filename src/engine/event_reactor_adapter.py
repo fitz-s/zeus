@@ -35530,6 +35530,20 @@ def _validated_fast_residual_day0_conditioning(
     as_of = str(likelihood.get("as_of") or "").strip()
     window_start = str(likelihood.get("window_start") or "").strip()
     identity_hash = str(likelihood.get("identity_hash") or "").strip().lower()
+    station_id = str(likelihood.get("station_id") or "").strip().upper()
+    settlement_channel = str(likelihood.get("settlement_channel") or "").strip()
+    # The residual is measured against the channel that SETTLES the city, which
+    # is family-specific: the WU history page for wu_icao, the weather.gov
+    # station page for noaa (build_fast_station_residual_likelihood,
+    # src/data/day0_fast_obs.py). Demanding the WU literal here rejected every
+    # NOAA posterior the producer legitimately stamped `noaa_wrh_<icao>`, so the
+    # exit organ went blind on live NOAA positions (Shanghai 2026-09-18: 169
+    # consecutive BELIEF_AUTHORITY_FAULT cycles while the market price was
+    # fresh). Accept either family channel, still bound to THIS likelihood's own
+    # station so a channel cannot name a different station's page.
+    allowed_settlement_channels = {"wu_icao_history"}
+    if station_id:
+        allowed_settlement_channels.add(f"noaa_wrh_{station_id.lower()}")
     try:
         observed_at = datetime.fromisoformat(observation_time.replace("Z", "+00:00"))
         as_of_at = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
@@ -35551,8 +35565,7 @@ def _validated_fast_residual_day0_conditioning(
         }
         or str(likelihood.get("fast_channel") or "").strip()
         != FAST_OBS_SOURCE_ID
-        or str(likelihood.get("settlement_channel") or "").strip()
-        != "wu_icao_history"
+        or settlement_channel not in allowed_settlement_channels
         or str(likelihood.get("semantics_revision") or "").strip()
         != FAST_RESIDUAL_LIKELIHOOD_REVISION
         or metric not in {"high", "low"}
@@ -35593,8 +35606,8 @@ def _validated_fast_residual_day0_conditioning(
 
     identity = {
         "semantics_revision": FAST_RESIDUAL_LIKELIHOOD_REVISION,
-        "station_id": str(likelihood.get("station_id") or "").strip().upper(),
-        "settlement_channel": "wu_icao_history",
+        "station_id": station_id,
+        "settlement_channel": settlement_channel,
         "fast_channel": FAST_OBS_SOURCE_ID,
         "unit": unit,
         "as_of": as_of,
@@ -35611,7 +35624,7 @@ def _validated_fast_residual_day0_conditioning(
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
-    if not identity["station_id"] or computed_hash != identity_hash:
+    if not station_id or computed_hash != identity_hash:
         raise ValueError("GLOBAL_DAY0_FAST_RESIDUAL_POSTERIOR_IDENTITY_INVALID")
     return conditioning
 
