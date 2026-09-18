@@ -40,6 +40,17 @@ apscheduler==3.11.2
 # --- serialization / config ---
 PyYAML==6.0.3
 pytz==2026.1.post1
+# bumped 2026-09-18 added: receipt/provenance payload codec. The pre-submit auction
+# receipt encodes with zlib-9 then base64 inline before order submission, measured at
+# 125.2 ms/receipt across 40 live receipts (238 MB raw payload). zstd-3 raw BLOB is
+# 37.6% smaller AND 113.1 ms faster per receipt, losslessly (every payload round-tripped
+# byte-identical). Also the right codec for the offline forecast_posteriors.provenance_json
+# rewrite, where zstd-19 + a trained dictionary measured 5.02x on a column that is 94.6%
+# of a 78 KB row and ~46.8 GB of a 98.4 GB DB. Vetted per this file's bump policy:
+# scratch venv (cp314 arm64 prebuilt wheel, no compiler), pip-audit "No known
+# vulnerabilities found", full suite re-run. See
+# docs/operations/current/receipt_codec_options_2026-09-17.md.
+zstandard==0.25.0
 
 # --- testing ---
 pytest==9.0.2
