@@ -6389,3 +6389,55 @@ def test_repair_prompt_points_at_the_current_generation_not_the_legacy_path(
 
     assert str(current_evidence) in captured["prompt"]
     assert f"incident evidence={legacy_evidence}\n" not in captured["prompt"]
+
+
+def test_superseded_complete_generation_is_reaped(cfg: dict) -> None:
+    """A published-then-superseded generation is unreachable, so it must be reaped.
+
+    `CURRENT` is the only entry point into `generations/`, so once the pointer
+    moves, the previous generation can never be read again. The reaper skipped
+    exactly those directories (it returned early when both `evidence.db` and
+    `manifest.json` were present), so every rebuild leaked a full snapshot:
+    160 such directories held 2.18 GB in production.
+    """
+    cfg["loop"]["evidence_generation_reap_age_seconds"] = 0
+    _position(cfg)
+    _evidence_quote_triplet(cfg, "supersede-q", "2026-08-22T09:00:02+00:00", 0.01)
+    incident_id = loop.detect(cfg)[0]
+    incident_dir = Path(cfg["paths"]["runtime"]) / "incidents" / incident_id
+    current = (incident_dir / "CURRENT").read_text().strip()
+
+    superseded = incident_dir / "generations" / "published-then-superseded"
+    superseded.mkdir(parents=True)
+    (superseded / "evidence.db").write_bytes(b"complete-but-unreachable")
+    (superseded / "manifest.json").write_text(json.dumps({"incident_id": incident_id}))
+
+    loop._reap_incomplete_generations(cfg, incident_id)
+
+    assert not superseded.exists()
+    assert (incident_dir / "generations" / current / "evidence.db").is_file()
+    assert loop._evidence_pair_valid(cfg, incident_id)
+
+
+def test_complete_generations_survive_an_unreadable_current_pointer(cfg: dict) -> None:
+    """No pointer means no way to tell live from superseded, so keep both.
+
+    Widening the reaper to superseded generations must not turn a missing
+    `CURRENT` into "reap every complete generation" — that would delete the
+    very snapshot the next rebuild would otherwise reuse.
+    """
+    cfg["loop"]["evidence_generation_reap_age_seconds"] = 0
+    incident_dir = Path(cfg["paths"]["runtime"]) / "incidents" / "pointerless"
+    complete = incident_dir / "generations" / "complete-generation"
+    complete.mkdir(parents=True)
+    (complete / "evidence.db").write_bytes(b"complete")
+    (complete / "manifest.json").write_text(json.dumps({"incident_id": "pointerless"}))
+    incomplete = incident_dir / "generations" / "incomplete-generation"
+    incomplete.mkdir(parents=True)
+    (incomplete / ".evidence.db.tmp").write_bytes(b"partial")
+    assert not (incident_dir / "CURRENT").exists()
+
+    loop._reap_incomplete_generations(cfg, "pointerless")
+
+    assert complete.exists()
+    assert not incomplete.exists()

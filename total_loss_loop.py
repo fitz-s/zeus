@@ -3271,12 +3271,21 @@ def _reap_incomplete_generations(cfg: Mapping[str, Any], incident_id: str) -> No
         pointer = (incident_dir / "CURRENT").read_text().strip()
     except OSError:
         pass
+    # Without a readable pointer we cannot tell the live generation from a
+    # superseded one, so reap only the incomplete ones (the pre-existing rule).
+    complete_is_reapable = bool(pointer)
     reap_after = max(0.0, float(cfg["loop"].get("evidence_generation_reap_age_seconds", 60)))
     for generation_dir in generations.iterdir():
         _evidence_guard()
         if not generation_dir.is_dir() or generation_dir.name == pointer:
             continue
-        if (generation_dir / "evidence.db").is_file() and (generation_dir / "manifest.json").is_file():
+        # A complete generation that CURRENT no longer names is unreachable:
+        # CURRENT is the only entry point into generations/, so nothing can
+        # read it again. Exempting it leaked a full snapshot per rebuild.
+        if not complete_is_reapable and (
+            (generation_dir / "evidence.db").is_file()
+            and (generation_dir / "manifest.json").is_file()
+        ):
             continue
         try:
             age = time.time() - generation_dir.stat().st_mtime
