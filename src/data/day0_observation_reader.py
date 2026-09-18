@@ -1502,7 +1502,12 @@ def source_priority_for_city(
     if source_type == "noaa":
         if station:
             return (f"ogimet_metar_{station}",)
-        return tuple(src for src in _DEFAULT_SOURCE_PRIORITY if src.startswith("ogimet_metar_"))
+        # A stationless noaa city has no mirror of its own. Falling back to the
+        # module defaults named THREE OTHER cities' stations (ltfm/uuww/llbg,
+        # the only noaa cities when that tuple was written), so the reader would
+        # have answered with a different city's temperature. An empty priority
+        # yields no observation, which the callers already treat as absence.
+        return ()
     if source_type == "wu_icao":
         return ("wu_icao_history",)
     return _DEFAULT_SOURCE_PRIORITY

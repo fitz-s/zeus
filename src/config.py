@@ -580,7 +580,12 @@ def validate_cities_config(city_list: list[City] | None = None) -> list[str]:
     for c in (city_list or cities):
         if not c.settlement_source:
             warnings.append(f"{c.name}: settlement_source is empty")
-        if c.settlement_source_type == "wu_icao" and not c.wu_station:
+        # Both families name their settlement station in wu_station: the WU
+        # history page and the weather.gov station page read the same ICAO id.
+        # Enforcing it only for wu_icao let a noaa city be configured without
+        # one, and a stationless noaa city falls through to defaults that name
+        # OTHER cities' stations (day0_observation_reader._default_source_priority).
+        if c.settlement_source_type in ("wu_icao", "noaa") and not c.wu_station:
             warnings.append(f"{c.name}: wu_station is empty")
         if not c.timezone:
             warnings.append(f"{c.name}: timezone is empty")
