@@ -40,7 +40,9 @@ import argparse
 import importlib.util
 import shutil
 import sqlite3
+import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -179,6 +181,66 @@ def _incident_states(runtime: Path) -> tuple[int | None, frozenset[str]]:
         return None, frozenset()
 
 
+_REPAIR_PATH_FIX = "47da51eee"
+
+
+def _daemon_predates_the_fix() -> str | None:
+    """Return a refusal reason when the running daemon is older than the fix.
+
+    `--daemon-restarted` asserts that the daemon resolves evidence through
+    `_evidence_pair_paths`. An assertion the script cannot check is not a guard: a
+    stale daemon still resolves the legacy path, so evicting those files while it
+    runs removes evidence it would hand to a repair agent. Compare the process start
+    time against the fix's commit time and refuse rather than trust the operator.
+
+    A daemon that is not running, or a repository that cannot date the fix, is not a
+    refusal: there is then nothing that could read the legacy path.
+    """
+    try:
+        pids = subprocess.run(
+            ["pgrep", "-f", "total_loss_loop.py daemon"],
+            capture_output=True, text=True, check=False,
+        ).stdout.split()
+    except OSError:
+        return None
+    if not pids:
+        return None
+    try:
+        fix_epoch = int(
+            subprocess.run(
+                ["git", "log", "-1", "--format=%ct", _REPAIR_PATH_FIX],
+                cwd=ROOT, capture_output=True, text=True, check=True,
+            ).stdout.strip()
+        )
+    except (subprocess.CalledProcessError, OSError, ValueError):
+        return None
+
+    for pid in pids:
+        try:
+            started = subprocess.run(
+                ["ps", "-o", "lstart=", "-p", pid],
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            if not started:
+                continue
+            started_epoch = int(
+                subprocess.run(
+                    ["date", "-j", "-f", "%a %b %d %H:%M:%S %Y", started, "+%s"],
+                    capture_output=True, text=True, check=True,
+                ).stdout.strip()
+            )
+        except (subprocess.CalledProcessError, OSError, ValueError):
+            continue
+        if started_epoch < fix_epoch:
+            return (
+                f"daemon pid {pid} started {started}, before {_REPAIR_PATH_FIX} "
+                f"({datetime.fromtimestamp(fix_epoch).astimezone():%Y-%m-%d %H:%M:%S %z}), "
+                "so it still resolves the legacy evidence path. Restart it first, or "
+                "drop --daemon-restarted to keep those files."
+            )
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true", help="perform the unlinks")
@@ -186,10 +248,10 @@ def main(argv: list[str] | None = None) -> int:
         "--daemon-restarted",
         action="store_true",
         help=(
-            "the running daemon carries 47da51eee or later, so the legacy path is "
-            "unreachable for every incident. Without this flag, the legacy file of an "
-            "incident queued at repair_waiting is retained, because a pre-fix daemon "
-            "would still resolve it."
+            "evict the legacy files of incidents queued at repair_waiting too. Only "
+            "valid once the running daemon carries 47da51eee, and VERIFIED against the "
+            "daemon's own start time rather than taken on trust: a daemon older than "
+            "the fix refuses the flag."
         ),
     )
     parser.add_argument(
@@ -203,6 +265,12 @@ def main(argv: list[str] | None = None) -> int:
     if not runtime.is_dir():
         print(f"runtime directory not found: {runtime}", file=sys.stderr)
         return 2
+
+    if args.daemon_restarted:
+        refusal = _daemon_predates_the_fix()
+        if refusal is not None:
+            print(f"refusing --daemon-restarted: {refusal}", file=sys.stderr)
+            return 3
 
     live, dispatchable = _incident_states(runtime)
     hold = frozenset() if args.daemon_restarted else dispatchable
