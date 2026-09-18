@@ -248,6 +248,80 @@ def _global_auction_artifact_persister(
     return persist
 
 
+# Pre-submit receipt cost attribution (2026-09-17).
+#
+# `_store_global_auction_receipt` runs synchronously between "decided to trade"
+# and `actuate_winner`, and its own completion log measures p50 0.516s / p99
+# 2.300s / max 21.3s over n=3,269 live calls. A decomposition against real
+# payloads attributed only 138 ms of that median (zlib-9+base64 encode 123.6 ms,
+# canonical json.dumps 10.1 ms, INSERT+fsync 4.4 ms), leaving ~73% unattributed
+# in the component builders and the reads that feed them. A residual is not a
+# measurement, so these counters replace it with one before anything is
+# restructured. See docs/operations/current/presubmit_receipt_decomposition_2026-09-17.md.
+#
+# Thread-local because the auction runs on one thread but the process also hosts
+# monitor/exit work: a shared dict would blend unrelated stages into one sample.
+_RECEIPT_STAGE_TIMINGS = threading.local()
+
+
+@contextmanager
+def _receipt_stage(label: str):
+    """Accumulate wall-clock per receipt-construction stage, when collecting.
+
+    A no-op unless `_receipt_stage_collect()` is active, so non-auction callers
+    of these builders pay one attribute lookup and nothing else.
+    """
+
+    stages = getattr(_RECEIPT_STAGE_TIMINGS, "stages", None)
+    if stages is None:
+        yield
+        return
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        elapsed_ms = (time.monotonic() - started) * 1000.0
+        entry = stages.get(label)
+        if entry is None:
+            stages[label] = [elapsed_ms, 1]
+        else:
+            entry[0] += elapsed_ms
+            entry[1] += 1
+
+
+def _receipt_stages_begin() -> dict[str, list[float]]:
+    """Start collecting per-stage timings; returns the dict the stages fill in.
+
+    Paired with `_receipt_stages_end()` in a try/finally rather than offered as a
+    context manager: the receipt-store call it wraps is ~100 lines of keyword
+    arguments, and re-indenting that to gain a `with` block would put a large
+    diff on the money path to buy nothing.
+    """
+
+    stages: dict[str, list[float]] = {}
+    _RECEIPT_STAGE_TIMINGS.stages = stages
+    return stages
+
+
+def _receipt_stages_end() -> None:
+    """Stop collecting, so a later non-auction builder call is not attributed here."""
+
+    _RECEIPT_STAGE_TIMINGS.stages = None
+
+
+def _receipt_stage_summary(stages: Mapping[str, list[float]]) -> str:
+    """Render stages slowest-first so the dominant term reads off the log line."""
+
+    if not stages:
+        return "none"
+    return " ".join(
+        f"{label}={total_ms:.1f}ms/{count}"
+        for label, (total_ms, count) in sorted(
+            stages.items(), key=lambda item: -item[1][0]
+        )
+    )
+
+
 @dataclass
 class _GlobalPreflightSqliteFence:
     interrupt_reason: str | None = None
@@ -4047,14 +4121,16 @@ def _store_global_auction_receipt(
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
-    minimum_repair_zlib = zlib.compress(minimum_repair_json, level=9)
-    book_native_side_receipt = _book_native_side_receipt(
-        asset_states=book_asset_states,
-        probability_keys=probability_keys,
-        buy_candidate_index=buy_candidate_index,
-        excluded_by_family=excluded_by_family or {},
-        required=book_capture_complete,
-    )
+    with _receipt_stage("encode_minimum_repair"):
+        minimum_repair_zlib = zlib.compress(minimum_repair_json, level=9)
+    with _receipt_stage("book_native_side_receipt"):
+        book_native_side_receipt = _book_native_side_receipt(
+            asset_states=book_asset_states,
+            probability_keys=probability_keys,
+            buy_candidate_index=buy_candidate_index,
+            excluded_by_family=excluded_by_family or {},
+            required=book_capture_complete,
+        )
     detailed_rows.sort(key=_candidate_semantic_key)
     compact_evaluations = {
         "rejected_groups": [
@@ -4088,7 +4164,8 @@ def _store_global_auction_receipt(
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
-    evaluation_zlib = zlib.compress(evaluation_json, level=9)
+    with _receipt_stage("encode_candidate_evaluations"):
+        evaluation_zlib = zlib.compress(evaluation_json, level=9)
     holding_coverage_rows = tuple(
         asdict(row)
         for row in sorted(
@@ -4102,7 +4179,8 @@ def _store_global_auction_receipt(
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
-    holding_coverage_zlib = zlib.compress(holding_coverage_json, level=9)
+    with _receipt_stage("encode_holding_coverage"):
+        holding_coverage_zlib = zlib.compress(holding_coverage_json, level=9)
     candidate_ids = tuple(
         str(row.get("candidate_id") or "") for row in evaluation_rows
     )
@@ -4334,15 +4412,17 @@ def _store_global_auction_receipt(
         for field in _GLOBAL_AUCTION_AUDIT_CONTEXT_FIELDS
     }
     audit_context_json = _canonical_json_bytes(audit_context)
+    with _receipt_stage("encode_audit_context"):
+        audit_context_zlib_b64 = base64.b64encode(
+            zlib.compress(audit_context_json, level=9)
+        ).decode("ascii")
     receipt.update(
         {
             "audit_context_encoding": "zlib+base64+canonical-json-object-v1",
             "audit_context_sha256": hashlib.sha256(
                 audit_context_json
             ).hexdigest(),
-            "audit_context_zlib_b64": base64.b64encode(
-                zlib.compress(audit_context_json, level=9)
-            ).decode("ascii"),
+            "audit_context_zlib_b64": audit_context_zlib_b64,
         }
     )
     payload_identity = _global_auction_payload_identity(receipt)
@@ -4425,12 +4505,13 @@ def _store_global_auction_receipt(
                 and audit_context_identity[0] == audit_context_ref.encoding
                 and isinstance(audit_context_ref.payload, Mapping)
             ):
-                audit_context_delta = _json_object_delta_receipt(
-                    prefix="audit_context",
-                    base=audit_context_ref.payload,
-                    current=audit_context,
-                    expected_sha256=audit_context_identity[1],
-                )
+                with _receipt_stage("delta_audit_context"):
+                    audit_context_delta = _json_object_delta_receipt(
+                        prefix="audit_context",
+                        base=audit_context_ref.payload,
+                        current=audit_context,
+                        expected_sha256=audit_context_identity[1],
+                    )
                 if _delta_component_is_smaller(
                     delta=audit_context_delta["audit_context_delta_zlib_b64"],
                     inline=receipt["audit_context_zlib_b64"],
@@ -4491,11 +4572,12 @@ def _store_global_auction_receipt(
                 and isinstance(candidate_ref.payload, Mapping)
             ):
                 try:
-                    candidate_delta = _candidate_evaluations_delta_receipt(
-                        base=candidate_ref.payload,
-                        current=compact_evaluations,
-                        expected_sha256=candidate_identity[1],
-                    )
+                    with _receipt_stage("delta_candidate_evaluations"):
+                        candidate_delta = _candidate_evaluations_delta_receipt(
+                            base=candidate_ref.payload,
+                            current=compact_evaluations,
+                            expected_sha256=candidate_identity[1],
+                        )
                 except ValueError as exc:
                     if exc.args != (
                         "GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_HASH_MISMATCH",
@@ -4580,13 +4662,14 @@ def _store_global_auction_receipt(
                 and holding_identity[0] == holding_ref.encoding
                 and isinstance(holding_ref.payload, Sequence)
             ):
-                holding_delta = _keyed_object_list_delta_receipt(
-                    prefix="holding_auction_coverage",
-                    key_field="position_id",
-                    base_rows=holding_ref.payload,
-                    current_rows=holding_coverage_rows,
-                    expected_sha256=holding_identity[1],
-                )
+                with _receipt_stage("delta_holding_coverage"):
+                    holding_delta = _keyed_object_list_delta_receipt(
+                        prefix="holding_auction_coverage",
+                        key_field="position_id",
+                        base_rows=holding_ref.payload,
+                        current_rows=holding_coverage_rows,
+                        expected_sha256=holding_identity[1],
+                    )
                 if _delta_component_is_smaller(
                     delta=holding_delta[
                         "holding_auction_coverage_delta_zlib_b64"
@@ -4645,10 +4728,11 @@ def _store_global_auction_receipt(
                 and isinstance(book_ref.payload, Sequence)
                 and bool(book_ref.payload)
             ):
-                book_delta = _book_native_side_delta_receipt(
-                    base_rows=book_ref.payload,
-                    current_rows=current_book_rows,
-                )
+                with _receipt_stage("delta_book_native_side"):
+                    book_delta = _book_native_side_delta_receipt(
+                        base_rows=book_ref.payload,
+                        current_rows=current_book_rows,
+                    )
                 delta_b64 = str(book_delta["book_native_side_delta_zlib_b64"])
                 full_book_b64 = str(receipt[book_field])
                 if _delta_component_is_smaller(
@@ -9347,6 +9431,7 @@ def process_current_global_batch(
             receipt_store_started = time.monotonic()
             if held_completion_expired():
                 return reject("HELD_SELL_DEADLINE_EXPIRED")
+            receipt_stage_timings = _receipt_stages_begin()
             try:
                 receipt_row_id = _store_global_auction_receipt(
                     trade_conn,
@@ -9445,10 +9530,17 @@ def process_current_global_batch(
                 )
             except _GlobalArtifactCommitRevoked as exc:
                 return reject(exc.reason)
+            finally:
+                _receipt_stages_end()
             last_selection_receipt_row_id = receipt_row_id
+            # stages= attributes the elapsed_s this line already reported. The
+            # decomposition (2026-09-17) accounted for only ~138 ms of a 516 ms
+            # median and left ~73% in these builders, so the residual is
+            # replaced with per-stage measurement rather than inferred.
             _LOG.info(
-                "global auction receipt store completed: elapsed_s=%.3f",
+                "global auction receipt store completed: elapsed_s=%.3f stages=%s",
                 time.monotonic() - receipt_store_started,
+                _receipt_stage_summary(receipt_stage_timings),
             )
             if (
                 isinstance(trade_conn, sqlite3.Connection)
