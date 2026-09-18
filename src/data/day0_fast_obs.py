@@ -109,6 +109,14 @@ FAST_RESIDUAL_LOOKBACK_DAYS = 7
 FAST_RESIDUAL_MIN_PAIRS = 20
 FAST_RESIDUAL_MATCH_TOLERANCE_S = 6 * 60
 FAST_RESIDUAL_UNKNOWN_ALPHA = 0.05
+#: Settlement families whose declared settlement station is the SAME ICAO
+#: station the AWC METAR fast lane reads, so a fast print is same-station
+#: physical evidence about the same eventual settlement value. Both families
+#: keep their own settlement channel below; membership here grants no
+#: settlement authority, only admission as a conditioning observation.
+#: Hong Kong is absent by design: HKO publishes its own products and names no
+#: ICAO station (see ``fast_obs_source_for_city``).
+_FAST_LANE_SETTLEMENT_SOURCE_TYPES = frozenset({"wu_icao", "noaa"})
 
 _MemoKey = tuple[str, str, str]
 _MemoUpdate = tuple[Optional[int], Optional[int], Optional[str]]
@@ -294,7 +302,7 @@ def latest_fast_station_extreme_c(
         or decision is None
         or normalized_metric not in {"high", "low"}
         or str(getattr(city_obj, "settlement_source_type", "") or "").lower()
-        != "wu_icao"
+        not in _FAST_LANE_SETTLEMENT_SOURCE_TYPES
     ):
         return None
     station = str(getattr(city_obj, "wu_station", "") or "").strip().upper()
@@ -448,8 +456,9 @@ def build_fast_station_residual_likelihood(
     """Return a same-station, seven-day, strictly causal residual likelihood.
 
     Missing/thin/mismatched evidence is an inert ``None``: it neither blocks a
-    family nor changes its baseline probability.  WU remains the sole
-    settlement channel and the fast METAR stream remains a noisy observation.
+    family nor changes its baseline probability.  The city's declared channel
+    remains the sole settlement channel and the fast METAR stream remains a
+    noisy observation of it.
     """
 
     if str(observed_source or "").strip() not in {
@@ -470,7 +479,10 @@ def build_fast_station_residual_likelihood(
     city_obj = cities_by_name.get(str(city))
     if city_obj is None:
         return None
-    if str(getattr(city_obj, "settlement_source_type", "") or "").lower() != "wu_icao":
+    source_type = str(
+        getattr(city_obj, "settlement_source_type", "") or ""
+    ).strip().lower()
+    if source_type not in _FAST_LANE_SETTLEMENT_SOURCE_TYPES:
         return None
     station = str(getattr(city_obj, "wu_station", "") or "").strip().upper()
     settlement_unit = str(
@@ -478,6 +490,16 @@ def build_fast_station_residual_likelihood(
     ).strip().upper()
     if not station or settlement_unit not in {"C", "F"}:
         return None
+    # The residual is measured against the channel that actually SETTLES the
+    # city, which is family-specific: the WU history page for wu_icao, the
+    # weather.gov station page for noaa. Pairing a fast print against the
+    # wrong family's channel yields no rows, and a residual model with no
+    # rows is an inert None that silently drops the whole fast lane.
+    settlement_channel = (
+        "wu_icao_history"
+        if source_type == "wu_icao"
+        else f"noaa_wrh_{station.lower()}"
+    )
     try:
         target_day = date.fromisoformat(str(target_date))
         tz = ZoneInfo(str(getattr(city_obj, "timezone", "") or "UTC"))
@@ -512,7 +534,7 @@ def build_fast_station_residual_likelihood(
                AND publish_ts_utc >= ?
                AND publish_ts_utc < ?
                AND upper(station_id) = ?
-               AND source_channel IN ('wu_icao_history', ?)
+               AND source_channel IN (?, ?)
                AND julianday(publish_ts_utc) >= julianday(?)
                AND julianday(publish_ts_utc) < julianday(?)
                AND julianday(fetched_at_utc) < julianday(?)
@@ -523,6 +545,7 @@ def build_fast_station_residual_likelihood(
                 index_window_start,
                 index_window_end,
                 station,
+                settlement_channel,
                 FAST_OBS_SOURCE_ID,
                 window_start.isoformat(),
                 training_cutoff.isoformat(),
@@ -548,7 +571,7 @@ def build_fast_station_residual_likelihood(
         )
         if value_c is None:
             continue
-        target = settlement_rows if channel == "wu_icao_history" else fast_rows
+        target = settlement_rows if channel == settlement_channel else fast_rows
         target.append((published, value_c))
     if not settlement_rows or not fast_rows:
         return None
@@ -608,7 +631,7 @@ def build_fast_station_residual_likelihood(
     identity = {
         "semantics_revision": FAST_RESIDUAL_LIKELIHOOD_REVISION,
         "station_id": station,
-        "settlement_channel": "wu_icao_history",
+        "settlement_channel": settlement_channel,
         "fast_channel": FAST_OBS_SOURCE_ID,
         "unit": settlement_unit,
         "as_of": training_cutoff.isoformat(),
@@ -623,7 +646,7 @@ def build_fast_station_residual_likelihood(
     ).hexdigest()
     return FastStationResidualLikelihood(
         station_id=station,
-        settlement_channel="wu_icao_history",
+        settlement_channel=settlement_channel,
         fast_channel=FAST_OBS_SOURCE_ID,
         unit=settlement_unit,
         as_of=training_cutoff.isoformat(),
