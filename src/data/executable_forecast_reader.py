@@ -248,12 +248,23 @@ def _is_finite_number(value: object) -> bool:
         return False
 
 
+#: Settlement families whose product names an ICAO airport station, so a grid
+#: point can be proven to represent it. hko names no station and is exempt.
+_STATION_SETTLED_SOURCE_TYPES = frozenset({"wu_icao", "noaa"})
+
+
 def _station_grid_provenance_reason(row: dict[str, Any]) -> str | None:
-    """WU airport-settled markets need explicit grid-to-station provenance.
+    """An airport-settled market needs explicit grid-to-station provenance.
 
     This is an input-authority gate, not a second probability model: EMOS remains
     the single q builder, but a current OpenData row cannot be live-executable
     unless it proves which grid point represented the settlement station.
+
+    Both wu_icao and noaa settle off an ICAO airport station, so both need the
+    proof; the gate previously required it only for wu_icao, which after the
+    settlement migration meant 48 of 53 cities could go live-executable with no
+    grid-to-station evidence at all. Families that name no station (hko) have no
+    station to prove a grid against and are exempt.
     """
     data_version = str(row.get("dataset_id") or "")
     if "ecmwf_opendata" not in data_version:
@@ -267,7 +278,7 @@ def _station_grid_provenance_reason(row: dict[str, Any]) -> str | None:
         or contract.get("settlement_source_type")
         or ""
     ).strip().lower()
-    if source_type != "wu_icao":
+    if source_type not in _STATION_SETTLED_SOURCE_TYPES:
         return None
     required = (
         provenance.get("nearest_grid_lat"),

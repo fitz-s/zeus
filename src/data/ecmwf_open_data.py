@@ -1700,7 +1700,9 @@ def _station_grid_provenance_reason(row: dict[str, Any]) -> str | None:
         or contract.get("settlement_source_type")
         or ""
     ).strip().lower()
-    if source_type != "wu_icao":
+    # Twin of executable_forecast_reader._station_grid_provenance_reason; both
+    # families settle off an ICAO airport station and so both owe the proof.
+    if source_type not in {"wu_icao", "noaa"}:
         return None
     required = (
         provenance.get("nearest_grid_lat"),
