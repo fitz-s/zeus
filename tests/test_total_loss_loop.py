@@ -6348,3 +6348,44 @@ def test_exhausted_recovery_bounds_due_gate_receipt_without_debt_writes(
     assert receipt["incident_ids"] == ["caller-0", "caller-1"]
     assert receipt["remainder_count"] == cfg["loop"]["evidence_queue_batch_size"]
     assert result["deferred"] == [*caller_known, "recovered-0", "recovered-1"]
+
+
+def test_repair_prompt_points_at_the_current_generation_not_the_legacy_path(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The repair agent must receive the evidence snapshot that actually exists.
+
+    `_build_evidence_snapshot` has written `generations/<id>/evidence.db` with a
+    `CURRENT` pointer since 2026-08-24 (6721fa637). `_start_repair` still named the
+    pre-migration `incidents/<id>/evidence.db`, so it handed the agent a path that
+    nothing writes any more.
+    """
+    incident_id = "repair-generation"
+    incident_dir = Path(cfg["paths"]["runtime"]) / "incidents" / incident_id
+    generation_dir = incident_dir / "generations" / "gen-abc"
+    generation_dir.mkdir(parents=True)
+    current_evidence = generation_dir / "evidence.db"
+    current_evidence.write_bytes(b"current-generation")
+    (generation_dir / "manifest.json").write_text(json.dumps({"incident_id": incident_id}))
+    (incident_dir / "CURRENT").write_text("gen-abc")
+    (incident_dir / "diagnosis.json").write_text(json.dumps({"root_cause": "x"}))
+    (incident_dir / "classification.json").write_text(json.dumps({"relation": "self"}))
+    legacy_evidence = incident_dir / "evidence.db"
+    assert not legacy_evidence.exists()
+
+    captured: dict[str, str] = {}
+
+    monkeypatch.setattr(loop, "_worktree", lambda _cfg, _incident: Path(cfg["paths"]["runtime"]))
+    monkeypatch.setattr(loop, "_repair_branch", lambda _cfg, _incident: "test/branch")
+    monkeypatch.setattr(loop, "_schema_file", lambda *_args, **_kwargs: Path("/dev/null"))
+    monkeypatch.setattr(loop, "_codex_exec_base", lambda *_args, **_kwargs: ["true"])
+    monkeypatch.setattr(
+        loop,
+        "_spawn_run",
+        lambda *_args, **kwargs: captured.update(prompt=str(kwargs["prompt"])) or {"run_id": "r1"},
+    )
+
+    loop._start_repair(cfg, incident_id, "hard")
+
+    assert str(current_evidence) in captured["prompt"]
+    assert f"incident evidence={legacy_evidence}\n" not in captured["prompt"]

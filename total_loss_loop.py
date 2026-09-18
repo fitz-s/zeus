@@ -7625,7 +7625,14 @@ def _start_repair(cfg: Mapping[str, Any], incident_id: str, kind: str) -> str:
     output = incident_dir / "patch.json"
     events = incident_dir / "codex-repair.jsonl"
     schema = _schema_file(cfg, "patch", PATCH_SCHEMA)
-    prompt = Path(str(cfg["paths"]["prompt"])).read_text() + "\n\nIMPLEMENTATION PHASE. Implement and test the structural repair in this incident worktree. Do not commit, push, open a PR, merge, or deploy; the controller owns Git metadata and will commit the proven diff before fresh review.\n\nDIAGNOSIS:\n" + json.dumps(diagnosis, ensure_ascii=False, indent=2) + "\n\nCLASSIFICATION:\n" + json.dumps(classification, ensure_ascii=False, indent=2) + f"\n\nincident evidence={incident_dir / 'evidence.db'}\n"
+    # The evidence snapshot lives in the CURRENT generation directory; the
+    # pre-migration incidents/<id>/evidence.db has had no writer since
+    # 6721fa637 (2026-08-24), so naming it handed the agent a dead path.
+    evidence_pair = _evidence_pair_paths(cfg, incident_id)
+    evidence_db = (
+        evidence_pair[0] if evidence_pair is not None else incident_dir / "evidence.db"
+    )
+    prompt = Path(str(cfg["paths"]["prompt"])).read_text() + "\n\nIMPLEMENTATION PHASE. Implement and test the structural repair in this incident worktree. Do not commit, push, open a PR, merge, or deploy; the controller owns Git metadata and will commit the proven diff before fresh review.\n\nDIAGNOSIS:\n" + json.dumps(diagnosis, ensure_ascii=False, indent=2) + "\n\nCLASSIFICATION:\n" + json.dumps(classification, ensure_ascii=False, indent=2) + f"\n\nincident evidence={evidence_db}\n"
     command = _codex_exec_base(cfg, sandbox="workspace-write", cwd=worktree, schema=schema, output=output, persistent=True)
     spawned = _spawn_run(
         cfg,
