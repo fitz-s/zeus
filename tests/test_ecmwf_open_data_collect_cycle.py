@@ -189,6 +189,53 @@ def test_raw_retention_fails_closed_on_incomplete_canonical_proof(tmp_path):
     )
 
 
+def test_raw_retention_evicts_same_day_proven_group_and_keeps_unproven(tmp_path):
+    """Retention is gated by the per-cycle proof, not by a calendar window.
+
+    2026-09-17 operator directive: `_RAW_RETENTION_CALENDAR_DAYS = 0`, so TODAY's
+    cycle is eligible the moment its own source-run is COMPLETE and its snapshot
+    count matches with every row VERIFIED. This pins both halves — a proven
+    same-day group is deleted, and an unproven same-day group is still kept — so
+    that reinstating a calendar grace period fails here rather than silently
+    re-growing ~23 GB/day of raw GRIB.
+    """
+    from src.data import ecmwf_open_data
+
+    assert ecmwf_open_data._RAW_RETENTION_CALENDAR_DAYS == 0
+
+    raw_root = tmp_path / "51 source data"
+    proven_paths = _write_raw_group(raw_root, "20260821", 0, "mx2t3")
+    unproven_paths = _write_raw_group(raw_root, "20260821", 12, "mx2t3")
+    conn = _make_conn(tmp_path)
+    # Only the 00Z cycle gets COMPLETE + VERIFIED canonical evidence.
+    _record_raw_authority(conn, day="20260821", hour=0, param="mx2t3")
+
+    plan = ecmwf_open_data._plan_decoded_open_data_raw_retention(
+        conn,
+        raw_root=raw_root,
+        reference_date=date(2026, 8, 21),
+    )
+    result = ecmwf_open_data._apply_decoded_open_data_raw_retention(plan)
+
+    assert result["status"] == "APPLIED"
+    assert result["eligible_group_count"] == 1
+    assert all(not path.exists() for path in proven_paths)
+    assert all(path.exists() for path in unproven_paths)
+
+
+def test_raw_retention_rejects_negative_days(tmp_path):
+    from src.data import ecmwf_open_data
+
+    conn = _make_conn(tmp_path)
+    with pytest.raises(ValueError, match="must not be negative"):
+        ecmwf_open_data._plan_decoded_open_data_raw_retention(
+            conn,
+            raw_root=tmp_path / "51 source data",
+            reference_date=date(2026, 8, 21),
+            retention_days=-1,
+        )
+
+
 def test_raw_retention_never_follows_matching_symlink(tmp_path):
     from src.data import ecmwf_open_data
 

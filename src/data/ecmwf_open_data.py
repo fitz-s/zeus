@@ -247,11 +247,19 @@ SOURCE_ID = "ecmwf_open_data"
 FORECAST_SOURCE_ROLE = "entry_primary"
 MODEL_VERSION = "ecmwf_open_data"
 
-# Keep the current and immediately preceding UTC calendar days available for
-# restart/redecode. Older raw GRIBs are recoverable from ECMWF, but only after
-# their exact cycle+track has durable COMPLETE source-run evidence and an equal
-# count of VERIFIED canonical snapshots.
-_RAW_RETENTION_CALENDAR_DAYS = 2
+# Raw GRIB is a decode input, not an archive: it is deleted as soon as its own
+# cycle+track has durable COMPLETE source-run evidence AND an equal count of
+# VERIFIED canonical snapshots (the proof gate in
+# _plan_decoded_open_data_raw_retention is unchanged and remains the only thing
+# that authorizes a delete). Any GRIB still needed is re-fetchable from ECMWF,
+# so retaining a calendar window buys nothing a re-fetch does not.
+#
+# 2026-09-17 (operator directive, twice restated): was 2, which retained ~46 GB
+# across two day-dirs on a host at 96% full — for the only one of 13 sources that
+# keeps raw payloads at all. 0 means "no calendar grace": eligibility is decided
+# purely by the per-cycle proof gate, so an unproven cycle is still retained no
+# matter how old. Set to 1 to keep the current UTC day, 2 for the prior behaviour.
+_RAW_RETENTION_CALENDAR_DAYS = 0
 _RAW_STEP_NAME = re.compile(
     r"^\.(?P<date>\d{8})_(?P<hour>\d{2})z_step\d{3}_"
     r"(?P<param>mx2t3|mn2t3)_ens51\.grib2$"
@@ -300,8 +308,8 @@ def _plan_decoded_open_data_raw_retention(
     writer lock so multi-gigabyte filesystem cleanup cannot stall probability
     writers. Unknown files and symlinks are never candidates.
     """
-    if retention_days < 2:
-        raise ValueError("OpenData raw retention must keep at least two calendar days")
+    if retention_days < 0:
+        raise ValueError("OpenData raw retention days must not be negative")
     root = raw_root / "raw" / "ecmwf_open_ens" / "ecmwf"
     if not root.exists() or root.is_symlink() or not root.is_dir():
         return _RawRetentionPlan(root, (), 0, 0, 0, 0)
