@@ -1274,7 +1274,17 @@ def _latest_authorized_day0_fact(
                 ogimet_channel = f"ogimet_metar_{expected_station.lower()}"
                 page_channel = f"noaa_wrh_{expected_station.lower()}"
                 settlement_channels = {page_channel}
-                physical_channels = {page_channel, ogimet_channel}
+                # aviationweather_metar reads the SAME ICAO station the page
+                # names, and the branch below already applies this family's
+                # unit law and margin to it. Omitting it here made the ledger
+                # fallback blind to the fastest physical channel we hold while
+                # the event branch above admitted it, so the two paths
+                # disagreed about the same reading.
+                physical_channels = {
+                    page_channel,
+                    ogimet_channel,
+                    "aviationweather_metar",
+                }
             else:
                 settlement_channels = set()
                 physical_channels = set()
