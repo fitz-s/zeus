@@ -77,6 +77,15 @@ def main() -> int:
         help="root containing raw/ecmwf_open_ens/ecmwf (default: repo '51 source data')",
     )
     parser.add_argument(
+        "--prune-manifests",
+        action="store_true",
+        help=(
+            "also prune superseded decoded-JSON cycle views under "
+            "raw/coordinate_manifests (keeps the newest cycle present per track). "
+            "Requires --apply."
+        ),
+    )
+    parser.add_argument(
         "--forecasts-db",
         default=None,
         help=(
@@ -121,12 +130,109 @@ def main() -> int:
             print(f"  would delete: {path.parent.name}/{path.name}")
         if len(plan.files) > 5:
             print(f"  ... and {len(plan.files) - 5} more")
+        if args.prune_manifests:
+            # Report rather than silently no-op: a flag that does nothing without
+            # a second flag is how a cleanup gets believed and never runs.
+            print("\n--prune-manifests would also run (counts only in a dry run):")
+            _count_manifest_prune(Path(args.raw_root))
         print("\nDRY RUN — nothing deleted. Re-run with --apply.")
         return 0
 
     summary = eod._apply_decoded_open_data_raw_retention(plan)
     print(json.dumps(summary, indent=2, default=str))
-    return 0 if summary.get("status") in {"APPLIED", "NO_ELIGIBLE_RAW"} else 1
+    ok = summary.get("status") in {"APPLIED", "NO_ELIGIBLE_RAW"}
+
+    if args.prune_manifests:
+        ok = _prune_manifests(Path(args.raw_root)) and ok
+    return 0 if ok else 1
+
+
+def _manifest_prune_targets(raw_root: Path):
+    """Yield (sha_dir, track_dir, keep_date, keep_hour) for each prunable track.
+
+    The in-daemon prune runs for the cycle it just ingested. Out of process we do
+    not know which that was, so the newest cycle actually present under each track
+    is what is kept — the same thing the next ingest would keep, and never less.
+    """
+
+    manifests_root = raw_root / "raw" / "coordinate_manifests"
+    if not manifests_root.is_dir():
+        return
+    for sha_dir in sorted(manifests_root.iterdir()):
+        if sha_dir.is_symlink() or not sha_dir.is_dir():
+            continue
+        for track_dir in sorted(sha_dir.iterdir()):
+            if track_dir.is_symlink() or not track_dir.is_dir():
+                continue
+            newest = None
+            for city_dir in track_dir.iterdir():
+                if not city_dir.is_dir():
+                    continue
+                for cycle_dir in city_dir.iterdir():
+                    parsed = eod._parse_cycle_extract_dir_name(cycle_dir.name)
+                    if parsed is not None and (newest is None or parsed > newest):
+                        newest = parsed
+            if newest is not None:
+                yield sha_dir, track_dir, newest[0], newest[1]
+
+
+def _count_manifest_prune(raw_root: Path) -> None:
+    """Dry-run counterpart: count what _prune_manifests would remove."""
+
+    total_dirs = 0
+    total_bytes = 0
+    for sha_dir, track_dir, keep_date, keep_hour in _manifest_prune_targets(raw_root):
+        dirs = 0
+        size = 0
+        for city_dir in sorted(track_dir.iterdir()):
+            if not city_dir.is_dir():
+                continue
+            for cycle_dir in sorted(city_dir.iterdir()):
+                parsed = eod._parse_cycle_extract_dir_name(cycle_dir.name)
+                if parsed is None or parsed >= (keep_date, keep_hour):
+                    continue
+                dirs += 1
+                size += sum(
+                    p.stat().st_size
+                    for p in cycle_dir.rglob("*")
+                    if p.is_file() and not p.is_symlink()
+                )
+        total_dirs += dirs
+        total_bytes += size
+        print(
+            f"  {sha_dir.name[:12]}/{track_dir.name} "
+            f"keep={keep_date.isoformat()}T{keep_hour:02d}Z "
+            f"removable={dirs} bytes={size / 1e6:.1f}MB"
+        )
+    print(f"  TOTAL removable: {total_dirs} cycle dirs, {total_bytes / 1e6:.1f} MB")
+
+
+def _prune_manifests(raw_root: Path) -> bool:
+    """Prune superseded decoded-JSON cycle views under every manifest sha."""
+
+    ok = True
+    ran = False
+    for sha_dir, track_dir, keep_date, keep_hour in _manifest_prune_targets(raw_root):
+        ran = True
+        result = eod._prune_superseded_coordinate_manifest_cycles(
+            coordinate_raw_root=sha_dir,
+            extract_subdir=track_dir.name,
+            keep_run_date=keep_date,
+            keep_run_hour=keep_hour,
+        )
+        print(
+            f"manifest_prune {sha_dir.name[:12]}/{track_dir.name} "
+            f"keep={keep_date.isoformat()}T{keep_hour:02d}Z "
+            f"removed={result['removed_cycle_dirs']} "
+            f"bytes={int(result['removed_bytes']) / 1e6:.1f}MB "
+            f"status={result['status']}"
+        )
+        if result["errors"]:
+            print(f"  errors: {result['errors']}")
+            ok = False
+    if not ran:
+        print("NO_MANIFEST_CYCLES — nothing to prune")
+    return ok
 
 
 if __name__ == "__main__":
