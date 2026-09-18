@@ -490,12 +490,29 @@ def validate_day0_causal_evidence_bundle(
     )
 
 
+#: Metadata that records HOW a capture was fetched, never WHAT it observed, so
+#: two captures of the SAME provider run may differ here and still be the same
+#: evidence. ``endpoint``/``endpoint_mode``/``source_run_authority`` join the
+#: original four because ``_select_day0_run_endpoint`` deliberately falls back
+#: from the run-pinned single-runs endpoint to the standard meta-stamped one
+#: (35ff9a3dc) whenever the freshest run fails its clock precheck or its
+#: response starts after the causal observation boundary. That fallback proves
+#: the SAME run through a different URL: measured 2026-09-18, 28 of that day's
+#: endpoint-mode flips carried an identical ``provider_run_id`` AND
+#: byte-identical values on every shared timestamp, yet the semantic hash
+#: rejected the entry (GLOBAL_ACTUATION_PROBABILITY_USE_DIVERGED, the largest
+#: winner-preflight rejection class). Run identity stays enforced by
+#: ``provider_run_id`` and the four ``provider_source_*`` clocks, which are NOT
+#: exempt, so a flip that also advances the run still mismatches.
 _DAY0_CAPTURE_EQUIVALENCE_ONLY_META = frozenset(
     {
         "fetch_started_at",
         "fetch_finished_at",
         "request_hash",
         "source_run_id",
+        "endpoint",
+        "endpoint_mode",
+        "source_run_authority",
     }
 )
 
@@ -518,8 +535,17 @@ def _day0_normalize_vector_request_semantics(
     ``request_params_json`` is stamped from the bundle-wide capture request, so
     its ``runs``/``endpoint_modes`` maps carry an entry per sibling model in the
     bundle, not just this row's own model. A sibling model's run advancing must
-    not change this row's own semantic identity, so both maps are projected
-    down to this row's own model before the equivalence comparison.
+    not change this row's own semantic identity, so ``runs`` is projected down
+    to this row's own model before the equivalence comparison.
+
+    ``endpoint_modes`` is dropped entirely rather than projected: it names the
+    URL each model was fetched through, which is transport, not evidence —
+    the same reason ``endpoint``/``endpoint_mode`` sit in
+    ``_DAY0_CAPTURE_EQUIVALENCE_ONLY_META``. Projecting it to this row's own
+    model still let the row's own single-runs/standard fallback change the
+    semantic hash, which is the very divergence that exemption exists to
+    tolerate. ``runs`` still carries the projected run, so a fallback that
+    proves a DIFFERENT run remains a mismatch here.
     """
 
     if key == "request_params_json" and isinstance(value, str):
@@ -529,12 +555,10 @@ def _day0_normalize_vector_request_semantics(
             return value
     if key == "request_params_json" and isinstance(value, Mapping):
         projected = dict(value)
-        for map_key in ("runs", "endpoint_modes"):
-            sub = projected.get(map_key)
-            if isinstance(sub, Mapping):
-                projected[map_key] = (
-                    {model: sub[model]} if model in sub else {}
-                )
+        sub = projected.get("runs")
+        if isinstance(sub, Mapping):
+            projected["runs"] = {model: sub[model]} if model in sub else {}
+        projected.pop("endpoint_modes", None)
         value = projected
     return _day0_canonical_json(value)
 

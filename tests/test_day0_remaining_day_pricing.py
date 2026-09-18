@@ -628,6 +628,13 @@ def test_day0_normalize_vector_request_semantics_legacy_own_model_only_row_uncha
     # A legacy row whose `runs`/`endpoint_modes` maps already carry only its
     # own model (pre-8acb71a4f capture shape) must normalize identically to
     # itself and to the projected form of an equivalent bundle-wide row.
+    # `endpoint_modes` is now DROPPED on both sides rather than projected: it
+    # names the URL each model was fetched through, so the row's own
+    # single-runs/standard fallback used to change the semantic hash even when
+    # the SAME provider run with byte-identical values was proven through the
+    # other endpoint. The invariant under test -- legacy and bundle-wide rows
+    # normalize alike -- holds either way; `runs` still carries the projected
+    # run, so a fallback proving a DIFFERENT run remains a mismatch.
     import src.data.day0_hourly_vectors as hourly
 
     legacy = json.dumps(
@@ -656,9 +663,9 @@ def test_day0_normalize_vector_request_semantics_legacy_own_model_only_row_uncha
     )
     assert normalized_legacy == normalized_legacy_again
     assert normalized_legacy["runs"] == {"icon_d2": "2026-06-10T00:00:00+00:00"}
-    assert normalized_legacy["endpoint_modes"] == {"icon_d2": "single_runs"}
+    assert "endpoint_modes" not in normalized_legacy
+    assert "endpoint_modes" not in normalized_bundle_wide
     assert normalized_legacy["runs"] == normalized_bundle_wide["runs"]
-    assert normalized_legacy["endpoint_modes"] == normalized_bundle_wide["endpoint_modes"]
 
 
 def test_day0_v1_capture_equivalence_preserves_ordinary_entry_bundle(
