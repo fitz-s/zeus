@@ -1323,6 +1323,7 @@ def restore_reservation_for_late_fill(
     *,
     filled_size: Decimal,
     partial: bool,
+    remainder_retired: bool = False,
 ) -> bool:
     """Rebuild collateral accounting after a falsely terminal command.
 
@@ -1362,7 +1363,18 @@ def restore_reservation_for_late_fill(
         or filled_size <= 0
         or remaining < 0
         or (partial and remaining <= 0)
-        or (not partial and remaining > Decimal("0.01"))
+        or (
+            not partial
+            # `not partial` normally means the fill covered the request, so an
+            # unfilled remainder would be unaccounted collateral. When the VENUE
+            # RETIRED the remainder (a genuine cancel of the unfilled part), the
+            # remainder is correctly reserved by nobody: the body below converts
+            # the filled fraction and leaves no remainder reservation, which is
+            # exactly the right accounting. Only this arithmetic assumption
+            # needed the exemption.
+            and not remainder_retired
+            and remaining > Decimal("0.01")
+        )
         or not released_at
     ):
         raise CollateralInsufficient("late_partial_fill_reservation_shape_invalid")

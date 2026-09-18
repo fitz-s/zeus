@@ -5174,7 +5174,52 @@ def _terminal_entry_fill_boundary(
         )
         if partial is not None:
             return "partial_fill", partial
+    # A GENUINE cancel of the unfilled remainder: the venue matched part of the
+    # order and retired the rest, so the terminal event makes no claim about
+    # fills in either direction. It is neither a no-fill terminal (a fill
+    # occurred) nor a terminal-partial one (nothing recorded the partial), so it
+    # is its own category — and the one shape for which NOTHING mints
+    # execution_fact, which degrades portfolio_consistency into a book-wide
+    # reduce-only that cannot self-heal.
+    if _canonical_order_matched_size(conn, command) is not None:
+        return "unsourced_cancelled_remainder", Decimal("0")
     return "", None
+
+
+def _canonical_order_matched_size(
+    conn: sqlite3.Connection,
+    command: Mapping[str, Any],
+) -> Decimal | None:
+    """Positive matched size from the canonical (strongest-proof) order fact."""
+
+    from src.execution.command_recovery import _canonical_order_truth_cte
+
+    try:
+        row = conn.execute(
+            "WITH "
+            + _canonical_order_truth_cte(
+                cte_name="canonical_boundary_order_truth",
+                partition_by_venue_order=True,
+            )
+            + """
+            SELECT matched_size
+              FROM canonical_boundary_order_truth
+             WHERE command_id = ?
+               AND venue_order_id = ?
+             LIMIT 1
+            """,
+            (
+                str(command.get("command_id") or ""),
+                str(command.get("venue_order_id") or ""),
+            ),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    return _positive_decimal_or_none(
+        (row["matched_size"] if hasattr(row, "keys") else row[0])
+    )
 
 
 def persisted_terminal_late_entry_fill_command_ids(
@@ -5426,6 +5471,15 @@ def reconcile_persisted_terminal_late_entry_fills(
                 and (
                     terminal_partial_size is None
                     or cumulative_shares <= terminal_partial_size
+                )
+            )
+            or (
+                # Nothing has sourced this fill yet, so any authenticated size
+                # is new; a re-run finds the minted row and stays here instead.
+                boundary == "unsourced_cancelled_remainder"
+                and (
+                    cumulative_shares <= 0
+                    or _sourced_entry_fill_shares(conn, candidate_id) > 0
                 )
             )
         ):
@@ -8389,7 +8443,53 @@ def _fill_event_payload_for_command(
                     "cumulative_fill_exceeds_terminal_partial": True,
                 },
             })
+        elif boundary == "unsourced_cancelled_remainder":
+            payload.update({
+                "schema_version": 1,
+                "reason": "authenticated_fill_after_genuine_cancel",
+                "proof_class": "terminal_command_late_fill_correction",
+                "command_id": str(command.get("command_id") or ""),
+                "terminal_state_before": terminal_state,
+                "correction_event": event_type,
+                "required_predicates": {
+                    "terminal_event_made_no_fill_claim": True,
+                    "order_ledger_matched_positive": True,
+                    "no_live_execution_fact": True,
+                    "authenticated_confirmed_trade_fact": True,
+                    "bound_venue_order_identity": True,
+                    "order_matched_remainder_arithmetic": True,
+                },
+            })
     return payload
+
+
+def _sourced_entry_fill_shares(
+    conn: sqlite3.Connection,
+    command_id: str,
+) -> Decimal:
+    """Entry shares already sourced by a live execution_fact row (0 when none)."""
+
+    try:
+        row = conn.execute(
+            """
+            SELECT COALESCE(SUM(CAST(COALESCE(shares, '0') AS REAL)), 0)
+              FROM execution_fact
+             WHERE command_id = ?
+               AND order_role = 'entry'
+               AND voided_at IS NULL
+            """,
+            (str(command_id),),
+        ).fetchone()
+    except sqlite3.Error:
+        # Fail CLOSED: an unreadable ledger must not license a mint whose
+        # double-count guard cannot be evaluated.
+        return Decimal("Infinity")
+    if row is None:
+        return Decimal("0")
+    try:
+        return Decimal(str(row[0]))
+    except (ArithmeticError, TypeError, ValueError):
+        return Decimal("Infinity")
 
 
 def _fill_event_for_command(

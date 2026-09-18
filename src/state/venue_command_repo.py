@@ -2682,6 +2682,10 @@ def append_event(
                     command_id,
                     filled_size=Decimal(str(payload["canonical_filled_size"])),
                     partial=terminal_late_partial,
+                    remainder_retired=(
+                        str(payload.get("reason") or "")
+                        == "authenticated_fill_after_genuine_cancel"
+                    ),
                 )
             except CollateralInsufficient as exc:
                 raise ValueError(
@@ -2861,28 +2865,57 @@ def _validate_terminal_late_fill_correction_payload(
     terminal_partial_correction = (
         reason == "authenticated_fill_after_terminal_partial"
     )
+    # A command may terminate LEGITIMATELY -- a genuine cancel of the unfilled
+    # remainder -- while carrying a real partial fill. Such a terminal event
+    # makes no claim about fills in either direction, so it is neither of the two
+    # categories above, and before this branch existed NOTHING minted its
+    # execution_fact: riskguard then refused the position, degraded
+    # portfolio_consistency, and latched the book reduce-only with no path out
+    # (2026-09-18, one row out of 797). The proof below is verified against
+    # durable facts, never trusted from the payload.
+    genuine_cancel_correction = (
+        reason == "authenticated_fill_after_genuine_cancel"
+    )
     if (
         payload.get("proof_class") != "terminal_command_late_fill_correction"
-        or not (terminal_no_fill_correction or terminal_partial_correction)
+        or not (
+            terminal_no_fill_correction
+            or terminal_partial_correction
+            or genuine_cancel_correction
+        )
         or payload.get("command_id") != command_id
         or payload.get("terminal_state_before") != current_state
     ):
         raise ValueError("terminal late-fill correction proof identity is invalid")
     required = payload.get("required_predicates")
-    required_names = (
-        (
-            "terminal_event_was_no_fill"
-            if terminal_no_fill_correction
-            else "terminal_event_was_partial"
-        ),
-        "terminal_event_precedes_trade_fact",
-        "terminal_event_precedes_order_fact",
-        "authenticated_confirmed_trade_fact",
-        "bound_venue_order_identity",
-        "order_matched_remainder_arithmetic",
-    )
-    if terminal_partial_correction:
-        required_names += ("cumulative_fill_exceeds_terminal_partial",)
+    if genuine_cancel_correction:
+        # The fill lands BEFORE the cancel ack here, so the two
+        # `terminal_event_precedes_*` predicates of the other categories are
+        # deliberately absent: requiring them would be requiring the very
+        # ordering this category exists to handle.
+        required_names = (
+            "terminal_event_made_no_fill_claim",
+            "order_ledger_matched_positive",
+            "no_live_execution_fact",
+            "authenticated_confirmed_trade_fact",
+            "bound_venue_order_identity",
+            "order_matched_remainder_arithmetic",
+        )
+    else:
+        required_names = (
+            (
+                "terminal_event_was_no_fill"
+                if terminal_no_fill_correction
+                else "terminal_event_was_partial"
+            ),
+            "terminal_event_precedes_trade_fact",
+            "terminal_event_precedes_order_fact",
+            "authenticated_confirmed_trade_fact",
+            "bound_venue_order_identity",
+            "order_matched_remainder_arithmetic",
+        )
+        if terminal_partial_correction:
+            required_names += ("cumulative_fill_exceeds_terminal_partial",)
     if not isinstance(required, Mapping) or any(
         required.get(name) is not True for name in required_names
     ):
@@ -3005,7 +3038,33 @@ def _validate_terminal_late_fill_correction_payload(
         observed_at is None or observed_at <= terminal_at
         for observed_at in (*prior_trade_times, *prior_order_times)
     )
-    if terminal_no_fill_correction:
+    if genuine_cancel_correction:
+        # Every clause is a durable fact, checked here rather than believed:
+        #   - the terminal claimed NOTHING about fills (a no-fill claim would
+        #     make this the first category, and a contradicted one),
+        #   - the venue's own order ledger matched a positive size,
+        #   - nothing has sourced that fill yet (so this cannot double count),
+        #   - and the authenticated economics MATCH the ledger's matched size,
+        #     so the minted row records the venue's number, not a derived one.
+        order_matched = _decimal_or_none(order_fact["matched_size"])
+        execution_shares = (
+            _decimal_or_none(execution_fact["shares"])
+            if execution_fact is not None
+            else None
+        )
+        if (
+            terminal_no_fill
+            or terminal_partial
+            or order_matched is None
+            or order_matched <= 0
+            or execution_shares is not None
+            or canonical_filled is None
+            or canonical_filled != order_matched
+        ):
+            raise ValueError(
+                "terminal late-fill correction genuine-cancel proof is invalid"
+            )
+    elif terminal_no_fill_correction:
         if not terminal_no_fill or prior_positive_before_terminal:
             raise ValueError(
                 "terminal late-fill correction terminal was not no-fill truth"
@@ -3049,7 +3108,24 @@ def _validate_terminal_late_fill_correction_payload(
 
     trade_at = _review_clearance_parse_utc(trade_fact["observed_at"])
     order_at = _review_clearance_parse_utc(order_fact["observed_at"])
-    if (
+    if genuine_cancel_correction:
+        # "Causally newer than the terminal" is the right rule for a LATE fill
+        # defeating a terminal that denied it. This category is the opposite
+        # ordering by construction: the fill lands first and the cancel ack
+        # follows, retiring only the remainder, so requiring trade_at >
+        # terminal_at would reject exactly the shape this category exists for.
+        # What must still hold is that the ORDER FACT proving the match is not
+        # older than the trade it accounts for, and that both are real clocks.
+        if (
+            terminal_at is None
+            or trade_at is None
+            or order_at is None
+            or order_at < trade_at
+        ):
+            raise ValueError(
+                "terminal late-fill correction genuine-cancel clocks are invalid"
+            )
+    elif (
         terminal_at is None
         or trade_at is None
         or order_at is None
@@ -3072,11 +3148,37 @@ def _validate_terminal_late_fill_correction_payload(
         or matched <= 0
         or remaining < 0
         or abs(matched - canonical_filled) > Decimal("0.000001")
-        or abs(requested - matched - remaining) > Decimal("0.000001")
+        or (
+            # requested = matched + remaining is the book identity of a LIVE
+            # order. A retired remainder leaves the venue reporting
+            # remaining = 0 while `requested - matched` is exactly the amount it
+            # cancelled, so the live identity cannot hold and demanding it
+            # rejects the shape. What must still hold is that nothing was
+            # over-filled: matched + remaining never EXCEEDS the request.
+            abs(requested - matched - remaining) > Decimal("0.000001")
+            if not genuine_cancel_correction
+            else matched + remaining - requested > Decimal("0.000001")
+        )
     ):
         raise ValueError("terminal late-fill correction order arithmetic does not match")
 
     if event_type == "PARTIAL_FILL_OBSERVED":
+        if genuine_cancel_correction:
+            # The venue RETIRED the remainder, so there is no live remainder to
+            # restore collateral for — that is what makes this a genuine cancel
+            # rather than a still-working order. The order fact must say so, and
+            # the filled size must fall short of the request (otherwise nothing
+            # was cancelled and this is a plain full fill). Returning False
+            # reports "no live remainder", which is the truth here.
+            if (
+                str(order_fact["state"] or "").upper()
+                not in {"CANCEL_CONFIRMED", "PARTIALLY_MATCHED"}
+                or canonical_filled >= requested
+            ):
+                raise ValueError(
+                    "terminal late-fill correction genuine-cancel remainder is invalid"
+                )
+            return False
         if (
             str(order_fact["state"] or "").upper() != "PARTIALLY_MATCHED"
             or remaining <= 0
