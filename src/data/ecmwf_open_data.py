@@ -294,6 +294,22 @@ def _raw_file_identity(path: Path) -> tuple[str, int, str] | None:
     return match.group("date"), hour, match.group("param")
 
 
+def _sql_like_escape(value: str) -> str:
+    """Escape LIKE wildcards so a literal prefix cannot match more than itself.
+
+    Source-run ids are built from a date and a track name, so they carry no
+    wildcards today — but a `_` in a future track label would silently match any
+    character and widen an eviction probe, which is the one direction this gate
+    must never fail in.
+    """
+
+    return (
+        value.replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
+
+
 def _plan_decoded_open_data_raw_retention(
     conn,
     *,
@@ -347,47 +363,78 @@ def _plan_decoded_open_data_raw_retention(
             retained_groups += 1
             continue
         track, metric = _RAW_PARAM_AUTHORITY[param]
-        source_run_id = (
+        # The writer stamps ``…:<cycle>Z:coordsha:<manifest_sha>`` (see
+        # collect_open_ens_cycle), so an equality probe on the bare cycle prefix
+        # matches nothing and every group reads as MISSING -> retained forever.
+        # 2026-08-21 (0afd62b16) wrote this lookup before the coordinate-manifest
+        # identity existed; 2026-09-09 (160b5ff40) added the suffix to the writer
+        # without updating this reader, silently disabling raw eviction. Match the
+        # cycle+track prefix and require EVERY run recorded for that cycle to be
+        # proven: one unproven coordsha retains the group, so a re-pin under a new
+        # manifest can never authorize deleting raw that a prior pin still needs.
+        source_run_prefix = (
             f"{SOURCE_ID}:{track}:"
             f"{datetime.strptime(day_text, '%Y%m%d').date().isoformat()}T{hour:02d}Z"
         )
-        source_run = conn.execute(
+        source_runs = conn.execute(
             """
             SELECT status, completeness_status, partial_run,
                    expected_count, observed_count
               FROM source_run
-             WHERE source_run_id = ? AND source_id = ?
+             WHERE source_id = ?
+               AND (source_run_id = ? OR source_run_id LIKE ? ESCAPE '\\')
             """,
-            (source_run_id, SOURCE_ID),
-        ).fetchone()
-        if source_run is None:
+            (
+                SOURCE_ID,
+                source_run_prefix,
+                _sql_like_escape(source_run_prefix) + ":%",
+            ),
+        ).fetchall()
+        if not source_runs:
             retained_groups += 1
             continue
-        expected = source_run["expected_count"]
-        observed = source_run["observed_count"]
-        source_complete = (
-            source_run["status"] == "SUCCESS"
-            and source_run["completeness_status"] == "COMPLETE"
-            and int(source_run["partial_run"]) == 0
-            and expected is not None
-            and observed is not None
-            and int(expected) > 0
-            and int(expected) == int(observed)
-        )
-        if not source_complete:
+        observed_counts: set[int] = set()
+        source_complete = True
+        for source_run in source_runs:
+            expected = source_run["expected_count"]
+            observed = source_run["observed_count"]
+            if not (
+                source_run["status"] == "SUCCESS"
+                and source_run["completeness_status"] == "COMPLETE"
+                and int(source_run["partial_run"]) == 0
+                and expected is not None
+                and observed is not None
+                and int(expected) > 0
+                and int(expected) == int(observed)
+            ):
+                source_complete = False
+                break
+            observed_counts.add(int(observed))
+        # Two pins disagreeing on how many snapshots the cycle owes leaves the
+        # snapshot proof below no single number to check against; retain.
+        if not source_complete or len(observed_counts) != 1:
             retained_groups += 1
             continue
+        observed = next(iter(observed_counts))
+        # Same prefix match as the source_run probe above: the snapshots carry the
+        # writer's full coordsha-suffixed id, so an equality probe on the bare
+        # cycle prefix would count zero and retain even a fully proven cycle.
         snapshot_proof = conn.execute(
             """
             SELECT COUNT(*) AS snapshot_count,
                    SUM(CASE WHEN authority = 'VERIFIED' THEN 1 ELSE 0 END)
                        AS verified_count
               FROM ensemble_snapshots
-             WHERE source_run_id = ?
-               AND source_id = ?
+             WHERE source_id = ?
                AND temperature_metric = ?
+               AND (source_run_id = ? OR source_run_id LIKE ? ESCAPE '\\')
             """,
-            (source_run_id, SOURCE_ID, metric),
+            (
+                SOURCE_ID,
+                metric,
+                source_run_prefix,
+                _sql_like_escape(source_run_prefix) + ":%",
+            ),
         ).fetchone()
         snapshot_count = int(snapshot_proof["snapshot_count"] or 0)
         verified_count = int(snapshot_proof["verified_count"] or 0)

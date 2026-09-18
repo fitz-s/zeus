@@ -68,11 +68,19 @@ def _record_raw_authority(
     expected: int = 2,
     snapshot_count: int = 2,
     authority: str = "VERIFIED",
+    coordsha: str | None = "6e28420e5809b3b30f5a075629c0ebd56b1fa15d405a00a85455b4fbcd1a14f4",
 ) -> None:
     track = "mx2t6_high" if param == "mx2t3" else "mn2t6_low"
     metric = "high" if param == "mx2t3" else "low"
     iso_day = datetime.strptime(day, "%Y%m%d").date().isoformat()
+    # collect_open_ens_cycle stamps ":coordsha:<manifest_sha>" onto the id. The
+    # fixture wrote only the bare cycle prefix, so every retention test passed
+    # while production matched nothing and evicted nothing for 9 days (live
+    # 2026-09-18: 10 recognized groups, all "source_run: MISSING"). Default to
+    # the real shape; pass coordsha=None for the legacy bare-id form.
     source_run_id = f"ecmwf_open_data:{track}:{iso_day}T{hour:02d}Z"
+    if coordsha is not None:
+        source_run_id = f"{source_run_id}:coordsha:{coordsha}"
     write_source_run(
         conn,
         source_run_id=source_run_id,
@@ -221,6 +229,70 @@ def test_raw_retention_evicts_same_day_proven_group_and_keeps_unproven(tmp_path)
     assert result["eligible_group_count"] == 1
     assert all(not path.exists() for path in proven_paths)
     assert all(path.exists() for path in unproven_paths)
+
+
+def test_raw_retention_matches_the_writers_coordsha_suffixed_run_id(tmp_path):
+    """RED-on-revert for the identity drift that silently disabled eviction.
+
+    `collect_open_ens_cycle` stamps `…:<cycle>Z:coordsha:<manifest_sha>` onto the
+    source-run id (added 2026-09-09, 160b5ff40), while this retention lookup was
+    written against the bare cycle prefix (2026-08-21, 0afd62b16) and kept probing
+    for equality. Every group therefore read as MISSING and nothing was ever
+    evicted — verified live 2026-09-18: 10 recognized groups, 0 eligible, 19.14 GB
+    retained. Reverting to an equality probe must fail here.
+    """
+    from src.data import ecmwf_open_data
+
+    raw_root = tmp_path / "51 source data"
+    paths = _write_raw_group(raw_root, "20260818", 0, "mx2t3")
+    conn = _make_conn(tmp_path)
+    # Only the realistic suffixed id is recorded — no bare-id row exists.
+    _record_raw_authority(conn, day="20260818", hour=0, param="mx2t3")
+
+    plan = ecmwf_open_data._plan_decoded_open_data_raw_retention(
+        conn,
+        raw_root=raw_root,
+        reference_date=date(2026, 8, 21),
+    )
+    result = ecmwf_open_data._apply_decoded_open_data_raw_retention(plan)
+
+    assert result["status"] == "APPLIED", (
+        "a proven cycle whose source-run id carries the writer's coordsha suffix "
+        "must be evictable; an equality probe on the bare prefix matches nothing"
+    )
+    assert result["eligible_group_count"] == 1
+    assert all(not path.exists() for path in paths)
+
+
+def test_raw_retention_retains_when_any_coordsha_pin_is_unproven(tmp_path):
+    """A re-pin must not authorize deleting raw that an earlier pin still needs."""
+    from src.data import ecmwf_open_data
+
+    raw_root = tmp_path / "51 source data"
+    paths = _write_raw_group(raw_root, "20260818", 0, "mx2t3")
+    conn = _make_conn(tmp_path)
+    _record_raw_authority(conn, day="20260818", hour=0, param="mx2t3", coordsha="a" * 64)
+    # Second pin for the SAME cycle, still partial: the group must be retained.
+    _record_raw_authority(
+        conn,
+        day="20260818",
+        hour=0,
+        param="mx2t3",
+        coordsha="b" * 64,
+        completeness="PARTIAL",
+        partial=True,
+    )
+
+    plan = ecmwf_open_data._plan_decoded_open_data_raw_retention(
+        conn,
+        raw_root=raw_root,
+        reference_date=date(2026, 8, 21),
+    )
+    result = ecmwf_open_data._apply_decoded_open_data_raw_retention(plan)
+
+    assert result["status"] == "NO_ELIGIBLE_RAW"
+    assert result["retained_group_count"] == 1
+    assert all(path.exists() for path in paths)
 
 
 def test_raw_retention_rejects_negative_days(tmp_path):
