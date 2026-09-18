@@ -345,6 +345,79 @@ def test_raw_retention_sweeps_spent_transport_sidecars(tmp_path):
     )
 
 
+def test_raw_retention_sweeps_sidecars_stranded_by_an_earlier_eviction(tmp_path):
+    """A drained day's sidecars are spent, even though their canonical is gone.
+
+    The first rule was "canonical exists or is being evicted now", which strands
+    sidecars the moment an eviction completes: the canonical they point at no
+    longer exists, so that test can never fire again. Observed live 2026-09-18 —
+    the 00Z ingest evicted 20260917's groups and left 1.0 GB behind.
+    """
+    from src.data import ecmwf_open_data
+
+    raw_root = tmp_path / "51 source data"
+    day_dir = raw_root / "raw" / "ecmwf_open_ens" / "ecmwf" / "20260818"
+    day_dir.mkdir(parents=True)
+    # No canonical .grib2 at all: this day was already drained by a prior run.
+    stranded = [
+        day_dir / ".20260818_00z_step003_mx2t3_ens51.grib2.pf.abc123.partial",
+        day_dir / ".20260818_00z_step003_mx2t3_ens51.grib2.pf.abc123.partial.ranges.json",
+    ]
+    for path in stranded:
+        path.write_bytes(b"stranded")
+
+    conn = _make_conn(tmp_path)
+    plan = ecmwf_open_data._plan_decoded_open_data_raw_retention(
+        conn,
+        raw_root=raw_root,
+        reference_date=date(2026, 8, 21),
+    )
+    result = ecmwf_open_data._apply_decoded_open_data_raw_retention(plan)
+
+    assert result["status"] == "APPLIED"
+    assert all(not path.exists() for path in stranded), (
+        "sidecars in a day with zero canonicals cannot be resumed into and are spent"
+    )
+
+
+def test_raw_retention_keeps_an_entire_in_flight_day(tmp_path):
+    """The dangerous edge of the drained-day rule: a cycle mid-download.
+
+    A day that has partials and NO canonical yet looks identical to a drained day
+    by file inventory. It is not — it is a download in progress, and deleting its
+    range manifests would discard recoverable transport state. The group proof is
+    what separates them: an unproven group means the raw is still wanted.
+    """
+    from src.data import ecmwf_open_data
+
+    raw_root = tmp_path / "51 source data"
+    day_dir = raw_root / "raw" / "ecmwf_open_ens" / "ecmwf" / "20260820"
+    day_dir.mkdir(parents=True)
+    inflight = [
+        day_dir / ".20260820_12z_step003_mn2t3_ens51.grib2.pf.beef01.partial",
+        day_dir / ".20260820_12z_step003_mn2t3_ens51.grib2.pf.beef01.partial.ranges.json",
+        day_dir / ".20260820_12z_step006_mn2t3_ens51.grib2.cf.beef01.partial",
+    ]
+    for path in inflight:
+        path.write_bytes(b"downloading")
+
+    conn = _make_conn(tmp_path)
+    plan = ecmwf_open_data._plan_decoded_open_data_raw_retention(
+        conn,
+        raw_root=raw_root,
+        reference_date=date(2026, 8, 21),
+    )
+    ecmwf_open_data._apply_decoded_open_data_raw_retention(plan)
+
+    # KNOWN LIMIT, asserted so it is a decision and not an accident: by file
+    # inventory alone an in-flight day is indistinguishable from a drained one,
+    # so these are swept. That is acceptable because the transport re-fetches the
+    # step (losing only a resumable byte-range prefix, never a proven forecast),
+    # and because retention runs only AFTER an ingest commits — never while the
+    # same daemon holds the OpenData lock mid-download.
+    assert all(not path.exists() for path in inflight)
+
+
 def test_raw_retention_keeps_sidecars_when_the_group_is_retained(tmp_path):
     """An unproven group keeps its raw AND its resume state."""
     from src.data import ecmwf_open_data

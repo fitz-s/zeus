@@ -338,13 +338,31 @@ def _orphaned_transport_sidecars(
     for day_dir in sorted(root.iterdir()):
         if day_dir.is_symlink() or not day_dir.is_dir():
             continue
-        for candidate in day_dir.iterdir():
-            if candidate.is_symlink() or not candidate.is_file():
+        entries = [path for path in day_dir.iterdir() if not path.is_symlink()]
+        # A day whose canonicals are all gone is a DRAINED day: either every group
+        # was evicted, or none was ever completed. Either way no download can
+        # resume into it, so its leftover sidecars are spent. Without this, the
+        # first eviction strands them permanently — the canonical they point at no
+        # longer exists, so the exists() test below can never fire again. Observed
+        # live 2026-09-18: the 00Z ingest evicted 20260917's groups and left
+        # 1.0 GB of sidecars behind with zero surviving canonicals.
+        day_has_canonical = any(
+            path.is_file()
+            and path.name.endswith(".grib2")
+            and _canonical_for_transport_sidecar(path) is None
+            for path in entries
+        )
+        for candidate in entries:
+            if not candidate.is_file():
                 continue
             canonical = _canonical_for_transport_sidecar(candidate)
             if canonical is None:
                 continue
-            if canonical in planned_canonical or canonical.exists():
+            if (
+                canonical in planned_canonical
+                or canonical.exists()
+                or not day_has_canonical
+            ):
                 orphans.append(candidate)
     return orphans
 
