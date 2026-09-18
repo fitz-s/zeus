@@ -66,28 +66,42 @@ download concurrency and earliest-usable-step processing directly set possession
 This is not about MN2T3. Every large table stores wide identifier strings on every row
 where a small integer key would carry the same information. Measured, not inferred.
 
-### `zeus-forecasts.db calibration_pairs` — 81,314,490 rows, ~241 B/row, ~19.6 GB
+### `zeus-forecasts.db calibration_pairs` — 48,157,324 rows, ~241 B/row, ~11.6 GB
 
-Distinct-value counts measured over a 200k-row window:
+**Corrected:** 48,157,324 is the real `count(*)`; the 81,314,490 figure is the rowid
+high-water mark — the exact trap this audit already documented once. Savings below are
+computed on the real count.
 
-| column | bytes/row | distinct values |
+All of this table is `source_id = 'tigge_mars'` — i.e. the MN2T6/MX2T6 lane the operator
+asked about. So the largest single encoding waste in the system sits on exactly that
+source's derived data, even though its *raw files* are the dead 1.4 GB dirs.
+
+Distinct-value counts, measured over 6 rowid strata spanning the whole table (240k rows
+sampled, not one recent window — the caveat in §4 of the first draft is now closed):
+
+| column | bytes/row | distinct (whole-table strata) |
 |---|---|---|
-| `dataset_id` | 43.0 | **2** |
-| `decision_group_id` | 40.0 | 2009 |
+| `dataset_id` | 43.0 | **3** (`tigge_mn2t6_local_calendar_day_min`, `..._contract_window`, `tigge_mx2t6_local_calendar_day_max`) |
+| `decision_group_id` | 40.0 | 2400 (SHA-1 hex) |
 | `forecast_available_at` | 25.0 | 336 |
 | `recorded_at` | 19.0 | 150 |
-| `source_id` | 15.0 | **2** |
-| `bin_source` | 12.0 | **1** |
+| `source_id` | 15.0 | **1** (`tigge_mars`) |
+| `bin_source` | 12.0 | **1** (`canonical_v2`) |
 | `target_date` | 10.0 | 242 |
-| `observation_field` | 8.0 | **1** |
-| `authority` | 8.0 | **1** |
+| `observation_field` | 8.0 | **2** (`low_temp`, `high_temp`) |
+| `authority` | 8.0 | **1** (`VERIFIED`) |
 | `temperature_metric` / `season` / `causality_status` / `horizon_profile` | 3.0 / 3.0 / 2.0 / 4.0 | **1 each** |
 
-`dataset_id` spends 43 bytes per row across 81.3M rows to express **one of two values**.
-Replacing each with a 1-2 byte key sized to its cardinality saves **192 B of 241 B/row
-= 80%**: **19.6 GB → 4.0 GB, ~15.6 GB reclaimed, fully lossless** (the strings live once
-in a dimension table). The same TEXT keys are re-carried inside this table's 7 indexes,
-so index savings stack on top.
+`dataset_id` spends 43 bytes per row across 48.2M rows to express **one of three
+values**; `source_id`, `bin_source` and `authority` spend 15 + 12 + 8 B/row to express
+**one value each**. Replacing each with a key sized to its cardinality saves **192 B of
+241 B/row = 80%**: **11.6 GB → 2.4 GB, ~9.2 GB reclaimed, fully lossless** (the strings
+live once in a dimension table). The same TEXT keys are re-carried inside this table's 7
+indexes, so index savings stack on top.
+
+Separately, hex-hash-as-TEXT costs 2x a BLOB across the system, but it is minor: summed
+over `calibration_pairs`, `forecast_posteriors` and `ensemble_snapshots` it is only
+~2.4 GB. Worth doing with the migration, not worth a migration of its own.
 
 ### `research/family_books.db book_top` — 16.4M rows
 
@@ -138,18 +152,23 @@ captures the shared skeleton). ~46.8 GB → ~9 GB.
   MN2T6/MX2T6 dirs (1.4 GB), and `coordinate_manifests` having no retention at all.
 - **Encoding**: **systemic, not one source.** Every large table pays to re-store
   identifier strings that a dimension table already holds, or stores numbers as text.
-  Combined lossless reclaim from encoding alone: ~15.6 GB (calibration_pairs) +
-  ~37 GB (provenance dict-compression) + ~4.1 GB (book_top) + decision_log's 46%, with
-  no information discarded anywhere.
+  Combined lossless reclaim from encoding alone: ~9.2 GB (calibration_pairs dict-FK) +
+  ~37 GB (provenance dict-compression) + ~4.1 GB (book_top FK) + ~2.4 GB (hash→BLOB) +
+  decision_log's 46%, with no information discarded anywhere.
+  Note the irony for the operator's question: the biggest single encoding waste
+  (`calibration_pairs`, all `tigge_mars`) is the **derived** data of the same MN2T6 lane
+  whose **raw** files are the dead 1.4 GB dirs. The raw copy was the visible symptom; the
+  derived table is where the bytes actually are.
 - **The root cause is one missing convention**, not 13 separate bugs: there is no rule
   that a repeated identifier becomes a key and a number is stored as a number. That is
   why it recurs in every table written by a different author.
 
 ## 4. UNVERIFIED / open
 
-- Whether `calibration_pairs`'s low-cardinality columns are low-cardinality *globally* or
-  only in the 200k-row window sampled (a long-lived `dataset_id` vocabulary could be
-  larger historically). Re-measure over the full table before migrating.
+- ~~Whether `calibration_pairs`'s columns are low-cardinality globally~~ — **CLOSED**:
+  re-measured across 6 rowid strata spanning the whole table. `dataset_id`=3,
+  `source_id`/`bin_source`/`authority`=1, `observation_field`=2, `city`=5. The 80% claim
+  holds table-wide.
 - Whether the ECMWF subprocess boundary is load-bearing (eccodes/conda isolation, crash
   containment) or an accident — sent to consult.
 - `_DOWNLOAD_MAX_WORKERS=2` vs the docstring's 5: which is intentional, and what raising
