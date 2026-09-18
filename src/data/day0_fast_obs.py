@@ -3186,8 +3186,19 @@ class Day0FastObsEmitter:
         This is a probability feature, not an absorbing fact. It therefore
         shares the ENTRY freshness rule with ``latest_extremes`` and never opens
         a network request or recovers old event-store facts.
+
+        Every family whose settlement station is the ICAO station this cache
+        polls can carry the feature: ``pre_day0_low_window_for_target`` reads
+        only the city's timezone, settlement unit and station. The wu_icao-only
+        gate left the 48 noaa cities with no late T-1 LOW conditioning at all,
+        and its entry-side callers (evaluator, event reactor) invoke it for any
+        LOW metric with no family pre-check, so nothing upstream supplied a
+        substitute.
         """
-        if str(getattr(city, "settlement_source_type", "") or "") != "wu_icao":
+        if (
+            str(getattr(city, "settlement_source_type", "") or "").strip().lower()
+            not in _FAST_LANE_SETTLEMENT_SOURCE_TYPES
+        ):
             return None
         source = fast_obs_source_for_city(city)
         if source is None:

@@ -910,12 +910,18 @@ def _durable_observation_instants_summary(
     now: datetime,
     world_conn: Any = None,
 ) -> DurableObservationExtremes | None:
-    """Verified durable WU-hourly extrema for the local target date.
+    """Verified durable hourly extrema for the local target date.
 
-    This is the restart-safe side of the hard-fact lane. WU live API and METAR
+    This is the restart-safe side of the hard-fact lane. The live API and METAR
     memo are useful when warm, but monitor decisions must also consume verified
     rows already written to the canonical observation surface. LOW uses the
     monotone minimum over the local target date; HIGH uses the monotone maximum.
+
+    Rows are restricted to the channels that carry THIS city's settlement
+    truth, resolved by ``source_priority_for_city``. The predicate was
+    ``source LIKE 'wu%'``, which no noaa city's ``ogimet_metar_<icao>`` row can
+    match, so every noaa city lost this channel entirely while both live
+    callers invoke it with no family gate.
     """
 
     if world_conn is None:
@@ -927,6 +933,16 @@ def _durable_observation_instants_summary(
     station_id = str(getattr(city, "wu_station", "") or "").strip().upper()
     if not station_id:
         return None
+    from src.data.day0_observation_reader import source_priority_for_city
+
+    settlement_channels = tuple(
+        channel
+        for channel in source_priority_for_city(city, target_date)
+        if str(channel or "").strip()
+    )
+    if not settlement_channels:
+        return None
+    channel_placeholders = ",".join("?" for _ in settlement_channels)
     metric_filter = ("", "high", "low")
     now_iso = now.astimezone(UTC).isoformat()
     table_refs = (
@@ -953,11 +969,18 @@ def _durable_observation_instants_summary(
                   AND utc_timestamp <= ?
                   AND UPPER(COALESCE(authority, '')) = 'VERIFIED'
                   AND COALESCE(causality_status, 'OK') = 'OK'
-                  AND LOWER(COALESCE(source, '')) LIKE 'wu%'
+                  AND LOWER(COALESCE(source, '')) IN ({channel_placeholders})
                   AND UPPER(COALESCE(station_id, '')) = ?
                   AND LOWER(COALESCE(temperature_metric, '')) IN (?, ?, ?)
                 """,
-                (city_name, target_date, now_iso, station_id, *metric_filter),
+                (
+                    city_name,
+                    target_date,
+                    now_iso,
+                    *(channel.lower() for channel in settlement_channels),
+                    station_id,
+                    *metric_filter,
+                ),
             ).fetchall()
         except Exception:  # noqa: BLE001 - missing attachment/table/columns fail soft
             continue
