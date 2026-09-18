@@ -1281,6 +1281,54 @@ def _compute_divergence_score(p_posterior: float, p_market: float, *, available:
     return max(0.0, p_market - p_posterior)
 
 
+def _book_side_absent_for_token(
+    conn: sqlite3.Connection | None,
+    *,
+    token_id: str,
+    observed_at: str | None,
+) -> bool:
+    """True when the newest causal quote for this token has NO ask either.
+
+    Distinguishes a withdrawn book (both sides absent) from a real zero bid,
+    which still carries an ask. Any read failure returns False so the caller
+    keeps its existing behaviour rather than silently suppressing a real
+    collapse.
+    """
+    if conn is None or not token_id or not observed_at:
+        return False
+    try:
+        row = conn.execute(
+            """
+            SELECT bid, ask
+              FROM token_price_log
+             WHERE token_id = ?
+               AND COALESCE(
+                       julianday(NULLIF(source_timestamp, '')),
+                       julianday(timestamp)
+                   ) <= julianday(?)
+             ORDER BY COALESCE(
+                          julianday(NULLIF(source_timestamp, '')),
+                          julianday(timestamp)
+                      ) DESC,
+                      id DESC
+             LIMIT 1
+            """,
+            (str(token_id), str(observed_at)),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    if row is None:
+        return False
+    bid = row["bid"] if hasattr(row, "keys") else row[0]
+    ask = row["ask"] if hasattr(row, "keys") else row[1]
+    if ask is not None:
+        return False
+    try:
+        return bid is None or float(bid) <= 0.0
+    except (TypeError, ValueError):
+        return False
+
+
 def _causal_market_velocity_1h(
     conn: sqlite3.Connection | None,
     *,
@@ -1297,6 +1345,23 @@ def _causal_market_velocity_1h(
     and ``0.50 -> 0.30`` are the same ``-0.40`` market-path observation.
     """
     if conn is None or not observed_at:
+        return None
+    # A WITHDRAWN book is not a price move. `_held_token_quote_from_book` carries
+    # an empty bid side forward as 0.0 by design (the exit boundary still refuses
+    # it as non-executable SELL authority), but feeding that 0.0 into a
+    # price-CHANGE measure reads a liquidity withdrawal as a -100%/h collapse.
+    # Shanghai 2026-09-18: the held NO bid sat at 0.998-0.999 for 25 minutes,
+    # then BOTH sides went absent at 16:30 and flash-crash fired velocity
+    # -1.00/hr on a position whose settlement was already a win (local-day low
+    # 25.0C against a shorted 24C bin) — only NO_EXECUTABLE_BID stopped the sale.
+    # A genuinely zero-valued market still quotes an ask (someone sells the
+    # worthless side), so bid absent AND ask absent is the discriminator.
+    # Returning None withdraws market-path evidence entirely, which is the
+    # already-built fail-closed path: `fresh_market_path_evidence` goes false and
+    # the confirmation count resets (src/state/portfolio.py).
+    if float(current_bid) <= 0.0 and _book_side_absent_for_token(
+        conn, token_id=token_id, observed_at=observed_at
+    ):
         return None
     try:
         as_of = datetime.fromisoformat(str(observed_at).replace("Z", "+00:00"))

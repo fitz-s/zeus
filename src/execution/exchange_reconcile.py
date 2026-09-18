@@ -5197,11 +5197,18 @@ def persisted_terminal_late_entry_fill_command_ids(
     scoped = str(command_id or "").strip()
     scope_sql = " AND command.command_id = ?" if scoped else ""
     params = (scoped,) if scoped else ()
+    from src.execution.command_recovery import _canonical_order_truth_cte
+
     rows = conn.execute(
         "WITH "
         + _canonical_trade_fact_cte()
         + ", "
         + _economic_trade_fact_cte()
+        + ", "
+        + _canonical_order_truth_cte(
+            cte_name="canonical_entry_order_truth",
+            partition_by_venue_order=True,
+        )
         + f"""
         SELECT command.command_id
           FROM venue_commands command
@@ -5237,6 +5244,34 @@ def persisted_terminal_late_entry_fill_command_ids(
                               terminal.payload_json,
                               '$.terminal_no_fill'
                           ) = 'true'
+                      )
+                      -- The venue's own order ledger proves the fill, so the
+                      -- terminal event does not have to. A command can end by a
+                      -- GENUINE cancel of its unfilled remainder while carrying a
+                      -- real partial fill: matched_size > 0 with remaining_size 0
+                      -- on the canonical order fact. Such a terminal event can
+                      -- never carry `terminal_no_fill` (a fill did occur) nor the
+                      -- later-trade proof_class below (the trade lands BEFORE the
+                      -- cancel ack), so both clauses above miss it and nothing
+                      -- mints execution_fact -- which then degrades
+                      -- portfolio_consistency into a book-wide reduce-only that
+                      -- does not self-heal (2026-09-18: one Hong Kong row out of
+                      -- 797 terminal ENTRY commands froze every entry).
+                      --
+                      -- Fill truth is a property of the order ledger, not of
+                      -- which event arrived last or what its payload says. Keyed
+                      -- on the canonical (strongest-proof) order fact so a later
+                      -- weaker observation cannot resurrect a settled command,
+                      -- and the outer CONFIRMED-trade-with-positive-economics
+                      -- requirement still gates the actual economics.
+                      OR EXISTS (
+                          SELECT 1
+                            FROM canonical_entry_order_truth ledger
+                           WHERE ledger.command_id = command.command_id
+                             AND ledger.venue_order_id = command.venue_order_id
+                             AND CAST(COALESCE(
+                                 ledger.matched_size, '0'
+                             ) AS REAL) > 0
                       )
                       OR (
                           json_valid(terminal.payload_json)

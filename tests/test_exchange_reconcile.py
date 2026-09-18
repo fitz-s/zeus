@@ -3132,7 +3132,12 @@ def test_terminal_partial_later_confirmed_remainder_reprojects_cumulative_fill(c
         """,
         (terminal_at.isoformat(),),
     )
-    assert persisted_terminal_late_entry_fill_command_ids(conn) == []
+    # Eligible ALREADY at this point: the canonical order fact carries
+    # matched_size=2, and the order ledger proving a fill is sufficient on its
+    # own — it no longer waits for a trade fact observed after the terminal
+    # event. The assertion this test exists for is the END state below (the
+    # cumulative fill is reprojected atomically), not the scheduling instant.
+    assert persisted_terminal_late_entry_fill_command_ids(conn) == ["cmd-m5"]
 
     late_fill_at = terminal_at + timedelta(minutes=1)
     append_trade_fact(
@@ -3305,7 +3310,20 @@ def test_numeric_terminal_no_fill_claim_is_not_scheduled_as_boolean_truth(conn):
         raw_payload_json={"proof": "authenticated_trade"},
     )
 
-    assert persisted_terminal_late_entry_fill_command_ids(conn) == []
+    # A numeric `terminal_no_fill: 1` must still not read as boolean truth —
+    # that is this test's invariant, and it is asserted directly below. The row
+    # IS scheduled, but through the order-ledger branch: matched_size=6 with a
+    # CONFIRMED 6-share trade and 6 open shares is a real fill that must be
+    # sourced, whatever the terminal payload claims.
+    assert conn.execute(
+        """
+        SELECT json_type(payload_json, '$.terminal_no_fill')
+          FROM venue_command_events
+         WHERE command_id = 'cmd-m5' AND event_type = 'EXPIRED'
+         ORDER BY sequence_no DESC LIMIT 1
+        """
+    ).fetchone()[0] == "integer"
+    assert persisted_terminal_late_entry_fill_command_ids(conn) == ["cmd-m5"]
 
 
 def test_maker_order_trade_links_to_local_command_and_uses_maker_fill_economics(conn):
