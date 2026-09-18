@@ -3736,7 +3736,46 @@ def _fetch_noaa_day0_observation(
             )
             return parsed or datetime.min.replace(tzinfo=timezone.utc)
 
-        return max(candidates, key=_causal_time)
+        freshest = max(candidates, key=_causal_time)
+        if len(candidates) < 2:
+            return freshest
+        # A running extreme is MONOTONE, so the two lanes union rather than
+        # compete: both read the same physical settlement station (station
+        # identity is enforced inside each reader), so the honest day extreme is
+        # max/min across them, while the freshness clock stays the freshest
+        # lane's. Returning the freshest lane alone DISCARDED an already-observed
+        # higher high whenever the other lane held it — measured live on
+        # 2026-09-17, 3 of 48 noaa cities (Los Angeles 73.92 vs 75.92 F,
+        # Manila 29 vs 31 C, Wellington 13 vs 15 C), a 2-unit loss that can
+        # cross a bin edge. This mirrors the wu_icao lane's own union
+        # (observation_client._fuse_wu_prefix_with_same_station_tail), whose
+        # docstring states the same reason.
+        units = {
+            str(_day0_observation_field(item, "unit") or "").strip().upper()
+            for item in candidates
+        }
+        if len(units) != 1:
+            return freshest
+        highs: list[float] = []
+        lows: list[float] = []
+        for item in candidates:
+            high = _day0_observation_field(item, "high_so_far")
+            low = _day0_observation_field(item, "low_so_far")
+            try:
+                highs.append(float(high))
+                lows.append(float(low))
+            except (TypeError, ValueError):
+                return freshest
+        import dataclasses
+
+        try:
+            return dataclasses.replace(
+                freshest,
+                high_so_far=max(highs),
+                low_so_far=min(lows),
+            )
+        except Exception:  # noqa: BLE001 - a non-dataclass context keeps the freshest lane
+            return freshest
     except Exception:
         return None
     finally:
