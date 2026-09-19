@@ -104,3 +104,86 @@ databases are static (0 MB/min each, verified over 60-second windows). `zeus_tra
 sawtooths to ~310 MB and collapses back on checkpoint, and a `du` taken mid-checkpoint
 reads ~20 GB high. Measure a store's reclaim with `du` on the store; a volume with
 concurrent writers cannot answer that question.
+
+## 4. Correction: `forecast_posteriors` is the lever, not `calibration_pairs`
+
+The `dbstat` pass finished after §2 was written and reorders the priorities. Objects in
+`zeus-forecasts.db` (99.4 GB, freelist 0.0%):
+
+```
+57.10 GB  forecast_posteriors            <- over half the database
+12.84 GB  calibration_pairs
+ 6.69 GB  sqlite_autoindex_calibration_pairs_1
+ 4.96 GB  ensemble_snapshots
+ 2.89 GB  idx_calibration_pairs_refit_core
+ 2.73 GB  idx_calibration_pairs_group_lookup_lead
+ 2.65 GB  idx_calibration_pairs_group_lookup
+ 2.44 GB  idx_calibration_pairs_decision_group
+ 1.61 GB  idx_calibration_pairs_city_date_metric
+ 1.36 GB  idx_calibration_pairs_bucket
+```
+
+Two corrections to §2:
+
+- **`forecast_posteriors` at 57.1 GB is the largest object by far**, and §2 did not
+  mention it. Its 604,164 rows average 93,275 B, of which `provenance_json` is
+  **89,203 B — 95.6%**, so one column is ~54 GB, over half the file.
+- **`calibration_pairs`'s seven indexes total 20.4 GB against a 12.8 GB table.** The
+  dictionary-FK idea in §2 was sized against the table alone; the indexes are the larger
+  half, and `sqlite_autoindex_calibration_pairs_1` (6.69 GB, the `pair_id` PK) is
+  untouched by any column-encoding change.
+
+### What is inside the 54 GB
+
+```
+q_bootstrap_samples_by_bin          66.2%
+day0_causal_evidence_bundle         10.6%
+day0_remaining_vector_witness        8.7%
+bayes_precision_fusion               7.2%
+bin_topology                         6.1%
+```
+
+The same field that dominated `.total_loss`'s evidence snapshots.
+
+### Why plain compression is refused, and what works instead
+
+`provenance_json` is read by `json_extract` **inside SQL** — `center_debias_live_fit.py`
+lines 132 and 144-145 filter and project on `$.anchor_value_c` and `$.q_shape`. SQLite
+cannot `json_extract` a compressed blob, so compressing the column would break the live
+center-debias fit. (The `json_extract(NEW.provenance_json, ...)` trigger in
+`src/state/db.py:4002` is on `settlements`, not this table, so it is not an additional
+constraint here.)
+
+The separable part is the bulk field. `q_bootstrap_samples_by_bin` has **zero**
+`json_extract` sites and exactly one reader,
+`src/data/day0_hourly_vectors.py:1164`, which reads it in Python via
+`provenance.get(...)` to rebuild the carrier sample matrix. It is a real consumer, so the
+field must stay readable — this is a split, not a delete.
+
+Measured over 500 real rows:
+
+| | MB (500 rows) | share |
+|---|---|---|
+| `provenance_json` today | 44.45 | 100% |
+| JSON kept, still SQL-visible | 9.88 | 22.2% |
+| `q_bootstrap_samples_by_bin` split out | 34.55 | 77.7% |
+| that bulk as a zstd-19+dict BLOB | 12.75 | 2.71x |
+| **total after split** | **22.64** | **1.96x** |
+
+**57.1 GB becomes ~29.1 GB: a 28 GB reclaim**, with `json_extract` still working on
+everything SQL actually queries. That is roughly four times the `calibration_pairs`
+table-column lever, and it needs no index rewrite.
+
+Note the compression ratio is far lower here than the 8.01x measured on `.total_loss`:
+these rows are large and individually varied, so a trained dictionary adds little
+(zstd-19 alone is 3.25x, with the dictionary 3.34x). Sized from the measurement, not from
+the earlier store's ratio.
+
+### Revised order
+
+1. **`forecast_posteriors` provenance split** — 28 GB, no index work, one Python reader
+   to reroute, needs a dual-read decoder and a backfill.
+2. **`zeus_trades.db` VACUUM reset** — 63.4 GB, blocked on two live positions and on
+   ~136 GB of output space.
+3. **`calibration_pairs` dictionary-FK** — ~7.5 GB in the table, but the 20.4 GB of
+   indexes dominate and several index the very columns being narrowed.
