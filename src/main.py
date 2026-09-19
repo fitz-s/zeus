@@ -7880,7 +7880,15 @@ def _edli_command_recovery_cycle() -> None:
             exc,
         )
     recovery_client = None
-    if screen_cancel_due:
+    # A capital-blocking command is resolved by READING the venue: an
+    # ACKED or SUBMIT_UNKNOWN_SIDE_EFFECT row whose order we have never
+    # observed can only be settled by an authenticated lookup. Building the
+    # client solely for a pending screen-cancel gated the READ on an
+    # unrelated WRITE obligation, so with no cancel due the pass ran
+    # client-less, scanned nothing, and returned silently every minute --
+    # leaving those rows non-terminal forever, which in turn refuses every
+    # live-trading restart.
+    if screen_cancel_due or capital_blockers:
         # Reuse only the client prepared by the live heartbeat/runtime owner.
         # A lazy adapter may derive credentials or perform SDK I/O; that work is
         # forbidden inside this bounded recovery lane.
@@ -7897,7 +7905,13 @@ def _edli_command_recovery_cycle() -> None:
                 "prewarm=%s; leaving screen cancel debt for the next cadence",
                 prewarm_status,
             )
-            return
+            # A pending CANCEL cannot proceed without the authenticated client,
+            # so that obligation still owns the whole cadence. A capital blocker
+            # only needs to be READ, and every DB-only recovery pass below still
+            # runs, so aborting for it would forfeit work that does not need a
+            # client at all.
+            if screen_cancel_due:
+                return
         try:
             recovery_client = PolymarketClient()
             recovery_adapter = _venue_heartbeat_adapter
@@ -7910,7 +7924,9 @@ def _edli_command_recovery_cycle() -> None:
                 "leaving screen cancel debt for the next cadence: %r",
                 exc,
             )
-            return
+            recovery_client = None
+            if screen_cancel_due:
+                return
     global_capital_handoff = capital_blockers > 0
     if capital_scope is not None:
         try:
