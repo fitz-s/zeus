@@ -215,3 +215,24 @@ def test_every_generated_column_the_shipped_sql_reads_exists_in_production() -> 
         f"center-debias SQL reads {sorted(missing)} which init_schema_forecasts "
         "does not create; the query would raise 'no such column' in production"
     )
+
+
+def test_the_generated_column_migration_is_idempotent() -> None:
+    """Running the migration twice must not raise.
+
+    `_table_columns` uses `PRAGMA table_info`, which omits VIRTUAL generated columns
+    entirely — so on an already-migrated database every ALTER re-fired and raised
+    `duplicate column name: bundle_identity`. Caught by running it against the live
+    database, not by any test, because a fresh in-memory schema only ever runs it once.
+    """
+    from src.state.schema.v2_schema import _ensure_forecast_posteriors_bundle_identity
+
+    conn = _forecasts_conn()
+    try:
+        # The schema build already ran it once; a second and third call are no-ops.
+        _ensure_forecast_posteriors_bundle_identity(conn)
+        _ensure_forecast_posteriors_bundle_identity(conn)
+        columns = {row[1] for row in conn.execute("PRAGMA table_xinfo(forecast_posteriors)")}
+        assert {"bundle_identity", "q_shape", "anchor_value_c"} <= columns
+    finally:
+        conn.close()

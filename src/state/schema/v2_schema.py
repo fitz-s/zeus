@@ -376,7 +376,14 @@ def _ensure_forecast_posteriors_bundle_identity(conn: sqlite3.Connection) -> Non
     columns = _table_columns(conn, "forecast_posteriors")
     if not columns or "provenance_json" not in columns:
         return
-    if "bundle_identity" not in columns:
+    # table_xinfo, not table_info: the latter omits VIRTUAL generated columns
+    # entirely, so every one of these ALTERs would re-fire on an already-migrated
+    # database and raise "duplicate column name".
+    generated = {
+        str(row[1] if not isinstance(row, sqlite3.Row) else row["name"])
+        for row in conn.execute("PRAGMA table_xinfo(forecast_posteriors)").fetchall()
+    }
+    if "bundle_identity" not in generated:
         conn.execute(
             """
             ALTER TABLE forecast_posteriors
@@ -397,7 +404,7 @@ def _ensure_forecast_posteriors_bundle_identity(conn: sqlite3.Connection) -> Non
     # The center-debias fit filters on these two and reads the second. Without
     # them the fit pays 361.8 ms/row cold, the same class of cost that made an
     # un-deduped fitter join take 546.37 s (src/ingest_main.py's 600 s bound note).
-    if "q_shape" not in columns:
+    if "q_shape" not in generated:
         conn.execute(
             """
             ALTER TABLE forecast_posteriors
@@ -407,7 +414,7 @@ def _ensure_forecast_posteriors_bundle_identity(conn: sqlite3.Connection) -> Non
                 ) VIRTUAL
             """
         )
-    if "anchor_value_c" not in columns:
+    if "anchor_value_c" not in generated:
         conn.execute(
             """
             ALTER TABLE forecast_posteriors
