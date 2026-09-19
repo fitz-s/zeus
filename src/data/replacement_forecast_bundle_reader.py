@@ -203,10 +203,7 @@ def day0_causal_bundle_successor_materialized(
                AND runtime_layer = ?
                AND source_available_at <= ?
                AND computed_at <= ?
-               AND json_extract(
-                     provenance_json,
-                     '$.day0_causal_evidence_bundle.bundle_identity'
-                   ) = ?
+               AND bundle_identity = ?
              ORDER BY computed_at DESC, posterior_id DESC
              LIMIT 1
             """,

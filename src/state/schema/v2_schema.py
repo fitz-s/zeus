@@ -358,6 +358,44 @@ def _create_ensemble_snapshots(conn: sqlite3.Connection) -> None:
     """)
 
 
+def _ensure_forecast_posteriors_bundle_identity(conn: sqlite3.Connection) -> None:
+    """Expose the day0 bundle identity as an indexed VIRTUAL generated column.
+
+    The live bundle lookup (replacement_forecast_bundle_reader) filters on
+    ``json_extract(provenance_json, '$.day0_causal_evidence_bundle.bundle_identity')``.
+    ``provenance_json`` averages 93 KB — roughly 23 pages of overflow chain per row —
+    so each candidate row was faulted in whole to read one identifier: 1.427 ms/call
+    live against 0.014 ms for the same query with the blob untouched.
+
+    VIRTUAL, not STORED: the value is recomputed on read and duplicates no bytes in
+    what is already the database's largest table. The index carries the key, which is
+    what the lookup needs. Measured on a 20,000-row replica: 192.3 ms/call -> 0.012
+    ms/call, file +2 MB for the index alone.
+    """
+
+    columns = _table_columns(conn, "forecast_posteriors")
+    if not columns or "provenance_json" not in columns:
+        return
+    if "bundle_identity" not in columns:
+        conn.execute(
+            """
+            ALTER TABLE forecast_posteriors
+            ADD COLUMN bundle_identity TEXT
+                GENERATED ALWAYS AS (
+                    json_extract(
+                        provenance_json,
+                        '$.day0_causal_evidence_bundle.bundle_identity'
+                    )
+                ) VIRTUAL
+            """
+        )
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_forecast_posteriors_bundle_identity
+            ON forecast_posteriors(city, target_date, temperature_metric,
+                                   training_allowed, bundle_identity, computed_at)
+    """)
+
+
 def _ensure_forecast_posteriors_runtime_layer_compatibility(conn: sqlite3.Connection) -> None:
     """Ensure forecast_posteriors carries the runtime-layer column."""
 
@@ -559,6 +597,7 @@ def _create_replacement_forecast_live_tables(conn: sqlite3.Connection) -> None:
         )
     """)
     _ensure_forecast_posteriors_runtime_layer_compatibility(conn)
+    _ensure_forecast_posteriors_bundle_identity(conn)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_forecast_posteriors_target
             ON forecast_posteriors(city, target_date, temperature_metric, product_id, computed_at)

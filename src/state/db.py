@@ -4997,6 +4997,16 @@ def _ensure_forecast_indexes(conn: sqlite3.Connection) -> None:
                 source_run_id
             )
     """)
+    # forecast_posteriors: the day0 bundle identity as an indexed VIRTUAL generated
+    # column. Mirrors v2_schema._ensure_forecast_posteriors_bundle_identity, and is
+    # called here for the same reason every other index is: the ATTACH-from-world.db
+    # branch copies whatever world.db has, which may predate this column entirely.
+    from src.state.schema.v2_schema import (
+        _ensure_forecast_posteriors_bundle_identity as _ensure_bundle_identity,
+    )
+
+    _ensure_bundle_identity(conn)
+
     # calibration_pairs (mirror src/state/schema/v2_schema.py — _create_calibration_pairs)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_calibration_pairs_bucket
