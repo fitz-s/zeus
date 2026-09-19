@@ -386,6 +386,19 @@ def _entry_event(
 ) -> dict:
     trade_id = str(getattr(position, "trade_id"))
     slug = event_type.lower()
+    # The decision that opened a position is a property OF that position, not
+    # of the call site.  Every sibling identity here is read from `position`;
+    # reading this one from a parameter let a caller omit it and write an entry
+    # event with a NULL decision_id, which makes the position's entry
+    # provenance ambiguous forever -- and held-entry calibration refuses on
+    # ambiguity, so the position can never obtain exit authority again.
+    # An explicit argument still wins; absence now falls back to the truth the
+    # position already carries.
+    resolved_decision_id = _nullable(
+        decision_id
+        if str(decision_id or "").strip()
+        else getattr(position, "decision_id", "")
+    )
     return {
         "event_id": f"{trade_id}:{slug}",
         "position_id": trade_id,
@@ -396,7 +409,7 @@ def _entry_event(
         "phase_before": phase_before,
         "phase_after": phase_after,
         "strategy_key": _strategy_key(position),
-        "decision_id": decision_id,
+        "decision_id": resolved_decision_id,
         "snapshot_id": _nullable(getattr(position, "decision_snapshot_id", "")),
         "order_id": order_id,
         "command_id": None,
