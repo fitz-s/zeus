@@ -3518,11 +3518,19 @@ def load_held_entry_calibration(
             """,
             (position_id,),
         ).fetchone()
+        # Count the entry DECISION IDENTITIES, not the rows. A row that carries
+        # no identity is an absence; ambiguity is two identities that disagree.
+        # Selecting rows (NULL included) conflated the two, and the LIMIT 3 plus
+        # a "1..2 rows" allowance could only ever have meant "one identity, with
+        # a NULL row tolerated" -- while a separate clause rejected exactly that
+        # and let two CONFLICTING identities through.
         event_identity_rows = trade_conn.execute(
             """
             SELECT DISTINCT decision_id FROM position_events
              WHERE position_id = ?
                AND event_type IN ('POSITION_OPEN_INTENT', 'ENTRY_ORDER_POSTED', 'ENTRY_ORDER_FILLED')
+               AND typeof(decision_id) = 'text'
+               AND trim(decision_id) <> ''
              LIMIT 3
             """,
             (position_id,),
@@ -3557,9 +3565,14 @@ def load_held_entry_calibration(
     if (
         event_status is None
         or int(event_status[0] or 0) < 1
-        or int(event_status[1] or 0) > 0
         or int(event_status[2] or 0) > 0
         or int(event_status[3] or 0) > 0
+        # One or two entry decision IDENTITIES: the normal and recovery writers
+        # may spell the same ENTRY differently, and the loop below authenticates
+        # each spelling against the certificate, refusing a third. NULLs are
+        # excluded by the query above because a row that carries no identity is
+        # an ABSENCE, not a second, conflicting one -- counting it as a row both
+        # consumed the two-spelling allowance and rejected the position outright.
         or not 1 <= len(event_identity_rows) <= 2
         or len(payload_receipt_rows) > 1
         or len(certificate_hashes) != 1
