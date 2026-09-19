@@ -3689,6 +3689,73 @@ def _pause_entries_for_live_restart_if_needed(
     return True, f"live restart entry pause guard armed: {tail}"
 
 
+def _release_unused_live_restart_guard(
+    labels: list[str],
+    *,
+    expected_sha: str,
+) -> str:
+    """Release the guard this invocation armed when the restart will not run.
+
+    The guard is armed before the obligation gate on purpose -- that gate needs
+    the pause witness, so testing it first refuses circularly.  But when the
+    gate then refuses, the restart never happens, and the guard cannot clear
+    itself: its proof goes green only once the runtime serves ``expected_sha``,
+    which only a restart can achieve.  Without this release the pause is
+    indefinite and ownerless, and entries stay stopped for a transition that
+    never began.
+
+    Releases exactly the generation matching ``expected_sha``; an operator pause
+    or a newer guard is left untouched by the control-plane CAS.
+    """
+
+    if LIVE_TRADING_LABEL not in labels:
+        return "live restart guard release not required for this daemon"
+    live_repo = _require_live_repo()
+    py = os.path.join(live_repo, ".venv", "bin", "python")
+    if not os.path.exists(py):
+        py = sys.executable
+    expected_literal = json.dumps(str(expected_sha))
+    code = textwrap.dedent(
+        f"""
+        from src.control.control_plane import (
+            get_active_deploy_live_restart_guard,
+            release_unused_deploy_live_restart_guard,
+        )
+
+        witness = get_active_deploy_live_restart_guard()
+        if witness is None:
+            print('live restart guard release: no guard selected')
+        elif witness.expected_sha != {expected_literal}:
+            # A newer invocation owns the pause now; leave it selected.
+            print(
+                'live restart guard release: skipped, a different guard is '
+                f'selected (expected_sha={{witness.expected_sha[:9]}})'
+            )
+        else:
+            result = release_unused_deploy_live_restart_guard(witness)
+            print(
+                f"live restart guard release: {{result.get('status')}} "
+                f"reason={{result.get('reason') or 'restart_refused'}}"
+            )
+        """
+    ).strip()
+    try:
+        res = subprocess.run(
+            [py, "-c", code],
+            cwd=live_repo,
+            env=_live_trading_subprocess_env(),
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return f"live restart guard release could not run: {exc}"
+    output = (res.stdout or res.stderr or "").strip()
+    if res.returncode != 0:
+        return f"live restart guard release failed rc={res.returncode}: {output}"
+    return output or "live restart guard release: no output"
+
+
 def _pause_entries_with_stuck_live_recovery(
     labels: list[str],
     *,
@@ -3977,6 +4044,15 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
     if not obligation_ok:
         print("REFUSING to restart — live capital still requires continuous monitoring:")
         print(obligation_detail)
+        # The restart will not run, so the guard armed above now protects
+        # nothing and can never prove itself green. Leaving it would stop
+        # entries indefinitely with no owner.
+        print(
+            _release_unused_live_restart_guard(
+                labels,
+                expected_sha=expected_live_sha,
+            )
+        )
         return 1
     print(obligation_detail)
 

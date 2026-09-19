@@ -734,6 +734,64 @@ def reset_deploy_live_restart_guard(
     return {"status": "reset", "witness": witness.as_dict()}
 
 
+def release_unused_deploy_live_restart_guard(
+    witness,
+    *,
+    released_at: str | None = None,
+) -> dict[str, object]:
+    """CAS-release a guard whose restart never happened.
+
+    ``arm_deploy_live_restart_guard`` runs BEFORE the obligation gate, because
+    that gate requires the pause witness and checking it first would refuse
+    circularly.  When the gate then refuses, the restart does not occur -- and
+    the guard it armed can never clear itself: ``prove_deploy_live_restart_guard``
+    goes green only when the runtime serves ``expected_sha``, which only a
+    restart can make true.  The pause is indefinite, so entries stop for a
+    transition that never began.
+
+    This releases exactly the generation identified by ``witness`` and nothing
+    else.  An operator pause, or a newer guard, is left selected: the CAS in
+    ``expire_control_override`` refuses on any mismatch.  It deliberately does
+    NOT consult ``prove_deploy_live_restart_guard`` -- there is no runtime proof
+    to be had for a restart that did not run, and demanding one is what makes
+    the pause ownerless.
+    """
+
+    witness = _coerce_restart_guard_witness(witness)
+    released = str(released_at or datetime.now(timezone.utc).isoformat())
+    conn = get_world_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        current = _active_entries_pause_row(conn, now_iso=released)
+        if _restart_guard_witness_from_row(current) != witness:
+            conn.rollback()
+            return {"status": "noop", "reason": "restart_guard_invocation_mismatch"}
+        result = expire_control_override(
+            conn,
+            override_id=witness.override_id,
+            expired_at=released,
+            expected_issued_at=witness.issued_at,
+            expected_reason=DEPLOY_LIVE_RESTART_GUARD_REASON,
+            expected_issued_by=DEPLOY_LIVE_RESTART_GUARD_ISSUER,
+        )
+        if int(result.get("expired_count") or 0) != 1:
+            conn.rollback()
+            return {"status": "noop", "reason": "restart_guard_already_retired"}
+        conn.commit()
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
+    logger.warning(
+        "DEPLOY_LIVE_RESTART_GUARD_RELEASED_UNUSED expected_sha=%s issued_at=%s",
+        witness.expected_sha,
+        witness.issued_at,
+    )
+    return {"status": "released", "witness": witness.as_dict()}
+
+
 def recover_deploy_live_restart_guard() -> dict[str, object]:
     """Prove and CAS-reset the selected guard after one reactor invocation."""
 
