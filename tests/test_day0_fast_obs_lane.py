@@ -540,6 +540,17 @@ def test_fast_station_extreme_invalid_timezone_fails_soft(monkeypatch) -> None:
     )
 
 
+def _kfst_raw(published, *, t_group: bool) -> str:
+    """A KFST METAR whose valid-time group is this print's own instant.
+
+    One observation republished at twenty different instants is a shape no live
+    feed produces, and it collapses every pair onto a single observation key.
+    """
+
+    raw = f"KFST {published.astimezone(UTC):%d%H%M}Z 20/10"
+    return f"{raw} T02000100" if t_group else raw
+
+
 def test_fast_residual_low_fahrenheit_requires_t_group(
     monkeypatch,
 ) -> None:
@@ -587,7 +598,9 @@ def test_fast_residual_low_fahrenheit_requires_t_group(
                 68.0,
                 "F",
                 fetched.isoformat(),
-                "",
+                # The mirror republishes the very report the fast feed carries,
+                # so both renderings key to one observation.
+                _kfst_raw(published, t_group=index != 0),
             ),
         )
         conn.execute(
@@ -602,11 +615,7 @@ def test_fast_residual_low_fahrenheit_requires_t_group(
                 20.0,
                 "C",
                 fetched.isoformat(),
-                (
-                    "KFST 270000Z 20/10"
-                    if index == 0
-                    else "KFST 270000Z 20/10 T02000100"
-                ),
+                _kfst_raw(published, t_group=index != 0),
             ),
         )
     observation_time = datetime(2026, 7, 27, 8, 0, tzinfo=UTC)
@@ -628,7 +637,7 @@ def test_fast_residual_low_fahrenheit_requires_t_group(
         "UPDATE observation_prints SET raw_report = ? "
         "WHERE source_channel = ? AND publish_ts_utc = ?",
         (
-            "KFST 270000Z 20/10 T02000100",
+            _kfst_raw(start, t_group=True),
             FAST_OBS_SOURCE_ID,
             start.isoformat(),
         ),
@@ -694,7 +703,7 @@ def test_fast_residual_low_fahrenheit_requires_t_group(
         target_date="2026-07-27",
         metric="low",
         decision_time=decision_time,
-    ) == (10.0, post_trough_time.isoformat(), 4, "F")
+    ) == (10.0, post_trough_time.isoformat(), 23, "F")
     likelihood = build_fast_station_residual_likelihood(
         conn,
         city="Residual F City",

@@ -58,14 +58,28 @@ def _insert(conn, *, city, station, channel, publish, value, unit="C", raw=""):
 
 
 def _stock_paired_window(conn, *, city, station, settlement_channel, unit, cutoff):
-    """Write enough matched (settlement, fast) pairs to clear the residual minimum."""
+    """Write enough matched (settlement, fast) pairs to clear the residual minimum.
+
+    Both channels republish the SAME METAR, and the mirror lags the fast feed by
+    a fixed per-station offset, so each pair carries one report text at two
+    publish instants.  The report's own ``DDHHMMZ`` group is what makes them one
+    observation; writing two blank reports 30 s apart would be a shape the live
+    ledger never produces (the AWC feed is 100 % raw-bearing).
+    """
     pairs = FAST_RESIDUAL_MIN_PAIRS + 5
     for index in range(pairs):
-        stamp = cutoff - timedelta(hours=index + 2)
+        stamp = (cutoff - timedelta(hours=index + 2)).replace(
+            minute=0, second=0, microsecond=0
+        )
+        report = (
+            f"{station} {stamp.day:02d}{stamp.hour:02d}{stamp.minute:02d}Z "
+            f"08004KT 6000 FEW017 10/05 Q1008 NOSIG"
+        )
         _insert(conn, city=city, station=station, channel=settlement_channel,
-                publish=stamp, value=10.0, unit=unit)
+                publish=stamp, value=10.0, unit=unit, raw=report)
         _insert(conn, city=city, station=station, channel=FAST_OBS_SOURCE_ID,
-                publish=stamp + timedelta(seconds=30), value=10.0, unit=unit)
+                publish=stamp + timedelta(seconds=30), value=10.0, unit=unit,
+                raw=report)
 
 
 def test_noaa_city_fast_extreme_is_read_not_silently_dropped():

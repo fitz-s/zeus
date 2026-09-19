@@ -107,7 +107,6 @@ FAST_LANE_ENTRY_MAX_CACHE_AGE_S = 900.0  # 15 minutes
 FAST_RESIDUAL_LIKELIHOOD_REVISION = "same_station_causal_residual_v1"
 FAST_RESIDUAL_LOOKBACK_DAYS = 7
 FAST_RESIDUAL_MIN_PAIRS = 20
-FAST_RESIDUAL_MATCH_TOLERANCE_S = 6 * 60
 FAST_RESIDUAL_UNKNOWN_ALPHA = 0.05
 #: Settlement families whose declared settlement station is the SAME ICAO
 #: station the AWC METAR fast lane reads, so a fast print is same-station
@@ -416,6 +415,30 @@ def _fast_residual_utc(value: object) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
+def _fast_residual_observation_instant(
+    *,
+    raw_report: object,
+    published: datetime | None,
+) -> datetime | None:
+    """Return when the observation was TAKEN, not when a channel republished it.
+
+    Both the settlement mirror and the fast feed carry the same METAR, whose
+    valid-time group is the observation's own clock -- the same identity
+    ``latest_fast_station_extreme_c`` already uses to dedupe two renderings of
+    one physical fact.  A channel carrying no report text (``wu_icao_history``)
+    publishes AT the observation instant, so its publication IS that clock, and
+    an unparseable group falls back the same way: this widens what can pair,
+    never what can be claimed.
+    """
+
+    if published is None:
+        return None
+    return (
+        metar_observation_time_from_raw(str(raw_report or ""), published_at=published)
+        or published
+    )
+
+
 def _fast_residual_value_c(
     *,
     channel: str,
@@ -571,32 +594,29 @@ def build_fast_station_residual_likelihood(
         )
         if value_c is None:
             continue
+        # Key each print by the observation it renders, not by the instant its
+        # channel republished it.  Both channels carry the same METAR, and each
+        # station's republish offset is fixed, so publish-proximity pairing does
+        # not degrade gracefully: a station whose mirror lags past the tolerance
+        # pairs nothing every hour, while its neighbour pairs everything.
+        observed_at_instant = _fast_residual_observation_instant(
+            raw_report=row[6], published=published
+        )
+        if observed_at_instant is None:
+            continue
         target = settlement_rows if channel == settlement_channel else fast_rows
-        target.append((published, value_c))
+        target.append((observed_at_instant, value_c))
     if not settlement_rows or not fast_rows:
         return None
 
-    fast_by_time: dict[datetime, float] = {}
-    for published, value in fast_rows:
-        fast_by_time[published] = value
-    fast_times = sorted(fast_by_time)
-    residuals: list[float] = []
-    import bisect
-
-    for published, wu_value in settlement_rows:
-        index = bisect.bisect_left(fast_times, published)
-        nearest: tuple[float, datetime] | None = None
-        for candidate_index in (index - 1, index):
-            if 0 <= candidate_index < len(fast_times):
-                candidate = fast_times[candidate_index]
-                distance = abs((candidate - published).total_seconds())
-                if (
-                    distance <= FAST_RESIDUAL_MATCH_TOLERANCE_S
-                    and (nearest is None or distance < nearest[0])
-                ):
-                    nearest = (distance, candidate)
-        if nearest is not None:
-            residuals.append(round(wu_value - fast_by_time[nearest[1]], 6))
+    fast_by_observation: dict[datetime, float] = {}
+    for observed_at_instant, value in fast_rows:
+        fast_by_observation[observed_at_instant] = value
+    residuals = [
+        round(settlement_value - fast_by_observation[observed_at_instant], 6)
+        for observed_at_instant, settlement_value in settlement_rows
+        if observed_at_instant in fast_by_observation
+    ]
     if len(residuals) < FAST_RESIDUAL_MIN_PAIRS:
         return None
 
@@ -618,10 +638,12 @@ def build_fast_station_residual_likelihood(
         target_day, datetime.min.time(), tzinfo=tz
     ).astimezone(UTC)
     local_end = local_start + timedelta(days=1)
+    # Bucketed by when the observation was TAKEN: a 23:50Z observation whose
+    # mirror republishes it after local midnight belongs to the day it measured.
     settlement_values = [
         value
-        for published, value in settlement_rows
-        if local_start <= published < local_end
+        for observed_at_instant, value in settlement_rows
+        if local_start <= observed_at_instant < local_end
     ]
     settlement_extreme = (
         (min(settlement_values) if normalized_metric == "low" else max(settlement_values))
