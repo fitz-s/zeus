@@ -4791,20 +4791,22 @@ def _store_global_auction_receipt(
                     and audit_context_exact_reference
                     else "global_single_order_auction_delta"
                 )
-                compact_receipt["artifact_summary_hash"] = (
-                    global_auction_artifact_summary_hash(compact_receipt)
-                )
-                row_id = persist(
-                    CycleArtifact(
-                        mode=mode,
-                        started_at=selection_cut_at_utc.isoformat(),
-                        completed_at=decision_at_utc.isoformat(),
-                        skipped_reason=str(
-                            getattr(decision, "no_trade_reason", "") or ""
+                with _receipt_stage("summary_hash_compact"):
+                    compact_receipt["artifact_summary_hash"] = (
+                        global_auction_artifact_summary_hash(compact_receipt)
+                    )
+                with _receipt_stage("persist_compact"):
+                    row_id = persist(
+                        CycleArtifact(
+                            mode=mode,
+                            started_at=selection_cut_at_utc.isoformat(),
+                            completed_at=decision_at_utc.isoformat(),
+                            skipped_reason=str(
+                                getattr(decision, "no_trade_reason", "") or ""
+                            ),
+                            summary=compact_receipt,
                         ),
-                        summary=compact_receipt,
-                    ),
-                )
+                    )
                 if row_id is None:
                     raise RuntimeError("GLOBAL_AUCTION_RECEIPT_ID_MISSING")
                 current_receipt_hash = str(receipt["receipt_hash"])
@@ -4899,20 +4901,22 @@ def _store_global_auction_receipt(
                 compact_bytes,
             )
 
-        receipt["artifact_summary_hash"] = (
-            global_auction_artifact_summary_hash(receipt)
-        )
-        row_id = persist(
-            CycleArtifact(
-                mode="global_single_order_auction",
-                started_at=selection_cut_at_utc.isoformat(),
-                completed_at=decision_at_utc.isoformat(),
-                skipped_reason=str(
-                    getattr(decision, "no_trade_reason", "") or ""
+        with _receipt_stage("summary_hash_full"):
+            receipt["artifact_summary_hash"] = (
+                global_auction_artifact_summary_hash(receipt)
+            )
+        with _receipt_stage("persist_full"):
+            row_id = persist(
+                CycleArtifact(
+                    mode="global_single_order_auction",
+                    started_at=selection_cut_at_utc.isoformat(),
+                    completed_at=decision_at_utc.isoformat(),
+                    skipped_reason=str(
+                        getattr(decision, "no_trade_reason", "") or ""
+                    ),
+                    summary=receipt,
                 ),
-                summary=receipt,
-            ),
-        )
+            )
         if row_id is not None and getattr(decision, "no_trade_reason", None) is None:
             # reversal_plan_tier0_2026-08-24 item 3b: candidate-set provenance
             # only for a real winner, only on the full (non-delta,

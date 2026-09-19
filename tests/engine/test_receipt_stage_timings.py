@@ -119,6 +119,14 @@ def test_receipt_builders_are_actually_wrapped_on_the_runtime_path():
         "encode_candidate_evaluations",
         "encode_holding_coverage",
         "encode_audit_context",
+        # The artifact write itself and the hash over the whole receipt. The
+        # first instrumented pass (n=887) attributed only 60 ms of a 354 ms p50
+        # to the builders and encodes above, so 83% was still unattributed and
+        # these are where the remainder is spent.
+        "summary_hash_compact",
+        "persist_compact",
+        "summary_hash_full",
+        "persist_full",
     }
     for label in sorted(expected_labels):
         assert f'_receipt_stage("{label}")' in source, (
