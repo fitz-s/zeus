@@ -1948,6 +1948,7 @@ class PolymarketV2Adapter:
         headers: dict[str, str],
         deadline_monotonic: float,
         max_pages: int,
+        after_epoch_seconds: int | None = None,
     ) -> list[dict[str, Any]]:
         try:
             from py_clob_client_v2.constants import END_CURSOR, INITIAL_CURSOR
@@ -1967,11 +1968,17 @@ class PolymarketV2Adapter:
                     "INCOMPLETE_ACCOUNT_TRUTH: pagination cursor repeated or missing"
                 )
             seen_cursors.add(cursor_text)
+            params = {"next_cursor": cursor_text}
+            if after_epoch_seconds is not None:
+                # Server-side lower bound. The L2 HMAC covers method, request
+                # path and body only -- never the query string -- so scoping
+                # here is signature-safe, exactly as ``next_cursor`` already is.
+                params["after"] = str(after_epoch_seconds)
             payload = await self._account_truth_json_get_async(
                 http,
                 f"{host}{request_path}",
                 headers=headers,
-                params={"next_cursor": cursor_text},
+                params=params,
                 deadline_monotonic=deadline_monotonic,
             )
             if not isinstance(payload, dict):
@@ -2024,6 +2031,7 @@ class PolymarketV2Adapter:
         *,
         deadline_monotonic: float,
         max_pages: int,
+        trades_after_epoch_seconds: int | None = None,
     ) -> AccountTruth:
         try:
             import httpx
@@ -2083,6 +2091,7 @@ class PolymarketV2Adapter:
                             headers=trades_headers,
                             deadline_monotonic=deadline_monotonic,
                             max_pages=max_pages,
+                            after_epoch_seconds=trades_after_epoch_seconds,
                         ),
                     )
                     self._account_truth_deadline_remaining(deadline_monotonic)
@@ -2106,6 +2115,7 @@ class PolymarketV2Adapter:
         *,
         deadline_monotonic: float,
         max_pages: int = _ACCOUNT_TRUTH_MAX_PAGES,
+        trades_after_epoch_seconds: int | None = None,
     ) -> AccountTruth:
         """Read complete orders and trades under one wall-clock deadline.
 
@@ -2114,6 +2124,15 @@ class PolymarketV2Adapter:
         timeout, TLS failure, malformed page, repeated cursor, or page-limit
         breach raises ``INCOMPLETE_ACCOUNT_TRUTH`` rather than returning a
         partial list that a caller could mistake for absence.
+
+        ``trades_after_epoch_seconds`` bounds the TRADE history the venue is
+        asked for.  Without it the snapshot's cost grows with the account's
+        lifetime while its deadline stays fixed, so the read fails eventually by
+        construction -- it did on 2026-09-18, 313 consecutive deadline
+        elapses against a 45 s budget.  The caller supplies a bound it can
+        JUSTIFY (the oldest obligation the snapshot must still answer for);
+        completeness is then a property of that stated window, and trades
+        before it were already durable.  ``None`` keeps the whole history.
         """
         _assert_no_world_mutex_held_for_io("venue.get_account_truth")
         if max_pages <= 0:
@@ -2131,6 +2150,7 @@ class PolymarketV2Adapter:
             self._get_account_truth_async(
                 deadline_monotonic=deadline_monotonic,
                 max_pages=max_pages,
+                trades_after_epoch_seconds=trades_after_epoch_seconds,
             )
         )
 

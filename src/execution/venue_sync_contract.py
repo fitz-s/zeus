@@ -545,6 +545,7 @@ def capture_venue_read_snapshot(
     account_truth_deadline_seconds: float = _ACCOUNT_TRUTH_DEADLINE_SECONDS,
     deadline_monotonic: float | None = None,
     derive_orders_from_account_truth: bool = False,
+    trades_after_epoch_seconds: int | None = None,
 ) -> VenueReadSnapshot:
     """NETWORK phase: capture every venue read the apply phase will need.
 
@@ -591,8 +592,22 @@ def capture_venue_read_snapshot(
         raise IncompleteAccountTruthError(
             "INCOMPLETE_ACCOUNT_TRUTH: authoritative account reader unavailable"
         )
+    account_reader_kwargs: dict[str, object] = {
+        "deadline_monotonic": account_deadline
+    }
+    if trades_after_epoch_seconds is not None:
+        # The caller states the window it must answer for; trades older than
+        # its oldest unresolved obligation cannot change this invocation's
+        # decisions and were durable long before it. A reader that does not
+        # accept the bound still gets the complete read.
+        account_reader_kwargs["trades_after_epoch_seconds"] = (
+            trades_after_epoch_seconds
+        )
     try:
-        account_truth = account_reader(deadline_monotonic=account_deadline)
+        try:
+            account_truth = account_reader(**account_reader_kwargs)
+        except TypeError:
+            account_truth = account_reader(deadline_monotonic=account_deadline)
     except IncompleteAccountTruthError:
         raise
     except Exception as exc:

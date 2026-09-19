@@ -145,6 +145,10 @@ _FULL_SWEEP_BUDGET_SECONDS = 45.0
 # lookup.  Fifteen seconds proved sufficient for account pagination but left no
 # time for the identity read; keep this bounded below the full sweep budget.
 _FULL_PRIORITY_ACCOUNT_TRUTH_DEADLINE_SECONDS = 30.0
+#: Slack below the oldest unresolved obligation when bounding the account
+#: trade read.  Generous on purpose: the bound exists to drop history that
+#: answers nothing, not to trim the evidence a pass may need.
+_ACCOUNT_TRUTH_OBLIGATION_SLACK_DAYS = 2
 # Full recovery is deliberately background work.  Keep each matched-fact apply
 # lease to one command so a monitor that registers mid-sweep can take the next
 # writer turn instead of waiting for a historical debt scan to finish.
@@ -187,13 +191,58 @@ def _account_truth_snapshot_kwargs(scope: str) -> dict[str, object]:
     }
 
 
+def _obligation_window_epoch_seconds(
+    *candidate_groups: Sequence[Mapping[str, object]],
+) -> int | None:
+    """Return when the oldest command this snapshot must answer for began.
+
+    The account snapshot exists to resolve THESE candidates.  Trade history
+    older than the oldest of them cannot change this invocation's decisions and
+    was durable long before it, so reading it answers nothing while costing the
+    whole deadline.  Deriving the bound from the candidate rows themselves --
+    rather than a fixed retention guess -- keeps the window exactly as wide as
+    the work, so the snapshot's cost tracks unresolved WORK instead of account
+    lifetime.  That is what makes a fixed deadline survivable as the account
+    ages; the unbounded read fails eventually by construction.
+
+    Any missing or unparseable timestamp returns ``None``, i.e. the previous
+    whole-history read.  This may only narrow a window we can justify, never
+    widen what absence is permitted to prove.
+    """
+
+    oldest: datetime | None = None
+    saw_candidate = False
+    for group in candidate_groups:
+        for row in group or ():
+            saw_candidate = True
+            mapping = row if isinstance(row, Mapping) else _dict_row(row)
+            # _parse_ts reads a naive stamp as UTC, the module's convention and
+            # the one venue_commands.created_at is written in.
+            parsed = _parse_ts(str(mapping.get("created_at") or "").strip())
+            if parsed is None:
+                return None
+            if oldest is None or parsed < oldest:
+                oldest = parsed
+    if not saw_candidate or oldest is None:
+        return None
+    # Generous slack below the oldest obligation: a fill can be reported
+    # slightly before the command row a reader pairs it to, and this bound must
+    # never be tighter than the evidence a pass may need.
+    return int(
+        (oldest - timedelta(days=_ACCOUNT_TRUTH_OBLIGATION_SLACK_DAYS)).timestamp()
+    )
+
+
 def _scheduled_venue_snapshot_kwargs(
     scope: str,
     priming: Mapping[str, set[str]],
     *,
     deadline_monotonic: float | None,
+    trades_after_epoch_seconds: int | None = None,
 ) -> dict[str, object]:
     kwargs = _account_truth_snapshot_kwargs(scope)
+    if trades_after_epoch_seconds is not None:
+        kwargs["trades_after_epoch_seconds"] = trades_after_epoch_seconds
     kwargs.update(
         {
             "order_ids": priming["order_ids"],
@@ -31967,6 +32016,11 @@ def _reconcile_passes_short_conn(
                     "condition_ids": set(),
                 },
                 deadline_monotonic=scheduler_deadline,
+                trades_after_epoch_seconds=_obligation_window_epoch_seconds(
+                    cancel_candidates,
+                    terminal_candidates,
+                    partial_candidates,
+                ),
             ),
         )
         fast_deadline = _capital_deadline()
