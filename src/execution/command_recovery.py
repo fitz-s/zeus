@@ -6882,6 +6882,178 @@ def _append_live_entry_projection_repair(
     return True
 
 
+def _acked_command_missing_order_fact_candidates(
+    conn: sqlite3.Connection,
+) -> list[dict]:
+    """Return ACKED commands whose bound order has no venue_order_facts row.
+
+    Every lane that can advance an ACKED command keys on ``venue_order_facts``.
+    An ACKED row with a bound ``venue_order_id`` and no fact is therefore
+    invisible to all of them: it can never terminalize, never release its
+    collateral reservation, and refuses every loaded-daemon restart. The
+    executor's submit path makes the ACK event and the fact one atomic pair, so
+    such a row means the pair was broken -- historically by a recovery ACK that
+    wrote only the event.
+
+    A row that reached ACKED moments ago is NOT that: its fact is owned by the
+    writer still completing this pass, and by the M5 local-orphan writer for
+    rows it is resolving. Only a row whose ACK has outlived every in-flight
+    writer is ownerless, so this selects on the same safe-replay age boundary
+    the rest of the module uses to decide that no writer can still be working.
+    """
+
+    if not all(
+        _table_exists(conn, table)
+        for table in ("venue_commands", "venue_order_facts")
+    ):
+        return []
+    stranded_before = (
+        datetime.now(timezone.utc)
+        - timedelta(seconds=_SAFE_REPLAY_MIN_AGE_SECONDS)
+    ).isoformat()
+    rows = conn.execute(
+        """
+        SELECT cmd.*
+          FROM venue_commands cmd
+         WHERE cmd.state IN ('ACKED', 'POST_ACKED')
+           AND COALESCE(cmd.venue_order_id, '') != ''
+           AND COALESCE(cmd.updated_at, cmd.created_at, '') < ?
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM venue_order_facts fact
+                WHERE fact.command_id = cmd.command_id
+           )
+         ORDER BY cmd.created_at, cmd.command_id
+        """,
+        (stranded_before,),
+    ).fetchall()
+    return [_dict_row(row) for row in rows]
+
+
+def reconcile_acked_commands_missing_order_facts(
+    conn: sqlite3.Connection,
+    client,
+) -> dict:
+    """Re-derive the missing order fact for an ACKED command from venue truth.
+
+    SCOPE: one ACKED/POST_ACKED command with a bound venue_order_id and zero
+    order facts. DRAIN: one authenticated point read supplies the fact its own
+    state implies -- resting, matched, or terminal -- after which the existing
+    fact-keyed lanes own the row again. RESET: the fact exists, so the next pass
+    finds no candidate; an unavailable or ambiguous read leaves the row for the
+    next cadence rather than inventing a state.
+    """
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    candidates = _acked_command_missing_order_fact_candidates(conn)
+    if not candidates:
+        return summary
+    get_order = getattr(client, "get_order", None)
+    if not callable(get_order):
+        summary["stayed"] += len(candidates)
+        return summary
+    for command in candidates:
+        summary["scanned"] += 1
+        command_id = str(command.get("command_id") or "")
+        venue_order_id = str(command.get("venue_order_id") or "")
+        observed_at = _now_iso()
+        try:
+            point_read = _client_point_order_read(client, venue_order_id)
+        except Exception as exc:  # noqa: BLE001 - a failed read is not absence.
+            logger.warning(
+                "recovery: ACKED command %s missing order fact; authenticated "
+                "point read failed (%s); leaving for the next cadence",
+                command_id,
+                exc.__class__.__name__,
+            )
+            summary["errors"] += 1
+            continue
+        if not point_read.query_complete:
+            logger.info(
+                "recovery: ACKED command %s missing order fact; point read is "
+                "not a complete proof (%s); leaving for the next cadence",
+                command_id,
+                point_read.source,
+            )
+            summary["stayed"] += 1
+            continue
+        safe_command_id = "".join(
+            ch if ch.isalnum() else "_" for ch in command_id
+        )
+        sp_name = f"sp_acked_missing_order_fact_{safe_command_id}"
+        conn.execute(f"SAVEPOINT {sp_name}")
+        try:
+            if point_read.absent:
+                # An authenticated 404 is absence authority: the venue holds no
+                # record of this order, so the fact is a terminal no-fill and the
+                # existing terminal-fact lane can close the command.
+                fact_id = _append_point_order_terminal_no_fill_fact(
+                    conn,
+                    command=command,
+                    observed_at=observed_at,
+                    venue_status="NOT_FOUND",
+                    point_order=None,
+                    matching_open_orders=[],
+                    matching_trades=[],
+                    source_reason="acked_command_authenticated_order_absence",
+                    venue_resp_present_for_terminal_state=False,
+                    venue_read_proof={
+                        "point_order_checked": True,
+                        "point_order_query_complete": True,
+                        "point_order_source": point_read.source,
+                        "point_order_id": point_read.order_id,
+                        "point_order_absent": True,
+                        "point_order_absence_reason": point_read.absence_reason,
+                    },
+                )[0]
+                fact_state = "authenticated_absence_terminal_no_fill"
+            else:
+                venue_status = _order_status(point_read.point_order or {})
+                if venue_status not in {"LIVE", "OPEN", "RESTING"}:
+                    # A matched or cancelled point order carries fill economics
+                    # that the trade-fact and M5 lanes own; this lane only
+                    # restores the resting fact those lanes then key on.
+                    conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                    logger.info(
+                        "recovery: ACKED command %s missing order fact; point "
+                        "status=%s belongs to the fill lanes, not this repair",
+                        command_id,
+                        venue_status,
+                    )
+                    summary["stayed"] += 1
+                    continue
+                fact_id = _append_recovery_live_order_fact(
+                    conn,
+                    command_id=command_id,
+                    venue_order_id=venue_order_id,
+                    observed_at=observed_at,
+                    venue_status=venue_status,
+                    venue_response=point_read.point_order,
+                    submitted_size=command.get("size"),
+                    side=command.get("side"),
+                    source_reason="acked_command_order_fact_rederived",
+                )
+                fact_state = venue_status
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+        except Exception:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            raise
+        if fact_id is None:
+            summary["stayed"] += 1
+            continue
+        summary["advanced"] += 1
+        logger.warning(
+            "recovery: ACKED command %s had no order fact; re-derived %s from "
+            "authenticated point truth (fact_id=%s order %s)",
+            command_id,
+            fact_state,
+            fact_id,
+            venue_order_id,
+        )
+    return summary
+
+
 def reconcile_live_entry_projection_repairs(conn: sqlite3.Connection, client=None) -> dict:
     """Repair open ACKED ENTRY command truth when initial pending projection failed."""
 
@@ -16634,6 +16806,93 @@ def _resolve_m5_exchange_ghost_findings(
 def _payload_hash(payload: dict) -> str:
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _append_recovery_live_order_fact(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    venue_order_id: str,
+    observed_at: str,
+    venue_status: str,
+    venue_response: dict | None,
+    submitted_size: object,
+    side: str | None,
+    source_reason: str,
+) -> int | None:
+    """Persist the resting order fact that a recovery ACK just authenticated.
+
+    Every lane that can later terminalize an ACKED command keys on
+    ``venue_order_facts``: the point-order sweep, the terminal-fact sweep, the
+    live-entry projection repair. The normal submit path therefore writes the
+    SUBMIT_ACKED event and this fact as one pair. A recovery ACK that wrote only
+    the event produced an ACKED row no lane could see -- permanently stranded,
+    holding its collateral reservation and refusing every live restart. This
+    closes that asymmetry: the same authenticated read that proves the ACK also
+    proves the order rests, so both are recorded together.
+
+    Returns the new fact_id, or None when a fact already exists or the read
+    proves something other than a clean resting order -- fill economics belong
+    to the lanes that can prove their exact size.
+    """
+
+    if not command_id or not venue_order_id:
+        return None
+    existing = conn.execute(
+        """
+        SELECT 1
+          FROM venue_order_facts
+         WHERE command_id = ?
+           AND venue_order_id = ?
+         LIMIT 1
+        """,
+        (command_id, venue_order_id),
+    ).fetchone()
+    if existing is not None:
+        return None
+    # Only a resting order has a fact this pairing can prove. A matched,
+    # partially matched, or terminal status carries fill economics whose exact
+    # size must come from the trade-fact and identity-bound lanes that own it;
+    # writing a fact here would pin a guessed size ahead of that proof.
+    if str(venue_status or "").upper() not in {"LIVE", "OPEN", "RESTING"}:
+        return None
+    matched_size = _point_order_matched_size(
+        venue_response,
+        fallback="0",
+        side=side,
+    )
+    matched = _decimal_or_none(matched_size) or Decimal("0")
+    if matched > 0:
+        return None
+    submitted = _decimal_or_none(submitted_size)
+    state = "LIVE"
+    remaining_size = (
+        _decimal_text(submitted) if submitted is not None else "0"
+    )
+    payload = {
+        "reason": source_reason,
+        "proof_class": "recovery_authenticated_point_order_ack",
+        "source_surface": "client.get_order",
+        "command_id": command_id,
+        "venue_order_id": venue_order_id,
+        "venue_status": venue_status,
+        "venue_response": venue_response,
+    }
+    return append_order_fact(
+        conn,
+        venue_order_id=venue_order_id,
+        command_id=command_id,
+        state=state,
+        remaining_size=remaining_size,
+        matched_size=_decimal_text(matched),
+        source="REST",
+        observed_at=observed_at,
+        # The authenticated point read carries no server match time; observed_at
+        # is this process's receipt clock, which venue_timestamp must not claim.
+        venue_timestamp=None,
+        raw_payload_hash=_payload_hash(payload),
+        raw_payload_json=payload,
+    )
 
 
 def _append_point_order_terminal_no_fill_fact(
@@ -28280,6 +28539,17 @@ def _recover_no_venue_order_id_submit(
             occurred_at=now,
             payload=payload,
         )
+        _append_recovery_live_order_fact(
+            conn,
+            command_id=cmd.command_id,
+            venue_order_id=str(venue_order_id or ""),
+            observed_at=now,
+            venue_status=venue_status,
+            venue_response=venue_resp,
+            submitted_size=cmd.size,
+            side=cmd.side,
+            source_reason="recovery_submitting_no_venue_order_id_ack",
+        )
         logger.info(
             "recovery: command %s SUBMITTING/no-venue-id -> ACKED "
             "(venue status=%s order %s)",
@@ -28520,6 +28790,17 @@ def _reconcile_row(
                     occurred_at=now,
                     payload=payload,
                 )
+                _append_recovery_live_order_fact(
+                    conn,
+                    command_id=cmd.command_id,
+                    venue_order_id=str(venue_order_id or ""),
+                    observed_at=now,
+                    venue_status=venue_status,
+                    venue_response=venue_resp,
+                    submitted_size=cmd.size,
+                    side=cmd.side,
+                    source_reason="recovery_submit_unknown_side_effect_ack",
+                )
                 logger.info(
                     "recovery: command %s SUBMIT_UNKNOWN_SIDE_EFFECT -> ACKED "
                     "(venue status=%s order %s)",
@@ -28701,6 +28982,17 @@ def _reconcile_row(
                     occurred_at=now,
                     payload={"venue_order_id": venue_order_id, "venue_status": venue_status, "venue_response": venue_resp},
                 )
+                _append_recovery_live_order_fact(
+                    conn,
+                    command_id=cmd.command_id,
+                    venue_order_id=str(venue_order_id or ""),
+                    observed_at=now,
+                    venue_status=venue_status,
+                    venue_response=venue_resp,
+                    submitted_size=cmd.size,
+                    side=cmd.side,
+                    source_reason="recovery_submitting_bound_order_ack",
+                )
                 logger.info(
                     "recovery: command %s SUBMITTING -> ACKED (venue status=%s order %s)",
                     cmd.command_id, venue_status, venue_order_id,
@@ -28795,6 +29087,17 @@ def _reconcile_row(
                     event_type=CommandEventType.SUBMIT_ACKED.value,
                     occurred_at=now,
                     payload={"venue_order_id": venue_order_id, "venue_status": venue_status, "venue_response": venue_resp},
+                )
+                _append_recovery_live_order_fact(
+                    conn,
+                    command_id=cmd.command_id,
+                    venue_order_id=str(venue_order_id or ""),
+                    observed_at=now,
+                    venue_status=venue_status,
+                    venue_response=venue_resp,
+                    submitted_size=cmd.size,
+                    side=cmd.side,
+                    source_reason="recovery_unknown_bound_order_ack",
                 )
                 logger.info(
                     "recovery: command %s UNKNOWN -> ACKED (venue status=%s order %s)",
@@ -29309,6 +29612,14 @@ def _reconcile_passes_inline(
         summary["advanced"] += edli_rejected_sync_summary["advanced"]
         summary["stayed"] += edli_rejected_sync_summary["stayed"]
         summary["errors"] += edli_rejected_sync_summary["errors"]
+
+        acked_missing_fact_summary = reconcile_acked_commands_missing_order_facts(
+            conn, client
+        )
+        summary["acked_missing_order_fact_repair"] = acked_missing_fact_summary
+        summary["advanced"] += acked_missing_fact_summary["advanced"]
+        summary["stayed"] += acked_missing_fact_summary["stayed"]
+        summary["errors"] += acked_missing_fact_summary["errors"]
 
         live_entry_repair_summary = reconcile_live_entry_projection_repairs(conn, client=client)
         summary["live_entry_projection_repair"] = live_entry_repair_summary
@@ -33005,6 +33316,11 @@ def _reconcile_passes_short_conn(
             "terminal_exit_partial_remainders",
             terminal_exit_only=True,
         )
+        _client_pass(
+            "acked_missing_order_fact_repair",
+            reconcile_acked_commands_missing_order_facts,
+            "acked_missing_order_fact_repair",
+        )
         _db_pass(
             "live_entry_projection_repair",
             reconcile_live_entry_projection_repairs,
@@ -33166,6 +33482,9 @@ def _reconcile_passes_short_conn(
         _db_pass("edli_rejected_venue_command_sync",
                  reconcile_edli_rejected_venue_command_sync,
                  "edli_rejected_venue_command_sync")
+        _client_pass("acked_missing_order_fact_repair",
+                     reconcile_acked_commands_missing_order_facts,
+                     "acked_missing_order_fact_repair")
         _db_pass("live_entry_projection_repair",
                  reconcile_live_entry_projection_repairs,
                  "live_entry_projection_repair")
@@ -33293,6 +33612,9 @@ def _reconcile_passes_short_conn(
     _db_pass("edli_rejected_venue_command_sync",
              reconcile_edli_rejected_venue_command_sync,
              "edli_rejected_venue_command_sync")
+    _client_pass("acked_missing_order_fact_repair",
+                 reconcile_acked_commands_missing_order_facts,
+                 "acked_missing_order_fact_repair")
     _client_pass("live_entry_projection_repair",
                  reconcile_live_entry_projection_repairs, "live_entry_projection_repair", client_kw=True)
     _db_pass("filled_entry_position_link_repair",
