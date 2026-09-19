@@ -459,6 +459,16 @@ def _fast_residual_value_c(
             precise = metar_t_group_temperature_c(str(raw_report or ""))
             return precise if precise is not None and math.isfinite(precise) else None
         return value if normalized_unit == "C" else None
+    # The settlement mirror renders the SAME report, and when it carries that
+    # report's T group the tenths are the measurement itself.  Its published
+    # number is a rounded view of them: weather.gov prints a whole-degree F
+    # (78.8F) whose exact preimage is 26.0C while the report says 25.6C.
+    # Converting that published view manufactures a residual of up to ~0.4C
+    # out of one measurement, so read the same precise group both channels
+    # carry before falling back to the published unit.
+    precise = metar_t_group_temperature_c(str(raw_report or ""))
+    if precise is not None and math.isfinite(precise):
+        return precise
     if normalized_unit == "C":
         return value
     if normalized_unit == "F":
