@@ -59,7 +59,16 @@ def _memory_db(
             target_date TEXT NOT NULL,
             temperature_metric TEXT NOT NULL,
             computed_at TEXT NOT NULL,
-            provenance_json TEXT NOT NULL DEFAULT '{}'
+            provenance_json TEXT NOT NULL DEFAULT '{}',
+            -- Mirrors production (v2_schema._ensure_forecast_posteriors_bundle_identity):
+            -- the fit reads these as columns, not out of the blob. A fixture that
+            -- omits them passes against SQL production cannot run.
+            q_shape TEXT GENERATED ALWAYS AS (
+                json_extract(provenance_json, '$.q_shape')
+            ) VIRTUAL,
+            anchor_value_c REAL GENERATED ALWAYS AS (
+                json_extract(provenance_json, '$.anchor_value_c')
+            ) VIRTUAL
         )
         """
     )

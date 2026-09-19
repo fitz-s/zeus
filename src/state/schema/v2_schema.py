@@ -394,6 +394,34 @@ def _ensure_forecast_posteriors_bundle_identity(conn: sqlite3.Connection) -> Non
             ON forecast_posteriors(city, target_date, temperature_metric,
                                    training_allowed, bundle_identity, computed_at)
     """)
+    # The center-debias fit filters on these two and reads the second. Without
+    # them the fit pays 361.8 ms/row cold, the same class of cost that made an
+    # un-deduped fitter join take 546.37 s (src/ingest_main.py's 600 s bound note).
+    if "q_shape" not in columns:
+        conn.execute(
+            """
+            ALTER TABLE forecast_posteriors
+            ADD COLUMN q_shape TEXT
+                GENERATED ALWAYS AS (
+                    json_extract(provenance_json, '$.q_shape')
+                ) VIRTUAL
+            """
+        )
+    if "anchor_value_c" not in columns:
+        conn.execute(
+            """
+            ALTER TABLE forecast_posteriors
+            ADD COLUMN anchor_value_c REAL
+                GENERATED ALWAYS AS (
+                    json_extract(provenance_json, '$.anchor_value_c')
+                ) VIRTUAL
+            """
+        )
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_forecast_posteriors_center_debias
+            ON forecast_posteriors(q_shape, anchor_value_c)
+            WHERE q_shape IS NOT NULL
+    """)
 
 
 def _ensure_forecast_posteriors_runtime_layer_compatibility(conn: sqlite3.Connection) -> None:

@@ -129,7 +129,7 @@ winners AS (
     GROUP BY city, target_date, lead
 )
 SELECT w.city AS city,
-       json_extract(p.provenance_json, '$.anchor_value_c') AS center_c,
+       p.anchor_value_c AS center_c,
        CASE WHEN s.settlement_unit = 'F'
             THEN (s.settlement_value - 32.0) * 5.0 / 9.0
             ELSE s.settlement_value
@@ -141,8 +141,8 @@ JOIN settlement_outcomes AS s
   ON s.city = w.city
  AND s.target_date = w.target_date
  AND s.temperature_metric = :metric
-WHERE json_extract(p.provenance_json, '$.q_shape') = 'fused_normal_direct'
-  AND json_extract(p.provenance_json, '$.anchor_value_c') IS NOT NULL
+WHERE p.q_shape = 'fused_normal_direct'
+  AND p.anchor_value_c IS NOT NULL
   AND s.authority = 'VERIFIED'
   AND s.settlement_value IS NOT NULL
   AND s.settlement_unit IN ('F', 'C')

@@ -118,3 +118,100 @@ def test_the_live_lookup_plan_uses_an_index_not_a_blob_scan() -> None:
         )
     finally:
         conn.close()
+
+
+def test_center_debias_keys_are_generated_columns() -> None:
+    """The center-debias fit must not json_extract a 93 KB blob per row.
+
+    `_RESIDUAL_SQL` filters on `$.q_shape` and projects `$.anchor_value_c`. Measured
+    cold on the live database: **361.8 ms/row** — the same class of cost that made an
+    un-deduped fitter join take 546.37 s (see src/ingest_main.py's 600 s bound note).
+    On a 6,000-row replica the filter went 0.681 s -> 0.000 s with identical matches.
+    """
+    conn = _forecasts_conn()
+    try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_xinfo(forecast_posteriors)")}
+        assert {"q_shape", "anchor_value_c"} <= columns, (
+            "center-debias still reads its keys out of the blob"
+        )
+        rows = (
+            ("direct", '{"q_shape": "fused_normal_direct", "anchor_value_c": "21.729351"}'),
+            ("numeric", '{"q_shape": "fused_normal_direct", "anchor_value_c": 21.729351}'),
+            ("other-shape", '{"q_shape": "fused_day0_fast_residual_likelihood"}'),
+            ("absent", "{}"),
+        )
+        for identity_hash, provenance in rows:
+            conn.execute(
+                """
+                INSERT INTO forecast_posteriors
+                    (source_id, product_id, data_version, city, target_date,
+                     temperature_metric, source_cycle_time, source_available_at,
+                     computed_at, q_json, posterior_method, provenance_json,
+                     posterior_identity_hash, runtime_layer, training_allowed)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live', 0)
+                """,
+                ("s", "p", "v", "London", "2026-09-19", "high",
+                 "2026-09-19T00:00:00+00:00", "2026-09-19T00:00:00+00:00",
+                 "2026-09-19T00:00:00+00:00", "{}", "m", provenance, identity_hash),
+            )
+
+        # A JSON string and a JSON number must both read back as the same number:
+        # REAL affinity converts the string, and the consumer calls float() anyway.
+        for identity_hash in ("direct", "numeric"):
+            assert conn.execute(
+                "SELECT anchor_value_c FROM forecast_posteriors WHERE posterior_identity_hash = ?",
+                (identity_hash,),
+            ).fetchone()[0] == 21.729351
+
+        # Absent keys stay NULL rather than becoming 0.0, which the fit skips.
+        assert conn.execute(
+            "SELECT anchor_value_c FROM forecast_posteriors WHERE posterior_identity_hash = 'absent'"
+        ).fetchone()[0] is None
+
+        selected = {
+            row[0]
+            for row in conn.execute(
+                "SELECT posterior_identity_hash FROM forecast_posteriors "
+                "WHERE q_shape = 'fused_normal_direct' AND anchor_value_c IS NOT NULL"
+            )
+        }
+        assert selected == {"direct", "numeric"}, selected
+    finally:
+        conn.close()
+
+
+def test_center_debias_sql_does_not_json_extract_the_blob() -> None:
+    """The shipped query must use the columns, not re-read the blob."""
+    from src.calibration.center_debias_live_fit import _RESIDUAL_SQL
+
+    assert "json_extract(p.provenance_json" not in _RESIDUAL_SQL, (
+        "center-debias SQL still json_extracts provenance_json; the generated "
+        "columns exist but the query does not use them"
+    )
+    assert "p.q_shape" in _RESIDUAL_SQL and "p.anchor_value_c" in _RESIDUAL_SQL
+
+
+def test_every_generated_column_the_shipped_sql_reads_exists_in_production() -> None:
+    """A query may only read columns the production schema actually creates.
+
+    The center-debias fixture built `forecast_posteriors` with its own DDL, so when
+    the shipped SQL moved off the blob the fixture kept passing while production
+    would have raised `no such column`. Bind the two together: every bare `p.<col>`
+    the query selects or filters on must exist on a real `init_schema_forecasts`
+    table.
+    """
+    import re
+
+    from src.calibration.center_debias_live_fit import _RESIDUAL_SQL
+
+    conn = _forecasts_conn()
+    try:
+        available = {row[1] for row in conn.execute("PRAGMA table_xinfo(forecast_posteriors)")}
+    finally:
+        conn.close()
+    referenced = set(re.findall(r"\bp\.([a-z_][a-z0-9_]*)", _RESIDUAL_SQL))
+    missing = referenced - available
+    assert not missing, (
+        f"center-debias SQL reads {sorted(missing)} which init_schema_forecasts "
+        "does not create; the query would raise 'no such column' in production"
+    )
