@@ -353,3 +353,60 @@ def test_repair_defers_a_matched_point_order_to_the_fill_lanes(conn):
     assert summary["advanced"] == 0
     assert summary["stayed"] == 1
     assert _order_facts(conn, command_id) == []
+
+
+def test_the_404_repair_reaches_terminal_and_releases_its_collateral(conn):
+    """The whole point: the derived fact must end in a released reservation.
+
+    The repair only earns its existence if the fact it writes carries the row
+    through the terminal-fact lane to collateral release -- that release is what
+    the stranded row was holding hostage.
+    """
+    from src.execution import command_recovery as recovery
+
+    # The live row this reproduces is a buy_no on a real weather event; the
+    # void projection the terminal lane emits derives its identity from that
+    # slug, so the fixture must carry one.
+    command_id = _insert(
+        conn,
+        command_id="cmd-chain",
+        size=41.48,
+        price=0.54,
+        selected_token_id="tok-chain-no",
+        no_token_id="tok-chain-no",
+        event_slug="highest-temperature-in-guangzhou-on-september-19-2026-36c",
+    )
+    conn.execute(
+        "UPDATE venue_commands SET state = 'ACKED', venue_order_id = ?, "
+        "created_at = '2026-09-01T00:00:00+00:00', "
+        "updated_at = '2026-09-01T00:00:00+00:00' WHERE command_id = ?",
+        ("0xchain", command_id),
+    )
+    conn.execute(
+        "INSERT INTO collateral_reservations("
+        "  command_id, reservation_type, token_id, amount, created_at"
+        ") VALUES (?, 'PUSD_BUY', NULL, 22399200, '2026-09-01T00:00:00+00:00')",
+        (command_id,),
+    )
+    assert _unreleased(conn, command_id) == 1
+
+    repaired = recovery.reconcile_acked_commands_missing_order_facts(
+        conn, _point_client(not_found=True)
+    )
+    assert repaired["advanced"] == 1
+
+    recovery.reconcile_terminal_order_facts(conn)
+
+    state = conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id = ?", (command_id,)
+    ).fetchone()[0]
+    assert state in {"EXPIRED", "CANCELLED", "REJECTED"}, state
+    assert _unreleased(conn, command_id) == 0
+
+
+def _unreleased(conn, command_id: str) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) FROM collateral_reservations "
+        "WHERE command_id = ? AND released_at IS NULL",
+        (command_id,),
+    ).fetchone()[0]
