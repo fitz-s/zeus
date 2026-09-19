@@ -2056,21 +2056,34 @@ class PolymarketV2Adapter:
                         deadline_monotonic=deadline_monotonic,
                         timestamp=server_timestamp,
                     )
-                    open_orders = await self._account_truth_pages_async(
-                        http,
-                        client,
-                        request_path=ORDERS,
-                        headers=orders_headers,
-                        deadline_monotonic=deadline_monotonic,
-                        max_pages=max_pages,
-                    )
-                    trades = await self._account_truth_pages_async(
-                        http,
-                        client,
-                        request_path=TRADES,
-                        headers=trades_headers,
-                        deadline_monotonic=deadline_monotonic,
-                        max_pages=max_pages,
+                    # Both surfaces are signed up-front from ONE server
+                    # timestamp, so neither pagination depends on the other's
+                    # result: running them in sequence spends the snapshot's
+                    # shared deadline twice over for no semantic gain. The
+                    # account's trade history only grows, so a sequential
+                    # snapshot's cost rises with account lifetime against a
+                    # fixed budget -- it fails eventually by construction.
+                    # Overlapping them halves the wall clock and leaves the
+                    # truth identical: the same pages, the same shared
+                    # deadline, and the same fail-closed error from whichever
+                    # surface cannot complete.
+                    open_orders, trades = await asyncio.gather(
+                        self._account_truth_pages_async(
+                            http,
+                            client,
+                            request_path=ORDERS,
+                            headers=orders_headers,
+                            deadline_monotonic=deadline_monotonic,
+                            max_pages=max_pages,
+                        ),
+                        self._account_truth_pages_async(
+                            http,
+                            client,
+                            request_path=TRADES,
+                            headers=trades_headers,
+                            deadline_monotonic=deadline_monotonic,
+                            max_pages=max_pages,
+                        ),
                     )
                     self._account_truth_deadline_remaining(deadline_monotonic)
                     return AccountTruth(
