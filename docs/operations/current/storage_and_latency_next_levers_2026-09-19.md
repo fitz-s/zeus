@@ -187,3 +187,44 @@ the earlier store's ratio.
    ~136 GB of output space.
 3. **`calibration_pairs` dictionary-FK** — ~7.5 GB in the table, but the 20.4 GB of
    indexes dominate and several index the very columns being narrowed.
+
+## 5. Where the reclaimed space went: a TimeMachine local snapshot
+
+§3's "not a leak" note was right that the databases are static and that `du` beats `df`
+for measuring a store. It did not explain why free space kept falling anyway. It is a
+local APFS snapshot:
+
+```
+com.apple.TimeMachine.2026-09-18-121115.local
+```
+
+Taken at **12:11 local today**, it pins every block freed since then — including the
+~10 GB evicted from `.total_loss` at 14:44 and 18:0x. That is why `du` shows the store at
+10 GB while the volume never gave the space back:
+
+| | |
+|---|---|
+| free at the start of this work | ~80 GiB |
+| free now | 66 GiB |
+| main DBs growth (60 s windows, each) | **0 MB/min** |
+| `~/Library/Caches` growth (100 s window) | **0 MB** |
+| free-space decline over the same window | ~17 MB / 100 s |
+| `zeus/` growth vs free-space loss (90 s) | **70 MB grown vs 428 MB lost** |
+
+Six-sevenths of the decline is outside the repo and matches no growing file, which is the
+signature of blocks held by a snapshot rather than blocks in use.
+
+The destination is an SDXC card (`帅哥的SDXC`) and `/Volumes` shows only `Macintosh HD`,
+so the drive is **not attached**: the snapshot cannot be flushed to a backup and thins
+only on macOS's own schedule or when space pressure forces it.
+
+**Consequence for §1**: the `zeus_trades.db` VACUUM reset needs ~136 GB of output. Some of
+the headroom it is waiting on is already reclaimed and merely pinned. Deleting the
+snapshot (`sudo tmutil deletelocalsnapshots 2026-09-18-121115`) is an operator decision —
+it discards a restore point taken before today's evictions, which is exactly why it is
+worth a deliberate choice rather than a reflex.
+
+**Method note that outlives this incident**: when files are static and free space still
+falls, check `tmutil listlocalsnapshots` before hunting for a writer. A snapshot is
+invisible to `du`, so the two tools disagree by design, and every "which file is growing"
+probe will come back empty — as several did here.
