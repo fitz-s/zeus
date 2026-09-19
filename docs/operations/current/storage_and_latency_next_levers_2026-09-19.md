@@ -267,3 +267,57 @@ force. When it clears, the 63.4 GB reclaim and — more durably — the two dorm
 Worth keeping in mind for the future: thinning is reversible only in the sense that a new
 snapshot can be taken. It discards restore points, so it stays an operator action even
 though it needs no password.
+
+## 6. Applied: the live bundle lookup is 200x faster, for 0.23 GB
+
+The §4 plan was to split `provenance_json` for 28 GB. Profiling first found a better
+first move: the blob's cost is not only disk, it is **read latency on the decision path**.
+
+`_replacement_bundle_identity_is_live` filtered `forecast_posteriors` on
+`json_extract(provenance_json, '$.day0_causal_evidence_bundle.bundle_identity')`. At
+93,275 B/row — about 23 pages of overflow chain — every candidate row was faulted in
+whole to read one identifier:
+
+| | |
+|---|---|
+| live, `json_extract` on the blob | **1.427 ms/call** |
+| same query, blob untouched | 0.014 ms/call |
+| reaching small JSON keys across the table | **34.2 s** (vs 0.014 s without the blob) |
+
+The fix is a VIRTUAL generated column over that one key, plus a covering index. VIRTUAL
+stores no bytes, so the largest table in the database gains only the index, and SQLite
+derives the value itself, so it cannot drift from the JSON it mirrors.
+
+**Applied to the live database** (290.5 s):
+
+```
+before: bundle_identity present = False
+after : column=True index=True
+verify: rows disagreeing with json_extract (last 5000) = 0
+LIVE new path: 0.007 ms/call
+plan: SEARCH forecast_posteriors USING INDEX idx_forecast_posteriors_bundle_identity
+```
+
+`zeus-forecasts.db` 99.43 -> 99.66 GB: **0.23 GB for a 200x lookup speedup**. Equivalence
+was proven before the change too, on a copy of 8,000 real rows: identical results for all
+40 distinct bundle identities, 6.041 ms/call -> 0.014 ms/call.
+
+### The ordering hazard, and why the DB went first
+
+The rerouted query sits inside `except sqlite3.Error: return False`. A daemon loading the
+new code against a database without the column would not crash — it would read **every
+bundle as not-live** and silently stop admitting entries. So the column was applied to the
+live database *before* any restart can pick up the new code. The running daemons are 12 h
+old and still hold the pre-change reader, so the live path was never exposed.
+
+`ensure_forecast_runtime_indexes` (called at `substrate_observer_daemon` boot) converges
+this for any other database, and `_ensure_forecast_indexes` carries it for the
+ATTACH-from-world.db branch.
+
+### What this changes about §4
+
+The 28 GB split is still worth doing, but it is no longer the *latency* argument — this
+change already took the hot lookup off the blob. The split remains a storage argument, and
+a second latency argument only for whatever still reads the whole column. Worth measuring
+each remaining reader the same way before assuming it needs the split at all: the cheapest
+fix for a blob you only need one key from is to index that key, not to move the blob.
