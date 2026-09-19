@@ -228,3 +228,42 @@ worth a deliberate choice rather than a reflex.
 falls, check `tmutil listlocalsnapshots` before hunting for a writer. A snapshot is
 invisible to `du`, so the two tools disagree by design, and every "which file is growing"
 probe will come back empty — as several did here.
+
+### Applied: 95 GiB returned, and no sudo was needed
+
+`sudo tmutil deletelocalsnapshots` cannot run through a `!`-prefixed shell (no TTY for the
+password prompt). `tmutil thinlocalsnapshots`, which needs no elevation, does the same job
+here:
+
+```
+tmutil thinlocalsnapshots /System/Volumes/Data 21474836480 4
+Thinned local snapshots:
+com.apple.TimeMachine.2026-09-18-121115.local
+```
+
+| | before | after |
+|---|---|---|
+| free | 65 GiB | **160 GiB** |
+| used | 93% | **82%** |
+| local snapshots | 1 | **0** |
+
+The snapshot was holding **95 GiB** — far more than the ~10 GB evicted today, so it had
+been accumulating freed blocks well before this session. The estimate in §5 was the
+floor, not the total.
+
+**This unblocks §1's space constraint.** `VACUUM INTO` needs ~136 GB of output and there
+are now 160 GiB free (172.0 GB container free). The `--check` still refuses, now on the
+one remaining precondition:
+
+```
+REFUSED: 2 open position(s) exist and entries_paused is not set.
+```
+
+Hong Kong `pending_exit` and Shanghai `day0_window`, both on 2026-09-19 markets, $25.85
+at risk. That gate protects capital and clears on settlement; it is not something to
+force. When it clears, the 63.4 GB reclaim and — more durably — the two dormant
+`incremental_vacuum` call sites both become available.
+
+Worth keeping in mind for the future: thinning is reversible only in the sense that a new
+snapshot can be taken. It discards restore points, so it stays an operator action even
+though it needs no password.
