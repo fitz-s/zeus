@@ -321,3 +321,60 @@ change already took the hot lookup off the blob. The split remains a storage arg
 a second latency argument only for whatever still reads the whole column. Worth measuring
 each remaining reader the same way before assuming it needs the split at all: the cheapest
 fix for a blob you only need one key from is to index that key, not to move the blob.
+
+## 7. The same fix, applied to the calibration fit
+
+Sweeping the remaining `json_extract`-on-`provenance_json` readers found one far worse
+than the bundle lookup. `center_debias_live_fit._RESIDUAL_SQL` filters on `$.q_shape` and
+projects `$.anchor_value_c`, over many rows rather than one:
+
+```
+300 rows cold: 108.534 s = 361.8 ms/row
+```
+
+That is the same class of cost `src/ingest_main.py` documents behind its 600 s bound —
+an un-deduped fitter join that json_extracted a ~93 KB blob per row and took 546.37 s.
+Two more VIRTUAL generated columns and a partial index:
+
+| | |
+|---|---|
+| before, cold | **361.8 ms/row** |
+| after, full 605k-row table | **0.012 s total**, 310,899 rows matched |
+| `zeus-forecasts.db` | 99.66 -> 100.32 GB |
+
+`anchor_value_c` takes REAL affinity, which converts the JSON string form and leaves an
+absent key NULL rather than 0.0; the consumer already calls `float()`, so both shapes read
+the same.
+
+Not every reader needed this. `replacement_forecast_bundle_reader:1723` filters on three
+blob keys but costs 0.287 ms/call, because other predicates narrow the candidate set
+first, and `day0_extreme_updated`'s `json_extract`es are on observation rows, not this
+table. Measured rather than assumed.
+
+### Two defects this surfaced, both of them the real value
+
+**The fixture had diverged from production.** `tests/calibration/test_center_debias_live_fit.py`
+built `forecast_posteriors` with its own DDL, so when the shipped SQL moved to the columns
+the fixture kept passing while production would have raised `no such column`. The fixture
+now mirrors them, and a new antibody binds the two permanently: every bare `p.<col>` the
+shipped SQL reads must exist on a real `init_schema_forecasts` table.
+
+**The migration was not idempotent.** `_table_columns` uses `PRAGMA table_info`, which
+omits VIRTUAL generated columns entirely, so on an already-migrated database every ALTER
+re-fired and died with `duplicate column name: bundle_identity`. It uses `table_xinfo`
+now. This was found by *running* the migration against the live database — a fresh
+in-memory schema only ever calls the helper once, so no test could have caught it.
+
+That same PRAGMA blind spot had already produced a false negative earlier in this session,
+when a test reported the column absent from a table that carried it.
+
+### Running total on this table
+
+| query | before | after |
+|---|---|---|
+| live bundle lookup | 1.427 ms/call | **0.007 ms/call** |
+| center-debias filter | 361.8 ms/row | **0.012 s / 605k rows** |
+| cost | | **+0.89 GB total** |
+
+The §4 split (28 GB) remains available and is now purely a storage argument: both hot
+readers are off the blob.
