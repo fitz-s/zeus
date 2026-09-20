@@ -378,3 +378,77 @@ when a test reported the column absent from a table that carried it.
 
 The §4 split (28 GB) remains available and is now purely a storage argument: both hot
 readers are off the blob.
+
+## 8. The pre-submit residual is closed: it is `persist`, and it is not the write
+
+The instrumentation from §3 reached production. Across **n=143** live receipts carrying
+the new stages:
+
+```
+p50=605.0ms  p90=981.0ms  p99=1587.0ms
+
+persist_full                  229.1 ms p50   37.9%
+persist_compact               127.7          21.1%
+book_native_side_receipt       62.9          10.4%
+encode_candidate_evaluations   56.7           9.4%
+delta_candidate_evaluations    50.4           8.3%
+delta_book_native_side         28.8           4.8%
+delta_audit_context            18.6           3.1%
+encode_audit_context            8.5           1.4%
+summary_hash_compact            0.8           0.1%
+(4 more below 0.2 ms)
+------------------------------------------------
+sum of medians                583.7 ms  of a 605.0 ms p50
+UNATTRIBUTED                   21.3 ms  (4%)
+```
+
+**Unattributed fell from 83% to 4%**, and the answer is the artifact write: `persist` is
+59% of pre-submit time. That is the opposite of the earlier prediction that the component
+builders held it, and the reason §3 says to instrument the whole function rather than the
+part you suspect.
+
+### But it is not the writing
+
+Measured against the shapes involved:
+
+| | |
+|---|---|
+| artifact being written | **1,025.7 KB** (96% of it zlib+base64 payloads) |
+| `json.dumps` of the whole artifact | 1.7 ms |
+| clean 1 MB INSERT + commit, WAL + synchronous=FULL | **3.0 ms** |
+| the 50-row × 1 MB retention DELETE + commit | **9.3 ms** |
+| same 1 MB INSERT against a 90k-page freelist | 2.0 ms |
+
+None of these is 229 ms, and the freelist — the obvious suspect, given `zeus_trades.db`
+carries 63.4 GB of it — changes nothing. What `persist` does *before* any of it is acquire
+a write lease, which makes lock wait the candidate the numbers point at, with the trading
+mesh writing concurrently from eight other daemons.
+
+So the lease acquisition is now timed as `<owner>:lease_wait`. The clock brackets only the
+acquisition and control flow is byte-identical: re-entering the context manager by hand to
+wrap it in `_receipt_stage` would have changed exception handling on the money path, which
+is not a trade worth making for a measurement. `_record_receipt_stage` reports an
+already-measured span into the same structure and is a silent no-op outside a collection
+window.
+
+### A second finding worth its own work
+
+The artifact is 1,025.7 KB of which **983.9 KB is base64 text of already-zlib'd payloads**:
+
+```
+book_native_side_delta_zlib_b64      498.1 KB   48.6%
+candidate_evaluations_delta_zlib_b64 323.0 KB   31.5%
+audit_context_zlib_b64               161.5 KB   15.7%
+```
+
+Base64 inflates by 33%, so **245.8 KB per artifact is pure encoding overhead**, written
+synchronously before every submit. The same 2,900.5 KB of underlying bytes is 697.6 KB as
+a zstd-3 BLOB — smaller than the base64 *text* of the zlib form, and without the inflation.
+That is the receipt-codec migration already described in `receipt_codec_options_2026-09-17.md`,
+and this is the measurement that sizes it: it is not only storage, it is bytes on the
+pre-submit path.
+
+Note it is not yet proven to be 229 ms of *cost* — if the time is lock wait, a smaller
+artifact shortens the hold but not necessarily the wait. The next sample with
+`lease_wait` present will say which, and that ordering matters: shrinking the payload
+before knowing would be optimising the half the measurement does not implicate.
