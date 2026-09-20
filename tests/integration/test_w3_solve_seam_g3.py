@@ -44721,3 +44721,70 @@ def test_day0_ask_final_stamp_rereads_after_selection_cache(monkeypatch):
         assert payload[era.DAY0_ASK_DISTINCT_10MIN_KEY] == 2
     finally:
         conn.close()
+
+
+def test_book_projection_prefilters_depth_without_changing_exact_freshness(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    conn.executescript("""
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT PRIMARY KEY, selected_outcome_token_id TEXT,
+            orderbook_depth_json TEXT, captured_at TEXT, min_tick_size TEXT,
+            min_order_size TEXT, neg_risk INTEGER);
+        CREATE TABLE executable_market_snapshot_latest (
+            condition_id TEXT, selected_outcome_token_id TEXT, snapshot_id TEXT,
+            freshness_deadline TEXT);
+        CREATE INDEX idx_snapshot_latest_selected_token_captured
+            ON executable_market_snapshot_latest(selected_outcome_token_id);
+        CREATE TABLE execution_feasibility_latest (
+            token_id TEXT, direction TEXT, event_id TEXT, condition_id TEXT,
+            quote_seen_at TEXT, depth_before_json TEXT, book_hash_before TEXT);
+    """)
+    checked = _dt.datetime(2026, 9, 20, 9, 0, 0, 500000, tzinfo=_dt.timezone.utc)
+    age = _dt.timedelta(seconds=30)
+    cases = {
+        "fresh": ("2026-09-20T09:00:00.500000+00:00", "2026-09-20T09:01:00+00:00"),
+        "expired": ("2026-09-20T08:00:00+00:00", "2026-09-20T08:01:00+00:00"),
+        "boundary": ("2026-09-20T08:59:30.500000+00:00", "2026-09-20T09:00:00.500000+00:00"),
+        "subsecond_stale": ("2026-09-20T08:59:30.499999+00:00", "2026-09-20T09:01:00+00:00"),
+        "offset": ("2026-09-20T17:00:00.500000+08:00", "2026-09-20T17:01:00+08:00"),
+        "python_iso": ("2026-W38-7T09:00:00.500000+00:00", "2026-W38-7T09:01:00+00:00"),
+        "future": ("2026-09-20T09:00:00.500001+00:00", "2026-09-20T09:01:00+00:00"),
+        "naive": ("2026-09-20T09:00:00", "2026-09-20T09:01:00"),
+    }
+    for token, (at, deadline) in cases.items():
+        depth = json.dumps({"asset_id": token, "bids": [{"price": "0.20", "size": "20"}],
+                            "asks": [{"price": "0.30", "size": "20"}]})
+        conn.execute("INSERT INTO executable_market_snapshots VALUES (?,?,?,?,?,?,?)",
+                     (token, token, depth, at, "0.01", "5", 0))
+        conn.execute("INSERT INTO executable_market_snapshot_latest VALUES (?,?,?,?)",
+                     (token, token, token, deadline))
+        conn.execute("INSERT INTO execution_feasibility_latest VALUES (?,?,?,?,?,?,?)",
+                     (token, "buy_yes", token, token, at, depth, token))
+
+    fetched = []
+    class ReadCounter:
+        def execute(self, sql, params=()):
+            cursor = conn.execute(sql, params)
+            class Rows:
+                def fetchall(self):
+                    rows = cursor.fetchall()
+                    fetched.append(len(rows))
+                    return rows
+            return Rows()
+
+    monkeypatch.setattr(era, "_market_channel_continuity_cut", lambda **kwargs: None)
+    snapshots = era._snapshot_projected_global_book_rows(ReadCounter(), cases, checked_at=checked, max_age=age)
+    assert set(snapshots) == {"fresh", "boundary", "offset", "python_iso"}
+    assert fetched.pop() == len(cases) - 1  # Expired depth never enters Python.
+    channels = era._latest_market_channel_book_rows(ReadCounter(), cases, checked_at=checked, max_age=age)
+    assert set(channels) == {"fresh", "boundary", "offset", "python_iso"}
+    assert fetched.pop() == len(cases) - 1
+
+    # A continuously observed channel can legitimately retain older depth.
+    monkeypatch.setattr(era, "_market_channel_continuity_cut",
+                        lambda **kwargs: (checked - _dt.timedelta(hours=2), checked))
+    channels = era._latest_market_channel_book_rows(ReadCounter(), cases, checked_at=checked, max_age=age)
+    assert set(channels) == {"fresh", "expired", "boundary", "subsecond_stale", "offset", "python_iso"}
+    assert channels["expired"][1] == checked
+    assert fetched.pop() == len(cases)
+    conn.close()

@@ -2816,6 +2816,7 @@ def _snapshot_projected_global_book_rows(
     if not token_ids or any(not token for token in token_ids):
         return None
     books: dict[str, tuple[Mapping[str, object], datetime, str]] = {}
+    deadline_floor = math.floor(checked_at.timestamp())
     try:
         for start in range(0, len(token_ids), 400):
             chunk = token_ids[start : start + 400]
@@ -2835,8 +2836,9 @@ def _snapshot_projected_global_book_rows(
                   JOIN executable_market_snapshots AS snapshot
                     ON snapshot.snapshot_id = latest.snapshot_id
                  WHERE latest.selected_outcome_token_id IN ({placeholders})
+                   AND COALESCE(CAST(strftime('%s', latest.freshness_deadline) AS INTEGER), ?) >= ?
                 """,
-                chunk,
+                (*chunk, deadline_floor, deadline_floor),
             ).fetchall()
             for row in rows:
                 token_id = str(row[0] or "").strip()
@@ -3020,6 +3022,12 @@ def _latest_market_channel_book_rows(
         checked_at=checked_at,
         max_age=max_age,
     )
+    # Coarse SQL bounds avoid hydrating obsolete depth. Exact UTC/subsecond
+    # and continuity checks below remain authoritative; unparsed dates pass through.
+    oldest_usable = checked_at - max_age
+    if continuity_cut is not None:
+        oldest_usable = min(oldest_usable, continuity_cut[0])
+    quote_floor = math.floor(oldest_usable.timestamp())
     try:
         for start in range(0, len(token_ids), 400):
             chunk = token_ids[start : start + 400]
@@ -3046,8 +3054,9 @@ def _latest_market_channel_book_rows(
                    AND latest.condition_id = latest_event.condition_id
                   JOIN executable_market_snapshots AS snapshot
                     ON snapshot.snapshot_id = latest.snapshot_id
+                 WHERE COALESCE(CAST(strftime('%s', latest_event.quote_seen_at) AS INTEGER), ?) >= ?
                 """,
-                chunk,
+                (*chunk, quote_floor, quote_floor),
             ).fetchall()
             for row in rows:
                 token_id = str(row[0] or "").strip()
