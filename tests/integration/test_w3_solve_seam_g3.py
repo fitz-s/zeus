@@ -33791,11 +33791,34 @@ def test_global_work_deadline_bounds_selection_schema_lock_before_network(tmp_pa
     seed.commit()
     seed.close()
     locker = sqlite3.connect(path)
-    selection = sqlite3.connect(path)
+    injected_clock = {"now": 0.0}
+    deadline = 0.05
+
+    class ControlledSelectionConnection(sqlite3.Connection):
+        advance_clock_on_schema_lock = False
+        raise_schema_fault = False
+
+        def execute(self, sql, parameters=()):
+            normalized = " ".join(str(sql).upper().split())
+            if self.raise_schema_fault and normalized.startswith(
+                "SELECT 1 FROM SQLITE_MASTER"
+            ):
+                raise sqlite3.OperationalError("synthetic schema fault")
+            try:
+                return super().execute(sql, parameters)
+            except sqlite3.OperationalError:
+                if normalized.startswith("SELECT 1 FROM SQLITE_MASTER"):
+                    if self.advance_clock_on_schema_lock:
+                        injected_clock["now"] = deadline
+                raise
+
+    selection = sqlite3.connect(path, factory=ControlledSelectionConnection)
+    selection.advance_clock_on_schema_lock = True
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
     network_calls = []
     work_context = universe.WorkContext(
-        deadline_monotonic=time.monotonic() + 0.05,
+        deadline_monotonic=deadline,
+        monotonic=lambda: injected_clock["now"],
     )
     locker.execute("BEGIN EXCLUSIVE")
     locker.execute("CREATE TABLE held_schema_lock (value TEXT)")
@@ -33840,6 +33863,50 @@ def test_global_work_deadline_bounds_selection_schema_lock_before_network(tmp_pa
     assert selection.in_transaction is False
     selection.close()
     locker.close()
+
+    # A non-deadline SQLite fault remains an ordinary auction failure.  The
+    # controlled connection deliberately leaves the injected clock before its
+    # deadline, so bounded_work_sqlite must re-raise the original OperationalError.
+    fault_selection = sqlite3.connect(
+        ":memory:", factory=ControlledSelectionConnection
+    )
+    fault_selection.raise_schema_fault = True
+    fault_clock = {"now": 0.0}
+    fault_context = universe.WorkContext(
+        deadline_monotonic=1.0,
+        monotonic=lambda: fault_clock["now"],
+    )
+    fault_result = global_batch_runtime.process_current_global_batch(
+        (event,),
+        decision_time=_dt.datetime(
+            2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc
+        ),
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda current: json.loads(current.payload_json),
+        prepare_event=lambda *_: pytest.fail(
+            "schema fault must fail before preparation"
+        ),
+        actuate_winner=lambda *_: pytest.fail(
+            "schema fault must fail before actuation"
+        ),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: 0,
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: pytest.fail(
+            "schema fault must fail before decision time read"
+        ),
+        current_book_epoch_provider=lambda *_: network_calls.append(True),
+        work_context=fault_context,
+        selection_snapshot_connections=(fault_selection,),
+    )
+    assert fault_result.receipts[event.event_id].reason.startswith(
+        "GLOBAL_AUCTION_FAILED:OperationalError:synthetic schema fault"
+    )
+    assert network_calls == []
+    assert fault_selection.in_transaction is False
+    fault_selection.close()
 
 
 def test_global_selection_schema_reads_are_cached_only_inside_owned_snapshot():
