@@ -530,3 +530,58 @@ The remaining pre-submit cost is the write of a ~1 MB artifact, 96% of which is 
 text of already-compressed payloads (245.8 KB per artifact is base64 inflation alone).
 That is the codec migration, now sized by two independent measurements: 1.47x smaller
 *and* 9.6x faster, against a 48-literal reader surface.
+
+## 11. The trades WAL: an unbounded yield, and a correction to how it was read
+
+`zeus_trades.db-wal` was found at **2,956 MB** — 46x the 64 MiB idle band — while the
+three main databases were static and nothing had alerted.
+
+### What was actually wrong
+
+`_defer_background_io_for_held_position_monitor` returned True whenever a held-position
+monitor was active, and the checkpoint cycle returned **before measuring anything**. With
+positions held around the clock:
+
+| | deferred | ran | deferred share |
+|---|---|---|---|
+| **trades** | **123** | 85 | **59%** |
+| world | 46 | 165 | 22% |
+| forecasts | 47 | 164 | 22% |
+
+The deferrals were not evenly spread. The longest consecutive streaks were 12, 11, 8, 7
+events at a 90-second period, so the trades WAL went **up to 18 minutes with no checkpoint
+at all** — and a deferred cycle emits no backlog check, no size check, nothing but the
+defer line. The docstring's claim that an unexecutable residual "cannot starve WAL
+drainage" is true per claim and false across a continuous series of them.
+
+Fixed: past the same 512 MiB starvation line the yield ends, loudly. Yielding disk
+priority to live capital is worth a bounded delay, never an unbounded one.
+
+### Correction: the backlog was small, the allocation was not
+
+Running the codebase's own `checkpoint_wal` against the live database:
+
+```
+busy=0 log_frames=15000 checkpointed=14640 page_size=4096
+  log total   :  61.4 MB
+  checkpointed:  60.0 MB
+  outstanding :   1.5 MB
+```
+
+So the **un-checkpointed backlog was 1.5 MB**, not 2.9 GB, and after that single
+checkpoint the file was 67 MB. The 2,956 MB was *allocated file size* left behind by a
+spike, not undrained data — which is exactly the distinction
+`_wal_checkpoint_is_starved` was rewritten to make in W5-5, and the reason the alert was
+correctly silent. The live log confirms the checkpoints were running and merely CONTENDED
+(`busy=1`), not starved.
+
+Two lessons here, and the second one is mine:
+
+- A WAL file's **size** and its **backlog** are different quantities. `ls` answers the
+  first; only `PRAGMA wal_checkpoint` answers the second, and the existing alert
+  deliberately measures the second.
+- I reported "checkpoints can't truncate because a reader always holds a lock" from file
+  size and an `F_GETLK` probe alone, before running a checkpoint. The probe showed a
+  SHARED lock held by `price_channel_ingest`, which is what a healthy reader looks like.
+  The fix still stands — an 18-minute drainage gap is real and unbounded — but it is
+  justified by the defer streaks, not by the number I first quoted.
