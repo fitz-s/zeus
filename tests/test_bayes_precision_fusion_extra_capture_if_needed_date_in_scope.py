@@ -1175,6 +1175,36 @@ def test_candidate_coldstart_rejects_stale_offgrid_metadata(monkeypatch) -> None
     ) == {}
 
 
+def test_candidate_coldstart_ages_the_derived_run_not_only_metadata(monkeypatch) -> None:
+    """A 14Z metadata clock cannot keep its older derived 12Z run fresh."""
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+
+    model = "met_nordic"
+    metadata_run = datetime(2026, 9, 20, 14, tzinfo=timezone.utc)
+    derived_run = datetime(2026, 9, 20, 12, tzinfo=timezone.utc)
+    update = OpenMeteoModelUpdate(
+        model=model,
+        last_run_initialisation_time=metadata_run,
+        last_run_availability_time=metadata_run + timedelta(minutes=32, seconds=44),
+    )
+    monkeypatch.setenv("ZEUS_REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS", "24")
+    monkeypatch.setattr(
+        "src.strategy.live_inference.source_clock_vnext.source_publicly_usable_at",
+        lambda _run: datetime(1970, 1, 1, tzinfo=timezone.utc),
+    )
+
+    assert production._candidate_offgrid_single_runs_prior_runs(
+        models=(model,),
+        updates_by_model={model: update},
+        now=metadata_run + timedelta(hours=24),
+    ) == {}
+    assert production._candidate_offgrid_single_runs_prior_runs(
+        models=(model,),
+        updates_by_model={model: update},
+        now=derived_run + timedelta(hours=24),
+    ) == {model: derived_run}
+
+
 def test_candidate_accrual_empty_market_scope_still_reaches_held_union(
     monkeypatch,
     tmp_path,

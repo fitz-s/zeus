@@ -1554,14 +1554,17 @@ def _candidate_offgrid_single_runs_prior_runs(
             continue
         prior_hours = tuple(hour for hour in cadence_hours if hour <= run_utc.hour)
         if prior_hours:
-            expected_runs[model] = run_utc.replace(
+            derived_run = run_utc.replace(
                 hour=prior_hours[-1], minute=0, second=0, microsecond=0
             )
         else:
-            expected_runs[model] = (
+            derived_run = (
                 run_utc.replace(hour=cadence_hours[-1], minute=0, second=0, microsecond=0)
                 - timedelta(days=1)
             )
+        if now_utc - derived_run > timedelta(hours=max_cycle_age_hours):
+            continue
+        expected_runs[model] = derived_run
     return expected_runs
 
 
