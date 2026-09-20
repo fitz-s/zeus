@@ -338,8 +338,10 @@ def _request(
     )
 
 
+@pytest.mark.parametrize("frozen_two_source_scheme", (False, True))
 def test_hourly_cwa_low_persisted_row_enters_real_precision_override_when_cold_start(
     monkeypatch: pytest.MonkeyPatch,
+    frozen_two_source_scheme: bool,
 ) -> None:
     """The 061 LOW is an actual q-center member, not merely a selectable raw row."""
     from src.config import City
@@ -373,9 +375,9 @@ def test_hourly_cwa_low_persisted_row_enters_real_precision_override_when_cold_s
         (target.isoformat(),),
     )
     taipei = City(
-        name="Taipei", lat=25.051608, lon=121.568983, timezone="Asia/Taipei",
+        name="Taipei", lat=25.067244, lon=121.552822, timezone="Asia/Taipei",
         settlement_unit="C", cluster="Taiwan", wu_station="RCSS",
-        settlement_source_type="cwa_station",
+        settlement_source_type="wu_icao",
     )
     monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {"Taipei": taipei})
 
@@ -403,9 +405,20 @@ def test_hourly_cwa_low_persisted_row_enters_real_precision_override_when_cold_s
             sd=0.5, method="TEST_FUSION", used_models=("gfs_global",), regional_models=(),
         ),
     )
+    if frozen_two_source_scheme:
+        from src.strategy.live_inference.source_clock_city_weights import CityOneScheme
+
+        scheme = CityOneScheme(
+            city="Taipei", scheme_status="ACTIVE",
+            final_sources=("ecmwf_ifs", "gfs_global"),
+            weights={"ecmwf_ifs": 0.6, "gfs_global": 0.4},
+            sample_n=30, walkforward_pass=True, one_scheme_status="ACTIVE",
+        )
+    else:
+        scheme = None
     monkeypatch.setattr(
         "src.strategy.live_inference.source_clock_city_weights.scheme_for_city",
-        lambda *_args, **_kwargs: None,
+        lambda *_args, **_kwargs: scheme,
     )
 
     class _Shape:
