@@ -2122,3 +2122,55 @@ def test_mid_transaction_edge_delete_failure_rolls_back_old_schema(tmp_path: Pat
     finally:
         conn.close()
     assert not receipt.exists()
+
+
+def test_critical_trade_commit_does_not_checkpoint_released_reader_backlog(tmp_path: Path) -> None:
+    from hashlib import sha256
+    from src.state.db import connect_existing_trade_db_without_journal_bootstrap
+
+    path = tmp_path / "zeus_trades.db"
+    keeper = sqlite3.connect(path)
+    keeper.execute("PRAGMA journal_mode=WAL")
+    keeper.execute("CREATE TABLE checkpoint_probe(value BLOB)")
+    keeper.commit()
+    keeper.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    reader = sqlite3.connect(path)
+    writer = connect_existing_trade_db_without_journal_bootstrap(path)
+    try:
+        reader.execute("BEGIN")
+        reader.execute("SELECT COUNT(*) FROM checkpoint_probe").fetchone()
+        writer.executemany("INSERT INTO checkpoint_probe VALUES (?)", [(b"x" * 4096,)] * 1200)
+        writer.commit()
+        reader.rollback()
+        before = sha256(path.read_bytes()).hexdigest()
+        writer.execute("INSERT INTO checkpoint_probe VALUES (?)", (b"committed",))
+        writer.commit()
+        assert sha256(path.read_bytes()).hexdigest() == before
+        assert keeper.execute("SELECT COUNT(*) FROM checkpoint_probe").fetchone()[0] == 1201
+        busy, frames, copied = keeper.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+        assert busy == 0 and copied == frames and frames > 1000
+        assert sha256(path.read_bytes()).hexdigest() != before
+        writer.execute("INSERT INTO checkpoint_probe VALUES (?)", (b"rolled back",))
+        writer.rollback()
+        assert keeper.execute("SELECT COUNT(*) FROM checkpoint_probe").fetchone()[0] == 1201
+        assert keeper.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    finally:
+        reader.close()
+        writer.close()
+        keeper.close()
+
+
+def test_critical_trade_checkpoint_policy_does_not_change_forecast(tmp_path: Path, monkeypatch) -> None:
+    from src.state import db
+
+    path = tmp_path / "forecast.db"
+    sqlite3.connect(path).close()
+    monkeypatch.setattr(db, "ZEUS_FORECASTS_DB_PATH", path)
+    forecast = db.connect_existing_forecasts_db_without_journal_bootstrap()
+    trade = db.connect_existing_trade_db_without_journal_bootstrap(path)
+    try:
+        assert trade.execute("PRAGMA wal_autocheckpoint").fetchone()[0] == 0
+        assert forecast.execute("PRAGMA wal_autocheckpoint").fetchone()[0] == 1000
+    finally:
+        forecast.close()
+        trade.close()

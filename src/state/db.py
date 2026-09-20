@@ -420,9 +420,15 @@ def _connect_existing_db_without_journal_bootstrap(
 def connect_existing_trade_db_without_journal_bootstrap(
     db_path: Path,
 ) -> sqlite3.Connection:
-    """Open an existing trade DB for one latency-critical canonical write."""
+    """Open a latency-critical trade writer; the periodic job owns WAL drainage."""
 
-    return _connect_existing_db_without_journal_bootstrap(db_path)
+    conn = _connect_existing_db_without_journal_bootstrap(db_path)
+    try:
+        conn.execute("PRAGMA wal_autocheckpoint=0")
+        return conn
+    except BaseException:
+        conn.close()
+        raise
 
 
 def connect_existing_forecasts_db_without_journal_bootstrap() -> sqlite3.Connection:
