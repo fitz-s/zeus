@@ -407,6 +407,110 @@ def test_candidate_accrual_without_metadata_skips_without_http(monkeypatch, tmp_
     }
 
 
+def test_candidate_canonical_query_binds_deadline_progress_handler(monkeypatch, tmp_path) -> None:
+    """A canonical fallback query must interrupt at the candidate pass deadline."""
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+
+    deadline = 100.0
+    progress: list[tuple[object, int]] = []
+
+    class _DeadlineConnection:
+        def set_progress_handler(self, callback, every) -> None:
+            progress.append((callback, every))
+
+        def execute(self, *_args):
+            assert progress[-1][0]() == 1
+            raise sqlite3.OperationalError("interrupted")
+
+        def close(self) -> None:
+            return None
+
+    calls: list[float | None] = []
+
+    def _connect(_path, *, deadline_monotonic=None):
+        calls.append(deadline_monotonic)
+        return _DeadlineConnection()
+
+    monkeypatch.setattr("src.state.db._connect_read_only", _connect)
+    monkeypatch.setattr(production.time, "monotonic", lambda: deadline)
+    update = OpenMeteoModelUpdate(
+        model="met_nordic",
+        last_run_initialisation_time=datetime(2026, 9, 20, 13, tzinfo=timezone.utc),
+        last_run_availability_time=datetime(2026, 9, 20, 13, 5, tzinfo=timezone.utc),
+    )
+
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        production._candidate_canonical_single_runs_fallbacks(
+            tmp_path / "forecasts.db",
+            models=("met_nordic",),
+            updates_by_model={"met_nordic": update},
+            now=datetime(2026, 9, 20, 13, 30, tzinfo=timezone.utc),
+            deadline_monotonic=deadline,
+        )
+
+    assert calls == [deadline]
+    assert progress[-1] == (None, 0)
+
+
+def test_candidate_canonical_timeout_skips_downloader(monkeypatch, tmp_path) -> None:
+    """Deadline-expired canonical recovery returns a retry receipt before fetch work."""
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+
+    model = "met_nordic"
+    clock = [0.0]
+    canonical_deadlines: list[float | None] = []
+    monkeypatch.setattr(dl_mod, "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS", (model,))
+    monkeypatch.setattr(production.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        "src.strategy.live_inference.source_clock_vnext.source_publicly_usable_at",
+        lambda _run: datetime(1970, 1, 1, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        "src.data.openmeteo_model_updates.fetch_model_updates",
+        lambda *_args, **_kwargs: (
+            OpenMeteoModelUpdate(
+                model=model,
+                last_run_initialisation_time=datetime(2026, 9, 20, 13, tzinfo=timezone.utc),
+                last_run_availability_time=datetime(2026, 9, 20, 13, 5, tzinfo=timezone.utc),
+            ),
+        ),
+    )
+
+    def _timed_out_canonical(*_args, deadline_monotonic=None, **_kwargs):
+        canonical_deadlines.append(deadline_monotonic)
+        clock[0] = float(deadline_monotonic)
+        raise sqlite3.OperationalError("interrupted")
+
+    monkeypatch.setattr(
+        production,
+        "_candidate_canonical_single_runs_fallbacks",
+        _timed_out_canonical,
+    )
+    monkeypatch.setattr(
+        production,
+        "_download_bayes_precision_fusion_extra_raw_inputs_if_needed",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("canonical timeout must not start a downloader")
+        ),
+    )
+
+    report = production._download_bayes_precision_fusion_candidate_accrual_if_needed(
+        {"forecast_db": tmp_path / "forecasts.db"}
+    )
+
+    assert report == {
+        "status": "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE",
+        "timebox_stage": "candidate_canonical_run",
+        "retryable": True,
+        "timeboxed_incomplete": True,
+        "attempted_target_group_count": 0,
+        "candidate_accrual_only": True,
+    }
+    assert canonical_deadlines == [
+        production._BPF_CANDIDATE_ACCRUAL_MAX_WALL_CLOCK_SECONDS
+    ]
+
+
 def test_candidate_accrual_metadata_timebox_never_starts_capture(monkeypatch, tmp_path) -> None:
     """Metadata time is part of the candidate pass's fixed ten-second budget."""
     from src.data.openmeteo_model_updates import OpenMeteoModelUpdate

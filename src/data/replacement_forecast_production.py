@@ -1503,6 +1503,7 @@ def _candidate_canonical_single_runs_fallbacks(
     models: Sequence[str],
     updates_by_model: Mapping[str, object],
     now: datetime,
+    deadline_monotonic: float | None = None,
 ) -> dict[str, tuple[datetime, datetime]]:
     """Recover a cadence-valid candidate run from canonical successful single-runs rows.
 
@@ -1575,8 +1576,12 @@ def _candidate_canonical_single_runs_fallbacks(
         for model, cycle in expected_runs.items()
         for value in (model, cycle.isoformat())
     )
-    conn = _connect_read_only(forecast_db)
+    conn = _connect_read_only(forecast_db, deadline_monotonic=deadline_monotonic)
     try:
+        if deadline_monotonic is not None:
+            conn.set_progress_handler(
+                lambda: int(time.monotonic() >= deadline_monotonic), 1000
+            )
         rows = conn.execute(
             f"""
             SELECT model, source_cycle_time, source_available_at,
@@ -1592,6 +1597,8 @@ def _candidate_canonical_single_runs_fallbacks(
             exact_pair_params,
         ).fetchall()
     finally:
+        if deadline_monotonic is not None:
+            conn.set_progress_handler(None, 0)
         conn.close()
 
     accepted: dict[str, list[datetime]] = {}
@@ -1686,6 +1693,9 @@ def _download_bayes_precision_fusion_candidate_accrual_if_needed(
         if not models:
             return {"status": "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_NO_MODELS"}
         started_monotonic = time.monotonic()
+        deadline_monotonic = (
+            started_monotonic + _BPF_CANDIDATE_ACCRUAL_MAX_WALL_CLOCK_SECONDS
+        )
         metadata_timeout_seconds = min(
             _BPF_CANDIDATE_ACCRUAL_METADATA_TIMEOUT_SECONDS,
             _BPF_CANDIDATE_ACCRUAL_MAX_WALL_CLOCK_SECONDS,
@@ -1728,14 +1738,36 @@ def _download_bayes_precision_fusion_candidate_accrual_if_needed(
             )
         }
         fallback_models = tuple(model for model in models if model not in frozen_source_runs)
-        frozen_source_runs.update(
-            _candidate_canonical_single_runs_fallbacks(
-                Path(str(cfg["forecast_db"])),
-                models=fallback_models,
-                updates_by_model=updates_by_model,
-                now=now,
+        try:
+            frozen_source_runs.update(
+                _candidate_canonical_single_runs_fallbacks(
+                    Path(str(cfg["forecast_db"])),
+                    models=fallback_models,
+                    updates_by_model=updates_by_model,
+                    now=now,
+                    deadline_monotonic=deadline_monotonic,
+                )
             )
-        )
+        except sqlite3.OperationalError:
+            if time.monotonic() < deadline_monotonic:
+                raise
+            return {
+                "status": "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE",
+                "timebox_stage": "candidate_canonical_run",
+                "retryable": True,
+                "timeboxed_incomplete": True,
+                "attempted_target_group_count": 0,
+                "candidate_accrual_only": True,
+            }
+        if time.monotonic() >= deadline_monotonic:
+            return {
+                "status": "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE",
+                "timebox_stage": "candidate_canonical_run",
+                "retryable": True,
+                "timeboxed_incomplete": True,
+                "attempted_target_group_count": 0,
+                "candidate_accrual_only": True,
+            }
         if not frozen_source_runs:
             return {
                 "status": "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_NO_PUBLIC_RUN",
