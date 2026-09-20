@@ -15564,6 +15564,17 @@ def reconcile_matched_cancel_review_required_entries(conn: sqlite3.Connection) -
                 command_id=command_id,
                 venue_order_id=venue_order_id,
             )
+            latest_review_payload = _latest_review_required_payload(
+                _command_events(conn, command_id)
+            )
+            point_review = latest_review_payload.get("reason") == (
+                "partial_remainder_point_order_filled_without_full_trade_fact"
+            ) and isinstance(latest_review_payload.get("point_order"), Mapping)
+            point_full_fill_proven = (
+                canonical_terminal_entry_order_full_fill_proven(conn, command_id)
+                if point_review
+                else False
+            )
             filled_size = str(trade_summary.get("filled_size") or "0")
             confirmed_rows = conn.execute(
                 "WITH " + _canonical_trade_fact_cte() + """
@@ -15690,6 +15701,7 @@ def reconcile_matched_cancel_review_required_entries(conn: sqlite3.Connection) -
                     continue
             if (
                 bool(trade_summary.get("authenticated_confirmed"))
+                and (not point_review or point_full_fill_proven)
                 and _matched_cancel_residual_is_dust(command, {}, filled_size)
             ):
                 observed_at = str(trade_summary.get("observed_at") or "")
@@ -20099,6 +20111,25 @@ def reconcile_partial_remainders(
                             raise
                         summary["advanced"] += 1
                         continue
+                    if _canonical_entry_point_full_fill_proven(
+                        conn,
+                        command=command,
+                        point_order=point_order,
+                    ):
+                        # The point order is short only against the submitted
+                        # decimal size.  Exact canonical CONFIRMED trade facts
+                        # already cover the point matched size and satisfy the
+                        # existing fill-completion semantics, so the held
+                        # projection is not a reason to manufacture a new
+                        # REVIEW_REQUIRED boundary here.
+                        logger.info(
+                            "recovery: command %s PARTIAL point order %s has "
+                            "canonical complete entry fill proof; leaving fill lane to reconcile",
+                            command_id,
+                            point_status,
+                        )
+                        summary["stayed"] += 1
+                        continue
                     append_event(
                         conn,
                         command_id=command_id,
@@ -21368,6 +21399,151 @@ def _terminal_positive_order_fact_matches_held_projection(
         venue_order_id=str(command.get("venue_order_id") or ""),
         filled_size=matched_size,
     )
+
+
+def _canonical_entry_point_full_fill_proven(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, object],
+    point_order: Mapping[str, object] | None,
+) -> bool:
+    """Prove a terminal ENTRY point order against immutable confirmed fills."""
+
+    command_id = str(command.get("command_id") or "")
+    venue_order_id = str(command.get("venue_order_id") or "")
+    if (
+        str(command.get("intent_kind") or "").upper() != "ENTRY"
+        or str(command.get("side") or "").upper() != "BUY"
+        or not command_id
+        or not venue_order_id
+        or not isinstance(point_order, Mapping)
+        or str(_extract_order_id(dict(point_order)) or "") != venue_order_id
+    ):
+        return False
+    point_status = str(_order_status(dict(point_order)) or "").upper()
+    if point_status not in {"MATCHED", "FILLED"}:
+        return False
+    command_token_id = str(command.get("token_id") or "")
+    point_token_id = str(
+        _first_present(point_order, "asset_id", "assetId", "token_id", "tokenId")
+        or ""
+    )
+    original_size = _first_present(
+        point_order,
+        "_v2_original_size",
+        "original_size",
+        "originalSize",
+    )
+    expected_order_type = str(
+        command.get("env_order_type")
+        or command.get("submission_order_type")
+        or ""
+    ).upper().removesuffix("_LIMIT")
+    point_order_type = str(
+        _first_present(point_order, "order_type", "orderType") or ""
+    ).upper().removesuffix("_LIMIT")
+    if not expected_order_type and str(command.get("envelope_id") or ""):
+        envelope_row = conn.execute(
+            "SELECT order_type FROM venue_submission_envelopes WHERE envelope_id = ?",
+            (str(command.get("envelope_id") or ""),),
+        ).fetchone()
+        expected_order_type = str(
+            envelope_row["order_type"] if envelope_row is not None else ""
+        ).upper().removesuffix("_LIMIT")
+    if (
+        not command_token_id
+        or point_token_id != command_token_id
+        or _normalised_order_side(_first_present(point_order, "side")) != "BUY"
+        or original_size in (None, "")
+        or _positive_decimal_or_none(original_size) != _positive_decimal_or_none(command.get("size"))
+        or not expected_order_type
+        or point_order_type != expected_order_type
+    ):
+        return False
+    point_matched = _positive_decimal_or_none(
+        _point_order_matched_size(
+            dict(point_order),
+            fallback=None,
+            side=command.get("side"),
+        )
+    )
+    if point_matched is None:
+        return False
+    point_remaining_raw = _first_present(
+        dict(point_order), "remaining_size", "remainingSize"
+    )
+    if point_remaining_raw not in (None, ""):
+        point_remaining = _decimal_or_none(point_remaining_raw)
+        if point_remaining is None or point_remaining != 0:
+            return False
+    trade_summary = _confirmed_bound_trade_fact_summary(
+        conn,
+        command_id=command_id,
+        venue_order_id=venue_order_id,
+        limit_price=command.get("price"),
+        side=command.get("side"),
+    )
+    filled = _positive_decimal_or_none(trade_summary.get("filled_size"))
+    if (
+        filled is None
+        or int(trade_summary.get("count") or 0) <= 0
+        or trade_summary.get("authenticated_confirmed") is not True
+        or trade_summary.get("fill_prices_respect_limit") is not True
+        or filled != point_matched
+        or not _fill_size_completes_limit_order(
+            filled,
+            command.get("size"),
+            side=command.get("side"),
+        )
+    ):
+        return False
+    return True
+
+def canonical_terminal_entry_order_full_fill_proven(
+    conn: sqlite3.Connection, command_id: str,
+) -> bool:
+    """Prove a stale review boundary cannot conceal an unfilled ENTRY order.
+
+    SCOPE: the exact partial-remainder review and its terminal authenticated
+    point read. DRAIN: normal confirmed-fill recovery restores FILLED. RESET:
+    a different latest event, later order fact or mismatched fill invalidates
+    this read-only proof; no position or command state is changed here.
+    """
+    try:
+        row = conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id=? AND state='REVIEW_REQUIRED'",
+            (str(command_id),),
+        ).fetchone()
+        command = _dict_row(row)
+        if not command:
+            return False
+        row = conn.execute(
+            "SELECT event_type, occurred_at, payload_json FROM venue_command_events "
+            "WHERE command_id=? ORDER BY sequence_no DESC LIMIT 1",
+            (str(command_id),),
+        ).fetchone()
+        event = _dict_row(row)
+        payload = _json_dict(event.get("payload_json"))
+        observed = _parse_ts(event.get("occurred_at"))
+        if (
+            event.get("event_type") != "REVIEW_REQUIRED"
+            or payload.get("reason") != "partial_remainder_point_order_filled_without_full_trade_fact"
+            or observed is None
+        ):
+            return False
+        fact = _latest_order_fact_for_command_order(
+            conn, command_id=str(command_id),
+            venue_order_id=str(command.get("venue_order_id") or ""),
+        )
+        if fact:
+            fact_observed = _parse_ts(fact.get("observed_at"))
+            if fact_observed is None or fact_observed > observed:
+                return False
+        return _canonical_entry_point_full_fill_proven(
+            conn, command=command, point_order=payload.get("point_order"),
+        )
+    except (sqlite3.Error, TypeError, ValueError, InvalidOperation):
+        return False
 
 
 def _append_terminal_positive_order_fact_fill(

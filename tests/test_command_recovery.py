@@ -40655,3 +40655,177 @@ def test_terminal_entry_no_fill_priority_requires_exact_terminal_fact(conn, fact
     assert recovery.terminal_entry_no_fill_projection_pending(conn) is False
     assert recovery._reconcile_terminal_entry_no_fill_priority_pass(conn)["advanced"] == 0
     assert conn.execute("SELECT phase FROM position_current WHERE position_id='pos-001'").fetchone()[0] == "pending_entry"
+
+
+def _seed_terminal_entry_point_full_fill_case(
+    conn,
+    *,
+    filled_size="44.117355",
+    trade_sizes=("20", "10", "8", "6.117355"),
+):
+    from src.state.venue_command_repo import append_event
+
+    _insert(conn, size=44.12, price=0.50)
+    _advance_to_partial(conn, venue_order_id="ord-entry-point-proof")
+    _seed_pending_entry_projection(
+        conn,
+        order_id="ord-entry-point-proof",
+        token_id="tok-001",
+    )
+    append_event(
+        conn,
+        command_id="cmd-001",
+        event_type="FILL_CONFIRMED",
+        occurred_at="2026-04-26T00:07:00Z",
+        payload={
+            "reason": "authenticated_entry_trade_fact_committed",
+            "proof_class": "canonical_confirmed_trade_facts_exact_order",
+            "venue_order_id": "ord-entry-point-proof",
+            "filled_size": filled_size,
+            "fill_price": "0.50",
+        },
+    )
+    for index, size in enumerate(trade_sizes):
+        _append_trade_fact(
+            conn,
+            order_id="ord-entry-point-proof",
+            trade_id=f"trade-entry-point-proof-{index}",
+            state="CONFIRMED",
+            filled_size=size,
+            fill_price="0.50",
+        )
+    conn.execute("UPDATE position_current SET phase='economically_closed', shares=0, chain_shares=0 WHERE position_id='pos-001'")
+    _append_order_fact(
+        conn,
+        order_id="ord-entry-point-proof",
+        state="MATCHED",
+        matched_size=filled_size,
+        remaining_size="0.002645",
+        raw_payload_json={
+            "orderID": "ord-entry-point-proof",
+            "status": "MATCHED",
+            "side": "BUY",
+            "asset_id": "tok-001",
+            "original_size": "44.12",
+            "size_matched": filled_size,
+            "remaining_size": "0",
+            "order_type": "GTC",
+        },
+    )
+
+
+def test_partial_remainder_preserves_exact_terminal_entry_fill_proof(
+    conn,
+    mock_client,
+):
+    from src.execution import command_recovery as recovery
+
+    _seed_terminal_entry_point_full_fill_case(conn)
+    mock_client.get_order.return_value = {
+        "orderID": "ord-entry-point-proof",
+        "status": "MATCHED",
+        "side": "BUY",
+        "asset_id": "tok-001",
+        "original_size": "44.12",
+        "size_matched": "44.117355",
+        "remaining_size": "0",
+        "order_type": "GTC",
+        "price": "0.50",
+    }
+    mock_client.get_open_orders.return_value = []
+
+    summary = recovery.reconcile_partial_remainders(conn, mock_client)
+
+    assert summary == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+    assert _get_state(conn, "cmd-001") == "FILLED"
+    assert [
+        event["event_type"]
+        for event in _get_events(conn, "cmd-001")
+        if event["event_type"] == "REVIEW_REQUIRED"
+    ] == []
+
+
+@pytest.mark.parametrize("point_changes", [
+    None, {"size_matched": None}, {"size_matched": "NaN"},
+    {"asset_id": "wrong-token"}, {"side": "SELL"},
+    {"original_size": "44.13"}, {"order_type": "FAK"},
+    {"status": "LIVE"}, {"remaining_size": "0.001"},
+    {"remaining_size": "-1"},
+])
+def test_existing_terminal_entry_review_drains_with_exact_fill_proof(
+    conn, point_changes,
+):
+    from src.execution import command_recovery as recovery
+    from src.state.venue_command_repo import append_event
+
+    _seed_terminal_entry_point_full_fill_case(conn)
+    append_event(
+        conn,
+        command_id="cmd-001",
+        event_type="REVIEW_REQUIRED",
+        occurred_at="2026-04-26T00:08:00Z",
+        payload={
+            "reason": "partial_remainder_point_order_filled_without_full_trade_fact",
+            "venue_order_id": "ord-entry-point-proof",
+            "point_order_status": "MATCHED",
+            "point_order": {
+                "id": "ord-entry-point-proof",
+                "status": "MATCHED",
+                "order_type": "GTC",
+                "side": "BUY",
+                "asset_id": "tok-001",
+                "original_size": "44.12",
+                "size_matched": "44.117355",
+                **(point_changes or {}),
+            },
+        },
+    )
+
+    assert recovery.canonical_terminal_entry_order_full_fill_proven(conn, "cmd-001") is (point_changes is None)
+    summary = recovery.reconcile_matched_cancel_review_required_entries(conn)
+
+    if point_changes is not None:
+        assert summary["advanced"] == 0
+        assert _get_state(conn, "cmd-001") == "REVIEW_REQUIRED"
+        return
+    assert summary == {"scanned": 2, "advanced": 1, "stayed": 1, "errors": 0}
+    assert _get_state(conn, "cmd-001") == "FILLED"
+    assert _get_events(conn, "cmd-001")[-1]["event_type"] == "FILL_CONFIRMED"
+    assert conn.execute("SELECT phase FROM position_current WHERE position_id='pos-001'").fetchone()[0] == "economically_closed"
+
+
+@pytest.mark.parametrize("negative_case", ["missing_trade", "actual_remainder"])
+def test_partial_remainder_rejects_missing_trade_or_actual_point_remainder(
+    conn,
+    mock_client,
+    negative_case,
+):
+    from src.execution import command_recovery as recovery
+
+    _seed_terminal_entry_point_full_fill_case(
+        conn,
+        trade_sizes=("20", "10", "8", "6.117354")
+        if negative_case == "missing_trade"
+        else ("20", "10", "8", "6.117355"),
+    )
+    point_remaining = "0.001" if negative_case == "actual_remainder" else "0"
+    mock_client.get_order.return_value = {
+        "orderID": "ord-entry-point-proof",
+        "status": "MATCHED",
+        "side": "BUY",
+        "asset_id": "tok-001",
+        "original_size": "44.12",
+        "size_matched": "44.117355",
+        "remaining_size": point_remaining,
+        "order_type": "GTC",
+        "price": "0.50",
+    }
+    mock_client.get_open_orders.return_value = []
+
+    summary = recovery.reconcile_partial_remainders(conn, mock_client)
+
+    assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+    assert _get_state(conn, "cmd-001") == "REVIEW_REQUIRED"
+    assert json.loads(_get_events(conn, "cmd-001")[-1]["payload_json"])["reason"] == (
+        "partial_remainder_point_order_filled_without_full_trade_fact"
+    )

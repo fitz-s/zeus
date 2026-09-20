@@ -1180,6 +1180,7 @@ def _canonical_live_restart_obligations(trade_db: Path) -> dict[str, object]:
             ).fetchall()
         from src.execution.command_recovery import (
             canonical_terminal_fak_exit_order_proven,
+            canonical_terminal_entry_order_full_fill_proven,
         )
         from src.execution.exit_safety import _terminal_partial_command_proven
 
@@ -1189,8 +1190,9 @@ def _canonical_live_restart_obligations(trade_db: Path) -> dict[str, object]:
             if (
                 not (
                     state == "REVIEW_REQUIRED"
-                    and canonical_terminal_fak_exit_order_proven(
-                        conn, str(command_id)
+                    and (
+                        canonical_terminal_fak_exit_order_proven(conn, str(command_id))
+                        or canonical_terminal_entry_order_full_fill_proven(conn, str(command_id))
                     )
                 )
                 and (

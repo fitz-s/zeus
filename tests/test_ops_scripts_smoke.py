@@ -4748,6 +4748,47 @@ def test_deploy_live_review_terminal_fak_real_proof_works_on_classifier_connecti
     assert dl._nonterminal_sell_command_count(trade_db) == 1
 
 
+@pytest.mark.parametrize("proof_case", ["complete", "wrong_token", "newer_fact"])
+def test_deploy_live_terminal_entry_fill_proof_preserves_unknown_obligations(tmp_path, proof_case):
+    from src.state.db import init_schema, init_schema_trade_only
+    from src.state.venue_command_repo import append_event
+    from tests.test_command_recovery import _seed_terminal_entry_point_full_fill_case, _insert
+
+    dl = _load("deploy_live_terminal_entry_fill_proof", "deploy_live.py")
+    path = tmp_path / "entry-proof.db"
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    _seed_terminal_entry_point_full_fill_case(conn)
+    append_event(conn, command_id="cmd-001", event_type="REVIEW_REQUIRED",
+        occurred_at="2026-04-26T00:08:00Z", payload={
+            "reason": "partial_remainder_point_order_filled_without_full_trade_fact",
+            "point_order": {
+                "id": "ord-entry-point-proof", "status": "MATCHED", "side": "BUY",
+                "asset_id": "wrong-token" if proof_case == "wrong_token" else "tok-001",
+                "original_size": "44.12", "size_matched": "44.117355", "order_type": "GTC",
+            },
+        })
+    if proof_case == "newer_fact":
+        from src.state.venue_command_repo import append_order_fact
+        append_order_fact(conn, venue_order_id="ord-entry-point-proof", command_id="cmd-001",
+            state="PARTIALLY_MATCHED", matched_size="44.117355", remaining_size="0.002645",
+            source="REST", observed_at="2026-04-26T00:09:00Z", venue_timestamp="2026-04-26T00:09:00Z",
+            raw_payload_hash="e" * 64, raw_payload_json={"status": "LIVE"})
+    _insert(conn, command_id="unproved-entry", position_id="unproved-position")
+    conn.commit()
+    before = conn.total_changes
+    obligations = dl._canonical_live_restart_obligations(path)
+    assert obligations["nonterminal_command_ids"] == (
+        ("unproved-entry",) if proof_case == "complete" else ("cmd-001", "unproved-entry")
+    )
+    assert obligations["open_position_count"] == 0
+    assert conn.execute("SELECT state FROM venue_commands WHERE command_id='cmd-001'").fetchone()[0] == "REVIEW_REQUIRED"
+    assert conn.total_changes == before
+    conn.close()
+
+
 def test_deploy_live_post_start_parked_count_ignores_proven_terminal_fak_partial(
     monkeypatch, tmp_path
 ):
