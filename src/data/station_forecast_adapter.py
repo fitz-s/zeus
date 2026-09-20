@@ -721,14 +721,17 @@ def parse_cwa_township_hourly_product(raw_xml: bytes, *, captured_at: str) -> Cw
     issue = _cwa_aware_time(_xml_child_text(info, "IssueTime"), field="IssueTime")
     update = _cwa_aware_time(_xml_child_text(info, "Update"), field="Update")
     captured = _cwa_aware_time(captured_at, field="captured_at")
-    sent = _xml_child_text(root, "Sent")
-    if sent is not None:
-        _cwa_aware_time(sent, field="Sent")
+    if not issue <= update <= captured:
+        raise ValueError("CWA F-D0047-061 requires IssueTime <= Update <= captured_at")
+    sent_text = _xml_child_text(root, "Sent")
+    sent = None if sent_text is None else _cwa_aware_time(sent_text, field="Sent")
+    if sent is not None and not update <= sent <= captured:
+        raise ValueError("CWA F-D0047-061 requires Update <= Sent <= captured_at")
     return CwaHourlyProduct(
         raw_xml=raw_xml,
         issue_time=issue.astimezone(UTC).isoformat(),
         update_time=update.astimezone(UTC).isoformat(),
-        sent_time=(None if sent is None else _cwa_aware_time(sent, field="Sent").astimezone(UTC).isoformat()),
+        sent_time=(None if sent is None else sent.astimezone(UTC).isoformat()),
         raw_sha256=hashlib.sha256(raw_xml).hexdigest(),
         captured_at=captured.astimezone(UTC).isoformat(),
     )

@@ -284,9 +284,9 @@ def _hourly_low_xml(
     ).encode("utf-8")
 
 
-def _hourly_product(**kwargs) -> adapter.CwaHourlyProduct:
+def _hourly_product(*, captured_at="2026-07-23T10:15:00+00:00", **kwargs) -> adapter.CwaHourlyProduct:
     return adapter.parse_cwa_township_hourly_product(
-        _hourly_low_xml(**kwargs), captured_at="2026-07-23T10:15:00+00:00"
+        _hourly_low_xml(**kwargs), captured_at=captured_at
     )
 
 
@@ -423,6 +423,7 @@ def test_hourly_low_same_update_changed_body_is_loud_conflict(monkeypatch):
 def test_hourly_low_same_issue_new_update_is_new_official_revision(monkeypatch):
     first = _hourly_product()
     revised = _hourly_product(
+        captured_at="2026-07-23T10:30:00+00:00",
         update_time="2026-07-23T18:29:00+08:00",
         sent_time="2026-07-23T18:29:00+08:00",
         points=[
@@ -766,3 +767,24 @@ def test_diagnostic_download_cycle_does_not_duplicate_station_ingest():
 
     src = inspect.getsource(prod._replacement_forecast_download_cycle)
     assert "_ingest_station_forecasts_live(cfg)" not in src
+
+
+@pytest.mark.parametrize("clocks", [
+    {"issue_time": "2026-07-23T18:15:00+08:00"},
+    {"update_time": "2026-07-23T18:16:00+08:00"},
+    {"sent_time": "2026-07-23T18:13:00+08:00"},
+    {"sent_time": "2026-07-23T18:16:00+08:00"},
+])
+def test_hourly_product_rejects_impossible_publisher_possession_order(clocks):
+    with pytest.raises(ValueError, match="requires"):
+        _hourly_product(**clocks)
+
+
+def test_hourly_product_accepts_equal_clocks_and_optional_sent():
+    for sent in (None, "2026-07-23T10:15:00+00:00"):
+        product = _hourly_product(
+            issue_time="2026-07-23T18:15:00+08:00",
+            update_time="2026-07-23T10:15:00+00:00",
+            sent_time=sent,
+        )
+        assert product.issue_time == product.update_time == product.captured_at
