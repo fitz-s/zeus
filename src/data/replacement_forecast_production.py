@@ -1773,9 +1773,6 @@ def _download_bayes_precision_fusion_candidate_accrual_if_needed(
                 "status": "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_NO_PUBLIC_RUN",
                 "candidate_models": models,
             }
-        deadline_monotonic = (
-            started_monotonic + _BPF_CANDIDATE_ACCRUAL_MAX_WALL_CLOCK_SECONDS
-        )
         try:
             candidate_target_scopes = _candidate_accrual_market_scopes(
                 Path(str(cfg["forecast_db"])),
