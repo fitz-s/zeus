@@ -388,6 +388,11 @@ atexit.register(_close_current_target_bucket_pool)
 # appears or a quota window reopens, one round trip should advance many market
 # families instead of an arbitrary alphabetical city.
 _SOURCE_CLOCK_LOCATION_BATCH_SIZE = 25
+# Coverage probes must stay on the same source -> city -> metric -> target-date
+# scope as the fast capture.  Keep each SQL statement below SQLite's default
+# parameter limit: model/cycle contribute two binds and every scope another
+# three.
+_SOURCE_CLOCK_COVERAGE_SCOPE_BATCH_SIZE = 250
 _NONRETRYABLE_SOURCE_HTTP_STATUS_CODES = frozenset(
     {400, 401, 403, 404, 405, 410, 422}
 )
@@ -1475,19 +1480,63 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             try:
                 for source, rows in target_keys_by_source.items():
                     cycle_iso = source_cycles[source].isoformat()
-                    covered = {
-                        (str(city), str(target_date), str(metric))
-                        for city, target_date, metric in coverage_conn.execute(
-                            """
-                            SELECT city, target_date, metric
-                              FROM raw_model_forecasts
-                             WHERE model = ?
-                               AND source_cycle_time = ?
-                               AND endpoint = 'single_runs'
-                            """,
-                            (source, cycle_iso),
+                    candidate_scopes = tuple(
+                        dict.fromkeys(
+                            (
+                                str(row.city),
+                                str(row.target_date),
+                                str(row.temperature_metric),
+                            )
+                            for row in rows
                         )
-                    }
+                    )
+                    covered: set[tuple[str, str, str]] = set()
+                    for offset in range(
+                        0,
+                        len(candidate_scopes),
+                        _SOURCE_CLOCK_COVERAGE_SCOPE_BATCH_SIZE,
+                    ):
+                        scope_batch = candidate_scopes[
+                            offset : offset + _SOURCE_CLOCK_COVERAGE_SCOPE_BATCH_SIZE
+                        ]
+                        if not scope_batch:
+                            continue
+                        scope_values = ", ".join(
+                            "(?, ?, ?)"
+                            for _scope in scope_batch
+                        )
+                        query_rows = tuple(
+                            coverage_conn.execute(
+                                f"""
+                                WITH scopes(city, target_date, metric) AS (
+                                    VALUES {scope_values}
+                                )
+                                SELECT DISTINCT forecast.city, forecast.target_date, forecast.metric
+                                  FROM scopes
+                                 CROSS JOIN raw_model_forecasts AS forecast
+                                   INDEXED BY idx_raw_model_forecasts_endpoint_family_cycle_members
+                                 WHERE forecast.endpoint = 'single_runs'
+                                   AND forecast.city = scopes.city
+                                   AND forecast.target_date = scopes.target_date
+                                   AND forecast.metric = scopes.metric
+                                   AND forecast.source_cycle_time = ?
+                                   AND forecast.model = ?
+                                """,
+                                (
+                                    *(
+                                        value
+                                        for scope in scope_batch
+                                        for value in scope
+                                    ),
+                                    cycle_iso,
+                                    source,
+                                ),
+                            )
+                        )
+                        covered.update(
+                            (str(city), str(target_date), str(metric))
+                            for city, target_date, metric in query_rows
+                        )
                     missing = [
                         row
                         for row in rows

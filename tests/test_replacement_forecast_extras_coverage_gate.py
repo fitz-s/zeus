@@ -74,6 +74,11 @@ def _make_forecast_db(tmp_path: Path) -> Path:
             )
             """
         )
+        conn.execute(
+            "CREATE INDEX idx_raw_model_forecasts_endpoint_family_cycle_members "
+            "ON raw_model_forecasts "
+            "(endpoint, city, target_date, metric, source_cycle_time, model)"
+        )
         conn.commit()
     finally:
         conn.close()
@@ -1642,6 +1647,146 @@ def test_source_clock_scoped_capture_fans_out_only_exact_cycle_gaps(
     assert complete["planned_target_count"] == 2
     assert complete["covered_target_count"] == 2
     assert complete["missing_target_count"] == 0
+
+
+def test_source_clock_coverage_probe_reads_only_current_scopes_in_batches(
+    tmp_path, monkeypatch
+) -> None:
+    """Coverage inspection must not materialize a source-cycle's historical rows.
+
+    The source-cycle contains 651 rows, but only 251 current target scopes.  The
+    exact-scope read therefore has to return 251 rows and split the candidate
+    set across two bounded SQL batches.  Every current scope is already covered,
+    so the test also proves this read reduction never sends a completed target
+    to the downloader.
+    """
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_model_updates as updates
+    import src.data.replacement_forecast_current_target_plan as target_plan
+    import src.data.replacement_forecast_seed_discovery as seed_discovery
+    import src.state.db as state_db
+    import src.strategy.live_inference.source_clock_city_weights as city_weights
+
+    db = _make_forecast_db(tmp_path)
+    current_cities = tuple(f"CurrentScope{index:03d}" for index in range(251))
+    irrelevant_cities = tuple(f"HistoricalScope{index:03d}" for index in range(400))
+    conn = sqlite3.connect(db)
+    try:
+        conn.executemany(
+            "INSERT INTO raw_model_forecasts (model, city, target_date, metric,"
+            " source_cycle_time, endpoint) VALUES ('ecmwf_ifs', ?, ?, 'high', ?, 'single_runs')",
+            [
+                (city, "2026-07-17", _CYCLE_ISO)
+                for city in (*current_cities, *irrelevant_cities)
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    class _CoverageReadConnection:
+        def __init__(self, path: Path) -> None:
+            self._conn = sqlite3.connect(path)
+            self.plan_details: list[str] = []
+            self.returned_row_count = 0
+
+        def execute(self, query, parameters=()):
+            if "raw_model_forecasts" not in query:
+                return self._conn.execute(query, parameters)
+            self.plan_details.extend(
+                str(row[-1])
+                for row in self._conn.execute(
+                    f"EXPLAIN QUERY PLAN {query}", parameters
+                )
+            )
+            rows = tuple(self._conn.execute(query, parameters))
+            self.returned_row_count += len(rows)
+            return iter(rows)
+
+        def close(self) -> None:
+            self._conn.close()
+
+    coverage_connection = _CoverageReadConnection(db)
+
+    class _Report:
+        updated_sources = ("ecmwf_ifs",)
+        affected_cities = current_cities
+
+        def as_dict(self):
+            return {
+                "updated_sources": list(self.updated_sources),
+                "affected_cities": list(self.affected_cities),
+            }
+
+    monkeypatch.setitem(
+        prod.settings["edli"],
+        "replacement_0_1_bayes_precision_fusion_capture_enabled",
+        True,
+    )
+    monkeypatch.setattr(dl, "bayes_precision_fusion_quota_cooldown_seconds", lambda: 0)
+    monkeypatch.setattr(
+        updates,
+        "read_model_updates_jsonl",
+        lambda _path: (
+            updates.OpenMeteoModelUpdate(
+                model="ecmwf_ifs",
+                last_run_initialisation_time=_CYCLE,
+                last_run_availability_time=_CYCLE,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        target_plan,
+        "replacement_forecast_current_target_keys",
+        lambda _path: tuple(
+            target_plan.ReplacementForecastTargetKey(
+                city, "2026-07-17", "high"
+            )
+            for city in current_cities
+        ),
+    )
+    monkeypatch.setattr(seed_discovery, "held_position_family_priorities", lambda: {})
+    monkeypatch.setattr(
+        state_db,
+        "_connect_read_only",
+        lambda _path: coverage_connection,
+    )
+    monkeypatch.setattr(
+        city_weights,
+        "affected_cities_for_source_updates",
+        lambda _sources: current_cities,
+    )
+    monkeypatch.setattr(
+        dl,
+        "download_bayes_precision_fusion_extra_raw_inputs",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("covered current scopes must not fan out")
+        ),
+    )
+
+    report = prod._download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
+        {"forecast_db": str(db)},
+        source_clock_report=_Report(),
+        max_wall_clock_seconds=1.0,
+    )
+
+    assert report["status"] == "SOURCE_CLOCK_BPF_SCOPED_NO_TARGETS"
+    assert report["planned_target_count"] == 251
+    assert report["covered_target_count"] == 251
+    assert report["missing_target_count"] == 0
+    assert coverage_connection.returned_row_count == 251
+    assert coverage_connection.returned_row_count < 651
+    assert len(
+        [detail for detail in coverage_connection.plan_details if "SEARCH forecast" in detail]
+    ) == 2
+    assert all(
+        "idx_raw_model_forecasts_endpoint_family_cycle_members" in detail
+        and "endpoint=? AND city=? AND target_date=? AND metric=?"
+        in detail
+        and "source_cycle_time=?" in detail
+        for detail in coverage_connection.plan_details
+        if "SEARCH forecast" in detail
+    )
 
 
 def test_source_clock_scoped_capture_isolates_source_cycle_and_cities(
