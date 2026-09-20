@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Lifecycle: created=2026-06-08; last_reviewed=2026-09-03; last_reused=2026-09-03
+# Lifecycle: created=2026-06-08; last_reviewed=2026-09-20; last_reused=2026-09-20
 # Purpose: Regression tests for BPF raw forecast download and persistence semantics.
 # Reuse: Run when changing Bayes precision fusion raw-input capture or scheduler health.
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 (raw capture: previous_runs + single_runs ->
@@ -45,6 +45,29 @@ def _targets():
         BayesPrecisionFusionDownloadTarget(city="Paris", metric="high", target_date="2026-06-09",
                           lead_days=1, latitude=48.967, longitude=2.428, timezone_name="Europe/Paris"),
     ]
+
+
+def _complete_hourly_local_day_payload(
+    target_date: date,
+    *,
+    base: float = 0.0,
+    missing_hour: int | None = None,
+) -> dict[str, object]:
+    """A full hourly local-day axis; an optional defect stays internal to that axis."""
+    hours = list(range(24))
+    temperatures: list[float | None] = [
+        base - 1.0 if hour == 0 else base + 2.0 if hour == 12 else base + 1.0
+        for hour in hours
+    ]
+    if missing_hour is not None:
+        temperatures[hours.index(missing_hour)] = None
+    return {
+        "hourly": {
+            "time": [f"{target_date.isoformat()}T{hour:02d}:00" for hour in hours],
+            "temperature_2m": temperatures,
+        },
+        "hourly_units": {"temperature_2m": "C"},
+    }
 
 
 def _two_city_targets():
@@ -391,6 +414,27 @@ def test_single_runs_partial_future_day_receipts_exact_run_as_unmaterializable()
     assert "icon_eu" not in parsed
     gaps = parsed[dl._BATCH_EXACT_RUN_UNMATERIALIZABLE_KEY]
     assert gaps["icon_eu"].startswith("ValueError:partial local-day coverage")
+
+
+def test_single_runs_rejects_internal_hourly_nonfinite_value() -> None:
+    """A daily extreme cannot silently skip a missing value between finite samples."""
+    from src.data import bayes_precision_fusion_download as dl
+
+    target_date = date(2026, 9, 4)
+    parsed = dl._parse_batched_single_runs_payload(
+        _complete_hourly_local_day_payload(
+            target_date, missing_hour=12
+        ),
+        ["ecmwf_ifs"],
+        target_date,
+        "UTC",
+        decision_at=datetime(2026, 9, 3, 15, tzinfo=UTC),
+    )
+
+    assert "ecmwf_ifs" not in parsed
+    assert (
+        "internal hourly" in parsed[dl._BATCH_EXACT_RUN_UNMATERIALIZABLE_KEY]["ecmwf_ifs"]
+    )
 
 
 def test_source_clock_fetch_isolates_location_response_failure(monkeypatch) -> None:
@@ -1199,6 +1243,45 @@ def test_source_clock_exact_run_geometry_gap_is_terminal_for_that_run(
         "Paris",
         "Berlin",
     }
+
+
+def test_source_clock_internal_nonfinite_gap_remains_retryable(tmp_path, monkeypatch) -> None:
+    """A recoverable payload hole must not advance the source cursor as a permanent gap."""
+    import src.data.bayes_precision_fusion_download as dl
+
+    db = _forecast_db(tmp_path)
+    run = datetime(2026, 9, 3, 9, tzinfo=UTC)
+    gap = {
+        dl._BATCH_EXACT_RUN_UNMATERIALIZABLE_KEY: {
+            "icon_eu": "ValueError:internal hourly temperature is non-finite"
+        }
+    }
+    monkeypatch.setattr(
+        dl,
+        "_default_live_fetch_locations_batched",
+        lambda **kwargs: [
+            {target_date: dict(gap) for target_date in location[3]}
+            for location in kwargs["locations"]
+        ],
+    )
+    monkeypatch.setattr(dl, "_read_source_clock_single_runs_requests", lambda **_kwargs: {})
+    dl._EXACT_RUN_UNMATERIALIZABLE_MEMO.clear()
+
+    report = dl.download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=db,
+        cycle=run,
+        targets=_two_city_targets(),
+        models=("icon_eu",),
+        include_previous_runs=False,
+        prune_after=False,
+        allow_single_runs_fallback=False,
+        frozen_source_runs={"icon_eu": (run, run)},
+    )
+
+    assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
+    assert report["written_row_count"] == 0
+    assert len(report["exact_run_unmaterializable"]) == 2
+    assert dl._EXACT_RUN_UNMATERIALIZABLE_MEMO == {}
 
 
 def test_source_clock_exact_run_gap_does_not_discard_other_city_progress(
@@ -2467,6 +2550,124 @@ def _two_day_single_runs_payload() -> dict:
         },
         "hourly_units": {"temperature_2m": "°C"},
     }
+
+
+def test_shared_single_runs_cache_retries_an_internal_hourly_hole(monkeypatch) -> None:
+    """The day0/BPF shared raw cache cannot make a recoverable hole permanent."""
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_client as client
+
+    dl._SINGLE_RUNS_PAYLOAD_CACHE.clear()
+    dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEX.clear()
+    dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEXED_KEYS.clear()
+    dl._SINGLE_RUNS_PAYLOAD_CACHE_RECORDED_AT.clear()
+    target_date = date(2026, 9, 6)
+    location = (1.35019, 103.994003, "UTC", (target_date,))
+    run = datetime(2026, 9, 5, 18, tzinfo=UTC)
+    calls: list[dict[str, object]] = []
+
+    def _fetch(_url, params, **_kwargs):
+        calls.append(dict(params))
+        if len(calls) == 1:
+            return _complete_hourly_local_day_payload(target_date, missing_hour=12)
+        return _complete_hourly_local_day_payload(target_date)
+
+    monkeypatch.setattr(client, "fetch", _fetch)
+    first_payload, = dl._fetch_single_runs_hourly_payloads_batched(
+        models=["ecmwf_ifs"], locations=[location], run=run, forecast_hours=120
+    )
+    first = dl._parse_batched_single_runs_payload(first_payload, ["ecmwf_ifs"], target_date, "UTC")
+    second_payload, = dl._fetch_single_runs_hourly_payloads_batched(
+        models=["ecmwf_ifs"], locations=[location], run=run, forecast_hours=120
+    )
+    second = dl._parse_batched_single_runs_payload(second_payload, ["ecmwf_ifs"], target_date, "UTC")
+
+    assert "ecmwf_ifs" not in first
+    assert len(calls) == 2
+    assert second["ecmwf_ifs"] == (2.0, -1.0)
+
+
+def test_shared_single_runs_cache_bypasses_a_preexisting_internal_hole(monkeypatch) -> None:
+    """An old exact-cache entry is a miss when its requested target slice is incomplete."""
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_client as client
+
+    dl._SINGLE_RUNS_PAYLOAD_CACHE.clear()
+    dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEX.clear()
+    dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEXED_KEYS.clear()
+    dl._SINGLE_RUNS_PAYLOAD_CACHE_RECORDED_AT.clear()
+    target_date = date(2026, 9, 6)
+    latitude, longitude, timezone_name = 1.3503, 103.9942, "UTC"
+    location = (latitude, longitude, timezone_name, (target_date,))
+    run = datetime(2026, 9, 5, 18, tzinfo=UTC)
+    run_iso = run.strftime("%Y-%m-%dT%H:%M")
+    om_ids = (dl.OPENMETEO_MODEL_IDS.get("ecmwf_ifs", "ecmwf_ifs"),)
+    cache_key = dl._single_runs_payload_cache_key(
+        om_ids=om_ids,
+        run_iso=run_iso,
+        latitude=latitude,
+        longitude=longitude,
+        timezone_name=timezone_name,
+        forecast_hours=120,
+        past_hours=0,
+    )
+    dl._store_single_runs_payload_cache(
+        cache_key,
+        _complete_hourly_local_day_payload(target_date, missing_hour=12),
+        identity_key=dl._single_runs_payload_identity_key(
+            run_iso=run_iso, latitude=latitude, longitude=longitude, timezone_name=timezone_name
+        ),
+        forecast_hours=120,
+        past_hours=0,
+    )
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        client,
+        "fetch",
+        lambda _url, params, **_kwargs: calls.append(dict(params))
+        or _complete_hourly_local_day_payload(target_date),
+    )
+
+    payload, = dl._fetch_single_runs_hourly_payloads_batched(
+        models=["ecmwf_ifs"], locations=[location], run=run, forecast_hours=120
+    )
+
+    assert len(calls) == 1
+    assert dl._parse_batched_single_runs_payload(
+        payload, ["ecmwf_ifs"], target_date, timezone_name
+    )["ecmwf_ifs"] == (2.0, -1.0)
+
+
+def test_shared_single_runs_cache_reuses_normal_trailing_horizon_null(monkeypatch) -> None:
+    """A horizon suffix remains the existing coverage gate, not a retry-loop cache miss."""
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_client as client
+
+    dl._SINGLE_RUNS_PAYLOAD_CACHE.clear()
+    dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEX.clear()
+    dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEXED_KEYS.clear()
+    dl._SINGLE_RUNS_PAYLOAD_CACHE_RECORDED_AT.clear()
+    target_date = date(2026, 9, 6)
+    location = (1.3502, 103.9941, "UTC", (target_date,))
+    run = datetime(2026, 9, 5, 18, tzinfo=UTC)
+    payload = _complete_hourly_local_day_payload(target_date)
+    payload["hourly"]["temperature_2m"][20:] = [None, None, None, None]
+    calls: list[dict[str, object]] = []
+
+    def _fetch(_url, params, **_kwargs):
+        calls.append(dict(params))
+        return payload
+
+    monkeypatch.setattr(client, "fetch", _fetch)
+    first, = dl._fetch_single_runs_hourly_payloads_batched(
+        models=["ecmwf_ifs"], locations=[location], run=run, forecast_hours=120
+    )
+    second, = dl._fetch_single_runs_hourly_payloads_batched(
+        models=["ecmwf_ifs"], locations=[location], run=run, forecast_hours=120
+    )
+
+    assert len(calls) == 1
+    assert first == second
 
 
 def test_single_runs_payload_cache_serves_second_target_date_without_http(

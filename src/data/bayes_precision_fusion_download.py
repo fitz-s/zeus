@@ -43,6 +43,7 @@ import fcntl
 import hashlib
 import json
 import logging
+import math
 import os
 import sqlite3
 import time
@@ -578,8 +579,7 @@ _SOURCE_CLOCK_LOCATION_BATCH_SIZE = 25
 # can only burn quota. Every other gap reason (transport, timeout, quota abort, 4xx/5xx,
 # temperature_series_missing, malformed payload) may succeed on a retry and is NOT memoized.
 _EXACT_RUN_IMMUTABLE_GAP_REASONS = (
-    "ValueError:partial local-day coverage is not an elapsed-prefix-only "
-    "Day0 slice with remaining-day coverage",
+    "ValueError:partial local-day coverage",
     "ValueError:insufficient Open-Meteo hourly samples inside target local day",
 )
 # (model, city, target_date, run_iso) -> reason. A run is immutable: once a target local day
@@ -821,6 +821,92 @@ _SINGLE_RUNS_PAYLOAD_CACHE_INDEXED_KEYS: set[str] = set()
 # In-process store time per key: the same age/count bounds the durable mirror
 # applies (24 h / 400 entries) are applied here from these stamps.
 _SINGLE_RUNS_PAYLOAD_CACHE_RECORDED_AT: dict[str, datetime] = {}
+
+
+def _target_hourly_internal_axis_gap_reason(
+    times: object,
+    values: object,
+    *,
+    target_local_date: date,
+    timezone_name: str,
+) -> str | None:
+    """Return a retryable internal target-day non-finite value defect, if one is present."""
+    if not isinstance(times, Sequence) or isinstance(times, (str, bytes)):
+        return "hourly time axis is not a sequence"
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+        return "hourly temperature series is not a sequence"
+    if len(times) != len(values):
+        return "hourly time/value lengths differ"
+
+    try:
+        target_rows: list[tuple[int, object]] = []
+        for index, (raw_time, raw_value) in enumerate(zip(times, values, strict=True)):
+            if not isinstance(raw_time, str) or not raw_time:
+                return "hourly time axis is malformed"
+            parsed = datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
+            local_time = (
+                parsed.astimezone(ZoneInfo(timezone_name))
+                if parsed.tzinfo is not None and parsed.utcoffset() is not None
+                else parsed
+            )
+            if local_time.date() == target_local_date:
+                target_rows.append((index, raw_value))
+    except (TypeError, ValueError):
+        return "hourly time axis is malformed"
+    if not target_rows:
+        return None
+
+    finite_indexes: list[int] = []
+    for index, raw_value in target_rows:
+        try:
+            if math.isfinite(float(raw_value)):
+                finite_indexes.append(index)
+        except (TypeError, ValueError):
+            continue
+    if len(finite_indexes) < 2:
+        return None
+
+    first_finite, last_finite = finite_indexes[0], finite_indexes[-1]
+    interior = [row for row in target_rows if first_finite <= row[0] <= last_finite]
+    for _index, raw_value in interior:
+        try:
+            if not math.isfinite(float(raw_value)):
+                return "internal hourly temperature is non-finite"
+        except (TypeError, ValueError):
+            return "internal hourly temperature is non-finite"
+
+    return None
+
+
+def _single_runs_payload_has_reusable_hourly_axis(
+    payload: Mapping[str, object],
+    *,
+    models: Sequence[str],
+    timezone_name: str,
+    target_local_dates: Sequence[date],
+) -> bool:
+    """Whether this request's target-day slices are safe to replay from raw cache."""
+    hourly = payload.get("hourly")
+    if not isinstance(hourly, Mapping):
+        return False
+    times = hourly.get("time")
+    for model in models:
+        om_id = OPENMETEO_MODEL_IDS.get(model, model)
+        keyed_var = f"temperature_2m_{om_id}"
+        values = hourly.get(keyed_var)
+        if values is None and len(models) == 1:
+            values = hourly.get("temperature_2m")
+        if values is None:
+            return False
+        for target_local_date in target_local_dates:
+            if _target_hourly_internal_axis_gap_reason(
+                times,
+                values,
+                target_local_date=target_local_date,
+                timezone_name=timezone_name,
+            ) is not None:
+                return False
+    return True
 
 
 def _single_runs_payload_cache_persistence_enabled() -> bool:
@@ -1583,8 +1669,16 @@ def _default_live_fetch_batched(
             timezone_name=timezone_name,
         )
         cached_payload = _SINGLE_RUNS_PAYLOAD_CACHE.get(cache_key)
+        if cached_payload is not None and not _single_runs_payload_has_reusable_hourly_axis(
+            cached_payload,
+            models=models,
+            timezone_name=timezone_name,
+            target_local_dates=(target_local_date,),
+        ):
+            cached_payload = None
         if cached_payload is None:
             cached_payload = _lookup_single_runs_superset_payload(
+                models=models,
                 om_ids=tuple(om_ids),
                 run_iso=run_iso,
                 latitude=latitude,
@@ -1593,6 +1687,7 @@ def _default_live_fetch_batched(
                 forecast_hours=int(forecast_hours),
                 past_hours=0,
                 identity_key=identity_key,
+                target_local_dates=(target_local_date,),
             )
         if cached_payload is not None:
             payload = copy.deepcopy(cached_payload)
@@ -1605,7 +1700,12 @@ def _default_live_fetch_batched(
                 fast_fail_429=True,
                 **_deadline_fetch_kwargs(deadline_monotonic),
             )
-            if isinstance(payload, Mapping):
+            if isinstance(payload, Mapping) and _single_runs_payload_has_reusable_hourly_axis(
+                payload,
+                models=models,
+                timezone_name=timezone_name,
+                target_local_dates=(target_local_date,),
+            ):
                 _store_single_runs_payload_cache(
                     cache_key,
                     payload,
@@ -1899,6 +1999,7 @@ def _slice_single_runs_payload(
 
 def _lookup_single_runs_superset_payload(
     *,
+    models: Sequence[str],
     om_ids: tuple[str, ...],
     run_iso: str,
     latitude: float,
@@ -1907,6 +2008,7 @@ def _lookup_single_runs_superset_payload(
     forecast_hours: int,
     past_hours: int,
     identity_key: str,
+    target_local_dates: Sequence[date],
 ) -> dict[str, object] | None:
     """Find a cached payload for a >= forecast_hours window at the same identity.
 
@@ -1935,6 +2037,13 @@ def _lookup_single_runs_superset_payload(
             continue
         donor = _SINGLE_RUNS_PAYLOAD_CACHE.get(cand_key)
         if donor is None:
+            continue
+        if not _single_runs_payload_has_reusable_hourly_axis(
+            donor,
+            models=models,
+            timezone_name=timezone_name,
+            target_local_dates=target_local_dates,
+        ):
             continue
         if cand_forecast_hours == forecast_hours:
             return copy.deepcopy(donor)
@@ -2023,9 +2132,17 @@ def _fetch_single_runs_hourly_payloads_batched(
     cached: list[Mapping[str, object] | None] = []
     for index, key in enumerate(cache_keys):
         entry = _SINGLE_RUNS_PAYLOAD_CACHE.get(key)
+        latitude, longitude, timezone_name, target_local_dates = locations[index]
+        if entry is not None and not _single_runs_payload_has_reusable_hourly_axis(
+            entry,
+            models=models,
+            timezone_name=timezone_name,
+            target_local_dates=target_local_dates,
+        ):
+            entry = None
         if entry is None:
-            latitude, longitude, timezone_name, _dates = locations[index]
             entry = _lookup_single_runs_superset_payload(
+                models=models,
                 om_ids=om_ids,
                 run_iso=run_iso,
                 latitude=latitude,
@@ -2034,6 +2151,7 @@ def _fetch_single_runs_hourly_payloads_batched(
                 forecast_hours=forecast_hours,
                 past_hours=past_hours,
                 identity_key=identity_keys[index],
+                target_local_dates=target_local_dates,
             )
         cached.append(entry)
     missing_positions = [index for index, entry in enumerate(cached) if entry is None]
@@ -2049,13 +2167,20 @@ def _fetch_single_runs_hourly_payloads_batched(
         )
         for index, payload in zip(missing_positions, fetched, strict=True):
             cached[index] = payload
-            _store_single_runs_payload_cache(
-                cache_keys[index],
+            _latitude, _longitude, timezone_name, target_local_dates = locations[index]
+            if _single_runs_payload_has_reusable_hourly_axis(
                 payload,
-                identity_key=identity_keys[index],
-                forecast_hours=forecast_hours,
-                past_hours=past_hours,
-            )
+                models=models,
+                timezone_name=timezone_name,
+                target_local_dates=target_local_dates,
+            ):
+                _store_single_runs_payload_cache(
+                    cache_keys[index],
+                    payload,
+                    identity_key=identity_keys[index],
+                    forecast_hours=forecast_hours,
+                    past_hours=past_hours,
+                )
     return tuple(copy.deepcopy(entry) for entry in cached)
 
 
@@ -2160,6 +2285,15 @@ def _parse_batched_single_runs_payload(
         series = hourly.get(keyed_var) or (hourly.get(bare_var) if len(models) == 1 else None)
         if series is None:
             unmaterializable[model] = "temperature_series_missing"
+            continue
+        axis_gap = _target_hourly_internal_axis_gap_reason(
+            hourly.get("time"),
+            series,
+            target_local_date=target_local_date,
+            timezone_name=timezone_name,
+        )
+        if axis_gap is not None:
+            unmaterializable[model] = f"ValueError:{axis_gap}"
             continue
         # Build a sub-payload shaped like a single-model response for the extractor.
         sub_payload = dict(payload)
@@ -2688,6 +2822,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     exact_run_unmaterializable: list[dict[str, str]] = []
     attempted_single_scopes: set[tuple[str, str, str, str]] = set()
     exact_run_unmaterializable_scopes: set[tuple[str, str, str, str]] = set()
+    retryable_single_run_gap_scopes: set[tuple[str, str, str, str]] = set()
     abort_transport = False
     attempted_target_group_count = 0
     started_monotonic = time.monotonic()
@@ -3230,7 +3365,6 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                             continue
                         scope = (model, city, target_date, single_run.isoformat())
                         reason = str(raw_reason)[:220]
-                        exact_run_unmaterializable_scopes.add(scope)
                         exact_run_unmaterializable.append(
                             {
                                 "model": model,
@@ -3240,7 +3374,11 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                                 "reason": reason,
                             }
                         )
-                        _memoize_exact_run_gap(scope, reason)
+                        if reason.startswith(_EXACT_RUN_IMMUTABLE_GAP_REASONS):
+                            exact_run_unmaterializable_scopes.add(scope)
+                            _memoize_exact_run_gap(scope, reason)
+                        else:
+                            retryable_single_run_gap_scopes.add(scope)
                 if single_transport_error is not None:
                     single_error_text = str(single_transport_error[0])
                     transport_errors.append(
@@ -3470,13 +3608,15 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     # A scoped transport gap after durable coverage is not a failed capture cycle.
     # The downloader is monotone/idempotent per row and the production wrapper's
     # coverage/fixpoint gate will keep healing residual scopes. Mark the pass
-    # retryable only when transport prevented every current single-runs row, or
-    # when a quota-style abort stopped the remaining target fan-out.
+    # retryable only when transport or a retryable parser gap prevented every current
+    # single-runs row, or when a quota-style abort stopped the remaining target fan-out.
     status = (
         "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE"
         if timeboxed
         else "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
-        if transport_errors and (abort_transport or not single_success_models)
+        if (transport_errors or retryable_single_run_gap_scopes) and (
+            abort_transport or not single_success_models
+        )
         else "BAYES_PRECISION_FUSION_EXTRA_EXACT_RUN_UNMATERIALIZABLE"
         # Memoized scopes are skipped WITHOUT being attempted, so the terminal verdict keys
         # on the unmaterializable set: every scope still in play is proven empty for this
