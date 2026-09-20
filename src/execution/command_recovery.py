@@ -13886,6 +13886,103 @@ def reconcile_exit_lifecycle_alignment_repairs(
     return summary
 
 
+def terminal_entry_no_fill_projection_pending(conn: sqlite3.Connection) -> bool:
+    """Request a writer only for a currently proved zero-fill entry candidate."""
+    if not all(_table_exists(conn, name) for name in ("venue_commands", "position_current")):
+        return False
+    return bool(_terminal_entry_no_fill_priority_command_ids(conn))
+
+
+def _terminal_entry_no_fill_priority_command_ids(conn: sqlite3.Connection) -> frozenset[str]:
+    """Select only exact terminal zero-exposure entries on this connection."""
+    command_ids = set()
+    for candidate in _latest_terminal_order_fact_candidates(conn):
+        if (
+            candidate.get("intent_kind") != "ENTRY"
+            or candidate.get("side") != "BUY"
+            or candidate.get("state") not in {"CANCELLED", "EXPIRED"}
+            or not str(candidate.get("venue_order_id") or "").strip()
+            or candidate.get("venue_order_id") != candidate.get("order_fact_venue_order_id")
+            or candidate.get("order_fact_state") not in _TERMINAL_NO_FILL_ORDER_FACT_STATES
+            or not _decimal_is_zero(candidate.get("order_fact_matched_size"))
+            or _fill_trade_fact_count(conn, str(candidate.get("command_id") or "")) > 0
+        ):
+            continue
+        row = conn.execute(
+            "SELECT * FROM position_current WHERE position_id = ?",
+            (candidate.get("position_id"),),
+        ).fetchone()
+        if row is None:
+            continue
+        position = _dict_row(row)
+        # Shared-position commands keep their existing general recovery owner.
+        if conn.execute(
+            "SELECT 1 FROM venue_commands WHERE position_id = ? AND command_id <> ? LIMIT 1",
+            (candidate.get("position_id"), candidate.get("command_id")),
+        ).fetchone() is not None:
+            continue
+        if (
+            position.get("phase") != "pending_entry"
+            or position.get("chain_state") != "local_only"
+            or not all(_decimal_is_zero(position.get(key)) for key in ("shares", "cost_basis_usd"))
+            or not all(
+                position.get(key) is None or _decimal_is_zero(position.get(key))
+                for key in ("chain_shares", "chain_cost_basis_usd")
+            )
+        ):
+            continue
+        command_ids.add(str(candidate["command_id"]))
+    ordered_ids = sorted(command_ids)
+    if ordered_ids:
+        limit = _LIVE_TICK_IDENTITY_BOUND_MAX_CANDIDATES
+        start = (_identity_bound_rotation_slot() * limit) % len(ordered_ids)
+        command_ids = set((ordered_ids[start:] + ordered_ids[:start])[:limit])
+    return frozenset(command_ids)
+
+
+def _reconcile_terminal_entry_no_fill_priority_pass(conn: sqlite3.Connection) -> dict:
+    """Recheck the entire read hint inside the canonical writer transaction."""
+    return reconcile_terminal_order_facts(
+        conn,
+        command_ids=_terminal_entry_no_fill_priority_command_ids(conn),
+        collect_continuations=True,
+        emit_immediate_redecision=False,
+    )
+
+
+def reconcile_terminal_entry_no_fill_projections_priority(
+    *, deadline_monotonic: float | None = None,
+) -> dict:
+    """Drain terminal entry facts before blocker-free maintenance yields.
+
+    SCOPE: bounded exact terminal BUY entries with zero local/chain exposure.
+    DRAIN: the scheduled recovery turn, using the sanctioned WORLD+TRADE writer
+    and existing reducer; no venue calls. RESET: ENTRY_ORDER_VOIDED removes the
+    candidate. Deadline, lock or monitor preemption rolls back for the next turn.
+    """
+    from src.execution.venue_sync_contract import default_trade_conn_factory, run_db_only_pass
+
+    deadline = _bounded_recovery_deadline(deadline_monotonic, _capital_recovery_db_budget_seconds())
+    priority_factory = _recovery_priority_conn_factory(
+        default_trade_conn_factory, scope="live_tick", deadline_monotonic=deadline,
+    )
+    apply_factory = _recovery_apply_conn_factory(
+        priority_factory, scope="live_tick", deadline_monotonic=deadline,
+        monitor_preemptible=True,
+    )
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    result = _run_recovery_pass_with_lock_policy(
+        "terminal_entry_no_fill_projection_priority",
+        lambda: run_db_only_pass(
+            _reconcile_terminal_entry_no_fill_priority_pass,
+            conn_factory=apply_factory,
+            label="recovery.terminal_entry_no_fill_projection_priority",
+        ),
+        scope="live_tick", summary=summary, deadline_monotonic=deadline,
+    )
+    return result if result is not None else summary
+
+
 def terminal_exit_residual_projection_pending(conn: sqlite3.Connection) -> bool:
     """Return whether one open terminal EXIT residual merits bounded priority."""
 

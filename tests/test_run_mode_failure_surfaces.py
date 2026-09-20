@@ -8439,6 +8439,13 @@ def test_edli_terminal_residual_priority_precedes_stalled_screen_selector(
         def set_progress_handler(self, *_args) -> None:
             return None
 
+        def execute(self, *_args, **_kwargs):
+            class _Result:
+                def fetchone(self):
+                    return None
+
+            return _Result()
+
         def close(self) -> None:
             return None
 
@@ -8475,6 +8482,74 @@ def test_edli_terminal_residual_priority_precedes_stalled_screen_selector(
     main_module._edli_command_recovery_cycle.__wrapped__()
 
     assert calls == ["terminal_residual", "selector"]
+
+
+def test_edli_terminal_entry_no_fill_priority_runs_before_monitor_deferral(
+    monkeypatch,
+):
+    """Current zero-fill ENTRY projection drains before monitor maintenance yields."""
+    import threading
+
+    import src.execution.command_recovery as command_recovery
+    import src.main as main_module
+    import src.state.db as state_db
+
+    calls: list[str] = []
+    monitor_active = threading.Event()
+    monitor_active.set()
+    monitor_debt = threading.Event()
+    monitor_debt.set()
+
+    class FakeConn:
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(main_module, "_consume_live_control_commands", lambda: None)
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main_module, "_held_position_monitor_active", monitor_active)
+    monkeypatch.setattr(main_module, "_held_position_monitor_canonical_debt", monitor_debt)
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_read_only",
+        lambda **_kwargs: FakeConn(),
+    )
+    monkeypatch.setattr(command_recovery, "capital_blocking_command_count", lambda _conn: 0)
+    monkeypatch.setattr(
+        command_recovery,
+        "terminal_entry_no_fill_projection_pending",
+        lambda _conn: True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_terminal_entry_no_fill_projections_priority",
+        lambda **_kwargs: calls.append("terminal_entry_no_fill")
+        or {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0, "continuations": [{"city": "Ankara"}]},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "terminal_exit_residual_projection_pending",
+        lambda _conn: False,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        lambda **_kwargs: calls.append("broad") or {"scanned": 1, "advanced": 0},
+    )
+
+    def consume(summary, *, log_context, deadline_monotonic):
+        assert summary["advanced"] == 1
+        assert summary["terminal_no_fill_continuations"] == [{"city": "Ankara"}]
+        assert deadline_monotonic > main_module._time.monotonic()
+        calls.append("allocator_and_redecision")
+        return True
+
+    monkeypatch.setattr(main_module, "_consume_edli_command_recovery_summary", consume)
+    main_module._edli_command_recovery_cycle.__wrapped__()
+
+    assert calls == ["terminal_entry_no_fill", "allocator_and_redecision"]
 
 
 def test_command_recovery_yields_trade_db_to_overdue_held_monitor(monkeypatch) -> None:

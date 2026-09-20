@@ -7782,6 +7782,8 @@ def _edli_command_recovery_cycle() -> None:
         capital_blocking_command_scope,
         capital_blocking_command_count,
         reconcile_terminal_exit_residual_projections_priority,
+        reconcile_terminal_entry_no_fill_projections_priority,
+        terminal_entry_no_fill_projection_pending,
         reconcile_unresolved_commands,
         scheduled_recovery_budget_seconds,
         terminal_exit_residual_projection_pending,
@@ -7798,6 +7800,7 @@ def _edli_command_recovery_cycle() -> None:
     capital_blockers = 0
     capital_scope = None
     terminal_exit_residual_due = False
+    terminal_entry_no_fill_due = False
     selector_read_completed = False
     try:
         trade_conn = get_trade_connection_read_only(
@@ -7816,6 +7819,7 @@ def _edli_command_recovery_cycle() -> None:
             terminal_exit_residual_due = terminal_exit_residual_projection_pending(
                 trade_conn
             )
+            terminal_entry_no_fill_due = terminal_entry_no_fill_projection_pending(trade_conn)
         finally:
             if callable(set_progress_handler):
                 set_progress_handler(None, 0)
@@ -7828,6 +7832,17 @@ def _edli_command_recovery_cycle() -> None:
                 logger.info(
                     "edli_command_recovery: terminal EXIT residual priority: %s",
                     terminal_summary,
+                )
+        if terminal_entry_no_fill_due:
+            entry_summary = reconcile_terminal_entry_no_fill_projections_priority(
+                deadline_monotonic=invocation_deadline,
+            )
+            if entry_summary.get("advanced"):
+                logger.info("edli_command_recovery: terminal ENTRY no-fill priority: %s", entry_summary)
+                _consume_edli_command_recovery_summary(
+                    {**entry_summary, "terminal_no_fill_continuations": entry_summary.get("continuations", [])},
+                    log_context="edli_command_recovery.terminal_entry_priority",
+                    deadline_monotonic=invocation_deadline,
                 )
         trade_conn = get_trade_connection_read_only(
             deadline_monotonic=invocation_deadline,
@@ -8088,6 +8103,7 @@ def _consume_edli_command_recovery_summary(
     summary: dict,
     *,
     log_context: str,
+    deadline_monotonic: float | None = None,
 ) -> bool:
     """Apply allocator and redecision follow-through for one recovery scope."""
 
@@ -8097,6 +8113,10 @@ def _consume_edli_command_recovery_summary(
     if summary.get("scanned"):
         logger.info("%s: %s", log_context, summary)
     deadline = _time.monotonic() + 5.0
+    if deadline_monotonic is not None:
+        deadline = min(deadline, deadline_monotonic)
+    if _time.monotonic() >= deadline:
+        return False
     if _command_recovery_summary_mutated_allocator_inputs(summary):
         try:
             trade_conn = get_trade_connection_read_only()

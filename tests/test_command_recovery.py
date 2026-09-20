@@ -40270,3 +40270,231 @@ def test_scheduled_deterministic_no_fill_drains_before_venue_reads(
     with pytest.raises(StopAtVenueRead):
         command_recovery.reconcile_unresolved_commands(client=client, scope=scope)
     assert client.mock_calls == []
+
+
+def test_terminal_entry_no_fill_priority_projects_void_once(conn):
+    """The bounded priority lane reuses the canonical terminal reducer."""
+    from src.execution import command_recovery as recovery
+    from src.state.venue_command_repo import append_event
+
+    _insert(conn)
+    _advance_to_cancel_pending(conn, venue_order_id="ord-001")
+    append_event(
+        conn,
+        command_id="cmd-001",
+        event_type="CANCEL_ACKED",
+        occurred_at="2026-04-26T00:04:00Z",
+    )
+    _seed_pending_entry_projection(conn)
+    _append_order_fact(conn, state="CANCEL_CONFIRMED", matched_size="0", remaining_size="0")
+
+    assert recovery.terminal_entry_no_fill_projection_pending(conn) is True
+    summary = recovery._reconcile_terminal_entry_no_fill_priority_pass(conn)
+
+    assert summary["advanced"] == 1
+    assert _get_state(conn, "cmd-001") == "CANCELLED"
+    assert conn.execute(
+        "SELECT phase FROM position_current WHERE position_id='pos-001'"
+    ).fetchone()[0] == "voided"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events "
+        "WHERE position_id='pos-001' AND event_type='ENTRY_ORDER_VOIDED'"
+    ).fetchone()[0] == 1
+
+    replay = recovery._reconcile_terminal_entry_no_fill_priority_pass(conn)
+    assert replay["scanned"] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events "
+        "WHERE position_id='pos-001' AND event_type='ENTRY_ORDER_VOIDED'"
+    ).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda conn: conn.execute(
+            "UPDATE position_current SET shares=1.0 WHERE position_id='pos-001'"
+        ),
+        lambda conn: conn.execute(
+            "UPDATE position_current SET cost_basis_usd=0.1 WHERE position_id='pos-001'"
+        ),
+        lambda conn: conn.execute(
+            "UPDATE position_current SET chain_shares=1.0, chain_cost_basis_usd=0.1 "
+            "WHERE position_id='pos-001'"
+        ),
+        lambda conn: conn.execute(
+            "UPDATE position_current SET shares='nan' WHERE position_id='pos-001'"
+        ),
+        lambda conn: conn.execute(
+            "UPDATE position_current SET phase='active' WHERE position_id='pos-001'"
+        ),
+        lambda conn: conn.execute(
+            "UPDATE venue_commands SET side='SELL' WHERE command_id='cmd-001'"
+        ),
+        lambda conn: conn.execute("UPDATE position_current SET chain_shares='nan' WHERE position_id='pos-001'"),
+        lambda conn: conn.execute("UPDATE position_current SET chain_cost_basis_usd='inf' WHERE position_id='pos-001'"),
+        lambda conn: conn.execute("UPDATE position_current SET cost_basis_usd='broken' WHERE position_id='pos-001'"),
+        lambda conn: conn.execute("UPDATE position_current SET shares=-1 WHERE position_id='pos-001'"),
+        lambda conn: conn.execute("UPDATE position_current SET chain_state='confirmed' WHERE position_id='pos-001'"),
+        lambda conn: _insert(conn, command_id="cmd-other"),
+    ],
+    ids=("positive_shares", "positive_cost", "positive_chain", "nonfinite_local", "active_phase", "sell_side", "nonfinite_chain", "nonfinite_chain_cost", "malformed_cost", "negative_shares", "chain_state", "shared_position"),
+)
+def test_terminal_entry_no_fill_priority_rejects_exposure_and_scope_shapes(conn, mutation):
+    from src.execution import command_recovery as recovery
+    from src.state.venue_command_repo import append_event
+
+    _insert(conn)
+    _advance_to_cancel_pending(conn, venue_order_id="ord-001")
+    append_event(
+        conn,
+        command_id="cmd-001",
+        event_type="CANCEL_ACKED",
+        occurred_at="2026-04-26T00:04:00Z",
+    )
+    _seed_pending_entry_projection(conn)
+    _append_order_fact(conn, state="CANCEL_CONFIRMED", matched_size="0", remaining_size="0")
+    mutation(conn)
+    conn.commit()
+
+    assert recovery.terminal_entry_no_fill_projection_pending(conn) is False
+    summary = recovery._reconcile_terminal_entry_no_fill_priority_pass(conn)
+
+    assert summary["advanced"] == 0
+    assert _get_state(conn, "cmd-001") == "CANCELLED"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events "
+        "WHERE position_id='pos-001' AND event_type='ENTRY_ORDER_VOIDED'"
+    ).fetchone()[0] == 0
+
+
+def test_terminal_entry_no_fill_priority_rejects_positive_trade_fact(conn):
+    from src.execution import command_recovery as recovery
+    from src.state.venue_command_repo import append_event
+
+    _insert(conn)
+    _advance_to_cancel_pending(conn, venue_order_id="ord-001")
+    append_event(
+        conn,
+        command_id="cmd-001",
+        event_type="CANCEL_ACKED",
+        occurred_at="2026-04-26T00:04:00Z",
+    )
+    _seed_pending_entry_projection(conn)
+    _append_order_fact(conn, state="CANCEL_CONFIRMED", matched_size="0", remaining_size="0")
+    _append_confirmed_trade_fact(conn, filled_size="1", fill_price="0.5")
+
+    assert recovery.terminal_entry_no_fill_projection_pending(conn) is False
+    summary = recovery._reconcile_terminal_entry_no_fill_priority_pass(conn)
+
+    assert summary["advanced"] == 0
+    assert _get_state(conn, "cmd-001") == "CANCELLED"
+
+
+def test_terminal_entry_no_fill_priority_rotates_bounded_candidate_window(conn, monkeypatch):
+    from src.execution import command_recovery as recovery
+    from src.state.venue_command_repo import append_event
+
+    for index in range(5):
+        command_id = f"cmd-priority-{index}"
+        position_id = f"pos-priority-{index}"
+        order_id = f"ord-priority-{index}"
+        token_id = f"tok-priority-{index}"
+        _insert(
+            conn,
+            command_id=command_id,
+            position_id=position_id,
+            token_id=token_id,
+        )
+        _advance_to_cancel_pending(conn, command_id=command_id, venue_order_id=order_id)
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type="CANCEL_ACKED",
+            occurred_at="2026-04-26T00:04:00Z",
+        )
+        _seed_pending_entry_projection(
+            conn,
+            position_id=position_id,
+            command_id=command_id,
+            order_id=order_id,
+            token_id=token_id,
+        )
+        _append_order_fact(
+            conn,
+            command_id=command_id,
+            order_id=order_id,
+            state="CANCEL_CONFIRMED",
+            matched_size="0",
+            remaining_size="0",
+        )
+    conn.commit()
+    monkeypatch.setattr(recovery, "_identity_bound_rotation_slot", lambda: 1)
+
+    summary = recovery._reconcile_terminal_entry_no_fill_priority_pass(conn)
+
+    assert summary["advanced"] == 4
+    assert conn.execute(
+        "SELECT phase FROM position_current WHERE position_id='pos-priority-3'"
+    ).fetchone()[0] == "pending_entry"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_current WHERE phase='voided'"
+    ).fetchone()[0] == 4
+
+
+def test_terminal_entry_no_fill_priority_deadline_and_lock_defer_without_bypass(monkeypatch):
+    import time
+
+    from src.execution import command_recovery as recovery
+    import src.execution.venue_sync_contract as venue_sync_contract
+
+    class _NeverOpenedFactory:
+        requires_writer_flocks = True
+        supports_nonblocking_flocks = True
+
+        def __call__(self, **_kwargs):
+            raise AssertionError("expired priority must not open a writer")
+
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "default_trade_conn_factory",
+        _NeverOpenedFactory(),
+    )
+    deadline_summary = recovery.reconcile_terminal_entry_no_fill_projections_priority(
+        deadline_monotonic=time.monotonic() - 1
+    )
+    assert deadline_summary["db_budget_deferred"] is True
+
+    lock_summary = {}
+    result = recovery._run_recovery_pass_with_lock_policy(
+        "terminal_entry_no_fill_projection_priority_test",
+        lambda: (_ for _ in ()).throw(
+            BlockingIOError("db_writer_lock(trade) contended on test")
+        ),
+        scope="live_tick",
+        summary=lock_summary,
+        deadline_monotonic=time.monotonic() + 1,
+        bounded_lock_retry_delays=(),
+    )
+    assert result is None
+    assert lock_summary["db_lock_deferred"] is True
+
+
+@pytest.mark.parametrize("fact_shape", ["missing", "wrong_order", "nonzero_matched"])
+def test_terminal_entry_no_fill_priority_requires_exact_terminal_fact(conn, fact_shape):
+    from src.execution import command_recovery as recovery
+    from src.state.venue_command_repo import append_event
+
+    _insert(conn)
+    _advance_to_cancel_pending(conn, venue_order_id="ord-001")
+    append_event(conn, command_id="cmd-001", event_type="CANCEL_ACKED", occurred_at="2026-04-26T00:04:00Z")
+    _seed_pending_entry_projection(conn)
+    if fact_shape != "missing":
+        _append_order_fact(
+            conn, state="CANCEL_CONFIRMED", remaining_size="0",
+            order_id="wrong-order" if fact_shape == "wrong_order" else "ord-001",
+            matched_size="1" if fact_shape == "nonzero_matched" else "0",
+        )
+    assert recovery.terminal_entry_no_fill_projection_pending(conn) is False
+    assert recovery._reconcile_terminal_entry_no_fill_priority_pass(conn)["advanced"] == 0
+    assert conn.execute("SELECT phase FROM position_current WHERE position_id='pos-001'").fetchone()[0] == "pending_entry"
