@@ -35930,6 +35930,9 @@ def _seed_test_filled_exit_command(
     order_id: str,
     shares: str,
     price: str,
+    limit_price: str | None = None,
+    trade_fills: tuple[tuple[str, str], ...] | None = None,
+    execution_price: str | None = None,
 ) -> None:
     from src.state.db import log_execution_fact
 
@@ -35941,7 +35944,7 @@ def _seed_test_filled_exit_command(
         intent_kind="EXIT",
         side="SELL",
         size=float(shares),
-        price=float(price),
+        price=float(limit_price if limit_price is not None else price),
         created_at=observed_at,
     )
     _advance_to_acked(conn, command_id=command_id, venue_order_id=order_id)
@@ -35949,16 +35952,20 @@ def _seed_test_filled_exit_command(
         "UPDATE venue_commands SET state = 'FILLED' WHERE command_id = ?",
         (command_id,),
     )
-    _append_trade_fact(
-        conn,
-        command_id=command_id,
-        order_id=order_id,
-        trade_id=f"trade-{command_id}",
-        state="CONFIRMED",
-        filled_size=shares,
-        fill_price=price,
-        observed_at=observed_at,
-    )
+    for index, (trade_shares, trade_price) in enumerate(
+        trade_fills or ((shares, price),),
+        start=1,
+    ):
+        _append_trade_fact(
+            conn,
+            command_id=command_id,
+            order_id=order_id,
+            trade_id=f"trade-{command_id}-{index}",
+            state="CONFIRMED",
+            filled_size=trade_shares,
+            fill_price=trade_price,
+            observed_at=observed_at,
+        )
     log_execution_fact(
         conn,
         intent_id=f"{position_id}:exit:{command_id}",
@@ -35967,7 +35974,7 @@ def _seed_test_filled_exit_command(
         command_id=command_id,
         order_role="exit",
         filled_at=observed_at,
-        fill_price=float(price),
+        fill_price=float(execution_price if execution_price is not None else price),
         shares=float(shares),
         venue_status="FILLED",
         terminal_exec_status="confirmed",
@@ -36129,6 +36136,71 @@ def test_capital_blocker_excludes_exact_partial_fills_after_later_close(conn):
         "SELECT COUNT(*) FROM position_events WHERE position_id = ? AND event_type = 'EXIT_ORDER_FILLED'",
         (position_id,),
     ).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize(
+    ("witness_price", "execution_price", "absorbed"),
+    (
+        ("0.50", "0.50", True),
+        ("0.49", "0.50", False),
+        ("0.50", "0.49", False),
+    ),
+)
+def test_partial_exit_witness_and_execution_use_exact_multi_fill_vwap(
+    conn,
+    witness_price,
+    execution_price,
+    absorbed,
+):
+    """A multi-fill partial fold binds both durable price serializations."""
+    from src.execution.command_recovery import _partial_exit_projection_absorbs_terminal_fill
+
+    position_id = "pos-multi-fill-price"
+    command_id = "cmd-multi-fill-price"
+    order_id = "ord-multi-fill-price"
+    _insert(conn, command_id="cmd-multi-entry", position_id=position_id, size=2, price=0.25)
+    _advance_to_acked(conn, command_id="cmd-multi-entry", venue_order_id="ord-multi-entry")
+    _seed_pending_entry_projection(
+        conn,
+        position_id=position_id,
+        command_id="cmd-multi-entry",
+        order_id="ord-multi-entry",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'economically_closed', shares = 2, chain_shares = 0,
+               chain_state = 'chain_confirmed_zero', cost_basis_usd = 0.5,
+               entry_price = 0.25, exit_price = 0.5, realized_pnl_usd = 0.5
+         WHERE position_id = ?
+        """,
+        (position_id,),
+    )
+    _seed_test_filled_exit_command(
+        conn,
+        command_id=command_id,
+        position_id=position_id,
+        order_id=order_id,
+        shares="2",
+        price="0.50",
+        limit_price="0.40",
+        trade_fills=(("1", "0.40"), ("1", "0.60")),
+        execution_price=execution_price,
+    )
+    _append_test_partial_exit_witness(
+        conn,
+        position_id=position_id,
+        order_id=order_id,
+        shares="2",
+        price=witness_price,
+        notional="1.00",
+        allocated_cost="0.50",
+    )
+
+    assert _partial_exit_projection_absorbs_terminal_fill(
+        conn,
+        command_id=command_id,
+    ) is absorbed
 
 
 @pytest.mark.parametrize(

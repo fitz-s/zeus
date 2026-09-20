@@ -30875,6 +30875,9 @@ def _partial_exit_projection_absorbs_terminal_fill(
     filled_notional = _positive_decimal_or_none(fills.get("filled_notional"))
     if filled_notional is None:
         return False
+    expected_fill_price = _positive_decimal_or_none(fills.get("fill_price"))
+    if expected_fill_price is None:
+        return False
     execution_rows = conn.execute(
         """
         SELECT filled_at, shares, fill_price, terminal_exec_status
@@ -30894,7 +30897,8 @@ def _partial_exit_projection_absorbs_terminal_fill(
         or str(execution.get("terminal_exec_status") or "").lower()
         not in {"filled", "confirmed", "partial"}
         or _positive_decimal_or_none(execution.get("shares")) != filled_size
-        or _positive_decimal_or_none(execution.get("fill_price")) is None
+        or _positive_decimal_or_none(execution.get("fill_price"))
+        != expected_fill_price
     ):
         return False
     witnesses = conn.execute(
@@ -30926,12 +30930,7 @@ def _partial_exit_projection_absorbs_terminal_fill(
             and witnessed_at is not None
             and current_updated_at >= witnessed_at
             and witness_size == filled_size
-            and witness_price is not None
-            and (
-                int(fills.get("count") or 0) != 1
-                or witness_price
-                == _positive_decimal_or_none(fills.get("fill_price"))
-            )
+            and witness_price == expected_fill_price
             and witness_notional == filled_notional
             and allocated_cost is not None
             and allocated_cost >= Decimal("0")
