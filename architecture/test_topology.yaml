@@ -28,6 +28,7 @@ test_trust_policy:
   # Machine-readable registry: tests with valid lifecycle headers.
   # Tests not in this list require audit before running.
   trusted_tests:
+    tests/test_day0_analytic_carrier.py: {created: "2026-09-20", last_used: "2026-09-20", note: "Exact HIGH/LOW settlement-preimage integration, boundary atoms, zero noise, V1 replay and unchanged confidence draws."}
     tests/test_fill_cash_proof.py: {created: "2026-09-10", last_used: "2026-09-10", note: "Finalized receipt cash identity, exact-once economics, unknown preservation and caller-owned transaction antibodies."}
     tests/test_fill_cash_observer.py: {created: "2026-09-10", last_used: "2026-09-10", note: "Finalized receipt cash identity, exact-once economics, unknown preservation and caller-owned transaction antibodies."}
     tests/test_fill_cash_reader.py: {created: "2026-09-10", last_used: "2026-09-10", note: "Finalized receipt cash identity, exact-once economics, unknown preservation and caller-owned transaction antibodies."}
