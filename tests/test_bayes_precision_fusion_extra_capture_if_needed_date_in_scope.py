@@ -731,6 +731,44 @@ def test_candidate_canonical_fallback_uses_offgrid_prior_served_run(monkeypatch,
         updates_by_model={model: update},
         now=datetime(2026, 9, 20, 13, 30, tzinfo=timezone.utc),
     ) == {}
+    old_run = datetime(2026, 9, 19, 12, tzinfo=timezone.utc)
+    old_available = old_run + timedelta(minutes=20)
+    old_metadata = OpenMeteoModelUpdate(
+        model=model,
+        last_run_initialisation_time=old_run + timedelta(hours=1),
+        last_run_availability_time=old_run + timedelta(hours=1, minutes=5),
+        update_interval_seconds=3600,
+    )
+    old_now = old_run + timedelta(hours=26)
+    with sqlite3.connect(str(forecast_db)) as conn:
+        conn.execute(
+            "UPDATE raw_model_forecasts SET source_cycle_time = ?, "
+            "source_available_at = ?, request_url_hash = 'request-hash'",
+            (old_run.isoformat(), old_available.isoformat()),
+        )
+    monkeypatch.setenv("ZEUS_REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS", "25")
+    assert production._candidate_canonical_single_runs_fallbacks(
+        forecast_db,
+        models=(model,),
+        updates_by_model={model: old_metadata},
+        now=old_now,
+    ) == {}
+    monkeypatch.setenv("ZEUS_REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS", "27")
+    assert production._candidate_canonical_single_runs_fallbacks(
+        forecast_db,
+        models=(model,),
+        updates_by_model={model: old_metadata},
+        now=old_now,
+    ) == {model: (old_run, old_available)}
+    monkeypatch.delenv("ZEUS_REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS")
+    with sqlite3.connect(str(forecast_db)) as conn:
+        conn.execute(
+            "UPDATE raw_model_forecasts SET source_cycle_time = ?, source_available_at = ?",
+            (
+                run.isoformat(),
+                datetime(2026, 9, 20, 11, 55, tzinfo=timezone.utc).isoformat(),
+            ),
+        )
     with sqlite3.connect(str(forecast_db)) as conn:
         conn.execute(
             "UPDATE raw_model_forecasts SET source_available_at = ?",

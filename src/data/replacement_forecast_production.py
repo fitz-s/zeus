@@ -1515,7 +1515,9 @@ def _candidate_canonical_single_runs_fallbacks(
         OPENMETEO_MODEL_IDS,
         OPENMETEO_PROVIDER,
         SINGLE_RUNS_SOURCE_FAMILY,
-        _SINGLE_RUNS_PAYLOAD_CACHE_MAX_AGE_HOURS,
+    )
+    from src.data.replacement_forecast_cycle_policy import (  # noqa: PLC0415
+        replacement_source_cycle_max_age_hours,
     )
     from src.state.db import _connect_read_only  # noqa: PLC0415
     from src.strategy.live_inference.source_clock_vnext import (  # noqa: PLC0415
@@ -1525,6 +1527,7 @@ def _candidate_canonical_single_runs_fallbacks(
     if now.utcoffset() is None:
         return {}
     now_utc = now.astimezone(timezone.utc)
+    max_cycle_age_hours = replacement_source_cycle_max_age_hours()
     expected_runs: dict[str, datetime] = {}
     for model in models:
         update = updates_by_model.get(model)
@@ -1626,7 +1629,7 @@ def _candidate_canonical_single_runs_fallbacks(
             or available.astimezone(timezone.utc) > now_utc
             or available.astimezone(timezone.utc) < cycle.astimezone(timezone.utc)
             or now_utc - cycle.astimezone(timezone.utc)
-            > timedelta(hours=_SINGLE_RUNS_PAYLOAD_CACHE_MAX_AGE_HOURS)
+            > timedelta(hours=max_cycle_age_hours)
         ):
             continue
         expected_model_name = OPENMETEO_MODEL_IDS.get(model, model)
