@@ -9083,6 +9083,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
     observed_extreme = {"value": 69.0}
     conditioning_reads: list[Mapping[str, object] | None] = []
     conditioning_clock_advance_permissions: list[bool] = []
+    initial_bindings: list[dict[str, object]] = []
 
     def current_observation_payload(*_args, **kwargs):
         conditioning_reads.append(kwargs["conditioning"])
@@ -9091,7 +9092,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
         )
         base_identity = kwargs["probability_base_identity"]
         rounded = observed_extreme["value"]
-        return {
+        result = {
             "observation_time": "2026-07-11T17:00:00+00:00",
             "observation_available_at": "2026-07-11T17:05:00+00:00",
             "raw_value": rounded,
@@ -9129,6 +9130,14 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
                 ),
             },
         }
+        result["_edli_global_day0_binding"].update(
+            day0_causal_evidence_bundle=copy.deepcopy(causal_bundle),
+            day0_remaining_vector_witness=copy.deepcopy(
+                causal_bundle["carrier_vector_witness"]
+            ),
+        )
+        initial_bindings.append(copy.deepcopy(result["_edli_global_day0_binding"]))
+        return result
 
     monkeypatch.setattr(
         era,
@@ -9153,6 +9162,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
     )
 
     remaining_day_calls = 0
+    remaining_bindings: list[dict[str, object]] = []
     capture_time = {"value": "2026-07-11T17:30:00+00:00"}
 
     def remaining_day_components(*_args, **kwargs):
@@ -9169,6 +9179,41 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
                 ],
             }
         )
+        remaining_vector_witness = {
+            "vector_ids_by_model": {"ecmwf": "vector-dallas-remaining"},
+        }
+        remaining_bundle = {
+            **causal_bundle,
+            "bundle_identity": "bundle-dallas-remaining",
+            "carrier_vector_identity": "vector-dallas-remaining",
+            "carrier_vector_hash": "hash-dallas-remaining",
+            "carrier_vector_witness": remaining_vector_witness,
+        }
+        remaining_validation = {
+            "reason": None,
+            "expected_bundle_identity": remaining_bundle["bundle_identity"],
+            "actual_bundle_identity": remaining_bundle["bundle_identity"],
+            "expected_carrier_vector_identity": remaining_bundle[
+                "carrier_vector_identity"
+            ],
+            "actual_carrier_vector_identity": remaining_bundle[
+                "carrier_vector_identity"
+            ],
+            "expected_carrier_vector_hash": remaining_bundle["carrier_vector_hash"],
+            "actual_carrier_vector_hash": remaining_bundle["carrier_vector_hash"],
+        }
+        remaining_binding = {
+            **dict(payload["_edli_global_day0_binding"]),
+            "day0_causal_evidence_bundle": remaining_bundle,
+            "day0_remaining_vector_witness": remaining_vector_witness,
+        }
+        payload["_edli_global_day0_binding"] = remaining_binding
+        payload["_edli_day0_causal_evidence_bundle"] = remaining_bundle
+        payload["_edli_day0_causal_evidence_bundle_validation"] = (
+            remaining_validation
+        )
+        payload["_edli_day0_remaining_vector_witness"] = remaining_vector_witness
+        remaining_bindings.append(copy.deepcopy(remaining_binding))
         matrix = np.asarray(
             [[0.0, 0.3, 0.7]] * 200 + [[0.0, 0.1, 0.9]] * 200,
             dtype=float,
@@ -9194,6 +9239,86 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
         max_age=_dt.timedelta(seconds=30),
         day0_payload_out=day0_payload,
     )
+    from src.engine.global_auction_universe import _rebind_probability_witness_tokens
+
+    witness = _rebind_probability_witness_tokens(
+        prepared.probability_witness,
+        token_map_by_condition={
+            witness_binding.condition_id: (
+                str(witness_binding.yes_token_id),
+                f"no-{witness_binding.yes_token_id}",
+            )
+            for witness_binding in prepared.probability_witness.bindings
+        },
+    )
+
+    assert initial_bindings
+    assert remaining_bindings
+    assert remaining_bindings[-1] != initial_bindings[0]
+    import src.engine.monitor_refresh as monitor_refresh
+
+    position = SimpleNamespace(
+        city="Dallas",
+        target_date="2026-07-11",
+        temperature_metric="high",
+        direction="buy_yes",
+        condition_id="c2",
+        token_id=next(b.yes_token_id for b in witness.bindings if b.condition_id == "c2"),
+        no_token_id=next(b.no_token_id for b in witness.bindings if b.condition_id == "c2"),
+        applied_validations=[],
+    )
+    monkeypatch.setattr(monitor_refresh, "_canonical_condition_id", lambda _pos: "c2")
+    snapshot = monitor_refresh._CurrentGlobalDay0FamilySnapshot(
+        witness=witness,
+        token_pairs=tuple(
+            (
+                witness_binding.condition_id,
+                witness_binding.yes_token_id,
+                witness_binding.no_token_id,
+            )
+            for witness_binding in witness.bindings
+        ),
+        deterministic_condition_ids=frozenset(),
+        day0_payload=day0_payload,
+        metric="high",
+        probability_authority="day0_remaining_day_global_probability_v1",
+    )
+    held_probability, _refreshed, is_fresh = (
+        monitor_refresh._materialize_current_global_day0_probability(
+            position,
+            snapshot,
+        )
+    )
+    assert is_fresh is True
+    assert held_probability == pytest.approx(0.8)
+    assert day0_payload["_edli_global_day0_binding"] == remaining_bindings[-1]
+
+    no_position = copy.copy(position)
+    no_position.direction = "buy_no"
+    no_probability, _no_refreshed, no_is_fresh = (
+        monitor_refresh._materialize_current_global_day0_probability(
+            no_position,
+            snapshot,
+        )
+    )
+    assert no_is_fresh is True
+    assert no_probability == pytest.approx(0.2)
+
+    tampered_payload = dict(day0_payload)
+    tampered_binding = dict(tampered_payload["_edli_global_day0_binding"])
+    tampered_bundle = dict(tampered_binding["day0_causal_evidence_bundle"])
+    tampered_bundle["bundle_identity"] = "tampered-bundle"
+    tampered_binding["day0_causal_evidence_bundle"] = tampered_bundle
+    tampered_payload["_edli_global_day0_binding"] = tampered_binding
+    tampered_snapshot = replace(snapshot, day0_payload=tampered_payload)
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_STATISTICAL_PROVENANCE_INCOMPLETE",
+    ):
+        monitor_refresh._materialize_current_global_day0_probability(
+            position,
+            tampered_snapshot,
+        )
 
     witness = prepared.probability_witness
     from src.events.day0_authority import (
@@ -9219,7 +9344,9 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
     )
     assert day0_payload["q_source"] == "day0_remaining_day"
     assert day0_payload["_edli_day0_q_mode"] == "remaining_day"
-    assert day0_payload["_edli_day0_causal_evidence_bundle"] == causal_bundle
+    assert day0_payload["_edli_day0_causal_evidence_bundle"] == (
+        remaining_bindings[-1]["day0_causal_evidence_bundle"]
+    )
     assert (
         day0_payload["probability_authority"]
         == "day0_remaining_day_global_probability_v1"

@@ -41740,6 +41740,7 @@ def _prepare_current_global_probability_family(
         and day0_payload_out is not None
     ):
         for key in (
+            "_edli_global_day0_binding",
             "probability_authority",
             "q_source",
             "_edli_q_source",
