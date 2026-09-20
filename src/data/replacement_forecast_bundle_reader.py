@@ -104,9 +104,11 @@ def _day0_carrier_identity_reason(provenance: Mapping[str, Any]) -> str | None:
     has_operator = operator_key in provenance
     if not has_identity and not has_operator:
         return None
-    identity = str(provenance.get(identity_key) or "").strip()
-    operator = str(provenance.get(operator_key) or "").strip()
-    if not identity or not operator:
+    identity = provenance.get(identity_key)
+    operator = provenance.get(operator_key)
+    if not isinstance(identity, str) or not identity.strip():
+        return "REPLACEMENT_DAY0_CARRIER_IDENTITY_PAIR_INCOMPLETE"
+    if not isinstance(operator, str) or not operator:
         return "REPLACEMENT_DAY0_CARRIER_IDENTITY_PAIR_INCOMPLETE"
     if operator != DAY0_REMAINING_CARRIER_OPERATOR_V2:
         return "REPLACEMENT_DAY0_CARRIER_OPERATOR_NOT_CURRENT"

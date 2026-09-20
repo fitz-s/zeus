@@ -45706,7 +45706,6 @@ def _day0_remaining_p_raw_vector(
     )
     if shared_provisional_carrier:
         from src.data.day0_hourly_vectors import (
-            DAY0_REMAINING_CARRIER_OPERATOR_V2,
             build_day0_remaining_probability_carrier,
             day0_remaining_carrier_identity_inputs,
         )

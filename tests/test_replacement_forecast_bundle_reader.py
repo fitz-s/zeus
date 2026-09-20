@@ -1215,6 +1215,62 @@ def _live_provenance() -> dict[str, object]:
         ({"day0_remaining_carrier_operator": "operator-only"}, False),
         (
             {
+                "day0_remaining_carrier_content_identity": 17,
+                "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+            },
+            False,
+        ),
+        (
+            {
+                "day0_remaining_carrier_content_identity": ["content-v2"],
+                "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+            },
+            False,
+        ),
+        (
+            {
+                "day0_remaining_carrier_content_identity": {"value": "content-v2"},
+                "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+            },
+            False,
+        ),
+        (
+            {
+                "day0_remaining_carrier_content_identity": None,
+                "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+            },
+            False,
+        ),
+        (
+            {
+                "day0_remaining_carrier_content_identity": "   ",
+                "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+            },
+            False,
+        ),
+        (
+            {
+                "day0_remaining_carrier_content_identity": "content-v2",
+                "day0_remaining_carrier_operator": " extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+            },
+            False,
+        ),
+        (
+            {
+                "day0_remaining_carrier_content_identity": "content-v2",
+                "day0_remaining_carrier_operator": 17,
+            },
+            False,
+        ),
+        (
+            {
+                "day0_remaining_carrier_content_identity": "content-v2",
+                "day0_remaining_carrier_operator": None,
+            },
+            False,
+        ),
+        (
+            {
                 "day0_remaining_carrier_content_identity": "content-unknown",
                 "day0_remaining_carrier_operator": "unknown",
             },
