@@ -2241,7 +2241,11 @@ def test_materializer_hko_provisional_observation_does_not_truncate_support(
     assert q["25plus"] > 0.7
     assert q_lcb["target24"] >= 0.0
     assert provenance["day0_provisional_observation"]["support_truncation"] is False
-    assert provenance["q_shape"] == "day0_remaining_shared_carrier_v1"
+    assert provenance["q_shape"] == "day0_remaining_shared_carrier_v2"
+    assert provenance["day0_remaining_carrier_operator"] == (
+        "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2"
+    )
+    assert provenance["day0_remaining_carrier_content_identity"]
     assert provenance["day0_preliminary_report_survival_likelihood"] == likelihood
     assert provenance["day0_remaining_carrier_sample_count"] == 500
     assert provenance["day0_remaining_carrier_q"] == pytest.approx(

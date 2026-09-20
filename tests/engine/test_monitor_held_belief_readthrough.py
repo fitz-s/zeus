@@ -2143,7 +2143,7 @@ def test_day0_pinned_current_local_day_requires_hwm_station_witness(
         },
         "day0_preliminary_report_survival_likelihood": likelihood,
         "day0_remaining_carrier_content_identity": "carrier-content-hash",
-        "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_v1",
+        "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
         "day0_remaining_carrier_q": [0.0, 1.0],
         "day0_remaining_carrier_probability_samples": [[0.0, 1.0]] * 500,
         "day0_remaining_carrier_sample_count": 500,

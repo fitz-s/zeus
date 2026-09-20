@@ -1911,7 +1911,7 @@ def test_shared_remaining_carrier_accepts_valid_market_order_and_preserves_align
 def test_shared_remaining_carrier_normalizes_fahrenheit_round_trip_grid():
     """Celsius storage residue must not invalidate adjacent Fahrenheit bins."""
 
-    assert DAY0_PROBABILITY_SEMANTICS_REVISION.endswith("_v15")
+    assert DAY0_PROBABILITY_SEMANTICS_REVISION.endswith("_v16")
 
     bounds_c = [
         (None, 26.11111111111111),
@@ -2042,8 +2042,15 @@ def test_hko_provisional_replay_requires_persisted_carrier() -> None:
     assert materialized["content_identity"] != legacy_half_up["content_identity"]
 
 
-def test_noaa_adapter_replays_materialized_carrier_identity_and_samples():
-    """The monitor-side replay must consume the materializer's exact carrier."""
+@pytest.mark.parametrize(
+    "operator",
+    (
+        "extreme_observed_then_noisy_future_v1",
+        "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+    ),
+)
+def test_noaa_adapter_replays_materialized_carrier_identity_and_samples(operator):
+    """Strict replay accepts the persisted V1 history and current V2 carrier."""
     import src.engine.event_reactor_adapter as era
     from src.config import ensemble_n_mc, runtime_cities_by_name
     from src.contracts.settlement_semantics import SettlementSemantics
@@ -2103,6 +2110,7 @@ def test_noaa_adapter_replays_materialized_carrier_identity_and_samples():
             bin_bounds_c=[(None, 30), (31, 31), (32, 32), (33, None)],
             n_point=ensemble_n_mc(),
             n_samples=500,
+            operator=operator,
             identity_inputs=day0_remaining_carrier_identity_inputs(
                 city="Tel Aviv",
                 unit="C",
@@ -2155,9 +2163,12 @@ def test_noaa_adapter_replays_materialized_carrier_identity_and_samples():
             decision_time=decision_time,
         )
         assert replay.tolist() == pytest.approx(expected["q"])
-        assert replay[-1] == pytest.approx(0.9508620689655143, abs=0.005)
-        assert replay[-1] != pytest.approx(0.5326328498, abs=1e-9)
-        assert 1.0 - float(replay[-1]) < 0.16
+        assert replay.sum() == pytest.approx(1.0)
+        assert np.isfinite(replay).all()
+        if operator.endswith("_v1"):
+            assert replay[-1] == pytest.approx(0.9508620689655143, abs=0.005)
+            assert replay[-1] != pytest.approx(0.5326328498, abs=1e-9)
+            assert 1.0 - float(replay[-1]) < 0.16
         assert payload["_edli_day0_remaining_content_identity"] == expected["content_identity"]
         assert payload["_edli_day0_remaining_carrier_q"] == expected["q"]
         assert payload["_edli_day0_remaining_probability_samples"] == expected["samples"]
@@ -3797,6 +3808,9 @@ def test_noaa_actual_producer_consumer_reuses_canonical_path_sigma(
     assert builder_calls[0]["path_error_sigma_c"] == pytest.approx(
         expected_sigma_c * native_scale
     )
+    assert builder_calls[0]["operator"] == (
+        "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2"
+    )
 
     future_native = np.asarray(
         [
@@ -3817,6 +3831,9 @@ def test_noaa_actual_producer_consumer_reuses_canonical_path_sigma(
     assert len(builder_calls) == 2
     assert builder_calls[1]["path_error_sigma_c"] == pytest.approx(
         expected_sigma_c * native_scale
+    )
+    assert builder_calls[1]["operator"] == (
+        "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2"
     )
     assert builder_calls[1]["path_error_sigma_c"] == builder_calls[0]["path_error_sigma_c"]
     assert replay.tolist() == pytest.approx(payload["_edli_day0_remaining_carrier_q"])

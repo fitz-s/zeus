@@ -19,7 +19,10 @@ from src.contracts.ensemble_snapshot_provenance import (
     split_coordinate_bound_data_version,
 )
 from src.contracts.settlement_semantics import SettlementSemantics
-from src.data.day0_hourly_vectors import day0_remaining_carrier_samples_row_major
+from src.data.day0_hourly_vectors import (
+    DAY0_REMAINING_CARRIER_OPERATOR_V2,
+    day0_remaining_carrier_samples_row_major,
+)
 from src.data.forecast_target_contract import compute_target_local_day_window_utc
 from src.data.replacement_forecast_cycle_policy import (
     TRADEABLE_GRADE_QLCB_BASIS,
@@ -90,6 +93,24 @@ class _HeldContinuityStatus(StrEnum):
     READY = "ready"
     RESET = "reset"
     BLOCKED = "blocked"
+
+
+def _day0_carrier_identity_reason(provenance: Mapping[str, Any]) -> str | None:
+    """Validate the optional carrier identity pair at a live read boundary."""
+
+    identity_key = "day0_remaining_carrier_content_identity"
+    operator_key = "day0_remaining_carrier_operator"
+    has_identity = identity_key in provenance
+    has_operator = operator_key in provenance
+    if not has_identity and not has_operator:
+        return None
+    identity = str(provenance.get(identity_key) or "").strip()
+    operator = str(provenance.get(operator_key) or "").strip()
+    if not identity or not operator:
+        return "REPLACEMENT_DAY0_CARRIER_IDENTITY_PAIR_INCOMPLETE"
+    if operator != DAY0_REMAINING_CARRIER_OPERATOR_V2:
+        return "REPLACEMENT_DAY0_CARRIER_OPERATOR_NOT_CURRENT"
+    return None
 
 
 
@@ -325,6 +346,9 @@ def _held_pinned_provenance_reason(
     active/metric/unit/source or vector fields for the adapter.  This gate is
     deliberately stricter than the generic posterior live-grade check.
     """
+    carrier_reason = _day0_carrier_identity_reason(provenance)
+    if carrier_reason is not None:
+        return carrier_reason
     provisional = provenance.get("day0_provisional_observation")
     if not isinstance(provisional, Mapping) or provisional.get("active") is not True:
         return "REPLACEMENT_PINNED_DAY0_PROVISIONAL_ACTIVE_MISSING"
@@ -421,7 +445,7 @@ def _held_pinned_provenance_reason(
         return "REPLACEMENT_PINNED_DAY0_CARRIER_FIELDS_MISSING"
     if (
         str(provenance.get("day0_remaining_carrier_operator"))
-        != "extreme_observed_then_noisy_future_v1"
+        != DAY0_REMAINING_CARRIER_OPERATOR_V2
         or int(provenance.get("day0_remaining_carrier_sample_count") or 0) != 500
     ):
         return "REPLACEMENT_PINNED_DAY0_CARRIER_SHAPE_INVALID"
@@ -681,6 +705,8 @@ def _live_grade_provenance(
     if not row_map.get("q_ucb_json"):
         return None
     provenance = _json_mapping(row_map.get("provenance_json"), field_name="provenance_json")
+    if _day0_carrier_identity_reason(provenance) is not None:
+        return None
     precision_guard = provenance.get("openmeteo_precision_guard")
     precision_metadata = (
         precision_guard.get("metadata")
@@ -1100,6 +1126,12 @@ def read_replacement_forecast_bundle(
                 "BLOCKED", "REPLACEMENT_POSTERIOR_READINESS_MISMATCH"
             )
         row_map = dict(certified_row)
+    raw_provenance = _json_mapping(
+        row_map.get("provenance_json"), field_name="provenance_json"
+    )
+    carrier_reason = _day0_carrier_identity_reason(raw_provenance)
+    if carrier_reason is not None:
+        return ReplacementForecastBundleReadResult("BLOCKED", carrier_reason)
     provenance = _live_grade_provenance(
         row_map,
         authority_purpose=authority_purpose,
@@ -1466,6 +1498,9 @@ def read_pinned_replacement_forecast_bundle(
         row_map.get("provenance_json"),
         field_name="provenance_json",
     )
+    carrier_reason = _day0_carrier_identity_reason(provenance)
+    if carrier_reason is not None:
+        return ReplacementForecastBundleReadResult("BLOCKED", carrier_reason)
     if not _decorrelated_providers_complete(provenance):
         return ReplacementForecastBundleReadResult(
             "BLOCKED",
@@ -1601,6 +1636,9 @@ def read_prior_complete_replacement_forecast_bundle(
         latest.get("provenance_json"),
         field_name="provenance_json",
     )
+    latest_carrier_reason = _day0_carrier_identity_reason(latest_provenance)
+    if latest_carrier_reason is not None:
+        return ReplacementForecastBundleReadResult("BLOCKED", latest_carrier_reason)
     if _decorrelated_providers_complete(latest_provenance):
         if raw_input_hwm_conn is not None:
             if not _held_pinned_carrier_claimed(latest_provenance):
@@ -1761,6 +1799,11 @@ def read_prior_complete_replacement_forecast_bundle(
         candidate.get("provenance_json"),
         field_name="provenance_json",
     )
+    candidate_carrier_reason = _day0_carrier_identity_reason(candidate_provenance)
+    if candidate_carrier_reason is not None:
+        return ReplacementForecastBundleReadResult(
+            "BLOCKED", candidate_carrier_reason
+        )
     if not _held_pinned_carrier_claimed(candidate_provenance):
         return ReplacementForecastBundleReadResult(
             "NOT_APPLICABLE",

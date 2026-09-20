@@ -1331,6 +1331,7 @@ def _day0_noaa_preliminary_carrier(
     from src.config import runtime_cities_by_name
     from src.contracts.settlement_semantics import SettlementSemantics
     from src.data.day0_hourly_vectors import (
+        DAY0_REMAINING_CARRIER_OPERATOR_V2,
         build_day0_remaining_probability_carrier,
         day0_remaining_carrier_identity_inputs,
         read_day0_current_temperature_state,
@@ -1490,6 +1491,7 @@ def _day0_noaa_preliminary_carrier(
         n_samples=500,
         identity_inputs=identity_inputs,
         settlement_semantics=SettlementSemantics.for_city(city),
+        operator=DAY0_REMAINING_CARRIER_OPERATOR_V2,
     )
     return carrier, likelihood
 
@@ -6594,7 +6596,7 @@ def _compute_posterior_payload(
                     for index, item in enumerate(request.bins)
                 }
                 q = q_global
-                q_shape = "day0_remaining_shared_carrier_v1"
+                q_shape = "day0_remaining_shared_carrier_v2"
                 # 2026-09-13: the shared Day0 carrier derives its width from instrument sigma +
                 # path error (_day0_noaa_carrier_future_members / _day0_noaa_preliminary_carrier),
                 # never from the settlement-residual floor artifact — the lookup above ran
@@ -6805,7 +6807,7 @@ def _compute_posterior_payload(
                 except Exception:
                     pass
             if _day0_shared_carrier is not None:
-                q_shape = "day0_remaining_shared_carrier_v1"
+                q_shape = "day0_remaining_shared_carrier_v2"
                 carrier_q = {
                     str(item.bin_id): float(_day0_shared_carrier["q"][index])
                     for index, item in enumerate(request.bins)
@@ -7615,6 +7617,24 @@ def _write_posterior_row(
                     provenance_payload.get("day0_causal_evidence_bundle"), Mapping
                 )
                 else None
+            ),
+            # A carrier's point q may remain numerically unchanged across an
+            # operator migration.  Bind carrier rows to both the exact content
+            # and operator so equal q values cannot alias V1 historical
+            # evidence with the current V2 certificate.  Ordinary rows omit
+            # these optional fields and retain their existing identity shape.
+            **(
+                {
+                    "day0_remaining_carrier_content_identity": provenance_payload.get(
+                        "day0_remaining_carrier_content_identity"
+                    ),
+                    "day0_remaining_carrier_operator": provenance_payload.get(
+                        "day0_remaining_carrier_operator"
+                    ),
+                }
+                if provenance_payload.get("day0_remaining_carrier_content_identity")
+                or provenance_payload.get("day0_remaining_carrier_operator")
+                else {}
             ),
             "anchor_id": anchor_id,
             "anchor_artifact_id": request.anchor_artifact_id,

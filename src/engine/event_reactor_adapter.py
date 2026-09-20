@@ -45706,6 +45706,7 @@ def _day0_remaining_p_raw_vector(
     )
     if shared_provisional_carrier:
         from src.data.day0_hourly_vectors import (
+            DAY0_REMAINING_CARRIER_OPERATOR_V2,
             build_day0_remaining_probability_carrier,
             day0_remaining_carrier_identity_inputs,
         )
@@ -45887,6 +45888,10 @@ def _day0_remaining_p_raw_vector(
             n_samples=500,
             identity_inputs=identity_inputs,
             settlement_semantics=settlement_semantics,
+            # Strict replay must reproduce the persisted historical operator
+            # byte-for-byte (V1 remains valid only on this path).  The builder
+            # rejects unknown operators; current rebuilds below pass V2.
+            operator=str(payload["_edli_day0_probability_operator"]),
         )
         expected_identity = str(payload["_edli_day0_remaining_content_identity"]).strip()
         if expected_identity != str(carrier["content_identity"]):
@@ -47151,6 +47156,7 @@ def _rebuild_decision_time_day0_carrier(
         raise ValueError("DAY0_DECISION_CARRIER_AUTHORITY_KIND_INVALID")
     _snapshot_day0_source_clock_carrier_provenance(payload)
     from src.data.day0_hourly_vectors import (
+        DAY0_REMAINING_CARRIER_OPERATOR_V2,
         build_day0_remaining_probability_carrier,
         day0_remaining_carrier_identity_inputs,
     )
@@ -47278,6 +47284,7 @@ def _rebuild_decision_time_day0_carrier(
         n_samples=500,
         identity_inputs=identity_inputs,
         settlement_semantics=SettlementSemantics.for_city(city),
+        operator=DAY0_REMAINING_CARRIER_OPERATOR_V2,
     )
     payload.update(
         {

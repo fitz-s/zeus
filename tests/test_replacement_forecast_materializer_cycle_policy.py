@@ -408,6 +408,70 @@ def _request(*, cycle: datetime, computed_at: datetime) -> ReplacementForecastMa
     )
 
 
+def test_day0_carrier_coverage_requires_complete_current_v2_pair() -> None:
+    """Old/partial carrier declarations drain through the existing seed loop."""
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE posterior (q_lcb_json TEXT, q_ucb_json TEXT, provenance_json TEXT)"
+    )
+    base = {
+        "q_lcb_basis": "fused_center_bootstrap_p05",
+        "bayes_precision_fusion": {
+            "current_evidence_shape": {
+                "shape_lag_hours": 0,
+                "translation_applied": False,
+                "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                "source_cycle_time": "2026-09-20T00:00:00Z",
+            }
+        },
+    }
+    clause = tradeable_grade_coverage_sql(
+        posterior_columns={"q_lcb_json", "q_ucb_json", "provenance_json"},
+        decision_time=datetime(2026, 9, 20, 1, tzinfo=UTC),
+    )
+    cases = (
+        ({}, True),
+        (
+            {
+                "day0_remaining_carrier_content_identity": "content-v1",
+                "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_v1",
+            },
+            False,
+        ),
+        (
+            {
+                "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+            },
+            False,
+        ),
+        (
+            {
+                "day0_remaining_carrier_content_identity": "content-unknown",
+                "day0_remaining_carrier_operator": "unknown",
+            },
+            False,
+        ),
+        (
+            {
+                "day0_remaining_carrier_content_identity": "content-v2",
+                "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+            },
+            True,
+        ),
+    )
+    for carrier, expected in cases:
+        conn.execute("DELETE FROM posterior")
+        conn.execute(
+            "INSERT INTO posterior VALUES (?, ?, ?)",
+            ("{\"bin\":0.1}", "{\"bin\":0.2}", json.dumps({**base, **carrier})),
+        )
+        count = conn.execute(
+            f"SELECT count(*) FROM posterior WHERE 1=1 {clause}"
+        ).fetchone()[0]
+        assert bool(count) is expected, carrier
+
+
 def test_prewrite_blocks_when_cycle_older_than_bound() -> None:
     """(computed_at - source_cycle_time) > 30h => the stale reason is present in the prewrite gate."""
     cycle = datetime(2026, 6, 5, 0, tzinfo=UTC)  # 00Z (synoptic) so phase never confounds this
