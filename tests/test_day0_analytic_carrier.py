@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from math import erf, hypot, sqrt
+from math import erfc, erf, hypot, sqrt
 
 import numpy as np
 import pytest
@@ -285,6 +285,105 @@ def test_far_tail_is_finite_and_nonnegative():
     assert np.isfinite(actual["q"]).all()
     assert (np.asarray(actual["q"]) >= 0).all()
     assert sum(actual["q"]) == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    ("future", "bounds"),
+    [
+        ([-0.5], [(None, 7), (8, 23), (24, None)]),
+        ([0.5], [(None, -24), (-23, -8), (-7, None)]),
+    ],
+)
+def test_extreme_wmo_tail_mass_matches_erfc_reference(future, bounds):
+    """Interior [8σ,24σ] and mirrored lower-tail mass remains measurable."""
+    actual = _call(
+        future=future,
+        scenarios=((None, 1.0),),
+        bounds=bounds,
+        path_sigma=0.0,
+        instrument_sigma=1.0,
+    )
+    expected_tail = 0.5 * (erfc(8.0 / sqrt(2.0)) - erfc(24.0 / sqrt(2.0)))
+    assert expected_tail > 0.0
+    assert actual["q"][1] > 0.0
+    assert actual["q"][1] == pytest.approx(expected_tail, rel=2e-12, abs=0.0)
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+@pytest.mark.parametrize("rule", ["wmo_half_up", "floor", "ceil", "oracle_truncate"])
+def test_sigma_zero_rounding_matrix_has_exact_shoulders_and_none_scenario(metric, rule):
+    """Discrete sigma=0 outcomes follow an independent rounding hand calculation."""
+    future = [0.49, 1.51]
+    boundary = 0.5
+    scenarios = ((boundary, 0.4), (None, 0.6))
+    bounds = [(None, 0), (1, 1), (2, None)]
+    actual = _call(
+        metric=metric,
+        sem=_sem(rule),
+        future=future,
+        scenarios=scenarios,
+        bounds=bounds,
+        path_sigma=0.0,
+        instrument_sigma=0.0,
+    )
+
+    def hand_round(value):
+        if rule == "wmo_half_up":
+            return np.floor(value + 0.5)
+        if rule in {"floor", "oracle_truncate"}:
+            return np.floor(value)
+        return np.ceil(value)
+
+    expected = np.zeros(3)
+    for member in future:
+        for scenario_boundary, weight in scenarios:
+            final = member if scenario_boundary is None else (
+                max(member, scenario_boundary)
+                if metric == "high"
+                else min(member, scenario_boundary)
+            )
+            settled = hand_round(final)
+            for index, (low, high) in enumerate(bounds):
+                if (low is None or settled >= low) and (high is None or settled <= high):
+                    expected[index] += weight / len(future)
+                    break
+    assert actual["q"] == pytest.approx(expected, abs=0.0)
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+def test_fahrenheit_negative_half_boundary_nonzero_sigma_matches_native_oracle(metric):
+    """Negative Fahrenheit half-step atoms use native WMO tie classification."""
+    sem = _sem("wmo_half_up", "F")
+    mu = -4.0
+    boundary = -3.5
+    sigma = 1.8
+    bounds = [(None, -5), (-4, -4), (-3, None)]
+    actual = _call(
+        metric=metric,
+        sem=sem,
+        future=[mu],
+        scenarios=((boundary, 1.0),),
+        path_sigma=0.0,
+        instrument_sigma=sigma,
+        bounds=bounds,
+        identity={"city": "F-negative", "unit": "F", "prior": "native-negative"},
+    )
+    expected = np.zeros(3)
+    for index, (low, high) in enumerate(bounds):
+        lower = -np.inf if low is None else low - 0.5
+        upper = np.inf if high is None else high + 0.5
+        rounded_boundary = np.floor(boundary + 0.5)
+        in_bin = (low is None or rounded_boundary >= low) and (high is None or rounded_boundary <= high)
+        if metric == "high":
+            expected[index] = _normal_interval(mu, sigma, max(lower, boundary), upper)
+            if in_bin:
+                expected[index] += _normal_interval(mu, sigma, -np.inf, boundary)
+        else:
+            expected[index] = _normal_interval(mu, sigma, lower, min(upper, boundary))
+            if in_bin:
+                expected[index] += _normal_interval(mu, sigma, boundary, np.inf)
+    expected /= expected.sum()
+    assert actual["q"] == pytest.approx(expected, abs=2e-14)
 
 
 @pytest.mark.parametrize("metric", ["high", "low"])
