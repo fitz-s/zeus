@@ -88,6 +88,16 @@ economic_objects:
         meaning: "Settlement source finality time."
 
 state_machines:
+  capital_receipt_evidence_role:
+    owner: src/engine/global_batch_runtime.py
+    description: >
+      Read-only confidence-cost evidence recorded with the selected capital
+      proposal. This label grants neither selection nor submit authority and
+      is not a lifecycle, command, order, or fill state.
+    states:
+      - OBSERVATIONAL_EVIDENCE_NOT_SELECTION_OR_SUBMIT_AUTHORITY
+    invariant_tests:
+      - tests/integration/test_w3_solve_seam_g3.py
   reactor_runtime_config:
     owner: src/engine/event_reactor_adapter.py
     description: >
