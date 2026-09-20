@@ -34259,6 +34259,7 @@ def test_live_tick_identity_bound_matched_exit_outruns_account_snapshot(
 
     _conn_factory.supports_nonblocking_flocks = True
     monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+    monkeypatch.setattr("src.state.db._zeus_trade_db_path", lambda: db_path)
     monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "1")
     monkeypatch.setattr(
         venue_sync_contract,

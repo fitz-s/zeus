@@ -240,6 +240,14 @@ def conn(monkeypatch, tmp_path):
         },
     )
     monkeypatch.setattr(
+        "src.execution.executor._entry_strategy_policy_submit_component",
+        lambda *args, **kwargs: {
+            "component": "strategy_policy_submit",
+            "allowed": True,
+            "reason": "not_gated",
+        },
+    )
+    monkeypatch.setattr(
         "src.execution.executor._assert_collateral_allows_sell",
         lambda *args, **kwargs: {
             "component": "collateral_snapshot_refresh",
