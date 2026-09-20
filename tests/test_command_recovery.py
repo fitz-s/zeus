@@ -12361,10 +12361,12 @@ class TestRecoveryResolutionTable:
         ).fetchone()
         assert obligation["status"] == "RESOLVED"
 
+    @pytest.mark.parametrize("identity_route", ["command", "order", "execution", "unbound_execution"])
     def test_acked_terminal_no_fill_order_fact_projects_edli_lifecycle_terminal(
         self,
         conn,
         mock_client,
+        identity_route,
     ):
         _insert(conn)
         _advance_to_acked(conn, venue_order_id="ord-001")
@@ -12376,6 +12378,15 @@ class TestRecoveryResolutionTable:
             "execution_command_id": "dec-001",
             "command_id": "cmd-001",
         }
+        if identity_route != "command":
+            command_payload.pop("command_id")
+        if identity_route != "execution":
+            command_payload["execution_command_id"] = "unrelated-execution"
+        order_payload = {**command_payload}
+        if identity_route == "unbound_execution":
+            order_payload["execution_command_id"] = "dec-001"
+        if identity_route == "order":
+            order_payload["venue_order_id"] = "ord-001"
         _insert_edli_live_order_event(
             conn,
             aggregate_id=aggregate_id,
@@ -12389,7 +12400,7 @@ class TestRecoveryResolutionTable:
             aggregate_id=aggregate_id,
             sequence=2,
             event_type="VenueSubmitAcknowledged",
-            payload={**command_payload, "venue_order_id": "ord-001"},
+            payload=order_payload,
             occurred_at="2026-04-26T00:02:00Z",
         )
         _insert_edli_live_order_event(
@@ -12398,8 +12409,7 @@ class TestRecoveryResolutionTable:
             sequence=3,
             event_type="CapTransitioned",
             payload={
-                **command_payload,
-                "venue_order_id": "ord-001",
+                **order_payload,
                 "to_status": "CONSUMED",
                 "execution_receipt_hash": "receipt-hash",
             },
@@ -12432,7 +12442,17 @@ class TestRecoveryResolutionTable:
         from src.engine.event_reactor_adapter import _TERMINAL_EVENT_SQL
         from src.execution.command_recovery import reconcile_unresolved_commands
 
-        summary = reconcile_unresolved_commands(conn, mock_client)
+        statements = []
+        conn.set_trace_callback(statements.append)
+        try:
+            summary = reconcile_unresolved_commands(conn, mock_client)
+        finally:
+            conn.set_trace_callback(None)
+        queries = [sql for sql in statements if "WITH matched AS" in sql]
+        assert len(queries) == 1
+        plan = [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + queries[0])]
+        assert any("MULTI-INDEX OR" in step for step in plan), plan
+        assert not any("SCAN edli_live_order_events" in step for step in plan), plan
 
         assert summary["terminal_order_facts"]["advanced"] == 1
         projection = conn.execute(
@@ -12443,6 +12463,14 @@ class TestRecoveryResolutionTable:
             """,
             (aggregate_id,),
         ).fetchone()
+        if identity_route == "unbound_execution":
+            assert projection["current_state"] == "CAP_TRANSITIONED"
+            assert conn.execute(
+                "SELECT 1 FROM edli_live_order_events "
+                "WHERE event_type = 'OrderLifecycleProjected' AND aggregate_id = ?",
+                (aggregate_id,),
+            ).fetchone() is None
+            return
         assert dict(projection) == {
             "current_state": "TERMINAL_NO_FILL",
             "last_event_type": "OrderLifecycleProjected",

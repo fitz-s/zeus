@@ -25138,9 +25138,10 @@ def _project_edli_terminal_no_fill_order_lifecycle(
     params: list[str] = [command_id, venue_order_id]
     if execution_ids:
         predicates.append(
+            "(event_type = 'ExecutionCommandCreated' AND "
             "json_extract(payload_json, '$.execution_command_id') IN ("
             + ",".join("?" for _ in execution_ids)
-            + ")"
+            + "))"
         )
         params.extend(execution_ids)
 
