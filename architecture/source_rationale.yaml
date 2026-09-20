@@ -165,8 +165,12 @@ providers:
       inputs to source-clock precision fusion only; they are not settlement,
       Day0 observation, hourly-history, or venue truth. Per-source failures are
       fail-soft and must not silently substitute settlement/source authority.
-      CWA F-D0047-061 LOW is the minimum of a complete next-local-day hourly
-      temperature sequence, distinct from F-D0047-063 interval extrema.
+      CWA F-D0047-061 HIGH/LOW are extrema of a complete next-local-day
+      24-hour temperature sequence from the township forecast point, not native
+      continuous extrema or settlement-station observations. One response feeds
+      both metrics with distinct physical identities. Retired F-D0047-063
+      daytime extrema remain historical-only; current readers exclude non-entry
+      sources and the existing upgrade queue refreshes certificates using them.
   polymarket_gamma:
     role: internal_probe
     client: src/data/station_migration_probe.py
