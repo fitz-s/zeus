@@ -1,3 +1,5 @@
+# Purpose: Verify analytic settlement-bin probabilities and historical carrier replay.
+# Reuse: Run when changing Day0 mixture integration, units, rounding or carrier identity.
 # Created: 2026-09-20
 # Last reused/audited: 2026-09-20
 # Authority basis: forecast_time_performance PLAN.md frozen Contract B.
