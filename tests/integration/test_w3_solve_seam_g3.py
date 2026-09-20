@@ -43794,6 +43794,343 @@ def _saturated_day0_auction_inputs():
     return event.event_id, prepared, payload, kwargs
 
 
+def _day0_nowcast_context_for_witness(witness, *, candidate_bindings):
+    return bridge.Day0DiurnalNowcastContext(
+        probability_witness_identity=witness.witness_identity,
+        probability_authority="day0_remaining_day_global_probability_v1",
+        q_source="day0_remaining_day",
+        city_name="Manila",
+        city_timezone="Asia/Manila",
+        settlement_unit="C",
+        metric="high",
+        running_extreme=32.0,
+        carrier_future_extremes_c=(),
+        candidate_bindings=tuple(candidate_bindings),
+    )
+
+
+def _day0_yes_only_witness(witness):
+    from src.solve.solver import rebind_family_payoff_witness
+
+    return rebind_family_payoff_witness(
+        witness,
+        bindings=tuple(
+            replace(binding, no_token_id=None) for binding in witness.bindings
+        ),
+    )
+
+
+def _reidentity_probability_witness(witness, **changes):
+    from src.solve.solver import joint_probability_witness_identity
+
+    rebound = copy.copy(witness)
+    for name, value in changes.items():
+        object.__setattr__(rebound, name, value)
+    identity = joint_probability_witness_identity(
+        family_key=rebound.family_key,
+        bindings=rebound.bindings,
+        q_version=rebound.q_version,
+        resolution_identity=rebound.resolution_identity,
+        topology_identity=rebound.topology_identity,
+        posterior_identity_hash=rebound.posterior_identity_hash,
+        source_truth_identity=rebound.source_truth_identity,
+        authority_certificate_hash=rebound.authority_certificate_hash,
+        band_alpha=rebound.band_alpha,
+        band_basis=rebound.band_basis,
+        yes_point_q=rebound.yes_point_q,
+        yes_q_samples=rebound.yes_q_samples,
+        captured_at_utc=rebound.captured_at_utc,
+        exact_payoff_witness=rebound.exact_payoff_witness,
+    )
+    return replace(rebound, witness_identity=identity)
+
+
+def test_day0_probability_rebind_restores_nowcast_for_added_no_and_keeps_yes_context(
+    monkeypatch,
+):
+    event_id, prepared, _payload, kwargs = _saturated_day0_auction_inputs()
+    full = prepared.probability_witness
+    old = _day0_yes_only_witness(full)
+    old_context = _day0_nowcast_context_for_witness(
+        old,
+        candidate_bindings=(
+            bridge.Day0DiurnalNowcastCandidateBinding(
+                bin_id="bin-0",
+                condition_id="condition-0",
+                side="YES",
+                token_id="yes-0",
+                bin_label="Will the highest temperature in Manila be 32°C on July 2?",
+            ),
+        ),
+    )
+    rebound = global_batch_runtime._rebind_prepared_probability(
+        replace(prepared, probability_witness=old, day0_diurnal_nowcast_context=old_context),
+        full,
+    )
+
+    context = rebound.day0_diurnal_nowcast_context
+    assert context.probability_witness_identity == full.witness_identity
+    assert {
+        (binding.bin_id, binding.condition_id, binding.side, binding.token_id)
+        for binding in context.candidate_bindings
+    } == {
+        ("bin-0", "condition-0", "YES", "yes-0"),
+        ("bin-0", "condition-0", "NO", "no-0"),
+    }
+
+    monkeypatch.setattr(
+        era,
+        "_day0_diurnal_nowcast_verdict",
+        lambda **_kwargs: SimpleNamespace(q_held=0.05),
+    )
+    selected = select_prepared_global_auction({event_id: rebound}, **kwargs)
+
+    assert selected.decision.candidate.side == "YES"
+    assert selected.decision.candidate.bin_id == "bin-1"
+    rejected = [
+        row
+        for row in selected.decision.candidate_evaluations
+        if row.token_id == "no-0"
+    ]
+    assert rejected
+    assert all(
+        row.rejection_reason == "DAY0_DIURNAL_NOWCAST_VETO" for row in rejected
+    )
+
+
+def test_day0_probability_rebind_preserves_saturation_for_existing_token():
+    event_id, prepared, payload, kwargs = _saturated_day0_auction_inputs()
+    full = prepared.probability_witness
+    from src.solve.solver import rebind_family_payoff_witness
+
+    old = rebind_family_payoff_witness(
+        full,
+        bindings=tuple(
+            replace(
+                binding,
+                no_token_id=(binding.no_token_id if binding.bin_id == "bin-0" else None),
+            )
+            for binding in full.bindings
+        ),
+    )
+    old_prepared = era._bind_day0_saturated_statistical_sides(
+        replace(prepared, probability_witness=old), payload
+    )
+    assert old_prepared.day0_saturation_witness_identity == old.witness_identity
+    assert old_prepared.day0_saturated_statistical_sides == (("bin-0", "NO"),)
+
+    rebound = global_batch_runtime._rebind_prepared_probability(
+        old_prepared, full
+    )
+    assert rebound.day0_saturation_witness_identity == full.witness_identity
+    assert rebound.day0_saturated_statistical_sides == (("bin-0", "NO"),)
+
+    selected = select_prepared_global_auction({event_id: rebound}, **kwargs)
+    assert selected.decision.candidate.side == "YES"
+    assert selected.decision.candidate.bin_id == "bin-1"
+    rejected = [
+        row
+        for row in selected.decision.candidate_evaluations
+        if row.token_id == "no-0"
+    ]
+    assert rejected
+    assert all(
+        row.rejection_reason == "DAY0_STATISTICAL_CERTAINTY_UNSUPPORTED"
+        for row in rejected
+    )
+
+
+def test_day0_probability_rebind_same_identity_does_not_call_token_rebinder(monkeypatch):
+    _event_id, prepared, _payload, _kwargs = _saturated_day0_auction_inputs()
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("same witness identity must not rebind token hints")
+
+    monkeypatch.setattr(
+        "src.engine.global_auction_universe._rebind_probability_witness_tokens",
+        forbidden,
+    )
+    rebound = global_batch_runtime._rebind_prepared_probability(
+        prepared, prepared.probability_witness
+    )
+    assert rebound.probability_witness is prepared.probability_witness
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("q", "source", "certificate", "captured", "max_age", "token"),
+)
+def test_day0_probability_rebind_rejects_non_token_identity_changes(mutation):
+    _event_id, prepared, _payload, _kwargs = _saturated_day0_auction_inputs()
+    full = prepared.probability_witness
+    old = _day0_yes_only_witness(full)
+    if mutation == "q":
+        old = _reidentity_probability_witness(
+            old,
+            yes_point_q=np.asarray([0.0, 0.7, 0.3]),
+            yes_q_samples=np.tile([0.0, 0.7, 0.3], (400, 1)),
+        )
+    elif mutation == "source":
+        old = _reidentity_probability_witness(
+            old, source_truth_identity="changed-source"
+        )
+    elif mutation == "certificate":
+        old = _reidentity_probability_witness(
+            old, authority_certificate_hash="changed-certificate"
+        )
+    elif mutation == "captured":
+        old = _reidentity_probability_witness(
+            old, captured_at_utc=old.captured_at_utc + _dt.timedelta(seconds=1)
+        )
+    elif mutation == "max_age":
+        old = replace(old, max_age=old.max_age + _dt.timedelta(seconds=1))
+    elif mutation == "token":
+        from src.solve.solver import rebind_family_payoff_witness
+
+        old = rebind_family_payoff_witness(
+            old,
+            bindings=(
+                replace(old.bindings[0], yes_token_id="replaced-yes-0"),
+                *old.bindings[1:],
+            ),
+        )
+    old_context = _day0_nowcast_context_for_witness(
+        old,
+        candidate_bindings=(
+            bridge.Day0DiurnalNowcastCandidateBinding(
+                bin_id="bin-0",
+                condition_id="condition-0",
+                side="YES",
+                token_id=("replaced-yes-0" if mutation == "token" else "yes-0"),
+                bin_label="known-label",
+            ),
+        ),
+    )
+    rebound = global_batch_runtime._rebind_prepared_probability(
+        replace(
+            prepared,
+            probability_witness=old,
+            day0_diurnal_nowcast_context=old_context,
+            day0_saturation_witness_identity=old.witness_identity,
+        ),
+        full,
+    )
+
+    assert rebound.probability_witness is full
+    assert rebound.day0_diurnal_nowcast_context is old_context
+    assert rebound.day0_saturation_witness_identity == old.witness_identity
+
+
+def test_day0_probability_rebind_does_not_expand_uncovered_existing_context_side():
+    _event_id, prepared, _payload, _kwargs = _saturated_day0_auction_inputs()
+    full = prepared.probability_witness
+    from src.solve.solver import rebind_family_payoff_witness
+
+    old = rebind_family_payoff_witness(
+        full,
+        bindings=tuple(
+            replace(
+                binding,
+                no_token_id=(binding.no_token_id if binding.bin_id == "bin-0" else None),
+            )
+            for binding in full.bindings
+        ),
+    )
+    old_context = _day0_nowcast_context_for_witness(
+        old,
+        candidate_bindings=(
+            bridge.Day0DiurnalNowcastCandidateBinding(
+                bin_id="bin-0",
+                condition_id="condition-0",
+                side="YES",
+                token_id="yes-0",
+                bin_label="known-label",
+            ),
+        ),
+    )
+    rebound = global_batch_runtime._rebind_prepared_probability(
+        replace(prepared, probability_witness=old, day0_diurnal_nowcast_context=old_context),
+        full,
+    )
+
+    context = rebound.day0_diurnal_nowcast_context
+    assert context.probability_witness_identity == full.witness_identity
+    assert {
+        (binding.bin_id, binding.condition_id, binding.side, binding.token_id)
+        for binding in context.candidate_bindings
+    } == {("bin-0", "condition-0", "YES", "yes-0")}
+
+
+def test_day0_probability_rebind_does_not_retag_mismatched_saturation_hint():
+    _event_id, prepared, _payload, _kwargs = _saturated_day0_auction_inputs()
+    full = prepared.probability_witness
+    old = _day0_yes_only_witness(full)
+    rebound = global_batch_runtime._rebind_prepared_probability(
+        replace(
+            prepared,
+            probability_witness=old,
+            day0_saturation_witness_identity="different-old-witness",
+        ),
+        full,
+    )
+
+    assert rebound.probability_witness is full
+    assert rebound.day0_saturation_witness_identity == "different-old-witness"
+
+
+@pytest.mark.parametrize("mismatch", ("identity", "token", "label", "unknown_bin"))
+def test_day0_probability_rebind_keeps_mismatched_context_inert(mismatch):
+    _event_id, prepared, _payload, _kwargs = _saturated_day0_auction_inputs()
+    full = prepared.probability_witness
+    old = _day0_yes_only_witness(full)
+    bindings = [
+        bridge.Day0DiurnalNowcastCandidateBinding(
+            bin_id="bin-0",
+            condition_id="condition-0",
+            side="YES",
+            token_id=("wrong-token" if mismatch == "token" else "yes-0"),
+            bin_label="known-label",
+        )
+    ]
+    if mismatch == "label":
+        bindings.append(
+            bridge.Day0DiurnalNowcastCandidateBinding(
+                bin_id="bin-0",
+                condition_id="condition-0",
+                side="YES",
+                token_id="yes-0",
+                bin_label="conflicting-label",
+            )
+        )
+    elif mismatch == "unknown_bin":
+        bindings.append(
+            bridge.Day0DiurnalNowcastCandidateBinding(
+                bin_id="unknown-bin",
+                condition_id="unknown-condition",
+                side="YES",
+                token_id="unknown-yes",
+                bin_label="unknown-label",
+            )
+        )
+    context = _day0_nowcast_context_for_witness(
+        old,
+        candidate_bindings=bindings[:1],
+    )
+    if mismatch in {"label", "unknown_bin"}:
+        object.__setattr__(context, "candidate_bindings", tuple(bindings))
+    if mismatch == "identity":
+        context = replace(context, probability_witness_identity="wrong-identity")
+    rebound = global_batch_runtime._rebind_prepared_probability(
+        replace(prepared, probability_witness=old, day0_diurnal_nowcast_context=context),
+        full,
+    )
+
+    assert rebound.probability_witness is full
+    # A row claiming an unknown source bin is malformed authority, not a
+    # merely uncovered bin. It cannot be repaired by dropping the bad row.
+    assert rebound.day0_diurnal_nowcast_context is context
+
+
 def test_day0_saturated_no_is_removed_before_joint_kelly_and_yes_wins():
     event_id, prepared, payload, kwargs = _saturated_day0_auction_inputs()
     original = select_prepared_global_auction({event_id: prepared}, **kwargs)
