@@ -1549,6 +1549,9 @@ def enqueue_fusion_upgrade_reseeds(
                     resolve_path=_resolve_path,
                     expected_identity=expected_replacement_dependency_identity_by_role,
                     day0_payload=day0_payload,
+                    input_revision_sources=tuple(
+                        str(source) for source in verdict["changed_input_sources"]
+                    ),
                 )
             except Exception as exc:  # noqa: BLE001 — per-scope fail-soft
                 report["seed_build_failed"] = int(
@@ -1730,6 +1733,7 @@ def _build_and_write_upgrade_seed(
     resolve_path,
     expected_identity,
     day0_payload: Mapping[str, object] | None = None,
+    input_revision_sources: Sequence[str] = (),
 ) -> Path | None:
     """Build one re-materialization seed for a scope using the existing seed-builder pieces and
     atomically write it into private staging. Returns the staging Path, or None when the required
@@ -1785,5 +1789,14 @@ def _build_and_write_upgrade_seed(
     # posterior records WHY it was produced (instrument-set expansion, not a fresh cycle).
     seed_payload: dict[str, object] = dict(seed_result.seed)
     seed_payload["upgrade_trigger"] = "instrument_set_expansion"
+    revision_sources = tuple(
+        dict.fromkeys(
+            source
+            for source in (str(value).strip() for value in input_revision_sources)
+            if source
+        )
+    )
+    if revision_sources:
+        seed_payload["input_revision_sources"] = list(revision_sources)
     write_seed(seed_file, seed_payload)
     return seed_file

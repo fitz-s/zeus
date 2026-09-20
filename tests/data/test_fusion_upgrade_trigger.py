@@ -559,6 +559,11 @@ def test_upgrade_seed_baseline_lookup_obeys_manifest_and_decision_clocks(
         observed.update(kwargs)
         return {"coverage": True}
 
+    def _write_seed(path: Path, payload: dict[str, object]) -> None:
+        observed["seed_payload"] = dict(payload)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n", encoding="utf-8")
+
     output = tmp_path / "staging" / "seed.json"
     built = trigger._build_and_write_upgrade_seed(
         _conn(),
@@ -573,10 +578,7 @@ def test_upgrade_seed_baseline_lookup_obeys_manifest_and_decision_clocks(
         build_seed=lambda **_kwargs: SimpleNamespace(ok=True, seed={}),
         latest_baseline_coverage=_coverage,
         market_bins=lambda *_args, **_kwargs: (object(),),
-        write_seed=lambda path, _payload: (
-            path.parent.mkdir(parents=True, exist_ok=True),
-            path.write_text("{}\n", encoding="utf-8"),
-        ),
+        write_seed=_write_seed,
         latest_manifest=lambda *_args, **_kwargs: manifest,
         manifest_path_value=lambda *_args, **_kwargs: tmp_path / "input.json",
         manifest_base_dir=lambda *_args, **_kwargs: tmp_path,
@@ -587,11 +589,13 @@ def test_upgrade_seed_baseline_lookup_obeys_manifest_and_decision_clocks(
                 data_version="v1",
             )
         },
+        input_revision_sources=("cwa_township", "cwa_township", ""),
     )
 
     assert built == output
     assert observed["not_after_source_cycle_time"] == cycle
     assert observed["as_of_time"] == computed_at
+    assert observed["seed_payload"]["input_revision_sources"] == ["cwa_township"]
 
 
 def test_consumed_failed_publication_reclaims_same_transition_marker(
