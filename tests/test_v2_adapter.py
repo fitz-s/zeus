@@ -23,7 +23,7 @@ import threading
 import time
 import types
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -458,7 +458,12 @@ def _test_identity_receipt(signed_envelope, **overrides):
             CREATE TABLE venue_commands (
                 command_id TEXT PRIMARY KEY,
                 state TEXT NOT NULL,
-                venue_order_id TEXT
+                venue_order_id TEXT,
+                snapshot_id TEXT
+            );
+            CREATE TABLE executable_market_snapshots (
+                snapshot_id TEXT PRIMARY KEY,
+                freshness_deadline TEXT
             );
             CREATE TABLE venue_submission_envelopes (
                 envelope_id TEXT PRIMARY KEY,
@@ -477,10 +482,20 @@ def _test_identity_receipt(signed_envelope, **overrides):
             ),
             "raw_request_hash": signed_envelope.raw_request_hash,
         }
+        deadline = overrides.pop(
+            "snapshot_freshness_deadline",
+            datetime.now(timezone.utc) + timedelta(minutes=3),
+        )
+        snapshot_id = overrides.pop("snapshot_id", "test-original-snapshot")
+        if snapshot_id is not None:
+            conn.execute(
+                "INSERT INTO executable_market_snapshots VALUES (?, ?)",
+                (snapshot_id, deadline.isoformat() if isinstance(deadline, datetime) else deadline),
+            )
         identity.update(overrides)
         conn.execute(
-            "INSERT INTO venue_commands VALUES (?, 'SUBMITTING', ?)",
-            ("test-command", identity["order_id"]),
+            "INSERT INTO venue_commands VALUES (?, 'SUBMITTING', ?, ?)",
+            ("test-command", identity["order_id"], snapshot_id),
         )
         conn.execute(
             "INSERT INTO venue_submission_envelopes VALUES (?, ?, ?, ?, ?)",
@@ -3178,6 +3193,116 @@ def test_signed_identity_callback_runs_before_post(tmp_path, monkeypatch):
     names = [call[0] for call in fake.calls]
     assert names.index("create_order") < names.index("identity_persisted") < names.index("post_order")
 
+
+
+@pytest.mark.parametrize("side", ["BUY", "SELL"])
+@pytest.mark.parametrize("elapsed", [9, 10, 11])
+def test_original_snapshot_deadline_rechecked_after_identity_commit(
+    tmp_path, monkeypatch, side, elapsed
+):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    expected = "0xexpected-order-id"
+    fake = FakeTwoStepClient(post_response={"orderID": expected, "status": "LIVE"})
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type="GTC"
+    ).with_updates(side=side)
+    started = datetime.now(timezone.utc)
+
+    class Clock(datetime):
+        current = started
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current if tz is not None else cls.current.replace(tzinfo=None)
+
+    monkeypatch.setattr(adapter_mod, "datetime", Clock)
+    monkeypatch.setattr(adapter_mod, "_deterministic_v2_order_id", lambda *a, **k: expected)
+
+    def persist(signed_envelope):
+        receipt = _test_identity_receipt(
+            signed_envelope,
+            snapshot_freshness_deadline=started + timedelta(seconds=10),
+        )
+        Clock.current = started + timedelta(seconds=elapsed)
+        return receipt
+
+    result = _submit(adapter, envelope, before_post=persist)
+    posted = [call for call in fake.calls if call[0] == "post_order"]
+    if elapsed <= 10:
+        assert result.status == "accepted"
+        assert len(posted) == 1
+    else:
+        assert result.status == "rejected"
+        assert result.error_code == "V2_PRE_SUBMIT_SNAPSHOT_EXPIRED"
+        assert not posted
+
+
+@pytest.mark.parametrize("deadline", [None, "", "invalid", "2026-09-20T00:00:00"])
+def test_invalid_original_snapshot_deadline_prevents_post(tmp_path, monkeypatch, deadline):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    fake = FakeTwoStepClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
+    monkeypatch.setattr(
+        adapter_mod, "_deterministic_v2_order_id", lambda *a, **k: "0xexpected-order-id"
+    )
+    result = _submit(
+        adapter, envelope,
+        before_post=lambda signed: _test_identity_receipt(
+            signed, snapshot_freshness_deadline=deadline
+        ),
+    )
+    assert result.status == "rejected"
+    assert not any(call[0] == "post_order" for call in fake.calls)
+
+
+def test_expired_snapshot_receipt_cannot_be_renewed_or_replayed(tmp_path, monkeypatch):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    expected = "0xexpected-order-id"
+    fake = FakeTwoStepClient(post_response={"orderID": expected, "status": "LIVE"})
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
+    monkeypatch.setattr(adapter_mod, "_deterministic_v2_order_id", lambda *a, **k: expected)
+    receipts = []
+
+    def expired(signed):
+        # Signing timestamps cannot renew the original book deadline.
+        receipt = _test_identity_receipt(
+            signed.with_updates(captured_at=datetime.now(timezone.utc) + timedelta(days=1)),
+            snapshot_freshness_deadline=datetime.now(timezone.utc) - timedelta(seconds=1),
+        )
+        receipts.append(receipt)
+        return receipt
+
+    first = _submit(adapter, envelope, before_post=expired)
+    assert first.error_code == "V2_PRE_SUBMIT_SNAPSHOT_EXPIRED"
+    replay = _submit(adapter, envelope, before_post=lambda _: receipts[0])
+    assert replay.status == "rejected"
+    assert "not issued" in replay.error_message
+    assert not any(call[0] == "post_order" for call in fake.calls)
+    # A newly persisted command receipt with a fresh original snapshot can submit.
+    assert _submit(adapter, envelope).status == "accepted"
+    assert sum(call[0] == "post_order" for call in fake.calls) == 1
+
+
+def test_missing_original_snapshot_prevents_post(tmp_path, monkeypatch):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    fake = FakeTwoStepClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
+    monkeypatch.setattr(adapter_mod, "_deterministic_v2_order_id", lambda *a, **k: "0xexpected")
+    result = _submit(
+        adapter, envelope,
+        before_post=lambda signed: _test_identity_receipt(signed, snapshot_id=None),
+    )
+    assert result.status == "rejected"
+    assert "canonical read-back" in result.error_message
+    assert not any(call[0] == "post_order" for call in fake.calls)
 
 def test_signed_identity_persistence_failure_prevents_post(tmp_path, monkeypatch):
     import src.venue.polymarket_v2_adapter as adapter_mod

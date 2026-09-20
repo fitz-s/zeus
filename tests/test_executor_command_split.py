@@ -58,6 +58,8 @@ def test_pre_post_signed_identity_helper_commits_before_return(monkeypatch):
                         "a" * 64,
                         "b" * 64,
                         "c" * 64,
+                        "original-snapshot",
+                        (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat(),
                     )
 
             return Cursor()
@@ -114,6 +116,8 @@ def test_pre_post_signed_identity_helper_retries_transient_lock_before_post(monk
                         "a" * 64,
                         "b" * 64,
                         "c" * 64,
+                        "original-snapshot",
+                        (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat(),
                     )
 
             return Cursor()
@@ -6419,3 +6423,90 @@ def test_real_post_submit_path_rolls_back_final_envelope_and_fill_closure(
     else:
         assert event_types.count("SUBMIT_ACKED") == 1
         assert event_types.count(expected_fill_event) == 1
+
+
+@pytest.mark.parametrize("path", ["entry", "exit"])
+def test_expired_snapshot_after_identity_commit_is_terminal_without_post(
+    mem_conn, monkeypatch, tmp_path, path
+):
+    import src.execution.executor as executor
+    import src.venue.polymarket_v2_adapter as adapter_mod
+    from src.data.polymarket_client import _legacy_order_result_from_submit
+    from src.state.venue_command_repo import list_events
+    from tests.test_v2_adapter import FakeTwoStepClient, _adapter
+
+    if path == "entry":
+        _allow_entry_submit_until_client(monkeypatch)
+        intent = _make_entry_intent(mem_conn, limit_price=0.34)
+        def submit():
+            return executor._live_order(
+                trade_id="prepost-expired-entry", intent=intent, shares=5.0,
+                conn=mem_conn, decision_id="prepost-expired-entry",
+            )
+    else:
+        monkeypatch.setattr(executor, "_assert_risk_allocator_allows_exit_submit", lambda **k: None)
+        monkeypatch.setattr(executor, "_select_risk_allocator_order_type", lambda *a, **k: "FAK")
+        monkeypatch.setattr(executor, "_global_sell_receipt_closure_error", lambda *a, **k: None)
+        monkeypatch.setattr(executor, "_marketable_sell_certificate_error", lambda *a, **k: None)
+        intent = _make_exit_intent(
+            mem_conn, trade_id="prepost-expired-exit", shares=10.0, current_price=0.17,
+        )
+        object.__setattr__(intent, "submit_order_type", "FAK")
+        object.__setattr__(intent, "best_bid", 0.17)
+        object.__setattr__(intent, "exact_limit_price", 0.16)
+        def submit():
+            return executor.execute_exit_order(
+                intent=intent, conn=mem_conn, decision_id="prepost-expired-exit",
+            )
+
+    fake = FakeTwoStepClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    monkeypatch.setattr(adapter_mod, "_deterministic_v2_order_id", lambda *a, **k: "0xexpired")
+    released = []
+    real_release = executor._release_entry_risk_reservation
+    def release(conn, *, command_id):
+        released.append(command_id)
+        return real_release(conn, command_id=command_id)
+    monkeypatch.setattr(executor, "_release_entry_risk_reservation", release)
+
+    with patch("src.data.polymarket_client.PolymarketClient") as factory:
+        client = MagicMock()
+        factory.return_value = client
+        client.v2_preflight.return_value = None
+        bound = _capture_bound_submission_envelope(client)
+        def place(**kwargs):
+            adapter.funder_address = bound["envelope"].funder_address
+            class ExpiredClock(datetime):
+                current = datetime.now(timezone.utc)
+
+                @classmethod
+                def now(cls, tz=None):
+                    return cls.current
+
+            monkeypatch.setattr(adapter_mod, "datetime", ExpiredClock)
+
+            def persist(signed):
+                receipt = bound["identity_persister"](signed)
+                # Simulate journal latency only after the real durable callback.
+                ExpiredClock.current = receipt.snapshot_freshness_deadline + timedelta(microseconds=1)
+                return receipt
+            response = adapter.submit(bound["envelope"], before_post=persist)
+            assert response.error_code == "V2_PRE_SUBMIT_SNAPSHOT_EXPIRED", response.error_message
+            return _legacy_order_result_from_submit(response)
+        client.place_limit_order.side_effect = place
+        result = submit()
+
+    assert result.status == "rejected", result.reason
+    assert result.command_state == "REJECTED"
+    from src.venue.response_contracts import is_pre_sdk_no_side_effect_rejection
+    assert is_pre_sdk_no_side_effect_rejection(result.reason)
+    assert not any(record[0] == "post_order" for record in fake.calls)
+    command = mem_conn.execute("SELECT command_id, venue_order_id, state FROM venue_commands").fetchone()
+    assert command["venue_order_id"] == "0xexpired", result.reason
+    events = list_events(mem_conn, command["command_id"])
+    rejection = [e for e in events if e["event_type"] == "SUBMIT_REJECTED"]
+    assert len(rejection) == 1
+    assert json.loads(rejection[0]["payload_json"])["reason"] == "V2_PRE_SUBMIT_SNAPSHOT_EXPIRED"
+    assert not any(e["event_type"] in {"SUBMIT_TIMEOUT_UNKNOWN", "SUBMIT_ACKED"} for e in events)
+    if path == "entry":
+        assert released == [command["command_id"]]

@@ -427,6 +427,8 @@ class SignedIdentityPersistenceReceipt:
     signed_order_hash: str
     canonical_pre_sign_payload_hash: str
     raw_request_hash: str
+    snapshot_id: str = ""
+    snapshot_freshness_deadline: datetime | None = None
 
 
 _SIGNED_IDENTITY_RECEIPT_LOCK = threading.Lock()
@@ -448,11 +450,15 @@ def _issue_signed_identity_persistence_receipt(
                signed.order_id,
                signed.signed_order_hash,
                signed.canonical_pre_sign_payload_hash,
-               signed.raw_request_hash
+               signed.raw_request_hash,
+               command.snapshot_id,
+               snapshot.freshness_deadline
           FROM venue_commands command
           JOIN venue_submission_envelopes signed
             ON signed.envelope_id = ?
            AND signed.order_id = command.venue_order_id
+          JOIN executable_market_snapshots snapshot
+            ON snapshot.snapshot_id = command.snapshot_id
          WHERE command.command_id = ?
            AND command.state = 'SUBMITTING'
         """,
@@ -462,6 +468,9 @@ def _issue_signed_identity_persistence_receipt(
         raise V2AdapterError(
             "committed signed identity failed canonical read-back"
         )
+    deadline = datetime.fromisoformat(str(row[7] or "").replace("Z", "+00:00"))
+    if deadline.tzinfo is None:
+        raise V2AdapterError("signed identity snapshot deadline must be timezone-aware")
     receipt = SignedIdentityPersistenceReceipt(
         command_id=str(row[0] or ""),
         envelope_id=str(row[1] or ""),
@@ -469,6 +478,8 @@ def _issue_signed_identity_persistence_receipt(
         signed_order_hash=str(row[3] or ""),
         canonical_pre_sign_payload_hash=str(row[4] or ""),
         raw_request_hash=str(row[5] or ""),
+        snapshot_id=str(row[6] or ""),
+        snapshot_freshness_deadline=deadline.astimezone(timezone.utc),
     )
     with _SIGNED_IDENTITY_RECEIPT_LOCK:
         _SIGNED_IDENTITY_RECEIPTS[id(receipt)] = receipt
@@ -652,6 +663,10 @@ class StaleMarketSnapshotError(ValueError):
 
 class V2AdapterError(RuntimeError):
     """Base adapter exception for unexpected local contract failures."""
+
+
+class PrePostSnapshotExpired(V2AdapterError):
+    """The original executable snapshot expired before any venue POST."""
 
 
 class V2ReadUnavailable(V2AdapterError):
@@ -1275,6 +1290,7 @@ class PolymarketV2Adapter:
                     receipt.signed_order_hash,
                     receipt.canonical_pre_sign_payload_hash,
                     receipt.raw_request_hash,
+                    receipt.snapshot_id,
                 )
                 if not all(str(value or "").strip() for value in receipt_values):
                     raise V2AdapterError(
@@ -1290,6 +1306,19 @@ class PolymarketV2Adapter:
                 ):
                     raise V2AdapterError(
                         "signed identity persistence receipt does not match signed order"
+                    )
+                deadline = receipt.snapshot_freshness_deadline
+                if not isinstance(deadline, datetime) or deadline.tzinfo is None:
+                    raise V2AdapterError("signed identity snapshot deadline is missing or invalid")
+                # SCOPE: this command's original executable snapshot. DRAIN:
+                # reject without POST; a fresh decision must bind fresh evidence.
+                # RESET: a newly issued receipt retains its own original deadline.
+                # Signing or waiting for the local journal cannot renew a quote.
+                checked_at = datetime.now(timezone.utc)
+                if checked_at > deadline:
+                    raise PrePostSnapshotExpired(
+                        f"snapshot={receipt.snapshot_id}:deadline={deadline.isoformat()}:"
+                        f"checked_at={checked_at.isoformat()}"
                     )
                 post_started = True
                 return post_order(
@@ -3854,6 +3883,8 @@ def _is_polymarket_deterministic_request_400_error(exc: BaseException) -> bool:
 def _pre_submit_exception_code(exc: BaseException) -> str:
     """Separate safe pre-POST transport loss from terminal local defects."""
 
+    if isinstance(exc, PrePostSnapshotExpired):
+        return "V2_PRE_SUBMIT_SNAPSHOT_EXPIRED"
     if (
         isinstance(exc, PolyApiException)
         and exc.status_code is None
