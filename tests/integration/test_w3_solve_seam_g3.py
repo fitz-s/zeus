@@ -19001,6 +19001,12 @@ def test_persist_tier0_candidate_set_skips_candidates_without_city_date_context(
         (
             "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
             "GLOBAL_BUY_JIT_MAKER_WITNESS_SUPERSEDED:"
+            "ValueError:current_fill_distance_band_changed",
+            "MARKET_AUTHORITY_SUPERSEDED",
+        ),
+        (
+            "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+            "GLOBAL_BUY_JIT_MAKER_WITNESS_SUPERSEDED:"
             "ValueError:selected_witness_economics_mismatch",
             "BATCH_BLOCKED",
         ),
@@ -34981,13 +34987,21 @@ def test_global_batch_reauctions_with_tightened_candidate_q(monkeypatch):
     (
         "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED",
         "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:GLOBAL_BUY_JIT_MAKER_WITNESS_SUPERSEDED:current_limit_or_cashflow_changed",
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:GLOBAL_BUY_JIT_MAKER_WITNESS_SUPERSEDED:current_fill_distance_band_changed",
         "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:GLOBAL_SELL_ENTRY_CALIBRATION_SUPERSEDED",
         'GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:'
         'REPLACEMENT_RAW_INPUT_HWM:basis=current_ensemble_snapshot_superseded:latest_snapshot_id=2:consumed_ensemble_cycle=old',
         'GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:'
         'REPLACEMENT_RAW_INPUT_HWM:basis=used_raw_model_forecasts_superseded:model=icon_d2:latest_raw_id=2:consumed_raw_id=1',
     ),
-    ids=("probability", "market-authority", "calibration-artifact", "ensemble-clock", "raw-model-clock"),
+    ids=(
+        "probability",
+        "market-authority",
+        "market-authority-fill-band",
+        "calibration-artifact",
+        "ensemble-clock",
+        "raw-model-clock",
+    ),
 )
 def test_global_batch_rebuilds_full_cut_after_stale_sell_authority(
     monkeypatch, tmp_path, second_probability_drift, supersession_reason
@@ -40633,7 +40647,7 @@ def test_global_sell_selected_taker_mode_stays_taker_at_jit(
     assert rebound.execution_mode == "TAKER_LIMIT"
 
 
-def _current_maker_buy_candidate() -> GlobalSingleOrderCandidate:
+def _current_maker_buy_candidate(*, side: str = "YES") -> GlobalSingleOrderCandidate:
     selected_at = _dt.datetime.now(_dt.timezone.utc)
     base = _global_test_buy_candidate(
         family_key="Alpha|2026-08-12|high",
@@ -40643,7 +40657,8 @@ def _current_maker_buy_candidate() -> GlobalSingleOrderCandidate:
         captured_at=selected_at,
         bin_id="20C",
         condition_id="condition-maker-buy",
-        token_id="token-maker-buy",
+        side=side,
+        token_id=f"token-maker-buy-{side.lower()}",
         min_order_size="5",
     )
     bids = (BookLevel(price=Decimal("0.40"), size=Decimal("100")),)
@@ -40803,7 +40818,7 @@ def test_global_buy_jit_rebinds_exact_maker_witness_to_current_book():
             "tick_size": "0.001",
             "min_order_size": "5",
             "bids": [{"price": "0.40", "size": "100"}],
-            "asks": [{"price": "0.60", "size": "100"}],
+            "asks": [{"price": "0.59", "size": "80"}],
         },
         captured_at_utc=authority.snapshot.captured_at,
         market_authority=authority,
@@ -40823,6 +40838,85 @@ def test_global_buy_jit_rebinds_exact_maker_witness_to_current_book():
         rebound,
         decision_at_utc=authority.snapshot.captured_at,
     ) is None
+
+
+@pytest.mark.parametrize(
+    ("side", "fresh_ask"),
+    (
+        ("YES", "0.421"),
+        ("YES", "0.951"),
+        ("NO", "0.421"),
+        ("NO", "0.951"),
+    ),
+    ids=("yes-nearer", "yes-farther", "no-nearer", "no-farther"),
+)
+def test_global_buy_jit_maker_distance_band_change_supersedes_exact_witness(
+    side, fresh_ask
+):
+    selected = _current_maker_buy_candidate(side=side)
+    authority = _jit_market_authority(selected, tick="0.001", min_order_size="5")
+
+    with pytest.raises(ValueError) as exc_info:
+        era._global_buy_candidate_from_raw_book(
+            selected,
+            {
+                "asset_id": selected.token_id,
+                "tick_size": "0.001",
+                "min_order_size": "5",
+                "bids": [{"price": "0.40", "size": "100"}],
+                "asks": [{"price": fresh_ask, "size": "100"}],
+            },
+            captured_at_utc=authority.snapshot.captured_at,
+            market_authority=authority,
+        )
+
+    assert str(exc_info.value) == (
+        "GLOBAL_BUY_JIT_MAKER_WITNESS_SUPERSEDED:"
+        "ValueError:current_fill_distance_band_changed"
+    )
+    assert era._global_preflight_block_status(
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:" + str(exc_info.value)
+    ) == "MARKET_AUTHORITY_SUPERSEDED"
+
+
+@pytest.mark.parametrize(
+    ("fresh_ask", "superseded"),
+    (("0.901", False), ("0.902", True)),
+    ids=("equal-upper-edge-keeps-band", "above-upper-edge-changes-band"),
+)
+def test_global_buy_jit_maker_distance_band_edge_is_inclusive(
+    fresh_ask, superseded
+):
+    selected = _current_maker_buy_candidate()
+    authority = _jit_market_authority(selected, tick="0.001", min_order_size="5")
+    raw_book = {
+        "asset_id": selected.token_id,
+        "tick_size": "0.001",
+        "min_order_size": "5",
+        "bids": [{"price": "0.40", "size": "100"}],
+        "asks": [{"price": fresh_ask, "size": "100"}],
+    }
+
+    if superseded:
+        with pytest.raises(ValueError) as exc_info:
+            era._global_buy_candidate_from_raw_book(
+                selected,
+                raw_book,
+                captured_at_utc=authority.snapshot.captured_at,
+                market_authority=authority,
+            )
+        assert str(exc_info.value).endswith(
+            "ValueError:current_fill_distance_band_changed"
+        )
+    else:
+        rebound = era._global_buy_candidate_from_raw_book(
+            selected,
+            raw_book,
+            captured_at_utc=authority.snapshot.captured_at,
+            market_authority=authority,
+        )
+        assert rebound.proposal_cost_curve.levels[0].price == Decimal("0.401")
+        assert rebound.maker_fill_witness.limit_price == Decimal("0.401")
 
 
 def test_global_buy_jit_changed_maker_limit_requires_reauction():

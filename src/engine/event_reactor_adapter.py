@@ -13183,6 +13183,16 @@ def _global_buy_candidate_from_raw_book(
                 or proposal.levels[0].price != selected_witness.limit_price
             ):
                 raise ValueError("current_limit_or_cashflow_changed")
+            from src.engine.global_batch_runtime import _maker_fill_distance_band
+
+            # BUY fill authority is conditioned on ask-to-limit distance.
+            # Rebinding its book identity cannot preserve another band's odds.
+            if _maker_fill_distance_band(
+                selected_curve.levels[0].price - selected_witness.limit_price
+            ) != _maker_fill_distance_band(
+                curve.levels[0].price - proposal.levels[0].price
+            ):
+                raise ValueError("current_fill_distance_band_changed")
             current_binding = maker_fill_candidate_binding_identity(
                 action="BUY",
                 family_key=str(getattr(candidate, "family_key", "") or ""),
@@ -15391,9 +15401,11 @@ def _global_preflight_block_status(reason: str) -> str:
     if reason.startswith(
         "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
         "GLOBAL_BUY_JIT_MAKER_WITNESS_SUPERSEDED:"
-    ) and reason.endswith("current_limit_or_cashflow_changed"):
-        # The selected passive price is no longer current, so its typed maker
-        # witness and economics cannot be reused.  This is market-authority
+    ) and reason.endswith((
+        "current_limit_or_cashflow_changed", "current_fill_distance_band_changed",
+    )):
+        # The selected passive price or fill-distance band changed, so its
+        # maker witness and economics cannot be reused. This is market-authority
         # drift, not an unclassified certificate defect: rebuild the complete
         # Gamma/CLOB/raw-book cut and rank BUY/SELL/HOLD/CASH again.
         # SCOPE: this selected maker BUY's sealed market cut.
