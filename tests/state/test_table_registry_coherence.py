@@ -99,12 +99,6 @@ EXPECTED_RUNTIME_TRADE_TABLES = frozenset({
     # append-only ConditionalTokens payout observation log (ensure_table wired
     # into init_schema_trade_only via payout_observations_schema.py).
     "payout_observations",
-    # Passive post-fill book capture lineage (no admission, PnL, or settlement
-    # authority); all four tables are created by init_schema_trade_only.
-    "post_fill_book_protocols",
-    "post_fill_book_requests",
-    "post_fill_book_observation_events",
-    "post_fill_book_cursors",
     # LX-E packet 2026-07-13: position/command -> decision-certificate attribution
     # (ensure_table wired into init_schema_trade_only via
     # position_decision_attribution_schema.py).

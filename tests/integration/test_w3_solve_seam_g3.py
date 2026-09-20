@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-28
+# Last reused/audited: 2026-09-20
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -36432,21 +36432,25 @@ def test_global_auction_trade_receipt_rolls_back_if_work_expires_during_store(
         lambda: coordinator,
     )
     cancelled = [False]
+    clock = [time.monotonic()]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    deadline = clock[0] + 1.0
 
     def store_then_expire(conn, _artifact):
         row_id = conn.execute(
             "INSERT INTO receipt_probe VALUES ('must-rollback')"
         ).lastrowid
         if expiry_mode == "deadline":
-            time.sleep(0.03)
+            clock[0] = deadline + 0.01
         else:
             cancelled[0] = True
         return row_id
 
     monkeypatch.setattr(decision_chain, "store_artifact", store_then_expire)
     work_context = WorkContext(
-        time.monotonic() + (0.01 if expiry_mode == "deadline" else 1.0),
+        deadline,
         cancel_requested=lambda: cancelled[0],
+        monotonic=lambda: clock[0],
     )
     conn = sqlite3.connect(trade_path)
     persist = global_batch_runtime._global_auction_artifact_persister(
