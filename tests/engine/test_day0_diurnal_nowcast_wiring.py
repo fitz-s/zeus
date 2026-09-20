@@ -539,11 +539,12 @@ def _nowcast_candidate(*, side: str, curve: ExecutableCostCurve, mode: str = "TA
     )
 
 
-def test_global_nowcast_context_binds_real_topology_candidates_to_witness_bins():
+@pytest.mark.parametrize("metric,boundary", (("high", 33.2), ("low", 25.2)))
+def test_global_nowcast_context_binds_real_topology_candidates_to_witness_bins(metric, boundary):
     candidate = MarketTopologyCandidate(
         city="Manila",
         target_date="2026-07-02",
-        metric="high",
+        metric=metric,
         condition_id="condition-nowcast",
         yes_token_id="yes-token",
         no_token_id="no-token",
@@ -555,7 +556,7 @@ def test_global_nowcast_context_binds_real_topology_candidates_to_witness_bins()
         event_type="DAY0_EXTREME_UPDATED",
         city="Manila",
         target_date="2026-07-02",
-        metric="high",
+        metric=metric,
         condition_ids=("condition-nowcast",),
         yes_token_ids=("yes-token",),
         no_token_ids=("no-token",),
@@ -586,6 +587,7 @@ def test_global_nowcast_context_binds_real_topology_candidates_to_witness_bins()
         {
             "probability_authority": "day0_remaining_day_global_probability_v1",
             "_edli_q_source": "day0_remaining_day",
+            "_edli_day0_probability_boundary_native": boundary,
         }
     )
     bound = era._bind_day0_diurnal_nowcast_context(
@@ -597,6 +599,7 @@ def test_global_nowcast_context_binds_real_topology_candidates_to_witness_bins()
 
     context = bound.day0_diurnal_nowcast_context
     assert context.probability_witness_identity == "nowcast-witness"
+    assert context.running_extreme == boundary
     assert {(row.bin_id, row.side, row.token_id) for row in context.candidate_bindings} == {
         ("witness-bin", "YES", "yes-token"),
         ("witness-bin", "NO", "no-token"),
@@ -722,3 +725,54 @@ def test_global_nowcast_recomputes_the_local_time_cell_and_has_no_cross_cut_latc
     assert era.day0_diurnal_nowcast_candidate_rejection_reason(
         context, cheap, decision_time=next_cut,
     ) is None
+
+
+@pytest.mark.parametrize("metric,observed,boundary", (("high", 32.0, 33.2), ("low", 26.0, 25.2)))
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+@pytest.mark.parametrize("unit", ("C", "F"))
+def test_nowcast_final_uses_current_probability_boundary_over_stale_actionable(
+    monkeypatch, metric, observed, boundary, direction, unit,
+):
+    seen = []
+    model = SimpleNamespace(
+        fitted_unit=lambda city: unit,
+        held_probability=lambda **kwargs: seen.append(kwargs) or SimpleNamespace(q_held=0.5),
+    )
+    monkeypatch.setattr(
+        "src.calibration.day0_diurnal_residual.load_day0_diurnal_residual_nowcast",
+        lambda **kwargs: model,
+    )
+    key = "high_so_far" if metric == "high" else "low_so_far"
+    event = {key: observed, "rounded_value": observed,
+             "_edli_day0_probability_boundary_native": boundary}
+    actionable = {key: observed - 1, "direction": direction,
+                  "bin_label": f"32°{unit}"}
+    result = era._day0_diurnal_nowcast_verdict(
+        actionable_payload=actionable, event_payload=event, metric=metric,
+        city=SimpleNamespace(name="Manila", timezone="Asia/Manila", settlement_unit=unit),
+        decision_time=DECISION_TIME,
+    )
+    assert result is not None
+    assert seen[0]["running_extreme"] == boundary
+    assert seen[0]["direction"] == direction
+    assert era._day0_nowcast_extreme_native(event, metric) == boundary
+
+
+@pytest.mark.parametrize("metric,observed", (("high", 32.2), ("low", 25.8)))
+@pytest.mark.parametrize("boundary", (None, "invalid", float("nan"), float("inf")))
+def test_nowcast_without_finite_current_boundary_preserves_legacy(metric, observed, boundary):
+    key = "high_so_far" if metric == "high" else "low_so_far"
+    payload = {key: observed, "rounded_value": round(observed),
+               "_edli_day0_probability_boundary_native": boundary}
+    assert era._day0_nowcast_extreme_native(payload, metric) == observed
+    assert era._day0_nowcast_extreme_native(
+        payload, metric, actionable_payload={key: observed + 0.1},
+    ) == observed + 0.1
+
+
+@pytest.mark.parametrize("metric,observed,boundary", (("high", 32.2, 31.0), ("low", 25.8, 27.0)))
+def test_nowcast_rejects_regressing_physical_boundary_like_probability(metric, observed, boundary):
+    key = "high_so_far" if metric == "high" else "low_so_far"
+    payload = {key: observed, "rounded_value": round(observed),
+               "_edli_day0_probability_boundary_native": boundary}
+    assert era._day0_nowcast_extreme_native(payload, metric) == era._day0_probability_boundary_native(payload, metric)

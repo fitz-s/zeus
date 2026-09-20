@@ -23434,13 +23434,9 @@ def _day0_diurnal_nowcast_verdict(
         bin_low, bin_high = _parse_temp_range(bin_label)
         if bin_low is None and bin_high is None:
             return None
-        # The running extreme the reactor already holds for this candidate — the same
-        # observed value day0_probability_authority priced against. Never re-queried.
-        running_extreme = _optional_float(
-            actionable_payload.get("high_so_far" if metric == "high" else "low_so_far")
+        running_extreme = _day0_nowcast_extreme_native(
+            event_payload, metric, actionable_payload=actionable_payload,
         )
-        if running_extreme is None:
-            running_extreme = _observed_day0_extreme_native(event_payload, metric)
         if running_extreme is None:
             return None
         unit = str(getattr(city, "settlement_unit", "") or "").strip().upper()
@@ -39380,7 +39376,7 @@ def _bind_day0_diurnal_nowcast_context(
     try:
         city = runtime_cities_by_name().get(str(getattr(family, "city", "") or ""))
         metric = str(getattr(family, "metric", "") or "").strip().lower()
-        running_extreme = _observed_day0_extreme_native(payload, metric)
+        running_extreme = _day0_nowcast_extreme_native(payload, metric)
         witness_bindings = {
             str(binding.condition_id): binding
             for binding in tuple(getattr(witness, "bindings", ()))
@@ -46250,6 +46246,26 @@ def _observed_day0_extreme_native(
     if value is not None:
         return value
     return _optional_float(payload.get("rounded_value"))
+
+
+def _day0_nowcast_extreme_native(
+    payload: Mapping[str, object],
+    metric: str,
+    *,
+    actionable_payload: Mapping[str, object] | None = None,
+) -> float | None:
+    """Use the current statistical boundary, preserving legacy observation fallback."""
+
+    physical = _optional_float(payload.get("_edli_day0_probability_boundary_native"))
+    if physical is not None and math.isfinite(physical):
+        return _day0_probability_boundary_native(payload, metric)
+    if actionable_payload is not None:
+        value = _optional_float(
+            actionable_payload.get("high_so_far" if metric == "high" else "low_so_far")
+        )
+        if value is not None:
+            return value
+    return _observed_day0_extreme_native(payload, metric)
 
 
 def _day0_probability_boundary_native(
