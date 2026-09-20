@@ -60,7 +60,7 @@ def test_live_authorization_and_backfill_only_are_properties_not_stored_fields()
 
 def test_clock_law_for_station_prefixes_is_always_own_clock():
     assert clock_law_for("hko_fnd", family="forecast") == "own_clock"
-    assert clock_law_for("cwa_township", family="forecast") == "own_clock"
+    assert clock_law_for("cwa_township_hourly_high", family="forecast") == "own_clock"
     assert clock_law_for("cwa_township_hourly_low", family="forecast") == "own_clock"
     # Even if some future registry entry mislabels a station source's family as "forecast"
     # gridded — the prefix check wins; station identity is not overridable by a family typo.
@@ -75,7 +75,7 @@ def test_non_forecast_families_are_never_gridded_ceiling():
 def test_registry_rows_for_hko_and_cwa_are_own_clock():
     rows = source_contracts()
     assert rows["hko_fnd"].clock_law == "own_clock"
-    assert rows["cwa_township"].clock_law == "own_clock"
+    assert rows["cwa_township_hourly_high"].clock_law == "own_clock"
     assert rows["cwa_township_hourly_low"].clock_law == "own_clock"
 
 

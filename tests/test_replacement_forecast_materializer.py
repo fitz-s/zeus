@@ -325,11 +325,18 @@ def _request(
 
 
 @pytest.mark.parametrize("frozen_two_source_scheme", (False, True))
-def test_hourly_cwa_low_persisted_row_enters_real_precision_override_when_cold_start(
+@pytest.mark.parametrize(
+    ("metric", "model", "value_c"),
+    (("high", "cwa_township_hourly_high", 33.0), ("low", "cwa_township_hourly_low", 24.0)),
+)
+def test_hourly_cwa_extreme_persisted_row_enters_real_precision_override_when_cold_start(
     monkeypatch: pytest.MonkeyPatch,
     frozen_two_source_scheme: bool,
+    metric: str,
+    model: str,
+    value_c: float,
 ) -> None:
-    """The 061 LOW is an actual q-center member, not merely a selectable raw row."""
+    """Each 061 extreme enters its own q center; retired 063 remains excluded."""
     from src.config import City
 
     conn = _conn()
@@ -341,24 +348,24 @@ def test_hourly_cwa_low_persisted_row_enters_real_precision_override_when_cold_s
             raw_model_forecast_id, model, city, target_date, metric,
             source_cycle_time, source_available_at, captured_at, lead_days,
             forecast_value_c, endpoint
-        ) VALUES (?, 'cwa_township_hourly_low', 'Taipei', ?, 'low',
+        ) VALUES (?, ?, 'Taipei', ?, ?,
                   '2026-07-23T10:14:00+00:00', '2026-07-23T10:15:00+00:00',
-                  '2026-07-23T10:15:00+00:00', 1, 24.0, 'single_runs')
+                  '2026-07-23T10:15:00+00:00', 1, ?, 'single_runs')
         """,
-        (cwa_id, target.isoformat()),
+        (cwa_id, model, target.isoformat(), metric, value_c),
     )
-    # A same-city HIGH row cannot bleed into the LOW center.
+    # The retained F-D0047-063 raw row has the same metric but no entry role.
     conn.execute(
         """
         INSERT INTO raw_model_forecasts (
             raw_model_forecast_id, model, city, target_date, metric,
             source_cycle_time, source_available_at, captured_at, lead_days,
             forecast_value_c, endpoint
-        ) VALUES (702, 'cwa_township', 'Taipei', ?, 'high',
-                '2026-07-23T10:14:00+00:00', '2026-07-23T10:15:00+00:00',
-                '2026-07-23T10:15:00+00:00', 1, 33.0, 'single_runs')
+        ) VALUES (702, 'cwa_township', 'Taipei', ?, ?,
+                  '2026-07-23T10:14:00+00:00', '2026-07-23T10:15:00+00:00',
+                  '2026-07-23T10:15:00+00:00', 1, 99.0, 'single_runs')
         """,
-        (target.isoformat(),),
+        (target.isoformat(), metric),
     )
     taipei = City(
         name="Taipei", lat=25.067244, lon=121.552822, timezone="Asia/Taipei",
@@ -420,20 +427,20 @@ def test_hourly_cwa_low_persisted_row_enters_real_precision_override_when_cold_s
     request = replace(
         _request(),
         city="Taipei", city_id="Taipei", city_timezone="Asia/Taipei",
-        temperature_metric="low", target_date=target,
+        temperature_metric=metric, target_date=target,
         source_cycle_time=datetime(2026, 7, 23, 10, tzinfo=UTC),
         computed_at=datetime(2026, 7, 23, 10, 16, tzinfo=UTC),
     )
 
     override = materializer_mod._replacement_bayes_precision_fusion_override(
-        request, metric="low", anchor_value_corrected_c=25.0, conn=conn,
+        request, metric=metric, anchor_value_corrected_c=25.0, conn=conn,
     )
 
     assert override is not None
-    assert "cwa_township_hourly_low" in override.used_models
+    assert model in override.used_models
     assert "cwa_township" not in override.used_models
     assert cwa_id in override.raw_model_forecast_ids
-    assert override.current_value_serving["cwa_township_hourly_low"] == {
+    assert override.current_value_serving[model] == {
         "served_via": "single_runs",
         "previous_run_substitution": False,
         "raw_model_forecast_id": cwa_id,
@@ -442,13 +449,14 @@ def test_hourly_cwa_low_persisted_row_enters_real_precision_override_when_cold_s
         "age_hours": 0.017,
         "lead_days": 1,
     }
-    station_basis = override.precision_center_basis["cwa_township_hourly_low"]
+    station_basis = override.precision_center_basis[model]
     assert station_basis["n"] == 0.0
     assert station_basis["weight"] > 0.0
-    # Without the 24C station member, the mocked 30C extra + 25C anchor
-    # center at 27.5C; the real raw-precision center must move below 27C.
-    assert override.anchor_value_c < 27.0
-    assert "cwa_township_hourly_low" in override.low_n_prior_weighted_models
+    if metric == "low":
+        # Without the 24C station member, the mocked 30C extra + 25C anchor
+        # center at 27.5C; the real raw-precision center must move below 27C.
+        assert override.anchor_value_c < 27.0
+        assert model in override.low_n_prior_weighted_models
 
 
 def _day0_owner_witness(
