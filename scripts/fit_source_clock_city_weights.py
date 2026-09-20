@@ -84,13 +84,14 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.data.bayes_precision_fusion_download import _model_in_domain  # noqa: E402
-from src.forecast.center import MIN_SETTLED_N, raw_second_moment_weights  # noqa: E402
-from src.forecast.model_selection import (  # noqa: E402
-    ANCHOR_MODEL,
-    GLOBAL_LIKELIHOOD_MODELS,
-    REGIONAL_MODELS,
+from src.data.bayes_precision_fusion_download import (  # noqa: E402
+    BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS,
+    BAYES_PRECISION_FUSION_EXTRA_MODELS,
+    PREVIOUS_RUNS_UNSERVABLE_MODELS,
+    SINGLE_RUNS_UNSERVABLE_MODELS,
+    _model_in_domain,
 )
+from src.forecast.center import MIN_SETTLED_N, raw_second_moment_weights  # noqa: E402
 from src.strategy.live_inference.source_clock_city_weights import (  # noqa: E402
     DEFAULT_CITY_ONE_SCHEME_PATH,
     fixed_weight_center_from_values,
@@ -102,16 +103,21 @@ CITIES_DEFAULT = ROOT / "config" / "cities.json"
 OUT_DIR_DEFAULT = ROOT / "state" / "source_clock_weights"
 METRICS = ("high", "low")
 GLOBAL_CORE_BASKET = ("icon_global", "ecmwf_ifs", "ukmo_global_deterministic_10km")
-# Candidate universe = models the live pipeline actually fetches (anchor + globals +
-# regionals, src/forecast/model_selection.py). The previous_runs archive also carries
-# retired models (gfs_global/gem_global/jma_seamless/icon_seamless, dropped 2026-06-17);
-# a basket naming one would be permanently unservable at decision time — the serving
-# renormalizer would silently degrade it, and a single-model retired basket would fall
-# below PRESENT_WEIGHT_FLOOR and blank the city (the exact incident class this whole
-# artifact exists to prevent).
-LIVE_SERVABLE_MODELS = frozenset(
-    (ANCHOR_MODEL,) + GLOBAL_LIKELIHOOD_MODELS + REGIONAL_MODELS
+# Candidate universe is derived from the live downloader's declared capture registry,
+# not from historical ``raw_model_forecasts`` names. Candidate-accrual models receive the
+# same current and previous-runs captures as legacy F4 inputs specifically so the vNext
+# one-scheme fitter can compare them. A model with only one known-dead endpoint remains
+# eligible: current-value serving can use its other endpoint. Only models whose two current
+# paths are both permanently unavailable are excluded. The downloader registry also keeps
+# retired coarse/archive-only sources (gfs_global/gem_global/jma_seamless/icon_seamless) out
+# structurally, so no artifact can name a source that the live pipeline no longer captures.
+LIVE_INGESTION_MODELS = frozenset(BAYES_PRECISION_FUSION_EXTRA_MODELS).union(
+    BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS
 )
+FULLY_UNSERVABLE_CURRENT_MODELS = frozenset(SINGLE_RUNS_UNSERVABLE_MODELS).intersection(
+    PREVIOUS_RUNS_UNSERVABLE_MODELS
+)
+LIVE_SERVABLE_MODELS = LIVE_INGESTION_MODELS.difference(FULLY_UNSERVABLE_CURRENT_MODELS)
 TIER1_MIN_N = 60      # city-specific greedy basket
 TIER2_MIN_N = 30      # region-pooled basket (below TIER1_MIN_N, at/above this)
 BASKET_CAP = 4

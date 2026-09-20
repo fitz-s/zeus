@@ -26,6 +26,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 import fit_source_clock_city_weights as fscw  # noqa: E402
 
+from src.data.bayes_precision_fusion_download import (  # noqa: E402
+    BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS,
+    BAYES_PRECISION_FUSION_EXTRA_MODELS,
+    PREVIOUS_RUNS_UNSERVABLE_MODELS,
+    SINGLE_RUNS_UNSERVABLE_MODELS,
+)
 from src.forecast.center import raw_second_moment_weights  # noqa: E402
 
 
@@ -44,7 +50,7 @@ def _make_db(rows: list[dict]) -> sqlite3.Connection:
     )
     conn.execute(
         "CREATE TABLE observations (city TEXT, target_date TEXT, high_temp REAL, "
-        "low_temp REAL, unit TEXT, authority TEXT)"
+        "low_temp REAL, unit TEXT, authority TEXT, source TEXT)"
     )
     seen_settlements: set[tuple[str, str, str]] = set()
     for r in rows:
@@ -398,6 +404,132 @@ def test_default_servable_filter_excludes_retired_archive_models(tmp_path: Path)
     assert "ecmwf_ifs" in fscw.LIVE_SERVABLE_MODELS
 
 
+def test_default_servable_pool_is_derived_from_live_ingestion_contract() -> None:
+    """Every downloader-declared source with a current serving path is eligible for
+    walk-forward comparison; only a source whose two current paths are both known-dead
+    is excluded. This prevents candidate-accrual sources from silently remaining
+    observational forever while retaining the retired/coarse-source exclusion."""
+    ingestion_models = frozenset(BAYES_PRECISION_FUSION_EXTRA_MODELS).union(
+        BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS
+    )
+    no_current_path = frozenset(SINGLE_RUNS_UNSERVABLE_MODELS).intersection(
+        PREVIOUS_RUNS_UNSERVABLE_MODELS
+    )
+
+    assert fscw.LIVE_SERVABLE_MODELS == ingestion_models.difference(no_current_path)
+    assert frozenset(BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS).difference(
+        no_current_path
+    ) <= fscw.LIVE_SERVABLE_MODELS
+    assert no_current_path.isdisjoint(fscw.LIVE_SERVABLE_MODELS)
+
+
+@pytest.mark.parametrize(
+    ("city", "timezone", "country_code", "lat", "lon", "accrual_model"),
+    [
+        ("Copenhagen", "Europe/Copenhagen", "DK", 55.6761, 12.5683, "dmi_harmonie_europe"),
+        ("Amsterdam", "Europe/Amsterdam", "NL", 52.3676, 4.9041, "knmi_harmonie_netherlands"),
+        ("Tokyo", "Asia/Tokyo", "JP", 35.6762, 139.6503, "jma_msm"),
+        ("Milan", "Europe/Rome", "IT", 45.4642, 9.1900, "italiameteo_icon_2i"),
+        ("Helsinki", "Europe/Helsinki", "FI", 60.1699, 24.9384, "met_nordic"),
+        ("Dallas", "America/Chicago", "US", 32.7767, -96.7970, "nam_conus"),
+    ],
+)
+def test_default_pool_can_select_in_domain_serviceable_accrual_source(
+    tmp_path: Path,
+    city: str,
+    timezone: str,
+    country_code: str,
+    lat: float,
+    lon: float,
+    accrual_model: str,
+) -> None:
+    """An in-domain candidate-accrual source competes under the existing city-level
+    minimum-sample, paired-gain and provider-family selection rules; it is not
+    unconditionally selected or otherwise granted a probability-path exception."""
+    rows = []
+    for metric in fscw.METRICS:
+        rows += _rows_for_city(
+            city,
+            metric,
+            70,
+            models={accrual_model: 0.1, "ecmwf_ifs": 1.5},
+        )
+    conn = _make_db(rows)
+    cities_path = _cities_json(
+        tmp_path,
+        [{
+            "name": city,
+            "timezone": timezone,
+            "country_code": country_code,
+            "lat": lat,
+            "lon": lon,
+        }],
+    )
+
+    artifact = fscw.build_artifact(
+        conn,
+        as_of="2026-12-31",
+        generated_at="FIXED",
+        cities_path=cities_path,
+        frozen_csv_path=tmp_path / "missing.csv",
+        git_sha="FIXED",
+    )
+
+    models = artifact["cities"][city]["high"]["models"]
+    assert accrual_model in models
+    assert "ecmwf_ifs" in models
+
+
+@pytest.mark.parametrize(
+    "accrual_model",
+    sorted(
+        frozenset(BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS).difference(
+            frozenset(SINGLE_RUNS_UNSERVABLE_MODELS).intersection(
+                PREVIOUS_RUNS_UNSERVABLE_MODELS
+            )
+        )
+    ),
+)
+def test_serviceable_accrual_source_stays_excluded_outside_its_domain(
+    tmp_path: Path,
+    accrual_model: str,
+) -> None:
+    """Expanding the fitter pool does not turn archived regional rows into global
+    sources. Every serviceable candidate remains subject to the downloader's own
+    city-domain gate before it can reach the existing basket selection."""
+    city = "OutOfDomainCity"
+    lat, lon = -18.0, 178.0
+    assert not fscw._model_in_domain(accrual_model, lat=lat, lon=lon, lead_days=0)
+    rows = _rows_for_city(
+        city,
+        "high",
+        70,
+        models={accrual_model: 0.01, "ecmwf_ifs": 0.8, "icon_global": 1.0},
+    )
+    conn = _make_db(rows)
+    cities_path = _cities_json(
+        tmp_path,
+        [{
+            "name": city,
+            "timezone": "Pacific/Fiji",
+            "country_code": "FJ",
+            "lat": lat,
+            "lon": lon,
+        }],
+    )
+
+    artifact = fscw.build_artifact(
+        conn,
+        as_of="2026-12-31",
+        generated_at="FIXED",
+        cities_path=cities_path,
+        frozen_csv_path=tmp_path / "missing.csv",
+        git_sha="FIXED",
+    )
+
+    assert accrual_model not in artifact["cities"][city]["high"]["models"]
+
+
 def test_artifact_excludes_models_outside_each_city_domain(tmp_path: Path) -> None:
     """Archived rows cannot license a model the current downloader will never request.
 
@@ -534,8 +666,8 @@ def test_observation_truth_fills_metric_without_venue_settlement(tmp_path: Path)
                     (model, "ObsCity", date, metric, 1, base + offset, "previous_runs"),
                 )
         conn.execute(
-            "INSERT INTO observations VALUES (?,?,?,?,?,?)",
-            ("ObsCity", date, truth + 8.0, truth, "C", "VERIFIED"),
+            "INSERT INTO observations VALUES (?,?,?,?,?,?,?)",
+            ("ObsCity", date, truth + 8.0, truth, "C", "VERIFIED", "test_observation"),
         )
     conn.commit()
     cities_path = _cities_json(
@@ -577,8 +709,8 @@ def test_venue_settlement_preferred_over_observation_when_both_exist(tmp_path: P
             ("BothCity", date, "high", venue, "C", "VERIFIED"),
         )
         conn.execute(
-            "INSERT INTO observations VALUES (?,?,?,?,?,?)",
-            ("BothCity", date, obs, obs - 8.0, "C", "VERIFIED"),
+            "INSERT INTO observations VALUES (?,?,?,?,?,?,?)",
+            ("BothCity", date, obs, obs - 8.0, "C", "VERIFIED", "test_observation"),
         )
     conn.commit()
     loaded = fscw.load_walk_forward_rows(conn, as_of="2026-12-31")
