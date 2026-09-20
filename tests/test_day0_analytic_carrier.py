@@ -57,7 +57,7 @@ def _normal_interval(mu: float, sigma: float, low: float, high: float) -> float:
 def test_default_is_v2_and_unknown_operator_rejects():
     assert DAY0_REMAINING_CARRIER_OPERATOR == DAY0_REMAINING_CARRIER_OPERATOR_V2
     assert _call()["operator"] == DAY0_REMAINING_CARRIER_OPERATOR_V2
-    with pytest.raises(ValueError, match="DAY0_REMAINING_CARRIER_OPERATOR_UNKNOWN"):
+    with pytest.raises(ValueError, match="unsupported Day0 remaining carrier operator"):
         _call(operator="future_operator")
 
 

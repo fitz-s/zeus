@@ -1116,7 +1116,7 @@ def build_day0_remaining_probability_carrier(
         DAY0_REMAINING_CARRIER_OPERATOR_V1,
         DAY0_REMAINING_CARRIER_OPERATOR_V2,
     }:
-        raise ValueError("DAY0_REMAINING_CARRIER_OPERATOR_UNKNOWN")
+        raise ValueError("unsupported Day0 remaining carrier operator")
 
     def draw(rows: int, seed: int) -> np.ndarray:
         rng = np.random.default_rng(seed)
