@@ -98,10 +98,10 @@ class _HeldContinuityStatus(StrEnum):
 def _day0_carrier_identity_reason(provenance: Mapping[str, Any]) -> str | None:
     """Require current identity whenever the posterior declares a shared carrier."""
 
-    identity_key = "day0_remaining_carrier_content_identity"
-    operator_key = "day0_remaining_carrier_operator"
-    has_identity = identity_key in provenance
-    has_operator = operator_key in provenance
+    identity_field = "day0_remaining_carrier_content_identity"
+    operator_field = "day0_remaining_carrier_operator"
+    has_identity = identity_field in provenance
+    has_operator = operator_field in provenance
     if (
         not has_identity
         and not has_operator
@@ -111,8 +111,8 @@ def _day0_carrier_identity_reason(provenance: Mapping[str, Any]) -> str | None:
         )
     ):
         return None
-    identity = provenance.get(identity_key)
-    operator = provenance.get(operator_key)
+    identity = provenance.get(identity_field)
+    operator = provenance.get(operator_field)
     if not isinstance(identity, str) or not identity.strip():
         return "REPLACEMENT_DAY0_CARRIER_IDENTITY_PAIR_INCOMPLETE"
     if not isinstance(operator, str) or not operator:
