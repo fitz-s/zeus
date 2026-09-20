@@ -226,11 +226,17 @@ def test_candidate_accrual_uses_current_targets_after_live_coverage(monkeypatch,
         hour=0, minute=0, second=0, microsecond=0
     )
     target_date = cycle.date().isoformat()
-    rows = [_row(city="Helsinki", target_date=target_date, covered=True)]
     monkeypatch.setattr(
         plan_mod,
         "build_replacement_forecast_current_target_plan",
-        lambda _db: _plan(rows),
+        lambda _db: (_ for _ in ()).throw(
+            AssertionError("candidate capture must not build the full readiness plan")
+        ),
+    )
+    monkeypatch.setattr(
+        production,
+        "_candidate_accrual_market_scopes",
+        lambda _db, *, models: (("Helsinki", target_date, "high"),),
     )
     monkeypatch.setattr(
         production,
@@ -386,8 +392,8 @@ def test_candidate_accrual_metadata_timebox_never_starts_capture(monkeypatch, tm
     ]
 
 
-def test_candidate_accrual_planning_timebox_never_starts_capture(monkeypatch, tmp_path) -> None:
-    """The candidate deadline includes plan and rotation work after metadata returns."""
+def test_candidate_accrual_scope_planning_timebox_never_starts_capture(monkeypatch, tmp_path) -> None:
+    """The candidate deadline includes scoped planning and rotation after metadata."""
     from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
 
     cycle = datetime.now(timezone.utc).replace(
@@ -397,7 +403,14 @@ def test_candidate_accrual_planning_timebox_never_starts_capture(monkeypatch, tm
     monkeypatch.setattr(
         plan_mod,
         "build_replacement_forecast_current_target_plan",
-        lambda _db: _plan([_row(city="Helsinki", target_date=target_date, covered=True)]),
+        lambda _db: (_ for _ in ()).throw(
+            AssertionError("candidate capture must not build the full readiness plan")
+        ),
+    )
+    monkeypatch.setattr(
+        production,
+        "_candidate_accrual_market_scopes",
+        lambda _db, *, models: (("Helsinki", target_date, "high"),),
     )
     monkeypatch.setattr(
         dl_mod,
@@ -483,6 +496,11 @@ def test_candidate_accrual_recovery_cooldown_skips_capture_but_retries(monkeypat
     monkeypatch.setattr(
         "src.strategy.live_inference.source_clock_vnext.source_publicly_usable_at",
         lambda _run: datetime(1970, 1, 1, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        production,
+        "_candidate_accrual_market_scopes",
+        lambda _db, *, models: (("Helsinki", "2026-09-21", "high"),),
     )
     metadata_calls: list[object] = []
     monkeypatch.setattr(

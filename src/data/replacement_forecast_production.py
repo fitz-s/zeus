@@ -1051,6 +1051,7 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
     quota_lane: str = "source_clock",
     frozen_source_runs: Mapping[str, tuple[datetime, datetime]] | None = None,
     planning_cycle: datetime | None = None,
+    capture_target_scopes: Sequence[tuple[str, str, str]] | None = None,
     include_previous_runs: bool = True,
     prune_after: bool = True,
     deadline_monotonic: float | None = None,
@@ -1112,8 +1113,10 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
         # Future targets still need full local-day coverage. Active Day0 targets may use
         # an elapsed-prefix-only vector, but the downstream parser must prove that it spans
         # decision time through the unresolved evening before any row becomes authority.
-        plan = build_replacement_forecast_current_target_plan(Path(str(forecast_db)))
         decision_time = datetime.now(timezone.utc)
+        plan = None
+        if capture_target_scopes is None:
+            plan = build_replacement_forecast_current_target_plan(Path(str(forecast_db)))
         coverage = (
             None
             if capture_when_covered
@@ -1132,7 +1135,18 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
             held_priority = held_position_family_priorities()
         except Exception:
             held_priority = {}
-        capture_rows: list[object] = list(plan.rows)
+        capture_rows: list[object] = (
+            list(plan.rows)
+            if plan is not None
+            else [
+                ReplacementForecastTargetKey(
+                    city=city,
+                    target_date=target_date,
+                    temperature_metric=metric,
+                )
+                for city, target_date, metric in capture_target_scopes or ()
+            ]
+        )
         planned_scopes = {
             (row.city, row.target_date, row.temperature_metric)
             for row in capture_rows
@@ -1364,6 +1378,59 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
         return {"status": "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED", "error": str(exc)}
 
 
+def _candidate_accrual_market_scopes(
+    forecast_db: Path,
+    *,
+    models: Sequence[str],
+) -> tuple[tuple[str, str, str], ...]:
+    """Read only current market families where a candidate model can serve a city.
+
+    Candidate capture needs raw values, not the full materialization-readiness plan.
+    The latter performs expensive posterior/artifact joins across every city and can
+    consume this background lane before its first network request.
+    """
+    from src.config import cities_by_name  # noqa: PLC0415
+    from src.data.bayes_precision_fusion_download import _model_in_domain  # noqa: PLC0415
+    from src.state.db import _connect_read_only  # noqa: PLC0415
+
+    candidate_cities = tuple(
+        sorted(
+            city_name
+            for city_name, city_cfg in cities_by_name.items()
+            if any(
+                _model_in_domain(
+                    model,
+                    lat=float(city_cfg.lat),
+                    lon=float(city_cfg.lon),
+                    lead_days=0,
+                )
+                for model in models
+            )
+        )
+    )
+    if not candidate_cities:
+        return ()
+    placeholders = ", ".join("?" for _ in candidate_cities)
+    minimum_target_date = datetime.now(timezone.utc).date().isoformat()
+    conn = _connect_read_only(forecast_db)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT DISTINCT city, target_date, temperature_metric
+            FROM market_events
+            WHERE city IN ({placeholders})
+              AND target_date >= ?
+              AND token_id IS NOT NULL AND token_id != ''
+              AND range_label IS NOT NULL AND range_label != ''
+            ORDER BY target_date, city, temperature_metric
+            """,
+            (*candidate_cities, minimum_target_date),
+        ).fetchall()
+    finally:
+        conn.close()
+    return tuple((str(city), str(target_date), str(metric)) for city, target_date, metric in rows)
+
+
 def _download_bayes_precision_fusion_candidate_accrual_if_needed(
     cfg: dict[str, object],
 ) -> dict[str, object] | None:
@@ -1441,6 +1508,15 @@ def _download_bayes_precision_fusion_candidate_accrual_if_needed(
                 "status": "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_NO_PUBLIC_RUN",
                 "candidate_models": models,
             }
+        candidate_target_scopes = _candidate_accrual_market_scopes(
+            Path(str(cfg["forecast_db"])),
+            models=tuple(model for model in models if model in frozen_source_runs),
+        )
+        if not candidate_target_scopes:
+            return {
+                "status": "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_NO_TARGETS",
+                "candidate_models": tuple(frozen_source_runs),
+            }
         planning_cycle = max(run for run, _available in frozen_source_runs.values())
         return _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
             cfg,
@@ -1450,6 +1526,7 @@ def _download_bayes_precision_fusion_candidate_accrual_if_needed(
             quota_lane="recovery",
             frozen_source_runs=frozen_source_runs,
             planning_cycle=planning_cycle,
+            capture_target_scopes=candidate_target_scopes,
             include_previous_runs=False,
             prune_after=False,
             deadline_monotonic=(
