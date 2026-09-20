@@ -1761,12 +1761,22 @@ def test_substrate_refresh_wake_runs_screen_without_reactor(monkeypatch):
     monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda **_kwargs: wake)
     monkeypatch.setattr(
         reactor_wake,
+        "coalescible_reactor_wakes",
+        lambda selected, **_kwargs: (selected,),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
         "acknowledge_reactor_wake",
         lambda _wake: calls.append("ack") or True,
     )
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", _Lock())
     monkeypatch.setattr(main_module, "_edli_redecision_screen_lock", _Lock())
     monkeypatch.setattr(main_module, "_held_position_monitor_active", _Held())
+    monkeypatch.setattr(
+        main_module,
+        "_periodic_held_position_monitor_fairness_debt",
+        _Held(),
+    )
     monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _job: False)
     monkeypatch.setattr(
         main_module,
@@ -1835,11 +1845,21 @@ def test_forecast_wake_is_not_blocked_by_held_position_monitor(monkeypatch):
     monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda **_kwargs: wake)
     monkeypatch.setattr(
         reactor_wake,
+        "coalescible_reactor_wakes",
+        lambda selected, **_kwargs: (selected,),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
         "acknowledge_reactor_wake",
         lambda _wake: calls.append("ack") or True,
     )
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", _Lock())
     monkeypatch.setattr(main_module, "_held_position_monitor_active", _Held())
+    monkeypatch.setattr(
+        main_module,
+        "_periodic_held_position_monitor_fairness_debt",
+        threading.Event(),
+    )
     monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _job: False)
     monkeypatch.setattr(
         main_module,
@@ -1875,11 +1895,21 @@ def test_event_backed_wake_stays_queued_while_event_is_retryable(monkeypatch):
     monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda **_kwargs: wake)
     monkeypatch.setattr(
         reactor_wake,
+        "coalescible_reactor_wakes",
+        lambda selected, **_kwargs: (selected,),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
         "acknowledge_reactor_wake",
         lambda _wake: calls.append("ack") or True,
     )
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", _Lock())
     monkeypatch.setattr(main_module, "_held_position_monitor_active", _Held())
+    monkeypatch.setattr(
+        main_module,
+        "_periodic_held_position_monitor_fairness_debt",
+        _Held(),
+    )
     monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _job: False)
     monkeypatch.setattr(
         main_module,
