@@ -2,8 +2,10 @@
 """Boot-card generator -- representation contract §2 (generated metadata surface).
 # repr-surface: class=generated writer=scripts/gen_boot_card.py drift_detector=--check
 Assembles build/repr/boot_card.md deterministically from checked_policy_input sources
-(architecture/canonical_vocabulary.yaml, architecture/invariants.yaml, AGENTS.md Boot
-Digest) plus a small hand_kernel routing/stop-rule block owned by this script. No live
+(architecture/canonical_vocabulary.yaml, architecture/invariants.yaml, anchored AGENTS.md
+law paragraphs) plus a small hand_kernel routing/stop-rule block owned by this script.
+The representation contract that defines this surface lives off the default branch
+(removed from live by e9024b5c4); AGENTS.md is the on-branch authority for the kernel. No live
 DB reads, no dates, no run-to-run nondeterminism -- output is a pure function of repo
 state, so `--check` (regen + diff) is the drift detector for this surface.
 
@@ -16,7 +18,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -36,18 +37,23 @@ ROOT = _REPO_ROOT
 AGENTS_PATH = ROOT / "AGENTS.md"
 INVARIANTS_PATH = ROOT / "architecture" / "invariants.yaml"
 CANONICAL_VOCABULARY_PATH = ROOT / "architecture" / "canonical_vocabulary.yaml"
-CONTRACT_PATH = ROOT / "docs" / "rebuild" / "representation_contract_2026-07-08.md"
 OUTPUT_PATH = ROOT / "build" / "repr" / "boot_card.md"
 
-# contract §2: root <=2.5K/scoped <=500 tokens ~= 4 chars/token estimate; same constant
+# 4 chars/token estimate from the off-branch representation contract §2 (root <=2.5K/
+# scoped <=500 tokens); the estimate is the shared constant, not a live authority. Same one
 # used by scripts/topology_doctor_repr_checks.py check_agents_token_budgets for
 # comparability between the two token-budget reports.
 CHARS_PER_TOKEN_ESTIMATE = 4
 TOKEN_BUDGET = 5000
 
-# Digest one-liners pulled verbatim from AGENTS.md Boot Digest by section name --
-# this list IS the selection policy (edit here, not by re-deriving upstream text).
-AXIOM_SECTIONS = ("Mission", "Time law", "DBs")
+# The Boot Digest is a loader now and carries no law, so the kernel quotes the law itself.
+# One distinctive literal per fact IS the selection policy: reword the anchored sentence in
+# AGENTS.md and this fails loudly rather than emitting an empty kernel.
+AXIOM_ANCHORS = (
+    ("Mission", "Zeus trades Polymarket weather derivatives"),
+    ("Time law", "Facts carry source-issued"),
+    ("DBs", "`state/zeus-world.db`"),
+)
 
 ROUTING_BLOCK = """## Query routing
 structure/callers/blast-radius -> codegraph (code-review-graph MCP), not grep-first.
@@ -97,20 +103,21 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 
 def _axiom_kernel() -> str:
-    text = AGENTS_PATH.read_text(encoding="utf-8")
-    digest = text.split("## Boot Digest", 1)[1].split("## 0. Mission", 1)[0]
-    lines = [line.strip() for line in digest.splitlines() if line.strip().startswith("**")]
+    paras = [p.strip() for p in AGENTS_PATH.read_text(encoding="utf-8").split("\n\n")]
     picked = []
-    for line in lines:
-        section = re.match(r"\*\*([A-Za-z &]+?)\s*\[", line)
-        if section and section.group(1).strip() in AXIOM_SECTIONS:
-            picked.append(line)
+    for label, anchor in AXIOM_ANCHORS:
+        hit = next((p for p in paras if anchor in p), None)
+        if hit is None:
+            raise SystemExit(
+                f"gen_boot_card: axiom anchor {label} ({anchor!r}) not found in "
+                f"{AGENTS_PATH.relative_to(ROOT)} -- re-anchor AXIOM_ANCHORS to the law"
+            )
+        picked.append(f"**{label}.** {hit}")
     body = "\n".join(picked)
     return (
-        "## Axiom kernel (verbatim subset of AGENTS.md Boot Digest -- narrower surface wins;\n"
+        "## Axiom kernel (verbatim AGENTS.md law paragraphs -- narrower surface wins;\n"
         "## this card licenses orientation only, not a substitute for AGENTS.md/scoped AGENTS.md)\n"
         f"{body}\n"
-        f"Full representation contract: {CONTRACT_PATH.relative_to(ROOT)}\n"
     )
 
 

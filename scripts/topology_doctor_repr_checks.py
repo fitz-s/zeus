@@ -1,6 +1,7 @@
 """Representation-contract checker family for topology_doctor (`--repr`)."""
 # Lifecycle: created=2026-07-08; last_reviewed=2026-07-08; last_reused=never
-# Purpose: advisory-only heuristic checks against docs/rebuild/representation_contract_2026-07-08.md
+# Purpose: advisory-only heuristic checks against the representation contract
+# (docs/rebuild/representation_contract_2026-07-08.md, off the default branch since e9024b5c4)
 #   (comment law banned patterns, canonical_vocabulary.yaml forbidden aliases in new defs, AGENTS.md
 #   token budgets). Always returns ok=True / exit 0 -- a signal surface for R0-h, promoted to blocking
 #   only under contract Sec 5 R8. Scope: NEW or changed files only (legacy is migration debt).
@@ -262,7 +263,10 @@ def check_forbidden_aliases_in_new_defs(
 
 ROOT_AGENTS_TOKEN_BUDGET = 2500
 SCOPED_AGENTS_TOKEN_BUDGET = 500
-# contract Sec 1.3: root <=2.5K tokens ~= 10KB, scoped <=500 tokens ~= 2KB -> ~4 chars/token.
+# Budgets come from the representation contract Sec 1.3 (root <=2.5K tokens ~= 10KB,
+# scoped <=500 tokens ~= 2KB -> ~4 chars/token). That contract left the default branch
+# with docs/rebuild/ (e9024b5c4), so these are a report-only reference line, not live
+# authority: root carries the cross-subtree prohibitions and exceeds 2.5K by design.
 CHARS_PER_TOKEN_ESTIMATE = 4
 
 
@@ -287,7 +291,7 @@ def check_agents_token_budgets(api: Any) -> list[dict[str, Any]]:
             {
                 "code": "repr_agents_token_budget_report",
                 "path": rel,
-                "message": f"~{tokens} tokens (budget {budget}, {'root' if is_root else 'scoped'}) "
+                "message": f"~{tokens} tokens (reference budget {budget}, {'root' if is_root else 'scoped'}) "
                 f"{'OVER BUDGET' if tokens > budget else 'within budget'}",
                 "severity": "info" if tokens <= budget else "warning",
             }

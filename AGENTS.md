@@ -1,342 +1,129 @@
 # Zeus AGENTS
 
-Root operating contract for this repo: durable law, money-path mental models, evidence gates, routing. Never store runtime snapshots here (branches, SHAs, PIDs, bankrolls, receipts, packet diaries). Nested `AGENTS.md` govern their subtrees; direct instructions override all AGENTS files.
+## Boot Digest (loader only)
 
-## Boot Digest (SessionStart injection slice — NOT a reading surface)
+A SessionStart prefix is orientation, not the contract. Before acting, read this file in full and the scoped `AGENTS.md` for each touched subtree. Already loaded in full means no duplicate read.
 
-SessionStart injects only a prefix of this file; this digest keeps the whole law in outline under truncation. **Reading contract: the digest licenses orientation only.** Before touching any surface a digest line names, Read that section (§N) plus the scoped `AGENTS.md` of the subtree — the digest omits the tables and gates that make the law executable. Citing "Boot Digest" as authority is itself a misread. Reading this file directly? Skip the digest; read §0–§7.
+**END OF DIGEST.**
 
-**Mission [full law: §0].** Zeus trades Polymarket weather derivatives: `contract semantics -> source truth -> forecast signal -> calibration -> edge -> execution -> monitoring -> settlement -> learning`. Every non-trivial change states where it sits on that chain and how it behaves on re-decision. The chain is CYCLIC; no decision final until settlement; §0 carries the re-decision lanes this omits.
-
-**Time law [§0].** Freshness gates fail closed (DATA_DEGRADED), never stale-as-fresh; re-fetch executable truth at submit (FC-03). Learning strictly walk-forward; decision probability frozen as immutable certificate; no look-ahead.
-
-**Probability authority [§0 + docs/authority/replacement_final_form_2026_06_09.md].** Replacement chain is strategy of record. On the source-clock live route, current provider center + same-cycle causal target-specific ENS within-spread + absolute ENS-center disagreement + simultaneous provider between-spread produce one settlement-preimage q and current-evidence q bounds; missing same-cycle shape fails closed. Historical residual/floor/mixture transforms, stale ENS shapes, and legacy ENS/Platt are offline evidence only.
-
-**Proof discipline [§1 — both tables mandatory before any live/armed/safe claim].** Narrowest authoritative surface wins: direct instructions > AGENTS > executable law > authority docs > current facts > references > derived context (CodeGraph/CRG answer WHERE, never what is true) > archives. Stale surface = say stale, stop using it. Do not collapse §1's per-claim proof lines.
-
-**DBs [§2].** `zeus-world.db` (world/markets), `zeus-forecasts.db` (observations/settlements/calibration), `zeus_trades.db` (positions/orders/execution). Ownership machine-checked; no write transaction spans DBs on independent connections — only the two sanctioned helpers (INV-37).
-
-**Settlement [§2 — read before ANY settlement/bin/source work].** Integer temps from Weather Underground; every settlement write passes `SettlementSemantics.assert_settlement_value()`. Bin types point / finite_range / open_shoulder — never infer semantics from label punctuation. HIGH and LOW tracks share calendar geometry, nothing else.
-
-**Risk & lifecycle [§2].** GREEN/YELLOW/ORANGE/RED = max(individual); advisory-only risk forbidden (INV-05); only RED sweeps. Lifecycle enum-governed `pending_entry -> ... -> settled`; exit intent ≠ closure; settlement ≠ exit. Reconciliation: Chain > Chronicler > Portfolio. Fail-closed gates declare SCOPE/DRAIN/RESET or are presumed defective (INV-47).
-
-**Routing [§3 — has the per-task supplemental-read table this omits].** Root AGENTS -> scoped AGENTS for touched subtrees -> CodeGraph for structure (don't grep-first for symbols) -> targeted reference per §3 table. STOP AND PLAN before `architecture/**`, `docs/authority/**`, workflows, `src/state/**` truth paths, `src/control/**`, `src/supervisor_api/**`, cross-zone, >4 files, or anything canonical/lifecycle/schema/live-execution/settlement.
-
-**Docs & registries [§4 — registry-route table].** Unregistered files are invisible; every added/renamed/deleted file updates its owning registry. Current-fact docs are summary-only, evidence-backed, expiry-bound. No root coordination/scratch files unless asked.
-
-**Change control [§5].** `live` is the live branch (traded 24/7; commits arrive ONLY by hot-fix cherry-pick or merged PR — never a direct commit/edit; never mutate its checkout — `maintree_git_state_guard`); all work uses its durable role worktree, which persists across tasks until operator retirement, then lands via hot-fix cherry-pick (urgent money-path defect) or milestone PR; `type(scope): subject`; no destructive git; preserve unrelated dirty work; gates never weakened to land faster.
-
-**Review [§6 + REVIEW.md first].** Runtime-risk order (Tier 0 live-money before all); empty findings + partial coverage ≠ clean pass.
-
-**Code discipline [§7].** Concise/precise code and comments; trim names; entities earn existence only when the problem demands it; runtime mechanism = precision+simplicity; fix syntax-semantics gaps in the shape, not a comment; minimum tokens, maximum precision.
-
-**END OF DIGEST.** Law starts at §0. Context ends here = boot slice truncated: Read this file in full before acting on any named surface.
+Root owns cross-cutting law; scoped AGENTS own subtree routes/hazards. Direct instructions override AGENTS. Runtime snapshots (SHAs, PIDs, bankrolls, receipts, packet diaries, current config/version posture) belong on existing evidence surfaces, never here.
 
 ## 0. Mission And Money Path
 
-Zeus is a quantitative trading engine for Polymarket weather derivatives. It converts atmospheric data into settlement-aware probabilities, expected edge, position sizes, orders, monitoring actions, settlement records, and learning feedback.
+Zeus trades Polymarket weather derivatives: `contract semantics -> source truth -> forecast signal -> calibration -> edge -> execution -> monitoring -> settlement -> learning`. Every non-trivial change identifies its place, upstream truth and re-decision behavior; downstream optimization cannot guess contract/source/settlement truth.
 
-Primary causal chain:
+Convert a real-time multi-source probability lead into realized profit through fills: admission connects settlement-aware belief, symmetric YES/NO executable edge and Fractional Kelly sizing. Probability improvement alone is not trading edge. Prevent total loss by re-deciding before position expectation reaches zero; hold to settlement/redeem while computation remains correct and the action law supports holding. These objectives waive no execution/risk/sizing law and guarantee no exit fill.
 
-`contract semantics -> source truth -> forecast signal -> calibration -> edge -> execution -> monitoring -> settlement -> learning`
+The scheduled/event-woken cycle revisits forecasts, observations, books and deadlines; cadences are config. Re-emit entries with fair round-robin coverage of the full city x metric universe. Screen confirmed resting maker entries against current same-side best bid, never ask cost; pull/re-decide on book drift or belief decay, escalate rest to cross at deadline. Each monitor cycle passes fresh probability/quote in `ExitContext` through `Position.evaluate_exit`. Re-evaluation continues through exit, settlement and learning; no decision is final before settlement.
 
-Every non-trivial change must say where it sits on that chain, what upstream truth it consumes, and how it behaves on re-decision. A downstream optimization that guesses contract/source/settlement truth is a money-path bug.
+Facts carry source-issued, fetched and written timestamps. Stale forecasts/observations/quotes cause DATA_DEGRADED, never stale-as-fresh. Re-fetch executable truth at submit or fail closed (FC-03). Learning is walk-forward: de-bias/calibration use only outcomes settled before the decision; settlement skill-attribution grades only the immutable decision-time probability certificate. No look-ahead.
 
-### Cyclic, Not One-Shot
+Probability authority: replacement chain (`docs/authority/replacement_final_form_2026_06_09.md`), single-q regime (`docs/authority/regime_unification_2026-06-12.md`). Source-clock live posteriors use current provider center `mu*`, same-cycle causal target-specific ENS within-spread, absolute ENS-center disagreement and simultaneous provider between-spread: `sigma_pred = sqrt(within^2 + ens_center_delta^2 + between^2)`; integrate `N(mu*, sigma_pred)` over settlement preimages for current-evidence `q`, `q_lcb`, `q_ucb`.
 
-The chain above is one pass of a continuously repeating cycle, not a single decision. Zeus runs as a mesh of recurring scheduled jobs whose cadences range from seconds to daily — entry reactor, continuous-redecision screen, maker-rest escalation, held-position monitor/exit, command recovery, settlement skill-attribution, and freshness/heartbeat backstops (specific cadences are config, not root law). Every node on the chain is revisited as wall-clock time advances and as new information arrives: a fresher forecast issue, a moved book, a new observation, an elapsed deadline. No decision is final until settlement.
-
-Re-decision is a first-class lane, not an exception path:
-
-- New-entry candidates are re-emitted every reactor cycle; fair round-robin covers the full city×metric family universe over a few cycles, so a market passed over is reconsidered against fresh evidence rather than abandoned.
-- A confirmed resting maker entry stays under continuous re-decision — screened against current same-side best bid (never ask cost), pulled and re-decided when the book drifts past tolerance or belief decays, escalated rest→cross when its deadline elapses.
-- A held position is re-evaluated every monitor cycle on a fresh `ExitContext` (refreshed probability and CLOB quote) through `Position.evaluate_exit`: continuous re-evaluation before fill, during holding, through exit, and after settlement.
-
-Time-ordering is law:
-
-- Every fact carries source-issued, fetched, and written timestamps. Freshness gates drop stale forecasts, observations, and quotes and fail closed (DATA_DEGRADED, read-only); they never bridge a gap with stale-as-fresh. Selection-time executable truth is not submit-time truth (FC-03): re-fetch a fresh snapshot at submit or fail closed.
-- Learning is strictly walk-forward. De-bias and calibration consume only outcomes settled before the decision; the decision probability is frozen at decision time as an immutable certificate; settlement skill-attribution grades against that frozen certificate. No look-ahead crosses the time boundary.
-- Lifecycle is a monotonic time progression (`pending_entry -> ... -> settled`); each strategy's edge decays on its own clock (§2 alpha decay).
-
-### Probability Authority
-
-The replacement chain is the strategy of record. Authority basis: `docs/authority/replacement_final_form_2026_06_09.md`; single-q regime law: `docs/authority/regime_unification_2026-06-12.md`.
-
-Durable chain:
-
-`current provider center mu* -> same-cycle current target-specific ENS within-spread + absolute ENS-center disagreement + simultaneous provider between-spread -> sigma_pred = sqrt(within^2 + ens_center_delta^2 + between^2) -> settlement-preimage integration of N(mu*, sigma_pred) -> current-evidence q point + q_lcb/q_ucb confidence -> symmetric YES/NO expected executable edge -> Fractional Kelly -> Position Size`
-
-This decision-time current-evidence form is mandatory for source-clock live
-posteriors. A missing/invalid same-cycle current ENS shape blocks the posterior; it must not
-fall back to historical residual sigma, constant/fitted floors, fitted uniform or
-city mixtures, or a fitted affine center shift. Older fusion/calibration machinery
-may remain as offline evidence, never as a
-silent alternate live probability regime.
-
-The current-evidence semantics revision is part of the persisted shape and
-posterior identity. A shaped certificate from another revision is not current
-probability authority; the existing seed/materialization loop must recompute it
-before entry or held-position belief can consume it.
-
-Do not reintroduce market-anchor caps, submit-disabled state, parallel observe-only gates, version snapshots, bankrolls, or current Kelly multipliers into root law. Present behavior must be proven from executable source, active config, process state, canonical DB rows, and decision receipts at task time. If that proof changes durable strategy law, update the owning authority doc or manifest instead of encoding a runtime snapshot here.
-
-Settlement-graded facts backing the chain: prior-label is algebraically irrelevant under diagonal Sigma; precision weights beat equal weights by 12x SE; legacy AIFS member-vote shape put zero probability on the winning bin in 28% of settled cells; fitted sigma-shape mixture values live in `state/sigma_scale_fit.json` and must be verified live before quoting numeric k/w.
-
-The legacy ENS/Platt/market-fusion baseline is offline evidence only under the single-q regime. It is not a second live probability authority and must not be joined back onto the live path.
-
-Legacy offline chain:
-
-`51 ENS members -> per-member daily max -> Monte Carlo (sensor noise + ASOS rounding) -> P_raw -> Extended Platt -> P_cal -> alpha-weighted Market Fusion -> P_posterior -> Edge & Double-Bootstrap CI -> Fractional Kelly -> Position Size`
+Missing or invalid same-cycle current ENS shape blocks that posterior. No fallback to historical residual sigma, constant/fitted floors, fitted uniform/city mixtures, fitted affine center shifts, stale ENS shapes or legacy ENS/Platt/market fusion; these are offline evidence only, never another live probability regime. Persist the current-evidence semantics revision in shape/posterior identity. Certificates from another revision must be recomputed by the existing seed/materialization loop before entry or held-position belief consumes them.
 
 ## 1. Authority, Facts, And Proof
 
-Use the narrowest authoritative surface that can prove the claim.
+Use the narrowest proof surface: source/tests, `architecture/invariants.yaml` and manifests establish behavior/ownership/gates; authority docs carry durable law, with drift resolved against code/manifests/runtime. Config, canonical DBs, processes and receipts prove current facts. References explain; derived context (graphs, topology, reports, `architecture/history_lore.yaml`), archives and scratch are not current authority. CodeGraph/Code Review Graph answer where to inspect, never what settles, which source is valid, what runtime does or which authority wins.
 
-| Class | Examples | Role | Forbidden misread |
-|---|---|---|---|
-| Direct instructions | system/developer/user messages | highest priority this run | AGENTS never override direct instructions |
-| Routers | root/scoped `AGENTS.md` | operating law and local hazards | scoped rules do not apply outside their subtree |
-| Executable law | `src/**`, tests, `architecture/invariants.yaml`, machine manifests | behavior, invariants, ownership, gates | prose cannot create behavior |
-| Authority docs | `docs/authority/**` | durable architecture and delivery law | dated paragraphs can drift; conflict-resolve with code/manifests/runtime proof |
-| Current facts | `config/settings.json`, canonical DBs, process/launchd state, receipts, `docs/operations/current_*` | present-tense posture and evidence | current facts expire; they are not reusable root law |
-| References | `docs/reference/**`, module books | dense domain explanation | reference docs do not authorize runtime or packet state |
-| Derived context | topology digests, Code Review Graph, reports, `architecture/history_lore.yaml` | routing, review, lessons | derived context answers where to inspect, not what is true |
-| History/archive | `docs/archive_registry.md`, archive bodies | provenance and lessons | archives are cold storage, not default boot context |
-| Scratch/runtime | local scratch, linked worktrees, dumps | session context | scratch is not durable plan, audit, or authority evidence |
+Keep these proof obligations separate; one verdict cannot substitute for another.
 
-`docs/operations/current_state.md` is a live control pointer. It may point at active work and current-fact companions, but it is not proof of live SHA, daemon liveness, submit posture, source validity, or DB truth until those claims are rechecked on live surfaces.
+Live/armed/trading/blocked/safe: loaded SHA/state file, launchd/process, fresh heartbeat, active config, canonical DB path, latest receipt/event rows and current rejection reasons.
 
-### Claim Proof Gates
+Strategy/probability: source path, active config, materialized posterior/receipt fields; owning authority doc when changing law.
 
-Do not collapse separate proof lines into one verdict.
+Settlement/source: `SettlementSemantics`, current source/data evidence, city/date/source contract and market text or resolver evidence.
 
-| Claim | Minimum proof |
-|---|---|
-| live / armed / trading / blocked / safe | loaded SHA/state file, launchd/process, heartbeat freshness, active config, canonical DB path, latest receipt/event rows, current rejection reasons |
-| strategy or probability behavior | source path, active config, materialized posterior/receipt fields, authority doc if changing law |
-| settlement/source correctness | `SettlementSemantics`, current source/data evidence, city/date/source contract, market text or resolver evidence |
-| DB truth | canonical SQLite file, table ownership manifest, write path, transaction boundary |
-| position/execution truth | Chain/CLOB facts first, then chronicler/event log, then portfolio/local cache |
-| docs and packet state | `docs/operations/current_state.md`, `docs/operations/AGENTS.md`, active package manifest, receipt path |
-| review/impact | runtime-risk tier, invariants, changed paths, tests or receipts for reviewed slice |
+DB truth: canonical SQLite file, ownership manifest, write path and transaction boundary.
 
-If a proof surface is stale, say it is stale and stop using it as current fact. Do not bridge freshness gaps with memory, old logs, summaries, or archive bodies.
+Position/execution: Chain/CLOB facts, then chronicler/event log, then portfolio/local cache.
+
+Docs/packet state: `docs/operations/current_state.md`, `docs/operations/AGENTS.md`, active package manifest and receipt path.
+
+`docs/operations/current_state.md` is a control pointer, not live-SHA/liveness/submit/source/DB proof. Mark stale proof stale; stop using it as current fact and recheck authority, never memory/old logs/summaries/archives. Price, probability, sizing, fill, lifecycle and settlement are separate facts.
 
 ## 2. Trading Machine Invariants
 
-Runtime entry points:
+Canonical truth flows `chain/CLOB -> canonical DB/events -> projections/status -> derived reports`. `state/status_summary.json` can retain stale PID/status after respawn. Commit DB truth before exporting JSON, CSV or reports.
 
-| Surface | File |
-|---|---|
-| live daemon | `src/main.py` |
-| cycle orchestration | `src/engine/cycle_runner.py` |
-| candidate-to-decision pipeline | `src/engine/evaluator.py` |
-| live order placement | `src/execution/executor.py` |
-| monitoring / exits | `src/engine/monitor_refresh.py`, `src/execution/exit_lifecycle.py` |
-| settlement / learning follow-through | `src/execution/harvester.py` |
+`state/zeus-world.db` (`WORLD_CLASS`) owns markets and world/provenance records; position tables there are legacy ghost shells. `state/zeus-forecasts.db` (`FORECAST_CLASS`) owns observations, settlements, calibration pairs, ensemble snapshots, source runs and market events. `state/zeus_trades.db` owns `position_current`, `position_events`, lifecycle projections, order state, venue commands and execution records.
 
-Truth path: `chain/CLOB facts -> canonical DB/events -> projections/status -> derived reports`. `state/status_summary.json` is an operator projection and may have stale PID/status after respawn.
+Table ownership is machine-checked by `architecture/db_table_ownership.yaml` through `src/state/table_registry.py`. No write transaction may span canonical DBs on independent connections (INV-37); the only sanctioned cross-DB write paths are `get_forecasts_connection_with_world()` and `trade_connection_with_world_flocked()`.
 
-Canonical DBs:
+HIGH and LOW share local-calendar-day geometry, not physical quantity, observation field, Day0 causality, calibration family, replay identity, Platt fitting, settlement-rebuild identity or attribution slices.
 
-| DB | Class | Owns |
-|---|---|---|
-| `state/zeus-world.db` | `WORLD_CLASS` | markets and world/provenance records; trade-owned position tables here are legacy ghost shells |
-| `state/zeus-forecasts.db` | `FORECAST_CLASS` | observations, settlements, calibration pairs, ensemble snapshots, source runs, market events |
-| `state/zeus_trades.db` | trade execution | `position_current`, `position_events`, lifecycle projection, order state, venue commands, and execution records |
+Settlement is discrete integer Weather Underground temperature with sensor/METAR/WU rounding/display semantics. Every settlement DB write must pass `SettlementSemantics.assert_settlement_value()` in `src/contracts/settlement_semantics.py`. Types: `point` (one integer), `finite_range` (finite integer set), `open_shoulder` (unbounded). Never infer bin semantics from label punctuation/continuous intervals or treat shoulders as symmetric bounded ranges. Discovery/writes: `src/execution/harvester.py`; post-2026-02-21 resolver/Gamma semantics: `architecture/settlement_dual_source_truth_2026_05_07.yaml`.
 
-Table ownership is machine-checked by `architecture/db_table_ownership.yaml` and loaded through `src/state/table_registry.py`. No write transaction may span DBs through independent connections. Sanctioned cross-DB write paths are `get_forecasts_connection_with_world()` and `trade_connection_with_world_flocked()`.
+Risk is max(individual levels); advisory-only risk is forbidden (INV-05). GREEN permits normal operation; YELLOW blocks new entries and continues monitoring; ORANGE blocks new entries and exits at favorable prices; RED cancels pending orders and sweeps active positions. Only RED sweeps. Genuine computation error causes RED fail-closed. Missing/stale truth causes DATA_DEGRADED, YELLOW-equivalent: block entries, preserve held positions and alert. Authority loss makes monitor/exit lanes read-only, not dead cycles. Owner: `src/riskguard/risk_level.py`.
 
-Dual track: HIGH and LOW share local-calendar-day geometry but not physical quantity, observation field, Day0 causality, calibration family, replay identity, Platt fitting, settlement rebuild identity, or attribution slices.
+Lifecycle is a monotonic, enum-governed progression in `src/state/lifecycle_manager.py`: `pending_entry -> active -> day0_window -> pending_exit -> economically_closed -> settled`; terminals are `voided`, `settled`, `admin_closed`; `unknown` is recovery/transient only. Do not invent phase strings or restore `quarantined`. A confirmed-fill/chain-absence dispute retains its true `active`/`pending_exit` phase and uses typed `ReviewWorkItem` in `src/contracts/review_work_item.py`. Chain-only assets are typed `ChainOnlyFact`, never Position phases. Exit intent is not closure; settlement is not exit.
 
-Settlement: Polymarket weather markets settle on integer temperatures reported by Weather Underground. Settlement is discrete; real temperature may pass through sensor reading, METAR/WU rounding, and display before resolving. Every settlement DB write must pass `SettlementSemantics.assert_settlement_value()` in `src/contracts/settlement_semantics.py`.
+Reconcile `Chain/CLOB > Chronicler/event log > Portfolio/cache` in `src/state/chain_reconciliation.py`: matches sync; chain-absent local hallucinations are voided, subject to the confirmed-fill dispute rule above. Materialize chain-only facts, block entries only for their condition_id/market family, count worst-case exposure in risk caps and evaluate forced exit.
 
-| Bin type | Example | Cardinality |
-|---|---|---|
-| `point` | `10C` resolves on `{10}` | 1 |
-| `finite_range` | `50-51F` resolves on `{50, 51}` | finite |
-| `open_shoulder` | `75F+` | unbounded |
+Every fail-closed condition must declare adjacent SCOPE/DRAIN/RESET or is presumed defective (INV-47). SCOPE: narrowest blocking identity, not an unscoped incident-table `COUNT(*)`. DRAIN: clearing action, cadence and dependencies; scope for slow drainage if it can defer/misfire. RESET: a real return to false, not frozen provenance required to equal an always-newest reader. A PR adding/widening a gate must state SCOPE/DRAIN/RESET; absence warrants rejection. False-positive fixes check the low/high, bid/ask, entry/exit or maker/taker twin in the same change.
 
-Shoulder bins are not symmetric bounded ranges. Do not infer bin semantics from label punctuation or continuous-interval intuition.
+Every live venue BUY or SELL must submit a finite unit price in inclusive `[0.05, 0.95]`; its current authorizing executable quote must also be in that band. This covers entry, reduce-only exit, single and batch paths, without strategy, side or lifecycle exceptions. An in-band floor cannot legalize an out-of-band bid. Preserve already-realized venue facts without using them to authorize new actions. Reject out-of-band submissions at command persistence, submission envelope and an independent final SDK boundary. Tick/range, minimum size, identity, tradeability, fees, depth, action-law economics and Kelly are cumulative requirements, never band waivers.
 
-Settlement discovery and canonical DB write live in `src/execution/harvester.py`. Post-2026-02-21 weather settlement uses the internal automatic resolver documented by `architecture/settlement_dual_source_truth_2026_05_07.yaml`; harvester reads settled events via Gamma API for that era.
+Statistical BUY/SELL authority is probability-witness typed. Day0 statistical actions may be feasible when the current probability witness, holding, wealth and executable book are exact and reproduced at submit; temporal maturity upgrades observation evidence to absorbing hard-fact authority, not permission to suppress continuous statistical redecision. Parameter bounds are confidence evidence, not fixed-action expected payoff. BUY/statistical SELL sizes and fill-prefixes use posterior-predictive-mean expected log wealth and EV, never relabeled `robust_*` values. After each action passes its own law, globally rank fixed proposals on the same posterior-mean expected-log-growth axis; direction cannot license incomparable scores.
 
-Risk levels change behavior; advisory-only risk is forbidden by INV-05.
+When both execute lawfully, a held SELL exposes immediate-taker and maker-rest as separate fixed proposals on that axis. JIT rebinding preserves the selected mode and its capital-release semantics.
 
-| Level | Behavior |
-|---|---|
-| GREEN | normal operation |
-| YELLOW | no new entries; continue monitoring |
-| ORANGE | no new entries; exit at favorable prices |
-| RED | cancel pending; sweep active positions |
+Multiple same-family outcome tokens are not categorically forbidden. Evaluate each sibling-bin BUY against the exact same-family portfolio and unresolved entry commitments using correlated payoff endowment, expected delta-log-wealth/EV, fees, depth and cumulative Kelly target. Command persistence enforces executable truth/risk, not a blanket one-position or one-token family veto.
 
-Overall risk is max(individual levels). Genuine computation error -> RED fail-closed. Missing/stale truth input -> DATA_DEGRADED, YELLOW-equivalent: block new entries, preserve held positions, alert. Only RED sweeps active positions. Key file: `src/riskguard/risk_level.py`.
-
-Lifecycle is enum-governed in `src/state/lifecycle_manager.py`: `pending_entry -> active -> day0_window -> pending_exit -> economically_closed -> settled`; terminals are `voided`, `settled`, `admin_closed`; `unknown` is transient/recovery only. `quarantined` is retired from the enum entirely (T5 quarantine excision, 2026-07-11; design notes on the `lab` branch) — a confirmed-fill/chain-absence dispute keeps its TRUE phase (`active`/`pending_exit`) and the dispute lives in a typed `ReviewWorkItem` (`src/contracts/review_work_item.py`), never a lifecycle phase. Chain-only unknown assets never enter the Position lifecycle — they are typed `ChainOnlyFact` records, not a phase. Exit intent is not closure; settlement is not exit; no code may invent lifecycle strings.
-
-Chain reconciliation order: `Chain (Polymarket CLOB) > Chronicler (event log) > Portfolio (local cache)`. Local+chain match -> synced. Local exists, not on chain -> void local hallucination. Chain exists, not local -> materialize a scoped `ChainOnlyFact` (entry block limited to its own condition_id/market family + worst-case exposure counted into risk caps) and evaluate forced exit. Key file: `src/state/chain_reconciliation.py`.
-
-Every fail-closed gate must declare SCOPE, DRAIN, and RESET in code adjacent to its condition, or it is presumed defective (INV-47). SCOPE is the narrowest identity the gate may block (token/family/city/global); the `ChainOnlyFact` scoping above — entry block limited to its own condition_id/market family — is the correct shape. A bare `COUNT(*)` over an incident table is not: an unscoped `pending_reconcile`/`cap_usage RESERVED` count once blocked entries across all 57 families for 20.97h (`src/main.py` entry-readiness gate, since scoped per-family). DRAIN is what clears the gate, on what cadence, and what that cadence itself depends on; a drain job that can defer behind the money path or silently misfire means the gate must be scoped as if the drain were slow. RESET is how the gate returns to false; a frozen provenance snapshot compared for exact equality against a reader documented as always-newest-as-of-now has no reset path and is a ratchet, presumed defective (`src/engine/event_reactor_adapter.py` posterior identity check, since retired). A PR adding or widening a fail-closed gate states its SCOPE/DRAIN/RESET in the PR body; their absence is reviewer grounds for rejection. A false-positive fix on one side of a symmetric pair (low/high, bid/ask, entry/exit, maker/taker) is incomplete until the twin is checked in the same change.
-
-`strategy_key` is the governance identity for attribution, risk policy, and performance slicing.
-
-| Strategy | Edge source | Alpha decay |
-|---|---|---|
-| Settlement Capture | observed fact post-peak | very slow |
-| Shoulder Bin Sell | retail cognitive bias | moderate |
-| Center Bin Buy | model accuracy vs market | fast |
-| Opening Inertia | new market mispricing | fastest |
-
-Durable trading rules:
-
-- Canonical DB/event truth outranks derived JSON, CSV, reports, notebooks.
-- Every live venue BUY or SELL, including entry, reduce-only exit, single-order,
-  and batch paths, must submit a finite unit price inside inclusive `[0.05, 0.95]`.
-  The current executable quote used to authorize an action must be inside the
-  same band; an in-band submitted floor cannot legalize an out-of-band bid.
-  Already-realized venue facts remain recorded as facts, but cannot authorize a
-  new action. Anything submitted below `0.05` or above `0.95` is rejected at
-  command persistence, the submission envelope, and an independent final SDK
-  boundary. Current
-  tick/range, minimum size, identity, tradeability, fees, depth, action-law
-  economics, and Kelly remain cumulative requirements; none may waive
-  this absolute band. There are no strategy, side, lifecycle, or exit exceptions.
-- Statistical BUY/SELL authority is probability-witness typed. A Day0 statistical
-  action may enter the feasible set whenever its current probability witness,
-  holding, wealth, and executable book are exact and are reproduced at submit;
-  temporal maturity upgrades observation evidence to absorbing hard-fact
-  authority but must not suppress continuous statistical redecision. Posterior
-  parameter bounds are confidence evidence, not fixed-action expected payoff.
-  BUY and statistical SELL sizes and fill-prefixes therefore use posterior-
-  predictive-mean expected log wealth and EV, never values relabeled as
-  `robust_*`. After each action passes its own law, globally ranked
-  fixed proposals share one posterior-mean expected-log-growth comparison;
-  direction never licenses incomparable objective scores.
-- Whenever both are executable, a held SELL exposes immediate-taker and
-  maker-rest as separate fixed proposals on that same comparison axis. JIT
-  rebinding must preserve the selected execution mode rather than silently
-  switching its capital-release semantics.
-- Holding or buying multiple outcome tokens in the same weather family is not
-  categorically forbidden. Every sibling-bin BUY must be evaluated against the
-  exact current same-family portfolio and unresolved entry commitments through
-  the correlated payoff endowment, expected delta-log-wealth/EV, fees, depth, and
-  cumulative Kelly target. Command persistence may enforce executable truth and
-  risk contracts, but it must not replace that capital objective with a blanket
-  one-position or one-token family veto.
-- Live may act; backtest may evaluate — and only against verified settlement joins, never mixed regimes. Parallel observe-only runtime modes are forbidden; do not reintroduce one as a staging tier.
-- Settlement values flow through `SettlementSemantics`.
-- DB commits precede derived JSON/report exports.
-- Authority loss degrades monitor/exit lanes to read-only; it does not kill the cycle.
-- Price, probability, sizing, fill, lifecycle, and settlement evidence are separate facts.
-- Current config affects present behavior but does not belong in root AGENTS unless it becomes durable law.
-
-For derivations and worked examples, read `docs/reference/zeus_domain_model.md` and the targeted reference named by the task route. Term definitions live in `docs/reference/glossary.md`; math and physics index in `docs/reference/theory_map.md`.
+`strategy_key` governs attribution, risk policy and performance slicing; alpha decays on each strategy's clock. Live may act; backtests use verified settlement joins without mixed regimes. Parallel observe-only runtime modes are forbidden. Do not put market-anchor caps or submit-disabled state in root law. Prove present behavior at task time; change durable strategy law in its owning authority doc/manifest.
 
 ## 3. Routing And Gates
 
-Default route:
+For symbols/callers/callees/traces/impact, use CodeGraph before grep when available, then read source. Topology is optional orientation, not permission, paperwork or a refusal path. `topology_doctor.py --navigation` is a legacy route-card hint, not a required step or substitute for CodeGraph/live evidence.
 
-1. Read root `AGENTS.md`.
-2. Read scoped `AGENTS.md` for any subtree you will touch.
-3. Use CodeGraph for structural questions: symbols, callers, callees, traces, file impact, and "how does X work?"
-4. Use topology only as optional route/context orientation; do not treat it as a runtime permission surface.
-5. Read reference docs only after the route says which domain reference matters.
+Plan before changing `architecture/**`, `docs/authority/**`, `.github/workflows/**`, `src/state/**` schema/truth/projection/lifecycle writes, `src/control/**`, `src/supervisor_api/**`, cross-zone scope, more than four files, or canonical truth/lifecycle/governance/control/schema/DB authority/live execution/settlement semantics; then execute the authorized bounded slice. In unattended work, planning/critic review is work to complete, not a question-and-wait step. For long work, resume from its existing plan/packet or durable worktree's disk/git state; keep goal, decisions, evidence, remaining dispositions, next action and rollback point there. Missing required proof/review leaves that live change unlanded: record the blocker and continue independent authorized work, without inventing approvals or bypassing operator-only decisions.
 
-Do not grep first for symbol definitions or flow when CodeGraph is available. Do not use CodeGraph as settlement/source/current-fact authority.
+Supplemental reads are task-specific. Pipeline: `docs/reference/zeus_domain_model.md` plus targeted module book; definitions/derivations: `docs/reference/glossary.md`, `docs/reference/theory_map.md`.
 
-Topology checks are advisory orientation. They must not add paperwork,
-deny runtime-directed work, or turn broad/cross-zone edits into a refusal path.
+Settlement/bin/source: `docs/reference/zeus_market_settlement_reference.md`, scoped source AGENTS. Settlement/source/observation/Day0/calibration: also `docs/operations/current_source_validity.md`, `docs/operations/current_data_state.md`, `architecture/task_boot_profiles.yaml`, `architecture/fatal_misreads.yaml`. `architecture/city_truth_contract.yaml` defines source-role schema, not current city truth.
 
-If repo-wide docs checks fail from unrelated pre-existing registry drift, report the root changed-surface status separately from repo-wide drift. Do not repair unrelated docs drift just to make a narrow AGENTS change look globally clean.
+Calibration/replay/probability uses `docs/reference/zeus_math_spec.md` and `docs/reference/zeus_data_and_replay_reference.md`; execution/lifecycle uses `docs/reference/zeus_execution_lifecycle_reference.md`; risk/sizing/strategy uses `docs/reference/zeus_risk_strategy_reference.md`. Source edits use scoped `src/**/AGENTS.md` and `architecture/module_manifest.yaml`.
 
-`topology_doctor.py --navigation` is legacy substring routing: a route-card hint only, not a step and not a replacement for CodeGraph or live evidence.
+K0/K1 truth/lifecycle work uses `docs/authority/zeus_current_architecture.md`, `architecture/kernel_manifest.yaml`, `architecture/self_check/zero_context_entry.md` and `architecture/self_check/authority_index.md`. Delivery/governance uses `docs/authority/zeus_current_delivery.md`, the current-state pointer and active packet docs. Historical failures use matched `architecture/history_lore.yaml` cards; read the whole file only for failure-pattern investigation. Adversarial debate, 5+ teammates or contamination remediation uses `docs/methodology/adversarial_debate_for_project_evaluation.md` or its matching repo-local skill.
 
-Semantic boot inputs for settlement/source/observation/Day0/calibration tasks:
-
-- `docs/operations/current_source_validity.md`
-- `docs/operations/current_data_state.md`
-- `architecture/task_boot_profiles.yaml`
-- `architecture/fatal_misreads.yaml`
-
-`architecture/city_truth_contract.yaml` defines the source-role schema, not current per-city truth. Keep the fatal antibody loaded: Code Review Graph can answer where to inspect and likely blast radius; it cannot decide what settles, which source is valid, what runtime is doing, or which authority rank wins a conflict.
-
-Stop and plan before touching `architecture/**`, `docs/authority/**`, `.github/workflows/**`, `src/state/**` schema/truth/projection/lifecycle write paths, `src/control/**`, `src/supervisor_api/**`, cross-zone changes, more than four changed files, or anything described as canonical truth, lifecycle, governance, control, schema, DB authority, live execution, or settlement semantics.
-
-Do not create root-level coordination files, scratch research, or ad hoc handoff files unless the user explicitly asks for them.
-
-Task-specific supplemental reads:
-
-| Task | Read after route/admission |
-|---|---|
-| pipeline-impacting work | `docs/reference/zeus_domain_model.md` plus targeted reference/module book |
-| settlement/bin/source | `docs/reference/zeus_market_settlement_reference.md`, current source/data state, scoped source AGENTS |
-| calibration/replay/probability | `docs/reference/zeus_math_spec.md`, `docs/reference/zeus_data_and_replay_reference.md` |
-| execution/lifecycle | `docs/reference/zeus_execution_lifecycle_reference.md` |
-| risk/sizing/strategy | `docs/reference/zeus_risk_strategy_reference.md` |
-| source edits | scoped `src/**/AGENTS.md`, `architecture/module_manifest.yaml` |
-| K0/K1 truth or lifecycle | `docs/authority/zeus_current_architecture.md`, `architecture/kernel_manifest.yaml`, `architecture/self_check/zero_context_entry.md`, `architecture/self_check/authority_index.md` |
-| delivery/governance | `docs/authority/zeus_current_delivery.md`, `docs/operations/current_state.md`, active packet docs |
-| historical failure | matched `architecture/history_lore.yaml` cards; full file only for failure-pattern investigation |
-| adversarial debate / 5+ teammates / contamination remediation | `docs/methodology/adversarial_debate_for_project_evaluation.md` or matching repo-local skill |
+Runtime entry routes are `src/main.py` (daemon), `src/engine/cycle_runner.py` (cycle), `src/engine/evaluator.py` (candidate decisions), `src/execution/executor.py` (orders), `src/engine/monitor_refresh.py` and `src/execution/exit_lifecycle.py` (monitor/exits), and `src/execution/harvester.py` (settlement/learning).
 
 ## 4. Docs, Packets, And Mesh
 
-Layering: `docs/authority/**` carries durable law; `architecture/**` carries machine-checkable law/registries/topology/invariants; `docs/reference/**` explains durable domain/module knowledge; `docs/operations/**` points at active work/current facts/packets/evidence; `docs/archive_registry.md` is the visible archive interface. Archive bodies, reports, generated evidence, raw captures, and scratch are evidence only until promoted through the correct authority/registry path.
+Keep law, references, current operations and evidence in their existing classes; `docs/archive_registry.md` is the archive interface. Reports, captures and scratch need the existing promotion/registry path to become authority.
 
-Current-fact docs must be summary-only, receipt/evidence-backed, expiry-bound, and fail-closed when stale. Do not update them from memory.
+Current-fact docs are summary-only, evidence-backed, expiry-bound and fail closed when stale; never update from memory. When recording reference proof on existing evidence surfaces, use `checked=<ISO week or unverified>; basis=<proof>; until=<existing expiry or recheck-on-use>`; this records evidence, not a new renewal requirement. Use `YYYY-Www` for week precision, retaining exact deadlines; never round runtime freshness up to a week. Reading a file is not verifying its claims. Recheck expired claims, not their stamps; filename age alone neither validates current facts nor expires durable law.
 
-Packet-local names (`evidence.md`, `findings.md`, `work_log.md`, `receipt.json`) are used only when an active packet, closeout gate, audit/review task, or future handoff consumes them. Direct T0/T1 work should not create packet evidence for appearance.
+Use `evidence.md`, `findings.md`, `work_log.md`, `receipt.json` only for an active packet, closeout gate, audit/review or consuming handoff, never T0/T1 appearance-only paperwork. Close with durable promotions, local/scratch residue and topology friction or `none_observed`. No standalone capsules, root coordination/scratch/research, ad hoc handoffs or backlog entries unless explicitly requested.
 
-At the end of complete work, summarize what was promoted to durable surfaces, what was left local/scratch, and concrete topology friction or `none_observed`. Do not create standalone feedback capsules, root coordination files, ad hoc handoffs, or backlog entries unless the user explicitly asks.
+Add/rename/delete/reclassify files with their existing owner registry. Update scoped AGENTS only for local route/registry changes; `workspace_map.md` only for directory structure/visibility changes. Missing registry rows are coverage gaps, not permission.
 
-When adding, renaming, deleting, or reclassifying files: update the owning manifest/registry when one exists; update scoped `AGENTS.md` only if local routes or file registries changed; update `workspace_map.md` only when directory-level structure or visibility classes changed.
+Registry routes: `src/**` -> `architecture/source_rationale.yaml`; `scripts/*` -> `architecture/script_manifest.yaml`; `tests/test_*.py` -> `architecture/test_topology.yaml`; `docs/reference/zeus_*.md` -> `docs/reference/AGENTS.md`, `architecture/reference_replacement.yaml`, `architecture/docs_registry.yaml`; `docs/reference/modules/*.md` -> module router, docs registry, `architecture/module_manifest.yaml`; `docs/authority/*.md` -> `docs/authority/AGENTS.md`; `docs/operations/task_*` -> `docs/operations/AGENTS.md`; DB ownership -> `architecture/db_table_ownership.yaml`.
 
-Common registry routes:
-
-| Surface | Registry |
-|---|---|
-| `src/**` | `architecture/source_rationale.yaml` |
-| `scripts/*` | `architecture/script_manifest.yaml` |
-| `tests/test_*.py` | `architecture/test_topology.yaml` |
-| `docs/reference/zeus_*.md` | `docs/reference/AGENTS.md`, `architecture/reference_replacement.yaml`, `architecture/docs_registry.yaml` |
-| `docs/reference/modules/*.md` | module router, docs registry, `architecture/module_manifest.yaml` |
-| `docs/authority/*.md` | `docs/authority/AGENTS.md` |
-| `docs/operations/task_*` | `docs/operations/AGENTS.md` |
-| DB table ownership | `architecture/db_table_ownership.yaml` |
-
-Unregistered files are invisible to future agents. Treat a missing registry row as a coverage gap, not a green light.
+Report changed-surface docs checks separately from unrelated pre-existing repo-wide registry drift. Do not repair unrelated drift to make a narrow change appear globally clean.
 
 ## 5. Change Control
 
-### Live branch (`live`)
+`live` is traded continuously. Never directly commit, amend or edit its checkout, or switch/reset/force-move its git state. `maintree_git_state_guard` has no agent bypass. `live` accepts only verified hot-fix cherry-picks or merged PRs; verified cherry-pick is the only local landing command.
 
-`live` is the **live** branch: the exact tree the running engine trades from continuously — a 24/7 mesh of scheduled jobs and event-woken agents, not a staging or integration branch. A commit on `live` is a commit the live daemons will act on within one reload.
+All work uses its durable role worktree, persisting across tasks until operator retirement. Prove there, land promptly by urgency/blast radius: live money-path defect -> smallest correct hot-fix plus behavioral antibody, reviewed/proven to restore correct operation without new risk, then cherry-pick; functional milestone -> PR into `live`, required gates/review, merge. Never weaken freshness/fail-closed gates to accelerate landing.
 
-- **`live` accepts commits by exactly two lanes — hot-fix `git cherry-pick` or merged PR — and no third lane.** A direct commit, amend, or in-place edit to the live checkout is forbidden; it is a live incident, never a shortcut. Never mutate the live checkout's git state (switch / reset / force-move) — the daemons trade from it. `maintree_git_state_guard` has no agent bypass; a verified cherry-pick is the only local landing command.
-- **All work happens in its durable role worktree/branch, is proven there, then lands on live promptly** so the running code reloads and stays coherent. The role checkout persists across tasks until operator retirement. Two landing lanes, chosen by urgency × blast-radius:
-  - **Hot-fix** — a live defect degrading the money path (wrong settlement, dropped exit, fail-open admission, an unbounded hang). The smallest correct change plus a minimal antibody, `git cherry-pick`ed onto live as soon as it proves out. The bar is "restores correct live operation without new risk"; speed is the point.
-  - **PR** — functional / milestone work (a feature, a new invariant + antibody tests, a schema migration with coverage, a gate). Open a PR into `live`, pass the required gates and review, then merge.
-- **Freshness and fail-closed gates are never weakened to land faster.** The §0 alpha-clock and failure-isolation invariants bind every money-path change, both lanes.
-- **Multi-agent live-repair:** many agents are woken concurrently (improvement loop, failing gate, review, monitor, operator) to inspect and repair live. The **main thread is integrator + landing authority**; agents own bounded slices. Discipline: **one owner per file/slice**; parallel editors use their distinct assigned role worktrees; each agent **verifies the defect is real, ships a behavioral antibody, and proves zero new regressions** before its commit counts; remaining findings are **adversarially dispositioned** (fix/refute/defer-with-rationale) before landing; integrate by **disjoint cherry-pick onto the current live tip** with a base-vs-integrated diff; land small and often. Never clobber concurrent live-ops — rebase onto the current tip, and a dirty live checkout is a coordination point, not a force. Lowest model tier that fits the slice; the top tier only for outcome-deciding money-path logic. Full protocol: `docs/operations/current/plans/live_branch_workflow_2026-07-20.md`.
+Main thread = integrator/landing authority; one owner per file/slice, parallel editors in distinct assigned role worktrees. Each repair commit needs a verified defect, behavioral antibody and zero new regressions; remaining findings are fix/refute/defer-with-rationale before landing. Integrate disjoint cherry-picks against current live tip, prove base-vs-integrated diff, rebase to current tip before landing. Dirty live checkout means coordinate, never force/clobber live-ops. Use the lowest fitting model tier; top tier for outcome-deciding money logic. Protocol: `docs/operations/current/plans/live_branch_workflow_2026-07-20.md`; its older disposable-worktree/archival prose cannot override durable roles.
 
-Full workflow of record until fully absorbed here: `docs/operations/current/plans/live_branch_workflow_2026-07-20.md`.
+Math stays within semantic contracts; architecture changes canonical read/write paths, lifecycle grammar, truth ownership, schema, point-in-time semantics or zones; governance changes manifests, AGENTS, packets, constitutions, routing or control.
 
-Change classes: Math stays inside existing semantic contracts. Architecture changes canonical read/write paths, lifecycle grammar, truth ownership, schema, point-in-time semantics, or zone boundaries. Governance changes manifests, AGENTS, packets, constitutions, routing, or control surfaces.
+Preview conflicts in the worktree (`git merge-tree` or equivalent). Merge clean surfaces normally; resolve narrow mechanical conflicts and run affected checks. Obtain critic evidence for broad/cross-zone/high-risk/schema/lifecycle/DB/control/live/semantically ambiguous conflicts; missing evidence blocks that integration, not unrelated work. Mechanism: `architecture/worktree_merge_protocol.yaml`.
 
-Merge protocol: inspect conflict surface first (`git merge-tree`, `git merge --no-commit`, or equivalent); merge clean surfaces normally; resolve narrow mechanical conflicts directly and run affected checks; escalate to critic evidence only for broad, cross-zone, high-risk, schema, lifecycle, DB/control/live, or semantically ambiguous conflicts. Mechanism: `.agents/skills/zeus-ai-handoff/SKILL.md` and `architecture/worktree_merge_protocol.yaml`.
+Commit as `type(scope): subject`; body for non-obvious rationale/test scope/residual risk. `[skip-invariant]` is only for governance/docs-only baseline bypass. Avoid broad main-worktree staging unless explicitly permitted; this cannot authorize editing/committing on `live`.
 
-Commits use `type(scope): subject`. Add body only when why/tested scope/residual risk is non-obvious. Use `[skip-invariant]` only for governance/docs-only commits that intentionally bypass invariant baseline. In the main worktree, avoid broad staging unless explicitly permitted. Preserve unrelated dirty and untracked work.
+PRs are for complete features, invariant plus antibodies, security gates, covered schema migrations or equivalent milestones. Non-urgent single-function fixes, partial work, incremental docs and packet iterations stay in the worktree until bundled; urgent money defects use hot-fix. Batch related work before paid automated PR review. Template: `.github/pull_request_template.md`.
 
-Open PRs only for milestone-level changes: complete feature, new invariant plus antibody tests, security gate, schema migration with coverage, or equivalent. Single-function fixes, partial implementations, incremental docs, and local packet iterations stay in the worktree branch. Every PR consumes paid automated review once; batch related work before opening. Template: `.github/pull_request_template.md`.
-
-Never run destructive git commands (`reset --hard`, `checkout .`, `clean -f`, force-push to live) or overwrite unrelated dirty work. Preserve runtime artifacts, untracked inputs, other packets, and user edits unless the active packet explicitly governs them.
+Never run destructive git (`reset --hard`, `checkout .`, `clean -f`, force-push to `live`) or overwrite unrelated dirty work. Preserve runtime artifacts, untracked inputs, other packets and user edits unless explicitly governed by the active packet.
 
 ## 6. Review Tasks
 
-For code review, PR review, `/review`, automated review, ultrareview, or manual Claude/Codex/GitHub Copilot review: read `REVIEW.md` first; for deeper context read `docs/review/code_review.md` and `docs/review/review_scope_map.md`; review by runtime-risk surface, not GitHub file order; exhaust Tier 0 live-money/runtime safety before Tier 1 data/probability/persistence; review Tier 3 docs and agent-instruction surfaces only if budget remains.
-
-Default-skip the canonical skip-list in `docs/review/review_scope_map.md` unless a skipped path demonstrably changes runtime. Cite `architecture/invariants.yaml` invariant IDs for invariant-protected behavior. For large PRs, state coverage limits explicitly; empty findings plus partial coverage is not a clean pass. Trust the PR template's "AI Review Scope" before traversing alphabetically. Severity-model drift between `REVIEW.md`, `docs/review/code_review.md`, `.github/copilot-instructions.md`, and `.github/instructions/*.instructions.md` is an Important Tier 3 finding. The review doctrine surface is owned by `docs/review/AGENTS.md`.
+For any review, read `REVIEW.md` first; it owns runtime-risk ordering, the skip-list, PR AI Review Scope and coverage reporting. Empty findings with partial coverage is not a clean pass. Deeper doctrine/scope: `docs/review/code_review.md`, `docs/review/review_scope_map.md`; owner: `docs/review/AGENTS.md`. Cite `architecture/invariants.yaml` IDs for protected behavior. Severity drift among `REVIEW.md`, `docs/review/code_review.md`, `.github/copilot-instructions.md` and `.github/instructions/*.instructions.md` is an Important Tier 3 finding.
 
 ## 7. Code And Comment Discipline
 
-Code and comments earn their length: precise beats clever. Trim variable names to the shortest form still unambiguous in scope. First principles over precedent, repo-wide: an entity earns existence only when the problem demands it (Occam's razor). Runtime mechanism: precision and simplicity are one axis — fewest moving parts, exact guaranteed behavior. Where syntax and semantics diverge, fix the shape, not a comment around the gap. The limits of language are the limits of the world (Wittgenstein). Minimum tokens, maximum precision.
+Use first principles: entities and comments earn their existence. Prefer the fewest moving parts that preserve exact behavior and the shortest names unambiguous in scope. Fix syntax/semantics mismatches in the shape, not with explanatory patches around the defect.
