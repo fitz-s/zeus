@@ -7726,6 +7726,8 @@ def test_pending_exit_backoff_exhausted_reenters_redecision_when_still_held(monk
         ("DAY0_HARD_FACT_BIN_DEAD", True, True, "direct", False, False),
         ("EDGE_REVERSAL", False, True, "blocked", True, False),
         ("SELL_REVERSAL", False, True, "direct", False, True),
+        ("SELL_REVERSAL", True, True, "delegated", False, True),
+        ("SELL_REVERSAL", False, True, "blocked", False, True),
         ("EDGE_REVERSAL", False, True, "dust", False, False),
         ("EDGE_REVERSAL", False, True, "sub_precision", False, False),
         ("EDGE_REVERSAL", False, True, "no_book", False, False),
@@ -7901,6 +7903,11 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             )
         else:
             probability_receipt = {
+                "probability_authority": (
+                    "day0_deterministic_bin_payoff_v1"
+                    if posterior_support_zero and outcome == "direct"
+                    else "day0_remaining_day_global_probability_v1"
+                ),
                 "probability_witness_identity": "probability-current",
                 "probability_content_identity": (
                     "probability-content-current"
@@ -8510,6 +8517,7 @@ def test_branchwise_dominant_sell_requires_zero_support_and_legal_fresh_bid(
         fresh_prob_is_fresh=fresh,
         current_market_price_is_fresh=fresh,
         best_bid=best_bid,
+        probability_receipt={"probability_authority": "day0_deterministic_bin_payoff_v1"},
     )
 
     assert (
@@ -20383,6 +20391,7 @@ def test_zero_support_direct_sell_reaches_venue_with_typed_authority(monkeypatch
     pos.last_monitor_at = "2026-08-18T16:24:22+00:00"
     pos._current_global_held_probability_samples = (0.0, 0.0, 0.0)
     receipt = {
+        "probability_authority": "final_daily_observation_exact_global_probability_v1",
         "probability_content_identity": "final-daily-zero-content",
         "probability_witness_identity": "final-daily-zero-witness",
         "q_version": "final-daily-zero-v1",
@@ -20460,6 +20469,7 @@ def test_zero_support_direct_sell_rejects_changed_probability_support(monkeypatc
     pos.last_monitor_at = "2026-08-18T16:24:22+00:00"
     pos._current_global_held_probability_samples = (0.0, 0.0)
     receipt = {
+        "probability_authority": "final_daily_observation_exact_global_probability_v1",
         "probability_content_identity": "zero-content",
         "probability_witness_identity": "zero-witness",
     }
@@ -27962,3 +27972,85 @@ def test_real_red_executor_rechecks_b2_after_exit_certificate_persist(
         assert conn.execute(
             "SELECT COUNT(*) FROM venue_commands WHERE intent_kind = 'EXIT'"
         ).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+@pytest.mark.parametrize("authority_kind", (
+    "day0_remaining_day_global_probability_v1",
+    "day0_conditioned_replacement_global_probability_v1",
+    None,
+))
+def test_statistical_zero_cannot_bypass_inherited_calibration(side, authority_kind):
+    from src.calibration.market_anchored_residual import apply_artifact
+    from src.engine import cycle_runtime
+    from src.execution.exit_lifecycle import BranchwiseDominantSellAuthority
+
+    artifact = SimpleNamespace(
+        alpha={"day0": 0.1}, beta=0.1, clip_d=3.0, p_clip=(0.005, 0.995),
+    )
+    corrected_yes = apply_artifact(
+        artifact, 0.5, 0.0 if side == "YES" else 1.0, "day0",
+    )
+    corrected_held = corrected_yes if side == "YES" else 1.0 - corrected_yes
+    assert corrected_held > 0.05
+    pos = _make_position(direction="buy_yes" if side == "YES" else "buy_no")
+    pos._current_global_held_probability_samples = (0.0, 0.0)
+    context = ExitContext(
+        fresh_prob=0.0, fresh_prob_is_fresh=True,
+        current_market_price=0.05, current_market_price_is_fresh=True,
+        best_bid=0.05,
+        probability_receipt={
+            "probability_authority": authority_kind,
+            "probability_content_identity": "raw-zero-content",
+            "probability_witness_identity": "raw-zero-witness",
+        },
+    )
+    assert not cycle_runtime._posterior_support_zero_sell_dominates(pos, context)
+    with pytest.raises(ValueError, match="EXACT_PAYOFF_AUTHORITY_REQUIRED"):
+        BranchwiseDominantSellAuthority.from_current(pos, context)
+
+
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+@pytest.mark.parametrize("continuing", (False, True))
+def test_statistical_zero_typed_authority_cannot_reach_submit(monkeypatch, direction, continuing):
+    from src.execution import exit_lifecycle
+
+    pos = _make_position(
+        direction=direction, state="holding", shares=10.0, chain_shares=10.0,
+        token_id="yes-zero", no_token_id="no-zero",
+    )
+    pos.last_monitor_at = "2026-09-20T06:00:00+00:00"
+    pos.last_exit_order_id = "old-statistical-zero-order" if continuing else ""
+    pos._current_global_held_probability_samples = (0.0, 0.0)
+    context = ExitContext(
+        exit_reason="POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES",
+        fresh_prob=0.0, fresh_prob_is_fresh=True,
+        current_market_price=0.05, current_market_price_is_fresh=True,
+        best_bid=0.05,
+        probability_receipt={
+            "probability_authority": "day0_remaining_day_global_probability_v1",
+            "probability_content_identity": "raw-zero-content",
+            "probability_witness_identity": "raw-zero-witness",
+        },
+    )
+    cls = exit_lifecycle.BranchwiseDominantSellAuthority
+    payload = cls._identity_payload(
+        position_id=pos.trade_id,
+        token_id=pos.no_token_id if direction == "buy_no" else pos.token_id,
+        held_shares=str(pos.effective_shares),
+        probability_content_identity="raw-zero-content",
+        probability_witness_identity="raw-zero-witness",
+        probability_observed_at=pos.last_monitor_at,
+        support_identity=cls._support_identity(pos._current_global_held_probability_samples),
+    )
+    import hashlib
+    authority = cls(**payload, authority_identity=hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest())
+    monkeypatch.setattr(exit_lifecycle, "place_sell_order", lambda **_kwargs: pytest.fail("raw zero reached venue"))
+    outcome = execute_exit(
+        _make_portfolio(pos), pos, context, clob=object(),
+        exit_intent=exit_lifecycle.build_exit_intent(pos, context),
+        branchwise_sell_authority=authority,
+    )
+    assert outcome == "exit_blocked: branchwise_dominant_sell_exact_payoff_authority_required"

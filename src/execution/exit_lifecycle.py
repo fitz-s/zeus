@@ -3379,9 +3379,9 @@ class GlobalSellExecutionAuthority:
 class BranchwiseDominantSellAuthority:
     """Typed proof that every current payoff draw values HOLD at zero.
 
-    This is not a second statistical SELL route. It is the degenerate case in
-    which an in-band cash bid strictly dominates a zero-valued token in every
-    draw, so a global capital comparison has no competing state to resolve.
+    Only deterministic settlement evidence can make this claim before the
+    inherited entry calibration is applied. Statistical zero samples still
+    require the global SELL/HOLD comparison under that calibration policy.
     """
 
     position_id: str
@@ -3392,6 +3392,13 @@ class BranchwiseDominantSellAuthority:
     probability_observed_at: str
     support_identity: str
     authority_identity: str
+
+    @staticmethod
+    def has_exact_payoff_receipt(receipt: object) -> bool:
+        return isinstance(receipt, Mapping) and receipt.get("probability_authority") in {
+            "day0_deterministic_bin_payoff_v1",
+            "final_daily_observation_exact_global_probability_v1",
+        }
 
     @staticmethod
     def _support_identity(samples: object) -> str:
@@ -3452,6 +3459,8 @@ class BranchwiseDominantSellAuthority:
         receipt = exit_context.probability_receipt
         if not isinstance(receipt, Mapping):
             raise ValueError("BRANCHWISE_SELL_PROBABILITY_RECEIPT_MISSING")
+        if not cls.has_exact_payoff_receipt(receipt):
+            raise ValueError("BRANCHWISE_SELL_EXACT_PAYOFF_AUTHORITY_REQUIRED")
         probability_content_identity = str(
             receipt.get("probability_content_identity") or ""
         ).strip()
@@ -5376,6 +5385,8 @@ def _branchwise_dominant_sell_authority_error(
     receipt = exit_intent.probability_receipt
     if not isinstance(receipt, Mapping):
         return "branchwise_dominant_sell_probability_receipt_missing"
+    if not authority.has_exact_payoff_receipt(receipt):
+        return "branchwise_dominant_sell_exact_payoff_authority_required"
     receipt_content_identity = str(
         receipt.get("probability_content_identity") or ""
     ).strip()
@@ -8015,7 +8026,8 @@ def _execute_live_exit(
                     else "global_capital_optimal_sell_intent_required"
                 )
         if preliminary_error is not None and (
-            not continuing_existing_exit
+            branchwise_candidate
+            or not continuing_existing_exit
             or str(exit_intent.reason or "") == "GLOBAL_CAPITAL_OPTIMAL_SELL"
             or str(exit_intent.reason or "").startswith("FLASH_CRASH_PANIC")
         ):

@@ -4477,8 +4477,18 @@ def _global_auction_owns_statistical_sell(exit_decision, exit_reason: str) -> bo
 
 
 def _posterior_support_zero_sell_dominates(pos, exit_context) -> bool:
-    """Return whether legal SELL proceeds dominate HOLD in every current draw."""
+    """Return whether exact payoff truth makes legal cash dominate HOLD."""
 
+    from src.execution.exit_lifecycle import BranchwiseDominantSellAuthority
+
+    # Raw statistical support can become nonzero under the inherited entry
+    # calibration. Only exact payoff evidence bypasses that global comparison.
+    # SCOPE: this held token. DRAIN: existing global SELL/HOLD redecision.
+    # RESET: current exact payoff evidence, or a globally authorized action.
+    if not BranchwiseDominantSellAuthority.has_exact_payoff_receipt(
+        getattr(exit_context, "probability_receipt", None)
+    ):
+        return False
     if not (
         bool(getattr(exit_context, "fresh_prob_is_fresh", False))
         and bool(getattr(exit_context, "current_market_price_is_fresh", False))
