@@ -6,28 +6,14 @@
 #   Enters raw_model_forecasts as a single_runs candidate exactly like a gridded model
 #   (src/data/bayes_precision_fusion_download._RMF_INSERT_COLUMNS contract) and is weighted into
 #   the city's served center by the existing source-clock fixed-weight scheme — no bolt-on path.
-"""Reusable adapter for station-calibrated official forecasts (HKO, KMA, CWA, MetMalaysia, TWC...).
+"""Ingest official forecasts with explicit product, point, metric and clock identity.
 
-A *station forecast* is a national met agency's OWN published daily-extreme forecast for the SAME
-station the corresponding market settles on. Unlike a gridded model interpolated to a point, the
-agency's forecast bakes in the station microclimate through its operational MOS, so it is a
-genuinely station-calibrated, decorrelated information source — DATA PRECISION, never a de-bias.
+CWA township forecasts describe a representative point distinct from RCSS.
+Hourly-sampled calendar extrema and native interval extrema are separate products;
+none of these forecast rows establishes a settlement or observed temperature fact.
+Registry-authorized rows enter the existing current-value/raw-precision fusion path.
 
-This module ingests such a forecast into ``raw_model_forecasts`` under a dedicated ``model`` id
-(e.g. ``hko_fnd``) with ``endpoint='single_runs'`` and full request provenance, mirroring the
-Open-Meteo single_runs capture contract. Once a row exists, the model is admitted into the city's
-served center solely by the per-city source-clock scheme weights
-(``src/strategy/live_inference/source_clock_city_weights.py``): there is NO new fusion code path
-and NO hard-coded weight in code — a station source contributes iff (a) its row is persisted AND
-(b) the city's scheme row lists it. Out-of-domain cities (every city whose scheme omits the source)
-are byte-identical to before.
-
-Adding a sibling source requires its config row and ``forecast_source_registry`` entry.  The
-materializer admits a registry-authorized station row through the same current-value and
-raw-precision center path; it is not a separate fusion mode.
-
-NETWORK: ``fetch_*`` makes a live HTTPS GET. The pure parser/persist functions never touch the
-network — tests pin behaviour with a recorded fixture (tests/data/hko_fnd_sample.json).
+``fetch_*`` performs HTTPS reads; parsers and persistence never fetch data.
 """
 
 from __future__ import annotations
