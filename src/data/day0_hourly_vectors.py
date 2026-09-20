@@ -53,17 +53,25 @@ from dataclasses import dataclass
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Iterable, Mapping, Optional, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import numpy as np
 
 from src.contracts.settlement_semantics import SettlementSemantics
+from src.contracts.settlement_semantics import settlement_preimage_offsets
 from src.data.openmeteo_quota import quota_tracker
 
 logger = logging.getLogger(__name__)
 
 UTC = timezone.utc
+
+
+DAY0_REMAINING_CARRIER_OPERATOR_V1 = "extreme_observed_then_noisy_future_v1"
+DAY0_REMAINING_CARRIER_OPERATOR_V2 = (
+    "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2"
+)
+DAY0_REMAINING_CARRIER_OPERATOR = DAY0_REMAINING_CARRIER_OPERATOR_V2
 
 
 def _day0_utc_now() -> datetime:
@@ -1006,11 +1014,17 @@ def build_day0_remaining_probability_carrier(
     bin_bounds_c: Iterable[tuple[float | None, float | None]], n_point: int,
     n_samples: int, identity_inputs: Mapping[str, object],
     settlement_semantics: SettlementSemantics,
+    operator: str = DAY0_REMAINING_CARRIER_OPERATOR,
 ) -> dict[str, object]:
     """Pure ``extreme(boundary, noisy future)`` carrier for both Day0 readers.
 
     Boundary scenarios are a statistical report-survival likelihood, not final
     settlement authority.  Noise is always applied to the future path first.
+
+    V1 is the historical Monte Carlo operator and is intentionally byte-stable.
+    V2 keeps its confidence draw matrix from that same legacy stream while
+    replacing only the point estimate with the exact expectation of the same
+    physical Gaussian-mixture distribution.
     """
     values = np.sort(
         np.asarray(tuple(float(v) for v in future_extremes_c), dtype=float)
@@ -1079,18 +1093,28 @@ def build_day0_remaining_probability_carrier(
         for key, value in identity_inputs.items()
         if key not in {"decision_time_utc", "probability_cutoff_utc"}
     }
-    content = {"v": 3, "metric": metric, "future": sorted(values.tolist()), "scenarios": scenarios,
-               "path_sigma": path_error_sigma_c, "instrument_sigma": instrument_sigma_c,
-               "bins": bounds, "n_point": n_point, "n_samples": n_samples,
-               "settlement_semantics": {
-                   "resolution_source": settlement_semantics.resolution_source,
-                   "measurement_unit": settlement_semantics.measurement_unit,
-                   "precision": settlement_semantics.precision,
-                   "rounding_rule": settlement_semantics.rounding_rule,
-               },
-               "inputs": economic_identity_inputs}
-    identity = hashlib.sha256(json.dumps(content, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+    # Keep this object and its serialization exactly as the pre-analytic V1
+    # implementation.  It is the immutable confidence-draw identity for both
+    # operators and the complete V1 receipt identity for explicit V1 replay.
+    legacy_content = {"v": 3, "metric": metric, "future": sorted(values.tolist()), "scenarios": scenarios,
+                      "path_sigma": path_error_sigma_c, "instrument_sigma": instrument_sigma_c,
+                      "bins": bounds, "n_point": n_point, "n_samples": n_samples,
+                      "settlement_semantics": {
+                          "resolution_source": settlement_semantics.resolution_source,
+                          "measurement_unit": settlement_semantics.measurement_unit,
+                          "precision": settlement_semantics.precision,
+                          "rounding_rule": settlement_semantics.rounding_rule,
+                      },
+                      "inputs": economic_identity_inputs}
+    legacy_identity = hashlib.sha256(json.dumps(legacy_content, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
     sigma = math.hypot(path_error_sigma_c, instrument_sigma_c)
+
+    if operator not in {
+        DAY0_REMAINING_CARRIER_OPERATOR_V1,
+        DAY0_REMAINING_CARRIER_OPERATOR_V2,
+    }:
+        raise ValueError("DAY0_REMAINING_CARRIER_OPERATOR_UNKNOWN")
+
     def draw(rows: int, seed: int) -> np.ndarray:
         rng = np.random.default_rng(seed)
         future = values + rng.normal(0.0, sigma, (rows, values.size))
@@ -1121,11 +1145,161 @@ def build_day0_remaining_probability_carrier(
             raise ValueError("DAY0_REMAINING_CARRIER_BIN_TOPOLOGY_INVALID")
         out /= totals
         return out
-    seed = int(identity[:16], 16)
-    point = draw(n_point, seed).mean(axis=0)
-    samples = draw(n_samples, seed ^ 0x9E3779B97F4A7C15)
-    return {"q": [float(x) for x in point], "samples": [[float(x) for x in row] for row in samples], "content_identity": identity,
-            "operator": "extreme_observed_then_noisy_future_v1", "sample_count": n_samples}
+
+    # Confidence rows intentionally retain the old stream.  This prevents the
+    # analytic point-estimate migration from creating a one-time uncertainty
+    # shock in downstream LCB/monitor consumers.
+    legacy_seed = int(legacy_identity[:16], 16)
+    samples = draw(n_samples, legacy_seed ^ 0x9E3779B97F4A7C15)
+
+    if operator == DAY0_REMAINING_CARRIER_OPERATOR_V1:
+        point = draw(n_point, legacy_seed).mean(axis=0)
+        return {
+            "q": [float(x) for x in point],
+            "samples": [[float(x) for x in row] for row in samples],
+            "content_identity": legacy_identity,
+            "operator": DAY0_REMAINING_CARRIER_OPERATOR_V1,
+            "sample_count": n_samples,
+        }
+
+    # Do the Gaussian arithmetic in physical Celsius for Fahrenheit contracts,
+    # then classify the atom with the native settlement rounder.  The affine
+    # conversion applies to centers, boundaries, sigma, and preimage offsets;
+    # omitting any one of these would change the physical distribution.
+    physical_scale = 5.0 / 9.0 if unit == "F" else 1.0
+    physical_offset = -32.0 * physical_scale if unit == "F" else 0.0
+    sigma_physical = sigma * physical_scale
+
+    def stable_normal_interval_probability(
+        mu: float, lower: float, upper: float,
+    ) -> float:
+        """Return P(lower <= N(mu, sigma) <= upper) without tail cancellation."""
+
+        if lower >= upper:
+            return 0.0
+        from scipy.special import log_ndtr, ndtr
+
+        z_low = -math.inf if lower == -math.inf else (lower - mu) / sigma_physical
+        z_high = math.inf if upper == math.inf else (upper - mu) / sigma_physical
+        if z_low >= 0.0:
+            # P = SF(z_low) - SF(z_high), evaluated in log space for far tails.
+            log_low = float(log_ndtr(-z_low))
+            log_high = float(log_ndtr(-z_high))
+            if math.isinf(log_high) and log_high < 0.0:
+                return float(math.exp(log_low))
+            log_ratio = log_high - log_low
+            return float(math.exp(log_low) * (-math.expm1(log_ratio)))
+        if z_high <= 0.0:
+            # P = CDF(z_high) - CDF(z_low), likewise in log space.
+            log_high = float(log_ndtr(z_high))
+            log_low = float(log_ndtr(z_low))
+            if math.isinf(log_low) and log_low < 0.0:
+                return float(math.exp(log_high))
+            log_ratio = log_low - log_high
+            return float(math.exp(log_high) * (-math.expm1(log_ratio)))
+        return float(ndtr(z_high) - ndtr(z_low))
+
+    def exact_member_probability(mu: float, boundary: float | None) -> np.ndarray:
+        """Exact settlement-bin probabilities for one member/scenario."""
+
+        out = np.zeros(len(bounds), dtype=float)
+        if sigma == 0.0:
+            final = mu
+            if boundary is not None:
+                final = max(mu, boundary) if metric == "high" else min(mu, boundary)
+            settled = float(settlement_semantics.round_values([final])[0])
+            for index, (low, high) in enumerate(bounds):
+                if (low is None or settled >= low) and (high is None or settled <= high):
+                    out[index] = 1.0
+                    return out
+            raise ValueError("DAY0_REMAINING_CARRIER_BIN_TOPOLOGY_INVALID")
+
+        low_offset, high_offset = settlement_preimage_offsets(
+            settlement_semantics.rounding_rule,
+            half_step=settlement_semantics.precision / 2.0,
+        )
+        mu_physical = mu * physical_scale + physical_offset
+        boundary_physical = (
+            None if boundary is None
+            else boundary * physical_scale + physical_offset
+        )
+        low_offset *= physical_scale
+        high_offset *= physical_scale
+        for index, (low, high) in enumerate(bounds):
+            lower = (
+                -math.inf if low is None
+                else (low * physical_scale + physical_offset) + low_offset
+            )
+            upper = (
+                math.inf if high is None
+                else (high * physical_scale + physical_offset) + high_offset
+            )
+            if boundary is None:
+                out[index] = stable_normal_interval_probability(
+                    mu_physical, lower, upper
+                )
+                continue
+
+            rounded_boundary = float(settlement_semantics.round_values([boundary])[0])
+            atom_in_bin = (
+                (low is None or rounded_boundary >= low)
+                and (high is None or rounded_boundary <= high)
+            )
+            if metric == "high":
+                # max(X,b): X <= b becomes an atom at b; X > b retains X.
+                out[index] = stable_normal_interval_probability(
+                    mu_physical, max(lower, boundary_physical), upper
+                )
+                if atom_in_bin:
+                    out[index] += stable_normal_interval_probability(
+                        mu_physical, -math.inf, boundary_physical
+                    )
+            else:
+                # min(X,b): X >= b becomes an atom at b; X < b retains X.
+                out[index] = stable_normal_interval_probability(
+                    mu_physical, lower, min(upper, boundary_physical)
+                )
+                if atom_in_bin:
+                    out[index] += stable_normal_interval_probability(
+                        mu_physical, boundary_physical, math.inf
+                    )
+        total = float(out.sum())
+        if total <= 0.0 or not np.isfinite(total):
+            raise ValueError("DAY0_REMAINING_CARRIER_BIN_TOPOLOGY_INVALID")
+        return out / total
+
+    point = np.zeros(len(bounds), dtype=float)
+    for member in values:
+        member_probability = np.zeros(len(bounds), dtype=float)
+        for boundary, weight in scenarios:
+            member_probability += float(weight) * exact_member_probability(
+                float(member), boundary
+            )
+        point += member_probability
+    point /= float(values.size)
+    point_total = float(point.sum())
+    if point_total <= 0.0 or not np.isfinite(point_total):
+        raise ValueError("DAY0_REMAINING_CARRIER_BIN_TOPOLOGY_INVALID")
+    point /= point_total
+
+    # V2's identity is a v4 envelope over the legacy confidence identity.  The
+    # nested legacy identity deliberately retains n_point because the old
+    # confidence seed included it; the analytic point estimate itself does not.
+    v2_content = {
+        "v": 4,
+        "operator": DAY0_REMAINING_CARRIER_OPERATOR_V2,
+        "confidence_draw_identity": legacy_identity,
+    }
+    identity = hashlib.sha256(
+        json.dumps(v2_content, sort_keys=True, separators=(",", ":"), default=str).encode()
+    ).hexdigest()
+    return {
+        "q": [float(x) for x in point],
+        "samples": [[float(x) for x in row] for row in samples],
+        "content_identity": identity,
+        "operator": DAY0_REMAINING_CARRIER_OPERATOR_V2,
+        "sample_count": n_samples,
+    }
 
 
 def day0_remaining_carrier_samples_row_major(
