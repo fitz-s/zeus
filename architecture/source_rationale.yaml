@@ -150,19 +150,23 @@ providers:
     role: forecast_skill_historical
     client: src/data/bayes_precision_fusion_history_provider.py
     why: >
-      Walk-forward historical forecast residuals for BAYES_PRECISION_FUSION-Bayes fusion (previous_runs
-      endpoint only, target_date < decision_date, VERIFIED settlement). Intra-DB JOIN
+      Walk-forward historical forecast residuals for BAYES_PRECISION_FUSION-Bayes fusion
+      (previous_runs, plus explicitly registered positive-lead official station forecasts
+      captured and available before the target local day; target_date < decision_date,
+      VERIFIED settlement). Intra-DB JOIN
       on zeus-forecasts.db (raw_model_forecasts + settlement_outcomes). Not an
       external network source; reads Zeus's own persisted forecast history.
   station_forecast:
     role: forecast_skill_live_station
     client: src/data/station_forecast_adapter.py
     why: >
-      Config-routed official station forecast ingest for CWA/HKO station values,
+      Config-routed official forecast ingest for CWA township/HKO products,
       called from replacement_forecast_production. These rows are forecast-skill
       inputs to source-clock precision fusion only; they are not settlement,
       Day0 observation, hourly-history, or venue truth. Per-source failures are
       fail-soft and must not silently substitute settlement/source authority.
+      CWA F-D0047-061 LOW is the minimum of a complete next-local-day hourly
+      temperature sequence, distinct from F-D0047-063 interval extrema.
   polymarket_gamma:
     role: internal_probe
     client: src/data/station_migration_probe.py
