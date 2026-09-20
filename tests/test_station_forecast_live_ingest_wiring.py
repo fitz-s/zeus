@@ -17,6 +17,7 @@ and is per-source fail-soft so one provider outage never starves the others.
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,17 @@ _HKO_SPEC = {
     "city": "Hong Kong",
     "metrics": ["high", "low"],
     "endpoint": "https://example.invalid/hko",
+}
+_CWA_HOURLY_LOW_SPEC = {
+    "enabled": True,
+    "adapter_kind": "cwa_township_hourly_xml",
+    "city": "Taipei",
+    "metric": "low",
+    "location_name": "松山區",
+    "location_geocode": "63000010",
+    "location_latitude": 25.051608,
+    "location_longitude": 121.568983,
+    "endpoint": "https://example.invalid/cwa-fileapi",
 }
 
 _CONN = object()  # sentinel; ingest fns are monkeypatched so the conn is never touched
@@ -82,6 +94,29 @@ def test_dispatch_passes_city_and_metric_from_spec(monkeypatch, tmp_path):
 
     assert seen.get("city") == "Taipei"
     assert seen.get("metric") == "high"
+
+
+def test_dispatch_routes_hourly_low_product_with_township_identity(monkeypatch, tmp_path):
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        adapter,
+        "ingest_cwa_township_hourly_low_live",
+        lambda conn, **kw: (seen.update(kw), 1)[1],
+    )
+    _write_config(tmp_path, {"cwa_township_hourly_low": dict(_CWA_HOURLY_LOW_SPEC)})
+
+    assert adapter.ingest_enabled_station_sources_live(_CONN, root=tmp_path) == {
+        "cwa_township_hourly_low": 1
+    }
+    assert seen == {
+        "city": "Taipei",
+        "metric": "low",
+        "location_name": "松山區",
+        "location_geocode": "63000010",
+        "location_latitude": 25.051608,
+        "location_longitude": 121.568983,
+        "endpoint": "https://example.invalid/cwa-fileapi",
+    }
 
 
 def test_dispatch_passes_both_hko_metrics_from_spec(monkeypatch, tmp_path):
@@ -196,6 +231,170 @@ def test_hko_multi_metric_ingest_rejects_invalid_metrics_before_fetch(
 
     with pytest.raises(ValueError):
         adapter.ingest_hko_fnd_live(_CONN, metrics=metrics)
+
+
+# ---------------------------------------------------------------------------
+# CWA F-D0047-061: a complete raw XML product is required for a LOW.  The
+# JSON REST projection omits DatasetInfo IssueTime/Update, so fixtures exercise
+# the fileapi shape and the separate publisher/local clocks directly.
+# ---------------------------------------------------------------------------
+def _hourly_low_xml(
+    *,
+    issue_time: str = "2026-07-23T17:00:00+08:00",
+    update_time: str = "2026-07-23T18:14:00+08:00",
+    sent_time: str | None = "2026-07-23T18:14:00+08:00",
+    points: list[tuple[str, str]] | None = None,
+    element_name: str = "溫度",
+    location_name: str = "松山區",
+    location_geocode: str = "63000010",
+    location_latitude: str = "25.051608",
+    location_longitude: str = "121.568983",
+) -> bytes:
+    samples = points or [
+        (f"2026-07-24T{hour:02d}:00:00+08:00", str(29 - (hour % 7)))
+        for hour in range(24)
+    ]
+    sent = "" if sent_time is None else f"<Sent>{sent_time}</Sent>"
+    times = "".join(
+        "<Time><DataTime>" + when + "</DataTime><ElementValue><Temperature>"
+        + value + "</Temperature></ElementValue></Time>"
+        for when, value in samples
+    )
+    return (
+        "<cwaopendata>"
+        + sent
+        + "<Dataid>D0047-061</Dataid>"
+        + "<Dataset><DatasetInfo><IssueTime>" + issue_time
+        + "</IssueTime><Update>" + update_time
+        + "</Update></DatasetInfo><Locations><Location><LocationName>"
+        + location_name + "</LocationName><Geocode>" + location_geocode
+        + "</Geocode><Latitude>" + location_latitude + "</Latitude><Longitude>"
+        + location_longitude + "</Longitude><WeatherElement><ElementName>" + element_name
+        + "</ElementName>" + times
+        + "</WeatherElement></Location></Locations></Dataset></cwaopendata>"
+    ).encode("utf-8")
+
+
+def _hourly_product(**kwargs) -> adapter.CwaHourlyProduct:
+    return adapter.parse_cwa_township_hourly_product(
+        _hourly_low_xml(**kwargs), captured_at="2026-07-23T10:15:00+00:00"
+    )
+
+
+def test_hourly_low_requires_complete_unique_finite_whole_hour_dplus1_grid():
+    product = _hourly_product()
+    rows = adapter.parse_cwa_township_hourly_low_product(product)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row.model, row.city, row.metric, row.target_date, row.lead_days) == (
+        "cwa_township_hourly_low", "Taipei", "low", "2026-07-24", 1,
+    )
+    assert row.forecast_value_c == 23.0
+    assert row.source_cycle_time == "2026-07-23T10:14:00+00:00"
+    assert row.source_available_at == "2026-07-23T10:15:00+00:00"
+
+
+@pytest.mark.parametrize(
+    ("points", "element_name"),
+    [
+        ([(f"2026-07-24T{hour:02d}:00:00+08:00", "20") for hour in range(23)], "溫度"),
+        ([(f"2026-07-24T{hour:02d}:00:00+08:00", "20") for hour in range(24)] + [("2026-07-24T02:00:00+08:00", "19")], "溫度"),
+        ([(f"2026-07-24T{hour:02d}:30:00+08:00", "20") for hour in range(24)], "溫度"),
+        ([(f"2026-07-24T{hour:02d}:00:00+08:00", "NaN" if hour == 9 else "20") for hour in range(24)], "溫度"),
+        ([(f"2026-07-24T{hour:02d}:00:00+08:00", "20") for hour in range(24)], "最低溫度"),
+    ],
+)
+def test_hourly_low_rejects_incomplete_ambiguous_or_wrong_product(points, element_name):
+    # A MinT-only/cross-midnight 12-hour product cannot be re-labelled LOW.
+    assert adapter.parse_cwa_township_hourly_low_product(
+        _hourly_product(points=points, element_name=element_name)
+    ) == ()
+
+
+def test_hourly_low_rejects_unexpected_township_identity():
+    with pytest.raises(ValueError, match="exactly one configured township"):
+        adapter.parse_cwa_township_hourly_low_product(
+            _hourly_product(location_name="大安區", location_geocode="63000011")
+        )
+
+
+def test_hourly_low_rejects_unexpected_township_coordinates():
+    with pytest.raises(ValueError, match="coordinates do not match"):
+        adapter.parse_cwa_township_hourly_low_product(
+            _hourly_product(location_latitude="25.000000")
+        )
+
+
+def _hourly_schema_conn() -> sqlite3.Connection:
+    from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
+
+    conn = sqlite3.connect(":memory:")
+    ensure_replacement_forecast_live_schema(conn)
+    return conn
+
+
+def test_hourly_low_same_publisher_revision_is_idempotent_and_retains_raw_hash(monkeypatch):
+    product = _hourly_product()
+    monkeypatch.setattr(adapter, "fetch_cwa_township_hourly_product", lambda **_kw: product)
+    conn = _hourly_schema_conn()
+
+    assert adapter.ingest_cwa_township_hourly_low_live(conn, api_key="test") == 1
+    assert adapter.ingest_cwa_township_hourly_low_live(conn, api_key="test") == 0
+    row = conn.execute(
+        "SELECT source_cycle_time, source_available_at, captured_at, raw_sha256, request_params_json "
+        "FROM raw_model_forecasts"
+    ).fetchone()
+    assert row[:4] == (
+        "2026-07-23T10:14:00+00:00", "2026-07-23T10:15:00+00:00",
+        "2026-07-23T10:15:00+00:00", product.raw_sha256,
+    )
+    provenance = json.loads(row[4])
+    assert provenance["issue_time"] == "2026-07-23T09:00:00+00:00"
+    assert provenance["response_sha256"] == product.raw_sha256
+
+
+def test_hourly_low_same_update_changed_body_is_loud_conflict(monkeypatch):
+    from src.data.bayes_precision_fusion_download import RawModelForecastRequestConflict
+
+    first = _hourly_product()
+    changed = _hourly_product(points=[
+        (f"2026-07-24T{hour:02d}:00:00+08:00", "18" if hour == 4 else "20")
+        for hour in range(24)
+    ])
+    products = iter((first, changed))
+    monkeypatch.setattr(adapter, "fetch_cwa_township_hourly_product", lambda **_kw: next(products))
+    conn = _hourly_schema_conn()
+
+    assert adapter.ingest_cwa_township_hourly_low_live(conn, api_key="test") == 1
+    with pytest.raises(RawModelForecastRequestConflict):
+        adapter.ingest_cwa_township_hourly_low_live(conn, api_key="test")
+    assert conn.execute("SELECT COUNT(*) FROM raw_model_forecasts").fetchone()[0] == 1
+
+
+def test_hourly_low_same_issue_new_update_is_new_official_revision(monkeypatch):
+    first = _hourly_product()
+    revised = _hourly_product(
+        update_time="2026-07-23T18:29:00+08:00",
+        sent_time="2026-07-23T18:29:00+08:00",
+        points=[
+            (f"2026-07-24T{hour:02d}:00:00+08:00", "17" if hour == 4 else "20")
+            for hour in range(24)
+        ],
+    )
+    products = iter((first, revised))
+    monkeypatch.setattr(adapter, "fetch_cwa_township_hourly_product", lambda **_kw: next(products))
+    conn = _hourly_schema_conn()
+
+    assert adapter.ingest_cwa_township_hourly_low_live(conn, api_key="test") == 1
+    assert adapter.ingest_cwa_township_hourly_low_live(conn, api_key="test") == 1
+    rows = conn.execute(
+        "SELECT source_cycle_time, forecast_value_c FROM raw_model_forecasts ORDER BY source_cycle_time"
+    ).fetchall()
+    assert rows == [
+        ("2026-07-23T10:14:00+00:00", 23.0),
+        ("2026-07-23T10:29:00+00:00", 17.0),
+    ]
 
 
 def test_dispatch_fail_soft_one_source_error_does_not_abort_others(monkeypatch, tmp_path):
@@ -338,7 +537,11 @@ def test_due_gate_honors_each_station_source_clock(monkeypatch):
     monkeypatch.setattr(
         prod,
         "_station_forecast_poll_intervals",
-        lambda: {"cwa_township": 10800.0, "hko_fnd": 15.0},
+        lambda: {
+            "cwa_township": 10800.0,
+            "cwa_township_hourly_low": 300.0,
+            "hko_fnd": 15.0,
+        },
     )
     monkeypatch.setattr(prod, "_last_station_ingest_monotonic_by_source", {})
 
@@ -346,11 +549,18 @@ def test_due_gate_honors_each_station_source_clock(monkeypatch):
     gated = prod._ingest_station_forecasts_if_due({})
     prod._last_station_ingest_monotonic_by_source["hko_fnd"] -= 16.0
     hko_again = prod._ingest_station_forecasts_if_due({})
+    prod._last_station_ingest_monotonic_by_source["cwa_township_hourly_low"] -= 301.0
+    low_again = prod._ingest_station_forecasts_if_due({})
 
-    assert first == {"cwa_township": 1, "hko_fnd": 1}
+    assert first == {"cwa_township": 1, "cwa_township_hourly_low": 1, "hko_fnd": 1}
     assert gated is None
     assert hko_again == {"hko_fnd": 1}
-    assert calls == [("cwa_township", "hko_fnd"), ("hko_fnd",)]
+    assert low_again == {"cwa_township_hourly_low": 1}
+    assert calls == [
+        ("cwa_township", "cwa_township_hourly_low", "hko_fnd"),
+        ("hko_fnd",),
+        ("cwa_township_hourly_low",),
+    ]
 
 
 def test_due_gate_does_not_reseed_unchanged_fast_poll(monkeypatch):

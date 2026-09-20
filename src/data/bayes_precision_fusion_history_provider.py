@@ -45,6 +45,7 @@ _LOG = logging.getLogger("zeus.bayes_precision_fusion_history_provider")
 
 _STATION_SINGLE_RUNS_HISTORY_TIMEZONES = {
     "cwa_township": {"Taipei": "Asia/Taipei"},
+    "cwa_township_hourly_low": {"Taipei": "Asia/Taipei"},
     "hko_fnd": {"Hong Kong": "Asia/Hong_Kong"},
 }
 
