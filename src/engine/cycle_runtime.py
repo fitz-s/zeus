@@ -4142,9 +4142,9 @@ _FAMILY_OVERLAY_STATISTICAL_EXIT_TRIGGERS = frozenset(
 # the default, not an allowlist: a new trigger must not fall through to a local
 # submit that the execution boundary will reject. RED, recomputed absorbing
 # Day0 facts, and exact zero support remain direct reduce-only authorities. A
-# durable market-relative rejection of the exact HOLD q is also direct: the
-# global auction cannot compare HOLD using the probability witness RiskGuard
-# just invalidated. Zero support is statistical in provenance but deterministic
+# market-price crash requests the same global comparison; price velocity does
+# not invalidate or replace the held probability witness. Zero support is
+# statistical in provenance but deterministic
 # in action: positive cash strictly dominates a zero-payoff token in every
 # represented branch. A strategy entry gate is not SELL authority: historical
 # evidence may stop new exposure, but held exposure remains subject to the
@@ -4153,12 +4153,6 @@ _DIRECT_REDUCE_ONLY_SELL_TRIGGERS = (
     "RED_FORCE_EXIT",
     "DAY0_HARD_FACT_BIN_DEAD",
     "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES",
-    # Position.evaluate_exit emits this only after multiple causal quotes prove
-    # a fresh, executable deep book collapse and settlement is not guaranteed.
-    # It is the market-path override to HOLD/EVIDENCE_UNAVAILABLE, so routing it
-    # back through an ordinary statistical full-family preparation can erase
-    # the emergency decision before command persistence.
-    "FLASH_CRASH_PANIC",
 )
 
 _FAMILY_OVERLAY_MIN_DIRECT_SELL_ADVANTAGE_USD = 0.05
@@ -7836,7 +7830,7 @@ def execute_monitoring_phase(
         # A direct reduce-only trigger's retry-pending state must never be
         # released into a fresh global-auction reauction: that reauction
         # re-enters execute_exit through the generic auction adapter, which
-        # carries no hard_fact_authority/RED handoff/flash-crash receipt, so
+        # carries no hard_fact_authority/RED handoff, so
         # the direct authority recheck fails forever (the DAY0_HARD_FACT_
         # BIN_DEAD retry-starvation bug). The ordinary requester=None retry
         # path (check_pending_exits above, and the primary per-position
@@ -10152,7 +10146,7 @@ def execute_monitoring_phase(
                 )
             )
             protective_fak_redecision = should_exit and local_exit_trigger in {
-                "RED_FORCE_EXIT", "DAY0_HARD_FACT_BIN_DEAD", "FLASH_CRASH_PANIC",
+                "RED_FORCE_EXIT", "DAY0_HARD_FACT_BIN_DEAD",
             }
             if should_exit:
                 # Global redecision may choose an immediate FAK below the

@@ -3588,16 +3588,19 @@ def test_global_auction_owns_statistical_sell_direct_vs_mirror_triggers():
         "RED_FORCE_EXIT",
         "DAY0_HARD_FACT_BIN_DEAD",
         "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES",
-        "FLASH_CRASH_PANIC",
     ):
         decision = SimpleNamespace(trigger=direct_trigger)
         assert _global_auction_owns_statistical_sell(decision, direct_trigger) is False
 
-    statistical = SimpleNamespace(trigger="GLOBAL_CAPITAL_OPTIMAL_SELL")
-    assert (
-        _global_auction_owns_statistical_sell(statistical, statistical.trigger)
-        is True
-    )
+    for statistical_trigger in (
+        "GLOBAL_CAPITAL_OPTIMAL_SELL",
+        "FLASH_CRASH_PANIC",
+    ):
+        statistical = SimpleNamespace(trigger=statistical_trigger)
+        assert (
+            _global_auction_owns_statistical_sell(statistical, statistical.trigger)
+            is True
+        )
 
 
 def test_refresh_position_finishes_read_only_work_before_quote_writer(monkeypatch):
@@ -7683,11 +7686,14 @@ def test_pending_exit_backoff_exhausted_reenters_redecision_when_still_held(monk
     ),
     (
         ("EDGE_REVERSAL", True, True, "delegated", False, False),
-        ("FLASH_CRASH_PANIC", True, True, "direct", False, False),
-        ("FLASH_CRASH_PANIC", True, True, "direct_small", False, False),
-        ("FLASH_CRASH_PANIC", True, True, "direct_dust", False, False),
-        ("FLASH_CRASH_PANIC", True, True, "direct_dust_open", False, False),
-        ("FLASH_CRASH_PANIC", True, True, "direct_dust_cooldown", False, False),
+        # FLASH_CRASH_PANIC remains the Position.evaluate_exit trigger, but
+        # monitor execution must request the existing global statistical SELL
+        # redecision even with a fresh q=.273075 and executable bid=.05.
+        ("FLASH_CRASH_PANIC", True, True, "delegated", False, False),
+        ("FLASH_CRASH_PANIC", False, True, "old_panic_retry", False, False),
+        ("DAY0_HARD_FACT_BIN_DEAD", True, True, "direct_dust", False, False),
+        ("DAY0_HARD_FACT_BIN_DEAD", True, True, "direct_dust_open", False, False),
+        ("DAY0_HARD_FACT_BIN_DEAD", True, True, "direct_dust_cooldown", False, False),
         ("DAY0_HARD_FACT_BIN_DEAD", True, True, "direct_small", False, False),
         ("RED_FORCE_EXIT", True, True, "direct_small", False, False),
         ("EDGE_REVERSAL", True, True, "lineage_upgrade", False, False),
@@ -7701,6 +7707,8 @@ def test_pending_exit_backoff_exhausted_reenters_redecision_when_still_held(monk
         ),
         ("EDGE_REVERSAL", False, True, "blocked", False, False),
         ("EDGE_REVERSAL", False, False, "request_failed", False, False),
+        ("FLASH_CRASH_PANIC", False, True, "blocked", False, False),
+        ("FLASH_CRASH_PANIC", False, False, "request_failed", False, False),
         ("CI_OVERLAP_SELL_VALUE_DOMINATES", False, True, "blocked", False, False),
         ("SETTLEMENT_IMMINENT", False, True, "blocked", False, False),
         (
@@ -7734,6 +7742,9 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
     posterior_support_zero,
 ):
     """Statistical SELL is global-only; missing authority holds while RED acts."""
+    old_panic_retry = outcome == "old_panic_retry"
+    if old_panic_retry:
+        outcome = "blocked"
     from decimal import Decimal
     from src.execution import exit_lifecycle
     from src.contracts import EdgeContext, EntryMethod
@@ -7786,9 +7797,20 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         source_module="tests/test_current_global_monitor_sell_is_non_authoritative",
     )
     append_many_and_project(conn, events, projection)
+    if old_panic_retry:
+        with monkeypatch.context() as seed_patch:
+            seed_patch.setattr(exit_lifecycle, "_utcnow", lambda: datetime(2026, 7, 14, 17, 30, tzinfo=timezone.utc))
+            exit_lifecycle._mark_exit_retry(
+                pos, reason="FLASH_CRASH_PANIC (legacy intent)",
+                error="executable_snapshot_error", cooldown_seconds=0, conn=conn,
+            )
+        conn.commit()
+        pos.exit_trigger = "FLASH_CRASH_PANIC"
+        assert pos.state == "pending_exit"
+        assert pos.exit_state == "retry_pending"
     if outcome.startswith("direct_dust"):
         exit_lifecycle._mark_exit_dust_hold(
-            pos, reason="FLASH_CRASH_PANIC [DUST]",
+            pos, reason=f"{trigger} [DUST]",
             error="executable_snapshot_gate: size 2.0 is below snapshot min_order_size 5",
             conn=conn,
         )
@@ -7822,13 +7844,26 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         }
 
     def fake_refresh(_conn, _clob, position, **_kwargs):
-        position.last_monitor_prob = 0.0 if posterior_support_zero else 0.10
+        monitor_prob = (
+            0.0
+            if posterior_support_zero
+            else 0.273075
+            if trigger == "FLASH_CRASH_PANIC"
+            else 0.10
+        )
+        position.last_monitor_prob = monitor_prob
         position.last_monitor_prob_is_fresh = True
         position.last_monitor_edge = -0.50 if posterior_support_zero else -0.40
         position.last_monitor_market_price = 0.50
         position.last_monitor_market_price_is_fresh = True
-        position.last_monitor_best_bid = 0.0 if outcome == "no_book" else 0.49
-        position.last_monitor_best_ask = 0.50
+        position.last_monitor_best_bid = (
+            0.0
+            if outcome == "no_book"
+            else 0.05
+            if trigger == "FLASH_CRASH_PANIC"
+            else 0.49
+        )
+        position.last_monitor_best_ask = 0.06 if trigger == "FLASH_CRASH_PANIC" else 0.50
         position.last_monitor_at = (
             "2026-07-14T17:59:59+00:00"
             if posterior_support_zero
@@ -7888,7 +7923,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             p_raw=np.array([]),
             p_cal=np.array([]),
             p_market=np.array([0.50]),
-            p_posterior=0.0 if posterior_support_zero else 0.10,
+            p_posterior=monitor_prob,
             forward_edge=-0.50 if posterior_support_zero else -0.40,
             alpha=0.1,
             confidence_band_upper=-0.35,
@@ -8102,7 +8137,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
 
     monitor_now = (
         (lambda: datetime.now(timezone.utc))
-        if outcome == "sub_precision" or outcome.startswith("direct_dust")
+        if old_panic_retry or outcome == "sub_precision" or outcome.startswith("direct_dust")
         else (lambda: datetime(2026, 7, 14, 18, 0, tzinfo=timezone.utc))
     )
 
@@ -8136,8 +8171,12 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         type("Tracker", (), {"record_exit": lambda self, position: None})(),
         summary,
         deps=deps,
-        run_exit_preflight=False,
+        run_exit_preflight=old_panic_retry,
     )
+
+    if old_panic_retry:
+        if not results:
+            pytest.fail(json.dumps(summary, sort_keys=True, indent=2))
 
     if outcome == "delegated":
         assert summary["monitor_sells_delegated_to_global_auction"] == 1
@@ -8302,13 +8341,13 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             assert float(pos.effective_shares) == 2.0
         # FIX 1 (DAY0_HARD_FACT_BIN_DEAD retry-starvation): this branch is
         # reached only for the "direct" outcome (RED_FORCE_EXIT,
-        # DAY0_HARD_FACT_BIN_DEAD, FLASH_CRASH_PANIC, and the branchwise
-        # posterior-support-zero SELL) -- every _DIRECT_REDUCE_ONLY_SELL_
+        # DAY0_HARD_FACT_BIN_DEAD and the branchwise posterior-support-zero
+        # SELL) -- every _DIRECT_REDUCE_ONLY_SELL_
         # TRIGGERS member. A direct trigger's no-fill must never be handed to
         # the same-turn global-sell reauction drain: that drain's eventual
         # reauction re-enters execute_exit through the generic global-auction
-        # adapter, which carries no hard_fact_authority/RED handoff/flash-
-        # crash receipt, so the direct authority recheck fails forever.
+        # adapter, which carries no hard_fact_authority/RED handoff, so the
+        # direct authority recheck fails forever.
         assert same_turn_reauction_drain_attempts == []
     if outcome not in {
         "blocked",

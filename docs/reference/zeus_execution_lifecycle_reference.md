@@ -338,8 +338,12 @@ decision precedence is:
 5. **WHALE_TOXICITY observation** — records `whale_toxicity_observed` only. It
    has no independent liquidation authority and cannot bypass probability,
    CI, or hold-vs-sell economics.
-6. **FLASH_CRASH_PANIC / VIG_EXTREME** — independent market-mechanics evidence
-   remains actionable under its own guards.
+6. **FLASH_CRASH_PANIC / VIG_EXTREME** — market-mechanics evidence requests
+   global statistical redecision; it is not independent liquidation authority.
+   SELL must win the current probability, wealth, depth and fee comparison and
+   carry the global execution certificate. Missing authority retains the
+   existing scoped redecision/preparation path; RED and absorbing hard facts
+   retain their direct reduce-only authority.
 7. **CI separation and direction-specific economics** — a confirmed belief
    reversal or executable sell-value dominance may exit; overlap, positive
    held edge, or superior hold value remains a hold.

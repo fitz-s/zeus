@@ -575,9 +575,9 @@ def test_causal_catastrophe_uses_executable_bid_not_ask_sensitive_mark():
     assert confirmations == flash_crash_confirmations()
 
 
-def test_flash_catastrophe_preserves_immediate_reduce_only_authority():
+def test_flash_catastrophe_requests_global_statistical_redecision():
     decision = SimpleNamespace(trigger="FLASH_CRASH_PANIC")
-    assert _global_auction_owns_statistical_sell(decision, decision.trigger) is False
+    assert _global_auction_owns_statistical_sell(decision, decision.trigger) is True
     ordinary = SimpleNamespace(trigger="SELL_REVERSAL")
     assert _global_auction_owns_statistical_sell(ordinary, ordinary.trigger) is True
 

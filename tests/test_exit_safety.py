@@ -7928,7 +7928,7 @@ def test_live_exit_consumes_exact_submit_fill_without_second_venue_poll(
     assert projection["shares"] == pytest.approx(12.0)
 
 
-def test_live_exit_releases_terminal_fak_partial_before_second_venue_poll(
+def test_flash_panic_rejects_local_terminal_fak_before_second_venue_poll(
     conn,
     monkeypatch,
 ):
@@ -7961,7 +7961,7 @@ def test_live_exit_releases_terminal_fak_partial_before_second_venue_poll(
         strategy_key="day0_nowcast_entry",
         state="pending_exit",
         exit_state="exit_intent",
-        env="test",
+        env="live",
     )
     position.chain_seen_at = _NOW.isoformat()
     portfolio = PortfolioState(positions=[position])
@@ -8126,43 +8126,21 @@ def test_live_exit_releases_terminal_fak_partial_before_second_venue_poll(
         exit_intent_already_recorded=True,
     )
 
-    assert result == (
-        "position_reduced: 5 shares; terminal FAK residual ready for redecision"
-    )
-    assert position.state == "holding"
-    assert position.exit_state == ""
-    assert position.shares == pytest.approx(43.0)
-    assert position.cost_basis_usd == pytest.approx(15.05)
-    # Canonical fill economics reduce the local exposure immediately; the
-    # independently observed chain projection is not locally fabricated.
-    assert position.chain_shares == pytest.approx(48.0)
-    assert position.chain_cost_basis_usd == pytest.approx(16.8)
-    assert conn.in_transaction is False
-    events = conn.execute(
-        """
-        SELECT event_type, caused_by
-          FROM position_events
-         WHERE position_id = ?
-         ORDER BY sequence_no DESC
-         LIMIT 2
-        """,
+    assert result == "exit_blocked: global_capital_optimal_sell_intent_required"
+    assert position.state == "pending_exit"
+    assert position.exit_state == "exit_intent"
+    assert position.shares == pytest.approx(48.0)
+    assert position.cost_basis_usd == pytest.approx(16.8)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_commands WHERE position_id = ?",
         (position.trade_id,),
-    ).fetchall()
-    assert [(row["event_type"], row["caused_by"]) for row in reversed(events)] == [
-        ("MONITOR_REFRESHED", "partial_exit_fill"),
-        ("EXIT_RETRY_RELEASED", "capital_reduction_filled"),
-    ]
-    binding_sequence = conn.execute(
-        "SELECT sequence_no FROM position_events WHERE position_id = ? "
-        "AND event_type = 'EXIT_ORDER_POSTED' AND command_id = ?",
-        (position.trade_id, command_id),
-    ).fetchone()[0]
-    assert exit_lifecycle._capital_reduction_released_global_sell_command(
-        conn,
-        position,
-        command_id=command_id,
-        binding_sequence=binding_sequence,
-    )
+    ).fetchone()[0] == 0
+    assert conn.in_transaction is False
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events "
+        "WHERE position_id = ? AND event_type = 'EXIT_RETRY_RELEASED'",
+        (position.trade_id,),
+    ).fetchone()[0] == 0
 
 
 def test_live_exit_uses_expired_snapshot_identity_when_static_topology_lacks_no_token(
@@ -9537,7 +9515,7 @@ def test_hard_fact_exit_uses_fresh_bid_protective_fak(
         ("subminimum_protective_fak", 2.0, "5"),
     ),
 )
-def test_protective_fak_terminal_no_fill_is_immediately_redecision_eligible(
+def test_flash_panic_rejects_protective_fak_before_venue_no_fill_path(
     conn, monkeypatch, case_id, requested_shares, snapshot_min_order_size
 ):
     from src.execution import exit_lifecycle
@@ -9662,11 +9640,7 @@ def test_protective_fak_terminal_no_fill_is_immediately_redecision_eligible(
         PortfolioState(positions=[position]),
         position,
         ExitContext(
-            exit_reason=(
-                "FLASH_CRASH_PANIC "
-                f"(velocity={flash_crash_catastrophe_velocity() - 0.01:.3f}, "
-                f"causal_quotes={flash_crash_confirmations()})"
-            ),
+            exit_reason="FLASH_CRASH_PANIC",
             fresh_prob=None,
             fresh_prob_is_fresh=False,
             current_market_price=0.10,
@@ -9680,32 +9654,19 @@ def test_protective_fak_terminal_no_fill_is_immediately_redecision_eligible(
         conn=conn,
     )
 
-    assert outcome == "sell_error: venue_fak_no_match_400"
-    assert submitted["submit_order_type"] == "FAK"
-    assert submitted["shares"] == pytest.approx(requested_shares)
-    assert submitted["executable_snapshot_min_order_size"] == snapshot_min_order_size
-    authority = submitted["protective_sell_execution_authority"]
-    assert isinstance(authority, exit_lifecycle.ProtectiveSellExecutionAuthority)
-    assert Decimal(authority.shares) == Decimal(str(requested_shares))
-    assert authority.snapshot_id == "snapshot-protective-fak-no-fill"
-    assert authority.snapshot_hash == "hash-protective-fak-no-fill"
+    assert outcome == "exit_blocked: global_capital_optimal_sell_intent_required"
+    assert submitted == {}
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_commands WHERE position_id = ?",
+        (position.trade_id,),
+    ).fetchone()[0] == 0
     assert position.state == "day0_window"
     assert position.exit_state == ""
-    events = conn.execute(
-        """SELECT event_type, payload_json FROM position_events
-            WHERE position_id=? AND event_type IN (
-                'EXIT_ORDER_REJECTED', 'EXIT_RETRY_RELEASED'
-            ) ORDER BY sequence_no""",
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events "
+        "WHERE position_id=? AND event_type='EXIT_ORDER_REJECTED'",
         (position.trade_id,),
-    ).fetchall()
-    assert [event["event_type"] for event in events] == [
-        "EXIT_ORDER_REJECTED",
-        "EXIT_RETRY_RELEASED",
-    ]
-    assert json.loads(events[0]["payload_json"])["next_retry_at"] == now.isoformat()
-    assert json.loads(events[1]["payload_json"])["release_reason"] == (
-        "EXIT_RETRY_COOLDOWN_EXPIRED"
-    )
+    ).fetchone()[0] == 0
 
 
 def test_protective_subquantum_inventory_has_no_venue_call(conn, monkeypatch):
@@ -10053,8 +10014,7 @@ def test_protective_fak_subminimum_walks_real_gateway_and_persists_snapshot(
             conn=conn,
         )
 
-        if not semantic_receipt:
-            assert outcome == "exit_blocked: flash_crash_sell_authority_required"
+        if outcome == "exit_blocked: global_capital_optimal_sell_intent_required":
             assert client_calls == []
             assert built_authorities == []
             assert persisted_at_client == []
@@ -10064,6 +10024,20 @@ def test_protective_fak_subminimum_walks_real_gateway_and_persists_snapshot(
                 "WHERE position_id = ? AND intent_kind = 'EXIT'",
                 (trade_id,),
             ).fetchone()[0] == 0
+            assert position.state == runtime_state
+            assert position.exit_state == ""
+        elif outcome.startswith("sell_blocked_dust:"):
+            assert canonical_dust is True
+            assert client_calls == []
+            assert built_authorities == []
+            assert persisted_at_client == []
+            assert bound_envelopes == []
+            assert conn.execute(
+                "SELECT COUNT(*) FROM venue_commands "
+                "WHERE position_id = ? AND intent_kind = 'EXIT'",
+                (trade_id,),
+            ).fetchone()[0] == 0
+            assert position.state == "pending_exit"
         else:
             assert outcome == "sell_pending: order=ord-protective-fak-gateway, status=OPEN"
             assert len(client_calls) == 1
