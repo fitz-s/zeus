@@ -147,6 +147,7 @@ def _fully_licensed_selection_calibrator_artifact() -> dict:
             "authority": "test_event_reactor_selection_calibrator",
             "version": "sel_v1",
             "posterior_version": sc.DEFAULT_POSTERIOR_VERSION,
+            "probability_semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
             "min_n": 30,
             "armed_sides": ["YES", "NO"],
             "cell_key_schema": "side|lead_bucket|bin_class|raw_prob_bucket",
@@ -1628,6 +1629,22 @@ def test_runtime_receipt_uses_event_bound_final_intent_contract():
     assert receipt.decision_proof_bundle.quote_feasibility.payload["quote_depth_hash"]
     assert "receipt_projection" not in receipt.decision_proof_bundle.fdr.payload
     assert receipt.decision_proof_bundle.quote_feasibility.payload["execution_price_type"] == "ExecutionPrice"
+
+
+def test_missing_selection_calibrator_artifact_blocks_replacement_entry(monkeypatch):
+    """The shared fixture cannot turn an absent live calibrator into a pass."""
+    from src.decision import selection_calibrator as sc
+
+    monkeypatch.setattr(sc, "load_artifact", lambda: None)
+    sc.reset_artifact_cache()
+
+    receipt = _receipt(
+        _bound_replacement_forecast_event(),
+        _trade_conn_with_live_replacement_taker_snapshot(),
+    )
+
+    assert receipt.proof_accepted is False
+    assert receipt.reason == "QKERNEL_SPINE_NO_TRADE:NO_POSITIVE_EDGE_CANDIDATE"
 
 
 def test_runtime_receipt_does_not_fit_platt_models(monkeypatch):
