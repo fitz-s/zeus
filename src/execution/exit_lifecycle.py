@@ -3395,7 +3395,8 @@ class BranchwiseDominantSellAuthority:
 
     @staticmethod
     def has_exact_payoff_receipt(receipt: object) -> bool:
-        return isinstance(receipt, Mapping) and receipt.get("probability_authority") in {
+        authority = receipt.get("probability_authority") if isinstance(receipt, Mapping) else None
+        return isinstance(authority, str) and authority in {
             "day0_deterministic_bin_payoff_v1",
             "final_daily_observation_exact_global_probability_v1",
         }

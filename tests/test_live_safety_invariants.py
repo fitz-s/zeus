@@ -27979,6 +27979,8 @@ def test_real_red_executor_rechecks_b2_after_exit_certificate_persist(
     "day0_remaining_day_global_probability_v1",
     "day0_conditioned_replacement_global_probability_v1",
     None,
+    [],
+    {},
 ))
 def test_statistical_zero_cannot_bypass_inherited_calibration(side, authority_kind):
     from src.calibration.market_anchored_residual import apply_artifact
