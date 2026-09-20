@@ -28737,14 +28737,26 @@ def _review_required_confirmed_trade_recovery(
         occurred_at=now,
         payload=payload,
     )
-    _append_matched_order_fill_projection(
-        conn,
-        command={**command, "venue_order_id": venue_order_id},
-        venue_order_id=venue_order_id,
-        matched_size=filled_size,
-        fill_price=fill_price,
-        observed_at=now,
-    )
+    if cmd.intent_kind == IntentKind.EXIT:
+        _append_exit_order_fill_projection(
+            conn,
+            command={**command, "venue_order_id": venue_order_id},
+            venue_order_id=venue_order_id,
+            matched_size=filled_size,
+            fill_price=fill_price,
+            observed_at=now,
+            event_type=CommandEventType.FILL_CONFIRMED.value,
+            raise_on_error=True,
+        )
+    else:
+        _append_matched_order_fill_projection(
+            conn,
+            command={**command, "venue_order_id": venue_order_id},
+            venue_order_id=venue_order_id,
+            matched_size=filled_size,
+            fill_price=fill_price,
+            observed_at=now,
+        )
     logger.info(
         "recovery: command %s REVIEW_REQUIRED %s -> FILLED "
         "(venue_order_id=%s trade_id=%s)",
@@ -30935,6 +30947,7 @@ def capital_blocking_command_scope(
                 (CommandState.SUBMITTING.value,),
             ).fetchall()
         )
+    command_rows.extend(_post_ack_persistence_review_candidates(conn))
     if all(
         _table_exists(conn, table)
         for table in ("entry_exposure_obligations", "venue_commands")
@@ -31049,6 +31062,71 @@ def capital_blocking_command_count(conn: sqlite3.Connection) -> int:
     """Return exact unresolved venue side effects that freeze current capital."""
 
     return capital_blocking_command_scope(conn).total_count
+
+
+def _post_ack_persistence_review_candidates(
+    conn: sqlite3.Connection,
+    *,
+    limit: int | None = None,
+    rotation_slot: int | None = None,
+) -> list[dict]:
+    """Select bounded known-order post-ACK reviews for positive recovery only.
+
+    SCOPE: exact ENTRY/EXIT REVIEW_REQUIRED rows emitted by the ACK-persistence
+    failure path and already bound to a venue order id. DRAIN: one complete
+    authenticated account snapshot consumed by the existing review reducer.
+    RESET: an ACKED/FILLED/EXPIRED command no longer matches. Missing, terminal,
+    or incomplete evidence never gains new authority in this selector.
+    """
+
+    if not all(
+        _table_exists(conn, table)
+        for table in ("venue_commands", "venue_command_events")
+    ):
+        return []
+    rows = [
+        _dict_row(row)
+        for row in conn.execute(
+            """
+            SELECT command.*
+              FROM venue_commands command
+             WHERE command.state = 'REVIEW_REQUIRED'
+               AND command.intent_kind IN ('ENTRY', 'EXIT')
+               AND COALESCE(command.venue_order_id, '') != ''
+               AND EXISTS (
+                    SELECT 1
+                      FROM venue_command_events review
+                     WHERE review.command_id = command.command_id
+                       AND review.event_type = 'REVIEW_REQUIRED'
+                       AND review.sequence_no = (
+                            SELECT MAX(latest.sequence_no)
+                              FROM venue_command_events latest
+                             WHERE latest.command_id = command.command_id
+                               AND latest.event_type = 'REVIEW_REQUIRED'
+                       )
+                       AND json_extract(review.payload_json, '$.reason') IN (?, ?)
+               )
+             ORDER BY command.updated_at, command.command_id
+            """,
+            tuple(sorted(_POST_ACK_PERSISTENCE_REVIEW_REASONS)),
+        ).fetchall()
+    ]
+    if limit is None:
+        return rows
+    candidate_limit = max(0, int(limit))
+    if candidate_limit <= 0 or not rows:
+        return []
+    slot = (
+        _identity_bound_rotation_slot()
+        if rotation_slot is None
+        else max(0, int(rotation_slot))
+    )
+    window = min(candidate_limit, len(rows))
+    offset = (slot * window) % len(rows)
+    selected = rows[offset:offset + window]
+    if len(selected) < window:
+        selected.extend(rows[:window - len(selected)])
+    return selected
 
 
 def _identity_bound_submitting_candidates(
@@ -32207,8 +32285,41 @@ def _reconcile_passes_short_conn(
                 )
                 if command_id not in terminal_fill_review_command_ids
             )
+            submitting_probe, _submitting_probe_deferred = (
+                _identity_bound_submitting_candidates(
+                    conn,
+                    limit=_LIVE_TICK_IDENTITY_BOUND_MAX_CANDIDATES,
+                )
+            )
+            # A current post-ACK review is capital debt, but it cannot consume
+            # every identity slot while known-order SUBMITTING debt also exists.
+            # Each class gets a rotating half-window; a class without peers may
+            # consume the full bounded window.
+            post_ack_limit = (
+                _LIVE_TICK_IDENTITY_BOUND_MAX_CANDIDATES // 2
+                if submitting_probe
+                else _LIVE_TICK_IDENTITY_BOUND_MAX_CANDIDATES
+            )
+            post_ack_review_candidates = _post_ack_persistence_review_candidates(
+                conn,
+                limit=post_ack_limit,
+            )
+            post_ack_review_total = len(_post_ack_persistence_review_candidates(conn))
+            remaining_identity_slots = max(
+                0,
+                _LIVE_TICK_IDENTITY_BOUND_MAX_CANDIDATES
+                - len(post_ack_review_candidates),
+            )
             identity_submit_candidates, identity_submit_deferred = (
-                _identity_bound_submitting_candidates(conn)
+                _identity_bound_submitting_candidates(
+                    conn,
+                    limit=remaining_identity_slots,
+                )
+                if remaining_identity_slots
+                else ([], 0)
+            )
+            post_ack_review_deferred = max(
+                0, post_ack_review_total - len(post_ack_review_candidates)
             )
             exit_fill_projection_command_ids = (
                 _terminal_filled_exit_projection_blocker_command_ids(conn)
@@ -32270,6 +32381,112 @@ def _reconcile_passes_short_conn(
                     "authenticated_terminal_fill_review_fast",
                     terminal_fill_review_result,
                 )
+        post_ack_review_result = None
+        post_ack_review_ids = frozenset(
+            str(row.get("command_id") or "")
+            for row in post_ack_review_candidates
+            if str(row.get("command_id") or "")
+        )
+        if post_ack_review_ids:
+            # Post-ACK REVIEW_REQUIRED has a known order id, but a terminal
+            # result (including an authenticated 404) is still absence truth.
+            # Capture the existing complete account snapshot outside the writer
+            # and let the established REVIEW_REQUIRED reducer consume it. The
+            # bounded selector only grants this work a timely turn; it creates
+            # no new negative-proof or lifecycle transition authority.
+            assert_no_open_connection("recovery.post_ack_review_fast")
+            try:
+                snapshot = capture_venue_read_snapshot(
+                    client,
+                    **_scheduled_venue_snapshot_kwargs(
+                        "live_tick",
+                        {
+                            "order_ids": {
+                                str(row.get("venue_order_id") or "")
+                                for row in post_ack_review_candidates
+                                if str(row.get("venue_order_id") or "")
+                            },
+                            "idempotency_keys": set(),
+                            "condition_ids": set(),
+                        },
+                        deadline_monotonic=scheduler_deadline,
+                        trades_after_epoch_seconds=_obligation_window_epoch_seconds(
+                            post_ack_review_candidates,
+                        ),
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001 - no incomplete read can mutate review truth.
+                logger.warning(
+                    "recovery: post-ACK complete account snapshot deferred: %s",
+                    exc,
+                )
+                summary["post_ack_review_snapshot_deferred"] = len(
+                    post_ack_review_ids
+                )
+                if (
+                    scheduler_deadline is not None
+                    and time.monotonic() >= scheduler_deadline
+                ):
+                    return terminal_fill_review_result
+            else:
+                post_ack_deadline = _capital_deadline()
+                post_ack_conn_factory = _capital_apply_conn_factory(
+                    post_ack_deadline,
+                    cross_db=True,
+                )
+
+                def _apply_post_ack_reviews(conn, snap_client):
+                    result = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+                    current = {
+                        str(row.get("command_id") or ""): row
+                        for row in _post_ack_persistence_review_candidates(conn)
+                        if str(row.get("command_id") or "") in post_ack_review_ids
+                    }
+                    for command_id in sorted(post_ack_review_ids):
+                        row = current.get(command_id)
+                        if row is None:
+                            continue
+                        result["scanned"] += 1
+                        outcome = _reconcile_row(
+                            conn,
+                            VenueCommand.from_row(row),
+                            snap_client,
+                        )
+                        if outcome in {"advanced", "stayed"}:
+                            result[outcome] += 1
+                        else:
+                            raise RuntimeError(
+                                "post-ACK review reducer returned error; "
+                                "rolling back bounded apply"
+                            )
+                    return result
+
+                try:
+                    post_ack_review_result = _run_capital_pass(
+                        "post_ack_review_full_snapshot_fast",
+                        lambda: run_three_phase(
+                            lambda conn: None,
+                            lambda _snap: snapshot,
+                            _apply_post_ack_reviews,
+                            conn_factory=post_ack_conn_factory,
+                            snapshot_conn_factory=read_conn_factory,
+                            label="recovery.post_ack_review_full_snapshot_fast",
+                        ),
+                        deadline_monotonic=post_ack_deadline,
+                    )
+                except Exception as exc:  # noqa: BLE001 - transaction already rolled back.
+                    logger.warning(
+                        "recovery: post-ACK review apply rolled back: %s", exc
+                    )
+                    summary["post_ack_review_apply_rollback"] = len(
+                        post_ack_review_ids
+                    )
+                if post_ack_review_result is not None:
+                    _accumulate(
+                        summary,
+                        "post_ack_review_full_snapshot_fast",
+                        post_ack_review_result,
+                    )
         terminal_entry_projection_result = None
         if terminal_entry_projection_command_ids:
             # A FILLED command with authenticated trade truth but no matching
@@ -32516,6 +32733,8 @@ def _reconcile_passes_short_conn(
                 )
         if identity_submit_deferred:
             summary["identity_bound_inflight_deferred"] = identity_submit_deferred
+        if post_ack_review_deferred:
+            summary["post_ack_review_deferred"] = post_ack_review_deferred
         terminal_late_fill_result = None
         if terminal_late_fill_command_ids:
             late_fill_deadline = _capital_deadline()
@@ -32663,6 +32882,7 @@ def _reconcile_passes_short_conn(
                 # cancel/terminal capital release work.
                 return (
                     terminal_fill_review_result
+                    or post_ack_review_result
                     or exit_fill_result
                     or existing_position_terminal_cancel_result
                     or preexisting_terminal_result
@@ -32674,6 +32894,7 @@ def _reconcile_passes_short_conn(
         if not cancel_candidates and not terminal_candidates and not partial_candidates:
             return (
                 terminal_fill_review_result
+                or post_ack_review_result
                 or exit_fill_result
                 or existing_position_terminal_cancel_result
                 or preexisting_terminal_result
@@ -32829,6 +33050,7 @@ def _reconcile_passes_short_conn(
                 )
         return (
             terminal_fill_review_result
+            or post_ack_review_result
             or exit_fill_result
             or existing_position_terminal_cancel_result
             or preexisting_terminal_result
@@ -33234,7 +33456,12 @@ def _reconcile_passes_short_conn(
 
     if scope == "live_tick":
         _capital_recovery_fast_pass()
-        _entry_posterior_recovery_fast_pass()
+        if not (
+            summary.get("post_ack_review_snapshot_deferred")
+            and scheduler_deadline is not None
+            and time.monotonic() >= scheduler_deadline
+        ):
+            _entry_posterior_recovery_fast_pass()
 
     # A confirmed trade already persisted for a REVIEW_REQUIRED submit is the
     # narrowest unresolved capital truth: it resolves known exposure and releases

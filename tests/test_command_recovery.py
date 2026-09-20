@@ -7813,7 +7813,7 @@ class TestRecoveryResolutionTable:
         mock_client.get_trades.return_value = [{
             "id": "trade-bound-entry",
             "status": "CONFIRMED",
-            "match_time": "2026-04-26T00:04:00Z",
+            "match_time": "2026-04-26T00:06:00Z",
             "transaction_hash": "0xboundentry",
             "maker_orders": [{
                 "asset_id": trade_token,
@@ -40886,3 +40886,410 @@ def test_live_tick_closed_entry_fill_review_precedes_expired_maintenance(conn, t
         assert _get_state(persisted, "cmd-001") == "FILLED"
         assert persisted.execute("SELECT phase FROM position_current WHERE position_id='pos-001'").fetchone()[0] == "economically_closed"
     assert scoped_calls == [frozenset({"cmd-001"})]
+
+
+def _seed_post_ack_persistence_review(conn, *, command_id, order_id, intent_kind="ENTRY"):
+    from src.state.venue_command_repo import append_event
+
+    side = "BUY" if intent_kind == "ENTRY" else "SELL"
+    _insert(
+        conn,
+        command_id=command_id,
+        position_id=f"pos-{command_id}",
+        intent_kind=intent_kind,
+        side=side,
+        size=10.0,
+        price=0.50,
+    )
+    _advance_to_acked(conn, command_id=command_id, venue_order_id=order_id)
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="REVIEW_REQUIRED",
+        occurred_at="2026-04-26T00:03:00Z",
+        payload={
+            "reason": (
+                "entry_ack_persistence_failed_after_side_effect"
+                if intent_kind == "ENTRY"
+                else "exit_ack_persistence_failed_after_side_effect"
+            ),
+            "venue_order_id": order_id,
+            "side_effect_boundary_crossed": True,
+            "sdk_submit_returned_order_id": True,
+        },
+    )
+
+
+def test_post_ack_persistence_reviews_are_capital_blocking_and_rotated(conn):
+    from src.execution import command_recovery as recovery
+
+    for index in range(5):
+        _seed_post_ack_persistence_review(
+            conn,
+            command_id=f"cmd-post-ack-rotated-{index}",
+            order_id=f"ord-post-ack-rotated-{index}",
+            intent_kind="EXIT" if index % 2 else "ENTRY",
+        )
+    selected = recovery._post_ack_persistence_review_candidates(
+        conn,
+        limit=2,
+        rotation_slot=1,
+    )
+    scope = recovery.capital_blocking_command_scope(conn)
+
+    assert [row["command_id"] for row in selected] == [
+        "cmd-post-ack-rotated-2",
+        "cmd-post-ack-rotated-3",
+    ]
+    assert scope.total_count == 5
+    assert scope.scoped_markets == ("mkt-001",)
+
+
+def test_post_ack_review_and_submitting_debt_share_the_identity_window(conn):
+    from src.execution import command_recovery as recovery
+
+    for index in range(3):
+        _seed_post_ack_persistence_review(
+            conn,
+            command_id=f"cmd-post-ack-window-{index}",
+            order_id=f"ord-post-ack-window-{index}",
+        )
+        _insert(conn, command_id=f"cmd-submitting-window-{index}")
+        _advance_to_submitting(
+            conn,
+            command_id=f"cmd-submitting-window-{index}",
+            venue_order_id=f"ord-submitting-window-{index}",
+        )
+
+    submitting, deferred = recovery._identity_bound_submitting_candidates(
+        conn,
+        limit=2,
+        rotation_slot=0,
+    )
+    post_ack = recovery._post_ack_persistence_review_candidates(
+        conn,
+        limit=2,
+        rotation_slot=0,
+    )
+
+    assert len(post_ack) == 2
+    assert len(submitting) == 2
+    assert deferred == 1
+    assert {row["state"] for row in post_ack} == {"REVIEW_REQUIRED"}
+    assert {row["state"] for row in submitting} == {"SUBMITTING"}
+
+
+def test_live_tick_post_ack_review_uses_complete_snapshot(
+    conn, tmp_path, monkeypatch,
+):
+    """An authenticated 404 reaches the existing post-ACK reducer before maintenance."""
+    from src.execution import command_recovery, venue_sync_contract
+
+    _seed_post_ack_persistence_review(
+        conn,
+        command_id="cmd-post-ack-live-tick",
+        order_id="ord-post-ack-live-tick",
+    )
+    conn.commit()
+    db_path = tmp_path / "post-ack-live-tick.db"
+    with sqlite3.connect(db_path) as target:
+        conn.backup(target)
+
+    def factory(**_kwargs):
+        db = sqlite3.connect(db_path)
+        db.row_factory = sqlite3.Row
+        return db
+
+    factory.supports_nonblocking_flocks = True
+    snapshot = SimpleNamespace(
+        get_order=lambda _order_id: None,
+        get_open_orders=lambda: [],
+        get_trades=lambda: [],
+        venue_reads_are_complete=True,
+        authenticated_point_absence_returns_none=True,
+    )
+    captures = []
+
+    def capture(_client, **kwargs):
+        captures.append(kwargs)
+        return snapshot
+
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+    monkeypatch.setattr(venue_sync_contract, "capture_venue_read_snapshot", capture)
+    monkeypatch.setattr(
+        command_recovery,
+        "drain_screen_redecision_cancel_obligations",
+        lambda *_args, **_kwargs: {"cancelled": 0, "errors": 0, "deferred": 0},
+    )
+    summary = command_recovery.reconcile_unresolved_commands(
+        client=MagicMock(),
+        scope="live_tick",
+        deadline_monotonic=command_recovery.time.monotonic() + 1.0,
+    )
+
+    assert captures
+    assert set(captures[0]["order_ids"]) == {"ord-post-ack-live-tick"}
+    assert summary["post_ack_review_full_snapshot_fast"]["advanced"] == 1
+    with factory() as persisted:
+        assert _get_state(persisted, "cmd-post-ack-live-tick") == "EXPIRED"
+
+
+def test_live_tick_post_ack_entry_confirmed_fill_projects_position(
+    conn, tmp_path, monkeypatch,
+):
+    from src.execution import command_recovery, venue_sync_contract
+
+    command_id = "cmd-post-ack-live-entry"
+    order_id = "ord-post-ack-live-entry"
+    position_id = f"pos-{command_id}"
+    _seed_post_ack_persistence_review(
+        conn, command_id=command_id, order_id=order_id,
+    )
+    _seed_pending_entry_projection(
+        conn, position_id=position_id, command_id=command_id, order_id=order_id,
+    )
+    conn.commit()
+    db_path = tmp_path / "post-ack-live-entry.db"
+    with sqlite3.connect(db_path) as target:
+        conn.backup(target)
+
+    def factory(**_kwargs):
+        db = sqlite3.connect(db_path)
+        db.row_factory = sqlite3.Row
+        return db
+
+    factory.supports_nonblocking_flocks = True
+    snapshot = SimpleNamespace(
+        get_order=lambda _order_id: None,
+        get_open_orders=lambda: [],
+        get_trades=lambda: [{
+            "id": "trade-post-ack-live-entry",
+            "status": "CONFIRMED",
+            "trader_side": "TAKER",
+            "match_time": "2026-04-26T00:04:00Z",
+            "transaction_hash": "0xpostackliveentry",
+            "asset_id": "tok-001",
+            "taker_order_id": order_id,
+            "side": "BUY",
+            "price": "0.50",
+            "size": "10",
+        }],
+        venue_reads_are_complete=True,
+        authenticated_point_absence_returns_none=True,
+    )
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+    monkeypatch.setattr(
+        venue_sync_contract, "capture_venue_read_snapshot", lambda *_args, **_kwargs: snapshot,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "drain_screen_redecision_cancel_obligations",
+        lambda *_args, **_kwargs: {"cancelled": 0, "errors": 0, "deferred": 0},
+    )
+    summary = command_recovery.reconcile_unresolved_commands(
+        client=MagicMock(),
+        scope="live_tick",
+        deadline_monotonic=command_recovery.time.monotonic() + 1.0,
+    )
+
+    assert summary["post_ack_review_full_snapshot_fast"]["advanced"] == 1
+    with factory() as persisted:
+        assert _get_state(persisted, command_id) == "FILLED"
+        assert persisted.execute(
+            "SELECT phase FROM position_current WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()[0] == "active"
+        assert persisted.execute(
+            "SELECT COUNT(*) FROM execution_fact WHERE command_id = ? AND order_role = 'entry'",
+            (command_id,),
+        ).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("projection_fails", [False, True])
+def test_live_tick_post_ack_exit_confirmed_fill_projects_position(
+    conn, tmp_path, monkeypatch, projection_fails,
+):
+    from src.execution import command_recovery, venue_sync_contract
+
+    command_id = "cmd-post-ack-live-exit"
+    order_id = "ord-post-ack-live-exit"
+    position_id = "pos-post-ack-live-exit"
+    _seed_post_ack_persistence_review(
+        conn,
+        command_id=command_id,
+        order_id=order_id,
+        intent_kind="EXIT",
+    )
+    conn.execute(
+        "UPDATE venue_commands SET position_id = ? WHERE command_id = ?",
+        (position_id, command_id),
+    )
+    _seed_pending_entry_projection(
+        conn,
+        position_id=position_id,
+        command_id="seed-entry",
+        order_id="seed-order",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit', shares = 10, chain_shares = 10,
+               cost_basis_usd = 5, entry_price = 0.50,
+               order_status = 'sell_pending_confirmation'
+         WHERE position_id = ?
+        """,
+        (position_id,),
+    )
+    _seed_full_exit_intent(
+        conn,
+        position_id=position_id,
+        shares=10,
+        order_id=order_id,
+        command_id=command_id,
+    )
+    conn.execute(
+        "UPDATE venue_commands SET created_at = ? WHERE command_id = ?",
+        ("2026-04-26T00:05:00Z", command_id),
+    )
+    conn.commit()
+    db_path = tmp_path / "post-ack-live-exit.db"
+    with sqlite3.connect(db_path) as target:
+        conn.backup(target)
+
+    def factory(**_kwargs):
+        db = sqlite3.connect(db_path)
+        db.row_factory = sqlite3.Row
+        return db
+
+    factory.supports_nonblocking_flocks = True
+    snapshot = SimpleNamespace(
+        get_order=lambda _order_id: None,
+        get_open_orders=lambda: [],
+        get_trades=lambda: [{
+            "id": "trade-post-ack-live-exit",
+            "status": "CONFIRMED",
+            "trader_side": "TAKER",
+            "match_time": "2026-04-26T00:06:00Z",
+            "transaction_hash": "0xpostackliveexit",
+            "asset_id": "tok-001",
+            "taker_order_id": order_id,
+            "side": "SELL",
+            "price": "0.50",
+            "size": "10",
+        }],
+        venue_reads_are_complete=True,
+        authenticated_point_absence_returns_none=True,
+    )
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+    capture_calls = [0]
+
+    def capture(*_args, **_kwargs):
+        capture_calls[0] += 1
+        if projection_fails and capture_calls[0] > 1:
+            raise RuntimeError("stop after bounded-apply rollback")
+        return snapshot
+
+    monkeypatch.setattr(venue_sync_contract, "capture_venue_read_snapshot", capture)
+    monkeypatch.setattr(
+        command_recovery,
+        "drain_screen_redecision_cancel_obligations",
+        lambda *_args, **_kwargs: {"cancelled": 0, "errors": 0, "deferred": 0},
+    )
+    if projection_fails:
+        original_projection = command_recovery._append_exit_order_fill_projection
+
+        def fail_after_projection(*args, **kwargs):
+            original_projection(*args, **kwargs)
+            raise RuntimeError("injected post-projection failure")
+
+        monkeypatch.setattr(
+            command_recovery,
+            "_append_exit_order_fill_projection",
+            fail_after_projection,
+        )
+    if projection_fails:
+        with pytest.raises(RuntimeError, match="stop after bounded-apply rollback"):
+            command_recovery.reconcile_unresolved_commands(
+                client=MagicMock(),
+                scope="live_tick",
+                deadline_monotonic=command_recovery.time.monotonic() + 1.0,
+            )
+        summary = {}
+    else:
+        summary = command_recovery.reconcile_unresolved_commands(
+            client=MagicMock(),
+            scope="live_tick",
+            deadline_monotonic=command_recovery.time.monotonic() + 1.0,
+        )
+
+    with factory() as persisted:
+        position = persisted.execute(
+            "SELECT phase, order_status FROM position_current WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+        fact_count = persisted.execute(
+            "SELECT COUNT(*) FROM venue_trade_facts WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()[0]
+        if projection_fails:
+            assert _get_state(persisted, command_id) == "REVIEW_REQUIRED"
+            assert dict(position) == {
+                "phase": "pending_exit",
+                "order_status": "sell_pending_confirmation",
+            }
+            assert fact_count == 0
+            assert capture_calls[0] == 2
+            return
+        assert summary["post_ack_review_full_snapshot_fast"]["advanced"] == 1
+        assert _get_state(persisted, command_id) == "FILLED"
+        assert dict(position) == {
+            "phase": "economically_closed",
+            "order_status": "sell_filled",
+        }
+        assert fact_count == 1
+
+
+def test_live_tick_post_ack_snapshot_failure_leaves_review_unmodified(
+    conn, tmp_path, monkeypatch,
+):
+    from src.execution import command_recovery, venue_sync_contract
+
+    _seed_post_ack_persistence_review(
+        conn,
+        command_id="cmd-post-ack-snapshot-failure",
+        order_id="ord-post-ack-snapshot-failure",
+    )
+    conn.commit()
+    db_path = tmp_path / "post-ack-snapshot-failure.db"
+    with sqlite3.connect(db_path) as target:
+        conn.backup(target)
+
+    def factory(**_kwargs):
+        db = sqlite3.connect(db_path)
+        db.row_factory = sqlite3.Row
+        return db
+
+    factory.supports_nonblocking_flocks = True
+    now = [0.0]
+
+    def fail_capture(*_args, **_kwargs):
+        now[0] = 1.0
+        raise RuntimeError("incomplete authenticated account snapshot")
+
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+    monkeypatch.setattr(venue_sync_contract, "capture_venue_read_snapshot", fail_capture)
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        command_recovery,
+        "drain_screen_redecision_cancel_obligations",
+        lambda *_args, **_kwargs: {"cancelled": 0, "errors": 0, "deferred": 0},
+    )
+    summary = command_recovery.reconcile_unresolved_commands(
+        client=MagicMock(),
+        scope="live_tick",
+        deadline_monotonic=0.5,
+    )
+
+    assert summary["post_ack_review_snapshot_deferred"] == 1
+    with factory() as persisted:
+        assert _get_state(persisted, "cmd-post-ack-snapshot-failure") == "REVIEW_REQUIRED"
