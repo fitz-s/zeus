@@ -5354,6 +5354,15 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(
         "_prepare_current_global_probability_family",
         current_family_for_condition,
     )
+    event = make_opportunity_event(
+        event_type="DAY0_EXTREME_UPDATED",
+        entity_key="Moscow|2026-07-10|high|UUWW",
+        source="test:witness-preservation",
+        observed_at="2026-07-10T19:00:00+00:00",
+        available_at="2026-07-10T19:05:00+00:00",
+        received_at="2026-07-10T19:05:00+00:00",
+        payload={"city": "Moscow", "target_date": "2026-07-10", "metric": "high"},
+    )
     conn = sqlite3.connect(":memory:")
     buy_candidate = _global_test_buy_candidate(
         family_key=str(selected.family_key),
@@ -5370,7 +5379,7 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(
         decision=SimpleNamespace(candidate=buy_candidate),
     )
     rebound, current_day0_payload = era._current_global_actuation_prepared_family(
-        SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+        event,
         global_actuation=actuation,
         forecast_conn=conn,
         topology_conn=conn,
@@ -5431,7 +5440,7 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(
         decision=SimpleNamespace(candidate=sell_candidate),
     )
     sell_rebound, _sell_payload = era._current_global_actuation_prepared_family(
-        SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+        event,
         global_actuation=sell_actuation,
         forecast_conn=conn,
         topology_conn=conn,
@@ -7698,6 +7707,14 @@ def test_held_unobserved_day0_replacement_is_sell_only_and_jit_current(
         allow_unobserved_day0_replacement=True,
     )
     witness = held.probability_witness
+    selected_witness = universe._rebind_probability_witness_tokens(
+        witness,
+        token_map_by_condition={
+            "c13": ("yes13", "no13"),
+            "c14": ("yes14", "no14"),
+            "c15": ("yes15", "no15"),
+        },
+    )
     held_bin_id = next(
         binding.bin_id
         for binding in witness.bindings
@@ -7736,27 +7753,39 @@ def test_held_unobserved_day0_replacement_is_sell_only_and_jit_current(
     )
     sell_candidate = GlobalSingleOrderSellCandidate(
         candidate_id="held-prefix-sell",
-        family_key=str(witness.family_key),
+        family_key=str(selected_witness.family_key),
         bin_id=held_bin_id,
         condition_id="c14",
         side="YES",
         token_id="yes14",
         position_id="held-position-c14",
         held_shares=Decimal("1"),
-        probability_witness_identity=str(witness.witness_identity),
+        probability_witness_identity=str(selected_witness.witness_identity),
         book_snapshot_id=sell_curve.snapshot_id,
         book_captured_at_utc=decision_at,
         execution_curve_identity=executable_curve_identity(sell_curve),
         ledger_snapshot_id="held-prefix-ledger",
         executable_sell_curve=sell_curve,
-        resolution_identity=str(witness.resolution_identity),
+        resolution_identity=str(selected_witness.resolution_identity),
         neg_risk=False,
         **_explicit_sell_maker_terms(sell_curve, capacity=Decimal("1")),
     )
+    with pytest.raises(ValueError, match="GLOBAL_BOOK_CACHED_TOKEN_IDENTITY_INCOMPLETE"):
+        era._current_global_actuation_prepared_family(
+            event,
+            global_actuation=SimpleNamespace(
+                probability_witness=witness,
+                decision=SimpleNamespace(candidate=sell_candidate),
+            ),
+            forecast_conn=forecast,
+            topology_conn=forecast,
+            observation_conn=observations,
+            decision_time=decision_at + _dt.timedelta(milliseconds=1),
+        )
     current, _payload = era._current_global_actuation_prepared_family(
         event,
         global_actuation=SimpleNamespace(
-            probability_witness=witness,
+            probability_witness=selected_witness,
             decision=SimpleNamespace(candidate=sell_candidate),
         ),
         forecast_conn=forecast,
@@ -7764,7 +7793,7 @@ def test_held_unobserved_day0_replacement_is_sell_only_and_jit_current(
         observation_conn=observations,
         decision_time=decision_at + _dt.timedelta(milliseconds=1),
     )
-    assert current.probability_witness is witness
+    assert current.probability_witness is selected_witness
     assert reads[-1]["authority_purpose"] is (
         bundle_reader.ReplacementForecastAuthorityPurpose.HELD_REDECISION
     )
@@ -7778,7 +7807,7 @@ def test_held_unobserved_day0_replacement_is_sell_only_and_jit_current(
         era._current_global_actuation_prepared_family(
             event,
             global_actuation=SimpleNamespace(
-                probability_witness=witness,
+                probability_witness=selected_witness,
                 decision=SimpleNamespace(candidate=sell_candidate),
             ),
             forecast_conn=forecast,
@@ -8863,6 +8892,76 @@ def test_global_candidate_probability_use_requires_typed_reduce_only_sell():
         )
 
 
+def _post_local_test_vector_witness(
+    *, city, target_date, metric, target_start, target_end, decision_time, capture
+) -> dict[str, object]:
+    models = ("ecmwf_ifs", "icon_global")
+    fetch_started = capture + _dt.timedelta(minutes=1)
+    fetch_finished = capture + _dt.timedelta(minutes=2)
+    provider_cycles = {
+        "ecmwf_ifs": target_start,
+        "icon_global": target_start + _dt.timedelta(minutes=3),
+    }
+    request_hashes = {
+        model: f"sha256:{city.lower()}:{model}" for model in models
+    }
+    capture_iso = capture.isoformat()
+    fetch_started_iso = fetch_started.isoformat()
+    fetch_finished_iso = fetch_finished.isoformat()
+    return {
+        "vector_id": f"{city.lower()}-ecmwf-vector",
+        "vector_ids_by_model": {
+            "ecmwf_ifs": f"{city.lower()}-ecmwf-vector",
+            "icon_global": f"{city.lower()}-icon-vector",
+        },
+        "expected_models": list(models),
+        "actual_models": list(models),
+        "capture_times_utc": [capture_iso, capture_iso],
+        "capture_times_by_model_utc": {model: capture_iso for model in models},
+        "fetch_started_times_by_model_utc": {
+            model: fetch_started_iso for model in models
+        },
+        "fetch_finished_times_by_model_utc": {
+            model: fetch_finished_iso for model in models
+        },
+        "provider_by_model": {model: "openmeteo" for model in models},
+        "endpoint_by_model": {
+            model: "https://single-runs-api.open-meteo.com/v1/forecast"
+            for model in models
+        },
+        "request_hash_by_model": request_hashes,
+        "source_run_id_by_model": {
+            model: f"day0_hourly:{request_hashes[model]}" for model in models
+        },
+        "provider_run_id_by_model": {
+            model: f"openmeteo:{model}:{provider_cycles[model].isoformat()}"
+            for model in models
+        },
+        "model_api_id_by_model": {model: model for model in models},
+        "provider_source_cycle_time_by_model_utc": {
+            model: provider_cycles[model].isoformat() for model in models
+        },
+        "provider_source_available_at_by_model_utc": {
+            model: fetch_finished_iso for model in models
+        },
+        "provider_source_modified_at_by_model_utc": {
+            model: fetch_started_iso for model in models
+        },
+        "source_run_authority_by_model": {
+            model: "run_pinned_single_runs" for model in models
+        },
+        "endpoint_mode_by_model": {model: "single_runs" for model in models},
+        "provider_source_cycle_time_utc": provider_cycles["ecmwf_ifs"].isoformat(),
+        "local_capture_clock_utc": capture_iso,
+        "source_available_at_utc": fetch_finished_iso,
+        "causal_as_of_utc": decision_time.isoformat(),
+        "target_end_utc": target_end.isoformat(),
+        "city": city,
+        "target_date": target_date,
+        "metric": metric,
+    }
+
+
 def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
     monkeypatch,
 ):
@@ -9077,17 +9176,30 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
     def remaining_components(*_args, **kwargs):
         nonlocal remaining_calls
         remaining_calls += 1
+        vector_witness = _post_local_test_vector_witness(
+            city="Hong Kong",
+            target_date="2026-07-11",
+            metric="low",
+            target_start=_dt.datetime(
+                2026, 7, 10, 16, tzinfo=_dt.timezone.utc
+            ),
+            target_end=_dt.datetime(
+                2026, 7, 11, 16, tzinfo=_dt.timezone.utc
+            ),
+            decision_time=kwargs["decision_time"],
+            capture=_dt.datetime.fromisoformat(remaining_capture["value"]),
+        )
         kwargs["payload"].update(
             {
-                "_edli_day0_remaining_model_names": [
-                    "ecmwf",
-                    "icon",
-                    "ukmo",
+                "_edli_day0_remaining_model_names": vector_witness["actual_models"],
+                "_edli_day0_remaining_models": len(vector_witness["actual_models"]),
+                "_edli_day0_remaining_capture_times_utc": vector_witness[
+                    "capture_times_utc"
                 ],
-                "_edli_day0_remaining_models": 3,
-                "_edli_day0_remaining_capture_times_utc": [
-                    remaining_capture["value"]
+                "_edli_day0_remaining_expected_models": vector_witness[
+                    "expected_models"
                 ],
+                "_edli_day0_remaining_vector_witness": vector_witness,
             }
         )
         matrix = np.asarray([[0.2, 0.5, 0.3]] * 400, dtype=float)
@@ -9193,14 +9305,14 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
         "_edli_day0_provisional_boundary_survival_probability"
     ] == pytest.approx(0.95)
     assert day0_payload["_edli_day0_redecision_authority_scope"] == (
-        "held_exposure_current_day0_only_v1"
+        "held_exposure_current_bundle_day0_only_v1"
     )
     assert day0_payload["_edli_global_day0_binding"][
         "evidence_finality"
     ] == "PROVISIONAL_CURRENT_SNAPSHOT"
     assert "_edli_day0_exact_yes_payoffs" not in day0_payload
-    assert bundle_reads == 0
-    assert replacement_calls == 0
+    assert bundle_reads == 1
+    assert replacement_calls == 1
 
     reduce_only = era._prepare_current_global_probability_family(
         event,
@@ -9215,7 +9327,20 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
     assert reduce_only.probability_witness.yes_point_q.tolist() == pytest.approx(
         [0.2, 0.5, 0.3]
     )
-    assert bundle_reads == 0
+    assert bundle_reads == 2
+
+    with pytest.raises(ValueError, match="GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_STALE"):
+        era._prepare_current_global_probability_family(
+            event,
+            forecast_conn=forecast,
+            topology_conn=forecast,
+            observation_conn=observations,
+            decision_time=_dt.datetime(2026, 7, 11, 16, 30, tzinfo=_dt.timezone.utc),
+            max_age=_dt.timedelta(seconds=30),
+            allow_provisional_day0_replacement=True,
+            probability_use=era._CurrentProbabilityUse.HELD_MONITOR,
+        )
+    remaining_capture["value"] = "2026-07-11T15:50:00+00:00"
 
     post_day_payload: dict[str, object] = {}
     post_day = era._prepare_current_global_probability_family(
@@ -9224,7 +9349,7 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
         topology_conn=forecast,
         observation_conn=observations,
         decision_time=_dt.datetime(
-            2026, 7, 12, 0, 30, tzinfo=_dt.timezone.utc
+            2026, 7, 11, 16, 30, tzinfo=_dt.timezone.utc
         ),
         max_age=_dt.timedelta(seconds=30),
         day0_payload_out=post_day_payload,
@@ -9248,7 +9373,7 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
         "2026-07-11T16:00:00+00:00"
     )
 
-    remaining_capture["value"] = "2026-07-11T17:00:00+00:00"
+    remaining_capture["value"] = "2026-07-11T16:10:00+00:00"
     with pytest.raises(
         ValueError,
         match="GLOBAL_DAY0_POST_LOCAL_VECTOR_CAPTURE_AFTER_TARGET",
@@ -9259,7 +9384,7 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
             topology_conn=forecast,
             observation_conn=observations,
             decision_time=_dt.datetime(
-                2026, 7, 12, 0, 30, tzinfo=_dt.timezone.utc
+                2026, 7, 11, 16, 30, tzinfo=_dt.timezone.utc
             ),
             max_age=_dt.timedelta(seconds=30),
             allow_provisional_day0_replacement=True,
@@ -9267,24 +9392,41 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
         )
     remaining_capture["value"] = "2026-07-11T07:10:00+00:00"
 
-    with pytest.raises(
-        ValueError,
-        match="GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_ENTRY_AUTHORITY",
-    ):
+    entry_payload: dict[str, object] = {}
+    entry = era._prepare_current_global_probability_family(
+        event,
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        observation_conn=observations,
+        decision_time=decision_at,
+        max_age=_dt.timedelta(seconds=30),
+        day0_payload_out=entry_payload,
+        allow_provisional_day0_replacement=True,
+        probability_use=era._CurrentProbabilityUse.ENTRY,
+    )
+    assert entry.probability_witness.yes_point_q.tolist() == pytest.approx(
+        [0.2, 0.5, 0.3]
+    )
+    assert entry_payload["probability_authority"] == (
+        "day0_remaining_day_global_probability_v1"
+    )
+    assert "_edli_day0_redecision_authority_scope" not in entry_payload
+    assert "_edli_day0_exact_yes_payoffs" not in entry_payload
+    with pytest.raises(ValueError, match="POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE"):
         era._prepare_current_global_probability_family(
             event,
             forecast_conn=forecast,
             topology_conn=forecast,
             observation_conn=observations,
-            decision_time=decision_at,
+            decision_time=_dt.datetime(2026, 7, 11, 16, 30, tzinfo=_dt.timezone.utc),
             max_age=_dt.timedelta(seconds=30),
             allow_provisional_day0_replacement=True,
             probability_use=era._CurrentProbabilityUse.ENTRY,
         )
 
-    assert remaining_calls == 4
-    assert replacement_calls == 0
-    assert bundle_reads == 0
+    assert remaining_calls == 6
+    assert replacement_calls == 3
+    assert bundle_reads == 3
 
     def unavailable_remaining_components(*_args, **_kwargs):
         raise ValueError("DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE")
@@ -9466,6 +9608,8 @@ def test_post_day_final_daily_observation_builds_exact_complete_global_simplex(
         "peak",
         "baseline",
         "expected_q",
+        "incomplete_q_mode",
+        "expects_exact_hourly",
     ),
     (
         (
@@ -9477,7 +9621,9 @@ def test_post_day_final_daily_observation_builds_exact_complete_global_simplex(
             (("69F or below", None, 69.0), ("70-71F", 70.0, 71.0), ("72F or above", 72.0, None)),
             72.4,
             68.0,
-            np.asarray([0.0, 0.0, 1.0]),
+                np.asarray([0.2, 0.5, 0.3]),
+            "post_local_provisional_tail",
+            False,
         ),
         (
             "Istanbul",
@@ -9489,6 +9635,8 @@ def test_post_day_final_daily_observation_builds_exact_complete_global_simplex(
             29.4,
             26.0,
             np.asarray([0.0, 1.0, 0.0]),
+            "post_local_incomplete_settlement_tail",
+            True,
         ),
     ),
     ids=("wu", "noaa-ogimet"),
@@ -9504,6 +9652,8 @@ def test_post_day_complete_hourly_observation_builds_exact_global_simplex(
     peak,
     baseline,
     expected_q,
+    incomplete_q_mode,
+    expects_exact_hourly,
 ):
     import src.data.replacement_forecast_bundle_reader as bundle_reader
     import src.data.replacement_forecast_readiness as readiness_reader
@@ -9550,6 +9700,21 @@ def test_post_day_complete_hourly_observation_builds_exact_global_simplex(
         )
         """
     )
+    observations.execute(
+        """
+        CREATE TABLE observation_revisions (
+            id INTEGER PRIMARY KEY,
+            table_name TEXT,
+            city TEXT,
+            target_date TEXT,
+            source TEXT,
+            existing_row_json TEXT,
+            incoming_row_json TEXT,
+            reason TEXT,
+            recorded_at TEXT
+        )
+        """
+    )
     zone = ZoneInfo(timezone_name)
     target_start = _dt.datetime(
         2026, 7, 11, tzinfo=ZoneInfo(timezone_name)
@@ -9558,6 +9723,7 @@ def test_post_day_complete_hourly_observation_builds_exact_global_simplex(
     following_at = following_local.astimezone(_dt.timezone.utc)
     decision_time = following_at + _dt.timedelta(minutes=30)
     peak_at = target_start + _dt.timedelta(hours=16)
+    pre_target_end_capture = following_at - _dt.timedelta(minutes=10)
     incomplete_bound = baseline
 
     def observation_row(
@@ -9656,17 +9822,26 @@ def test_post_day_complete_hourly_observation_builds_exact_global_simplex(
     def remaining_tail(*_args, **kwargs):
         nonlocal tail_calls
         tail_calls += 1
+        vector_witness = _post_local_test_vector_witness(
+            city=city,
+            target_date="2026-07-11",
+            metric="high",
+            target_start=target_start,
+            target_end=following_at,
+            decision_time=decision_time,
+            capture=pre_target_end_capture,
+        )
         kwargs["payload"].update(
             {
-                "_edli_day0_remaining_model_names": [
-                    "ecmwf",
-                    "icon",
-                    "ukmo",
+                "_edli_day0_remaining_model_names": vector_witness["actual_models"],
+                "_edli_day0_remaining_models": len(vector_witness["actual_models"]),
+                "_edli_day0_remaining_capture_times_utc": vector_witness[
+                    "capture_times_utc"
                 ],
-                "_edli_day0_remaining_models": 3,
-                "_edli_day0_remaining_capture_times_utc": [
-                    decision_time.isoformat()
+                "_edli_day0_remaining_expected_models": vector_witness[
+                    "expected_models"
                 ],
+                "_edli_day0_remaining_vector_witness": vector_witness,
             }
         )
         matrix = np.asarray([[0.2, 0.5, 0.3]] * 400, dtype=float)
@@ -9753,9 +9928,7 @@ def test_post_day_complete_hourly_observation_builds_exact_global_simplex(
         "day0_remaining_day_global_probability_v1"
     )
     assert incomplete_payload["q_source"] == "day0_remaining_day"
-    assert incomplete_payload["_edli_day0_q_mode"] == (
-        "post_local_incomplete_settlement_tail"
-    )
+    assert incomplete_payload["_edli_day0_q_mode"] == incomplete_q_mode
     assert tail_calls == 1
 
     with pytest.raises(
@@ -9852,19 +10025,30 @@ def test_post_day_complete_hourly_observation_builds_exact_global_simplex(
         decision_time=decision_time,
         max_age=_dt.timedelta(seconds=30),
         day0_payload_out=day0_payload,
+        allow_provisional_day0_replacement=not expects_exact_hourly,
         probability_use=era._CurrentProbabilityUse.HELD_MONITOR,
     )
 
     witness = prepared.probability_witness
-    assert witness.band_basis == (
-        "final_daily_observation_exact_settlement_simplex_v1"
-    )
     assert np.all(witness.yes_q_samples == expected_q)
-    assert day0_payload["probability_authority"] == (
-        "final_daily_observation_exact_global_probability_v1"
-    )
-    assert day0_payload["_edli_global_day0_binding"]["final_daily"] is True
-    assert tail_calls == 1
+    if expects_exact_hourly:
+        assert witness.band_basis == (
+            "final_daily_observation_exact_settlement_simplex_v1"
+        )
+        assert day0_payload["probability_authority"] == (
+            "final_daily_observation_exact_global_probability_v1"
+        )
+        assert day0_payload["_edli_global_day0_binding"]["final_daily"] is True
+        assert tail_calls == 1
+    else:
+        assert day0_payload["probability_authority"] == (
+            "day0_remaining_day_global_probability_v1"
+        )
+        assert day0_payload["_edli_day0_q_mode"] == "post_local_provisional_tail"
+        assert not day0_payload["_edli_global_day0_binding"].get(
+            "final_daily", False
+        )
+        assert tail_calls == 2
     assert snapshot_calls == 0
     observations.close()
     forecast.close()
