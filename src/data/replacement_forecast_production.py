@@ -1383,6 +1383,7 @@ def _candidate_accrual_market_scopes(
     *,
     models: Sequence[str],
     now_utc: datetime | None = None,
+    deadline_monotonic: float | None = None,
 ) -> tuple[tuple[str, str, str], ...]:
     """Read only current market families where a candidate model can serve a city.
 
@@ -1416,8 +1417,12 @@ def _candidate_accrual_market_scopes(
     # UTC midnight is still the prior local calendar day in westward cities.
     # Fetch one extra UTC date, then apply the authoritative city-local cutoff.
     minimum_target_date = (reference_now.date() - timedelta(days=1)).isoformat()
-    conn = _connect_read_only(forecast_db)
+    conn = _connect_read_only(forecast_db, deadline_monotonic=deadline_monotonic)
     try:
+        if deadline_monotonic is not None:
+            conn.set_progress_handler(
+                lambda: int(time.monotonic() >= deadline_monotonic), 1000
+            )
         rows = conn.execute(
             f"""
             SELECT DISTINCT city, target_date, temperature_metric
@@ -1519,10 +1524,31 @@ def _download_bayes_precision_fusion_candidate_accrual_if_needed(
                 "status": "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_NO_PUBLIC_RUN",
                 "candidate_models": models,
             }
-        candidate_target_scopes = _candidate_accrual_market_scopes(
-            Path(str(cfg["forecast_db"])),
-            models=tuple(model for model in models if model in frozen_source_runs),
+        deadline_monotonic = (
+            started_monotonic + _BPF_CANDIDATE_ACCRUAL_MAX_WALL_CLOCK_SECONDS
         )
+        try:
+            candidate_target_scopes = _candidate_accrual_market_scopes(
+                Path(str(cfg["forecast_db"])),
+                models=tuple(model for model in models if model in frozen_source_runs),
+                now_utc=now,
+                deadline_monotonic=deadline_monotonic,
+            )
+        except sqlite3.OperationalError:
+            if time.monotonic() < deadline_monotonic:
+                raise
+            candidate_target_scopes = None
+        if candidate_target_scopes is None or time.monotonic() >= deadline_monotonic:
+            # SCOPE: background candidate capture. DRAIN: the next maintenance
+            # tick retries. RESET: scope planning completes within its own cut.
+            return {
+                "status": "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE",
+                "timebox_stage": "candidate_market_scope",
+                "retryable": True,
+                "timeboxed_incomplete": True,
+                "attempted_target_group_count": 0,
+                "candidate_accrual_only": True,
+            }
         planning_cycle = max(run for run, _available in frozen_source_runs.values())
         return _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
             cfg,
@@ -1535,9 +1561,7 @@ def _download_bayes_precision_fusion_candidate_accrual_if_needed(
             capture_target_scopes=candidate_target_scopes,
             include_previous_runs=False,
             prune_after=False,
-            deadline_monotonic=(
-                started_monotonic + _BPF_CANDIDATE_ACCRUAL_MAX_WALL_CLOCK_SECONDS
-            ),
+            deadline_monotonic=deadline_monotonic,
         )
     except Exception as exc:  # noqa: BLE001 - candidate accrual cannot block live serving
         logger.warning("BPF candidate-accrual capture skipped (fail-soft): %s", exc)

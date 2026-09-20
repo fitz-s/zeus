@@ -238,7 +238,7 @@ def test_candidate_accrual_uses_current_targets_after_live_coverage(monkeypatch,
     monkeypatch.setattr(
         production,
         "_candidate_accrual_market_scopes",
-        lambda _db, *, models: (("Helsinki", target_date, "high"),),
+        lambda _db, *, models, **_kwargs: (("Helsinki", target_date, "high"),),
     )
     monkeypatch.setattr(
         production,
@@ -412,7 +412,7 @@ def test_candidate_accrual_scope_planning_timebox_never_starts_capture(monkeypat
     monkeypatch.setattr(
         production,
         "_candidate_accrual_market_scopes",
-        lambda _db, *, models: (("Helsinki", target_date, "high"),),
+        lambda _db, *, models, **_kwargs: (("Helsinki", target_date, "high"),),
     )
     monkeypatch.setattr(
         dl_mod,
@@ -502,7 +502,7 @@ def test_candidate_accrual_recovery_cooldown_skips_capture_but_retries(monkeypat
     monkeypatch.setattr(
         production,
         "_candidate_accrual_market_scopes",
-        lambda _db, *, models: (("Helsinki", "2026-09-21", "high"),),
+        lambda _db, *, models, **_kwargs: (("Helsinki", "2026-09-21", "high"),),
     )
     metadata_calls: list[object] = []
     monkeypatch.setattr(
@@ -1239,3 +1239,84 @@ def test_cross_process_busy_owner_skips_download_and_cursor_write(
     )
     assert report["target_rotation_owner_status"] == "BUSY"
     assert not state_path.exists()
+
+
+@pytest.mark.parametrize("expiry_stage", ["connection", "query"])
+def test_candidate_scope_sql_deadline_closes_reader_and_retries(monkeypatch, tmp_path, expiry_stage):
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+    from src.state import db
+
+    path = tmp_path / "candidate.db"
+    target = (datetime.now(timezone.utc).date() + timedelta(days=1)).isoformat()
+    with sqlite3.connect(path) as seed:
+        seed.execute(
+            "CREATE VIEW market_events AS WITH RECURSIVE rows(n) AS "
+            "(VALUES(1) UNION ALL SELECT n+1 FROM rows WHERE n<10000) "
+            "SELECT scope_probe('Helsinki') AS city, "
+            f"'{target}' AS target_date, 'high' AS temperature_metric, "
+            "'token' AS token_id, 'range' AS range_label FROM rows"
+        )
+    monkeypatch.setattr(cfg, "cities_by_name", {
+        "Helsinki": SimpleNamespace(lat=60.17, lon=24.94, timezone="Europe/Helsinki")
+    })
+    monkeypatch.setattr(dl_mod, "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS", ("met_nordic",))
+    monkeypatch.setattr(dl_mod, "_model_in_domain", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(dl_mod, "source_clock_metadata_run_is_single_runs_served", lambda *_args: True)
+    monkeypatch.setattr(
+        "src.strategy.live_inference.source_clock_vnext.source_publicly_usable_at",
+        lambda _run: datetime(1970, 1, 1, tzinfo=timezone.utc),
+    )
+    run = datetime.now(timezone.utc) - timedelta(hours=1)
+    monkeypatch.setattr(
+        "src.data.openmeteo_model_updates.fetch_model_updates",
+        lambda *_args, **_kwargs: (OpenMeteoModelUpdate(
+            model="met_nordic", last_run_initialisation_time=run,
+            last_run_availability_time=run,
+        ),),
+    )
+    clock = [100.0]
+    expire = [True]
+    deadlines = []
+    readers = []
+    row_visits = []
+    factory = db._connect_read_only
+    monkeypatch.setattr(production.time, "monotonic", lambda: clock[0])
+
+    def connect(db_path, *, deadline_monotonic=None):
+        deadlines.append(deadline_monotonic)
+        if expire[0] and expiry_stage == "connection":
+            clock[0] = 111.0
+        conn = factory(db_path, deadline_monotonic=deadline_monotonic)
+        readers.append(conn)
+
+        def scope_probe(city):
+            row_visits.append(city)
+            if expire[0] and expiry_stage == "query":
+                clock[0] = 111.0
+            return city
+
+        conn.create_function("scope_probe", 1, scope_probe)
+        return conn
+
+    monkeypatch.setattr(db, "_connect_read_only", connect)
+    captures = []
+    monkeypatch.setattr(
+        production, "_download_bayes_precision_fusion_extra_raw_inputs_if_needed",
+        lambda _cfg, **kwargs: captures.append(kwargs) or {"status": "captured"},
+    )
+    report = production._download_bayes_precision_fusion_candidate_accrual_if_needed({"forecast_db": path})
+    assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE"
+    assert report["timebox_stage"] == "candidate_market_scope"
+    assert report["retryable"] is True
+    assert captures == []
+    assert deadlines == [110.0]
+    if expiry_stage == "query":
+        assert 0 < len(row_visits) < 10000
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            readers[0].execute("SELECT 1")
+
+    expire[0] = False
+    report = production._download_bayes_precision_fusion_candidate_accrual_if_needed({"forecast_db": path})
+    assert report == {"status": "captured"}
+    assert captures[0]["capture_target_scopes"] == (("Helsinki", target, "high"),)
+    assert captures[0]["deadline_monotonic"] == 121.0
