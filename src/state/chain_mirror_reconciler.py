@@ -1954,6 +1954,7 @@ def _chain_mirror_trade_transaction(*, owner: str):
         write_class=WriteClass.LIVE,
         busy_timeout_ms=_CHAIN_MIRROR_WRITE_DEADLINE_MS,
         deadline_monotonic=bootstrap_deadline,
+        disable_wal_autocheckpoint=True,
     )
     try:
         with _bounded_chain_mirror_transaction(

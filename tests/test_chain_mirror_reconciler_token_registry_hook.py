@@ -387,3 +387,21 @@ def test_background_chain_mirror_write_chunk_releases_for_monitor_waiter(trades_
     assert not monitor_thread.is_alive()
     assert not errors
     assert monitor_acquired.is_set()
+
+
+def test_chain_mirror_writer_defers_checkpoint_and_keeps_atomic_commit(monkeypatch, tmp_path):
+    from src.state import db
+    from src.state.chain_mirror_reconciler import _chain_mirror_trade_transaction
+
+    path = tmp_path / "chain-mirror.db"
+    monkeypatch.setattr(db, "_zeus_trade_db_path", lambda: path)
+    with _chain_mirror_trade_transaction(owner="test_chain_mirror") as conn:
+        assert conn.execute("PRAGMA wal_autocheckpoint").fetchone()[0] == 0
+        conn.execute("CREATE TABLE atomic_probe (value INTEGER)")
+        conn.execute("INSERT INTO atomic_probe VALUES (1)")
+    with pytest.raises(RuntimeError, match="rollback probe"):
+        with _chain_mirror_trade_transaction(owner="test_chain_mirror") as conn:
+            conn.execute("INSERT INTO atomic_probe VALUES (2)")
+            raise RuntimeError("rollback probe")
+    with sqlite3.connect(path) as check:
+        assert check.execute("SELECT value FROM atomic_probe").fetchall() == [(1,)]
