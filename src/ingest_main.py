@@ -2767,6 +2767,7 @@ def _replacement_maintenance_tick():
     )
     from src.data.replacement_forecast_production import (  # noqa: PLC0415
         _download_bayes_precision_fusion_extra_raw_inputs_if_needed,
+        _download_bayes_precision_fusion_candidate_accrual_if_needed,
         _download_replacement_forecast_current_targets_if_needed,
         _enqueue_cycle_advance_reseeds_if_needed,
         _enqueue_fusion_upgrade_reseeds_if_needed,
@@ -2806,6 +2807,7 @@ def _replacement_maintenance_tick():
 
     held_report = None
     held_ordinary_report = None
+    candidate_accrual_report = None
     held_reseed_scope_set: set[tuple[str, str, str]] = set()
     if held_scopes:
         # SCOPE: exact canonical open-exposure families only.
@@ -3048,6 +3050,32 @@ def _replacement_maintenance_tick():
                 committed_reseed_errors.append(f"committed_{reseed_error}")
                 continue
             committed_reseed_report_count += 1
+    if broad_due:
+        try:
+            # Candidate capture is deliberately sequenced after all priority
+            # current/held work and its committed reactions. Its own strict
+            # recovery-lane timebox is outside the priority repair deadline so
+            # exhausted active work cannot starve history forever.
+            candidate_accrual_report = (
+                _download_bayes_precision_fusion_candidate_accrual_if_needed(cfg)
+            )
+        except Exception as exc:  # noqa: BLE001 - never block live maintenance
+            logger.warning(
+                "replacement maintenance candidate-accrual capture failed: %s",
+                exc,
+                exc_info=True,
+            )
+            candidate_accrual_report = {
+                "status": "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_FAILSOFT_SKIPPED",
+                "error": f"{type(exc).__name__}: {str(exc)[:220]}",
+            }
+        if candidate_accrual_report is not None:
+            report["bayes_precision_fusion_candidate_accrual_status"] = (
+                candidate_accrual_report.get("status")
+            )
+            report["bayes_precision_fusion_candidate_accrual_rows_written"] = (
+                candidate_accrual_report.get("written_row_count")
+            )
     maintenance_errors = [
         error
         for error in (

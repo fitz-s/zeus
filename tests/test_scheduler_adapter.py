@@ -2423,6 +2423,83 @@ def test_replacement_maintenance_repairs_full_extras_before_reseed(
     assert "maintenance_errors" not in result
 
 
+def test_replacement_maintenance_runs_candidate_accrual_after_committed_reseeds(
+    monkeypatch,
+) -> None:
+    """The scheduled maintenance job, not the telemetry-only production wrapper,
+    gives candidate capture a bounded recovery opportunity after every active
+    committed-family reaction has been published."""
+    import src.data.replacement_forecast_production as prod
+    import src.ingest_main as ingest_main
+
+    calls: list[str] = []
+    monkeypatch.setattr(ingest_main.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(ingest_main, "_REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC", 0.0)
+    monkeypatch.setattr(ingest_main, "_all_held_current_target_scopes", lambda: ())
+    monkeypatch.setattr(ingest_main, "_replacement_bpf_no_progress_retry_after_seconds", lambda: 0)
+    monkeypatch.setattr(ingest_main, "_record_replacement_bpf_maintenance_progress", lambda _report: None)
+    monkeypatch.setattr(
+        "src.data.bayes_precision_fusion_download.bayes_precision_fusion_quota_cooldown_seconds",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {"forecast_db": "unused.db", "download_current_targets_enabled": True},
+    )
+    monkeypatch.setattr(
+        prod,
+        "_download_replacement_forecast_current_targets_if_needed",
+        lambda *_args, **_kwargs: calls.append("current")
+        or {"status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS"},
+    )
+    monkeypatch.setattr(
+        prod,
+        "_download_bayes_precision_fusion_extra_raw_inputs_if_needed",
+        lambda *_args, **_kwargs: calls.append("extras")
+        or {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+            "written_row_count": 1,
+            "committed_families": (("Helsinki", "2026-09-21", "high"),),
+        },
+    )
+
+    def _fusion_reseed(_cfg, *, scopes=None, limit=None):
+        calls.append("committed_fusion_reseed" if scopes else "ordinary_fusion_reseed")
+        return {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 1}
+
+    def _cycle_reseed(_cfg, *, scopes=None, limit=None):
+        calls.append("committed_cycle_reseed" if scopes else "ordinary_cycle_reseed")
+        return {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 1}
+
+    monkeypatch.setattr(prod, "_enqueue_fusion_upgrade_reseeds_if_needed", _fusion_reseed)
+    monkeypatch.setattr(prod, "_enqueue_cycle_advance_reseeds_if_needed", _cycle_reseed)
+    monkeypatch.setattr(
+        prod,
+        "_download_bayes_precision_fusion_candidate_accrual_if_needed",
+        lambda _cfg: calls.append("candidate")
+        or {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+            "written_row_count": 1,
+            "candidate_accrual_only": True,
+        },
+    )
+
+    result = ingest_main._replacement_maintenance_tick.__wrapped__()
+
+    assert calls[:5] == [
+        "current",
+        "extras",
+        "committed_fusion_reseed",
+        "committed_cycle_reseed",
+        "candidate",
+    ]
+    assert result["bayes_precision_fusion_candidate_accrual_status"] == (
+        "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
+    )
+    assert "candidate_accrual_only" not in result
+
+
 @pytest.mark.parametrize(
     "zero_progress_status",
     (

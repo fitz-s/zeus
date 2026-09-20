@@ -57,6 +57,8 @@ _BPF_EXTRA_ROTATION_LOCK = Lock()
 _BPF_EXTRA_ROTATION_OWNER_LOCK = Lock()
 _BPF_EXTRA_ROTATION_SCHEMA_VERSION = 1
 _BPF_EXTRA_ROTATION_FILENAME = ".bpf_extra_rotation_cursor.json"
+_BPF_CANDIDATE_ACCRUAL_MAX_WALL_CLOCK_SECONDS = 10.0
+_BPF_CANDIDATE_ACCRUAL_METADATA_TIMEOUT_SECONDS = 3.0
 
 
 def _bpf_extra_group_key(target: object) -> tuple[str, str]:
@@ -216,6 +218,16 @@ def _bpf_extra_rotation_state_path(
     if seed_dir in (None, ""):
         return None
     return Path(str(seed_dir)).parent / _BPF_EXTRA_ROTATION_FILENAME
+
+
+def _bpf_candidate_accrual_rotation_state_path(
+    cfg: Mapping[str, object],
+) -> Path | None:
+    """Keep candidate-only fairness independent from live-serving extra rotation."""
+    state_path = _bpf_extra_rotation_state_path(cfg)
+    if state_path is None:
+        return None
+    return state_path.with_name(f"{state_path.stem}.candidate{state_path.suffix}")
 
 
 def _rotate_bpf_extra_targets(
@@ -1034,6 +1046,10 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
     cfg: dict[str, object],
     *,
     max_wall_clock_seconds: float | None = 45.0,
+    models: Sequence[str] | None = None,
+    capture_when_covered: bool = False,
+    quota_lane: str = "source_clock",
+    frozen_source_runs: Mapping[str, tuple[datetime, datetime]] | None = None,
 ) -> dict[str, object] | None:
     """Download missing multi-model inputs within one bounded live-runtime slice."""
     forecast_db = cfg.get("forecast_db")
@@ -1050,11 +1066,17 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
         from src.data.bayes_precision_fusion_download import (  # noqa: PLC0415
             BayesPrecisionFusionDownloadTarget,
             bayes_precision_fusion_quota_cooldown_seconds,
+            bayes_precision_fusion_recovery_quota_cooldown_seconds,
             download_bayes_precision_fusion_extra_raw_inputs,
         )
 
         release_lag_hours = float(cfg.get("download_release_lag_hours") or 14.0)
-        cooldown_seconds = bayes_precision_fusion_quota_cooldown_seconds()
+        if quota_lane == "source_clock":
+            cooldown_seconds = bayes_precision_fusion_quota_cooldown_seconds()
+        elif quota_lane == "recovery":
+            cooldown_seconds = bayes_precision_fusion_recovery_quota_cooldown_seconds()
+        else:
+            raise ValueError(f"unsupported BPF quota lane: {quota_lane!r}")
         if cooldown_seconds > 0:
             return {
                 "status": "BAYES_PRECISION_FUSION_EXTRA_QUOTA_COOLDOWN_SKIPPED",
@@ -1085,10 +1107,14 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
         # decision time through the unresolved evening before any row becomes authority.
         plan = build_replacement_forecast_current_target_plan(Path(str(forecast_db)))
         decision_time = datetime.now(timezone.utc)
-        coverage = _extras_coverage_missing(
-            cfg,
-            cycle,
-            decision_time=decision_time,
+        coverage = (
+            None
+            if capture_when_covered
+            else _extras_coverage_missing(
+                cfg,
+                cycle,
+                decision_time=decision_time,
+            )
         )
         missing_scopes = None if coverage is None else coverage[0]
         try:
@@ -1118,7 +1144,8 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
             row
             for row in capture_rows
             if (
-                missing_scopes is None
+                capture_when_covered
+                or missing_scopes is None
                 or (row.city, row.temperature_metric, row.target_date) in missing_scopes
             )
             and (
@@ -1190,7 +1217,11 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
             ))
         if not targets:
             return {"status": "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS"}
-        rotation_state_path = _bpf_extra_rotation_state_path(cfg)
+        rotation_state_path = (
+            _bpf_candidate_accrual_rotation_state_path(cfg)
+            if capture_when_covered
+            else _bpf_extra_rotation_state_path(cfg)
+        )
         owner_status, owner_fd, owner_error = (
             _try_acquire_bpf_extra_rotation_owner(rotation_state_path)
         )
@@ -1218,16 +1249,25 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                 targets,
                 cycle=cycle,
                 state_path=rotation_state_path,
-                priority_group_keys=priority_group_keys,
+                priority_group_keys=(set() if capture_when_covered else priority_group_keys),
             )
             download_error: Exception | None = None
             try:
+                download_kwargs: dict[str, object] = {
+                    "forecast_db": Path(str(forecast_db)),
+                    "cycle": cycle,
+                    "targets": rotated_targets,
+                    "release_lag_hours": release_lag_hours,
+                    "max_wall_clock_seconds": max_wall_clock_seconds,
+                }
+                if models is not None:
+                    download_kwargs["models"] = models
+                if quota_lane != "source_clock":
+                    download_kwargs["quota_lane"] = quota_lane
+                if frozen_source_runs is not None:
+                    download_kwargs["frozen_source_runs"] = frozen_source_runs
                 result = download_bayes_precision_fusion_extra_raw_inputs(
-                    forecast_db=Path(str(forecast_db)),
-                    cycle=cycle,
-                    targets=rotated_targets,
-                    release_lag_hours=release_lag_hours,
-                    max_wall_clock_seconds=max_wall_clock_seconds,
+                    **download_kwargs,
                 )
             except Exception as exc:
                 download_error = exc
@@ -1270,6 +1310,8 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
             result["target_rotation_last_attempted_group"] = rotation_write.get(
                 "last_attempted_group"
             )
+            if capture_when_covered:
+                result["candidate_accrual_only"] = True
             if rotation_write.get("error"):
                 result["target_rotation_cursor_error"] = rotation_write["error"]
             if download_error is not None:
@@ -1283,6 +1325,115 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
     except Exception as exc:  # noqa: BLE001 - fail-soft: extras accrual never breaks the cycle
         logger.warning("BAYES_PRECISION_FUSION extra-model capture skipped (fail-soft): %s", exc)
         return {"status": "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED", "error": str(exc)}
+
+
+def _download_bayes_precision_fusion_candidate_accrual_if_needed(
+    cfg: dict[str, object],
+) -> dict[str, object] | None:
+    """Bounded background capture for serviceable sources outside the active basket.
+
+    This deliberately shares the existing current/held target plan, downloader domain
+    gate and natural-key dedup. It is sequenced after live-serving work and uses only
+    the recovery lane, so it cannot spend source-clock or held-position reserves.
+    """
+    if cfg.get("forecast_db") is None:
+        return None
+    try:
+        from src.data.bayes_precision_fusion_download import (  # noqa: PLC0415
+            BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS,
+            PREVIOUS_RUNS_UNSERVABLE_MODELS,
+            SINGLE_RUNS_UNSERVABLE_MODELS,
+            source_clock_metadata_run_is_single_runs_served,
+        )
+        from src.data.openmeteo_model_updates import fetch_model_updates  # noqa: PLC0415
+        from src.strategy.live_inference.source_clock_vnext import (  # noqa: PLC0415
+            source_publicly_usable_at,
+        )
+
+        permanently_unservable = frozenset(SINGLE_RUNS_UNSERVABLE_MODELS).intersection(
+            PREVIOUS_RUNS_UNSERVABLE_MODELS
+        )
+        models = tuple(
+            model
+            for model in BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS
+            if model not in permanently_unservable
+        )
+        if not models:
+            return {"status": "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_NO_MODELS"}
+        started_monotonic = time.monotonic()
+        metadata_timeout_seconds = min(
+            _BPF_CANDIDATE_ACCRUAL_METADATA_TIMEOUT_SECONDS,
+            _BPF_CANDIDATE_ACCRUAL_MAX_WALL_CLOCK_SECONDS,
+        )
+        updates = fetch_model_updates(
+            models,
+            priority=False,
+            timeout_seconds=metadata_timeout_seconds,
+            max_workers=min(6, len(models)),
+        )
+        metadata_elapsed_seconds = max(0.0, time.monotonic() - started_monotonic)
+        remaining_seconds = max(
+            0.0,
+            _BPF_CANDIDATE_ACCRUAL_MAX_WALL_CLOCK_SECONDS - metadata_elapsed_seconds,
+        )
+        if remaining_seconds <= 0.0:
+            return {
+                "status": "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_METADATA_TIMEBOXED_INCOMPLETE",
+                "candidate_models": models,
+                "retryable": True,
+                "timeboxed_incomplete": True,
+                "metadata_elapsed_seconds": metadata_elapsed_seconds,
+                "max_wall_clock_seconds": _BPF_CANDIDATE_ACCRUAL_MAX_WALL_CLOCK_SECONDS,
+            }
+        now = datetime.now(timezone.utc)
+        frozen_source_runs = {
+            update.model: (
+                update.last_run_initialisation_time.astimezone(timezone.utc),
+                update.last_run_availability_time.astimezone(timezone.utc),
+            )
+            for update in updates
+            if update.model in models
+            and now >= source_publicly_usable_at(update.to_source_run_clock())
+            and source_clock_metadata_run_is_single_runs_served(
+                update.model,
+                update.last_run_initialisation_time.astimezone(timezone.utc).hour,
+            )
+        }
+        if not frozen_source_runs:
+            return {
+                "status": "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_NO_PUBLIC_RUN",
+                "candidate_models": models,
+            }
+        remaining_seconds = max(
+            0.0,
+            _BPF_CANDIDATE_ACCRUAL_MAX_WALL_CLOCK_SECONDS
+            - max(0.0, time.monotonic() - started_monotonic),
+        )
+        if remaining_seconds <= 0.0:
+            return {
+                "status": "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_METADATA_TIMEBOXED_INCOMPLETE",
+                "candidate_models": tuple(frozen_source_runs),
+                "retryable": True,
+                "timeboxed_incomplete": True,
+                "metadata_elapsed_seconds": max(
+                    0.0, time.monotonic() - started_monotonic
+                ),
+                "max_wall_clock_seconds": _BPF_CANDIDATE_ACCRUAL_MAX_WALL_CLOCK_SECONDS,
+            }
+        return _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+            cfg,
+            max_wall_clock_seconds=remaining_seconds,
+            models=tuple(model for model in models if model in frozen_source_runs),
+            capture_when_covered=True,
+            quota_lane="recovery",
+            frozen_source_runs=frozen_source_runs,
+        )
+    except Exception as exc:  # noqa: BLE001 - candidate accrual cannot block live serving
+        logger.warning("BPF candidate-accrual capture skipped (fail-soft): %s", exc)
+        return {
+            "status": "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_FAILSOFT_SKIPPED",
+            "error": str(exc),
+        }
 
 
 def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(

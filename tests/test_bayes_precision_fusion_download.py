@@ -3656,3 +3656,134 @@ def test_single_runs_payload_cache_load_skips_entries_without_a_stamp(tmp_path, 
     assert dl._SINGLE_RUNS_PAYLOAD_CACHE_RECORDED_AT == {}
     assert dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEXED_KEYS == set()
     assert dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEX == {}
+
+
+def test_candidate_recovery_lane_never_enters_source_clock_reserve(tmp_path, monkeypatch) -> None:
+    """Candidate accrual is background work: its single-runs request may use only
+    recovery quota, leaving both source-clock and held-position reserves intact."""
+    from contextlib import contextmanager
+
+    import src.data.bayes_precision_fusion_download as dl
+
+    entered: list[str] = []
+
+    @contextmanager
+    def _recovery_lane():
+        entered.append("recovery")
+        yield
+
+    @contextmanager
+    def _source_clock_lane():
+        raise AssertionError("candidate accrual must not enter source-clock quota")
+        yield
+
+    cycle = datetime(2026, 9, 20, 12, tzinfo=UTC)
+    monkeypatch.setattr(dl, "bayes_precision_fusion_recovery_quota_priority", _recovery_lane)
+    monkeypatch.setattr(dl, "bayes_precision_fusion_source_clock_quota_priority", _source_clock_lane)
+    monkeypatch.setattr(dl, "_model_in_domain", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(dl, "_read_source_clock_single_runs_requests", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        dl,
+        "_default_live_fetch_batched",
+        lambda **_kwargs: {"met_nordic": (16.6, 11.0)},
+    )
+
+    report = dl.download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=_forecast_db(tmp_path),
+        cycle=cycle,
+        targets=_targets(),
+        models=("met_nordic",),
+        include_previous_runs=False,
+        prune_after=False,
+        frozen_source_runs={"met_nordic": (cycle, cycle)},
+        quota_lane="recovery",
+    )
+
+    assert report["written_row_count"] > 0
+    assert entered == ["recovery"]
+
+
+def test_candidate_accrual_never_fetches_outside_its_declared_domain(tmp_path, monkeypatch) -> None:
+    """The candidate-only caller relies on the downloader's existing domain gate;
+    an out-of-domain Met Nordic target must be recorded without any HTTP attempt."""
+    import src.data.bayes_precision_fusion_download as dl
+
+    cycle = datetime(2026, 9, 20, 12, tzinfo=UTC)
+    target = dl.BayesPrecisionFusionDownloadTarget(
+        city="Fiji",
+        metric="high",
+        target_date="2026-09-21",
+        lead_days=1,
+        latitude=-18.1248,
+        longitude=178.4501,
+        timezone_name="Pacific/Fiji",
+    )
+    monkeypatch.setattr(dl, "_read_source_clock_single_runs_requests", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        dl,
+        "_default_live_fetch_batched",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("out-of-domain candidate must not issue HTTP")
+        ),
+    )
+
+    report = dl.download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=_forecast_db(tmp_path),
+        cycle=cycle,
+        targets=(target,),
+        models=("met_nordic",),
+        include_previous_runs=False,
+        prune_after=False,
+        frozen_source_runs={"met_nordic": (cycle, cycle)},
+        quota_lane="recovery",
+    )
+
+    assert report["written_row_count"] == 0
+    assert "met_nordic:Fiji" in report["domain_excluded"]
+
+
+def test_candidate_accrual_uses_its_own_newer_public_metadata_run(tmp_path, monkeypatch) -> None:
+    """A candidate's exact current capture is keyed to its own published run, not
+    the older cycle that selected the current target plan."""
+    import src.data.bayes_precision_fusion_download as dl
+
+    anchor_cycle = datetime(2026, 9, 20, 6, tzinfo=UTC)
+    met_cycle = datetime(2026, 9, 20, 12, tzinfo=UTC)
+    target = dl.BayesPrecisionFusionDownloadTarget(
+        city="Helsinki",
+        metric="high",
+        target_date="2026-09-21",
+        lead_days=1,
+        latitude=60.1699,
+        longitude=24.9384,
+        timezone_name="Europe/Helsinki",
+    )
+    monkeypatch.setattr(
+        dl,
+        "_read_source_clock_single_runs_requests",
+        lambda **_kwargs: {
+            "met_nordic": dl._SourceClockSingleRunsRequest(
+                run=met_cycle,
+                source_available_at=met_cycle.isoformat(),
+            )
+        },
+    )
+    seen_runs: list[datetime] = []
+
+    def _fetch(**kwargs):
+        seen_runs.append(kwargs["run"])
+        return {"met_nordic": (16.6, 11.0)}
+
+    monkeypatch.setattr(dl, "_default_live_fetch_batched", _fetch)
+    report = dl.download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=_forecast_db(tmp_path),
+        cycle=anchor_cycle,
+        targets=(target,),
+        models=("met_nordic",),
+        include_previous_runs=False,
+        prune_after=False,
+        quota_lane="recovery",
+    )
+
+    assert report["written_row_count"] > 0
+    assert seen_runs == [met_cycle]

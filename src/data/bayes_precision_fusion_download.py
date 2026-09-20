@@ -1363,6 +1363,21 @@ def bayes_precision_fusion_held_quota_cooldown_seconds() -> int:
     return 0 if 0 in waits else int(min(waits))
 
 
+def bayes_precision_fusion_recovery_quota_cooldown_seconds() -> int:
+    """Return the cooldown without borrowing either source-clock or held reserve."""
+
+    with _BPF_OPENMETEO_QUOTA_TRACKER.recovery_lane():
+        waits = (
+            _BPF_OPENMETEO_QUOTA_TRACKER.retry_after_seconds(
+                "single-runs-api.open-meteo.com/v1/forecast"
+            ),
+            _BPF_OPENMETEO_QUOTA_TRACKER.retry_after_seconds(
+                "api.open-meteo.com/v1/forecast"
+            ),
+        )
+    return 0 if 0 in waits else int(min(waits))
+
+
 def bayes_precision_fusion_source_clock_quota_priority():
     """Reserve Open-Meteo capacity for newly published source runs."""
 
@@ -2755,6 +2770,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     retention_days: int = RETENTION_DAYS,
     max_wall_clock_seconds: float | None = None,
     frozen_source_runs: Mapping[str, tuple[datetime, datetime]] | None = None,
+    quota_lane: str = "source_clock",
 ) -> dict[str, object]:
     """Capture (forward single_runs + fixed-lead previous_runs) the 8 extra OM models for each
     current target and persist into raw_model_forecasts on a SINGLE zeus-forecasts.db connection
@@ -2772,6 +2788,13 @@ def download_bayes_precision_fusion_extra_raw_inputs(
            cycle — a fixed-lead historical value is immutable once captured (never
            re-fetched AT THAT LEAD; other leads of the same target remain fetchable).
     """
+    if quota_lane == "source_clock":
+        single_runs_quota_priority = bayes_precision_fusion_source_clock_quota_priority
+    elif quota_lane == "recovery":
+        single_runs_quota_priority = bayes_precision_fusion_recovery_quota_priority
+    else:
+        raise ValueError(f"unsupported BPF quota lane: {quota_lane!r}")
+
     # Detect whether caller injected old-style per-model fetchers (test compat) or batched.
     _use_legacy_per_model = (single_runs_fetch is not None or previous_runs_fetch is not None)
     single_fetch = single_runs_fetch or _default_live_fetch
@@ -3121,7 +3144,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                 # source-clock tranche (cap 9000) exists exactly for this, so
                 # the fetch must not die at the 8500 maintenance ceiling
                 # alongside backfill jobs.
-                with bayes_precision_fusion_source_clock_quota_priority():
+                with single_runs_quota_priority():
                     results = _default_live_fetch_locations_batched(
                         models=[model],
                         locations=locations,
@@ -3331,7 +3354,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                 else:
                     # Same newly-published-run capture as the wave fetch above;
                     # same source-clock tranche.
-                    with bayes_precision_fusion_source_clock_quota_priority():
+                    with single_runs_quota_priority():
                         sv_map = _default_live_fetch_batched(
                             models=single_models,
                             latitude=ref.latitude,
