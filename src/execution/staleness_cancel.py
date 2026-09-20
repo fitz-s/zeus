@@ -229,10 +229,19 @@ def _decision_q_version_from_details(details: dict[str, object] | None) -> str |
     return None
 
 
-def find_open_entry_rests(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+def find_open_entry_rests(
+    conn: sqlite3.Connection,
+    *,
+    include_pending_cancels: bool = False,
+) -> list[dict[str, Any]]:
     """Every open ENTRY rest, with its stamped ``q_version``. No deadline filter —
     unlike the retired ``find_expired_resting_entries``, classification (stale vs.
     TTL-expired vs. neither) happens in Python via the derived predicates, not SQL.
+
+    When ``include_pending_cancels`` is true, also return ENTRY BUY commands in
+    ``CANCEL_PENDING`` only when their latest command event is the matching,
+    batch-owned ``CANCEL_REQUESTED`` intent. This is the C3 retry reader; the
+    default preserves the day0 consumer's original open-command scope.
     """
     placeholders = ",".join("?" for _ in OPEN_REST_FACT_STATES)
     q_version_expr = _venue_commands_q_version_select_expr(conn)
@@ -267,6 +276,27 @@ def find_open_entry_rests(conn: sqlite3.Connection) -> list[dict[str, Any]]:
           ON submit_payload.command_id = vc.command_id
         """
         submit_payload_select = "submit_payload.payload_json AS submit_payload_json"
+    pending_event_join = ""
+    pending_event_select = "NULL AS latest_cancel_event_type, NULL AS latest_cancel_payload_json"
+    if include_pending_cancels and _has_table(conn, "venue_command_events"):
+        pending_event_join = """
+        LEFT JOIN venue_command_events latest_command_event
+          ON latest_command_event.command_id = vc.command_id
+         AND latest_command_event.sequence_no = (
+                SELECT sequence_no
+                  FROM venue_command_events
+                 WHERE command_id = vc.command_id
+                 ORDER BY sequence_no DESC
+                 LIMIT 1
+             )
+        """
+        pending_event_select = (
+            "latest_command_event.event_type AS latest_cancel_event_type, "
+            "latest_command_event.payload_json AS latest_cancel_payload_json"
+        )
+    command_states = "'ACKED', 'POST_ACKED', 'PARTIAL'"
+    if include_pending_cancels:
+        command_states += ", 'CANCEL_PENDING'"
     rows = conn.execute(
         f"""
         WITH latest_facts AS (
@@ -279,17 +309,19 @@ def find_open_entry_rests(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         SELECT vc.command_id, vc.venue_order_id, vc.token_id, vc.market_id,
                vc.created_at, {q_version_expr} AS q_version, lf.state AS fact_state, lf.matched_size,
                {snapshot_id_select}, {snapshot_min_order_select}, {submit_payload_select},
-               vc.side AS command_side
+               vc.side AS command_side, vc.state AS command_state,
+               {pending_event_select}
         FROM venue_commands vc
         JOIN latest_facts lf
           ON lf.venue_order_id = vc.venue_order_id AND lf.rn = 1
         {snapshot_join}
         {submit_payload_join}
+        {pending_event_join}
         WHERE vc.intent_kind = 'ENTRY'
           AND upper(vc.side) = 'BUY'
           AND vc.venue_order_id IS NOT NULL
           AND vc.venue_order_id != ''
-          AND vc.state IN ('ACKED', 'POST_ACKED', 'PARTIAL')
+          AND vc.state IN ({command_states})
           AND lf.state IN ({placeholders})
         """,
         OPEN_REST_FACT_STATES,
@@ -312,7 +344,37 @@ def find_open_entry_rests(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                 "min_order_size": row[9],
                 "submit_payload_json": row[10],
                 "command_side": row[11],
+                "command_state": row[12],
+                "latest_cancel_event_type": row[13],
+                "latest_cancel_payload_json": row[14],
             }
+        command_state = str(item.get("command_state") or "").strip().upper()
+        pending_cancel = False
+        if command_state == "CANCEL_PENDING":
+            try:
+                pending_payload = json.loads(
+                    str(item.get("latest_cancel_payload_json") or "{}")
+                )
+            except (TypeError, ValueError):
+                pending_payload = None
+            pending_cancel = (
+                include_pending_cancels
+                and str(item.get("latest_cancel_event_type") or "").strip().upper()
+                == "CANCEL_REQUESTED"
+                and isinstance(pending_payload, dict)
+                and str(pending_payload.get("venue_order_id") or "").strip()
+                == str(item.get("venue_order_id") or "").strip()
+                and pending_payload.get("batch") is True
+            )
+            if not pending_cancel:
+                continue
+        if include_pending_cancels:
+            item["command_state"] = command_state
+            item["pending_cancel"] = pending_cancel
+        else:
+            item.pop("command_state", None)
+        item.pop("latest_cancel_event_type", None)
+        item.pop("latest_cancel_payload_json", None)
         source_details = _decision_source_details_from_submit_payload(item.get("submit_payload_json"))
         q_authority = _decision_q_authority_from_details(source_details)
         if q_authority:
@@ -625,7 +687,6 @@ def run_c3_staleness_cancel_cycle(
     from src.execution.day0_hard_fact_exit import (
         classify_day0_dead_bin_entry_cancels,
     )
-    from src.config import runtime_cities_by_name
     from src.state.venue_command_repo import get_command
 
     now = now or datetime.now(UTC)
@@ -635,11 +696,35 @@ def run_c3_staleness_cancel_cycle(
         else bootstrap_rest_deadline_minutes()
     )
 
-    entries = find_open_entry_rests(trade_conn_ro)
+    entries = find_open_entry_rests(
+        trade_conn_ro,
+        include_pending_cancels=True,
+    )
     families_by_command = resolve_order_families(entries, trade_conn_ro, forecasts_conn_ro)
 
+    pending_cancel_set = []
+    classifiable_entries = []
+    for entry in entries:
+        if not entry.get("pending_cancel"):
+            classifiable_entries.append(entry)
+            continue
+        pending_cancel_set.append(
+            {
+                "command_id": entry.get("command_id"),
+                "family": families_by_command.get(str(entry.get("command_id") or "")),
+                "cancel_reason": "CANCEL_PENDING_RETRY",
+                "cancel_action": "CANCEL_REPLACE",
+                "cancel_detail": {"trigger": "c3_pending_cancel_retry"},
+            }
+        )
+    classifiable_families = {
+        family
+        for entry in classifiable_entries
+        if (family := families_by_command.get(str(entry.get("command_id") or "")))
+    }
+
     ttl_cancel_set = classify_cancel_set(
-        entries, families_by_command, {}, now=now, deadline_minutes=deadline_minutes
+        classifiable_entries, families_by_command, {}, now=now, deadline_minutes=deadline_minutes
     )
 
     # SCOPE: every canonically open forecast-authority ENTRY rest. DRAIN: this
@@ -649,13 +734,17 @@ def run_c3_staleness_cancel_cycle(
     # order from this cancel-set; Day0 observation authority is excluded below.
     # ``affected_cities`` is deliberately not a filter: source-event delivery is
     # not current-probability authority.
-    q_by_family = read_current_family_q_versions(
-        forecasts_conn_ro,
-        (family for family in families_by_command.values() if family),
-        now=now,
+    q_by_family = (
+        read_current_family_q_versions(
+            forecasts_conn_ro,
+            classifiable_families,
+            now=now,
+        )
+        if classifiable_families
+        else {}
     )
     q_cancel_set = classify_cancel_set(
-        entries,
+        classifiable_entries,
         families_by_command,
         q_by_family,
         now=now,
@@ -667,20 +756,26 @@ def run_c3_staleness_cancel_cycle(
     # five minutes and batch-journals the cancel below; command recovery owns a
     # post-journal venue ambiguity. RESET: the command leaves the canonical open
     # set or the current qualified Day0 predicate no longer selects it.
-    try:
-        day0_cancel_set = classify_day0_dead_bin_entry_cancels(
-            entries,
-            trade_conn=trade_conn_ro,
-            forecasts_conn=forecasts_conn_ro,
-            cities_by_name=runtime_cities_by_name(),
-            now=now,
-        )
-    except Exception as exc:  # noqa: BLE001 - one lane cannot suppress TTL/q drain.
-        logger.warning("C3 Day0 cancel classification failed: %s", exc)
+    if classifiable_entries:
+        try:
+            from src.config import runtime_cities_by_name
+
+            day0_cancel_set = classify_day0_dead_bin_entry_cancels(
+                classifiable_entries,
+                trade_conn=trade_conn_ro,
+                forecasts_conn=forecasts_conn_ro,
+                cities_by_name=runtime_cities_by_name(),
+                now=now,
+            )
+        except Exception as exc:  # noqa: BLE001 - one lane cannot suppress TTL/q drain.
+            logger.warning("C3 Day0 cancel classification failed: %s", exc)
+            day0_cancel_set = []
+    else:
         day0_cancel_set = []
 
     cancel_set = _merge_cancel_proposals(
         (
+            ("pending_cancel", pending_cancel_set),
             ("ttl", ttl_cancel_set),
             ("q_version", q_cancel_set),
             ("day0", day0_cancel_set),

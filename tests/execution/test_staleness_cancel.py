@@ -593,6 +593,142 @@ class TestFindOpenEntryRests:
         assert find_open_entry_rests(conn) == []
 
 
+def _pending_cancel_reader_db(
+    *,
+    side="BUY",
+    fact_state="LIVE",
+    command_state="CANCEL_PENDING",
+    event_type="CANCEL_REQUESTED",
+    event_order_id="v-pending",
+    batch=True,
+    venue_order_id="v-pending",
+    include_fact=True,
+    include_event=True,
+):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            venue_order_id TEXT,
+            token_id TEXT,
+            market_id TEXT,
+            created_at TEXT,
+            intent_kind TEXT,
+            state TEXT,
+            side TEXT,
+            q_version TEXT
+        );
+        CREATE TABLE venue_order_facts (
+            venue_order_id TEXT,
+            state TEXT,
+            matched_size TEXT,
+            local_sequence INTEGER
+        );
+        CREATE TABLE venue_command_events (
+            command_id TEXT,
+            sequence_no INTEGER,
+            event_type TEXT,
+            payload_json TEXT
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO venue_commands VALUES (?, ?, 'tok-pending', 'mkt-pending', ?, 'ENTRY', ?, ?, 'q-same')",
+        ("c-pending", venue_order_id, NOW.isoformat(), command_state, side),
+    )
+    if include_fact and venue_order_id:
+        conn.execute(
+            "INSERT INTO venue_order_facts VALUES (?, ?, '0', 1)",
+            (venue_order_id, fact_state),
+        )
+    payload = {
+        "venue_order_id": event_order_id,
+        "batch": batch,
+    }
+    if include_event:
+        conn.execute(
+            "INSERT INTO venue_command_events VALUES ('c-pending', 1, ?, ?)",
+            (event_type, json.dumps(payload)),
+        )
+    conn.commit()
+    return conn
+
+
+def _seed_existing_pending_cancel(conn):
+    """Inject an already-journaled command; bypass new ENTRY admission gates."""
+    now = NOW.isoformat()
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            venue_order_id, state, last_event_id, created_at, updated_at,
+            review_required_reason, q_version
+        ) VALUES (
+                'c-pending', 'snap-pending', 'env-pending', 'pos-pending', 'decision-pending',
+            'pending-idempotency-key-000000', 'ENTRY', 'mkt-pending', 'tok-pending',
+                'BUY', 10.0, 0.50, 'v-pending', 'CANCEL_PENDING',
+                'c-pending:cancel-requested', ?, ?, NULL, 'q-same'
+        )
+        """,
+        (now, now),
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_order_facts (
+            venue_order_id, command_id, state, remaining_size, matched_size,
+            source, observed_at, local_sequence, raw_payload_hash
+        ) VALUES ('v-pending', 'c-pending', 'LIVE', '10', '0', 'REST', ?, 1, ?)
+        """,
+        (now, "f" * 64),
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_command_events (
+            event_id, command_id, sequence_no, event_type, occurred_at,
+            payload_json, state_after
+        ) VALUES ('c-pending:cancel-requested', 'c-pending', 1,
+                  'CANCEL_REQUESTED', ?, ?, 'CANCEL_PENDING')
+        """,
+        (now, json.dumps({"venue_order_id": "v-pending", "batch": True})),
+    )
+    conn.commit()
+
+
+class TestPendingCancelReader:
+    def test_c3_reader_returns_matching_pending_batch_intent(self):
+        conn = _pending_cancel_reader_db()
+
+        assert find_open_entry_rests(conn) == []
+        entries = find_open_entry_rests(conn, include_pending_cancels=True)
+
+        assert len(entries) == 1
+        assert entries[0]["command_state"] == "CANCEL_PENDING"
+        assert entries[0]["pending_cancel"] is True
+        assert entries[0]["venue_order_id"] == "v-pending"
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"side": "SELL"},
+            {"fact_state": "UNKNOWN"},
+            {"fact_state": "CANCEL_CONFIRMED"},
+            {"event_type": "CANCEL_ACKED"},
+            {"event_order_id": "v-other"},
+            {"batch": False},
+            {"venue_order_id": ""},
+            {"include_fact": False},
+            {"include_event": False},
+        ],
+    )
+    def test_c3_reader_rejects_non_matching_pending_shapes(self, kwargs):
+        conn = _pending_cancel_reader_db(**kwargs)
+
+        assert find_open_entry_rests(conn, include_pending_cancels=True) == []
+
+
 class TestResolveOrderFamilies:
     def test_token_resolves_through_condition_to_family(self):
         trade_conn = _trade_db()
@@ -679,6 +815,127 @@ class _FakeGatewayClient:
     def cancel_orders_batch(self, order_ids):
         self.cancel_calls.append(list(order_ids))
         return self._responses.pop(0)
+
+
+def test_pending_cancel_is_retried_without_q_ttl_or_day0_classification(monkeypatch):
+    from src.execution import batch_order_submission
+    from src.execution import day0_hard_fact_exit
+    from src.state import venue_command_repo
+
+    entry = {
+        **_entry("c-pending", q_version="q-same", age_minutes=1.0),
+        "venue_order_id": "v-pending",
+        "command_state": "CANCEL_PENDING",
+        "pending_cancel": True,
+    }
+    monkeypatch.setattr(
+        staleness_cancel_module,
+        "find_open_entry_rests",
+        lambda _conn, **kwargs: (
+            assert_pending_reader_flag(kwargs),
+            [entry],
+        )[1],
+    )
+    monkeypatch.setattr(
+        staleness_cancel_module,
+        "resolve_order_families",
+        lambda *_args: {"c-pending": FAMILY},
+    )
+    monkeypatch.setattr(
+        staleness_cancel_module,
+        "read_current_family_q_versions",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("pending retry read q")),
+    )
+    day0_calls = []
+    monkeypatch.setattr(
+        day0_hard_fact_exit,
+        "classify_day0_dead_bin_entry_cancels",
+        lambda entries, **_kwargs: (day0_calls.append(entries), [])[1],
+    )
+    submitted = []
+
+    def _cancel_batch(_conn, _client, command_ids, **_kwargs):
+        submitted.append(list(command_ids))
+        return [SimpleNamespace(command_id="c-pending", status="acked")]
+
+    monkeypatch.setattr(batch_order_submission, "cancel_commands_batch", _cancel_batch)
+    monkeypatch.setattr(venue_command_repo, "get_command", lambda *_args: {"state": "CANCELLED"})
+
+    result = run_c3_staleness_cancel_cycle(object(), object(), object(), object(), now=NOW)
+
+    assert submitted == [["c-pending"]]
+    assert result["cancel_set_size"] == 1
+    assert result["confirmed_families"] == {FAMILY}
+    assert day0_calls == []
+
+
+def assert_pending_reader_flag(kwargs):
+    assert kwargs == {"include_pending_cancels": True}
+
+
+def test_pending_cancel_real_batch_retry_rate_denial_ack_and_dedup(monkeypatch):
+    from src.execution import staleness_cancel
+
+    trade_conn = _trade_db()
+    _seed_existing_pending_cancel(trade_conn)
+    forecasts_conn = object()
+    monkeypatch.setattr(
+        staleness_cancel,
+        "resolve_order_families",
+        lambda *_args: {"c-pending": None},
+    )
+    monkeypatch.setattr(
+        staleness_cancel,
+        "read_current_family_q_versions",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("pending retry read q")),
+    )
+    client = _FakeGatewayClient(
+        cancel_responses=[[{"canceled": True, "orderID": "v-pending"}]]
+    )
+
+    class _RateBudget:
+        def __init__(self):
+            self.decisions = [False, True]
+
+        def try_acquire(self, _request_class):
+            granted = self.decisions.pop(0)
+            return SimpleNamespace(
+                granted=granted,
+                decision=SimpleNamespace(value="DENIED"),
+            )
+
+    budget = _RateBudget()
+    first = run_c3_staleness_cancel_cycle(
+        trade_conn, trade_conn, forecasts_conn, client, now=NOW, rate_budget=budget
+    )
+    assert first["outcomes"][0].status == "not_attempted"
+    assert client.cancel_calls == []
+    assert conn_state(trade_conn, "c-pending") == "CANCEL_PENDING"
+    assert trade_conn.execute(
+        "SELECT COUNT(*) FROM venue_command_events "
+        "WHERE command_id='c-pending' AND event_type='CANCEL_REQUESTED'"
+    ).fetchone()[0] == 1
+
+    second = run_c3_staleness_cancel_cycle(
+        trade_conn, trade_conn, forecasts_conn, client, now=NOW, rate_budget=budget
+    )
+    assert second["outcomes"][0].status == "acked"
+    assert client.cancel_calls == [["v-pending"]]
+    assert conn_state(trade_conn, "c-pending") == "CANCELLED"
+    assert trade_conn.execute(
+        "SELECT COUNT(*) FROM venue_command_events "
+        "WHERE command_id='c-pending' AND event_type='CANCEL_REQUESTED'"
+    ).fetchone()[0] == 1
+    assert trade_conn.execute(
+        "SELECT COUNT(*) FROM venue_command_events "
+        "WHERE command_id='c-pending' AND event_type='CANCEL_ACKED'"
+    ).fetchone()[0] == 1
+
+    third = run_c3_staleness_cancel_cycle(
+        trade_conn, trade_conn, forecasts_conn, client, now=NOW, rate_budget=budget
+    )
+    assert third["cancel_set_size"] == 0
+    assert client.cancel_calls == [["v-pending"]]
 
 
 class TestRunC3StalenessCancelCycle:
@@ -1064,7 +1321,11 @@ class TestRecurringCancelClockIndependence:
         read_families = []
         classified_q_maps = []
 
-        monkeypatch.setattr(staleness_cancel_module, "find_open_entry_rests", lambda _conn: entries)
+        monkeypatch.setattr(
+            staleness_cancel_module,
+            "find_open_entry_rests",
+            lambda _conn, **_kwargs: entries,
+        )
         monkeypatch.setattr(
             staleness_cancel_module,
             "resolve_order_families",
@@ -1481,7 +1742,11 @@ def test_c3_day0_cancel_uses_batch_journal_and_confirms_family(monkeypatch):
         "command_side": "BUY",
         "matched_size": "0",
     }
-    monkeypatch.setattr(staleness_cancel, "find_open_entry_rests", lambda _conn: [entry])
+    monkeypatch.setattr(
+        staleness_cancel,
+        "find_open_entry_rests",
+        lambda _conn, **_kwargs: [entry],
+    )
     monkeypatch.setattr(
         staleness_cancel,
         "resolve_order_families",
@@ -1583,7 +1848,11 @@ def test_day0_classification_failure_does_not_suppress_ttl(monkeypatch) -> None:
         q_version="q-current",
         age_minutes=DEADLINE_MIN + 1,
     )
-    monkeypatch.setattr(staleness_cancel, "find_open_entry_rests", lambda _conn: [entry])
+    monkeypatch.setattr(
+        staleness_cancel,
+        "find_open_entry_rests",
+        lambda _conn, **_kwargs: [entry],
+    )
     monkeypatch.setattr(
         staleness_cancel,
         "resolve_order_families",
