@@ -37,7 +37,7 @@ import sqlite3
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event, Lock
 from typing import Callable, Mapping, Sequence
@@ -1382,6 +1382,7 @@ def _candidate_accrual_market_scopes(
     forecast_db: Path,
     *,
     models: Sequence[str],
+    now_utc: datetime | None = None,
 ) -> tuple[tuple[str, str, str], ...]:
     """Read only current market families where a candidate model can serve a city.
 
@@ -1411,7 +1412,10 @@ def _candidate_accrual_market_scopes(
     if not candidate_cities:
         return ()
     placeholders = ", ".join("?" for _ in candidate_cities)
-    minimum_target_date = datetime.now(timezone.utc).date().isoformat()
+    reference_now = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    # UTC midnight is still the prior local calendar day in westward cities.
+    # Fetch one extra UTC date, then apply the authoritative city-local cutoff.
+    minimum_target_date = (reference_now.date() - timedelta(days=1)).isoformat()
     conn = _connect_read_only(forecast_db)
     try:
         rows = conn.execute(
@@ -1428,7 +1432,14 @@ def _candidate_accrual_market_scopes(
         ).fetchall()
     finally:
         conn.close()
-    return tuple((str(city), str(target_date), str(metric)) for city, target_date, metric in rows)
+    return tuple(
+        (str(city), str(target_date), str(metric))
+        for city, target_date, metric in rows
+        if str(target_date)
+        >= reference_now.astimezone(
+            ZoneInfo(str(cities_by_name[str(city)].timezone))
+        ).date().isoformat()
+    )
 
 
 def _download_bayes_precision_fusion_candidate_accrual_if_needed(
@@ -1512,11 +1523,6 @@ def _download_bayes_precision_fusion_candidate_accrual_if_needed(
             Path(str(cfg["forecast_db"])),
             models=tuple(model for model in models if model in frozen_source_runs),
         )
-        if not candidate_target_scopes:
-            return {
-                "status": "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_NO_TARGETS",
-                "candidate_models": tuple(frozen_source_runs),
-            }
         planning_cycle = max(run for run, _available in frozen_source_runs.values())
         return _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
             cfg,

@@ -38,10 +38,12 @@ from __future__ import annotations
 
 import importlib
 import json
+import sqlite3
 import subprocess
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -531,6 +533,106 @@ def test_candidate_accrual_recovery_cooldown_skips_capture_but_retries(monkeypat
         "cooldown_seconds": 30,
     }
     assert metadata_calls == [("met_nordic",), ("met_nordic",)]
+
+
+def test_candidate_accrual_scope_uses_each_city_local_day_at_utc_midnight(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """UTC date must not drop Chicago Day0 while Tokyo has reached its next day."""
+    forecast_db = tmp_path / "forecasts.db"
+    with sqlite3.connect(str(forecast_db)) as conn:
+        conn.execute(
+            """
+            CREATE TABLE market_events (
+                city TEXT, target_date TEXT, temperature_metric TEXT,
+                token_id TEXT, range_label TEXT
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO market_events VALUES (?, ?, ?, 'token', 'range')",
+            [
+                (city, target_date, metric)
+                for city, target_date in (
+                    ("Chicago", "2026-09-19"),
+                    ("Tokyo", "2026-09-20"),
+                )
+                for metric in ("high", "low")
+            ],
+        )
+    monkeypatch.setattr(
+        cfg,
+        "cities_by_name",
+        {
+            "Chicago": SimpleNamespace(lat=41.8781, lon=-87.6298, timezone="America/Chicago"),
+            "Tokyo": SimpleNamespace(lat=35.6762, lon=139.6503, timezone="Asia/Tokyo"),
+        },
+    )
+    monkeypatch.setattr(dl_mod, "_model_in_domain", lambda *_args, **_kwargs: True)
+
+    scopes = production._candidate_accrual_market_scopes(
+        forecast_db,
+        models=("met_nordic",),
+        now_utc=datetime(2026, 9, 20, 0, 30, tzinfo=timezone.utc),
+    )
+
+    assert scopes == (
+        ("Chicago", "2026-09-19", "high"),
+        ("Chicago", "2026-09-19", "low"),
+        ("Tokyo", "2026-09-20", "high"),
+        ("Tokyo", "2026-09-20", "low"),
+    )
+
+
+def test_candidate_accrual_empty_market_scope_still_reaches_held_union(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """An empty market query must not bypass generic helper's existing held union."""
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+
+    public_run = datetime.now(timezone.utc) - timedelta(minutes=20)
+    monkeypatch.setattr(
+        dl_mod,
+        "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS",
+        ("met_nordic",),
+    )
+    monkeypatch.setattr(
+        dl_mod,
+        "source_clock_metadata_run_is_single_runs_served",
+        lambda *_args: True,
+    )
+    monkeypatch.setattr(
+        "src.strategy.live_inference.source_clock_vnext.source_publicly_usable_at",
+        lambda _run: datetime(1970, 1, 1, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        "src.data.openmeteo_model_updates.fetch_model_updates",
+        lambda _models, **_kwargs: (
+            OpenMeteoModelUpdate(
+                model="met_nordic",
+                last_run_initialisation_time=public_run,
+                last_run_availability_time=public_run,
+            ),
+        ),
+    )
+    monkeypatch.setattr(production, "_candidate_accrual_market_scopes", lambda *_args, **_kwargs: ())
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        production,
+        "_download_bayes_precision_fusion_extra_raw_inputs_if_needed",
+        lambda _cfg, **kwargs: calls.append(kwargs)
+        or {"status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"},
+    )
+
+    report = production._download_bayes_precision_fusion_candidate_accrual_if_needed(
+        {"forecast_db": tmp_path / "forecasts.db"}
+    )
+
+    assert report is not None
+    assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
+    assert calls[0]["capture_target_scopes"] == ()
 
 
 def test_full_fanout_admits_current_day0_and_prioritizes_held_gap(
