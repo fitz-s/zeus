@@ -42365,6 +42365,8 @@ def _day0_remaining_p_raw_vector(
                 station_id=configured_station,
                 preliminary_survival_identity=likelihood_identity,
             ),
+            settlement_semantics=settlement_semantics,
+            operator=str(payload["_edli_day0_probability_operator"]),
         )
         expected_identity = str(payload["_edli_day0_remaining_content_identity"]).strip()
         if expected_identity != str(carrier["content_identity"]):
@@ -43549,6 +43551,7 @@ def _rebuild_decision_time_day0_carrier(
         raise ValueError("DAY0_DECISION_CARRIER_AUTHORITY_KIND_INVALID")
     _snapshot_day0_source_clock_carrier_provenance(payload)
     from src.data.day0_hourly_vectors import (
+        DAY0_REMAINING_CARRIER_OPERATOR_V2,
         build_day0_remaining_probability_carrier,
         day0_remaining_carrier_identity_inputs,
     )
@@ -43652,6 +43655,8 @@ def _rebuild_decision_time_day0_carrier(
             station_id=configured_station,
             preliminary_survival_identity=likelihood_identity,
         ),
+        settlement_semantics=SettlementSemantics.for_city(city),
+        operator=DAY0_REMAINING_CARRIER_OPERATOR_V2,
     )
     payload.update(
         {

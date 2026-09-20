@@ -1063,6 +1063,111 @@ def _live_provenance() -> dict[str, object]:
     }
 
 
+@pytest.mark.parametrize(
+    ("carrier", "accepted"),
+    (
+        ({}, True),
+        ({"q_shape": "day0_remaining_shared_carrier_v1"}, False),
+        ({"q_shape": "day0_remaining_shared_carrier_v2"}, False),
+        ({"q_shape": "fused_day0_fast_residual_likelihood"}, True),
+        (
+            {
+                "day0_remaining_carrier_content_identity": "content-v1",
+                "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_v1",
+            },
+            False,
+        ),
+        ({"day0_remaining_carrier_content_identity": "content-only"}, False),
+        ({"day0_remaining_carrier_operator": "operator-only"}, False),
+        (
+            {
+                "day0_remaining_carrier_content_identity": 17,
+                "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+            },
+            False,
+        ),
+        (
+            {
+                "day0_remaining_carrier_content_identity": ["content-v2"],
+                "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+            },
+            False,
+        ),
+        (
+            {
+                "day0_remaining_carrier_content_identity": {"value": "content-v2"},
+                "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+            },
+            False,
+        ),
+        (
+            {
+                "day0_remaining_carrier_content_identity": None,
+                "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+            },
+            False,
+        ),
+        (
+            {
+                "day0_remaining_carrier_content_identity": "   ",
+                "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+            },
+            False,
+        ),
+        (
+            {
+                "day0_remaining_carrier_content_identity": "content-v2",
+                "day0_remaining_carrier_operator": " extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+            },
+            False,
+        ),
+        (
+            {
+                "day0_remaining_carrier_content_identity": "content-v2",
+                "day0_remaining_carrier_operator": 17,
+            },
+            False,
+        ),
+        (
+            {
+                "day0_remaining_carrier_content_identity": "content-v2",
+                "day0_remaining_carrier_operator": None,
+            },
+            False,
+        ),
+        (
+            {
+                "day0_remaining_carrier_content_identity": "content-unknown",
+                "day0_remaining_carrier_operator": "unknown",
+            },
+            False,
+        ),
+        (
+            {
+                "day0_remaining_carrier_content_identity": "content-v2",
+                "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+            },
+            True,
+        ),
+    ),
+)
+def test_live_reader_accepts_only_complete_current_day0_carrier_pair(
+    carrier: dict[str, object], accepted: bool
+) -> None:
+    provenance = {**_live_provenance(), **carrier}
+    row = {
+        "runtime_layer": LIVE_RUNTIME_LAYER,
+        "q_lcb_json": "{\"cold\":0.1,\"warm\":0.7}",
+        "q_ucb_json": "{\"cold\":0.3,\"warm\":0.9}",
+        "provenance_json": json.dumps(provenance),
+    }
+    result = reader._live_grade_provenance(
+        row,
+        authority_purpose=ReplacementForecastAuthorityPurpose.ENTRY,
+    )
+    assert (result is not None) is accepted, carrier
+
+
 def _with_current_value_serving(
     consumed: dict[str, dict[str, object]],
     *,

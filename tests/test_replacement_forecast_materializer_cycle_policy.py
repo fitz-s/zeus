@@ -1,5 +1,6 @@
 # Created: 2026-06-10
 # Last reused or audited: 2026-08-19
+# Lifecycle: created=2026-06-10; last_reviewed=2026-08-19; last_reused=2026-08-19
 # Authority basis: operator staleness/cycle-physics directive 2026-06-10 (bounded re-materialization
 #   staleness gate at materialization, fail-closed; cycle-phase provenance treats all standard
 #   00Z/06Z/12Z/18Z cycles as live-eligible synoptic); 2026-08-19 causal
@@ -25,6 +26,7 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -406,6 +408,309 @@ def _request(*, cycle: datetime, computed_at: datetime) -> ReplacementForecastMa
         expires_at=computed_at + timedelta(hours=3),
         openmeteo_precision_guard=_precision_guard(),
     )
+
+
+def test_day0_carrier_coverage_requires_complete_current_v2_pair() -> None:
+    """Old/partial carrier declarations drain through the existing seed loop."""
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE posterior (q_lcb_json TEXT, q_ucb_json TEXT, provenance_json TEXT)"
+    )
+    base = {
+        "q_lcb_basis": "fused_center_bootstrap_p05",
+        "bayes_precision_fusion": {
+            "current_evidence_shape": {
+                "shape_lag_hours": 0,
+                "translation_applied": False,
+                "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                "source_cycle_time": "2026-09-20T00:00:00Z",
+            }
+        },
+    }
+    clause = tradeable_grade_coverage_sql(
+        posterior_columns={"q_lcb_json", "q_ucb_json", "provenance_json"},
+        decision_time=datetime(2026, 9, 20, 1, tzinfo=UTC),
+    )
+    cases = (
+        ({}, True),
+        ({"q_shape": "day0_remaining_shared_carrier_v1"}, False),
+        ({"q_shape": "day0_remaining_shared_carrier_v2"}, False),
+        ({"q_shape": "fused_day0_fast_residual_likelihood"}, True),
+        (
+            {
+                "day0_remaining_carrier_content_identity": "content-v1",
+                "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_v1",
+            },
+            False,
+        ),
+        (
+            {
+                "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+            },
+            False,
+        ),
+        (
+            {
+                "day0_remaining_carrier_content_identity": "content-unknown",
+                "day0_remaining_carrier_operator": "unknown",
+            },
+            False,
+        ),
+        (
+            {
+                "day0_remaining_carrier_content_identity": 17,
+                "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+            },
+            False,
+        ),
+        (
+            {
+                "day0_remaining_carrier_content_identity": ["content-v2"],
+                "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+            },
+            False,
+        ),
+        (
+            {
+                "day0_remaining_carrier_content_identity": {"value": "content-v2"},
+                "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+            },
+            False,
+        ),
+        (
+            {
+                "day0_remaining_carrier_content_identity": None,
+                "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+            },
+            False,
+        ),
+        (
+            {
+                "day0_remaining_carrier_content_identity": "   ",
+                "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+            },
+            False,
+        ),
+        (
+            {
+                "day0_remaining_carrier_content_identity": "content-v2",
+                "day0_remaining_carrier_operator": " extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+            },
+            False,
+        ),
+        (
+            {
+                "day0_remaining_carrier_content_identity": "content-v2",
+                "day0_remaining_carrier_operator": 17,
+            },
+            False,
+        ),
+        (
+            {
+                "day0_remaining_carrier_content_identity": "content-v2",
+                "day0_remaining_carrier_operator": None,
+            },
+            False,
+        ),
+        (
+            {
+                "day0_remaining_carrier_content_identity": "content-v2",
+                "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+            },
+            True,
+        ),
+    )
+    for carrier, expected in cases:
+        conn.execute("DELETE FROM posterior")
+        conn.execute(
+            "INSERT INTO posterior VALUES (?, ?, ?)",
+            ("{\"bin\":0.1}", "{\"bin\":0.2}", json.dumps({**base, **carrier})),
+        )
+        count = conn.execute(
+            f"SELECT count(*) FROM posterior WHERE 1=1 {clause}"
+        ).fetchone()[0]
+        assert bool(count) is expected, carrier
+
+
+def test_day0_v1_coverage_drains_seed_and_v2_coverage_stops_reenqueue(tmp_path, monkeypatch) -> None:
+    """The existing queue path retries an old carrier and then honors V2 coverage."""
+
+    import src.data.replacement_forecast_live_materialization_queue as queue
+
+    db_path = tmp_path / "forecast.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    apply_canonical_schema(conn, forecast_tables=True)
+    _create_readiness_state(conn)
+    now = datetime.now(UTC).replace(microsecond=0)
+    city = "Shanghai"
+    target_date = "2026-06-07"
+    metric = "high"
+    baseline_run = "baseline-v1"
+    openmeteo_run = "openmeteo-v1"
+    shape = {
+        "shape_lag_hours": 0.0,
+        "translation_applied": False,
+        "stale_shape_reused": False,
+        "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+        "source_cycle_time": now.isoformat(),
+    }
+    provenance = {
+        "q_lcb_basis": "fused_center_bootstrap_p05",
+        "bayes_precision_fusion": {"current_evidence_shape": shape},
+        "day0_remaining_carrier_content_identity": "content-v1",
+        "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_v1",
+    }
+    conn.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            source_id, product_id, data_version, city, target_date,
+            temperature_metric, source_cycle_time, source_available_at,
+            computed_at, q_json, q_lcb_json, q_ucb_json, posterior_method,
+            dependency_source_run_ids_json, provenance_json, runtime_layer
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            queue.SOURCE_ID,
+            "replacement",
+            "high",
+            city,
+            target_date,
+            metric,
+            now.isoformat(),
+            now.isoformat(),
+            now.isoformat(),
+            '{"cold":0.2}',
+            '{"cold":0.1}',
+            '{"cold":0.3}',
+            "replacement",
+            json.dumps(
+                {"baseline_b0": baseline_run, "openmeteo_ifs9_anchor": openmeteo_run}
+            ),
+            json.dumps(provenance),
+            "live",
+        ),
+    )
+    posterior_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+    readiness_dependencies = {
+        "dependencies": [
+            {"role": "baseline_b0", "source_run_id": baseline_run},
+            {"role": "openmeteo_ifs9_anchor", "source_run_id": openmeteo_run},
+        ]
+    }
+    conn.execute(
+        """
+        INSERT INTO readiness_state (
+            readiness_id, scope_key, scope_type, city, target_local_date,
+            temperature_metric, strategy_key, status, computed_at, expires_at,
+            dependency_json, provenance_json
+        ) VALUES (?, ?, 'city_metric', ?, ?, ?, ?, 'READY', ?, ?, ?, ?)
+        """,
+        (
+            "readiness-v1",
+            "test-scope-v1",
+            city,
+            target_date,
+            metric,
+            queue.STRATEGY_KEY,
+            now.isoformat(),
+            (now + timedelta(days=1)).isoformat(),
+            json.dumps(readiness_dependencies),
+            json.dumps({"city": city, "target_date": target_date, "temperature_metric": metric}),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    seed = {
+        "city": city,
+        "target_date": target_date,
+        "temperature_metric": metric,
+        "computed_at": now.isoformat(),
+        "source_cycle_time": now.isoformat(),
+        "baseline_source_run_id": baseline_run,
+        "openmeteo_source_run_id": openmeteo_run,
+        "openmeteo_payload_json": "{}",
+        "precision_metadata_json": "{}",
+        "bins": [{"bin_id": "cold"}],
+    }
+    monkeypatch.setattr(queue, "replacement_live_input_lag_reason", lambda *args, **kwargs: None)
+    assert not queue._seed_already_covered(forecast_db=db_path, seed=seed)
+
+    seed_dir = tmp_path / "seeds"
+    processed_dir = tmp_path / "processed"
+    failed_dir = tmp_path / "failed"
+    request_dir = tmp_path / "requests"
+    seed_dir.mkdir()
+    request_dir.mkdir()
+    seed_path = seed_dir / "Shanghai.2026-06-07.high.station-input-revision.1.json"
+    seed_path.write_text(json.dumps(seed), encoding="utf-8")
+    ready = SimpleNamespace(
+        ok=True,
+        request={"city": city, "target_date": target_date, "temperature_metric": metric},
+        status="READY",
+        reason_codes=(),
+    )
+    monkeypatch.setattr(
+        queue,
+        "build_replacement_forecast_materialization_request",
+        lambda *_args, **_kwargs: ready,
+    )
+    monkeypatch.setattr(
+        queue,
+        "_blocked_attempt_state",
+        lambda **_kwargs: (None, None, False),
+    )
+    monkeypatch.setattr(
+        queue,
+        "_upgrade_day0_seed_has_current_enqueue_ownership",
+        lambda **_kwargs: SimpleNamespace(
+            ownership=queue._Day0EnqueueOwnership.CURRENT, witness=None
+        ),
+    )
+    processed, failed, _reasons = queue._prepare_seed_requests(
+        seed_dir=seed_dir,
+        seed_processed_dir=processed_dir,
+        seed_failed_dir=failed_dir,
+        request_dir=request_dir,
+        forecast_db=db_path,
+        limit=1,
+    )
+    assert processed and not failed
+    assert (request_dir / seed_path.name).is_file()
+
+    v2_provenance = {
+        **provenance,
+        "day0_remaining_carrier_content_identity": "content-v2",
+        "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+    }
+    writer = sqlite3.connect(db_path)
+    writer.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        (json.dumps(v2_provenance), posterior_id),
+    )
+    writer.commit()
+    writer.close()
+    assert queue._seed_already_covered(forecast_db=db_path, seed=seed)
+
+    v2_seed = seed_dir / "Shanghai.2026-06-07.high.station-input-revision.2.json"
+    v2_seed.write_text(json.dumps(seed), encoding="utf-8")
+    monkeypatch.setattr(
+        queue,
+        "build_replacement_forecast_materialization_request",
+        lambda *_args, **_kwargs: pytest.fail("covered V2 seed must not rebuild"),
+    )
+    processed_v2, failed_v2, _reasons_v2 = queue._prepare_seed_requests(
+        seed_dir=seed_dir,
+        seed_processed_dir=processed_dir,
+        seed_failed_dir=failed_dir,
+        request_dir=request_dir,
+        forecast_db=db_path,
+        limit=1,
+    )
+    assert processed_v2 and not failed_v2
+    assert not (request_dir / v2_seed.name).exists()
 
 
 def test_prewrite_blocks_when_cycle_older_than_bound() -> None:

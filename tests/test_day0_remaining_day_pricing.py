@@ -39,6 +39,7 @@ import numpy as np
 import pytest
 
 from src.contracts.execution_price import ExecutionPrice as EP
+from src.contracts.settlement_semantics import SettlementSemantics
 from src.data.day0_hourly_vectors import (
     Day0HourlyVector,
     align_day0_hourly_vectors_on_common_causal_grid,
@@ -54,6 +55,12 @@ from src.data.day0_hourly_vectors import (
 from src.types.market import Bin
 
 UTC = timezone.utc
+
+
+def _carrier_semantics(city_name: str) -> SettlementSemantics:
+    from src.config import runtime_cities_by_name
+
+    return SettlementSemantics.for_city(runtime_cities_by_name()[city_name])
 
 # Pin the retention-prune clock so this suite is HERMETIC. The persisted-vector
 # fixtures use fixed captured_at timestamps on the 2026-06-10 target day; the
@@ -81,6 +88,7 @@ def test_shared_remaining_carrier_has_coherent_500_rows_and_identity(metric):
         n_point=1000,
         n_samples=500,
         identity_inputs={"city": "Tel Aviv", "unit": "C", "prior": "same_station_preliminary_report_survival_likelihood_v1"},
+        settlement_semantics=_carrier_semantics("Tel Aviv"),
     )
     assert carrier["sample_count"] == 500
     assert len(carrier["samples"]) == 500
@@ -96,6 +104,7 @@ def test_shared_remaining_carrier_has_coherent_500_rows_and_identity(metric):
         n_point=1000,
         n_samples=500,
         identity_inputs={"city": "Tel Aviv", "unit": "C", "prior": "same_station_preliminary_report_survival_likelihood_v1"},
+        settlement_semantics=_carrier_semantics("Tel Aviv"),
     )["content_identity"]
 
 
@@ -120,6 +129,7 @@ def test_shared_remaining_carrier_rejects_invalid_settlement_topology(identity, 
             n_point=10,
             n_samples=500,
             identity_inputs=identity,
+            settlement_semantics=_carrier_semantics("Tel Aviv"),
         )
 
 
@@ -136,6 +146,7 @@ def test_shared_remaining_carrier_accepts_valid_market_order_and_preserves_align
         n_point=10,
         n_samples=5,
         identity_inputs={"city": "Tel Aviv", "unit": "C"},
+        settlement_semantics=_carrier_semantics("Tel Aviv"),
     )
 
     assert carrier["q"] == pytest.approx([1.0 / 3.0, 2.0 / 3.0, 0.0])
@@ -145,8 +156,15 @@ def test_shared_remaining_carrier_accepts_valid_market_order_and_preserves_align
     )
 
 
-def test_noaa_adapter_replays_materialized_carrier_identity_and_samples():
-    """The monitor-side replay must consume the materializer's exact carrier."""
+@pytest.mark.parametrize(
+    "operator",
+    (
+        "extreme_observed_then_noisy_future_v1",
+        "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+    ),
+)
+def test_noaa_adapter_replays_materialized_carrier_identity_and_samples(operator):
+    """Strict replay accepts the persisted V1 history and current V2 carrier."""
     import src.engine.event_reactor_adapter as era
     from src.config import ensemble_n_mc, runtime_cities_by_name
     from src.contracts.settlement_semantics import SettlementSemantics
@@ -171,6 +189,8 @@ def test_noaa_adapter_replays_materialized_carrier_identity_and_samples():
             bin_bounds_c=[(None, 30), (31, 31), (32, 32), (33, None)],
             n_point=ensemble_n_mc(),
             n_samples=500,
+            settlement_semantics=SettlementSemantics.for_city(city),
+            operator=operator,
             identity_inputs=day0_remaining_carrier_identity_inputs(
                 city="Tel Aviv",
                 unit="C",
@@ -230,9 +250,12 @@ def test_noaa_adapter_replays_materialized_carrier_identity_and_samples():
             decision_time=decision_time,
         )
         assert replay.tolist() == pytest.approx(expected["q"])
-        assert replay[-1] == pytest.approx(0.9508620689655143, abs=0.005)
-        assert replay[-1] != pytest.approx(0.5326328498, abs=1e-9)
-        assert 1.0 - float(replay[-1]) < 0.16
+        assert replay.sum() == pytest.approx(1.0)
+        assert np.isfinite(replay).all()
+        if operator.endswith("_v1"):
+            assert replay[-1] == pytest.approx(0.9508620689655143, abs=0.005)
+            assert replay[-1] != pytest.approx(0.5326328498, abs=1e-9)
+            assert 1.0 - float(replay[-1]) < 0.16
         assert payload["_edli_day0_remaining_content_identity"] == expected["content_identity"]
         assert payload["_edli_day0_remaining_carrier_q"] == expected["q"]
         assert payload["_edli_day0_remaining_probability_samples"] == expected["samples"]
@@ -1229,6 +1252,7 @@ def test_noaa_adapter_replays_real_fahrenheit_family_in_native_settlement_units(
             bin_bounds_c=[(None, 79), (80, 81), (82, 83), (84, None)],
             n_point=ensemble_n_mc(),
             n_samples=500,
+            settlement_semantics=SettlementSemantics.for_city(city),
             identity_inputs=day0_remaining_carrier_identity_inputs(
                 city="Atlanta",
                 unit="F",

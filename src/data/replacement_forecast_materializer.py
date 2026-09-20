@@ -1243,7 +1243,9 @@ def _day0_noaa_preliminary_carrier(
     if future_members_c is None or len(future_members_c) == 0:
         raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_FUTURE_MEMBERS_MISSING")
     from src.config import runtime_cities_by_name
+    from src.contracts.settlement_semantics import SettlementSemantics
     from src.data.day0_hourly_vectors import (
+        DAY0_REMAINING_CARRIER_OPERATOR_V2,
         build_day0_remaining_probability_carrier,
         day0_remaining_carrier_identity_inputs,
     )
@@ -1358,6 +1360,8 @@ def _day0_noaa_preliminary_carrier(
             station_id=station,
             preliminary_survival_identity=str(likelihood["identity_hash"]),
         ),
+        settlement_semantics=SettlementSemantics.for_city(city),
+        operator=DAY0_REMAINING_CARRIER_OPERATOR_V2,
     )
     return carrier, likelihood
 
@@ -6137,7 +6141,7 @@ def _compute_posterior_payload(
                     for index, item in enumerate(request.bins)
                 }
                 q = q_global
-                q_shape = "day0_remaining_shared_carrier_v1"
+                q_shape = "day0_remaining_shared_carrier_v2"
             if set(q_global) != set(q):
                 raise ValueError(
                     f"fused-q bin keys != soft-anchor q keys ({sorted(q_global)[:3]}... vs "
@@ -6334,7 +6338,7 @@ def _compute_posterior_payload(
                 except Exception:
                     pass
             if _day0_shared_carrier is not None:
-                q_shape = "day0_remaining_shared_carrier_v1"
+                q_shape = "day0_remaining_shared_carrier_v2"
                 carrier_q = {
                     str(item.bin_id): float(_day0_shared_carrier["q"][index])
                     for index, item in enumerate(request.bins)
@@ -6993,8 +6997,7 @@ def _write_posterior_row(
     family_id = result.family_id
     provenance_payload = result.provenance_payload
     runtime_layer = result.runtime_layer
-    posterior_identity_hash = _json_hash(
-        {
+    posterior_identity = {
             "source_id": SOURCE_ID,
             "product_id": PRODUCT_ID,
             "data_version": data_version,
@@ -7018,8 +7021,22 @@ def _write_posterior_row(
             "posterior_config_hash": posterior_config_hash,
             "anchor_id": anchor_id,
             "anchor_artifact_id": request.anchor_artifact_id,
-        }
-    )
+    }
+    if (
+        provenance_payload.get("day0_remaining_carrier_content_identity")
+        or provenance_payload.get("day0_remaining_carrier_operator")
+    ):
+        posterior_identity.update(
+            {
+                "day0_remaining_carrier_content_identity": provenance_payload.get(
+                    "day0_remaining_carrier_content_identity"
+                ),
+                "day0_remaining_carrier_operator": provenance_payload.get(
+                    "day0_remaining_carrier_operator"
+                ),
+            }
+        )
+    posterior_identity_hash = _json_hash(posterior_identity)
     try:
         conn.execute(
             """
