@@ -271,6 +271,20 @@ def _global_auction_artifact_persister(
 #
 # Thread-local because the auction runs on one thread but the process also hosts
 # monitor/exit work: a shared dict would blend unrelated stages into one sample.
+# Receipt payload compression level. Measured 2026-09-20 over 34 real auction
+# payloads (19.0 MB raw) from decision_log: level 9 encodes in 30.8 ms/artifact,
+# level 6 in 22.8 ms for 1.3% more bytes, level 3 in 10.9 ms for 7.5% more, level
+# 1 in 8.0 ms for 9.8% more. Level 6 is the only one that buys real time without
+# paying for it in storage on a table already measured in tens of GB; level 1 was
+# rejected on exactly that trade.
+#
+# This is the same zlib format and the same `*_encoding` tag, so every existing
+# row stays readable and no reader changes: the decoders key off
+# "zlib+base64+..." strings (48 such literals across src/) and reject anything
+# else, which is why the codec itself is a separate, larger migration.
+_RECEIPT_ZLIB_LEVEL = 6
+
+
 _RECEIPT_STAGE_TIMINGS = threading.local()
 
 
@@ -2563,7 +2577,7 @@ def _book_native_side_receipt(
             "book_native_side_encoding": "zlib+base64+canonical-json-v1",
             "book_native_side_states_sha256": hashlib.sha256(encoded).hexdigest(),
             "book_native_side_states_zlib_b64": base64.b64encode(
-                zlib.compress(encoded, level=9)
+                zlib.compress(encoded, level=_RECEIPT_ZLIB_LEVEL)
             ).decode("ascii"),
         }
 
@@ -2651,7 +2665,7 @@ def _book_native_side_receipt(
         "book_native_side_encoding": "zlib+base64+canonical-json-v1",
         "book_native_side_states_sha256": hashlib.sha256(encoded).hexdigest(),
         "book_native_side_states_zlib_b64": base64.b64encode(
-            zlib.compress(encoded, level=9)
+            zlib.compress(encoded, level=_RECEIPT_ZLIB_LEVEL)
         ).decode("ascii"),
     }
 
@@ -2698,7 +2712,7 @@ def _book_native_side_delta_receipt(
         "book_native_side_delta_encoding": "zlib+base64+canonical-json-v1",
         "book_native_side_delta_sha256": hashlib.sha256(encoded).hexdigest(),
         "book_native_side_delta_zlib_b64": base64.b64encode(
-            zlib.compress(encoded, level=9)
+            zlib.compress(encoded, level=_RECEIPT_ZLIB_LEVEL)
         ).decode("ascii"),
         "book_native_side_delta_removed_count": len(payload["removed_keys"]),
         "book_native_side_delta_upsert_count": len(payload["upsert_rows"]),
@@ -3277,7 +3291,7 @@ def _candidate_evaluations_delta_receipt(
         ),
         "candidate_evaluations_delta_sha256": hashlib.sha256(encoded).hexdigest(),
         "candidate_evaluations_delta_zlib_b64": base64.b64encode(
-            zlib.compress(encoded, level=9)
+            zlib.compress(encoded, level=_RECEIPT_ZLIB_LEVEL)
         ).decode("ascii"),
         "candidate_evaluations_delta_removed_key_count": len(
             delta["top_level"]["removed_keys"]
@@ -3330,7 +3344,7 @@ def _json_object_delta_receipt(
         f"{prefix}_delta_encoding": "zlib+base64+canonical-json-object-delta-v1",
         f"{prefix}_delta_sha256": hashlib.sha256(encoded).hexdigest(),
         f"{prefix}_delta_zlib_b64": base64.b64encode(
-            zlib.compress(encoded, level=9)
+            zlib.compress(encoded, level=_RECEIPT_ZLIB_LEVEL)
         ).decode("ascii"),
         f"{prefix}_delta_removed_key_count": len(delta["removed_keys"]),
         f"{prefix}_delta_replacement_count": len(delta["replacements"]),
@@ -3416,7 +3430,7 @@ def _keyed_object_list_delta_receipt(
         f"{prefix}_delta_encoding": "zlib+base64+keyed-canonical-json-delta-v1",
         f"{prefix}_delta_sha256": hashlib.sha256(encoded).hexdigest(),
         f"{prefix}_delta_zlib_b64": base64.b64encode(
-            zlib.compress(encoded, level=9)
+            zlib.compress(encoded, level=_RECEIPT_ZLIB_LEVEL)
         ).decode("ascii"),
         f"{prefix}_delta_removed_key_count": len(delta["removed_keys"]),
         f"{prefix}_delta_patch_count": len(delta["patches"]),
@@ -4252,7 +4266,7 @@ def _store_global_auction_receipt(
         separators=(",", ":"),
     ).encode("utf-8")
     with _receipt_stage("encode_minimum_repair"):
-        minimum_repair_zlib = zlib.compress(minimum_repair_json, level=9)
+        minimum_repair_zlib = zlib.compress(minimum_repair_json, level=_RECEIPT_ZLIB_LEVEL)
     with _receipt_stage("book_native_side_receipt"):
         book_native_side_receipt = _book_native_side_receipt(
             asset_states=book_asset_states,
@@ -4295,7 +4309,7 @@ def _store_global_auction_receipt(
         separators=(",", ":"),
     ).encode("utf-8")
     with _receipt_stage("encode_candidate_evaluations"):
-        evaluation_zlib = zlib.compress(evaluation_json, level=9)
+        evaluation_zlib = zlib.compress(evaluation_json, level=_RECEIPT_ZLIB_LEVEL)
     holding_coverage_rows = tuple(
         asdict(row)
         for row in sorted(
@@ -4310,7 +4324,7 @@ def _store_global_auction_receipt(
         separators=(",", ":"),
     ).encode("utf-8")
     with _receipt_stage("encode_holding_coverage"):
-        holding_coverage_zlib = zlib.compress(holding_coverage_json, level=9)
+        holding_coverage_zlib = zlib.compress(holding_coverage_json, level=_RECEIPT_ZLIB_LEVEL)
     candidate_ids = tuple(
         str(row.get("candidate_id") or "") for row in evaluation_rows
     )
@@ -4544,7 +4558,7 @@ def _store_global_auction_receipt(
     audit_context_json = _canonical_json_bytes(audit_context)
     with _receipt_stage("encode_audit_context"):
         audit_context_zlib_b64 = base64.b64encode(
-            zlib.compress(audit_context_json, level=9)
+            zlib.compress(audit_context_json, level=_RECEIPT_ZLIB_LEVEL)
         ).decode("ascii")
     receipt.update(
         {
