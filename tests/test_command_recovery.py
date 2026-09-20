@@ -35922,6 +35922,327 @@ def test_recorded_exit_status_candidates_rotate_bounded_slice(monkeypatch):
     conn.close()
 
 
+def _seed_test_filled_exit_command(
+    conn,
+    *,
+    command_id: str,
+    position_id: str,
+    order_id: str,
+    shares: str,
+    price: str,
+) -> None:
+    from src.state.db import log_execution_fact
+
+    observed_at = datetime.now(timezone.utc).isoformat()
+    _insert(
+        conn,
+        command_id=command_id,
+        position_id=position_id,
+        intent_kind="EXIT",
+        side="SELL",
+        size=float(shares),
+        price=float(price),
+        created_at=observed_at,
+    )
+    _advance_to_acked(conn, command_id=command_id, venue_order_id=order_id)
+    conn.execute(
+        "UPDATE venue_commands SET state = 'FILLED' WHERE command_id = ?",
+        (command_id,),
+    )
+    _append_trade_fact(
+        conn,
+        command_id=command_id,
+        order_id=order_id,
+        trade_id=f"trade-{command_id}",
+        state="CONFIRMED",
+        filled_size=shares,
+        fill_price=price,
+        observed_at=observed_at,
+    )
+    log_execution_fact(
+        conn,
+        intent_id=f"{position_id}:exit:{command_id}",
+        position_id=position_id,
+        decision_id=f"decision-{command_id}",
+        command_id=command_id,
+        order_role="exit",
+        filled_at=observed_at,
+        fill_price=float(price),
+        shares=float(shares),
+        venue_status="FILLED",
+        terminal_exec_status="confirmed",
+    )
+
+
+def _append_test_partial_exit_witness(
+    conn,
+    *,
+    position_id: str,
+    order_id: str,
+    shares: str,
+    price: str,
+    allocated_cost: str,
+    identity: str | None = None,
+    notional: str | None = None,
+    realized_delta: str | None = None,
+) -> None:
+    sequence_no = conn.execute(
+        "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()[0]
+    shares_decimal = Decimal(shares)
+    price_decimal = Decimal(price)
+    notional_decimal = Decimal(notional) if notional is not None else shares_decimal * price_decimal
+    cost_decimal = Decimal(allocated_cost)
+    occurred_at = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key, order_id,
+            caused_by, source_module, env, payload_json
+        ) VALUES (?, ?, 1, ?, 'MONITOR_REFRESHED', ?, 'pending_exit',
+                  'pending_exit', 'test', ?, 'partial_exit_fill',
+                  'tests.test_command_recovery', 'live', ?)
+        """,
+        (
+            f"{position_id}:partial:{sequence_no}",
+            position_id,
+            sequence_no,
+            occurred_at,
+            order_id,
+            json.dumps(
+                {
+                    "economic_fill_identity": (
+                        identity
+                        if identity is not None
+                        else f"status-fill:v1:{position_id}:{order_id}"
+                    ),
+                    "filled_shares": str(shares_decimal),
+                    "fill_price": str(price_decimal),
+                    "filled_notional_usd": str(notional_decimal),
+                    "allocated_cost_basis_usd": str(cost_decimal),
+                    "realized_pnl_delta_usd": str(
+                        Decimal(realized_delta)
+                        if realized_delta is not None
+                        else notional_decimal - cost_decimal
+                    ),
+                },
+                sort_keys=True,
+            ),
+        ),
+    )
+    conn.execute(
+        "UPDATE position_current SET updated_at = ? WHERE position_id = ?",
+        (occurred_at, position_id),
+    )
+
+
+def test_capital_blocker_excludes_exact_partial_fills_after_later_close(conn):
+    """Later close cannot resurrect earlier exact partial economics as debt."""
+    from src.execution.command_recovery import (
+        _recorded_exit_fill_projection_candidates,
+        _terminal_filled_exit_projection_blocker_command_ids,
+        capital_blocking_command_count,
+    )
+    from src.execution.exchange_reconcile import reconcile_recorded_exit_fill_projections
+
+    position_id = "pos-partial-later-close"
+    _insert(conn, command_id="cmd-partial-entry", position_id=position_id, size=12, price=0.25)
+    _advance_to_acked(conn, command_id="cmd-partial-entry", venue_order_id="ord-partial-entry")
+    _seed_pending_entry_projection(
+        conn,
+        position_id=position_id,
+        command_id="cmd-partial-entry",
+        order_id="ord-partial-entry",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'economically_closed', shares = 5, chain_shares = 0,
+               chain_state = 'chain_confirmed_zero', cost_basis_usd = 1.25,
+               entry_price = 0.25, exit_price = 0.50, realized_pnl_usd = 3.0,
+               order_status = 'sell_filled'
+         WHERE position_id = ?
+        """,
+        (position_id,),
+    )
+    for command_id, order_id, shares, price, cost in (
+        ("cmd-partial-a", "ord-partial-a", "4", "0.40", "1.00"),
+        ("cmd-partial-b", "ord-partial-b", "3", "0.50", "0.75"),
+    ):
+        _seed_test_filled_exit_command(
+            conn,
+            command_id=command_id,
+            position_id=position_id,
+            order_id=order_id,
+            shares=shares,
+            price=price,
+        )
+        _append_test_partial_exit_witness(
+            conn,
+            position_id=position_id,
+            order_id=order_id,
+            shares=shares,
+            price=price,
+            allocated_cost=cost,
+        )
+    _seed_test_filled_exit_command(
+        conn,
+        command_id="cmd-later-close",
+        position_id=position_id,
+        order_id="ord-later-close",
+        shares="5",
+        price="0.50",
+    )
+    sequence_no = conn.execute(
+        "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()[0]
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key, order_id,
+            command_id, caused_by, source_module, env, payload_json
+        ) VALUES (?, ?, 1, ?, 'EXIT_ORDER_FILLED', ?, 'pending_exit',
+                  'economically_closed', 'test', 'ord-later-close',
+                  'cmd-later-close', 'exit_order_filled',
+                  'tests.test_command_recovery', 'live', '{}')
+        """,
+        (
+            f"{position_id}:later-close:{sequence_no}",
+            position_id,
+            sequence_no,
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+
+    assert _terminal_filled_exit_projection_blocker_command_ids(conn) == ()
+    assert capital_blocking_command_count(conn) == 0
+    assert not _recorded_exit_fill_projection_candidates(conn)
+    assert reconcile_recorded_exit_fill_projections(
+        conn,
+        command_ids=("cmd-partial-a", "cmd-partial-b"),
+    ) == {"scanned": 2, "projected": 0, "stayed": 2, "errors": 0}
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = ? AND event_type = 'EXIT_ORDER_FILLED'",
+        (position_id,),
+    ).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize(
+    "defect",
+    (
+        "missing",
+        "wrong_identity",
+        "wrong_price",
+        "wrong_delta",
+        "stale_fold",
+        "extra_fill",
+    ),
+)
+def test_terminal_partial_exit_without_exact_witness_remains_capital_debt(conn, defect):
+    """A partial witness must cover exact authenticated economics, not a prefix."""
+    from src.execution.command_recovery import _terminal_filled_exit_projection_blocker_command_ids
+
+    position_id = f"pos-partial-defect-{defect}"
+    _insert(conn, command_id=f"cmd-entry-{defect}", position_id=position_id, size=4, price=0.25)
+    _advance_to_acked(conn, command_id=f"cmd-entry-{defect}", venue_order_id=f"ord-entry-{defect}")
+    _seed_pending_entry_projection(
+        conn,
+        position_id=position_id,
+        command_id=f"cmd-entry-{defect}",
+        order_id=f"ord-entry-{defect}",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'economically_closed', shares = 4, chain_shares = 0,
+               chain_state = 'chain_confirmed_zero', cost_basis_usd = 1,
+               entry_price = 0.25, exit_price = 0.40, realized_pnl_usd = 0.60
+         WHERE position_id = ?
+        """,
+        (position_id,),
+    )
+    command_id = f"cmd-partial-{defect}"
+    order_id = f"ord-partial-{defect}"
+    _seed_test_filled_exit_command(
+        conn,
+        command_id=command_id,
+        position_id=position_id,
+        order_id=order_id,
+        shares="4",
+        price="0.40",
+    )
+    if defect != "missing":
+        _append_test_partial_exit_witness(
+            conn,
+            position_id=position_id,
+            order_id=order_id,
+            shares="4",
+            price="0.41" if defect == "wrong_price" else "0.40",
+            allocated_cost="1.00",
+            identity="wrong" if defect == "wrong_identity" else None,
+            realized_delta="0.61" if defect == "wrong_delta" else None,
+        )
+    if defect == "stale_fold":
+        conn.execute(
+            "UPDATE position_current SET updated_at = '2026-01-01T00:00:00+00:00' "
+            "WHERE position_id = ?",
+            (position_id,),
+        )
+    if defect == "extra_fill":
+        _append_trade_fact(
+            conn,
+            command_id=command_id,
+            order_id=order_id,
+            trade_id=f"trade-extra-{defect}",
+            state="CONFIRMED",
+            filled_size="0.01",
+            fill_price="0.40",
+            observed_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    assert _terminal_filled_exit_projection_blocker_command_ids(conn) == (command_id,)
+
+
+@pytest.mark.parametrize("phase", ("active", "pending_exit"))
+def test_terminal_full_exit_without_partial_witness_stays_capital_debt(conn, phase):
+    """Open phases still need a real projection; a later close cannot be assumed."""
+    from src.execution.command_recovery import _terminal_filled_exit_projection_blocker_command_ids
+
+    position_id = f"pos-unprojected-{phase}"
+    _insert(conn, command_id=f"cmd-entry-{phase}", position_id=position_id, size=4, price=0.25)
+    _advance_to_acked(conn, command_id=f"cmd-entry-{phase}", venue_order_id=f"ord-entry-{phase}")
+    _seed_pending_entry_projection(
+        conn,
+        position_id=position_id,
+        command_id=f"cmd-entry-{phase}",
+        order_id=f"ord-entry-{phase}",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = ?, shares = 4, chain_shares = 4, chain_state = 'synced',
+               cost_basis_usd = 1, entry_price = 0.25
+         WHERE position_id = ?
+        """,
+        (phase, position_id),
+    )
+    command_id = f"cmd-full-{phase}"
+    _seed_test_filled_exit_command(
+        conn,
+        command_id=command_id,
+        position_id=position_id,
+        order_id=f"ord-full-{phase}",
+        shares="4",
+        price="0.40",
+    )
+
+    assert _terminal_filled_exit_projection_blocker_command_ids(conn) == (command_id,)
+
+
 def test_capital_blocker_excludes_completed_partial_exit_with_live_residual(conn):
     from src.execution.command_recovery import (
         _recorded_exit_fill_projection_candidates,

@@ -4004,6 +4004,7 @@ def _confirmed_bound_trade_fact_summary(
         "count": len(fills),
         "filled_size": _decimal_text(filled),
         "fill_price": _decimal_text(cost / filled) if filled > 0 else "",
+        "filled_notional": _decimal_text(cost) if filled > 0 else "",
         "authenticated_confirmed": bool(fills),
         "fill_prices_respect_limit": bool(fills) and all(
             _fill_price_respects_limit(item[3], limit_price, side=side)
@@ -30802,6 +30803,144 @@ def _terminal_filled_entry_projection_blocker_count(
     return len(_terminal_filled_entry_projection_blocker_command_ids(conn))
 
 
+def _partial_exit_projection_absorbs_terminal_fill(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+) -> bool:
+    """Return whether one completed SELL already has its exact partial fold.
+
+    A completed partial reduction emits ``partial_exit_fill``, rather than an
+    ``EXIT_ORDER_FILLED`` lifecycle transition.  Once a later command closes
+    the position, that earlier partial remains a real, command-bound economic
+    fact; requiring it to manufacture a second close event would double-book
+    the same shares.  The partial witness is sufficient only when its exact
+    Decimal economics agree with the authenticated command-bound fill and the
+    command-bound execution fact.
+    """
+
+    required = {
+        "venue_commands",
+        "venue_trade_facts",
+        "position_current",
+        "position_events",
+        "execution_fact",
+    }
+    if not all(_table_exists(conn, table) for table in required):
+        return False
+    row = conn.execute(
+        "SELECT * FROM venue_commands WHERE command_id = ? LIMIT 1",
+        (command_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    command = _dict_row(row)
+    position_id = str(command.get("position_id") or "").strip()
+    venue_order_id = str(command.get("venue_order_id") or "").strip()
+    command_size = _positive_decimal_or_none(command.get("size"))
+    if (
+        not position_id
+        or not venue_order_id
+        or command_size is None
+        or str(command.get("intent_kind") or "").upper() != "EXIT"
+        or str(command.get("side") or "").upper() != "SELL"
+        or str(command.get("state") or "") != CommandState.FILLED.value
+    ):
+        return False
+    current_row = conn.execute(
+        "SELECT updated_at FROM position_current WHERE position_id = ? LIMIT 1",
+        (position_id,),
+    ).fetchone()
+    if current_row is None:
+        return False
+    current_updated_at = _parse_ts(
+        str(_dict_row(current_row).get("updated_at") or "")
+    )
+    if current_updated_at is None:
+        return False
+    fills = _confirmed_bound_trade_fact_summary(
+        conn,
+        command_id=command_id,
+        venue_order_id=venue_order_id,
+        limit_price=command.get("price"),
+        side=command.get("side"),
+    )
+    filled_size = _positive_decimal_or_none(fills.get("filled_size"))
+    if not (
+        fills.get("authenticated_confirmed") is True
+        and fills.get("fill_prices_respect_limit") is True
+        and filled_size == command_size
+    ):
+        return False
+    filled_notional = _positive_decimal_or_none(fills.get("filled_notional"))
+    if filled_notional is None:
+        return False
+    execution_rows = conn.execute(
+        """
+        SELECT filled_at, shares, fill_price, terminal_exec_status
+          FROM execution_fact
+         WHERE command_id = ?
+           AND position_id = ?
+           AND order_role = 'exit'
+           AND voided_at IS NULL
+        """,
+        (command_id, position_id),
+    ).fetchall()
+    if len(execution_rows) != 1:
+        return False
+    execution = _dict_row(execution_rows[0])
+    if (
+        not str(execution.get("filled_at") or "").strip()
+        or str(execution.get("terminal_exec_status") or "").lower()
+        not in {"filled", "confirmed", "partial"}
+        or _positive_decimal_or_none(execution.get("shares")) != filled_size
+        or _positive_decimal_or_none(execution.get("fill_price")) is None
+    ):
+        return False
+    witnesses = conn.execute(
+        """
+        SELECT sequence_no, occurred_at, payload_json
+          FROM position_events
+         WHERE position_id = ?
+           AND caused_by = 'partial_exit_fill'
+           AND lower(COALESCE(order_id, '')) = lower(?)
+         ORDER BY sequence_no DESC, event_id DESC
+        """,
+        (position_id, venue_order_id),
+    ).fetchall()
+    for raw in witnesses:
+        witness = _dict_row(raw)
+        payload = _json_dict(witness.get("payload_json"))
+        witnessed_at = _parse_ts(str(witness.get("occurred_at") or ""))
+        witness_size = _positive_decimal_or_none(payload.get("filled_shares"))
+        witness_price = _positive_decimal_or_none(payload.get("fill_price"))
+        witness_notional = _positive_decimal_or_none(
+            payload.get("filled_notional_usd")
+        )
+        allocated_cost = _decimal_or_none(payload.get("allocated_cost_basis_usd"))
+        realized_delta = _decimal_or_none(payload.get("realized_pnl_delta_usd"))
+        if (
+            str(payload.get("economic_fill_identity") or "").strip()
+            == f"status-fill:v1:{position_id}:{venue_order_id}"
+            and int(witness.get("sequence_no") or 0) > 0
+            and witnessed_at is not None
+            and current_updated_at >= witnessed_at
+            and witness_size == filled_size
+            and witness_price is not None
+            and (
+                int(fills.get("count") or 0) != 1
+                or witness_price
+                == _positive_decimal_or_none(fills.get("fill_price"))
+            )
+            and witness_notional == filled_notional
+            and allocated_cost is not None
+            and allocated_cost >= Decimal("0")
+            and realized_delta == witness_notional - allocated_cost
+        ):
+            return True
+    return False
+
+
 def _terminal_filled_exit_projection_blocker_command_ids(
     conn: sqlite3.Connection,
 ) -> tuple[str, ...]:
@@ -30911,7 +31050,15 @@ def _terminal_filled_exit_projection_blocker_command_ids(
         """,
         (f"-{_TERMINAL_FILL_PROJECTION_PRIORITY_SECONDS} seconds",),
     ).fetchall()
-    return tuple(str(row[0]) for row in rows if str(row[0] or "").strip())
+    return tuple(
+        command_id
+        for row in rows
+        if (command_id := str(row[0] or "").strip())
+        and not _partial_exit_projection_absorbs_terminal_fill(
+            conn,
+            command_id=command_id,
+        )
+    )
 
 
 def _terminal_filled_exit_projection_blocker_count(
