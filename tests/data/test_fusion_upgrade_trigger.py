@@ -1018,6 +1018,179 @@ def test_consumed_station_source_revision_returns_to_noop() -> None:
     assert verdict["changed_input_sources"] == []
 
 
+@pytest.mark.parametrize("target_date", ("2026-07-10", "2026-07-11", "2026-07-12"))
+def test_retired_source_used_by_posterior_triggers_one_same_cycle_recompute(
+    target_date: str,
+) -> None:
+    """A registry retirement drains an actually consumed source without treating an outage as one."""
+    conn = _conn()
+    cycle = "2026-07-10T06:00:00+00:00"
+    _insert_single_runs(
+        conn,
+        city="Taipei",
+        target_date=target_date,
+        metric="high",
+        cycle_iso=cycle,
+        models=["ecmwf_ifs"],
+    )
+    _insert_posterior(
+        conn,
+        city="Taipei",
+        target_date=target_date,
+        metric="high",
+        cycle_iso=cycle,
+        used_models=["ecmwf_ifs", "cwa_township"],
+        computed_at="2026-07-10T07:00:00+00:00",
+    )
+
+    retirement = scope_capture_offers_larger_provider_set(
+        conn,
+        city="Taipei",
+        target_date=target_date,
+        metric="high",
+        changed_sources=["cwa_township_hourly_high"],
+    )
+
+    assert retirement["is_upgrade"] is True
+    assert retirement["family_upgrade"] is False
+    assert retirement["input_revision_changed"] is True
+    assert retirement["changed_input_sources"] == ["cwa_township"]
+    assert retirement["changed_input_revisions"] == {
+        "cwa_township": "RETIRED_NON_ENTRY"
+    }
+    assert retirement["retired_nonentry_sources"] == ["cwa_township"]
+
+    # The successor's provenance no longer names 063, so the same scope drains.
+    _insert_posterior(
+        conn,
+        city="Taipei",
+        target_date=target_date,
+        metric="high",
+        cycle_iso=cycle,
+        used_models=["ecmwf_ifs"],
+        computed_at="2026-07-10T08:00:00+00:00",
+    )
+    drained = scope_capture_offers_larger_provider_set(
+        conn, city="Taipei", target_date=target_date, metric="high"
+    )
+
+    assert drained["is_upgrade"] is False
+    assert drained["retired_nonentry_sources"] == []
+
+
+def test_registry_nonentry_recompute_reuses_fusion_queue_for_d0_d1_d2(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retirement uses the existing non-held fusion marker and stops after successors commit."""
+    import src.data.replacement_forecast_current_target_plan as target_plan
+
+    db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    ensure_replacement_forecast_live_schema(conn)
+    cycle = "2026-07-10T06:00:00+00:00"
+    scopes = tuple(("Taipei", day, "high") for day in ("2026-07-10", "2026-07-11", "2026-07-12"))
+    for _city, target_date, metric in scopes:
+        _insert_single_runs(
+            conn,
+            city=_city,
+            target_date=target_date,
+            metric=metric,
+            cycle_iso=cycle,
+            models=["ecmwf_ifs"],
+        )
+        _insert_posterior(
+            conn,
+            city=_city,
+            target_date=target_date,
+            metric=metric,
+            cycle_iso=cycle,
+            used_models=["ecmwf_ifs", "cwa_township"],
+            computed_at="2026-07-10T07:00:00+00:00",
+        )
+    conn.close()
+
+    monkeypatch.setattr(
+        target_plan, "_day0_observed_extreme_required", lambda **_kwargs: False
+    )
+    built: list[dict[str, object]] = []
+
+    def _build(_conn, **kwargs):
+        path = Path(kwargs["seed_file"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n", encoding="utf-8")
+        built.append(dict(kwargs))
+        return path
+
+    monkeypatch.setattr(trigger, "_build_and_write_upgrade_seed", _build)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    kwargs = {
+        "forecast_db": db,
+        "seed_dir": state_dir / "replacement_forecast_live" / "seeds",
+        "raw_manifest_dir": tmp_path / "raw",
+        "computed_at": datetime(2026, 7, 10, 12, tzinfo=UTC),
+        "scopes": scopes,
+        "manifests": (),
+    }
+
+    first = trigger.enqueue_fusion_upgrade_reseeds(**kwargs)
+    duplicate = trigger.enqueue_fusion_upgrade_reseeds(**kwargs)
+
+    assert first["seeds_enqueued"] == 3
+    assert duplicate["seeds_enqueued"] == 0
+    assert duplicate["already_enqueued"] == 3
+    assert len(built) == 3
+    assert all(
+        build["input_revision_sources"] == ("cwa_township",)
+        for build in built
+    )
+    conn = sqlite3.connect(db)
+    markers = conn.execute(
+        "SELECT capturable_family_set FROM fusion_upgrade_enqueues ORDER BY target_date"
+    ).fetchall()
+    for _city, target_date, metric in scopes:
+        _insert_posterior(
+            conn,
+            city=_city,
+            target_date=target_date,
+            metric=metric,
+            cycle_iso=cycle,
+            used_models=["ecmwf_ifs"],
+            computed_at="2026-07-10T13:00:00+00:00",
+        )
+    conn.close()
+
+    drained = trigger.enqueue_fusion_upgrade_reseeds(**kwargs)
+
+    assert len(markers) == 3
+    assert all("input_revision=cwa_township:" in row[0] for row in markers)
+    assert drained["seeds_enqueued"] == 0
+    assert drained["upgrades_detected"] == 0
+
+
+def test_nonretired_used_model_does_not_create_a_retirement_recompute() -> None:
+    conn = _conn()
+    cycle = "2026-07-10T06:00:00+00:00"
+    _insert_posterior(
+        conn,
+        city="Taipei",
+        target_date="2026-07-11",
+        metric="high",
+        cycle_iso=cycle,
+        used_models=["ecmwf_ifs"],
+        computed_at="2026-07-10T07:00:00+00:00",
+    )
+
+    verdict = scope_capture_offers_larger_provider_set(
+        conn, city="Taipei", target_date="2026-07-11", metric="high"
+    )
+
+    assert verdict["is_upgrade"] is False
+    assert verdict["retired_nonentry_sources"] == []
+
+
 def test_station_input_revision_enqueue_is_idempotent_until_raw_id_changes(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,

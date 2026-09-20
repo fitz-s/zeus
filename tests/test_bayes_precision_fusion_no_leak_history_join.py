@@ -243,7 +243,7 @@ def test_station_positive_lead_uses_latest_single_runs_issue_per_date() -> None:
         ("2026-03-31T06:00:00+00:00", "2026-03-31T07:00:00+00:00", 20.0),
     ):
         _insert_raw(
-            conn, model="cwa_township", city="Taipei", target_date="2026-04-01",
+            conn, model="cwa_township_hourly_high", city="Taipei", target_date="2026-04-01",
             metric="high", forecast_value_c=value, endpoint="single_runs",
             source_cycle_time=cycle, source_available_at=available,
         )
@@ -254,8 +254,8 @@ def test_station_positive_lead_uses_latest_single_runs_issue_per_date() -> None:
 
     hist = BayesPrecisionFusionHistoryProvider(conn)(
         city="Taipei", metric="high", lead_days=1,
-        target_date=date(2026, 5, 1), models=["cwa_township"],
-    )["cwa_township"]
+        target_date=date(2026, 5, 1), models=["cwa_township_hourly_high"],
+    )["cwa_township_hourly_high"]
     assert hist.n_train == 1
     assert hist.forecast_values == (20.0,)
     assert hist.residuals == pytest.approx((1.0,))
@@ -287,7 +287,7 @@ def test_station_positive_lead_rejects_after_local_day_start() -> None:
 
     conn = _conn()
     _insert_raw(
-        conn, model="cwa_township", city="Taipei", target_date="2026-04-01",
+        conn, model="cwa_township_hourly_high", city="Taipei", target_date="2026-04-01",
         metric="high", forecast_value_c=30.0, endpoint="single_runs", lead_days=1,
         source_cycle_time="2026-03-31T12:00:00+00:00",
         # Taipei local 2026-04-01 starts at 2026-03-31T16:00Z. This issue is still
@@ -301,7 +301,7 @@ def test_station_positive_lead_rejects_after_local_day_start() -> None:
 
     hist = BayesPrecisionFusionHistoryProvider(conn)(
         city="Taipei", metric="high", lead_days=1,
-        target_date=date(2026, 5, 1), models=["cwa_township"],
+        target_date=date(2026, 5, 1), models=["cwa_township_hourly_high"],
     )
     assert hist == {}
 

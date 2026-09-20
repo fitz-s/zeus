@@ -150,6 +150,20 @@ def _parse_forecast_value_and_lead(
 _PRODUCT_MISMATCHED_PREVIOUS_RUNS = frozenset({"ecmwf_ifs"})
 
 
+def _is_station_model(model: str) -> bool:
+    return model.startswith(("cwa_", "hko_"))
+
+
+def _station_model_has_entry_authority(model: str) -> bool:
+    """Read station entry authority from the source registry, never a name prefix alone."""
+    if not _is_station_model(model):
+        return True
+    from src.data.forecast_source_registry import SOURCES
+
+    spec = SOURCES.get(model)
+    return spec is not None and "entry_primary" in spec.allowed_roles
+
+
 @dataclass(frozen=True)
 class ServedInstrumentValue:
     """One instrument's served CURRENT value + the honest serving provenance (brand law)."""
@@ -587,9 +601,9 @@ def read_current_instrument_values(
             model, value = served
             if model in out:
                 continue
-            if (
-                model.startswith(("cwa_", "hko_"))
-                and not include_station_sources
+            if _is_station_model(model) and (
+                not include_station_sources
+                or not _station_model_has_entry_authority(model)
             ):
                 continue
             out[model] = value
@@ -607,6 +621,8 @@ def read_current_instrument_values(
                 served_cycle = str(row[4])
                 captured = str(row[5]) if has_captured_at and row[5] is not None else None
             except Exception:
+                continue
+            if _is_station_model(model) and not _station_model_has_entry_authority(model):
                 continue
             if model in out:
                 continue
@@ -673,10 +689,13 @@ def read_current_instrument_values(
                 captured = str(row[5]) if has_captured_at and row[5] is not None else None
             except Exception:
                 continue
-            # Match the materializer's station-family convention exactly (cwa_/hko_ prefixes); the
-            # broad SQL LIKE is narrowed here so a hypothetical non-station "cwa…"/"hko…" name cannot
-            # leak in.
-            if not model.startswith(("cwa_", "hko_")) or model in _station_served:
+            # The broad SQL LIKE is narrowed through the registry: a retained raw row for a
+            # retired station product cannot regain entry authority through its name prefix.
+            if (
+                not _is_station_model(model)
+                or not _station_model_has_entry_authority(model)
+                or model in _station_served
+            ):
                 continue
             _station_served.add(model)
             _age = _age_hours_or_none(captured, served_cycle)
@@ -754,7 +773,10 @@ def read_freshest_coherent_instrument_values(
         model, value = served
         if model not in requested:
             continue
-        if model.startswith(("cwa_", "hko_")) and not include_station_sources:
+        if _is_station_model(model) and (
+            not include_station_sources
+            or not _station_model_has_entry_authority(model)
+        ):
             continue
         try:
             cycle = datetime.fromisoformat(

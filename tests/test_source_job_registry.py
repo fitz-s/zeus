@@ -225,10 +225,10 @@ def test_all_source_ids_includes_primary_and_secondaries() -> None:
     assert set(obs.all_source_ids) == {"wu_icao_history", "ogimet_metar"}
 
 
-def test_station_forecast_clock_job_declares_hourly_cwa_low_source() -> None:
+def test_station_forecast_clock_job_declares_both_hourly_cwa_extrema_sources() -> None:
     from src.data.source_job_registry import JOB_REGISTRY
 
     station = JOB_REGISTRY["ingest_station_forecast_source_clock"]
     assert set(station.all_source_ids) == {
-        "hko_fnd", "cwa_township", "cwa_township_hourly_low",
+        "hko_fnd", "cwa_township_hourly_high", "cwa_township_hourly_low",
     }

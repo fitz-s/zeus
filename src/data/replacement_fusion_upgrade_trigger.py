@@ -328,6 +328,7 @@ def _latest_posterior_inputs(
     frozenset[str],
     dict[str, int],
     frozenset[str],
+    frozenset[str],
     str | None,
     tuple[str, ...],
     bool,
@@ -346,14 +347,14 @@ def _latest_posterior_inputs(
             (SOURCE_ID, city, target_date, metric),
         ).fetchone()
     except Exception:
-        return None, frozenset(), {}, frozenset(), None, (), False, False
+        return None, frozenset(), {}, frozenset(), frozenset(), None, (), False, False
     if row is None:
-        return None, frozenset(), {}, frozenset(), None, (), False, False
+        return None, frozenset(), {}, frozenset(), frozenset(), None, (), False, False
     source_cycle_iso = str(row[0]) if row[0] is not None else None
     try:
         prov = json.loads(row[1]) if row[1] else {}
     except Exception:
-        return source_cycle_iso, frozenset(), {}, frozenset(), None, (), False, False
+        return source_cycle_iso, frozenset(), {}, frozenset(), frozenset(), None, (), False, False
     fusion = prov.get("bayes_precision_fusion", {}) or {}
     used = fusion.get("used_models") or []
     if not isinstance(used, (list, tuple)):
@@ -403,10 +404,28 @@ def _latest_posterior_inputs(
         decorrelated_provider_families_of(set(str(m) for m in used)),
         consumed,
         frozenset(str(source) for source in configured if str(source).strip()),
+        frozenset(str(model) for model in used if str(model).strip()),
         day0_revision,
         day0_expected_models,
         day0_bundle_valid,
         source_clock_scheme_bound,
+    )
+
+
+def _retired_or_nonentry_used_sources(used_models: Sequence[str]) -> tuple[str, ...]:
+    """Return only registry-declared non-entry models actually used by the posterior."""
+    from src.data.forecast_source_registry import SOURCES
+
+    return tuple(
+        sorted(
+            {
+                model
+                for model in (str(value).strip() for value in used_models)
+                if model
+                and (spec := SOURCES.get(model)) is not None
+                and "entry_primary" not in spec.allowed_roles
+            }
+        )
     )
 
 
@@ -472,6 +491,7 @@ def scope_capture_offers_larger_provider_set(
         served,
         consumed_inputs,
         configured_sources,
+        used_models,
         consumed_day0_vector_revision,
         day0_expected_models,
         day0_causal_bundle_valid,
@@ -488,6 +508,7 @@ def scope_capture_offers_larger_provider_set(
             "input_revision_changed": False,
             "changed_input_sources": [],
             "changed_input_revisions": {},
+            "retired_nonentry_sources": [],
         }
     capturable_inputs = _capturable_inputs_for_scope(
         conn,
@@ -552,6 +573,17 @@ def scope_capture_offers_larger_provider_set(
     changed_revisions: dict[str, object] = {
         source: capturable_inputs[source] for source in changed_inputs
     }
+    retired_nonentry_sources = _retired_or_nonentry_used_sources(used_models)
+    # A registry retirement is a durable source-contract revision. The raw row
+    # intentionally remains available for history, so it disappears from
+    # ``capturable_inputs``; that absence must still drain every posterior that
+    # actually used it. This does not classify temporary fetch absence as a
+    # retirement, and it deliberately ignores configured-but-unused sources.
+    for source in retired_nonentry_sources:
+        if source not in changed_revisions:
+            changed_inputs.append(source)
+            changed_revisions[source] = "RETIRED_NON_ENTRY"
+    changed_inputs.sort()
     day0_revision_requested = (
         requested_sources is None
         or _DAY0_HOURLY_VECTOR_SOURCE in requested_sources
@@ -595,6 +627,7 @@ def scope_capture_offers_larger_provider_set(
         "new_families": sorted(new_families),
         "changed_input_sources": changed_inputs,
         "changed_input_revisions": changed_revisions,
+        "retired_nonentry_sources": list(retired_nonentry_sources),
     }
 
 

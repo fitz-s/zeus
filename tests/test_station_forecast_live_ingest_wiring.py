@@ -60,6 +60,15 @@ _CWA_HOURLY_LOW_SPEC = {
     "location_longitude": 121.568983,
     "endpoint": "https://example.invalid/cwa-fileapi",
 }
+_CWA_HOURLY_HIGH_SPEC = {
+    **_CWA_HOURLY_LOW_SPEC,
+    "metric": "high",
+    "shared_fetch_group": "cwa_township_hourly_061",
+}
+_CWA_HOURLY_LOW_SHARED_SPEC = {
+    **_CWA_HOURLY_LOW_SPEC,
+    "shared_fetch_group": "cwa_township_hourly_061",
+}
 
 _CONN = object()  # sentinel; ingest fns are monkeypatched so the conn is never touched
 
@@ -96,11 +105,11 @@ def test_dispatch_passes_city_and_metric_from_spec(monkeypatch, tmp_path):
     assert seen.get("metric") == "high"
 
 
-def test_dispatch_routes_hourly_low_product_with_township_identity(monkeypatch, tmp_path):
+def test_dispatch_routes_ungrouped_hourly_low_product_with_township_identity(monkeypatch, tmp_path):
     seen: dict[str, object] = {}
     monkeypatch.setattr(
         adapter,
-        "ingest_cwa_township_hourly_low_live",
+        "ingest_cwa_township_hourly_extrema_live",
         lambda conn, **kw: (seen.update(kw), 1)[1],
     )
     _write_config(tmp_path, {"cwa_township_hourly_low": dict(_CWA_HOURLY_LOW_SPEC)})
@@ -110,7 +119,7 @@ def test_dispatch_routes_hourly_low_product_with_township_identity(monkeypatch, 
     }
     assert seen == {
         "city": "Taipei",
-        "metric": "low",
+        "metrics": ("low",),
         "location_name": "松山區",
         "location_geocode": "63000010",
         "location_latitude": 25.051608,
@@ -295,6 +304,45 @@ def test_hourly_low_requires_complete_unique_finite_whole_hour_dplus1_grid():
     assert row.source_available_at == "2026-07-23T10:15:00+00:00"
 
 
+def test_hourly_high_uses_the_same_complete_dplus1_grid_with_max_aggregation():
+    rows = adapter.parse_cwa_township_hourly_extreme_product(
+        _hourly_product(),
+        metric="high",
+        model="cwa_township_hourly_high",
+    )
+
+    assert len(rows) == 1
+    assert (rows[0].model, rows[0].metric, rows[0].forecast_value_c) == (
+        "cwa_township_hourly_high", "high", 29.0,
+    )
+
+
+def test_hourly_cross_midnight_revision_keeps_complete_issue_dplus1_identity():
+    product = adapter.parse_cwa_township_hourly_product(
+        _hourly_low_xml(
+            issue_time="2026-07-23T23:00:00+08:00",
+            update_time="2026-07-24T00:14:00+08:00",
+            sent_time="2026-07-24T00:14:00+08:00",
+        ),
+        captured_at="2026-07-24T00:15:00+08:00",
+    )
+
+    rows = adapter.parse_cwa_township_hourly_extreme_product(
+        product,
+        metric="high",
+        model="cwa_township_hourly_high",
+    )
+
+    assert [(row.target_date, row.lead_days, row.source_cycle_time, row.source_available_at) for row in rows] == [
+        (
+            "2026-07-24",
+            1,
+            "2026-07-23T16:14:00+00:00",
+            "2026-07-23T16:15:00+00:00",
+        )
+    ]
+
+
 @pytest.mark.parametrize(
     ("points", "element_name"),
     [
@@ -394,6 +442,52 @@ def test_hourly_low_same_issue_new_update_is_new_official_revision(monkeypatch):
     assert rows == [
         ("2026-07-23T10:14:00+00:00", 23.0),
         ("2026-07-23T10:29:00+00:00", 17.0),
+    ]
+
+
+def test_hourly_cwa_shared_due_batch_fetches_once_and_writes_both_models(monkeypatch):
+    """The real own-clock path dispatches HIGH/LOW as one F-D0047-061 fetch."""
+    from src.data import replacement_forecast_production as production
+
+    fetches = {"count": 0}
+    product = _hourly_product()
+
+    def _fetch(**_kwargs):
+        fetches["count"] += 1
+        return product
+
+    monkeypatch.setattr(adapter, "resolve_cwa_api_key", lambda **_kwargs: "test")
+    monkeypatch.setattr(adapter, "fetch_cwa_township_hourly_product", _fetch)
+    monkeypatch.setattr(
+        production,
+        "_station_forecast_poll_intervals",
+        lambda: {
+            "cwa_township_hourly_high": 300.0,
+            "cwa_township_hourly_low": 300.0,
+        },
+    )
+    monkeypatch.setattr(production, "_last_station_ingest_monotonic_by_source", {})
+    conn = _hourly_schema_conn()
+    monkeypatch.setattr(
+        production,
+        "_ingest_station_forecasts_live",
+        lambda _cfg, *, source_ids: adapter.ingest_enabled_station_sources_live(
+            conn, source_ids=source_ids
+        ),
+    )
+
+    report = production._ingest_station_forecasts_if_due({})
+
+    assert fetches["count"] == 1
+    assert report == {
+        "cwa_township_hourly_high": 1,
+        "cwa_township_hourly_low": 1,
+    }
+    assert conn.execute(
+        "SELECT model, metric, forecast_value_c FROM raw_model_forecasts ORDER BY model"
+    ).fetchall() == [
+        ("cwa_township_hourly_high", "high", 29.0),
+        ("cwa_township_hourly_low", "low", 23.0),
     ]
 
 
