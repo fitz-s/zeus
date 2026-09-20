@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-06-08; last_reviewed=2026-08-19; last_reused=2026-08-19
+# Lifecycle: created=2026-06-08; last_reviewed=2026-09-20; last_reused=2026-09-20
 # Purpose: Relationship regression test for BAYES_PRECISION_FUSION extra-model capture wiring in src/main.py; guards against bare `date` NameError (BLOCKER 9) and verifies capture is gated by the edli flag.
 # Reuse: Run with pytest; update if the BAYES_PRECISION_FUSION extra-capture wiring or flag gate in src/main.py changes.
 # Created: 2026-06-08
-# Last reused or audited: 2026-08-19
+# Last reused or audited: 2026-09-20
 # Authority basis: PR#400 review (src/main.py:4909 bare `date` NameError swallowed by
 #   fail-soft); CONTINUITY_AND_WIRING.md §4 step 2 + BAYES_PRECISION_FUSION_SPEC.md §6 F1 (BAYES_PRECISION_FUSION multi-model
 #   SHADOW capture gated by edli.replacement_0_1_bayes_precision_fusion_capture_enabled).
@@ -275,12 +275,18 @@ def test_candidate_accrual_uses_current_targets_after_live_coverage(monkeypatch,
     )
     from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
 
+    prior_public_run = datetime.now(timezone.utc) - timedelta(minutes=40)
     public_run = datetime.now(timezone.utc) - timedelta(minutes=20)
     metadata_calls: list[dict[str, object]] = []
 
     def _fetch_model_updates(models, **kwargs):
         metadata_calls.append({"models": models, **kwargs})
         return (
+            OpenMeteoModelUpdate(
+                model="met_nordic",
+                last_run_initialisation_time=prior_public_run,
+                last_run_availability_time=prior_public_run,
+            ),
             OpenMeteoModelUpdate(
                 model="met_nordic",
                 last_run_initialisation_time=public_run,
@@ -334,6 +340,71 @@ def test_candidate_accrual_uses_current_targets_after_live_coverage(monkeypatch,
     assert [(target.city, target.target_date) for target in calls[0]["targets"]] == [
         ("Helsinki", target_date)
     ]
+
+
+def test_candidate_metadata_ignores_future_and_causally_invalid_updates(monkeypatch) -> None:
+    """Only the newest public metadata identity can become a frozen run."""
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+
+    now = datetime(2026, 9, 20, 13, 30, tzinfo=timezone.utc)
+    prior = OpenMeteoModelUpdate(
+        model="met_nordic",
+        last_run_initialisation_time=datetime(2026, 9, 20, 12, tzinfo=timezone.utc),
+        last_run_availability_time=datetime(2026, 9, 20, 12, 20, tzinfo=timezone.utc),
+    )
+    latest = OpenMeteoModelUpdate(
+        model="met_nordic",
+        last_run_initialisation_time=datetime(2026, 9, 20, 13, tzinfo=timezone.utc),
+        last_run_availability_time=datetime(2026, 9, 20, 13, 5, tzinfo=timezone.utc),
+    )
+    future = OpenMeteoModelUpdate(
+        model="met_nordic",
+        last_run_initialisation_time=datetime(2026, 9, 20, 15, tzinfo=timezone.utc),
+        last_run_availability_time=datetime(2026, 9, 20, 15, 5, tzinfo=timezone.utc),
+    )
+    before_cycle = OpenMeteoModelUpdate(
+        model="met_nordic",
+        last_run_initialisation_time=datetime(2026, 9, 20, 14, tzinfo=timezone.utc),
+        last_run_availability_time=datetime(2026, 9, 20, 13, 55, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        "src.strategy.live_inference.source_clock_vnext.source_publicly_usable_at",
+        lambda run: run.run_availability_time,
+    )
+
+    selected = production._candidate_public_metadata_updates(
+        models=("met_nordic",),
+        updates=(prior, future, before_cycle, latest),
+        now=now,
+    )
+
+    assert selected == {"met_nordic": latest}
+
+
+def test_candidate_accrual_without_metadata_skips_without_http(monkeypatch, tmp_path) -> None:
+    """Cold metadata absence is a safe skip, never an invented cycle."""
+    model = "met_nordic"
+    monkeypatch.setattr(dl_mod, "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS", (model,))
+    monkeypatch.setattr(
+        "src.data.openmeteo_model_updates.fetch_model_updates",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        production,
+        "_download_bayes_precision_fusion_extra_raw_inputs_if_needed",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("missing metadata must not start a target fetch")
+        ),
+    )
+
+    report = production._download_bayes_precision_fusion_candidate_accrual_if_needed(
+        {"forecast_db": tmp_path / "forecasts.db"}
+    )
+
+    assert report == {
+        "status": "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_NO_PUBLIC_RUN",
+        "candidate_models": (model,),
+    }
 
 
 def test_candidate_accrual_metadata_timebox_never_starts_capture(monkeypatch, tmp_path) -> None:
@@ -615,7 +686,9 @@ def test_candidate_canonical_fallback_uses_offgrid_prior_served_run(monkeypatch,
             (
                 model,
                 run.isoformat(),
-                datetime(2026, 9, 20, 12, 20, tzinfo=timezone.utc).isoformat(),
+                datetime(
+                    2026, 9, 20, 14, 20, tzinfo=timezone(timedelta(hours=2))
+                ).isoformat(),
                 f"{model}_single_runs",
                 SINGLE_RUNS_SOURCE_FAMILY,
                 f"{model_name}::single_runs",
@@ -642,9 +715,72 @@ def test_candidate_canonical_fallback_uses_offgrid_prior_served_run(monkeypatch,
         now=datetime(2026, 9, 20, 13, 30, tzinfo=timezone.utc),
     )
 
+    # One HIGH row is enough: it proves the archived physical run existed. The
+    # downloader still re-fetches and parses the target, so it never borrows this value.
     assert fallback == {
         model: (run, datetime(2026, 9, 20, 12, 20, tzinfo=timezone.utc))
     }
+    with sqlite3.connect(str(forecast_db)) as conn:
+        conn.execute(
+            "UPDATE raw_model_forecasts SET source_available_at = ?",
+            (datetime(2026, 9, 20, 11, 55, tzinfo=timezone.utc).isoformat(),),
+        )
+    assert production._candidate_canonical_single_runs_fallbacks(
+        forecast_db,
+        models=(model,),
+        updates_by_model={model: update},
+        now=datetime(2026, 9, 20, 13, 30, tzinfo=timezone.utc),
+    ) == {}
+    with sqlite3.connect(str(forecast_db)) as conn:
+        conn.execute(
+            "UPDATE raw_model_forecasts SET source_available_at = ?",
+            (datetime(2026, 9, 20, 13, 40, tzinfo=timezone.utc).isoformat(),),
+        )
+    assert production._candidate_canonical_single_runs_fallbacks(
+        forecast_db,
+        models=(model,),
+        updates_by_model={model: update},
+        now=datetime(2026, 9, 20, 13, 30, tzinfo=timezone.utc),
+    ) == {}
+    with sqlite3.connect(str(forecast_db)) as conn:
+        conn.execute(
+            "UPDATE raw_model_forecasts SET source_available_at = ?, request_url_hash = 'request-hash', product_id = ?",
+            (
+                datetime(2026, 9, 20, 12, 20, tzinfo=timezone.utc).isoformat(),
+                "wrong-product::single_runs",
+            ),
+        )
+    assert production._candidate_canonical_single_runs_fallbacks(
+        forecast_db,
+        models=(model,),
+        updates_by_model={model: update},
+        now=datetime(2026, 9, 20, 13, 30, tzinfo=timezone.utc),
+    ) == {}
+    with sqlite3.connect(str(forecast_db)) as conn:
+        conn.execute(
+            "UPDATE raw_model_forecasts SET product_id = ?, source_cycle_time = ?",
+            (
+                f"{model_name}::single_runs",
+                datetime(2026, 9, 20, 9, tzinfo=timezone.utc).isoformat(),
+            ),
+        )
+    assert production._candidate_canonical_single_runs_fallbacks(
+        forecast_db,
+        models=(model,),
+        updates_by_model={model: update},
+        now=datetime(2026, 9, 20, 13, 30, tzinfo=timezone.utc),
+    ) == {}
+    with sqlite3.connect(str(forecast_db)) as conn:
+        conn.execute(
+            "UPDATE raw_model_forecasts SET source_cycle_time = ?, request_url_hash = NULL",
+            (run.isoformat(),),
+        )
+    assert production._candidate_canonical_single_runs_fallbacks(
+        forecast_db,
+        models=(model,),
+        updates_by_model={model: update},
+        now=datetime(2026, 9, 20, 13, 30, tzinfo=timezone.utc),
+    ) == {}
 
 
 def test_candidate_offgrid_metadata_passes_canonical_run_to_parser(monkeypatch, tmp_path) -> None:

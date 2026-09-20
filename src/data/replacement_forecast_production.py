@@ -1447,6 +1447,56 @@ def _candidate_accrual_market_scopes(
     )
 
 
+def _candidate_public_metadata_updates(
+    *,
+    models: Sequence[str],
+    updates: Sequence[object],
+    now: datetime,
+) -> dict[str, object]:
+    """Keep the latest internally consistent, public metadata row per model.
+
+    Metadata identifies a candidate run only after its own availability timestamp
+    is causally valid.  A later malformed or future row must not displace the
+    latest run that can actually be requested now.
+    """
+    from src.strategy.live_inference.source_clock_vnext import (  # noqa: PLC0415
+        source_publicly_usable_at,
+    )
+
+    if now.utcoffset() is None:
+        return {}
+    now_utc = now.astimezone(timezone.utc)
+    allowed_models = frozenset(models)
+    selected: dict[str, object] = {}
+    selected_clocks: dict[str, tuple[datetime, datetime]] = {}
+    for update in updates:
+        model = str(getattr(update, "model", "")).strip()
+        if model not in allowed_models:
+            continue
+        run = getattr(update, "last_run_initialisation_time", None)
+        available = getattr(update, "last_run_availability_time", None)
+        if not isinstance(run, datetime) or not isinstance(available, datetime):
+            continue
+        if run.utcoffset() is None or available.utcoffset() is None:
+            continue
+        run_utc = run.astimezone(timezone.utc)
+        available_utc = available.astimezone(timezone.utc)
+        if run_utc > available_utc or available_utc > now_utc or run_utc > now_utc:
+            continue
+        try:
+            publicly_usable_at = source_publicly_usable_at(update.to_source_run_clock())
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if now_utc < publicly_usable_at.astimezone(timezone.utc):
+            continue
+        clocks = (run_utc, available_utc)
+        prior_clocks = selected_clocks.get(model)
+        if prior_clocks is None or clocks > prior_clocks:
+            selected[model] = update
+            selected_clocks[model] = clocks
+    return selected
+
+
 def _candidate_canonical_single_runs_fallbacks(
     forecast_db: Path,
     *,
@@ -1465,9 +1515,16 @@ def _candidate_canonical_single_runs_fallbacks(
         OPENMETEO_MODEL_IDS,
         OPENMETEO_PROVIDER,
         SINGLE_RUNS_SOURCE_FAMILY,
+        _SINGLE_RUNS_PAYLOAD_CACHE_MAX_AGE_HOURS,
     )
     from src.state.db import _connect_read_only  # noqa: PLC0415
+    from src.strategy.live_inference.source_clock_vnext import (  # noqa: PLC0415
+        source_publicly_usable_at,
+    )
 
+    if now.utcoffset() is None:
+        return {}
+    now_utc = now.astimezone(timezone.utc)
     expected_runs: dict[str, datetime] = {}
     for model in models:
         update = updates_by_model.get(model)
@@ -1477,12 +1534,23 @@ def _candidate_canonical_single_runs_fallbacks(
             continue
         if run.utcoffset() is None or available.utcoffset() is None:
             continue
-        if available.astimezone(timezone.utc) > now:
+        run_utc = run.astimezone(timezone.utc)
+        available_utc = available.astimezone(timezone.utc)
+        if (
+            run_utc > available_utc
+            or available_utc > now_utc
+            or run_utc > now_utc
+        ):
+            continue
+        try:
+            publicly_usable_at = source_publicly_usable_at(update.to_source_run_clock())
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if now_utc < publicly_usable_at.astimezone(timezone.utc):
             continue
         cadence_hours = tuple(sorted(MODEL_PUBLISH_CYCLE_HOURS.get(model, ())))
         if not cadence_hours:
             continue
-        run_utc = run.astimezone(timezone.utc)
         prior_hours = tuple(hour for hour in cadence_hours if hour <= run_utc.hour)
         if prior_hours:
             expected_runs[model] = run_utc.replace(
@@ -1496,7 +1564,14 @@ def _candidate_canonical_single_runs_fallbacks(
     if not expected_runs:
         return {}
 
-    placeholders = ", ".join("?" for _ in expected_runs)
+    exact_pair_clause = " OR ".join(
+        "(model = ? AND source_cycle_time = ?)" for _ in expected_runs
+    )
+    exact_pair_params = tuple(
+        value
+        for model, cycle in expected_runs.items()
+        for value in (model, cycle.isoformat())
+    )
     conn = _connect_read_only(forecast_db)
     try:
         rows = conn.execute(
@@ -1506,12 +1581,12 @@ def _candidate_canonical_single_runs_fallbacks(
                    request_params_json, request_url_hash, model_domain_hash,
                    endpoint_mode, forecast_value_c
             FROM raw_model_forecasts
-            WHERE model IN ({placeholders})
+            WHERE ({exact_pair_clause})
               AND endpoint = 'single_runs'
               AND coverage_status = 'COVERED'
               AND forecast_value_c IS NOT NULL
             """,
-            tuple(expected_runs),
+            exact_pair_params,
         ).fetchall()
     finally:
         conn.close()
@@ -1547,6 +1622,11 @@ def _candidate_canonical_single_runs_fallbacks(
             or available.utcoffset() is None
             or not math.isfinite(value)
             or cycle.astimezone(timezone.utc) != expected_runs[model]
+            or cycle.astimezone(timezone.utc) > now_utc
+            or available.astimezone(timezone.utc) > now_utc
+            or available.astimezone(timezone.utc) < cycle.astimezone(timezone.utc)
+            or now_utc - cycle.astimezone(timezone.utc)
+            > timedelta(hours=_SINGLE_RUNS_PAYLOAD_CACHE_MAX_AGE_HOURS)
         ):
             continue
         expected_model_name = OPENMETEO_MODEL_IDS.get(model, model)
@@ -1557,9 +1637,12 @@ def _candidate_canonical_single_runs_fallbacks(
             or str(provider) != OPENMETEO_PROVIDER
             or str(model_name) != expected_model_name
             or str(endpoint_mode) != "single_runs"
-            or not str(request_params_json)
-            or not str(request_url_hash)
-            or not str(model_domain_hash)
+            or request_params_json is None
+            or request_params_json == ""
+            or request_url_hash is None
+            or request_url_hash == ""
+            or model_domain_hash is None
+            or model_domain_hash == ""
         ):
             continue
         accepted.setdefault(model, []).append(available.astimezone(timezone.utc))
@@ -1588,9 +1671,6 @@ def _download_bayes_precision_fusion_candidate_accrual_if_needed(
             source_clock_metadata_run_is_single_runs_served,
         )
         from src.data.openmeteo_model_updates import fetch_model_updates  # noqa: PLC0415
-        from src.strategy.live_inference.source_clock_vnext import (  # noqa: PLC0415
-            source_publicly_usable_at,
-        )
 
         permanently_unservable = frozenset(SINGLE_RUNS_UNSERVABLE_MODELS).intersection(
             PREVIOUS_RUNS_UNSERVABLE_MODELS
@@ -1628,17 +1708,19 @@ def _download_bayes_precision_fusion_candidate_accrual_if_needed(
                 "max_wall_clock_seconds": _BPF_CANDIDATE_ACCRUAL_MAX_WALL_CLOCK_SECONDS,
             }
         now = datetime.now(timezone.utc)
-        updates_by_model = {str(update.model): update for update in updates}
+        updates_by_model = _candidate_public_metadata_updates(
+            models=models,
+            updates=updates,
+            now=now,
+        )
         frozen_source_runs = {
-            update.model: (
+            model: (
                 update.last_run_initialisation_time.astimezone(timezone.utc),
                 update.last_run_availability_time.astimezone(timezone.utc),
             )
-            for update in updates
-            if update.model in models
-            and now >= source_publicly_usable_at(update.to_source_run_clock())
-            and source_clock_metadata_run_is_single_runs_served(
-                update.model,
+            for model, update in updates_by_model.items()
+            if source_clock_metadata_run_is_single_runs_served(
+                model,
                 update.last_run_initialisation_time.astimezone(timezone.utc).hour,
             )
         }
