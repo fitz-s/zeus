@@ -10085,6 +10085,7 @@ def reconcile_terminal_entry_exposure_obligations(
         summary["terminal_late_fill_corrections"] = late_fill_corrections
     projection_gate_sql = "0"
     settlement_absorption_sql = "0"
+    exit_absorption_sql = "0"
     if _table_exists(conn, "position_current") and _table_exists(conn, "position_events"):
         # EXIT_INTENT is not closure: pending_exit still carries the command's
         # materialized exposure and therefore supersedes its pre-submit bound.
@@ -10122,6 +10123,51 @@ def reconcile_terminal_entry_exposure_obligations(
                                          LOWER(command.venue_order_id)
                                  )
                              )
+                      )
+               )
+        """
+        # An entry obligation is discharged by the ENTRY being absorbed, and the
+        # two branches above cover a position that is still open or that reached
+        # settlement. A position SOLD before settlement reaches neither: it ends
+        # `economically_closed`, and its obligation could never resolve. That is
+        # not a corner case any more -- an exit rule that fires mid-window
+        # produces exactly this phase -- and an unresolvable obligation is
+        # counted by capital_blocking_command_scope as an unresolved venue side
+        # effect forever, which reserves a reactor handoff every cadence and
+        # starves the global auction (2026-09-20: 68 selections, 1 receipt).
+        #
+        # The proof here is stronger than the open-position branch, not weaker:
+        # the entry fill is evidenced by a durable EXIT_ORDER_FILLED over the
+        # same position, so the shares were not merely projected but sold.
+        exit_absorption_sql = """
+               EXISTS (
+                   SELECT 1
+                     FROM position_current position
+                    WHERE position.position_id = command.position_id
+                      AND position.phase = 'economically_closed'
+                      AND position.shares > 0.0
+                      AND position.shares < 1e308
+                      AND position.cost_basis_usd > 0.0
+                      AND position.cost_basis_usd < 1e308
+                      AND EXISTS (
+                          SELECT 1
+                            FROM position_events entry_event
+                           WHERE entry_event.position_id = position.position_id
+                             AND entry_event.event_type = 'ENTRY_ORDER_FILLED'
+                             AND (
+                                 entry_event.command_id = obligation.command_id
+                                 OR (
+                                     TRIM(COALESCE(command.venue_order_id, '')) <> ''
+                                     AND LOWER(COALESCE(entry_event.order_id, '')) =
+                                         LOWER(command.venue_order_id)
+                                 )
+                             )
+                      )
+                      AND EXISTS (
+                          SELECT 1
+                            FROM position_events exit_event
+                           WHERE exit_event.position_id = position.position_id
+                             AND exit_event.event_type = 'EXIT_ORDER_FILLED'
                       )
                )
         """
@@ -10203,7 +10249,8 @@ def reconcile_terminal_entry_exposure_obligations(
                       AND COALESCE(fact.fill_price, 0) > 0
                ) AS positive_execution_economics,
                {projection_gate_sql} AS positive_command_bound_position_projection,
-               {settlement_absorption_sql} AS settled_position_absorbed
+               {settlement_absorption_sql} AS settled_position_absorbed,
+               {exit_absorption_sql} AS exit_closed_position_absorbed
           FROM entry_exposure_obligations obligation
           JOIN venue_commands command
             ON command.command_id = obligation.command_id
@@ -10310,11 +10357,20 @@ def reconcile_terminal_entry_exposure_obligations(
             and positive_economics
             and bool(row.get("settled_position_absorbed"))
         )
+        # A position sold before settlement discharges its entry obligation on
+        # the same authority as one that settled: the entry was absorbed, and
+        # the durable EXIT_ORDER_FILLED proves the shares actually left.
+        terminal_exit_closed = (
+            state in _SETTLEMENT_ABSORBED_ENTRY_COMMAND_STATES
+            and positive_economics
+            and bool(row.get("exit_closed_position_absorbed"))
+        )
         if not (
             terminal_fill
             or terminal_no_fill
             or terminal_partial
             or terminal_settlement
+            or terminal_exit_closed
         ):
             summary["stayed"] += 1
             continue
@@ -30660,7 +30716,12 @@ def capital_blocking_command_scope(
         )
         + _terminal_filled_exit_projection_blocker_count(conn)
         + len(
-            _exchange_reconcile.persisted_terminal_late_entry_fill_command_ids(
+            # Ask whether the repair still has work, not whether its selector
+            # still matches: the selector keys on permanent facts (a canonical
+            # matched_size plus a CONFIRMED trade), so a finished command would
+            # otherwise count as capital debt forever and reserve a reactor
+            # handoff every cadence.
+            _exchange_reconcile.persisted_terminal_late_entry_fill_repair_pending(
                 conn
             )
         )

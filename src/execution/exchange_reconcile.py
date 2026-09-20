@@ -5379,6 +5379,80 @@ def persisted_terminal_late_entry_fill_command_ids(
     return [str(row["command_id"] if hasattr(row, "keys") else row[0]) for row in rows]
 
 
+def persisted_terminal_late_entry_fill_repair_pending(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str | None = None,
+) -> list[str]:
+    """Return only the late-fill candidates that still have work to mint.
+
+    ``persisted_terminal_late_entry_fill_command_ids`` selects on facts that are
+    PERMANENT once true: a canonical order fact with matched_size > 0 plus a
+    CONFIRMED trade. Nothing in it asks whether the correction has already been
+    applied, so a fully reconciled command keeps matching forever.
+
+    That is harmless for the repair itself -- it re-derives the boundary and
+    stays -- but ``capital_blocking_command_scope`` counts the same selector as
+    unresolved venue side effects. A finished command therefore became permanent
+    capital-recovery debt: the scheduler reserved a reactor handoff every 30 s,
+    and the global auction (7-8 s of selection) was cancelled before its write
+    lease on essentially every cycle. Observed 2026-09-20 00:43-01:15Z: 68
+    selections computed, 250 preemptions, 1 receipt persisted, 45 monitor yields
+    with the completion debt cleared 0 times -- a livelock in which neither the
+    auction nor the monitor finished, and entries stopped.
+
+    This applies the repair's OWN terminal predicate, so "is there debt" and "is
+    there work" are the same question by construction rather than by agreement
+    between two independently drifting queries.
+    """
+
+    pending: list[str] = []
+    # Forward the scope only when there is one: callers (and tests) may supply a
+    # narrowed selector that takes the connection alone.
+    candidates = (
+        persisted_terminal_late_entry_fill_command_ids(conn, command_id=command_id)
+        if command_id is not None
+        else persisted_terminal_late_entry_fill_command_ids(conn)
+    )
+    for candidate_id in candidates:
+        from src.state.venue_command_repo import get_command
+
+        command = get_command(conn, candidate_id)
+        if command is None:
+            # Unreadable: fail closed and keep it as debt.
+            pending.append(candidate_id)
+            continue
+        boundary, terminal_partial_size = _terminal_entry_fill_boundary(
+            conn,
+            command,
+        )
+        if not boundary:
+            continue
+        economics = _entry_fill_economics_for_command(
+            conn,
+            command_id=candidate_id,
+            fallback_filled_size="0",
+            fallback_fill_price="0",
+        )
+        if economics is None:
+            continue
+        cumulative_shares = economics[0]
+        if boundary == "partial_fill" and (
+            terminal_partial_size is None
+            or cumulative_shares <= terminal_partial_size
+        ):
+            # Every authenticated share is already inside the terminal partial.
+            continue
+        if boundary == "unsourced_cancelled_remainder" and (
+            cumulative_shares <= 0
+            or _sourced_entry_fill_shares(conn, candidate_id) > 0
+        ):
+            # An execution_fact already sources this fill.
+            continue
+        pending.append(candidate_id)
+    return pending
+
+
 def reconcile_persisted_terminal_late_entry_fills(
     conn: sqlite3.Connection,
     *,
