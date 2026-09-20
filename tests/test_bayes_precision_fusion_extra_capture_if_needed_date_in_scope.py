@@ -511,6 +511,127 @@ def test_candidate_canonical_timeout_skips_downloader(monkeypatch, tmp_path) -> 
     ]
 
 
+def test_candidate_canonical_malformed_db_error_stays_failsoft(monkeypatch, tmp_path) -> None:
+    """A post-deadline malformed canonical DB is never a timeout receipt."""
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+
+    model = "met_nordic"
+    clock = [0.0]
+    run = datetime.now(timezone.utc) - timedelta(minutes=20)
+    monkeypatch.setattr(dl_mod, "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS", (model,))
+    monkeypatch.setattr(dl_mod, "source_clock_metadata_run_is_single_runs_served", lambda *_args: False)
+    monkeypatch.setattr(production.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        "src.strategy.live_inference.source_clock_vnext.source_publicly_usable_at",
+        lambda _run: datetime(1970, 1, 1, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        "src.data.openmeteo_model_updates.fetch_model_updates",
+        lambda *_args, **_kwargs: (
+            OpenMeteoModelUpdate(
+                model=model,
+                last_run_initialisation_time=run,
+                last_run_availability_time=run,
+            ),
+        ),
+    )
+
+    def _malformed(*_args, deadline_monotonic=None, **_kwargs):
+        clock[0] = float(deadline_monotonic)
+        raise sqlite3.OperationalError("database disk image is malformed")
+
+    monkeypatch.setattr(production, "_candidate_canonical_single_runs_fallbacks", _malformed)
+
+    report = production._download_bayes_precision_fusion_candidate_accrual_if_needed(
+        {"forecast_db": tmp_path / "forecasts.db"}
+    )
+
+    assert report == {
+        "status": "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_FAILSOFT_SKIPPED",
+        "error": "database disk image is malformed",
+    }
+
+
+def test_candidate_scope_malformed_db_error_stays_failsoft(monkeypatch, tmp_path) -> None:
+    """A post-deadline market-scope DB failure remains distinct from timeout."""
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+
+    model = "met_nordic"
+    clock = [0.0]
+    run = datetime.now(timezone.utc) - timedelta(minutes=20)
+    monkeypatch.setattr(dl_mod, "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS", (model,))
+    monkeypatch.setattr(dl_mod, "source_clock_metadata_run_is_single_runs_served", lambda *_args: True)
+    monkeypatch.setattr(production.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        "src.strategy.live_inference.source_clock_vnext.source_publicly_usable_at",
+        lambda _run: datetime(1970, 1, 1, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        "src.data.openmeteo_model_updates.fetch_model_updates",
+        lambda *_args, **_kwargs: (
+            OpenMeteoModelUpdate(
+                model=model,
+                last_run_initialisation_time=run,
+                last_run_availability_time=run,
+            ),
+        ),
+    )
+
+    def _malformed(*_args, deadline_monotonic=None, **_kwargs):
+        clock[0] = float(deadline_monotonic)
+        raise sqlite3.OperationalError("database disk image is malformed")
+
+    monkeypatch.setattr(production, "_candidate_accrual_market_scopes", _malformed)
+
+    report = production._download_bayes_precision_fusion_candidate_accrual_if_needed(
+        {"forecast_db": tmp_path / "forecasts.db"}
+    )
+
+    assert report == {
+        "status": "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_FAILSOFT_SKIPPED",
+        "error": "database disk image is malformed",
+    }
+
+
+def test_candidate_interrupted_before_deadline_stays_failsoft(monkeypatch, tmp_path) -> None:
+    """An interrupt before the budget expires is not evidence of a deadline timeout."""
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+
+    model = "met_nordic"
+    run = datetime.now(timezone.utc) - timedelta(minutes=20)
+    monkeypatch.setattr(dl_mod, "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS", (model,))
+    monkeypatch.setattr(dl_mod, "source_clock_metadata_run_is_single_runs_served", lambda *_args: False)
+    monkeypatch.setattr(production.time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(
+        "src.strategy.live_inference.source_clock_vnext.source_publicly_usable_at",
+        lambda _run: datetime(1970, 1, 1, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        "src.data.openmeteo_model_updates.fetch_model_updates",
+        lambda *_args, **_kwargs: (
+            OpenMeteoModelUpdate(
+                model=model,
+                last_run_initialisation_time=run,
+                last_run_availability_time=run,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        production,
+        "_candidate_canonical_single_runs_fallbacks",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(sqlite3.OperationalError("interrupted")),
+    )
+
+    report = production._download_bayes_precision_fusion_candidate_accrual_if_needed(
+        {"forecast_db": tmp_path / "forecasts.db"}
+    )
+
+    assert report == {
+        "status": "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_FAILSOFT_SKIPPED",
+        "error": "interrupted",
+    }
+
+
 def test_candidate_accrual_metadata_timebox_never_starts_capture(monkeypatch, tmp_path) -> None:
     """Metadata time is part of the candidate pass's fixed ten-second budget."""
     from src.data.openmeteo_model_updates import OpenMeteoModelUpdate

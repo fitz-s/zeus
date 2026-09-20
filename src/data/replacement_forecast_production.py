@@ -1662,6 +1662,13 @@ def _candidate_canonical_single_runs_fallbacks(
     }
 
 
+def _is_candidate_deadline_operational_error(exc: sqlite3.OperationalError) -> bool:
+    """Recognize only SQLite's documented deadline-interrupt outcomes."""
+    if getattr(exc, "sqlite_errorcode", None) == sqlite3.SQLITE_INTERRUPT:
+        return True
+    return str(exc).strip() in {"interrupted", "DB_CONNECTION_DEADLINE_EXPIRED"}
+
+
 def _download_bayes_precision_fusion_candidate_accrual_if_needed(
     cfg: dict[str, object],
 ) -> dict[str, object] | None:
@@ -1748,8 +1755,11 @@ def _download_bayes_precision_fusion_candidate_accrual_if_needed(
                     deadline_monotonic=deadline_monotonic,
                 )
             )
-        except sqlite3.OperationalError:
-            if time.monotonic() < deadline_monotonic:
+        except sqlite3.OperationalError as exc:
+            if (
+                time.monotonic() < deadline_monotonic
+                or not _is_candidate_deadline_operational_error(exc)
+            ):
                 raise
             return {
                 "status": "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE",
@@ -1780,8 +1790,11 @@ def _download_bayes_precision_fusion_candidate_accrual_if_needed(
                 now_utc=now,
                 deadline_monotonic=deadline_monotonic,
             )
-        except sqlite3.OperationalError:
-            if time.monotonic() < deadline_monotonic:
+        except sqlite3.OperationalError as exc:
+            if (
+                time.monotonic() < deadline_monotonic
+                or not _is_candidate_deadline_operational_error(exc)
+            ):
                 raise
             candidate_target_scopes = None
         if candidate_target_scopes is None or time.monotonic() >= deadline_monotonic:
