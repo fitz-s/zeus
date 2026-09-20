@@ -1,6 +1,6 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-08-28
-# Lifecycle: created=2026-05-24; last_reviewed=2026-08-28; last_reused=2026-08-28
+# Last reused/audited: 2026-09-19
+# Lifecycle: created=2026-05-24; last_reviewed=2026-09-19; last_reused=2026-09-19
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -7124,6 +7124,7 @@ def test_main_reactor_injects_day0_and_monitor_preemption_signals(
         assert captured["held_position_monitor_debt_pending"]() is False
         main._held_position_monitor_handoff_pending.set()
         assert captured["held_position_monitor_pending"]() is True
+        assert captured["held_position_monitor_debt_pending"]() is False
         main._periodic_held_position_monitor_successor_pending.set()
         assert captured["held_position_monitor_pending"]() is True
         main._periodic_held_position_monitor_fairness_debt.set()
@@ -7144,6 +7145,81 @@ def test_main_reactor_injects_day0_and_monitor_preemption_signals(
         main._held_position_monitor_canonical_debt.clear()
         main._day0_urgent_wake_pending.clear()
         main._day0_exit_monitor_attempts.clear()
+
+
+def test_main_monitor_callbacks_preserve_reserved_completion_until_real_debt(
+    monkeypatch,
+):
+    import src.events.reactor as reactor_module
+    import src.main as main
+
+    captured: dict[str, object] = {}
+    completion_requests: list[dict[str, object]] = []
+    monkeypatch.setattr(main, "_start_edli_reactor_wake_listener", lambda: None)
+    monkeypatch.setattr(
+        main, "_edli_live_entry_readiness_block", lambda _cfg: (None, {})
+    )
+    monkeypatch.setattr(main, "_held_position_monitor_entry_block_reason", lambda: None)
+    monkeypatch.setattr(
+        reactor_module,
+        "run_edli_event_reactor_cycle",
+        lambda **kwargs: captured.update(kwargs) or True,
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "request_global_auction_completion",
+        lambda **kwargs: completion_requests.append(kwargs) or True,
+    )
+
+    main._held_position_monitor_handoff_pending.clear()
+    main._periodic_held_position_monitor_successor_pending.clear()
+    main._periodic_held_position_monitor_fairness_debt.clear()
+    reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    reactor_module._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+    try:
+        assert main._edli_event_reactor_cycle() is True
+        monitor_pending = captured["held_position_monitor_pending"]
+        monitor_debt_pending = captured["held_position_monitor_debt_pending"]
+        assert callable(monitor_pending)
+        assert callable(monitor_debt_pending)
+
+        main._held_position_monitor_handoff_pending.set()
+        _, normal_cut_cancelled = reactor_module._global_auction_monitor_cancellation_probe(
+            monitor_pending,
+            monitor_debt_pending=monitor_debt_pending,
+        )
+        assert normal_cut_cancelled() is True
+        assert [request["reason"] for request in completion_requests] == [
+            "periodic_monitor_preemption"
+        ]
+
+        _, reserved_cut_cancelled = (
+            reactor_module._global_auction_monitor_cancellation_probe(
+                monitor_pending,
+                monitor_debt_pending=monitor_debt_pending,
+                completion_due=True,
+            )
+        )
+        assert reserved_cut_cancelled() is False
+
+        main._periodic_held_position_monitor_fairness_debt.set()
+        assert reserved_cut_cancelled() is True
+
+        main._periodic_held_position_monitor_fairness_debt.clear()
+        _, fresh_cut_cancelled = (
+            reactor_module._global_auction_monitor_cancellation_probe(
+                monitor_pending,
+                monitor_debt_pending=monitor_debt_pending,
+                completion_due=True,
+            )
+        )
+        assert fresh_cut_cancelled() is False
+    finally:
+        main._held_position_monitor_handoff_pending.clear()
+        main._periodic_held_position_monitor_successor_pending.clear()
+        main._periodic_held_position_monitor_fairness_debt.clear()
+        reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+        reactor_module._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
 
 
 def _stub_selected_day0_wake_poll(monkeypatch, main, reactor_wake, wake):
