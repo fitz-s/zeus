@@ -1,5 +1,5 @@
 # Created: 2026-05-14
-# Last reused or audited: 2026-07-28
+# Last reused or audited: 2026-09-08
 # Authority basis: docs/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §1.1, §1.2, §3 (REV 4)
 #   Antibodies A1, A2 (subset as A4), A8 per PLAN §3
 #   INV-37 enforcement per architecture/invariants.yaml::INV-37
@@ -92,6 +92,9 @@ EXPECTED_RUNTIME_TRADE_TABLES = frozenset({
     # T5 migration epoch marker 2026-07-12 (SCHEMA_EPOCH_TABLE_DDL in
     # init_schema_trade_only; stamped by the T5 migration, presence-only here).
     "schema_epoch",
+    # Tier-0 candidate-set provenance is trade-owned and created by
+    # init_schema_trade_only for the preregistered selection-lift evidence.
+    "tier0_candidate_set_provenance",
     # LX-T1 2026-07-13 (docs/rebuild/local_ledger_excision_2026-07-12.md):
     # append-only ConditionalTokens payout observation log (ensure_table wired
     # into init_schema_trade_only via payout_observations_schema.py).

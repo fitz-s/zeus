@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused/audited: 2026-08-10
+# Last reused/audited: 2026-09-08
 # Authority basis (2026-06-13 add): docs/archive/2026-Q2/operations_historical/live_inventory_warm_skip_2026-06-13.md —
 #   venue-close warm-skip relationship tests (live-inventory focus; market_phase.family_venue_closed).
 # Authority basis: src/main.py:_edli_event_reactor_cycle (historical inline substrate refresh
@@ -1911,7 +1911,7 @@ def test_day0_wake_waits_for_active_held_position_monitor(monkeypatch):
         def is_set(self) -> bool:
             return True
 
-    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda **_kwargs: wake)
     monkeypatch.setattr(main_module, "_held_position_monitor_active", _Held())
     monkeypatch.setattr(main_module, "_edli_last_reactor_wake_id", None)
     monkeypatch.setattr(

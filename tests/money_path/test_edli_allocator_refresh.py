@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused/audited: 2026-07-09
+# Last reused/audited: 2026-09-08
 # Authority basis: /tmp/edli_submit_gate_trace.md (EDLI submit gate: allocator_not_configured
 #   root) + src/engine/cycle_runner.py:705-728 legacy refresh_global_allocator contract.
 """Relationship test for the EDLI live-path risk-allocator refresh seam.
@@ -332,9 +332,11 @@ def test_main_edli_cycle_wires_live_path_allocator_refresh_source():
     # from src/main.py to src.events.reactor.run_edli_event_reactor_cycle.
     source = Path("src/events/reactor.py").read_text()
 
-    refresh_call = source.index("_alloc_refresh = _edli_refresh_global_allocator(")
+    refresh_call = source.index("_alloc_refresh = _construct_sql(")
+    allocator_call = source.index("_edli_refresh_global_allocator(", refresh_call)
     adapter_build = source.index("submit_adapter = event_bound_live_adapter_from_trade_conn(")
-    assert refresh_call < adapter_build
+    assert refresh_call < allocator_call < adapter_build
+    assert '"allocator"' in source[refresh_call:allocator_call]
     assert 'if not _alloc_refresh.get("configured")' in source[refresh_call:adapter_build]
 
 

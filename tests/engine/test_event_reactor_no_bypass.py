@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-08-18
+# Last reused/audited: 2026-09-08
 # Authority basis: Operator GOAL 2026-06-04 — full-family q/FDR + executable-mask for illiquid bins; never trade an assumed/renormalized subset
 #   2026-06-08 audit (no-bypass 4-test slice): re-authored test_runtime_receipt_uses_selected_no_snapshot_not_yes_side_ask
 #   to the complement-immunity ban (014408394f/cbc454e17e); updated two selector tests to the buy_no independent-YES-posterior
@@ -1179,6 +1179,10 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
             "decorrelated_providers_expected": 3,
             "current_evidence_shape": {
                 "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                "shape_lag_hours": 0.0,
+                "source_cycle_time": "2026-05-24T00:00:00+00:00",
+                "stale_shape_reused": False,
+                "translation_applied": False,
             },
         },
     }

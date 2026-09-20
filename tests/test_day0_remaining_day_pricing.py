@@ -2616,8 +2616,8 @@ class TestRemainingDaySelection:
             target_date="2026-06-10",
             timezone_name="Europe/Paris",
             captured_at="2026-06-10T21:41:00+00:00",
-            times=("2026-06-10T22:00", "2026-06-10T23:00"),
-            temps_c=(22.4, 22.1),
+            times=tuple(f"2026-06-10T{hour:02d}:00" for hour in range(24)),
+            temps_c=tuple([20.0] * 22 + [22.4, 22.1]),
         )
         observation_time = datetime(2026, 6, 10, 21, 20, tzinfo=UTC)  # 23:20 local
         decision_time = datetime(2026, 6, 10, 23, 15, tzinfo=UTC)  # 01:15 next day
@@ -2814,6 +2814,71 @@ class TestRemainingDaySelection:
 class TestRemainingDayMembers:
     def _family(self):
         return SimpleNamespace(city="Paris", target_date="2026-06-10", metric="high")
+
+    def _persist_current_vector_bundle(
+        self,
+        monkeypatch,
+        vectors,
+        *,
+        decision_time: datetime,
+        captured_at: datetime,
+    ):
+        """Persist an explicitly fresh bundle with live witness provenance."""
+        import src.data.day0_hourly_vectors as hourly
+
+        captured_at = captured_at.astimezone(UTC)
+        if not timedelta(0) <= decision_time - captured_at <= timedelta(hours=3):
+            raise ValueError("fixture capture must be fresh at decision_time")
+        expected_models = [str(vector.model) for vector in vectors]
+        monkeypatch.setattr(
+            hourly,
+            "day0_hourly_models_for_city",
+            lambda _city: expected_models,
+        )
+        bundle_identity = "|".join(
+            f"{vector.model}:{captured_at.isoformat()}" for vector in vectors
+        )
+        request_hash = "sha256:" + hashlib.sha256(
+            f"day0-current-vector-fixture:{bundle_identity}".encode("utf-8")
+        ).hexdigest()
+        persisted = []
+        for vector in vectors:
+            source_cycle = captured_at - timedelta(hours=2)
+            source_available = captured_at - timedelta(minutes=90)
+            source_modified = captured_at - timedelta(minutes=60)
+            fetch_started = captured_at - timedelta(minutes=10)
+            fetch_finished = captured_at - timedelta(minutes=5)
+            source_meta = {
+                "source_run_id": f"day0-fixture:{vector.model}:{source_cycle.isoformat()}",
+                "provider_run_id": f"openmeteo:{vector.model}:{source_cycle.isoformat()}",
+                "provider_source_cycle_time_utc": source_cycle.isoformat(),
+                "provider_source_available_at_utc": source_available.isoformat(),
+                "provider_source_modified_at_utc": source_modified.isoformat(),
+                "endpoint": "https://api.open-meteo.com/v1/forecast",
+                "request_hash": request_hash,
+                "fetch_started_at": fetch_started.isoformat(),
+                "fetch_finished_at": fetch_finished.isoformat(),
+            }
+            persisted.append(
+                replace(
+                    vector,
+                    captured_at=captured_at.isoformat(),
+                    source_run_meta_json=json.dumps(
+                        source_meta,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+        conn = _conn()
+        assert persist_day0_hourly_vectors(
+            persisted,
+            target_date="2026-06-10",
+            conn=conn,
+            request_hash=request_hash,
+            now=decision_time,
+        ) == len(persisted)
+        return conn, persisted
 
     def test_common_causal_grid_aligns_24_21_24_without_interpolation(self):
         full_times = tuple(f"2026-06-10T{hour:02d}:00" for hour in range(24))
@@ -3035,10 +3100,17 @@ class TestRemainingDayMembers:
             _vector(model="icon_global", temps=[26.0] * 24),
             _vector(model="ecmwf_ifs", temps=[25.0] * 24),
         ]
+        decision_time = datetime(2026, 6, 10, 15, 0, tzinfo=UTC)
+        forecast_conn, persisted = self._persist_current_vector_bundle(
+            monkeypatch,
+            vectors,
+            decision_time=decision_time,
+            captured_at=decision_time - timedelta(minutes=30),
+        )
         monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Paris": _paris()})
         monkeypatch.setattr(
             "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
-            lambda **_kwargs: vectors,
+            lambda **_kwargs: persisted,
         )
         payload = {
             "metric": "high",
@@ -3050,7 +3122,8 @@ class TestRemainingDayMembers:
             payload=payload,
             family=self._family(),
             unit="C",
-            decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
+            decision_time=decision_time,
+            forecast_conn=forecast_conn,
         )
 
         assert members is not None
@@ -3064,9 +3137,10 @@ class TestRemainingDayMembers:
             "ecmwf_ifs",
         ]
         assert payload["_edli_day0_remaining_local_capture_clock_utc"] == (
-            "2026-06-10T09:00:00+00:00"
+            "2026-06-10T14:30:00+00:00"
         )
         assert "_edli_day0_remaining_source_cycle_time_utc" not in payload
+        forecast_conn.close()
 
     def test_current_vector_witness_mismatch_blocks_before_carrier_rebuild(
         self, monkeypatch, caplog
@@ -3512,9 +3586,16 @@ class TestRemainingDayMembers:
             _vector(model="icon_d2", temps=[20.0] * 24),
             _vector(model="meteofrance_arome_france_hd", temps=[21.0] * 24),
         ]
+        decision_time = datetime(2026, 6, 10, 15, 0, tzinfo=UTC)
+        forecast_conn, persisted = self._persist_current_vector_bundle(
+            monkeypatch,
+            vectors,
+            decision_time=decision_time,
+            captured_at=decision_time - timedelta(minutes=30),
+        )
         monkeypatch.setattr(
             "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
-            lambda **kw: vectors,
+            lambda **kw: persisted,
         )
         payload = {
             "metric": "high",
@@ -3523,7 +3604,8 @@ class TestRemainingDayMembers:
         }
         members = era._day0_remaining_day_members(
             payload=payload, family=self._family(), unit="C",
-            decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
+            decision_time=decision_time,
+            forecast_conn=forecast_conn,
         )
         assert members is not None
         # every member clamped UP to the running max (absorbing physical law)
@@ -3533,6 +3615,7 @@ class TestRemainingDayMembers:
             21.0,
         ]
         assert payload["_edli_day0_remaining_models"] == 2
+        forecast_conn.close()
 
     @pytest.mark.parametrize(
         ("metric", "settlement_boundary", "physical_boundary", "future", "impossible_bin"),
@@ -3561,9 +3644,16 @@ class TestRemainingDayMembers:
                 temps=[future] * 24,
             ),
         ]
+        decision_time = datetime(2026, 6, 10, 15, 0, tzinfo=UTC)
+        forecast_conn, persisted = self._persist_current_vector_bundle(
+            monkeypatch,
+            vectors,
+            decision_time=decision_time,
+            captured_at=decision_time - timedelta(minutes=30),
+        )
         monkeypatch.setattr(
             "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
-            lambda **kw: vectors,
+            lambda **kw: persisted,
         )
         monkeypatch.setattr(
             era,
@@ -3593,7 +3683,8 @@ class TestRemainingDayMembers:
             payload=payload,
             family=family,
             unit="C",
-            decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
+            decision_time=decision_time,
+            forecast_conn=forecast_conn,
         )
         assert members is not None
         assert np.all(members == physical_boundary)
@@ -3626,10 +3717,11 @@ class TestRemainingDayMembers:
             payload=payload,
             family=family,
             unit="C",
-            decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
+            decision_time=decision_time,
         )
         assert sampler is not None
         assert sampler.rounded == physical_boundary
+        forecast_conn.close()
 
     def test_remaining_members_keep_source_clock_exact_but_freeze_temporal_q_clock(
         self, monkeypatch
@@ -3643,10 +3735,11 @@ class TestRemainingDayMembers:
         ]
         source_times: list[datetime] = []
         probability_times: list[datetime | None] = []
+        persisted_vectors: list[Day0HourlyVector] = []
 
         def read_vectors(**kwargs):
             source_times.append(kwargs["now"])
-            return vectors
+            return persisted_vectors or vectors
 
         def record_authority(**kwargs):
             probability_times.append(kwargs["decision_time"])
@@ -3662,6 +3755,13 @@ class TestRemainingDayMembers:
         )
         exact = datetime(2026, 6, 10, 15, 0, 59, 900000, tzinfo=UTC)
         probability_cut = era._day0_probability_clock(exact)
+        forecast_conn, persisted = self._persist_current_vector_bundle(
+            monkeypatch,
+            vectors,
+            decision_time=exact,
+            captured_at=exact - timedelta(minutes=30),
+        )
+        persisted_vectors.extend(persisted)
         members = era._day0_remaining_day_members(
             payload={
                 "metric": "high",
@@ -3672,11 +3772,13 @@ class TestRemainingDayMembers:
             unit="C",
             decision_time=exact,
             probability_time=probability_cut,
+            forecast_conn=forecast_conn,
         )
 
         assert members is not None
         assert source_times == [exact]
         assert probability_times == [probability_cut]
+        forecast_conn.close()
 
     @pytest.mark.parametrize(
         ("metric", "observed", "future", "winning_index"),
@@ -3860,13 +3962,13 @@ class TestRemainingDayMembers:
             target_date="2026-06-10",
             timezone_name="Europe/Paris",
             captured_at="2026-06-10T21:41:00+00:00",
-            times=("2026-06-10T22:00", "2026-06-10T23:00"),
-            temps_c=(22.4, 22.1),
+            times=tuple(f"2026-06-10T{hour:02d}:00" for hour in range(24)),
+            temps_c=tuple([20.0] * 22 + [22.4, 22.1]),
         )
         monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Paris": _paris()})
         monkeypatch.setattr(
             "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
-            lambda **kw: [vector],
+            lambda **kw: persisted,
         )
         payload = {
             "metric": "high",
@@ -3874,12 +3976,20 @@ class TestRemainingDayMembers:
             "observation_time": "2026-06-10T21:20:00+00:00",
             "settlement_source": "aviationweather_metar",
         }
+        decision_time = datetime(2026, 6, 10, 23, 15, tzinfo=UTC)
+        forecast_conn, persisted = self._persist_current_vector_bundle(
+            monkeypatch,
+            [vector],
+            decision_time=decision_time,
+            captured_at=decision_time - timedelta(minutes=90),
+        )
 
         members = era._day0_remaining_day_members(
             payload=payload,
             family=self._family(),
             unit="C",
-            decision_time=datetime(2026, 6, 10, 23, 15, tzinfo=UTC),
+            decision_time=decision_time,
+            forecast_conn=forecast_conn,
         )
 
         assert members is not None
@@ -3887,6 +3997,7 @@ class TestRemainingDayMembers:
         assert payload["_edli_day0_remaining_window_start_utc"] == (
             "2026-06-10T21:20:00+00:00"
         )
+        forecast_conn.close()
 
     def test_entry_point_q_does_not_double_count_peak_timing(self, monkeypatch):
         import src.engine.event_reactor_adapter as era
@@ -4276,9 +4387,16 @@ class TestRemainingDayMembers:
             _vector(model="icon_d2", temps=[27.5] * 24),
             _vector(model="meteofrance_arome_france_hd", temps=[24.0] * 24),
         ]
+        decision_time = datetime(2026, 6, 10, 15, 0, tzinfo=UTC)
+        forecast_conn, persisted = self._persist_current_vector_bundle(
+            monkeypatch,
+            vectors,
+            decision_time=decision_time,
+            captured_at=decision_time - timedelta(minutes=30),
+        )
         monkeypatch.setattr(
             "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
-            lambda **kw: vectors,
+            lambda **kw: persisted,
         )
         import src.engine.event_reactor_adapter as era
 
@@ -4289,9 +4407,10 @@ class TestRemainingDayMembers:
                 "settlement_source": "aviationweather_metar",
             },
             family=self._family(),
-            unit="C", decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
+            unit="C", decision_time=decision_time, forecast_conn=forecast_conn,
         )
         assert sorted(members.tolist()) == [25.0, 27.5]
+        forecast_conn.close()
 
     def test_live_members_transport_current_error_with_validated_decay(
         self, monkeypatch
@@ -4314,7 +4433,7 @@ class TestRemainingDayMembers:
         monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Paris": _paris()})
         monkeypatch.setattr(
             "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
-            lambda **kw: [vector],
+            lambda **kw: persisted,
         )
         monkeypatch.setattr(
             era,
@@ -4324,6 +4443,13 @@ class TestRemainingDayMembers:
                 datetime(2026, 6, 10, 14, 0, tzinfo=UTC),  # local 16:00
                 "wu_icao_history",
             ),
+        )
+        decision_time = datetime(2026, 6, 10, 14, 20, tzinfo=UTC)
+        forecast_conn, persisted = self._persist_current_vector_bundle(
+            monkeypatch,
+            [vector],
+            decision_time=decision_time,
+            captured_at=decision_time - timedelta(minutes=30),
         )
         payload = {
             "metric": "high",
@@ -4336,8 +4462,9 @@ class TestRemainingDayMembers:
             payload=payload,
             family=self._family(),
             unit="C",
-            decision_time=datetime(2026, 6, 10, 14, 20, tzinfo=UTC),
+            decision_time=decision_time,
             world_conn=object(),
+            forecast_conn=forecast_conn,
         )
 
         assert members is not None
@@ -4354,6 +4481,7 @@ class TestRemainingDayMembers:
         assert payload["_edli_day0_remaining_window_start_utc"] == (
             "2026-06-10T14:00:00+00:00"
         )
+        forecast_conn.close()
 
     def test_live_members_exclude_the_observed_model_grid_point(self, monkeypatch):
         """The grid point used as the state anchor is not future support."""
@@ -4371,7 +4499,7 @@ class TestRemainingDayMembers:
         monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Paris": _paris()})
         monkeypatch.setattr(
             "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
-            lambda **kw: [vector],
+            lambda **kw: persisted,
         )
         monkeypatch.setattr(
             era,
@@ -4382,6 +4510,13 @@ class TestRemainingDayMembers:
                 "wu_icao_history",
             ),
         )
+        decision_time = datetime(2026, 6, 10, 14, 20, tzinfo=UTC)
+        forecast_conn, persisted = self._persist_current_vector_bundle(
+            monkeypatch,
+            [vector],
+            decision_time=decision_time,
+            captured_at=decision_time - timedelta(minutes=30),
+        )
 
         members = era._day0_remaining_day_members(
             payload={
@@ -4391,8 +4526,9 @@ class TestRemainingDayMembers:
             },
             family=self._family(),
             unit="C",
-            decision_time=datetime(2026, 6, 10, 14, 20, tzinfo=UTC),
+            decision_time=decision_time,
             world_conn=object(),
+            forecast_conn=forecast_conn,
         )
 
         assert members is not None
@@ -4401,6 +4537,7 @@ class TestRemainingDayMembers:
         assert members.tolist() == pytest.approx(
             [20.0 - 10.0 * np.exp(-7.0 / 4.2)]
         )
+        forecast_conn.close()
 
     def test_current_state_diagnostic_is_persisted_in_probability_authority(self):
         import src.engine.event_reactor_adapter as era
@@ -4467,18 +4604,26 @@ class TestRemainingDayMembers:
 
     def test_f_city_members_are_converted_at_the_seam(self, monkeypatch):
         vectors = [_vector(model="ncep_nbm_conus", temps=[25.0] * 24)]
+        decision_time = datetime(2026, 6, 10, 15, 0, tzinfo=UTC)
+        forecast_conn, persisted = self._persist_current_vector_bundle(
+            monkeypatch,
+            vectors,
+            decision_time=decision_time,
+            captured_at=decision_time - timedelta(minutes=30),
+        )
         monkeypatch.setattr(
             "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
-            lambda **kw: vectors,
+            lambda **kw: persisted,
         )
         import src.engine.event_reactor_adapter as era
 
         members = era._day0_remaining_day_members(
             payload={"metric": "high", "rounded_value": 70.0}, family=self._family(),
-            unit="F", decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
+            unit="F", decision_time=decision_time, forecast_conn=forecast_conn,
         )
         assert members is not None
         assert members[0] == pytest.approx(25.0 * 9 / 5 + 32)
+        forecast_conn.close()
 
     def test_no_vectors_returns_none_for_required_caller_to_block(self, monkeypatch):
         monkeypatch.setattr(
@@ -4731,8 +4876,6 @@ class TestRemainingDayMembers:
         import src.data.day0_hourly_vectors as hv
         import src.engine.monitor_refresh as monitor_refresh
         import src.state.db as db
-        from src.signal.day0_window import remaining_member_extrema_for_day0
-        from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
         temps = [10.0] * 24
         temps[13] = 99.0
@@ -4762,18 +4905,10 @@ class TestRemainingDayMembers:
         )
 
         assert out is not None
-        assert out["times"][13] == "2026-06-10T11:00:00+00:00"
-        extrema, hours = remaining_member_extrema_for_day0(
-            out["members_hourly"],
-            out["times"],
-            "Europe/Paris",
-            date(2026, 6, 10),
-            now=boundary,
-            temperature_metric=HIGH_LOCALDAY_MAX,
-        )
-        assert extrema is not None
-        assert extrema.maxes.tolist() == [10.0]
-        assert hours == 9.0
+        assert out["times"] == [
+            f"2026-06-10T{hour:02d}:00:00+00:00" for hour in range(12, 22)
+        ]
+        assert out["members_hourly"].tolist() == [[10.0] * 10]
 
         stale_observation = datetime(2026, 6, 10, 10, 30, tzinfo=UTC)
         stale_out = monitor_refresh._read_day0_hourly_vectors(
@@ -4783,17 +4918,10 @@ class TestRemainingDayMembers:
             remaining_window_start=stale_observation,
         )
         assert stale_out is not None
-        stale_extrema, stale_hours = remaining_member_extrema_for_day0(
-            stale_out["members_hourly"],
-            stale_out["times"],
-            "Europe/Paris",
-            date(2026, 6, 10),
-            now=stale_observation,
-            temperature_metric=HIGH_LOCALDAY_MAX,
-        )
-        assert stale_extrema is not None
-        assert stale_extrema.maxes.tolist() == [99.0]
-        assert stale_hours == 11.0
+        assert stale_out["times"] == [
+            f"2026-06-10T{hour:02d}:00:00+00:00" for hour in range(10, 22)
+        ]
+        assert stale_out["members_hourly"].tolist() == [[10.0, 99.0] + [10.0] * 10]
 
     def test_monitor_normalizes_both_fall_back_folds_to_distinct_utc_instants(
         self,
