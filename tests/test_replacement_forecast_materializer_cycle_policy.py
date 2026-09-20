@@ -1,3 +1,5 @@
+# Purpose: Verify forecast-cycle eligibility, coverage and current-carrier reseeding.
+# Reuse: Run when changing posterior cycle authority or seed coverage and drain rules.
 # Created: 2026-06-10
 # Last reused or audited: 2026-08-19
 # Lifecycle: created=2026-06-10; last_reviewed=2026-08-19; last_reused=2026-08-19
