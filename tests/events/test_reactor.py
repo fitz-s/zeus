@@ -1393,7 +1393,9 @@ def test_main_monitor_cadence_debt_blocks_buy_but_keeps_reactor_live(monkeypatch
     assert monitor_pending() is False
     monitor_debt_pending = captured["held_position_monitor_debt_pending"]
     assert callable(monitor_debt_pending)
-    assert monitor_debt_pending() is True
+    # Debt already present at admission is represented by the exact BUY block;
+    # the reactor only cancels a cut when fresh debt appears after admission.
+    assert monitor_debt_pending() is False
 
 
 def test_main_monitor_bootstrap_blocks_buy_but_keeps_reactor_live(monkeypatch):
@@ -1767,6 +1769,7 @@ def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
         "_held_position_monitor_entry_block_reason",
         lambda: None,
     )
+    monkeypatch.setattr(main, "_held_position_monitor_debt_pending", lambda: False)
     monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
     monkeypatch.setattr(main, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
     monkeypatch.setattr(
@@ -1865,7 +1868,7 @@ def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
     monkeypatch.setattr(
         reactor_module,
         "_edli_reactor_day0_hourly_refresher",
-        lambda: (lambda *_args, **_kwargs: None),
+        lambda **_kwargs: (lambda *_args, **_kwargs: None),
     )
     monkeypatch.setattr(
         reactor_module,
@@ -2030,10 +2033,14 @@ def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
         reactor_wake.read_reactor_wake(path=wake_path),
     )
     assert tuple(carrier_after_pause[:2]) == ("processed", 1)
+    # A forecast-only resume has one stale-work bridge slot. A Day0 resume
+    # spends it on the materialized Day0 carrier, leaving the ordinary event.
     assert check.execute(
         "SELECT processing_status, attempt_count FROM opportunity_event_processing WHERE event_id = ?",
         (ordinary.event_id,),
-    ).fetchone() == ("pending", 0)
+    ).fetchone() == (
+        ("pending", 0) if carrier_branch == "day0" else ("processed", 1)
+    )
     check.close()
     assert not resumed_queue_file.exists()
 
@@ -2136,8 +2143,7 @@ def test_paused_debt_drains_once_after_canonical_family_materializes(tmp_path):
     assert reactor_wake.read_reactor_wake(path=path) is None
 
 
-def test_paused_no_held_cycle_parks_before_active_lock(monkeypatch):
-    import src.engine.event_reactor_adapter as adapter_module
+def test_paused_no_held_cycle_threads_capital_proof_exception(monkeypatch):
     import src.events.reactor as reactor_module
     import src.main as main
     from src.riskguard import riskguard
@@ -2161,9 +2167,15 @@ def test_paused_no_held_cycle_parks_before_active_lock(monkeypatch):
         lambda: (lambda: frozenset()),
     )
     monkeypatch.setattr(
-        adapter_module,
-        "_entry_pause_blocks_live_submit",
+        reactor_module,
+        "_entry_reactor_park_reason",
         lambda _conn: "operator_pause",
+    )
+    parked: dict[str, object] = {}
+    monkeypatch.setattr(
+        reactor_module,
+        "_paused_entry_wake_should_park",
+        lambda **kwargs: parked.update(kwargs) or True,
     )
     drains = []
     monkeypatch.setattr(
@@ -2174,6 +2186,7 @@ def test_paused_no_held_cycle_parks_before_active_lock(monkeypatch):
 
     lock = threading.Lock()
     assert reactor_module.run_edli_event_reactor_cycle(active_lock=lock) is False
+    assert parked["allow_capital_proof_progress"] is True
     assert drains == [True]
     assert lock.acquire(blocking=False) is True
     lock.release()
@@ -2349,7 +2362,7 @@ def test_paused_exact_canonical_held_sell_request_reaches_reduce_only_cycle(monk
             active_lock=lock,
             producer_wake_reason="held_sell_global_auction_completion_requested",
             producer_held_sell_reauction_requests=(request,),
-            held_position_monitor_debt_pending=lambda: True,
+            held_position_monitor_debt_pending=lambda: False,
         )
     assert lock.locked() is False
 
@@ -5328,7 +5341,8 @@ def test_position_fill_wake_is_an_exact_targeted_reactor_fast_path():
     assert 'producer_wake_reason == "position_fill_projected"' in source
     assert "committed_position_fill_wake" in source
     assert "or committed_position_fill_wake" in source
-    assert "targeted_only=producer_fast_path" in source
+    assert "targeted_only=targeted_only_fast_path" in source
+    assert "targeted_only_fast_path = producer_fast_path and (" in source
     assert "forecast_posterior_wake or bool(targeted_event_ids)" in source
 
 
@@ -7110,6 +7124,10 @@ def test_global_selection_cancels_when_exact_publisher_arrives_after_probe_creat
             bid_observed_at=(now - timedelta(seconds=1)).isoformat(),
             probability_observed_at=(now - timedelta(seconds=1)).isoformat(),
             completion_deadline_at=(now + timedelta(seconds=30)).isoformat(),
+            selection_epoch_identity="epoch-probe-arrival",
+            sell_book_witness_identity="book-probe-arrival",
+            debt_event_id="probe-arrival-position:exit_retry_released:1",
+            monitor_event_id="probe-arrival-position:monitor_refreshed:1",
             book_state="EXECUTABLE",
             schema_version=4,
             wake_path=tmp_path / "probe-arrival-wake.json",
@@ -7381,6 +7399,7 @@ def test_monitor_fairness_debt_reserves_completion_before_cancelling(
 ):
     from src.events import reactor
 
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
     reservations: list[str] = []
     monkeypatch.setattr(
         reactor,
@@ -7403,6 +7422,7 @@ def test_monitor_fairness_debt_reserves_completion_before_cancelling(
 def test_monitor_fairness_debt_probe_failure_cannot_veto_auction(monkeypatch):
     from src.events import reactor
 
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
     monkeypatch.setattr(
         reactor,
         "request_global_auction_completion",
@@ -8185,6 +8205,10 @@ def _v4_stable_debt_attempts(
         "generation": "istanbul-v4-stable-generation",
         "held_best_bid": 0.22,
         "book_state": "EXECUTABLE",
+        "selection_epoch_identity": "epoch-istanbul-v4",
+        "sell_book_witness_identity": "book-istanbul-v4",
+        "debt_event_id": "istanbul-v4-lineage:exit_retry_released:1",
+        "monitor_event_id": "istanbul-v4-lineage:monitor_refreshed:1",
     }
     old = reactor_wake.make_held_sell_reauction_request(
         **common,

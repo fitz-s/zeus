@@ -15,6 +15,10 @@ from typing import Any, Mapping
 
 from src.config import cities_by_name
 from src.contracts.settlement_semantics import SettlementSemantics
+from src.data.day0_hourly_vectors import (
+    DAY0_REMAINING_CARRIER_OPERATOR_V2,
+    day0_remaining_carrier_samples_row_major,
+)
 from src.data.replacement_forecast_cycle_policy import (
     TRADEABLE_GRADE_QLCB_BASIS,
     current_evidence_shape_has_entry_authority,
@@ -83,6 +87,39 @@ class _HeldContinuityStatus(StrEnum):
     BLOCKED = "blocked"
 
 
+
+
+_DAY0_SHARED_CARRIER_Q_SHAPES = frozenset(
+    {
+        "day0_remaining_shared_carrier_v1",
+        "day0_remaining_shared_carrier_v2",
+    }
+)
+
+
+def _day0_carrier_identity_reason(provenance: Mapping[str, Any]) -> str | None:
+    """Validate a declared shared-carrier identity at a live read boundary."""
+
+    identity_field = "day0_remaining_carrier_content_identity"
+    operator_field = "day0_remaining_carrier_operator"
+    has_identity = identity_field in provenance
+    has_operator = operator_field in provenance
+    declared = (
+        has_identity
+        or has_operator
+        or provenance.get("q_shape") in _DAY0_SHARED_CARRIER_Q_SHAPES
+    )
+    if not declared:
+        return None
+    identity = provenance.get(identity_field)
+    operator = provenance.get(operator_field)
+    if not isinstance(identity, str) or not identity.strip():
+        return "REPLACEMENT_DAY0_CARRIER_IDENTITY_PAIR_INCOMPLETE"
+    if not isinstance(operator, str) or not operator:
+        return "REPLACEMENT_DAY0_CARRIER_IDENTITY_PAIR_INCOMPLETE"
+    if operator != DAY0_REMAINING_CARRIER_OPERATOR_V2:
+        return "REPLACEMENT_DAY0_CARRIER_OPERATOR_NOT_CURRENT"
+    return None
 
 
 @dataclass(frozen=True)
@@ -228,6 +265,9 @@ def _held_pinned_provenance_reason(
     active/metric/unit/source or vector fields for the adapter.  This gate is
     deliberately stricter than the generic posterior live-grade check.
     """
+    carrier_reason = _day0_carrier_identity_reason(provenance)
+    if carrier_reason is not None:
+        return carrier_reason
     provisional = provenance.get("day0_provisional_observation")
     if not isinstance(provisional, Mapping) or provisional.get("active") is not True:
         return "REPLACEMENT_PINNED_DAY0_PROVISIONAL_ACTIVE_MISSING"
@@ -302,11 +342,11 @@ def _held_pinned_provenance_reason(
         return "REPLACEMENT_PINNED_DAY0_CARRIER_FIELDS_MISSING"
     if (
         str(provenance.get("day0_remaining_carrier_operator"))
-        != "extreme_observed_then_noisy_future_v1"
+        != DAY0_REMAINING_CARRIER_OPERATOR_V2
         or int(provenance.get("day0_remaining_carrier_sample_count") or 0) != 500
     ):
         return "REPLACEMENT_PINNED_DAY0_CARRIER_SHAPE_INVALID"
-    samples = provenance.get("day0_remaining_carrier_probability_samples")
+    samples = day0_remaining_carrier_samples_row_major(provenance)
     q = provenance.get("day0_remaining_carrier_q")
     future = provenance.get("day0_remaining_carrier_future_extremes_c")
     if (
@@ -501,6 +541,7 @@ def _live_grade_provenance(
     row_map: Mapping[str, Any],
     *,
     authority_purpose: ReplacementForecastAuthorityPurpose,
+    provenance: Mapping[str, Any] | None = None,
 ) -> Mapping[str, Any] | None:
     """Return provenance only when it authorizes the named capital action."""
     if str(row_map.get("runtime_layer") or "") != LIVE_RUNTIME_LAYER:
@@ -509,7 +550,12 @@ def _live_grade_provenance(
         return None
     if not row_map.get("q_ucb_json"):
         return None
-    provenance = _json_mapping(row_map.get("provenance_json"), field_name="provenance_json")
+    if provenance is None:
+        provenance = _json_mapping(
+            row_map.get("provenance_json"), field_name="provenance_json"
+        )
+    if _day0_carrier_identity_reason(provenance) is not None:
+        return None
     mode = provenance.get("replacement_q_mode")
     if not isinstance(mode, str) or not mode:
         return None
@@ -895,9 +941,16 @@ def read_replacement_forecast_bundle(
                 "BLOCKED", "REPLACEMENT_POSTERIOR_READINESS_MISMATCH"
             )
         row_map = dict(certified_row)
+    raw_provenance = _json_mapping(
+        row_map.get("provenance_json"), field_name="provenance_json"
+    )
+    carrier_reason = _day0_carrier_identity_reason(raw_provenance)
+    if carrier_reason is not None:
+        return ReplacementForecastBundleReadResult("BLOCKED", carrier_reason)
     provenance = _live_grade_provenance(
         row_map,
         authority_purpose=authority_purpose,
+        provenance=raw_provenance,
     )
     if provenance is None:
         return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE")
@@ -1252,6 +1305,9 @@ def read_pinned_replacement_forecast_bundle(
         row_map.get("provenance_json"),
         field_name="provenance_json",
     )
+    carrier_reason = _day0_carrier_identity_reason(provenance)
+    if carrier_reason is not None:
+        return ReplacementForecastBundleReadResult("BLOCKED", carrier_reason)
     if not _decorrelated_providers_complete(provenance):
         return ReplacementForecastBundleReadResult(
             "BLOCKED",
@@ -1387,6 +1443,9 @@ def read_prior_complete_replacement_forecast_bundle(
         latest.get("provenance_json"),
         field_name="provenance_json",
     )
+    latest_carrier_reason = _day0_carrier_identity_reason(latest_provenance)
+    if latest_carrier_reason is not None:
+        return ReplacementForecastBundleReadResult("BLOCKED", latest_carrier_reason)
     if _decorrelated_providers_complete(latest_provenance):
         if raw_input_hwm_conn is not None:
             if not _held_pinned_carrier_claimed(latest_provenance):
@@ -1568,6 +1627,11 @@ def read_prior_complete_replacement_forecast_bundle(
         candidate.get("provenance_json"),
         field_name="provenance_json",
     )
+    candidate_carrier_reason = _day0_carrier_identity_reason(candidate_provenance)
+    if candidate_carrier_reason is not None:
+        return ReplacementForecastBundleReadResult(
+            "BLOCKED", candidate_carrier_reason
+        )
     candidate_reason = _held_pinned_provenance_reason(
         candidate_provenance,
         city=city,

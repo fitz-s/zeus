@@ -12424,6 +12424,139 @@ def _terminal_partial_exit_projection_candidates(
     return candidates
 
 
+def _status_first_exit_release_is_current(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, object],
+    filled: Decimal,
+    notional: Decimal,
+) -> bool:
+    """Prove a status-first partial fill still belongs to this pending EXIT.
+
+    SCOPE: one pending position and its exact terminal EXIT command/order.
+    DRAIN: command recovery rechecks the canonical event and command histories
+    on every pass.  RESET: a later EXIT_INTENT or distinct EXIT/SELL command
+    leaves the existing pending state to its newer command owner.
+    """
+
+    from src.state.fill_dedup import recorded_partial_exit_fill_cursors
+
+    position_id = str(command.get("position_id") or "").strip()
+    command_id = str(command.get("command_id") or "").strip()
+    venue_order_id = str(command.get("venue_order_id") or "").strip()
+    created_at = str(command.get("created_at") or "").strip()
+    if not all((position_id, command_id, venue_order_id, created_at)):
+        return False
+
+    try:
+        command_time = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if command_time.tzinfo is None or command_time.utcoffset() is None:
+        return False
+    command_time = command_time.astimezone(timezone.utc)
+
+    status_identity = f"status-fill:v1:{position_id}:{venue_order_id}"
+    cursors = recorded_partial_exit_fill_cursors(conn, position_id)
+    if cursors.get(status_identity) != (filled, notional):
+        return False
+
+    try:
+        status_rows = conn.execute(
+            """
+            SELECT event_id, occurred_at, order_id
+              FROM position_events
+             WHERE position_id = ?
+               AND caused_by = 'partial_exit_fill'
+               AND json_extract(payload_json, '$.economic_fill_identity') = ?
+             ORDER BY sequence_no, event_id
+            """,
+            (position_id, status_identity),
+        ).fetchall()
+        later_intents = conn.execute(
+            """
+            SELECT event_id, occurred_at
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'EXIT_INTENT'
+            """,
+            (position_id,),
+        ).fetchall()
+        exit_commands = conn.execute(
+            """
+            SELECT command_id, intent_kind, side, created_at
+              FROM venue_commands
+             WHERE position_id = ?
+               AND (UPPER(COALESCE(intent_kind, '')) = 'EXIT'
+                    OR UPPER(COALESCE(side, '')) = 'SELL')
+            """,
+            (position_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return False
+
+    if not status_rows:
+        return False
+    for status_row in status_rows:
+        status = _dict_row(status_row)
+        event_id = str(status.get("event_id") or "").strip()
+        status_order_id = str(status.get("order_id") or "").strip()
+        status_at = str(status.get("occurred_at") or "").strip()
+        try:
+            status_time = datetime.fromisoformat(status_at.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if (
+            not event_id
+            or status_order_id != venue_order_id
+            or status_time.tzinfo is None
+            or status_time.utcoffset() is None
+            or status_time.astimezone(timezone.utc) < command_time
+        ):
+            return False
+
+    for intent_row in later_intents:
+        intent = _dict_row(intent_row)
+        event_id = str(intent.get("event_id") or "").strip()
+        occurred_at = str(intent.get("occurred_at") or "").strip()
+        try:
+            intent_time = datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if (
+            not event_id
+            or intent_time.tzinfo is None
+            or intent_time.utcoffset() is None
+            or intent_time.astimezone(timezone.utc) >= command_time
+        ):
+            return False
+
+    for exit_row in exit_commands:
+        exit_command = _dict_row(exit_row)
+        candidate_id = str(exit_command.get("command_id") or "").strip()
+        if candidate_id == command_id:
+            continue
+        candidate_kind = str(exit_command.get("intent_kind") or "").strip().upper()
+        candidate_side = str(exit_command.get("side") or "").strip().upper()
+        candidate_created_at = str(exit_command.get("created_at") or "").strip()
+        try:
+            candidate_time = datetime.fromisoformat(
+                candidate_created_at.replace("Z", "+00:00")
+            )
+        except ValueError:
+            return False
+        if (
+            not candidate_id
+            or candidate_kind != "EXIT"
+            or candidate_side != "SELL"
+            or candidate_time.tzinfo is None
+            or candidate_time.utcoffset() is None
+            or candidate_time.astimezone(timezone.utc) >= command_time
+        ):
+            return False
+    return True
+
+
 def _repair_terminal_partial_exit_projection(
     conn: sqlite3.Connection,
     *,
@@ -12556,6 +12689,14 @@ def _repair_terminal_partial_exit_projection(
         raise RuntimeError(
             f"terminal partial EXIT residual exposure conflicts for {command_id}"
         )
+
+    if str(current.get("phase") or "") == "pending_exit" and _status_first_exit_release_is_current(
+        conn,
+        command=command,
+        filled=filled,
+        notional=notional,
+    ):
+        position.last_exit_order_id = venue_order_id
 
     applied = _complete_intentional_position_reduction(
         position,

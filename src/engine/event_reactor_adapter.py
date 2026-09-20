@@ -31010,28 +31010,28 @@ def _generate_candidate_proofs(
                         _sibling_complement_bid = _optional_float(
                             _yes_row.get("orderbook_top_bid")
                         )
-                    try:
-                        execution_price, p_fill_lcb, c_cost_95pct = _execution_price_from_snapshot(
-                            row,
-                            selected_token_id=token_id,
-                            direction=direction,
-                            complementary_top_bid=_sibling_complement_bid,
-                        )
-                        # INV-47 SCOPE: this exact candidate token only.
-                        # DRAIN: the next event/JIT cycle consumes a fresh quote.
-                        # RESET: no latch; an in-band quote restores eligibility.
-                        assert_live_order_unit_price(execution_price.value)
-                    except ValueError as exc:
-                        execution_price = None
-                        p_fill_lcb = 0.0
-                        c_cost_95pct = None
-                        error = str(exc)
-                        action_price_reason = (
-                            f"LIVE_UNIT_PRICE_OUT_OF_BOUNDS:{error}"
-                            if error.startswith("live order unit price")
-                            else None
-                        )
-                        missing_reason = action_price_reason or error
+                try:
+                    execution_price, p_fill_lcb, c_cost_95pct = _execution_price_from_snapshot(
+                        row,
+                        selected_token_id=token_id,
+                        direction=direction,
+                        complementary_top_bid=_sibling_complement_bid,
+                    )
+                    # INV-47 SCOPE: this exact candidate token only.
+                    # DRAIN: the next event/JIT cycle consumes a fresh quote.
+                    # RESET: no latch; an in-band quote restores eligibility.
+                    assert_live_order_unit_price(execution_price.value)
+                except ValueError as exc:
+                    execution_price = None
+                    p_fill_lcb = 0.0
+                    c_cost_95pct = None
+                    error = str(exc)
+                    action_price_reason = (
+                        f"LIVE_UNIT_PRICE_OUT_OF_BOUNDS:{error}"
+                        if error.startswith("live order unit price")
+                        else None
+                    )
+                    missing_reason = action_price_reason or error
             # FIX C (mode-consistent EV; operator directive 2026-06-10): the
             # trade_score is the CHOSEN execution mode's EV, never the hybrid
             # taker-cost x visible-depth-p_fill. TAKER-chosen scores are
@@ -42365,6 +42365,8 @@ def _day0_remaining_p_raw_vector(
                 station_id=configured_station,
                 preliminary_survival_identity=likelihood_identity,
             ),
+            settlement_semantics=settlement_semantics,
+            operator=str(payload["_edli_day0_probability_operator"]),
         )
         expected_identity = str(payload["_edli_day0_remaining_content_identity"]).strip()
         if expected_identity != str(carrier["content_identity"]):
@@ -43549,6 +43551,7 @@ def _rebuild_decision_time_day0_carrier(
         raise ValueError("DAY0_DECISION_CARRIER_AUTHORITY_KIND_INVALID")
     _snapshot_day0_source_clock_carrier_provenance(payload)
     from src.data.day0_hourly_vectors import (
+        DAY0_REMAINING_CARRIER_OPERATOR_V2,
         build_day0_remaining_probability_carrier,
         day0_remaining_carrier_identity_inputs,
     )
@@ -43652,6 +43655,8 @@ def _rebuild_decision_time_day0_carrier(
             station_id=configured_station,
             preliminary_survival_identity=likelihood_identity,
         ),
+        settlement_semantics=SettlementSemantics.for_city(city),
+        operator=DAY0_REMAINING_CARRIER_OPERATOR_V2,
     )
     payload.update(
         {

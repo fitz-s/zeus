@@ -24,6 +24,7 @@ import numpy as np
 import pytest
 
 from src.decision_kernel import claims
+from src.decision_kernel.canonicalization import stable_hash
 from src.decision_kernel.compiler import DecisionCompiler
 from src.contracts.execution_intent import DecisionSourceContext
 from src.state.snapshot_repo import init_snapshot_schema
@@ -146,6 +147,7 @@ def _fully_licensed_selection_calibrator_artifact() -> dict:
             "authority": "test_event_reactor_selection_calibrator",
             "version": "sel_v1",
             "posterior_version": sc.DEFAULT_POSTERIOR_VERSION,
+            "probability_semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
             "min_n": 30,
             "armed_sides": ["YES", "NO"],
             "cell_key_schema": "side|lead_bucket|bin_class|raw_prob_bucket",
@@ -1104,37 +1106,19 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
     import json as _json
 
     from src.data.replacement_forecast_bundle_reader import (
-        _current_market_bin_topology_hash as _topo_hash,
+        _current_market_bin_topology_payload,
     )
 
-    # Compute the topology hash from the already-inserted market_events rows.
-    topo_hash = _topo_hash(conn, city="Chicago", target_date="2026-05-25", temperature_metric="high") or "fixture-topo-hash"
-
-    # Build a minimal bin_topology list from market_events so the bin-binding step succeeds.
-    topo_rows = conn.execute(
-        "SELECT range_label, range_low, range_high FROM market_events WHERE city='Chicago' AND target_date='2026-05-25' AND temperature_metric='high' ORDER BY COALESCE(range_low,-999999)"
-    ).fetchall()
-    bin_topology = []
-    for r in topo_rows:
-        label = str(dict(r).get("range_label") or dict(r).get("outcome") or "")
-        low = dict(r).get("range_low")
-        high = dict(r).get("range_high")
-        # Convert °F to °C for the topology (Chicago = F settlement).
-        def _f_to_c(v):
-            return (float(v) - 32.0) * 5.0 / 9.0 if v is not None else None
-        lower_c = _f_to_c(low)
-        upper_c = _f_to_c(high)
-        center_c = (
-            (upper_c - 5.0 / 9.0) if lower_c is None and upper_c is not None
-            else (lower_c + 5.0 / 9.0) if upper_c is None and lower_c is not None
-            else ((lower_c + upper_c) / 2.0) if lower_c is not None and upper_c is not None
-            else 0.0
-        )
-        bin_topology.append({
-            "bin_id": label, "lower_c": lower_c, "upper_c": upper_c, "center_c": center_c,
-            "display_unit": "F", "settlement_unit": "F", "rounding_rule": "wmo_half_up",
-            "settlement_step_c": 5.0 / 9.0,
-        })
+    # Build the exact persisted topology from the market rows, then bind it with
+    # the same canonical hash the current authority validator verifies.
+    bin_topology = _current_market_bin_topology_payload(
+        conn,
+        city="Chicago",
+        target_date="2026-05-25",
+        temperature_metric="high",
+    )
+    assert bin_topology
+    topo_hash = stable_hash(bin_topology)
 
     # q_json: live fixture intentionally creates a positive YES edge for the
     # selected first bin while leaving the sibling available for full-family proof.
@@ -1153,13 +1137,22 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
         q_ucb = {b: max(v, 0.25) for b, v in q_point.items()}
         q_ucb[bin_ids[0]] = 0.86
 
+    q_bootstrap_samples_by_bin = {bin_id: [q_point[bin_id]] * 200 for bin_id in bin_ids}
+    family_id = weather_family_id(
+        city="Chicago", target_date="2026-05-25", metric="high"
+    )
+
     provenance = {
         "replacement_q_mode": "FUSED_NORMAL_FULL",
         "bin_topology_hash": topo_hash,
         "bin_topology": bin_topology,
         "q_shape": "fused_normal_direct",
         "q_lcb_basis": "fused_center_bootstrap_p05",
+        "q_ucb_json_role": "fused_center_bootstrap_ucb",
         "q_lcb_bootstrap_draws": 200,
+        "q_bootstrap_samples_basis": "global_simplex_v1",
+        "q_bootstrap_samples_by_bin": q_bootstrap_samples_by_bin,
+        "q_bootstrap_samples_hash": stable_hash(q_bootstrap_samples_by_bin),
         "anchor_value_c": 21.1,
         "bayes_precision_fusion": {
             "method": "T2_BAYES",
@@ -1288,6 +1281,7 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
             posterior_identity_hash, dependency_hash, posterior_config_hash,
             posterior_method,
             source_cycle_time, source_available_at, computed_at,
+            family_id,
             provenance_json, runtime_layer
         ) VALUES (
             ?, ?, ?,
@@ -1301,6 +1295,7 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
             'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
             'openmeteo_ecmwf_ifs9_bayes_fusion',
             '2026-05-24T00:00:00+00:00', '2026-05-24T08:10:00+00:00', '2026-05-24T08:11:00+00:00',
+            ?,
             ?, ?
         )
         """,
@@ -1315,6 +1310,7 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
             q_ucb_json,
             topo_hash,
             posterior_identity_hash,
+            family_id,
             provenance_json,
             LIVE_RUNTIME_LAYER,
         ),
@@ -1633,6 +1629,22 @@ def test_runtime_receipt_uses_event_bound_final_intent_contract():
     assert receipt.decision_proof_bundle.quote_feasibility.payload["quote_depth_hash"]
     assert "receipt_projection" not in receipt.decision_proof_bundle.fdr.payload
     assert receipt.decision_proof_bundle.quote_feasibility.payload["execution_price_type"] == "ExecutionPrice"
+
+
+def test_missing_selection_calibrator_artifact_blocks_replacement_entry(monkeypatch):
+    """The shared fixture cannot turn an absent live calibrator into a pass."""
+    from src.decision import selection_calibrator as sc
+
+    monkeypatch.setattr(sc, "load_artifact", lambda: None)
+    sc.reset_artifact_cache()
+
+    receipt = _receipt(
+        _bound_replacement_forecast_event(),
+        _trade_conn_with_live_replacement_taker_snapshot(),
+    )
+
+    assert receipt.proof_accepted is False
+    assert receipt.reason == "QKERNEL_SPINE_NO_TRADE:NO_POSITIVE_EDGE_CANDIDATE"
 
 
 def test_runtime_receipt_does_not_fit_platt_models(monkeypatch):
@@ -3421,6 +3433,84 @@ def test_top_ask_without_depth_does_not_create_fillable_quote(monkeypatch):
     assert receipt.submitted is False
     assert receipt.reason.startswith("EVENT_BOUND_SELECTED_CANDIDATE_MISSING:")
     assert receipt.proof_accepted is False
+
+
+@pytest.mark.parametrize(
+    ("direction", "token_id", "expected_price"),
+    (
+        ("buy_yes", "yes-1", 0.40),
+        ("buy_no", "no-1", 0.80),
+    ),
+)
+def test_execution_price_reads_the_native_yes_and_no_snapshot_side(
+    direction, token_id, expected_price
+):
+    """Both native sides must reach the common price extraction boundary."""
+    from src.engine.event_reactor_adapter import _execution_price_from_snapshot
+
+    conn = _trade_conn_with_snapshot()
+    row = dict(
+        conn.execute(
+            "SELECT * FROM executable_market_snapshots "
+            "WHERE condition_id = 'condition-1' "
+            "AND selected_outcome_token_id = ?",
+            (token_id,),
+        ).fetchone()
+    )
+
+    execution_price, _p_fill_lcb, _c_cost_95pct = _execution_price_from_snapshot(
+        row,
+        selected_token_id=token_id,
+        direction=direction,
+        complementary_top_bid=0.39 if direction == "buy_no" else None,
+    )
+
+    assert execution_price.value == expected_price
+
+
+@pytest.mark.parametrize("ask,bid,in_band", (("0.40", "0.39", True), ("0.96", "0.95", False)))
+def test_yes_quote_reaches_common_price_boundary(monkeypatch, ask, bid, in_band):
+    """YES reaches pricing, and out-of-band prices still cannot authorize it."""
+    import src.engine.event_reactor_adapter as adapter
+
+    # Pricing consumes an already-computed belief; its boundary must not depend
+    # on which source-clock revision produced that belief.
+    monkeypatch.setattr(
+        adapter,
+        "_live_yes_probabilities",
+        lambda **_kwargs: (
+            {"condition-1": 0.8, "condition-2": 0.2},
+            {("condition-1", "buy_yes"): 0.72, ("condition-1", "buy_no"): 0.1,
+             ("condition-2", "buy_yes"): 0.1, ("condition-2", "buy_no"): 0.72},
+            {(c, d): 0.01 for c in ("condition-1", "condition-2") for d in ("buy_yes", "buy_no")},
+            {(c, d): True for c in ("condition-1", "condition-2") for d in ("buy_yes", "buy_no")},
+            {"p_cal_vector_hash": "pricing-test-q", "p_live_vector_hash": "pricing-test-q"},
+        ),
+    )
+    event = _bound_forecast_event()
+    conn = _trade_conn_with_snapshot(
+        selected_ask=ask,
+        selected_bid=bid,
+        snapshot_condition_count=1,
+        include_no_snapshot=False,
+    )
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+    assert receipt.opportunity_book is not None, receipt.reason
+    yes_candidate = next(
+        candidate
+        for candidate in receipt.opportunity_book["candidates"]
+        if candidate["condition_id"] == "condition-1"
+        and candidate["direction"] == "buy_yes"
+    )
+
+    if in_band:
+        assert yes_candidate["execution_price"] is not None
+    else:
+        assert yes_candidate["execution_price"] is None
+        assert yes_candidate["missing_reason"].startswith(
+            "LIVE_UNIT_PRICE_OUT_OF_BOUNDS:"
+        )
 
 
 

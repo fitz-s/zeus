@@ -190,6 +190,26 @@ log-wealth objective, never on a side-specific probability recipe.
 
 #### Day0 conditional remaining-path operator
 
+The current shared-carrier numerical operator is
+`extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2`. Its point q
+integrates the existing Gaussian mixture through the physical max/min and the
+canonical settlement preimages, including the observed-boundary atom. It changes
+neither the physical distribution nor its fitted parameters. Confidence draws
+use the same canonical settlement semantics as the point computation; the V2
+content identity binds the operator and its semantic confidence-draw identity.
+The legacy `n_point` parameter affects that confidence seed, but not the
+analytic point expectation.
+
+The shared-carrier V1 is retained only for explicit, immutable remote historical replay, including
+its original full-input identity and half-up sampler. Current ENTRY and
+held-position belief require a complete V2 carrier declaration; ordinary
+non-carrier forecasts are unaffected. Old, partial or unknown carrier versions
+are uncovered in the existing family coverage/seed loop and are rebuilt from
+causal inputs. Valid V2 materialization clears this family-scoped condition.
+Unavailable inputs preserve DATA_DEGRADED/read-only monitoring; version migration
+does not authorize liquidation or rewriting historical receipts. Posterior
+identity binds both carrier operator and content, even when numerical q coincides.
+
 Once a causal target-day observation and complete unresolved-hour provider
 trajectories exist, Day0 point q is a different conditional random variable from
 the source-clock full-day extreme:

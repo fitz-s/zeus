@@ -275,6 +275,8 @@ def tradeable_grade_coverage_sql(
     the table alias with a trailing dot already applied by the caller's existing
     convention (for example, ``"p."``).
     """
+    from src.data.day0_hourly_vectors import DAY0_REMAINING_CARRIER_OPERATOR_V2
+
     cols = set(posterior_columns)
     fragments: list[str] = []
     if "q_lcb_json" in cols:
@@ -316,6 +318,19 @@ def tradeable_grade_coverage_sql(
     revision_value = (
         f"json_extract({provenance_expr}, '{shape_path}.semantics_revision')"
     )
+    carrier_identity_type = (
+        f"json_type({provenance_expr}, '$.day0_remaining_carrier_content_identity')"
+    )
+    carrier_identity_value = (
+        f"json_extract({provenance_expr}, '$.day0_remaining_carrier_content_identity')"
+    )
+    carrier_operator_type = (
+        f"json_type({provenance_expr}, '$.day0_remaining_carrier_operator')"
+    )
+    carrier_operator_value = (
+        f"json_extract({provenance_expr}, '$.day0_remaining_carrier_operator')"
+    )
+    carrier_shape_value = f"json_extract({provenance_expr}, '$.q_shape')"
     ens_cycle_value = (
         f"json_extract({provenance_expr}, '{shape_path}.source_cycle_time')"
     )
@@ -344,6 +359,26 @@ def tradeable_grade_coverage_sql(
         f"({stale_type} IS NULL OR {stale_type} = 'false') AND "
         f"{revision_value} = "
         f"'{CURRENT_EVIDENCE_SEMANTICS_REVISION}')"
+    )
+    # SCOPE: the exact city/date/metric family represented by this posterior.
+    # DRAIN: the existing seed/materialization loop rematerializes declared
+    # shared carriers whose pair is V1, unknown, or partial. RESET: both
+    # non-empty identity fields are present and the operator is current V2.
+    # The two exact shared-carrier q_shape values are producer declarations too;
+    # ordinary rows, including fused residual rows without either key, remain
+    # covered as before.
+    fragments.append(
+        "AND (("
+        f"{carrier_identity_type} IS NULL AND {carrier_operator_type} IS NULL AND "
+        f"COALESCE({carrier_shape_value}, '') NOT IN ("
+        "'day0_remaining_shared_carrier_v1', "
+        "'day0_remaining_shared_carrier_v2')"
+        ") OR ("
+        f"{carrier_identity_type} = 'text' AND "
+        f"length(trim(COALESCE({carrier_identity_value}, ''))) > 0 AND "
+        f"{carrier_operator_type} = 'text' AND "
+        f"{carrier_operator_value} = '{DAY0_REMAINING_CARRIER_OPERATOR_V2}'"
+        "))"
     )
     return "\n              ".join(fragments)
 

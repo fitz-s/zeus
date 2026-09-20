@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-08-27
-# Lifecycle: created=2026-06-06; last_reviewed=2026-08-23; last_reused=2026-08-23
+# Last reused/audited: 2026-09-20
+# Lifecycle: created=2026-06-06; last_reviewed=2026-09-20; last_reused=2026-09-20
 # Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + Bayes-fusion replacement live layer.
 # Reuse: Run before changing replacement forecast live/experiment write path.
 # Authority basis: Operator-directed replacement forecast simple-switch readiness.
@@ -8,7 +8,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import sqlite3
 import subprocess
 import sys
@@ -322,6 +324,89 @@ def _request(
         day0_observed_extreme_unit="C" if day0_observed_extreme_c is not None else None,
         day0_observation_state=day0_observation_state,
     )
+
+
+def test_posterior_identity_binds_day0_carrier_operator_and_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Equal q values must not alias carrier certificates across migrations."""
+
+    conn = _conn()
+    request = _request(anchor_artifact_id=17)
+    monkeypatch.setattr(
+        materializer_mod, "emit_materialization_latency", lambda **kwargs: None
+    )
+
+    def result(
+        *, identity: str | None = None, operator: str | None = None
+    ) -> SimpleNamespace:
+        provenance = {}
+        if identity is not None:
+            provenance["day0_remaining_carrier_content_identity"] = identity
+        if operator is not None:
+            provenance["day0_remaining_carrier_operator"] = operator
+        return SimpleNamespace(
+            live_eligible=True,
+            q={"cold": 0.2, "warm": 0.8},
+            q_lcb_map={"cold": 0.1, "warm": 0.7},
+            q_ucb_map={"cold": 0.3, "warm": 0.9},
+            data_version="high",
+            source_cycle_time="2026-06-06T00:00:00+00:00",
+            available_at="2026-06-06T03:00:00+00:00",
+            computed_at="2026-06-06T04:00:00+00:00",
+            runtime_layer=LIVE_RUNTIME_LAYER,
+            dependency_payload={"baseline_b0": "b0-run"},
+            dependency_hash="dependency-hash",
+            bin_topology_hash="topology-hash",
+            posterior_config_hash="config-hash",
+            family_id="Shanghai:2026-06-07:high:family",
+            provenance_payload=provenance,
+        )
+
+    ordinary_id = materializer_mod._write_posterior_row(
+        conn, request, metric="high", anchor_id=17, result=result()
+    )
+    assert materializer_mod._write_posterior_row(
+        conn, request, metric="high", anchor_id=17, result=result()
+    ) == ordinary_id
+
+    v1_id = materializer_mod._write_posterior_row(
+        conn,
+        request,
+        metric="high",
+        anchor_id=17,
+        result=result(
+            identity="carrier-content-v1",
+            operator="extreme_observed_then_noisy_future_v1",
+        ),
+    )
+    v2_id = materializer_mod._write_posterior_row(
+        conn,
+        request,
+        metric="high",
+        anchor_id=17,
+        result=result(
+            identity="carrier-content-v1",
+            operator="extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+        ),
+    )
+    v2_content_id = materializer_mod._write_posterior_row(
+        conn,
+        request,
+        metric="high",
+        anchor_id=17,
+        result=result(
+            identity="carrier-content-v2",
+            operator="extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+        ),
+    )
+
+    assert len({ordinary_id, v1_id, v2_id, v2_content_id}) == 4
+    assert conn.execute("SELECT count(*) FROM forecast_posteriors").fetchone()[0] == 4
+    hashes = conn.execute(
+        "SELECT posterior_identity_hash FROM forecast_posteriors ORDER BY posterior_id"
+    ).fetchall()
+    assert len({row[0] for row in hashes}) == 4
 
 
 @pytest.mark.parametrize("frozen_two_source_scheme", (False, True))
@@ -2117,7 +2202,15 @@ def test_materializer_hko_provisional_observation_does_not_truncate_support(
     assert q["cool"] > 0.0
     assert q_lcb["cool"] >= 0.0
     assert provenance["day0_provisional_observation"]["support_truncation"] is False
-    assert provenance["q_shape"] == "fused_normal_direct"
+    assert provenance["q_shape"] == "day0_remaining_shared_carrier_v2"
+    assert provenance["day0_remaining_carrier_operator"] == (
+        "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2"
+    )
+    assert provenance["day0_remaining_carrier_content_identity"]
+    assert provenance["day0_remaining_carrier_sample_count"] == 500
+    assert provenance["day0_remaining_carrier_q"] == pytest.approx(
+        [q[item.bin_id] for item in request.bins]
+    )
     assert "day0_conditioning" not in provenance
     assert provenance["day0_provisional_observation"] == {
         "active": True,
@@ -2146,6 +2239,220 @@ def test_materializer_hko_provisional_observation_does_not_truncate_support(
         (result.posterior_id, revised.posterior_id),
     ).fetchall()
     assert len({row["posterior_config_hash"] for row in hashes}) == 2
+
+
+def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The persisted Chicago carrier must use F members, boundary, bins, and sigma."""
+
+    from zoneinfo import ZoneInfo
+
+    from src.config import runtime_cities_by_name
+    from src.contracts.settlement_semantics import SettlementSemantics
+    from src.data.day0_hourly_vectors import Day0HourlyVector
+    from src.signal.ensemble_signal import sigma_instrument_for_city
+
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    city = runtime_cities_by_name()["Chicago"]
+    semantics = SettlementSemantics.for_city(city)
+    assert semantics.measurement_unit == "F"
+    assert semantics.rounding_rule == "wmo_half_up"
+
+    target = date(2026, 6, 7)
+    computed_at = datetime(2026, 6, 7, 18, tzinfo=UTC)
+    native_members_f = (84.0, 88.0)
+
+    def celsius(value_f: float) -> float:
+        return (value_f - 32.0) * 5.0 / 9.0
+
+    native_boundary_f = 86.0
+    native_bins = (
+        ("under_85", None, 84.0),
+        ("85", 85.0, 85.0),
+        ("86", 86.0, 86.0),
+        ("87", 87.0, 87.0),
+        ("88_plus", 88.0, None),
+    )
+    member_values_c = tuple(celsius(value) for value in native_members_f)
+    local_tz = ZoneInfo("America/Chicago")
+    local_hours = tuple(
+        datetime(2026, 6, 7, hour, tzinfo=local_tz) for hour in range(24)
+    )
+    anchor = OpenMeteoIfs9LocalDayAnchor(
+        city_timezone="America/Chicago",
+        target_local_date=target,
+        high_c=31.0,
+        low_c=22.0,
+        sample_count=24,
+        contributing_local_times=local_hours,
+        contributing_valid_times_utc=tuple(
+            item.astimezone(UTC) for item in local_hours
+        ),
+        source_cycle_time=datetime(2026, 6, 7, 6, tzinfo=UTC),
+    )
+    guard = _precision_guard(
+        city="Chicago",
+        station_id="KORD",
+        city_lat=41.8781,
+        city_lon=-87.6298,
+        station_lat=41.9742,
+        station_lon=-87.9073,
+        requested_lat=41.9742,
+        requested_lon=-87.9073,
+        local_day_start_utc=datetime(2026, 6, 7, 5, tzinfo=UTC),
+        local_day_end_utc=datetime(2026, 6, 8, 5, tzinfo=UTC),
+        timezone_name="America/Chicago",
+        target_local_date=target,
+    )
+    request = ReplacementForecastMaterializeRequest(
+        city="Chicago",
+        city_id="Chicago",
+        city_timezone="America/Chicago",
+        target_date=target,
+        temperature_metric="high",
+        baseline_source_run_id="b0-chicago",
+        baseline_data_version="ecmwf_opendata_mx2t3_local_calendar_day_max",
+        baseline_source_available_at=datetime(2026, 6, 7, 12, tzinfo=UTC),
+        openmeteo_anchor=anchor,
+        openmeteo_source_run_id="om-chicago",
+        openmeteo_source_available_at=datetime(2026, 6, 7, 12, 10, tzinfo=UTC),
+        bins=tuple(
+            _TemperatureBin(
+                bin_id,
+                lower_c=None if lower_f is None else celsius(lower_f),
+                upper_c=None if upper_f is None else celsius(upper_f),
+                display_unit="F",
+                settlement_unit="F",
+            )
+            for bin_id, lower_f, upper_f in native_bins
+        ),
+        source_cycle_time=datetime(2026, 6, 7, 6, tzinfo=UTC),
+        computed_at=computed_at,
+        expires_at=datetime(2026, 6, 7, 20, tzinfo=UTC),
+        openmeteo_precision_guard=guard,
+        day0_observed_extreme_c=celsius(native_boundary_f),
+        day0_observed_extreme_source="aviationweather_metar",
+        day0_observed_extreme_observation_time=datetime(
+            2026, 6, 7, 17, tzinfo=UTC
+        ).isoformat(),
+        day0_observed_extreme_sample_count=1,
+        day0_observed_extreme_unit="C",
+    )
+    times = tuple(f"{target.isoformat()}T{hour:02d}:00" for hour in range(24))
+    vectors = [
+        Day0HourlyVector(
+            model=model,
+            city="Chicago",
+            target_date=target.isoformat(),
+            timezone_name="America/Chicago",
+            captured_at="2026-06-07T17:30:00+00:00",
+            times=times,
+            temps_c=(value_c,) * 24,
+        )
+        for model, value_c in zip(("ecmwf_ifs", "icon_global"), member_values_c)
+    ]
+    likelihood_identity = {
+        "semantics": "same_station_preliminary_report_survival_likelihood_jeffreys_prior_only_v1",
+        "cutoff": computed_at.isoformat(),
+        "successes": [],
+        "failures": [],
+        "unconfirmed_awc_ids": [],
+        "alpha": 0.5,
+        "beta": 0.5,
+        "station_id": "KORD",
+        "source_channel_pair": {
+            "awc": "aviationweather_metar",
+            "ogimet": "ogimet_metar_kord",
+        },
+    }
+    likelihood = {
+        **likelihood_identity,
+        "identity_hash": hashlib.sha256(
+            json.dumps(
+                likelihood_identity, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest(),
+        "boundary_survival_probability": 0.5,
+    }
+    monkeypatch.setattr(
+        "src.data.day0_hourly_vectors.day0_hourly_models_for_city",
+        lambda _city: ["ecmwf_ifs", "icon_global"],
+    )
+    monkeypatch.setattr(
+        "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
+        lambda **_kwargs: vectors,
+    )
+    monkeypatch.setattr(
+        "src.data.day0_observation_reader.same_station_preliminary_report_survival_likelihood",
+        lambda *_args, **_kwargs: likelihood,
+    )
+    monkeypatch.setattr(
+        "src.data.day0_fast_obs.build_fast_station_residual_likelihood",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = materialize_replacement_forecast_live(conn, request)
+
+    assert result.ok is True
+    row = conn.execute(
+        "SELECT q_json, provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+        (result.posterior_id,),
+    ).fetchone()
+    q = json.loads(row["q_json"])
+    provenance = json.loads(row["provenance_json"])
+    native_path_sigma_f = math.sqrt(
+        sum(
+            (value - sum(native_members_f) / len(native_members_f)) ** 2
+            for value in native_members_f
+        )
+        / len(native_members_f)
+    )
+    instrument_sigma = sigma_instrument_for_city(city)
+    assert instrument_sigma.unit == "F"
+    native_sigma_f = math.hypot(native_path_sigma_f, instrument_sigma.value)
+
+    def normal_cdf(value: float, mean: float) -> float:
+        return 0.5 * (1.0 + math.erf((value - mean) / (native_sigma_f * math.sqrt(2.0))))
+
+    def maximum_cdf(value: float, mean: float, boundary: float | None) -> float:
+        if boundary is not None and value < boundary:
+            return 0.0
+        return normal_cdf(value, mean)
+
+    expected = {}
+    for bin_id, lower_f, upper_f in native_bins:
+        lower_edge = -math.inf if lower_f is None else lower_f - 0.5
+        upper_edge = math.inf if upper_f is None else upper_f + 0.5
+        probability = 0.0
+        for mean in native_members_f:
+            for boundary, weight in ((native_boundary_f, 0.5), (None, 0.5)):
+                lower_cdf = 0.0 if math.isinf(lower_edge) else maximum_cdf(lower_edge, mean, boundary)
+                upper_cdf = 1.0 if math.isinf(upper_edge) else maximum_cdf(upper_edge, mean, boundary)
+                probability += weight * (upper_cdf - lower_cdf) / len(native_members_f)
+        expected[bin_id] = probability
+
+    assert set(q) == set(expected)
+    assert all(math.isfinite(value) and value >= 0.0 for value in q.values())
+    assert sum(q.values()) == pytest.approx(1.0)
+    assert q == pytest.approx(expected, abs=1e-12)
+    assert provenance["day0_remaining_carrier_future_extremes_c"] == pytest.approx(
+        member_values_c
+    )
+    assert provenance["day0_remaining_carrier_path_error_sigma_c"] == pytest.approx(
+        native_path_sigma_f * 5.0 / 9.0
+    )
+    assert provenance["q_shape"] == "day0_remaining_shared_carrier_v2"
+    assert provenance["day0_remaining_carrier_operator"] == (
+        "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2"
+    )
+    assert provenance["day0_remaining_carrier_content_identity"]
+    assert provenance["day0_remaining_carrier_sample_count"] == 500
+    assert all(
+        sum(sample) == pytest.approx(1.0)
+        for sample in provenance["day0_remaining_carrier_probability_samples"]
+    )
 
 
 def test_wu_fast_residual_is_provisional_while_direct_noaa_fast_is_absorbing() -> None:
