@@ -16,7 +16,7 @@
       "location_name": "松山區",
       "element_name": "最高溫度",
       "max_lead_days": 7,
-      "settlement_aligned": true,
+      "settlement_aligned": false,
       "settlement_source_type": "wunderground_rcss_metar",
       "auth": "env CWA_API_KEY (forecast-live plist) or gitignored config/cwa_secret.json — NEVER committed",
       "notes": "Retained only to interpret already-persisted F-D0047-063 raw evidence. Its Songshan township representative point (25.051608, 121.568983) differs from the RCSS settlement sensor (25.067244, 121.552822), and its 06:00-18:00 MaxT is not a full Asia/Taipei calendar-day maximum. It is never an entry source; F-D0047-061 complete hourly Temperature is the live replacement.",
