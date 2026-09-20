@@ -1447,6 +1447,128 @@ def _candidate_accrual_market_scopes(
     )
 
 
+def _candidate_canonical_single_runs_fallbacks(
+    forecast_db: Path,
+    *,
+    models: Sequence[str],
+    updates_by_model: Mapping[str, object],
+    now: datetime,
+) -> dict[str, tuple[datetime, datetime]]:
+    """Recover a cadence-valid candidate run from canonical successful single-runs rows.
+
+    A model-updates feed can advance hourly while the single-runs archive exposes
+    only a coarser cadence.  Canonical rows prove that exact archived run was
+    previously requestable; they do not prove a new off-grid metadata run exists.
+    """
+    from src.data.bayes_precision_fusion_download import (  # noqa: PLC0415
+        MODEL_PUBLISH_CYCLE_HOURS,
+        OPENMETEO_MODEL_IDS,
+        OPENMETEO_PROVIDER,
+        SINGLE_RUNS_SOURCE_FAMILY,
+    )
+    from src.state.db import _connect_read_only  # noqa: PLC0415
+
+    expected_runs: dict[str, datetime] = {}
+    for model in models:
+        update = updates_by_model.get(model)
+        run = getattr(update, "last_run_initialisation_time", None)
+        available = getattr(update, "last_run_availability_time", None)
+        if not isinstance(run, datetime) or not isinstance(available, datetime):
+            continue
+        if run.utcoffset() is None or available.utcoffset() is None:
+            continue
+        if available.astimezone(timezone.utc) > now:
+            continue
+        cadence_hours = tuple(sorted(MODEL_PUBLISH_CYCLE_HOURS.get(model, ())))
+        if not cadence_hours:
+            continue
+        run_utc = run.astimezone(timezone.utc)
+        prior_hours = tuple(hour for hour in cadence_hours if hour <= run_utc.hour)
+        if prior_hours:
+            expected_runs[model] = run_utc.replace(
+                hour=prior_hours[-1], minute=0, second=0, microsecond=0
+            )
+        else:
+            expected_runs[model] = (
+                run_utc.replace(hour=cadence_hours[-1], minute=0, second=0, microsecond=0)
+                - timedelta(days=1)
+            )
+    if not expected_runs:
+        return {}
+
+    placeholders = ", ".join("?" for _ in expected_runs)
+    conn = _connect_read_only(forecast_db)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT model, source_cycle_time, source_available_at,
+                   source_id, source_family, product_id, provider, model_name,
+                   request_params_json, request_url_hash, model_domain_hash,
+                   endpoint_mode, forecast_value_c
+            FROM raw_model_forecasts
+            WHERE model IN ({placeholders})
+              AND endpoint = 'single_runs'
+              AND coverage_status = 'COVERED'
+              AND forecast_value_c IS NOT NULL
+            """,
+            tuple(expected_runs),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    accepted: dict[str, list[datetime]] = {}
+    for row in rows:
+        (
+            model,
+            raw_cycle,
+            raw_available,
+            source_id,
+            source_family,
+            product_id,
+            provider,
+            model_name,
+            request_params_json,
+            request_url_hash,
+            model_domain_hash,
+            endpoint_mode,
+            raw_value,
+        ) = row
+        model = str(model)
+        try:
+            cycle = datetime.fromisoformat(str(raw_cycle).replace("Z", "+00:00"))
+            available = datetime.fromisoformat(
+                str(raw_available).replace("Z", "+00:00")
+            )
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if (
+            cycle.utcoffset() is None
+            or available.utcoffset() is None
+            or not math.isfinite(value)
+            or cycle.astimezone(timezone.utc) != expected_runs[model]
+        ):
+            continue
+        expected_model_name = OPENMETEO_MODEL_IDS.get(model, model)
+        if (
+            str(source_id) != f"{model}_single_runs"
+            or str(source_family) != SINGLE_RUNS_SOURCE_FAMILY
+            or str(product_id) != f"{expected_model_name}::single_runs"
+            or str(provider) != OPENMETEO_PROVIDER
+            or str(model_name) != expected_model_name
+            or str(endpoint_mode) != "single_runs"
+            or not str(request_params_json)
+            or not str(request_url_hash)
+            or not str(model_domain_hash)
+        ):
+            continue
+        accepted.setdefault(model, []).append(available.astimezone(timezone.utc))
+    return {
+        model: (expected_runs[model], max(available_times))
+        for model, available_times in accepted.items()
+    }
+
+
 def _download_bayes_precision_fusion_candidate_accrual_if_needed(
     cfg: dict[str, object],
 ) -> dict[str, object] | None:
@@ -1506,6 +1628,7 @@ def _download_bayes_precision_fusion_candidate_accrual_if_needed(
                 "max_wall_clock_seconds": _BPF_CANDIDATE_ACCRUAL_MAX_WALL_CLOCK_SECONDS,
             }
         now = datetime.now(timezone.utc)
+        updates_by_model = {str(update.model): update for update in updates}
         frozen_source_runs = {
             update.model: (
                 update.last_run_initialisation_time.astimezone(timezone.utc),
@@ -1519,6 +1642,15 @@ def _download_bayes_precision_fusion_candidate_accrual_if_needed(
                 update.last_run_initialisation_time.astimezone(timezone.utc).hour,
             )
         }
+        fallback_models = tuple(model for model in models if model not in frozen_source_runs)
+        frozen_source_runs.update(
+            _candidate_canonical_single_runs_fallbacks(
+                Path(str(cfg["forecast_db"])),
+                models=fallback_models,
+                updates_by_model=updates_by_model,
+                now=now,
+            )
+        )
         if not frozen_source_runs:
             return {
                 "status": "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_NO_PUBLIC_RUN",

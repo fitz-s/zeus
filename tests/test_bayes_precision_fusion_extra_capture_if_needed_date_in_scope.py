@@ -585,6 +585,117 @@ def test_candidate_accrual_scope_uses_each_city_local_day_at_utc_midnight(
     )
 
 
+def test_candidate_canonical_fallback_uses_offgrid_prior_served_run(monkeypatch, tmp_path) -> None:
+    """A 13Z metadata update may reuse only canonical 12Z single-runs evidence."""
+    from src.data.bayes_precision_fusion_download import (
+        OPENMETEO_MODEL_IDS,
+        OPENMETEO_PROVIDER,
+        SINGLE_RUNS_SOURCE_FAMILY,
+    )
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+
+    forecast_db = tmp_path / "forecasts.db"
+    model = "met_nordic"
+    model_name = OPENMETEO_MODEL_IDS[model]
+    run = datetime(2026, 9, 20, 12, tzinfo=timezone.utc)
+    with sqlite3.connect(str(forecast_db)) as conn:
+        conn.execute(
+            """
+            CREATE TABLE raw_model_forecasts (
+                model TEXT, source_cycle_time TEXT, source_available_at TEXT,
+                source_id TEXT, source_family TEXT, product_id TEXT, provider TEXT,
+                model_name TEXT, request_params_json TEXT, request_url_hash TEXT,
+                model_domain_hash TEXT, endpoint_mode TEXT, forecast_value_c REAL,
+                endpoint TEXT, coverage_status TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO raw_model_forecasts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'single_runs', 'COVERED')",
+            (
+                model,
+                run.isoformat(),
+                datetime(2026, 9, 20, 12, 20, tzinfo=timezone.utc).isoformat(),
+                f"{model}_single_runs",
+                SINGLE_RUNS_SOURCE_FAMILY,
+                f"{model_name}::single_runs",
+                OPENMETEO_PROVIDER,
+                model_name,
+                '{"latitude":60.1}',
+                "request-hash",
+                "domain-hash",
+                "single_runs",
+                16.6,
+            ),
+        )
+    update = OpenMeteoModelUpdate(
+        model=model,
+        last_run_initialisation_time=datetime(2026, 9, 20, 13, tzinfo=timezone.utc),
+        last_run_availability_time=datetime(2026, 9, 20, 13, 5, tzinfo=timezone.utc),
+        update_interval_seconds=3600,
+    )
+
+    fallback = production._candidate_canonical_single_runs_fallbacks(
+        forecast_db,
+        models=(model,),
+        updates_by_model={model: update},
+        now=datetime(2026, 9, 20, 13, 30, tzinfo=timezone.utc),
+    )
+
+    assert fallback == {
+        model: (run, datetime(2026, 9, 20, 12, 20, tzinfo=timezone.utc))
+    }
+
+
+def test_candidate_offgrid_metadata_passes_canonical_run_to_parser(monkeypatch, tmp_path) -> None:
+    """Fallback selects an exact run only; the downloader must fetch the target anew."""
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+
+    model = "met_nordic"
+    prior_run = datetime(2026, 9, 20, 12, tzinfo=timezone.utc)
+    prior_available = datetime(2026, 9, 20, 12, 20, tzinfo=timezone.utc)
+    monkeypatch.setattr(dl_mod, "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS", (model,))
+    monkeypatch.setattr(
+        "src.strategy.live_inference.source_clock_vnext.source_publicly_usable_at",
+        lambda _run: datetime(1970, 1, 1, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        "src.data.openmeteo_model_updates.fetch_model_updates",
+        lambda _models, **_kwargs: (
+            OpenMeteoModelUpdate(
+                model=model,
+                last_run_initialisation_time=datetime(2026, 9, 20, 13, tzinfo=timezone.utc),
+                last_run_availability_time=datetime(2026, 9, 20, 13, 5, tzinfo=timezone.utc),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        production,
+        "_candidate_canonical_single_runs_fallbacks",
+        lambda *_args, **_kwargs: {model: (prior_run, prior_available)},
+    )
+    monkeypatch.setattr(
+        production,
+        "_candidate_accrual_market_scopes",
+        lambda *_args, **_kwargs: (("Helsinki", "2026-09-21", "high"),),
+    )
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        production,
+        "_download_bayes_precision_fusion_extra_raw_inputs_if_needed",
+        lambda _cfg, **kwargs: calls.append(kwargs)
+        or {"status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"},
+    )
+
+    report = production._download_bayes_precision_fusion_candidate_accrual_if_needed(
+        {"forecast_db": tmp_path / "forecasts.db"}
+    )
+
+    assert report is not None
+    assert calls[0]["frozen_source_runs"] == {model: (prior_run, prior_available)}
+    assert calls[0]["models"] == (model,)
+
+
 def test_candidate_accrual_empty_market_scope_still_reaches_held_union(
     monkeypatch,
     tmp_path,
