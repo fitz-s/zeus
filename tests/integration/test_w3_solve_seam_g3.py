@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-09-16
+# Last reused/audited: 2026-09-19
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -43549,6 +43549,181 @@ def test_day0_saturated_no_is_removed_before_joint_kelly_and_yes_wins():
     blocked = [row for row in selected.decision.candidate_evaluations if row.side == "NO"]
     assert blocked and all(row.rejection_reason == "DAY0_STATISTICAL_CERTAINTY_UNSUPPORTED" for row in blocked)
     assert selected.decision.expected_growth.expected_ev_usd > 0
+
+
+def test_day0_nowcast_rejects_the_current_overpriced_proposal_and_falls_through(monkeypatch):
+    event_id, prepared, _payload, kwargs = _saturated_day0_auction_inputs()
+    witness = prepared.probability_witness
+    context = bridge.Day0DiurnalNowcastContext(
+        probability_witness_identity=witness.witness_identity,
+        probability_authority="day0_remaining_day_global_probability_v1",
+        q_source="day0_remaining_day",
+        city_name="Manila",
+        city_timezone="Asia/Manila",
+        settlement_unit="C",
+        metric="high",
+        running_extreme=32.0,
+        carrier_future_extremes_c=(),
+        candidate_bindings=(
+            bridge.Day0DiurnalNowcastCandidateBinding(
+                bin_id="bin-0",
+                condition_id="condition-0",
+                side="NO",
+                token_id="no-0",
+                bin_label="Will the highest temperature in Manila be 32°C on July 2?",
+            ),
+        ),
+    )
+    prepared = replace(prepared, day0_diurnal_nowcast_context=context)
+    monkeypatch.setattr(
+        era,
+        "_day0_diurnal_nowcast_verdict",
+        lambda **_kwargs: SimpleNamespace(q_held=0.05),
+    )
+
+    selected = select_prepared_global_auction({event_id: prepared}, **kwargs)
+
+    assert selected.decision.candidate.side == "YES"
+    rejected = [
+        row for row in selected.decision.candidate_evaluations
+        if row.token_id == "no-0"
+    ]
+    assert rejected
+    assert all(row.rejection_reason == "DAY0_DIURNAL_NOWCAST_VETO" for row in rejected)
+
+
+def test_day0_nowcast_allows_the_same_token_to_reenter_on_a_cheaper_next_cut(monkeypatch):
+    event_id, prepared, _payload, kwargs = _saturated_day0_auction_inputs()
+    witness = prepared.probability_witness
+    context = bridge.Day0DiurnalNowcastContext(
+        probability_witness_identity=witness.witness_identity,
+        probability_authority="day0_remaining_day_global_probability_v1",
+        q_source="day0_remaining_day",
+        city_name="Manila",
+        city_timezone="Asia/Manila",
+        settlement_unit="C",
+        metric="high",
+        running_extreme=32.0,
+        carrier_future_extremes_c=(),
+        candidate_bindings=(
+            bridge.Day0DiurnalNowcastCandidateBinding(
+                bin_id="bin-0",
+                condition_id="condition-0",
+                side="NO",
+                token_id="no-0",
+                bin_label="Will the highest temperature in Manila be 32°C on July 2?",
+            ),
+        ),
+    )
+    prepared = replace(prepared, day0_diurnal_nowcast_context=context)
+    monkeypatch.setattr(
+        era,
+        "_day0_diurnal_nowcast_verdict",
+        lambda **_kwargs: SimpleNamespace(q_held=0.15),
+    )
+    first_assets = tuple(
+        replace(
+            asset,
+            curve=replace(
+                asset.curve,
+                book_hash="hash-nowcast-expensive",
+                levels=(BookLevel(price=Decimal("0.20"), size=Decimal("100")),),
+            ),
+        )
+        if asset.token_id == "no-0"
+        else asset
+        for asset in kwargs["book_epoch"].assets
+    )
+    first_states = tuple(
+        (
+            asset.family_key, asset.bin_id, asset.condition_id, asset.side,
+            asset.token_id, "EXECUTABLE", asset.curve.book_hash,
+            asset.market_event_id, asset.gamma_market_id, str(asset.neg_risk),
+        )
+        for asset in first_assets
+    )
+    first_book = CurrentGlobalBookEpoch(
+        assets=first_assets,
+        asset_states=first_states,
+        captured_at_utc=kwargs["decision_at_utc"],
+        max_age=_dt.timedelta(seconds=30),
+        witness_identity=current_global_book_epoch_identity(
+            asset_states=first_states,
+            captured_at_utc=kwargs["decision_at_utc"],
+        ),
+    )
+    first_kwargs = {
+        **kwargs,
+        "venue_universe_identity": first_book.witness_identity,
+        "current_venue_universe_identity_resolver": lambda: first_book.witness_identity,
+        "current_execution_resolver": lambda candidate: first_book.execution_authority(
+            candidate, checked_at_utc=kwargs["decision_at_utc"],
+        ),
+        "book_epoch": first_book,
+    }
+    first = select_prepared_global_auction({event_id: prepared}, **first_kwargs)
+    assert first.decision.candidate.side == "YES"
+
+    next_at = kwargs["decision_at_utc"] + _dt.timedelta(seconds=1)
+    assets = tuple(
+        replace(
+            asset,
+            curve=replace(
+                asset.curve,
+                book_hash="hash-nowcast-cheaper",
+                levels=(BookLevel(price=Decimal("0.10"), size=Decimal("100")),),
+            ),
+            captured_at_utc=next_at,
+        )
+        if asset.token_id == "no-0"
+        else replace(asset, captured_at_utc=next_at)
+        for asset in first_book.assets
+    )
+    states = tuple(
+        (
+            asset.family_key,
+            asset.bin_id,
+            asset.condition_id,
+            asset.side,
+            asset.token_id,
+            "EXECUTABLE",
+            asset.curve.book_hash,
+            asset.market_event_id,
+            asset.gamma_market_id,
+            str(asset.neg_risk),
+        )
+        for asset in assets
+    )
+    next_book = CurrentGlobalBookEpoch(
+        assets=assets,
+        asset_states=states,
+        captured_at_utc=next_at,
+        max_age=_dt.timedelta(seconds=30),
+        witness_identity=current_global_book_epoch_identity(
+            asset_states=states,
+            captured_at_utc=next_at,
+        ),
+    )
+    next_kwargs = {
+        **kwargs,
+        "selection_epoch_identity": "next-nowcast-cut",
+        "selection_cut_at_utc": next_at,
+        "decision_at_utc": next_at,
+        "venue_universe_identity": next_book.witness_identity,
+        "current_venue_universe_identity_resolver": lambda: next_book.witness_identity,
+        "current_execution_resolver": (
+            lambda candidate: next_book.execution_authority(
+                candidate,
+                checked_at_utc=next_at,
+            )
+        ),
+        "book_epoch": next_book,
+    }
+
+    next_cut = select_prepared_global_auction({event_id: prepared}, **next_kwargs)
+
+    assert next_cut.decision.candidate.side == "NO"
+    assert "DAY0_DIURNAL_NOWCAST_VETO" not in next_cut.decision.rejection_reasons.values()
 
 
 @pytest.mark.parametrize("case", ["absorbing", "unknown_transform", "lower_cap", "new_witness"])

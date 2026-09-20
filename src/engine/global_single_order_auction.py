@@ -1517,6 +1517,19 @@ def select_prepared_global_auction(
             and candidate.family_key in buy_disabled
         ):
             return "GLOBAL_BUY_DISABLED_FAMILY"
+        prepared = prepared_by_family.get(candidate.family_key)
+        if prepared is not None:
+            from src.engine.event_reactor_adapter import (
+                day0_diurnal_nowcast_candidate_rejection_reason,
+            )
+
+            nowcast_reason = day0_diurnal_nowcast_candidate_rejection_reason(
+                getattr(prepared, "day0_diurnal_nowcast_context", None),
+                candidate,
+                decision_time=decision_at_utc,
+            )
+            if nowcast_reason is not None:
+                return nowcast_reason
         if candidate_policy_rejection_resolver is None:
             return None
         return candidate_policy_rejection_resolver(candidate)

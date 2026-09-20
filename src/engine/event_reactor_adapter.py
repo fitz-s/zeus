@@ -39238,6 +39238,206 @@ def _bind_day0_saturated_statistical_sides(
     )
 
 
+def _day0_nowcast_carrier_future_extremes(
+    payload: Mapping[str, object],
+) -> tuple[float, ...]:
+    """Freeze the first valid carrier vector used by the submit-time nowcast."""
+
+    authority = payload.get("day0_probability_authority")
+    blocks: tuple[object, ...] = (payload,)
+    if isinstance(authority, Mapping):
+        blocks = (
+            authority,
+            authority.get("global_current_observation_payload"),
+            payload,
+        )
+    for block in blocks:
+        if not isinstance(block, Mapping):
+            continue
+        members = block.get("remaining_carrier_future_extremes_c") or block.get(
+            "_edli_day0_remaining_carrier_future_extremes_c"
+        )
+        if not isinstance(members, (list, tuple)) or not members:
+            continue
+        values = tuple(
+            value
+            for value in (_optional_float(member) for member in members)
+            if value is not None and math.isfinite(value)
+        )
+        if values:
+            return values
+    return ()
+
+
+def _bind_day0_diurnal_nowcast_context(
+    prepared: object,
+    payload: Mapping[str, object],
+    family: object,
+    *,
+    event_type: str,
+):
+    """Bind source-only Day0 inputs to this exact probability witness.
+
+    SCOPE: one current witness and its native token/bin bindings. DRAIN: the
+    selector scores remaining fixed proposals immediately. RESET: every cut
+    prepares a new witness/context; no nowcast veto is cached across cuts.
+    """
+
+    from src.engine.qkernel_spine_bridge import (
+        Day0DiurnalNowcastCandidateBinding,
+        Day0DiurnalNowcastContext,
+    )
+
+    witness = getattr(prepared, "probability_witness", None)
+    if (
+        event_type != "DAY0_EXTREME_UPDATED"
+        or witness is None
+        or payload.get("probability_authority")
+        != "day0_remaining_day_global_probability_v1"
+        or (payload.get("_edli_q_source") or payload.get("q_source"))
+        != "day0_remaining_day"
+    ):
+        return prepared
+    try:
+        city = runtime_cities_by_name().get(str(getattr(family, "city", "") or ""))
+        metric = str(getattr(family, "metric", "") or "").strip().lower()
+        running_extreme = _observed_day0_extreme_native(payload, metric)
+        witness_bindings = {
+            str(binding.condition_id): binding
+            for binding in tuple(getattr(witness, "bindings", ()))
+        }
+        bindings = []
+        for candidate in tuple(getattr(family, "candidates", ())):
+            condition_id = str(getattr(candidate, "condition_id", "") or "")
+            witness_binding = witness_bindings.get(condition_id)
+            if witness_binding is None or not condition_id:
+                raise ValueError("DAY0_NOWCAST_CONTEXT_CONDITION_MISMATCH")
+            for side, token_id, candidate_token_id in (
+                ("YES", witness_binding.yes_token_id, candidate.yes_token_id),
+                ("NO", witness_binding.no_token_id, candidate.no_token_id),
+            ):
+                if token_id is None:
+                    continue
+                if str(token_id) != str(candidate_token_id or ""):
+                    raise ValueError("DAY0_NOWCAST_CONTEXT_TOKEN_MISMATCH")
+                bindings.append(
+                    Day0DiurnalNowcastCandidateBinding(
+                        bin_id=str(witness_binding.bin_id),
+                        condition_id=condition_id,
+                        side=side,
+                        token_id=str(token_id),
+                        bin_label=str(candidate.bin.label),
+                    )
+                )
+        context = Day0DiurnalNowcastContext(
+            probability_witness_identity=str(witness.witness_identity),
+            probability_authority=str(payload.get("probability_authority") or ""),
+            q_source=str(
+                payload.get("_edli_q_source") or payload.get("q_source") or ""
+            ),
+            city_name=str(getattr(city, "name", "") or ""),
+            city_timezone=str(getattr(city, "timezone", "") or ""),
+            settlement_unit=str(getattr(city, "settlement_unit", "") or ""),
+            metric=metric,
+            running_extreme=float(running_extreme),
+            carrier_future_extremes_c=_day0_nowcast_carrier_future_extremes(payload),
+            candidate_bindings=tuple(bindings),
+        )
+    except (AttributeError, TypeError, ValueError):
+        # Missing or malformed early context has no authority to preempt the
+        # final submit-time predicate.
+        return prepared
+    return dataclass_replace(prepared, day0_diurnal_nowcast_context=context)
+
+
+def day0_diurnal_nowcast_candidate_rejection_reason(
+    context: object,
+    candidate: object,
+    *,
+    decision_time: datetime,
+) -> str | None:
+    """Reject only this currently overpriced BUY proposal, if source-bound."""
+
+    from src.engine.qkernel_spine_bridge import Day0DiurnalNowcastContext
+
+    if not isinstance(context, Day0DiurnalNowcastContext):
+        return None
+    if str(getattr(candidate, "action", "BUY") or "BUY").upper() != "BUY":
+        return None
+    if (
+        str(getattr(candidate, "probability_witness_identity", "") or "")
+        != context.probability_witness_identity
+    ):
+        return None
+    source_payload = {
+        "probability_authority": context.probability_authority,
+        "_edli_q_source": context.q_source,
+    }
+    if _uses_replacement_probability_authority(source_payload):
+        return None
+    key = (
+        str(getattr(candidate, "bin_id", "") or ""),
+        str(getattr(candidate, "condition_id", "") or ""),
+        str(getattr(candidate, "side", "") or "").upper(),
+        str(getattr(candidate, "token_id", "") or ""),
+    )
+    binding = next(
+        (
+            row
+            for row in context.candidate_bindings
+            if (row.bin_id, row.condition_id, row.side, row.token_id) == key
+        ),
+        None,
+    )
+    if binding is None:
+        return None
+    source_payload.update(
+        {
+            "event_type": "DAY0_EXTREME_UPDATED",
+            "city": context.city_name,
+            "metric": context.metric,
+            "temperature_metric": context.metric,
+            "direction": f"buy_{binding.side.lower()}",
+            "bin_label": binding.bin_label,
+            "high_so_far": (
+                context.running_extreme if context.metric == "high" else None
+            ),
+            "low_so_far": (
+                context.running_extreme if context.metric == "low" else None
+            ),
+        }
+    )
+    if context.carrier_future_extremes_c:
+        source_payload["day0_probability_authority"] = {
+            "remaining_carrier_future_extremes_c": list(
+                context.carrier_future_extremes_c
+            )
+        }
+    city = SimpleNamespace(
+        name=context.city_name,
+        timezone=context.city_timezone,
+        settlement_unit=context.settlement_unit,
+    )
+    verdict = _day0_diurnal_nowcast_verdict(
+        actionable_payload=source_payload,
+        event_payload=source_payload,
+        city=city,
+        metric=context.metric,
+        decision_time=decision_time,
+    )
+    if verdict is None:
+        return None
+    try:
+        curve = getattr(candidate, "economic_cost_curve")
+        level = curve.levels[0]
+        cost = float(curve.fee_model.all_in_price(level.price))
+    except (AttributeError, IndexError, TypeError, ValueError):
+        return None
+    if not math.isfinite(cost):
+        return None
+    return "DAY0_DIURNAL_NOWCAST_VETO" if cost >= float(verdict.q_held) else None
+
+
 class _CurrentProbabilityUse(StrEnum):
     ENTRY = "entry"
     HELD_MONITOR = "held_monitor"
@@ -41857,6 +42057,12 @@ def _prepare_current_global_probability_family(
             payload=payload,
             family=family,
         ),
+    )
+    prepared = _bind_day0_diurnal_nowcast_context(
+        prepared,
+        payload,
+        family,
+        event_type=str(event.event_type or ""),
     )
     return _bind_day0_saturated_statistical_sides(prepared, payload)
 

@@ -1,5 +1,5 @@
 # Created: 2026-09-04
-# Last reused or audited: 2026-09-09
+# Last reused or audited: 2026-09-19
 # Authority basis: diurnal-residual study 2026-09-04 (REPORT.md §5) — the veto is only
 #   real if the reactor actually assembles the nowcast context at the live submit seam
 #   and stamps the verdict where an audit can find it.
@@ -14,16 +14,24 @@ seals it, and the admission predicate turns that stamp into the veto.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
 
 import src.engine.event_reactor_adapter as era
+import src.engine.qkernel_spine_bridge as bridge
 from src.calibration.day0_diurnal_residual import (
     J_MAX,
     SCHEMA_VERSION,
     DiurnalResidualNowcast,
+)
+from src.contracts.executable_cost_curve import (
+    BookLevel,
+    ExecutableCostCurve,
+    FeeModel,
 )
 from src.engine.event_reactor_adapter import (
     DAY0_NOWCAST_BASIS_KEY,
@@ -33,6 +41,16 @@ from src.engine.event_reactor_adapter import (
     _day0_live_submit_admission_rejection_reason,
     stamp_day0_diurnal_nowcast,
 )
+from src.engine.qkernel_spine_bridge import (
+    Day0DiurnalNowcastCandidateBinding,
+    Day0DiurnalNowcastContext,
+)
+from src.events.candidate_binding import (
+    EventBoundCandidateFamily,
+    MarketTopologyCandidate,
+)
+from src.solve.solver import OutcomeTokenBinding
+from src.types.market import Bin
 
 # Manila peaks at local 13 (Asia/Manila, UTC+8). 2026-07-02T02:20Z is local 10:20,
 # so k = 13 - 10 = 3 — squarely inside the pre-peak cell the study localized.
@@ -455,3 +473,252 @@ def test_hot_path_does_not_open_a_database_connection(
     )
 
     assert payload[DAY0_NOWCAST_Q_HELD_KEY] > 0.0
+
+
+def _curve(*, token: str, side: str, levels: tuple[str, ...], fee: str) -> ExecutableCostCurve:
+    return ExecutableCostCurve(
+        token_id=token,
+        side=side,
+        snapshot_id=f"snapshot-{token}",
+        book_hash=f"book-{token}",
+        levels=tuple(
+            BookLevel(price=Decimal(price), size=Decimal("10"))
+            for price in levels
+        ),
+        fee_model=FeeModel(fee_rate=Decimal(fee)),
+        min_tick=Decimal("0.01"),
+        min_order_size=Decimal("1"),
+        quote_ttl=timedelta(seconds=30),
+    )
+
+
+def _nowcast_context(
+    *,
+    metric: str = "high",
+    side: str = "YES",
+    q_source: str = "day0_remaining_day",
+    authority: str = "day0_remaining_day_global_probability_v1",
+) -> Day0DiurnalNowcastContext:
+    token = f"{side.lower()}-token"
+    return Day0DiurnalNowcastContext(
+        probability_witness_identity="nowcast-witness",
+        probability_authority=authority,
+        q_source=q_source,
+        city_name="Manila",
+        city_timezone="Asia/Manila",
+        settlement_unit="C",
+        metric=metric,
+        running_extreme=32.0 if metric == "high" else 26.0,
+        carrier_future_extremes_c=(),
+        candidate_bindings=(
+            Day0DiurnalNowcastCandidateBinding(
+                bin_id="bin-nowcast",
+                condition_id="condition-nowcast",
+                side=side,
+                token_id=token,
+                bin_label=(
+                    "Will the highest temperature in Manila be between 32-33°C on July 2?"
+                    if metric == "high"
+                    else "Will the lowest temperature in Manila be between 25-26°C on July 2?"
+                ),
+            ),
+        ),
+    )
+
+
+def _nowcast_candidate(*, side: str, curve: ExecutableCostCurve, mode: str = "TAKER_LIMIT"):
+    return SimpleNamespace(
+        action="BUY",
+        probability_witness_identity="nowcast-witness",
+        bin_id="bin-nowcast",
+        condition_id="condition-nowcast",
+        side=side,
+        token_id=f"{side.lower()}-token",
+        execution_mode=mode,
+        economic_cost_curve=curve,
+    )
+
+
+def test_global_nowcast_context_binds_real_topology_candidates_to_witness_bins():
+    candidate = MarketTopologyCandidate(
+        city="Manila",
+        target_date="2026-07-02",
+        metric="high",
+        condition_id="condition-nowcast",
+        yes_token_id="yes-token",
+        no_token_id="no-token",
+        bin=Bin(low=32.0, high=32.0, unit="C", label=FLOOR_RANGE_BIN),
+    )
+    family = EventBoundCandidateFamily(
+        family_id="Manila|2026-07-02|high",
+        event_id="event-nowcast",
+        event_type="DAY0_EXTREME_UPDATED",
+        city="Manila",
+        target_date="2026-07-02",
+        metric="high",
+        condition_ids=("condition-nowcast",),
+        yes_token_ids=("yes-token",),
+        no_token_ids=("no-token",),
+        bins=(candidate.bin,),
+        candidates=(candidate,),
+        causal_snapshot_id="causal-nowcast",
+        market_topology_source="test",
+        binding_hash="binding-nowcast",
+    )
+    prepared = bridge.PreparedGlobalFamily(
+        decision_id="prepared-nowcast",
+        probability_witness=SimpleNamespace(
+            witness_identity="nowcast-witness",
+            bindings=(
+                OutcomeTokenBinding(
+                    bin_id="witness-bin",
+                    condition_id="condition-nowcast",
+                    yes_token_id="yes-token",
+                    no_token_id="no-token",
+                ),
+            ),
+        ),
+        candidate_seeds=(),
+    )
+
+    payload = _action_payload()
+    payload.update(
+        {
+            "probability_authority": "day0_remaining_day_global_probability_v1",
+            "_edli_q_source": "day0_remaining_day",
+        }
+    )
+    bound = era._bind_day0_diurnal_nowcast_context(
+        prepared,
+        payload,
+        family,
+        event_type="DAY0_EXTREME_UPDATED",
+    )
+
+    context = bound.day0_diurnal_nowcast_context
+    assert context.probability_witness_identity == "nowcast-witness"
+    assert {(row.bin_id, row.side, row.token_id) for row in context.candidate_bindings} == {
+        ("witness-bin", "YES", "yes-token"),
+        ("witness-bin", "NO", "no-token"),
+    }
+    nested_replacement = {
+        **_action_payload(),
+        "day0_probability_authority": {
+            "probability_authority": "replacement_current_global_probability_v1",
+            "_edli_q_source": "replacement_0_1",
+        },
+    }
+    assert era._bind_day0_diurnal_nowcast_context(
+        prepared,
+        nested_replacement,
+        family,
+        event_type="DAY0_EXTREME_UPDATED",
+    ) is prepared
+
+
+@pytest.mark.parametrize(
+    ("metric", "side", "mode", "levels", "fee", "expected"),
+    (
+        ("high", "YES", "TAKER_LIMIT", ("0.49",), "0.10", "DAY0_DIURNAL_NOWCAST_VETO"),
+        ("high", "NO", "MAKER_REST", ("0.50",), "0", "DAY0_DIURNAL_NOWCAST_VETO"),
+        ("low", "YES", "TAKER_LIMIT", ("0.40", "0.80"), "0", None),
+        ("low", "NO", "MAKER_REST", ("0.49",), "0.10", "DAY0_DIURNAL_NOWCAST_VETO"),
+    ),
+)
+def test_global_nowcast_uses_current_proposal_cheapest_fee_inclusive_cost(
+    monkeypatch, metric, side, mode, levels, fee, expected,
+):
+    seen = []
+    monkeypatch.setattr(
+        era,
+        "_day0_diurnal_nowcast_verdict",
+        lambda **kwargs: seen.append(kwargs["decision_time"]) or SimpleNamespace(q_held=0.5),
+    )
+    curve = _curve(token=f"{side.lower()}-token", side=side, levels=levels, fee=fee)
+
+    reason = era.day0_diurnal_nowcast_candidate_rejection_reason(
+        _nowcast_context(metric=metric, side=side),
+        _nowcast_candidate(side=side, curve=curve, mode=mode),
+        decision_time=DECISION_TIME,
+    )
+
+    assert reason == expected
+    assert seen == [DECISION_TIME]
+
+
+def test_global_nowcast_context_is_inert_for_mismatch_missing_or_replacement(monkeypatch):
+    monkeypatch.setattr(
+        era,
+        "_day0_diurnal_nowcast_verdict",
+        lambda **_kwargs: SimpleNamespace(q_held=0.5),
+    )
+    curve = _curve(token="yes-token", side="YES", levels=("0.90",), fee="0")
+    candidate = _nowcast_candidate(side="YES", curve=curve)
+
+    assert era.day0_diurnal_nowcast_candidate_rejection_reason(
+        None, candidate, decision_time=DECISION_TIME,
+    ) is None
+    assert era.day0_diurnal_nowcast_candidate_rejection_reason(
+        _nowcast_context(),
+        SimpleNamespace(**{**candidate.__dict__, "token_id": "other-token"}),
+        decision_time=DECISION_TIME,
+    ) is None
+    assert era.day0_diurnal_nowcast_candidate_rejection_reason(
+        _nowcast_context(
+            q_source="replacement_0_1",
+            authority="replacement_current_global_probability_v1",
+        ),
+        candidate,
+        decision_time=DECISION_TIME,
+    ) is None
+
+
+def test_global_nowcast_recomputes_the_local_time_cell_and_has_no_cross_cut_latch(
+    monkeypatch,
+):
+    nowcast = DiurnalResidualNowcast(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "fit_date": FIT_DATE,
+            "peak_hours": {"Manila": 13.0},
+            "trough_hours": {"Manila": 3.0},
+            "unit": {"Manila": "C"},
+            "pooled": {
+                "high|3": _counts(j0=900, j1=100),
+                "high|2": _counts(j0=100, j1=900),
+            },
+            "gap": {},
+            "city": {},
+        }
+    )
+    monkeypatch.setattr(
+        "src.calibration.day0_diurnal_residual.load_day0_diurnal_residual_nowcast",
+        lambda **_kw: nowcast,
+    )
+    context = _nowcast_context()
+    context = replace(
+        context,
+        candidate_bindings=(
+            replace(context.candidate_bindings[0], bin_label=FLOOR_POINT_BIN),
+        ),
+    )
+    expensive = _nowcast_candidate(
+        side="YES",
+        curve=_curve(token="yes-token", side="YES", levels=("0.50",), fee="0"),
+    )
+    cheap = _nowcast_candidate(
+        side="YES",
+        curve=_curve(token="yes-token", side="YES", levels=("0.05",), fee="0"),
+    )
+    first_cut = datetime(2026, 7, 2, 2, 20, tzinfo=timezone.utc)
+    next_cut = datetime(2026, 7, 2, 2, 40, tzinfo=timezone.utc)
+
+    assert era.day0_diurnal_nowcast_candidate_rejection_reason(
+        context, expensive, decision_time=first_cut,
+    ) is None
+    assert era.day0_diurnal_nowcast_candidate_rejection_reason(
+        context, expensive, decision_time=next_cut,
+    ) == "DAY0_DIURNAL_NOWCAST_VETO"
+    assert era.day0_diurnal_nowcast_candidate_rejection_reason(
+        context, cheap, decision_time=next_cut,
+    ) is None

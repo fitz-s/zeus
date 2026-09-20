@@ -250,6 +250,7 @@ class PreparedGlobalFamily:
     day0_payoff_truth_by_bin_side: tuple[tuple[str, str, str], ...] = ()
     day0_saturated_statistical_sides: tuple[tuple[str, str], ...] = ()
     day0_saturation_witness_identity: str | None = None
+    day0_diurnal_nowcast_context: "Day0DiurnalNowcastContext | None" = None
     day0_exit_authority_status: str = "not_applicable"
     day0_exit_authority_reason: str = "non_day0_family"
     sell_action_authority_identity: str = "non_day0_default_authority"
@@ -272,6 +273,75 @@ class PreparedGlobalFamily:
             "maker_fill_witnesses",
             MappingProxyType(witnesses),
         )
+
+
+@dataclass(frozen=True)
+class Day0DiurnalNowcastCandidateBinding:
+    """One source-bound Day0 token whose bin label may be nowcasted."""
+
+    bin_id: str
+    condition_id: str
+    side: str
+    token_id: str
+    bin_label: str
+
+    def __post_init__(self) -> None:
+        if (
+            self.side not in {"YES", "NO"}
+            or not all(
+                str(value or "").strip()
+                for value in (
+                    self.bin_id,
+                    self.condition_id,
+                    self.token_id,
+                    self.bin_label,
+                )
+            )
+        ):
+            raise ValueError("DAY0_NOWCAST_CANDIDATE_BINDING_INVALID")
+
+
+@dataclass(frozen=True)
+class Day0DiurnalNowcastContext:
+    """Immutable current-source inputs for one global-cut Day0 nowcast check."""
+
+    probability_witness_identity: str
+    probability_authority: str
+    q_source: str
+    city_name: str
+    city_timezone: str
+    settlement_unit: str
+    metric: str
+    running_extreme: float
+    carrier_future_extremes_c: tuple[float, ...]
+    candidate_bindings: tuple[Day0DiurnalNowcastCandidateBinding, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            not all(
+                str(value or "").strip()
+                for value in (
+                    self.probability_witness_identity,
+                    self.city_name,
+                    self.city_timezone,
+                    self.settlement_unit,
+                )
+            )
+            or self.metric not in {"high", "low"}
+            or not math.isfinite(float(self.running_extreme))
+            or not self.candidate_bindings
+            or not all(
+                math.isfinite(float(value))
+                for value in self.carrier_future_extremes_c
+            )
+        ):
+            raise ValueError("DAY0_NOWCAST_CONTEXT_INVALID")
+        keys = {
+            (binding.bin_id, binding.condition_id, binding.side, binding.token_id)
+            for binding in self.candidate_bindings
+        }
+        if len(keys) != len(self.candidate_bindings):
+            raise ValueError("DAY0_NOWCAST_CONTEXT_BINDING_AMBIGUOUS")
 
 
 def sell_action_authority_identity(
