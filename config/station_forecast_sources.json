@@ -57,7 +57,6 @@
       "value_unit": "C",
       "endpoint": "https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=fnd&lang=en",
       "adapter_kind": "hko_fnd_json",
-      "poll_interval_seconds": 15,
       "max_lead_days": 9,
       "settlement_aligned": true,
       "settlement_source_type": "hko",
