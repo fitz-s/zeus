@@ -1020,6 +1020,9 @@ def build_day0_remaining_probability_carrier(
 
     Boundary scenarios are a statistical report-survival likelihood, not final
     settlement authority.  Noise is always applied to the future path first.
+    Despite the historical ``*_c`` parameter names, all vector, boundary,
+    sigma, and bin values are in the settlement-native unit selected by
+    ``identity_inputs['unit']``.  This preserves the pre-change V1 contract.
 
     V1 is the historical Monte Carlo operator and is intentionally byte-stable.
     V2 keeps its confidence draw matrix from that same legacy stream while
@@ -1162,13 +1165,11 @@ def build_day0_remaining_probability_carrier(
             "sample_count": n_samples,
         }
 
-    # Do the Gaussian arithmetic in physical Celsius for Fahrenheit contracts,
-    # then classify the atom with the native settlement rounder.  The affine
-    # conversion applies to centers, boundaries, sigma, and preimage offsets;
-    # omitting any one of these would change the physical distribution.
-    physical_scale = 5.0 / 9.0 if unit == "F" else 1.0
-    physical_offset = -32.0 * physical_scale if unit == "F" else 0.0
-    sigma_physical = sigma * physical_scale
+    # All inputs are already in settlement-native units.  In particular, an F
+    # carrier arrives with F centers, F boundaries, F sigma, and F preimage
+    # offsets; converting only the analytic path would diverge from the V1
+    # confidence sampler and from the materializer's native payload.
+    sigma_physical = sigma
 
     def stable_normal_interval_probability(
         mu: float, lower: float, upper: float,
@@ -1218,21 +1219,16 @@ def build_day0_remaining_probability_carrier(
             settlement_semantics.rounding_rule,
             half_step=settlement_semantics.precision / 2.0,
         )
-        mu_physical = mu * physical_scale + physical_offset
-        boundary_physical = (
-            None if boundary is None
-            else boundary * physical_scale + physical_offset
-        )
-        low_offset *= physical_scale
-        high_offset *= physical_scale
+        mu_physical = mu
+        boundary_physical = boundary
         for index, (low, high) in enumerate(bounds):
             lower = (
                 -math.inf if low is None
-                else (low * physical_scale + physical_offset) + low_offset
+                else low + low_offset
             )
             upper = (
                 math.inf if high is None
-                else (high * physical_scale + physical_offset) + high_offset
+                else high + high_offset
             )
             if boundary is None:
                 out[index] = stable_normal_interval_probability(

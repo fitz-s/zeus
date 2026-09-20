@@ -198,6 +198,62 @@ def test_fahrenheit_native_bins_and_negative_boundary_ties_are_supported():
     assert actual["q"] == pytest.approx([0.0, 0.5, 0.0, 0.5])
 
 
+@pytest.mark.parametrize("metric", ["high", "low"])
+@pytest.mark.parametrize("boundary", [None, 68.5])
+def test_fahrenheit_nonzero_sigma_native_and_celsius_oracles_agree(metric, boundary):
+    """Native F integration equals an independently converted C calculation."""
+    sem = _sem("wmo_half_up", "F")
+    bounds = [(None, 67), (68, 68), (69, None)]
+    sigma_f = 1.8
+    mu_f = 68.0
+    actual = _call(
+        metric=metric,
+        sem=sem,
+        future=[mu_f],
+        scenarios=((boundary, 1.0),),
+        path_sigma=0.0,
+        instrument_sigma=sigma_f,
+        bounds=bounds,
+        identity={"city": "F", "unit": "F", "prior": "native-oracle"},
+    )
+
+    def interval(mu, sigma, low, high):
+        return _normal_interval(mu, sigma, low, high)
+
+    native = np.zeros(3)
+    converted = np.zeros(3)
+    scale = 5.0 / 9.0
+    offset = -32.0 * scale
+    for index, (low, high) in enumerate(bounds):
+        low_f = -np.inf if low is None else low - 0.5
+        high_f = np.inf if high is None else high + 0.5
+        low_c = -np.inf if low is None else (low - 32.0) * scale - 0.5 * scale
+        high_c = np.inf if high is None else (high - 32.0) * scale + 0.5 * scale
+        if boundary is None:
+            native[index] = interval(mu_f, sigma_f, low_f, high_f)
+            converted[index] = interval(mu_f * scale + offset, sigma_f * scale, low_c, high_c)
+            continue
+        rounded_boundary = float(sem.round_values([boundary])[0])
+        in_bin = (low is None or rounded_boundary >= low) and (high is None or rounded_boundary <= high)
+        boundary_c = boundary * scale + offset
+        if metric == "high":
+            native[index] = interval(mu_f, sigma_f, max(low_f, boundary), high_f)
+            converted[index] = interval(mu_f * scale + offset, sigma_f * scale, max(low_c, boundary_c), high_c)
+            if in_bin:
+                native[index] += interval(mu_f, sigma_f, -np.inf, boundary)
+                converted[index] += interval(mu_f * scale + offset, sigma_f * scale, -np.inf, boundary_c)
+        else:
+            native[index] = interval(mu_f, sigma_f, low_f, min(high_f, boundary))
+            converted[index] = interval(mu_f * scale + offset, sigma_f * scale, low_c, min(high_c, boundary_c))
+            if in_bin:
+                native[index] += interval(mu_f, sigma_f, boundary, np.inf)
+                converted[index] += interval(mu_f * scale + offset, sigma_f * scale, boundary_c, np.inf)
+    native /= native.sum()
+    converted /= converted.sum()
+    assert native == pytest.approx(converted, abs=2e-14)
+    assert actual["q"] == pytest.approx(native, abs=2e-14)
+
+
 def test_v2_point_is_independent_of_n_point_but_clock_only_identity_is_stable():
     common = dict(
         future=[1.0, 2.0, 3.0],
