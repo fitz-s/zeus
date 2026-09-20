@@ -452,3 +452,81 @@ Note it is not yet proven to be 229 ms of *cost* — if the time is lock wait, a
 artifact shortens the hold but not necessarily the wait. The next sample with
 `lease_wait` present will say which, and that ordering matters: shrinking the payload
 before knowing would be optimising the half the measurement does not implicate.
+
+## 9. `lease_wait` answers §8: it is not lock contention, except in the tail
+
+n=662 live receipts carrying `lease_wait`:
+
+```
+p50=323.0ms  p90=691.0ms  p99=1585.0ms  max=12113.0ms
+
+persist_full                                 324.7 ms p50   (n=8, rare)
+persist_compact                               53.3          (n=654)
+book_native_side_receipt                      28.8
+delta_candidate_evaluations                   24.4
+encode_candidate_evaluations                  22.8
+...
+global_auction_selection_receipt:lease_wait    0.6          p99 742.5   max 11873.8
+```
+
+**The lock-wait hypothesis in §8 is refuted at the median.** `lease_wait` is 0.6 ms p50 —
+0.8% of `persist_full`, 2.7% of `persist_compact`. The write lease is not what the auction
+waits on.
+
+Two further corrections to §8, both from the larger sample:
+
+- `persist_full` is **n=8 of 662**. It is the rarer branch, and reporting it as "the
+  dominant stage" over-weighted it; `persist_compact` at 53.3 ms is what almost every
+  auction actually pays.
+- The p50 itself moved again, 605 ms -> 323 ms across windows. Same instrumentation, same
+  code: this path varies enough between windows that only same-window comparisons mean
+  anything.
+
+### The tail has two causes, and they need different fixes
+
+Of 124 samples where `persist_compact` exceeded 200 ms:
+
+| | count | total |
+|---|---|---|
+| **write-bound** (lease ≤ 50% of persist) | **105** | 44.4 s |
+| **lock-bound** (lease > 50%) | 19 | 23.6 s |
+
+So lock contention is real but is 15% of tail events, with a worst case of 11.9 s where
+`lease_wait` is 100% of the time. The other 85% are the write itself.
+
+Retention was ruled out on the live database: the boundary lookup costs 1.8 ms and the
+candidate scan **0.1 ms returning 0 rows**. It is not the cost, on this path, today.
+
+## 10. Applied: 27.2 ms/auction of encode, removed without touching the format
+
+The encode stages are all zlib level 9. Measured over 34 real auction payloads from
+`decision_log` (19.0 MB raw):
+
+| level | encode | size | vs L9 |
+|---|---|---|---|
+| 9 | 30.8 ms/artifact | 600.2 KB | +0.0% |
+| **6** | **22.8 ms** | 607.9 KB | **+1.3%** |
+| 3 | 10.9 ms | 645.2 KB | +7.5% |
+| 1 | 8.0 ms | 658.7 KB | +9.8% |
+
+Level 6 is the only one that buys time without paying for it in storage on a table
+measured in tens of GB — level 1 is the same trade rejected earlier in this work
+(96.6 ms faster, 9.0% larger).
+
+**The format does not change.** Same zlib stream, same `*_encoding` tag, so every existing
+row stays readable and no reader moves. Verified by round-tripping a real payload at both
+levels: decoded bytes and their sha256 are identical, which also means the `*_sha256`
+integrity fields — computed over the *decoded* bytes — are unaffected.
+
+That property is what makes this safe, and it is exactly what the codec swap lacks: the
+decoders compare `*_encoding` against literal `"zlib+base64+..."` strings and raise on
+anything else, with **48 such literals across `src/`**. zstd-3 measures 1.47x smaller and
+**9.6x faster to encode** (3.3 ms vs 31.7 ms per artifact), so it is worth doing — but it
+has to move every reader in one change, which is a different size of work from a level.
+
+### What is left on this path
+
+The remaining pre-submit cost is the write of a ~1 MB artifact, 96% of which is base64
+text of already-compressed payloads (245.8 KB per artifact is base64 inflation alone).
+That is the codec migration, now sized by two independent measurements: 1.47x smaller
+*and* 9.6x faster, against a 48-literal reader surface.
