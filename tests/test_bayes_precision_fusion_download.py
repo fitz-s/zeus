@@ -3896,4 +3896,8 @@ def test_derived_offgrid_run_needs_complete_pair_before_possession_write(
     assert availability != metadata_available
     assert rows[0][2] == rows[1][2]
     assert rows[0][2] == rows[0][3]
-    assert availability <= datetime.fromisoformat(rows[0][4])
+    # SQLite recorded_at stores milliseconds; compare at its actual precision.
+    recorded_precision_availability = availability.replace(
+        microsecond=(availability.microsecond // 1000) * 1000
+    )
+    assert recorded_precision_availability <= datetime.fromisoformat(rows[0][4])
