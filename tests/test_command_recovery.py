@@ -40829,3 +40829,60 @@ def test_partial_remainder_rejects_missing_trade_or_actual_point_remainder(
     assert json.loads(_get_events(conn, "cmd-001")[-1]["payload_json"])["reason"] == (
         "partial_remainder_point_order_filled_without_full_trade_fact"
     )
+
+
+def test_live_tick_closed_entry_fill_review_precedes_expired_maintenance(conn, tmp_path, monkeypatch):
+    from src.execution import command_recovery, venue_sync_contract
+    from src.state.venue_command_repo import append_event
+
+    _seed_terminal_entry_point_full_fill_case(conn)
+    append_event(conn, command_id="cmd-001", event_type="REVIEW_REQUIRED",
+        occurred_at="2026-04-26T00:08:00Z", payload={
+            "reason": "partial_remainder_point_order_filled_without_full_trade_fact",
+            "point_order": {
+                "id": "ord-entry-point-proof", "status": "MATCHED", "side": "BUY",
+                "asset_id": "tok-001", "original_size": "44.12",
+                "size_matched": "44.117355", "order_type": "GTC",
+            },
+        })
+    conn.commit()
+    path = tmp_path / "closed-entry-fast.db"
+    with sqlite3.connect(path) as target:
+        conn.backup(target)
+    now = [0.0]
+
+    def factory():
+        db = sqlite3.connect(path)
+        db.row_factory = sqlite3.Row
+        return db
+
+    def expire_maintenance(_conn):
+        now[0] = 1.0
+        raise sqlite3.OperationalError("interrupted")
+
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(command_recovery, "reconcile_review_required_matched_submit_trade_facts", expire_maintenance)
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    client = MagicMock()
+    reduce_reviews = command_recovery.reconcile_matched_cancel_review_required_entries
+    scoped_calls = []
+
+    def verify_local_fold(db, **kwargs):
+        before = list(client.mock_calls)
+        result = reduce_reviews(db, **kwargs)
+        if kwargs.get("full_fill_command_ids") is not None:
+            assert client.mock_calls == before
+            scoped_calls.append(kwargs["full_fill_command_ids"])
+        return result
+
+    monkeypatch.setattr(command_recovery, "reconcile_matched_cancel_review_required_entries", verify_local_fold)
+    command_recovery._reconcile_passes_short_conn(
+        client, summary, "2026-04-26T00:09:00Z", scope="live_tick",
+    )
+    assert summary["authenticated_terminal_fill_review_fast"]["advanced"] == 1
+    assert summary["db_budget_deferred_at"] == "review_required_matched_submit_trade_fact"
+    with factory() as persisted:
+        assert _get_state(persisted, "cmd-001") == "FILLED"
+        assert persisted.execute("SELECT phase FROM position_current WHERE position_id='pos-001'").fetchone()[0] == "economically_closed"
+    assert scoped_calls == [frozenset({"cmd-001"})]

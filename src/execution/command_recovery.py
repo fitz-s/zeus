@@ -15498,7 +15498,9 @@ def _reconcile_terminal_fak_partial_exit_reviews(
     return summary
 
 
-def reconcile_matched_cancel_review_required_entries(conn: sqlite3.Connection) -> dict:
+def reconcile_matched_cancel_review_required_entries(
+    conn: sqlite3.Connection, *, full_fill_command_ids: frozenset[str] | None = None,
+) -> dict:
     """Clear REVIEW_REQUIRED commands when canonical venue facts prove a fill.
 
     This handles the live shape where a maker rest partially/near-fully fills,
@@ -15513,7 +15515,7 @@ def reconcile_matched_cancel_review_required_entries(conn: sqlite3.Connection) -
     """
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
-    for command in _terminal_partial_entry_review_candidates(conn):
+    for command in (() if full_fill_command_ids is not None else _terminal_partial_entry_review_candidates(conn)):
         summary["scanned"] += 1
         command_id = str(command.get("command_id") or "")
         venue_order_id = str(command.get("venue_order_id") or "")
@@ -15540,11 +15542,19 @@ def reconcile_matched_cancel_review_required_entries(conn: sqlite3.Connection) -
             )
             summary["errors"] += 1
 
-    terminal_summary = _reconcile_terminal_fak_partial_exit_reviews(conn)
-    for key in ("scanned", "advanced", "stayed", "errors"):
-        summary[key] += terminal_summary[key]
+    if full_fill_command_ids is None:
+        terminal_summary = _reconcile_terminal_fak_partial_exit_reviews(conn)
+        for key in ("scanned", "advanced", "stayed", "errors"):
+            summary[key] += terminal_summary[key]
 
     for command in _matched_cancel_review_required_candidates(conn):
+        if full_fill_command_ids is not None and (
+            str(command.get("command_id") or "") not in full_fill_command_ids
+            or not canonical_terminal_entry_order_full_fill_proven(
+                conn, str(command.get("command_id") or ""),
+            )
+        ):
+            continue
         summary["scanned"] += 1
         command_id = str(command.get("command_id") or "")
         venue_order_id = str(command.get("venue_order_id") or "")
@@ -32180,6 +32190,16 @@ def _reconcile_passes_short_conn(
                 if str(row.get("state") or "")
                 == CommandState.REVIEW_REQUIRED.value
             }
+            point_full_fill_review_command_ids = {
+                str(row["command_id"])
+                for row in _matched_cancel_review_required_candidates(conn)
+                if canonical_terminal_entry_order_full_fill_proven(conn, str(row["command_id"]))
+            }
+            review_ids = sorted(terminal_fill_review_command_ids | point_full_fill_review_command_ids)
+            if review_ids:
+                limit = _LIVE_TICK_IDENTITY_BOUND_MAX_CANDIDATES
+                start = (_identity_bound_rotation_slot() * limit) % len(review_ids)
+                terminal_fill_review_command_ids = set((review_ids[start:] + review_ids[:start])[:limit])
             terminal_entry_projection_command_ids = tuple(
                 command_id
                 for command_id in (
@@ -32223,10 +32243,14 @@ def _reconcile_passes_short_conn(
             def _fold_terminal_fill_reviews(conn):
                 folded = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
                 for command_id in sorted(terminal_fill_review_command_ids):
-                    result = reconcile_authenticated_entry_trade_facts(
-                        conn,
-                        command_id=command_id,
-                    )
+                    if command_id in point_full_fill_review_command_ids:
+                        result = reconcile_matched_cancel_review_required_entries(
+                            conn, full_fill_command_ids=frozenset({command_id}),
+                        )
+                    else:
+                        result = reconcile_authenticated_entry_trade_facts(
+                            conn, command_id=command_id,
+                        )
                     for key in folded:
                         folded[key] += int(result.get(key, 0) or 0)
                 return folded
