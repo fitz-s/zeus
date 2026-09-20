@@ -290,6 +290,15 @@ SOURCES: dict[str, ForecastSourceSpec] = {
         allowed_roles=("entry_primary",),
         degradation_level="OK",
     ),
+    "cwa_township_hourly_low": ForecastSourceSpec(
+        source_id="cwa_township_hourly_low",
+        tier="primary",
+        kind="scheduled_collector",
+        model_name="cwa_township_hourly_low",
+        enabled_by_default=True,
+        allowed_roles=("entry_primary",),
+        degradation_level="OK",
+    ),
 }
 
 

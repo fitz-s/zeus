@@ -39,10 +39,10 @@ def _conn() -> sqlite3.Connection:
     return conn
 
 
-def _insert(conn, rid, model, value, endpoint, *, cycle, captured, city="Taipei", lead=3):
+def _insert(conn, rid, model, value, endpoint, *, cycle, captured, city="Taipei", metric="high", lead=3):
     conn.execute(
         "INSERT INTO raw_model_forecasts VALUES (?,?,?,?,?,?,?,?,?,?)",
-        (rid, model, value, city, "high", TD, lead, cycle, endpoint, captured),
+        (rid, model, value, city, metric, TD, lead, cycle, endpoint, captured),
     )
 
 
@@ -98,6 +98,22 @@ def test_hko_prefix_also_served_when_opted_in():
     )
 
     assert served["hko_fnd"].value_c == 32.0
+
+
+def test_hourly_cwa_low_source_is_served_by_its_own_revision_clock():
+    conn = _conn()
+    _insert(
+        conn, 4, "cwa_township_hourly_low", 24.0, "single_runs",
+        cycle=STATION_CYCLE, captured=CAP, metric="low", lead=1,
+    )
+
+    served = read_current_instrument_values(
+        conn, city="Taipei", metric="low", target_date=TD,
+        source_cycle_time_iso=GRIDDED_CYCLE, include_station_sources=True,
+    )
+
+    assert served["cwa_township_hourly_low"].value_c == 24.0
+    assert served["cwa_township_hourly_low"].served_via == "single_runs"
 
 
 def test_gridded_only_db_unchanged_by_flag():

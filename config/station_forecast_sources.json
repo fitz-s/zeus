@@ -22,6 +22,27 @@
       "notes": "CWA 鄉鎮天氣預報 (F-D0047-063), Songshan district 松山區 which contains RCSS (Taipei-Songshan), the SAME station the Taipei market settles on (Wunderground RCSS METAR daily-max). Live ingestion and source-role authority are defined by this row and the source registry.",
       "_grading_note": "CWA-vs-gridded-vs-settlement forward grading: scripts/grade_cwa_township_forward.py"
     },
+    "cwa_township_hourly_low": {
+      "enabled": true,
+      "status": "live",
+      "model_id": "cwa_township_hourly_low",
+      "provider": "cwa_taiwan",
+      "provider_family": "cwa",
+      "city": "Taipei",
+      "metric": "low",
+      "value_unit": "C",
+      "endpoint": "https://opendata.cwa.gov.tw/fileapi/v1/opendataapi/F-D0047-061",
+      "adapter_kind": "cwa_township_hourly_xml",
+      "poll_interval_seconds": 300,
+      "location_name": "松山區",
+      "location_geocode": "63000010",
+      "location_latitude": 25.051608,
+      "location_longitude": 121.568983,
+      "max_lead_days": 1,
+      "settlement_aligned": false,
+      "auth": "env CWA_API_KEY (forecast-live plist) or gitignored config/cwa_secret.json — NEVER committed",
+      "notes": "CWA F-D0047-061 complete official XML. This is a township-district hourly-sampled Temperature product, not a settlement-station forecast and not F-D0047-063 12-hour MinT. Only D+1 Asia/Taipei 00:00..23:00 with 24 unique finite whole-hour samples is persisted as LOW; DatasetInfo.Update is its publisher revision clock and local capture is the availability proof."
+    },
     "hko_fnd": {
       "enabled": true,
       "status": "live",
