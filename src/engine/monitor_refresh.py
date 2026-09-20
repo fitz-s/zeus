@@ -156,6 +156,24 @@ _FLASH_CRASH_CONFIRMATION_MIN_SPAN_SECONDS = 30.0
 #: stream publishes every few seconds, so a small cap saw only the excursion
 #: itself.
 _FLASH_CRASH_CONFIRMATION_CANDIDATE_LIMIT = 400
+# A ratio is scale-free only on a continuous variable. On the venue's discrete
+# grid the DENOMINATOR carries the tick count, so a percentage bound silently
+# becomes a price-level filter: one 0.01 tick is 12.5% of a 0.08 bid and 1.3% of
+# a 0.75 bid. Measured over 112,857 quotes (2026-09-12 onward), the -0.40/hr
+# catastrophe bound was satisfied by 25.4% of one-hour windows at bid <= 0.10
+# against 0.3% above 0.60 -- an 85x spread from granularity alone. Hong Kong
+# 09-20 low 27C on 2026-09-19 tripped it on a 0.10 -> 0.06 slide: four ticks,
+# while the ask never left 0.10-0.12 (a real collapse moves both sides).
+#
+# Requiring a real tick DISTANCE alongside the ratio removes exactly that
+# artifact and nothing else. Sweeping the floor over the same corpus: 4 ticks
+# drops the <= 0.10 rate 9.3% -> 1.3% and leaves every band above 0.10 identical
+# (3.2 / 2.8 / 1.0 / 0.4%); 8+ ticks begins suppressing legitimate mid-price
+# collapses. This bounds the CATASTROPHE witness only -- the velocity
+# measurement itself stays the honest observed ratio.
+_FLASH_CRASH_MIN_TICK_DISTANCE = 4.0
+_FLASH_CRASH_COARSE_TICK = 0.01
+_FLASH_CRASH_FINE_TICK = 0.001
 HELD_MONITOR_PROBABILITY_PREPARE_MAX_SECONDS = 2.5
 HELD_MONITOR_RAW_HWM_READ_MAX_SECONDS = 2.5
 _MONITOR_DAY0_FAMILY_CACHE_ATTR = "_zeus_monitor_day0_family_cache"
@@ -1465,6 +1483,80 @@ def _causal_market_velocity_1h(
         return None
 
 
+def _flash_crash_token_tick(conn: sqlite3.Connection | None, *, token_id: str) -> float:
+    """Return this token's venue tick, defaulting to the coarsest live grid.
+
+    Two regimes are live (0.01 and 0.001). The tightest spread the token has ever
+    quoted is an upper bound on its grid -- a book cannot quote finer than one
+    tick -- so snap that to a regime rather than trusting a noisy minimum. The
+    coarse default is conservative here: it demands the LARGEST absolute move
+    before a deep ratio is believed, so an unknown grid cannot re-admit the
+    artifact.
+    """
+
+    if conn is None:
+        return _FLASH_CRASH_COARSE_TICK
+    try:
+        row = conn.execute(
+            """
+            SELECT MIN(ABS(bid - ask)) AS spread
+              FROM token_price_log
+             WHERE token_id = ?
+               AND bid IS NOT NULL
+               AND ask IS NOT NULL
+               AND ABS(bid - ask) > 0
+            """,
+            (str(token_id),),
+        ).fetchone()
+    except sqlite3.Error:
+        return _FLASH_CRASH_COARSE_TICK
+    if row is None or row["spread"] is None:
+        return _FLASH_CRASH_COARSE_TICK
+    try:
+        observed = float(row["spread"])
+    except (TypeError, ValueError):
+        return _FLASH_CRASH_COARSE_TICK
+    if not np.isfinite(observed) or observed <= 0.0:
+        return _FLASH_CRASH_COARSE_TICK
+    return (
+        _FLASH_CRASH_FINE_TICK
+        if observed < _FLASH_CRASH_COARSE_TICK
+        else _FLASH_CRASH_COARSE_TICK
+    )
+
+
+def _deep_drawdown_clears_tick_floor(
+    conn: sqlite3.Connection | None,
+    *,
+    token_id: str,
+    current_bid: float,
+    velocity: float,
+) -> bool:
+    """Return whether a deep RATIO also covers a real tick DISTANCE."""
+
+    try:
+        now_price = float(current_bid)
+        vel = float(velocity)
+    except (TypeError, ValueError):
+        return False
+    if not (np.isfinite(now_price) and np.isfinite(vel)) or vel >= 0.0:
+        return False
+    # Recover the reference the ratio was taken against, so the floor is measured
+    # on the same pair the threshold used.
+    denominator = 1.0 + vel
+    if denominator <= 0.0:
+        # A total collapse to zero is unambiguous at any grid.
+        return True
+    old_price = now_price / denominator
+    tick = _flash_crash_token_tick(conn, token_id=token_id)
+    required = _FLASH_CRASH_MIN_TICK_DISTANCE * tick
+    # The reference is recovered through a division, so a drawdown of exactly the
+    # floor lands a half-ULP short (0.09 -> 0.05 recovers 0.039999999999999994
+    # against 0.04). Compare with a tolerance far below one tick so the boundary
+    # case counts as clearing it, without admitting a genuinely smaller move.
+    return (old_price - now_price) >= required - (tick / 1024.0)
+
+
 def _causal_deep_market_catastrophe_evidence(
     conn: sqlite3.Connection | None,
     *,
@@ -1499,6 +1591,16 @@ def _causal_deep_market_catastrophe_evidence(
         )
         threshold = float(flash_crash_catastrophe_velocity())
         if current_velocity is None or current_velocity > threshold:
+            return current_velocity, 0
+        if not _deep_drawdown_clears_tick_floor(
+            conn,
+            token_id=token_id,
+            current_bid=current_bid,
+            velocity=current_velocity,
+        ):
+            # The ratio is deep only because its denominator is small. Report the
+            # measured velocity with ZERO confirmations: the witness is what this
+            # function decides, and no confirmation count means no catastrophe.
             return current_velocity, 0
         if required == 1:
             return current_velocity, 1
