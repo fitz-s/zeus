@@ -12121,8 +12121,18 @@ def test_live_adapter_reuses_unchanged_probability_and_evicts_changed_family(
     assert expired_refresh.probability_witness.captured_at_utc == at_expired
 
 
+@pytest.mark.parametrize(
+    "supersession_reason",
+    (
+        'GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED',
+        'GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:'
+        'REPLACEMENT_RAW_INPUT_HWM:basis=current_ensemble_snapshot_superseded:latest_snapshot_id=2:consumed_ensemble_cycle=old',
+        'GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:'
+        'REPLACEMENT_RAW_INPUT_HWM:basis=used_raw_model_forecasts_superseded:model=icon_d2:latest_raw_id=2:consumed_raw_id=1',
+    ),
+)
 def test_superseded_preflight_evicts_only_selected_family_probability_cache(
-    monkeypatch,
+    monkeypatch, supersession_reason,
 ):
     namespace = "probability-cache-test"
     selected_family = "family-selected"
@@ -12164,10 +12174,7 @@ def test_superseded_preflight_evicts_only_selected_family_probability_cache(
 
     evicted = era._evict_superseded_global_probability_family_cache(
         namespace,
-        reason=(
-            "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:"
-            "ValueError:GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED"
-        ),
+        reason=supersession_reason,
         actuation=actuation,
     )
 
@@ -12196,6 +12203,31 @@ def test_superseded_preflight_evicts_only_selected_family_probability_cache(
     assert any(
         key[0] == other_family for key in era._GLOBAL_PROBABILITY_FAMILY_CACHE
     )
+
+
+@pytest.mark.parametrize(
+    "basis",
+    (
+        "HWM_READ_DEADLINE",
+        "hwm_read_failed",
+        "current_value_serving_raw_row_identity_mismatch",
+        "unknown_superseded",
+    ),
+)
+def test_unknown_source_clock_preflight_stays_blocked_without_cache_eviction(basis):
+    reason = (
+        "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:"
+        "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:"
+        "REPLACEMENT_RAW_INPUT_HWM:basis=" + basis + ":detail=unavailable"
+    )
+    assert era._global_preflight_block_status(reason) == "BATCH_BLOCKED"
+    assert era._evict_superseded_global_probability_family_cache(
+        "unknown-source-clock",
+        reason=reason,
+        actuation=SimpleNamespace(
+            decision=SimpleNamespace(candidate=SimpleNamespace(family_key="family"))
+        ),
+    ) is False
 
 
 def test_model_identity_drift_evicts_pinned_probability_family_cache(monkeypatch):
@@ -34950,8 +34982,12 @@ def test_global_batch_reauctions_with_tightened_candidate_q(monkeypatch):
         "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED",
         "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:GLOBAL_BUY_JIT_MAKER_WITNESS_SUPERSEDED:current_limit_or_cashflow_changed",
         "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:GLOBAL_SELL_ENTRY_CALIBRATION_SUPERSEDED",
+        'GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:'
+        'REPLACEMENT_RAW_INPUT_HWM:basis=current_ensemble_snapshot_superseded:latest_snapshot_id=2:consumed_ensemble_cycle=old',
+        'GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:'
+        'REPLACEMENT_RAW_INPUT_HWM:basis=used_raw_model_forecasts_superseded:model=icon_d2:latest_raw_id=2:consumed_raw_id=1',
     ),
-    ids=("probability", "market-authority", "calibration-artifact"),
+    ids=("probability", "market-authority", "calibration-artifact", "ensemble-clock", "raw-model-clock"),
 )
 def test_global_batch_rebuilds_full_cut_after_stale_sell_authority(
     monkeypatch, tmp_path, second_probability_drift, supersession_reason

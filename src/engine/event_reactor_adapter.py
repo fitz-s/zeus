@@ -1414,6 +1414,20 @@ def _evict_global_probability_family_cache(
                 _GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE.pop(family_key, None)
 
 
+def _global_preflight_source_clock_superseded(reason: str) -> bool:
+    prefix = (
+        "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:"
+        "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:"
+        "REPLACEMENT_RAW_INPUT_HWM:basis="
+    )
+    return reason.startswith(
+        (
+            prefix + "current_ensemble_snapshot_superseded:",
+            prefix + "used_raw_model_forecasts_superseded:",
+        )
+    )
+
+
 def _evict_superseded_global_probability_family_cache(
     namespace: str | None,
     *,
@@ -1433,6 +1447,7 @@ def _evict_superseded_global_probability_family_cache(
     # never grafts a newer posterior onto the stale certificate in place.
     if not (
         reason.endswith("GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED")
+        or _global_preflight_source_clock_superseded(reason)
         or "model_identity_drift" in reason
     ):
         return False
@@ -15345,6 +15360,12 @@ def _global_preflight_candidate_receipt(
 def _global_preflight_block_status(reason: str) -> str:
     """Fall through only when current evidence proves this candidate infeasible."""
 
+    if _global_preflight_source_clock_superseded(reason):
+        # SCOPE: the winner's source clock advanced; its cached q is retired.
+        # DRAIN: rebuild the complete q/book/wealth auction within the existing
+        # reauction budget. RESET: only fresh evidence can authorize a new
+        # winner; missing successors and repeated drift remain fail-closed.
+        return "PROBABILITY_SUPERSEDED"
     if reason.endswith("GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED") or reason == (
         "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:"
         "GLOBAL_SELL_ENTRY_CALIBRATION_SUPERSEDED"
