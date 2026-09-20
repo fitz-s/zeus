@@ -1652,6 +1652,199 @@ def test_priority_probe_window_start_is_the_newest_metric_boundary(monkeypatch) 
     )
 
 
+def test_ambiguous_low_missing_ens_is_priority_debt_until_strict_current_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ready deterministic bundle cannot hide Day0 LOW's 51-member carrier debt."""
+    from src.data.openmeteo_quota import OpenMeteoQuotaTracker
+    import src.config as config_module
+    import src.data.replacement_forecast_current_target_plan as target_plan
+    import src.events.reactor as reactor
+    import src.state.db as db_module
+
+    city = SimpleNamespace(
+        name="Taipei", timezone="Asia/Taipei", lat=25.067244, lon=121.552822
+    )
+    decision = datetime(2026, 9, 20, 16, 20, tzinfo=UTC)
+    target_date = decision.astimezone(ZoneInfo(city.timezone)).date().isoformat()
+    observation_time = decision - timedelta(minutes=20)
+    members = day0.day0_source_clock_ensemble_member_models()
+    run = decision - timedelta(hours=2)
+    available = decision - timedelta(hours=1)
+    valid = [
+        _strict_ensemble_member_vector(
+            city,
+            member,
+            run,
+            available,
+            decision - timedelta(minutes=5),
+            decision - timedelta(minutes=4),
+            decision - timedelta(minutes=3),
+        )
+        for member in members
+    ]
+
+    def wrong_metadata(vector: Day0HourlyVector) -> Day0HourlyVector:
+        payload = _json.loads(vector.source_run_meta_json or "{}")
+        params = _json.loads(payload["request_params_json"])
+        params["metadata_model"] = "ecmwf_ifs025"
+        payload["request_params_json"] = _json.dumps(params)
+        return replace(vector, source_run_meta_json=_json.dumps(payload))
+
+    carriers = {
+        "missing": [],
+        "old_target": [
+            _strict_ensemble_member_vector(
+                city,
+                member,
+                run - timedelta(days=1),
+                available - timedelta(days=1),
+                decision - timedelta(days=1),
+                decision - timedelta(days=1) + timedelta(minutes=1),
+                decision - timedelta(days=1) + timedelta(minutes=2),
+            )
+            for member in members
+        ],
+        "wrong_metadata_run": [wrong_metadata(vector) for vector in valid],
+        "partial": valid[:-1],
+        "valid": valid,
+    }
+    state: dict[str, object] = {
+        "carrier": carriers["missing"],
+        "persisted": False,
+        "persisted_rows": 0,
+    }
+
+    class _Conn:
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        config_module, "runtime_cities_by_name", lambda: {city.name: city}
+    )
+    monkeypatch.setattr(
+        db_module, "get_world_connection_read_only", lambda **_kwargs: _Conn()
+    )
+    monkeypatch.setattr(
+        db_module, "get_forecasts_connection_read_only", lambda **_kwargs: _Conn()
+    )
+    monkeypatch.setattr(
+        target_plan,
+        "_latest_authorized_day0_fact",
+        lambda *_args, **_kwargs: {"observation_time": observation_time.isoformat()},
+    )
+    monkeypatch.setattr(
+        day0, "day0_hourly_models_for_city", lambda _city: ["ecmwf_ifs"]
+    )
+    monkeypatch.setattr(
+        day0,
+        "day0_source_clock_ensemble_target_dates",
+        lambda **_kwargs: (target_date,),
+    )
+
+    def strict_readback(**kwargs):
+        expected = tuple(kwargs.get("expected_models") or ())
+        if expected == ("ecmwf_ifs",):
+            return [object()]
+        if set(expected) != set(members):
+            return []
+        vectors = state["carrier"] if not state["persisted"] else valid
+        return day0.select_ready_day0_hourly_vectors(
+            vectors,
+            target_date=kwargs["target_date"],
+            now=kwargs["now"],
+            expected_models=expected,
+            require_expected=True,
+            max_bundle_skew_minutes=kwargs["max_bundle_skew_minutes"],
+            remaining_window_start=kwargs["remaining_window_start"],
+            require_complete_remaining_window=True,
+        )
+
+    monkeypatch.setattr(day0, "read_freshest_day0_hourly_vectors", strict_readback)
+
+    def due_probe():
+        return reactor._edli_day0_hourly_refresh_due_families(
+            cities=[city], decision_time=decision
+        )
+
+    for carrier_name in ("missing", "old_target", "wrong_metadata_run", "partial"):
+        state["carrier"] = carriers[carrier_name]
+        state["persisted"] = False
+        assert due_probe().refresh_due_families == frozenset(
+            {(city.name, target_date, "low")}
+        ), carrier_name
+
+    state["carrier"] = carriers["valid"]
+    assert due_probe().refresh_due_families == frozenset()
+
+    state["carrier"] = carriers["missing"]
+    priority_families = reactor._edli_day0_hourly_priority_families(
+        held_families=(), refresh_due_families=due_probe().refresh_due_families
+    )
+    ordered, priority_city_count = reactor._edli_order_day0_hourly_refresh_cities(
+        [city], decision_time=decision, priority_families=priority_families
+    )
+    assert ordered == [city]
+    assert priority_city_count == 1
+
+    ensemble_fetches = {"n": 0}
+    monkeypatch.setattr(day0, "quota_tracker", OpenMeteoQuotaTracker())
+    monkeypatch.setattr(
+        day0, "_current_provider_bundle_already_persisted", lambda **_kwargs: True
+    )
+    monkeypatch.setattr(
+        day0,
+        "_probe_day0_source_clock_ensemble_run_hwm",
+        lambda **_kwargs: Day0ProviderRunHwm(
+            model="ecmwf_ifs025_ensemble",
+            run_initialisation_time=run,
+            run_availability_time=available,
+        ),
+    )
+    monkeypatch.setattr(
+        day0,
+        "_current_ensemble_bundle_already_persisted",
+        lambda **_kwargs: bool(state["persisted"]),
+    )
+    monkeypatch.setattr(
+        day0,
+        "fetch_day0_hourly_vectors",
+        lambda **_kwargs: pytest.fail("ready deterministic carrier must not refetch"),
+    )
+    monkeypatch.setattr(
+        day0,
+        "fetch_day0_source_clock_ensemble_vectors",
+        lambda *_args, **_kwargs: (
+            ensemble_fetches.__setitem__("n", ensemble_fetches["n"] + 1)
+            or (valid, "sha256:ens")
+        ),
+    )
+    monkeypatch.setattr(
+        day0,
+        "persist_day0_hourly_vectors",
+        lambda rows, **_kwargs: (
+            state.__setitem__("persisted", True)
+            or state.__setitem__("persisted_rows", len(rows))
+            or len(rows)
+        ),
+    )
+    monkeypatch.setattr(day0, "_day0_utc_now", lambda: decision)
+    day0._LAST_REFRESH_MONOTONIC.clear()
+    day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.clear()
+    day0._INCOMPLETE_RETRY_STREAK.clear()
+
+    day0.maybe_refresh_day0_hourly_vectors(
+        ordered,
+        decision_time=decision,
+        interval_s=0.0,
+        quota_priority_cities=priority_city_count,
+    )
+
+    assert ensemble_fetches["n"] == 1
+    assert state["persisted_rows"] == 51
+    assert due_probe().refresh_due_families == frozenset()
+
+
 @pytest.mark.parametrize(
     "metadata_model,expected_hit",
     [("ecmwf_ifs025", False), ("ecmwf_ifs025_ensemble", True)],

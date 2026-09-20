@@ -6148,6 +6148,8 @@ def _edli_day0_hourly_refresh_due_families(
         DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
         DAY0_HOURLY_REFRESH_HEADROOM_HOURS,
         day0_hourly_models_for_city,
+        day0_source_clock_ensemble_member_models,
+        day0_source_clock_ensemble_target_dates,
         read_freshest_day0_hourly_vectors,
     )
     from src.data.replacement_forecast_current_target_plan import (
@@ -6230,6 +6232,13 @@ def _edli_day0_hourly_refresh_due_families(
             expected_models = day0_hourly_models_for_city(city_obj)
             if not expected_models:
                 continue
+            source_clock_low_target_dates = set(
+                day0_source_clock_ensemble_target_dates(
+                    city=city_obj,
+                    decision_time=now,
+                    conn=vector_conn,
+                )
+            )
             for metric in ("high", "low"):
                 if deadline_expired():
                     raise TimeoutError(
@@ -6290,6 +6299,29 @@ def _edli_day0_hourly_refresh_due_families(
                 )
                 if not vectors:
                     missing.add((city_name, target_date, metric))
+                if (
+                    metric == "low"
+                    and target_date in source_clock_low_target_dates
+                ):
+                    # A boundary-ambiguous extrema product needs the separate
+                    # source-clock carrier that the Day0 reader consumes.  Do
+                    # not infer this from the deterministic bundle: it has a
+                    # distinct 51-member identity, metadata domain and
+                    # remaining-window proof.
+                    source_clock_vectors = read_freshest_day0_hourly_vectors(
+                        city=city_name,
+                        target_date=target_date,
+                        now=now,
+                        expected_models=day0_source_clock_ensemble_member_models(),
+                        require_expected=True,
+                        max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+                        remaining_window_start=observation_time,
+                        require_complete_remaining_window=True,
+                        raise_on_db_error=True,
+                        conn=vector_conn,
+                    )
+                    if not source_clock_vectors:
+                        missing.add((city_name, target_date, metric))
     except Exception as exc:  # noqa: BLE001 -- priority is fail-closed, maintenance remains safe.
         read_error = exc
     close_errors = close_connections()
