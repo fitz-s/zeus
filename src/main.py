@@ -833,7 +833,9 @@ def _defer_for_held_position_monitor(job_name: str) -> bool:
     return False
 
 
-def _defer_background_io_for_held_position_monitor(job_name: str) -> bool:
+def _defer_background_io_for_held_position_monitor(
+    job_name: str, *, db_path: "Path | None" = None
+) -> bool:
     """Keep disk-heavy observers behind current held-capital redecision.
 
     SCOPE: only WAL checkpoint and deployment-freshness background I/O. DRAIN:
@@ -841,15 +843,39 @@ def _defer_background_io_for_held_position_monitor(job_name: str) -> bool:
     process events; no sticky state is written by this gate. Canonical overdue
     debt alone does not block maintenance between claims, so a permanently
     unexecutable residual cannot starve WAL drainage.
+
+    ``db_path`` bounds the yield. The claim above — that a residual "cannot starve
+    WAL drainage" — holds per claim, not across a continuous series of them: with
+    positions held around the clock the trades checkpoint deferred 123 times
+    against 85 runs (59%, versus 22% for world and forecasts) and its WAL reached
+    2,956 MiB, 5.8x the 512 MiB starvation line. Nothing alerted, because a
+    deferred cycle returns before measuring anything at all.
+
+    So past that same line the yield ends: disk priority is worth a bounded delay,
+    never an unbounded one, and a multi-GB WAL is precisely the 2026-06-16 810 MB
+    incident this backstop exists for. Callers with no ``db_path`` (deployment
+    freshness) keep the original unconditional yield.
     """
 
-    if (
+    if not (
         _held_position_monitor_active.is_set()
         or _held_position_monitor_handoff_pending.is_set()
     ):
-        logger.info("%s deferred: held-position monitor owns disk I/O priority", job_name)
-        return True
-    return False
+        return False
+    if db_path is not None:
+        wal_bytes = _wal_allocated_bytes(db_path)
+        if wal_bytes > _WAL_STARVATION_BACKLOG_BYTES:
+            logger.warning(
+                "%s NOT deferred: WAL is %.0fMiB, past the %dMiB starvation line — "
+                "yielding to the held-position monitor any longer would starve the "
+                "drainage this backstop exists to guarantee",
+                job_name,
+                wal_bytes / (1024 * 1024),
+                _WAL_STARVATION_BACKLOG_BYTES // (1024 * 1024),
+            )
+            return False
+    logger.info("%s deferred: held-position monitor owns disk I/O priority", job_name)
+    return True
 
 
 def _current_periodic_monitor_obligation_count() -> int | None:
@@ -9026,11 +9052,6 @@ def _make_wal_checkpoint_cycle(db_name: str, *, defer_for_monitor: bool):
 
     @_scheduler_job(job_name)
     def _cycle() -> None:
-        if defer_for_monitor and _defer_background_io_for_held_position_monitor(
-            job_name
-        ):
-            return
-
         from src.state import db as _db
 
         db_path = {
@@ -9038,6 +9059,13 @@ def _make_wal_checkpoint_cycle(db_name: str, *, defer_for_monitor: bool):
             "trades": lambda: _db._zeus_trade_db_path(),
             "forecasts": lambda: _db.ZEUS_FORECASTS_DB_PATH,
         }[db_name]()
+
+        # Resolved before the defer check so the yield can be bounded by this
+        # DB's own WAL size: an unbounded yield starves the drainage it protects.
+        if defer_for_monitor and _defer_background_io_for_held_position_monitor(
+            job_name, db_path=db_path
+        ):
+            return
         busy, log_frames, ckpt_frames, page_size = _db.checkpoint_wal(db_path)
         wal_bytes = _wal_allocated_bytes(db_path)
         if busy != 0:

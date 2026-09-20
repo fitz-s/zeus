@@ -157,3 +157,59 @@ def test_checkpoint_wal_returns_quad_against_tmp_db(tmp_path: Path) -> None:
     assert page_size > 0, f"page_size must be reported for byte-sizing: {result!r}"
 
     writer.close()
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-20: an unbounded defer starves the very drainage it yields for.
+# ---------------------------------------------------------------------------
+
+
+def test_defer_yields_to_the_monitor_while_the_wal_is_small(monkeypatch) -> None:
+    """The yield is correct behaviour and must survive."""
+    import src.main as main
+
+    monkeypatch.setattr(main._held_position_monitor_active, "is_set", lambda: True)
+    monkeypatch.setattr(
+        main, "_wal_allocated_bytes", lambda _path: 8 * 1024 * 1024
+    )
+    assert main._defer_background_io_for_held_position_monitor(
+        "trades_wal_checkpoint", db_path=Path("/nonexistent/zeus_trades.db")
+    ) is True
+
+
+def test_defer_stops_once_the_wal_passes_the_starvation_line(monkeypatch) -> None:
+    """A held position must not defer WAL drainage without bound.
+
+    `_defer_background_io_for_held_position_monitor` returned True whenever a
+    held-position monitor was active, and the caller returned *before* measuring
+    anything. With positions held continuously the trades checkpoint deferred 123
+    times against 85 runs (59%, versus 22% for world and forecasts) and its WAL
+    reached **2,956 MiB** — 5.8x the 512 MiB starvation alert and 46x the 64 MiB
+    idle band — while every threshold stayed silent, because a deferred cycle
+    measures nothing.
+
+    Past the alert line the checkpoint must run: yielding disk priority is worth
+    a bounded delay, never an unbounded one, and a multi-GB WAL is the condition
+    the 2026-06-16 810 MB incident was about.
+    """
+    import src.main as main
+
+    monkeypatch.setattr(main._held_position_monitor_active, "is_set", lambda: True)
+    monkeypatch.setattr(
+        main,
+        "_wal_allocated_bytes",
+        lambda _path: main._WAL_STARVATION_BACKLOG_BYTES + 1,
+    )
+    assert main._defer_background_io_for_held_position_monitor(
+        "trades_wal_checkpoint", db_path=Path("/nonexistent/zeus_trades.db")
+    ) is False
+
+
+def test_defer_without_a_db_path_keeps_the_old_behaviour(monkeypatch) -> None:
+    """Callers that pass no path (deployment freshness) are unaffected."""
+    import src.main as main
+
+    monkeypatch.setattr(main._held_position_monitor_active, "is_set", lambda: True)
+    assert main._defer_background_io_for_held_position_monitor(
+        "deployment_freshness"
+    ) is True
