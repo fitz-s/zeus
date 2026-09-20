@@ -769,15 +769,20 @@ def test_diagnostic_download_cycle_does_not_duplicate_station_ingest():
     assert "_ingest_station_forecasts_live(cfg)" not in src
 
 
-@pytest.mark.parametrize("clocks", [
-    {"issue_time": "2026-07-23T18:15:00+08:00"},
-    {"update_time": "2026-07-23T18:16:00+08:00"},
-    {"sent_time": "2026-07-23T18:13:00+08:00"},
-    {"sent_time": "2026-07-23T18:16:00+08:00"},
-])
-def test_hourly_product_rejects_impossible_publisher_possession_order(clocks):
-    with pytest.raises(ValueError, match="requires"):
-        _hourly_product(**clocks)
+def test_hourly_product_rejects_revision_after_possession():
+    with pytest.raises(ValueError, match="Update <= captured_at"):
+        _hourly_product(update_time="2026-07-23T18:16:00+08:00")
+
+
+@pytest.mark.parametrize("sent", ["2026-07-23T18:13:00+08:00", "2026-07-23T18:14:30+08:00"])
+def test_hourly_nominal_issue_and_xml_generation_are_not_revision_order(sent):
+    product = _hourly_product(
+        issue_time="2026-07-23T19:00:00+08:00",
+        sent_time=sent,
+    )
+    assert product.issue_time == "2026-07-23T11:00:00+00:00"
+    assert product.update_time == "2026-07-23T10:14:00+00:00"
+    assert product.captured_at == "2026-07-23T10:15:00+00:00"
 
 
 def test_hourly_product_accepts_equal_clocks_and_optional_sent():
