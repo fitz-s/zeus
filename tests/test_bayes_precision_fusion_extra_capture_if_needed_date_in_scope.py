@@ -235,7 +235,9 @@ def test_candidate_accrual_uses_current_targets_after_live_coverage(monkeypatch,
     monkeypatch.setattr(
         production,
         "_probe_resolved_bayes_precision_fusion_extras_cycle",
-        lambda: cycle,
+        lambda: (_ for _ in ()).throw(
+            AssertionError("candidate metadata planning must never probe the anchor")
+        ),
     )
     monkeypatch.setattr(
         production,
@@ -253,6 +255,15 @@ def test_candidate_accrual_uses_current_targets_after_live_coverage(monkeypatch,
         dl_mod,
         "bayes_precision_fusion_recovery_quota_cooldown_seconds",
         lambda: 0,
+    )
+    monkeypatch.setattr(
+        dl_mod,
+        "source_clock_metadata_run_is_single_runs_served",
+        lambda *_args: True,
+    )
+    monkeypatch.setattr(
+        "src.strategy.live_inference.source_clock_vnext.source_publicly_usable_at",
+        lambda _run: datetime(1970, 1, 1, tzinfo=timezone.utc),
     )
     from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
 
@@ -308,6 +319,9 @@ def test_candidate_accrual_uses_current_targets_after_live_coverage(monkeypatch,
     assert calls[0]["models"] == ("met_nordic",)
     assert calls[0]["quota_lane"] == "recovery"
     assert calls[0]["frozen_source_runs"] == {"met_nordic": (public_run, public_run)}
+    assert calls[0]["cycle"] == public_run
+    assert calls[0]["include_previous_runs"] is False
+    assert calls[0]["prune_after"] is False
     assert 0.0 < calls[0]["max_wall_clock_seconds"] <= production._BPF_CANDIDATE_ACCRUAL_MAX_WALL_CLOCK_SECONDS
     assert [(target.city, target.target_date) for target in calls[0]["targets"]] == [
         ("Helsinki", target_date)
@@ -372,6 +386,80 @@ def test_candidate_accrual_metadata_timebox_never_starts_capture(monkeypatch, tm
     ]
 
 
+def test_candidate_accrual_planning_timebox_never_starts_capture(monkeypatch, tmp_path) -> None:
+    """The candidate deadline includes plan and rotation work after metadata returns."""
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+
+    cycle = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    target_date = cycle.date().isoformat()
+    monkeypatch.setattr(
+        plan_mod,
+        "build_replacement_forecast_current_target_plan",
+        lambda _db: _plan([_row(city="Helsinki", target_date=target_date, covered=True)]),
+    )
+    monkeypatch.setattr(
+        dl_mod,
+        "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS",
+        ("met_nordic",),
+    )
+    monkeypatch.setattr(
+        dl_mod,
+        "bayes_precision_fusion_recovery_quota_cooldown_seconds",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        dl_mod,
+        "source_clock_metadata_run_is_single_runs_served",
+        lambda *_args: True,
+    )
+    monkeypatch.setattr(
+        "src.strategy.live_inference.source_clock_vnext.source_publicly_usable_at",
+        lambda _run: datetime(1970, 1, 1, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        production,
+        "_probe_resolved_bayes_precision_fusion_extras_cycle",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("candidate planning must not fall back to anchor probe")
+        ),
+    )
+    public_run = datetime.now(timezone.utc) - timedelta(minutes=20)
+    monkeypatch.setattr(
+        "src.data.openmeteo_model_updates.fetch_model_updates",
+        lambda _models, **_kwargs: (
+            OpenMeteoModelUpdate(
+                model="met_nordic",
+                last_run_initialisation_time=public_run,
+                last_run_availability_time=public_run,
+            ),
+        ),
+    )
+    monotonic_values = iter((100.0, 100.0, 110.0))
+    monkeypatch.setattr(production.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(
+        dl_mod,
+        "download_bayes_precision_fusion_extra_raw_inputs",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("candidate capture must not start after planning exhausts deadline")
+        ),
+    )
+
+    report = production._download_bayes_precision_fusion_candidate_accrual_if_needed(
+        {
+            "forecast_db": tmp_path / "forecasts.db",
+            "bpf_extra_rotation_state_path": tmp_path / "candidate" / ".rotation.json",
+        }
+    )
+
+    assert report is not None
+    assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE"
+    assert report["timeboxed_incomplete"] is True
+    assert report["attempted_target_group_count"] == 0
+    assert report["candidate_accrual_only"] is True
+
+
 def test_candidate_accrual_recovery_cooldown_skips_capture_but_retries(monkeypatch, tmp_path) -> None:
     """A recovery-lane cooldown never borrows priority quota or latches candidates off."""
     from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
@@ -386,6 +474,15 @@ def test_candidate_accrual_recovery_cooldown_skips_capture_but_retries(monkeypat
         dl_mod,
         "bayes_precision_fusion_recovery_quota_cooldown_seconds",
         lambda: 30,
+    )
+    monkeypatch.setattr(
+        dl_mod,
+        "source_clock_metadata_run_is_single_runs_served",
+        lambda *_args: True,
+    )
+    monkeypatch.setattr(
+        "src.strategy.live_inference.source_clock_vnext.source_publicly_usable_at",
+        lambda _run: datetime(1970, 1, 1, tzinfo=timezone.utc),
     )
     metadata_calls: list[object] = []
     monkeypatch.setattr(

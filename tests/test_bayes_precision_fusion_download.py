@@ -3761,12 +3761,9 @@ def test_candidate_accrual_uses_its_own_newer_public_metadata_run(tmp_path, monk
     monkeypatch.setattr(
         dl,
         "_read_source_clock_single_runs_requests",
-        lambda **_kwargs: {
-            "met_nordic": dl._SourceClockSingleRunsRequest(
-                run=met_cycle,
-                source_available_at=met_cycle.isoformat(),
-            )
-        },
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("candidate capture must use frozen metadata, not probe cache")
+        ),
     )
     seen_runs: list[datetime] = []
 
@@ -3775,15 +3772,32 @@ def test_candidate_accrual_uses_its_own_newer_public_metadata_run(tmp_path, monk
         return {"met_nordic": (16.6, 11.0)}
 
     monkeypatch.setattr(dl, "_default_live_fetch_batched", _fetch)
+    monkeypatch.setattr(
+        dl,
+        "_default_previous_runs_fetch_batched",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("candidate current-only capture must not request previous_runs")
+        ),
+    )
+    forecast_db = _forecast_db(tmp_path)
     report = dl.download_bayes_precision_fusion_extra_raw_inputs(
-        forecast_db=_forecast_db(tmp_path),
+        forecast_db=forecast_db,
         cycle=anchor_cycle,
         targets=(target,),
         models=("met_nordic",),
         include_previous_runs=False,
         prune_after=False,
+        frozen_source_runs={"met_nordic": (met_cycle, met_cycle)},
         quota_lane="recovery",
     )
 
     assert report["written_row_count"] > 0
     assert seen_runs == [met_cycle]
+    with sqlite3.connect(str(forecast_db)) as conn:
+        endpoints = {
+            row[0]
+            for row in conn.execute(
+                "SELECT DISTINCT endpoint FROM raw_model_forecasts"
+            )
+        }
+    assert endpoints == {"single_runs"}

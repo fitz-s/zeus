@@ -1050,6 +1050,10 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
     capture_when_covered: bool = False,
     quota_lane: str = "source_clock",
     frozen_source_runs: Mapping[str, tuple[datetime, datetime]] | None = None,
+    planning_cycle: datetime | None = None,
+    include_previous_runs: bool = True,
+    prune_after: bool = True,
+    deadline_monotonic: float | None = None,
 ) -> dict[str, object] | None:
     """Download missing multi-model inputs within one bounded live-runtime slice."""
     forecast_db = cfg.get("forecast_db")
@@ -1083,10 +1087,13 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                 "cooldown_seconds": cooldown_seconds,
             }
         # RUN-SELECTION AUTHORITY: free provider metadata/S3 chooses the exact
-        # cycle. The real extras download, not a duplicate paid preflight,
-        # proves whether single-runs can serve it and records any refusal.
-        cycle = _probe_resolved_bayes_precision_fusion_extras_cycle()
+        # cycle. Candidate accrual supplies a planning watermark and never
+        # invokes this anchor probe; its per-model source identity stays frozen
+        # in ``frozen_source_runs`` below.
+        cycle = planning_cycle
         if cycle is None:
+            cycle = _probe_resolved_bayes_precision_fusion_extras_cycle()
+        if cycle is None and planning_cycle is None:
             # The single-runs probe can be unavailable while the anchor lane has
             # already durably captured a current-target cycle through another
             # Open-Meteo rung. That DB row is live evidence, not a wall-clock
@@ -1253,22 +1260,52 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
             )
             download_error: Exception | None = None
             try:
-                download_kwargs: dict[str, object] = {
-                    "forecast_db": Path(str(forecast_db)),
-                    "cycle": cycle,
-                    "targets": rotated_targets,
-                    "release_lag_hours": release_lag_hours,
-                    "max_wall_clock_seconds": max_wall_clock_seconds,
-                }
-                if models is not None:
-                    download_kwargs["models"] = models
-                if quota_lane != "source_clock":
-                    download_kwargs["quota_lane"] = quota_lane
-                if frozen_source_runs is not None:
-                    download_kwargs["frozen_source_runs"] = frozen_source_runs
-                result = download_bayes_precision_fusion_extra_raw_inputs(
-                    **download_kwargs,
-                )
+                remaining_seconds = max_wall_clock_seconds
+                if deadline_monotonic is not None:
+                    deadline_remaining_seconds = max(
+                        0.0,
+                        deadline_monotonic - time.monotonic(),
+                    )
+                    if deadline_remaining_seconds <= 0.0:
+                        result = {
+                            "status": "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE",
+                            "timeboxed_incomplete": True,
+                            "attempted_target_group_count": 0,
+                            "max_wall_clock_seconds": 0.0,
+                        }
+                        attempted = 0
+                        receipt_status = "DEADLINE_EXPIRED_BEFORE_DOWNLOAD"
+                        remaining_seconds = 0.0
+                    elif remaining_seconds is None:
+                        remaining_seconds = deadline_remaining_seconds
+                    else:
+                        remaining_seconds = min(
+                            float(remaining_seconds),
+                            deadline_remaining_seconds,
+                        )
+                if deadline_monotonic is None or remaining_seconds > 0.0:
+                    download_kwargs: dict[str, object] = {
+                        "forecast_db": Path(str(forecast_db)),
+                        # Exact single_runs source identity remains per-model
+                        # frozen metadata, never this planning watermark.
+                        "cycle": cycle,
+                        "targets": rotated_targets,
+                        "release_lag_hours": release_lag_hours,
+                        "max_wall_clock_seconds": remaining_seconds,
+                    }
+                    if models is not None:
+                        download_kwargs["models"] = models
+                    if quota_lane != "source_clock":
+                        download_kwargs["quota_lane"] = quota_lane
+                    if frozen_source_runs is not None:
+                        download_kwargs["frozen_source_runs"] = frozen_source_runs
+                    if not include_previous_runs:
+                        download_kwargs["include_previous_runs"] = False
+                    if not prune_after:
+                        download_kwargs["prune_after"] = False
+                    result = download_bayes_precision_fusion_extra_raw_inputs(
+                        **download_kwargs,
+                    )
             except Exception as exc:
                 download_error = exc
                 result = {
@@ -1404,29 +1441,20 @@ def _download_bayes_precision_fusion_candidate_accrual_if_needed(
                 "status": "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_NO_PUBLIC_RUN",
                 "candidate_models": models,
             }
-        remaining_seconds = max(
-            0.0,
-            _BPF_CANDIDATE_ACCRUAL_MAX_WALL_CLOCK_SECONDS
-            - max(0.0, time.monotonic() - started_monotonic),
-        )
-        if remaining_seconds <= 0.0:
-            return {
-                "status": "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_METADATA_TIMEBOXED_INCOMPLETE",
-                "candidate_models": tuple(frozen_source_runs),
-                "retryable": True,
-                "timeboxed_incomplete": True,
-                "metadata_elapsed_seconds": max(
-                    0.0, time.monotonic() - started_monotonic
-                ),
-                "max_wall_clock_seconds": _BPF_CANDIDATE_ACCRUAL_MAX_WALL_CLOCK_SECONDS,
-            }
+        planning_cycle = max(run for run, _available in frozen_source_runs.values())
         return _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
             cfg,
-            max_wall_clock_seconds=remaining_seconds,
+            max_wall_clock_seconds=_BPF_CANDIDATE_ACCRUAL_MAX_WALL_CLOCK_SECONDS,
             models=tuple(model for model in models if model in frozen_source_runs),
             capture_when_covered=True,
             quota_lane="recovery",
             frozen_source_runs=frozen_source_runs,
+            planning_cycle=planning_cycle,
+            include_previous_runs=False,
+            prune_after=False,
+            deadline_monotonic=(
+                started_monotonic + _BPF_CANDIDATE_ACCRUAL_MAX_WALL_CLOCK_SECONDS
+            ),
         )
     except Exception as exc:  # noqa: BLE001 - candidate accrual cannot block live serving
         logger.warning("BPF candidate-accrual capture skipped (fail-soft): %s", exc)
