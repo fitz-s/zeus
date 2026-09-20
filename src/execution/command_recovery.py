@@ -12240,6 +12240,7 @@ def reconcile_terminal_order_facts(
     collect_continuations: bool = False,
     command_ids: frozenset[str] | None = None,
     emit_immediate_redecision: bool = True,
+    propagate_bounded_interrupt: bool = False,
 ) -> dict:
     """Close entry commands whose latest venue fact proves no resting remainder."""
 
@@ -12421,6 +12422,12 @@ def reconcile_terminal_order_facts(
                 emitted,
             )
         except Exception as exc:
+            if (
+                propagate_bounded_interrupt
+                and isinstance(exc, sqlite3.OperationalError)
+                and "interrupted" in str(exc).lower()
+            ):
+                raise
             logger.error(
                 "recovery: terminal order fact reconciliation failed for command %s: %s",
                 command_id,
@@ -13893,7 +13900,11 @@ def terminal_entry_no_fill_projection_pending(conn: sqlite3.Connection) -> bool:
     return bool(_terminal_entry_no_fill_priority_command_ids(conn))
 
 
-def _terminal_entry_no_fill_priority_command_ids(conn: sqlite3.Connection) -> frozenset[str]:
+def _terminal_entry_no_fill_priority_command_ids(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = _LIVE_TICK_IDENTITY_BOUND_MAX_CANDIDATES,
+) -> frozenset[str]:
     """Select only exact terminal zero-exposure entries on this connection."""
     command_ids = set()
     for candidate in _latest_terminal_order_fact_candidates(conn):
@@ -13934,9 +13945,13 @@ def _terminal_entry_no_fill_priority_command_ids(conn: sqlite3.Connection) -> fr
         command_ids.add(str(candidate["command_id"]))
     ordered_ids = sorted(command_ids)
     if ordered_ids:
-        limit = _LIVE_TICK_IDENTITY_BOUND_MAX_CANDIDATES
-        start = (_identity_bound_rotation_slot() * limit) % len(ordered_ids)
-        command_ids = set((ordered_ids[start:] + ordered_ids[:start])[:limit])
+        candidate_limit = min(max(1, int(limit)), _LIVE_TICK_IDENTITY_BOUND_MAX_CANDIDATES)
+        start = (_identity_bound_rotation_slot() * candidate_limit) % len(ordered_ids)
+        command_ids = set(
+            (ordered_ids[start:] + ordered_ids[:start])[:candidate_limit]
+        )
+    else:
+        command_ids = set()
     return frozenset(command_ids)
 
 
@@ -13944,9 +13959,10 @@ def _reconcile_terminal_entry_no_fill_priority_pass(conn: sqlite3.Connection) ->
     """Recheck the entire read hint inside the canonical writer transaction."""
     return reconcile_terminal_order_facts(
         conn,
-        command_ids=_terminal_entry_no_fill_priority_command_ids(conn),
+        command_ids=_terminal_entry_no_fill_priority_command_ids(conn, limit=1),
         collect_continuations=True,
         emit_immediate_redecision=False,
+        propagate_bounded_interrupt=True,
     )
 
 
@@ -13958,7 +13974,7 @@ def reconcile_terminal_entry_no_fill_projections_priority(
     SCOPE: bounded exact terminal BUY entries with zero local/chain exposure.
     DRAIN: the scheduled recovery turn, using the sanctioned WORLD+TRADE writer
     and existing reducer; no venue calls. RESET: ENTRY_ORDER_VOIDED removes the
-    candidate. Deadline, lock or monitor preemption rolls back for the next turn.
+    candidate. Deadline or lock contention rolls back for the next turn.
     """
     from src.execution.venue_sync_contract import default_trade_conn_factory, run_db_only_pass
 
@@ -13968,7 +13984,7 @@ def reconcile_terminal_entry_no_fill_projections_priority(
     )
     apply_factory = _recovery_apply_conn_factory(
         priority_factory, scope="live_tick", deadline_monotonic=deadline,
-        monitor_preemptible=True,
+        monitor_preemptible=False,
     )
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
     result = _run_recovery_pass_with_lock_policy(

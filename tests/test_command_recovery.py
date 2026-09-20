@@ -40429,17 +40429,18 @@ def test_terminal_entry_no_fill_priority_rotates_bounded_candidate_window(conn, 
             remaining_size="0",
         )
     conn.commit()
-    monkeypatch.setattr(recovery, "_identity_bound_rotation_slot", lambda: 1)
+    slots = iter((1, 2, 3, 4, 5))
+    monkeypatch.setattr(recovery, "_identity_bound_rotation_slot", lambda: next(slots))
 
-    summary = recovery._reconcile_terminal_entry_no_fill_priority_pass(conn)
+    summaries = [
+        recovery._reconcile_terminal_entry_no_fill_priority_pass(conn)
+        for _ in range(5)
+    ]
 
-    assert summary["advanced"] == 4
-    assert conn.execute(
-        "SELECT phase FROM position_current WHERE position_id='pos-priority-3'"
-    ).fetchone()[0] == "pending_entry"
+    assert [summary["advanced"] for summary in summaries] == [1, 1, 1, 1, 1]
     assert conn.execute(
         "SELECT COUNT(*) FROM position_current WHERE phase='voided'"
-    ).fetchone()[0] == 4
+    ).fetchone()[0] == 5
 
 
 def test_terminal_entry_no_fill_priority_deadline_and_lock_defer_without_bypass(monkeypatch):
@@ -40478,6 +40479,162 @@ def test_terminal_entry_no_fill_priority_deadline_and_lock_defer_without_bypass(
     )
     assert result is None
     assert lock_summary["db_lock_deferred"] is True
+
+
+def test_terminal_entry_priority_rethrows_sqlite_interrupt_and_rolls_back(conn, monkeypatch):
+    """A bounded interrupt cannot turn a partially applied candidate into success."""
+    from src.execution import command_recovery as recovery
+    from src.state.venue_command_repo import append_event
+
+    _insert(conn)
+    _advance_to_cancel_pending(conn, venue_order_id="ord-001")
+    append_event(
+        conn,
+        command_id="cmd-001",
+        event_type="CANCEL_ACKED",
+        occurred_at="2026-04-26T00:04:00Z",
+    )
+    _seed_pending_entry_projection(conn)
+    _append_order_fact(conn, state="CANCEL_CONFIRMED", matched_size="0", remaining_size="0")
+    conn.commit()
+
+    candidates = recovery._latest_terminal_order_fact_candidates(conn)
+    assert any(row["command_id"] == "cmd-001" for row in candidates)
+    monkeypatch.setattr(
+        recovery,
+        "_latest_terminal_order_fact_candidates",
+        lambda _conn: candidates,
+    )
+    original_resolve = recovery._resolve_m5_local_orphan_findings
+
+    def interrupt_after_write(db_conn, **kwargs):
+        db_conn.execute(
+            "UPDATE venue_commands SET updated_at='marker' WHERE command_id='cmd-001'"
+        )
+        db_conn.set_progress_handler(lambda: 1, 1)
+        try:
+            return original_resolve(db_conn, **kwargs)
+        finally:
+            db_conn.set_progress_handler(None, 0)
+
+    monkeypatch.setattr(recovery, "_resolve_m5_local_orphan_findings", interrupt_after_write)
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        recovery._reconcile_terminal_entry_no_fill_priority_pass(conn)
+
+    assert _get_state(conn, "cmd-001") == "CANCELLED"
+    assert conn.execute(
+        "SELECT phase, updated_at FROM position_current WHERE position_id='pos-001'"
+    ).fetchone()[0] == "pending_entry"
+    assert conn.execute(
+        "SELECT updated_at FROM venue_commands WHERE command_id='cmd-001'"
+    ).fetchone()[0] != "marker"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events "
+        "WHERE position_id='pos-001' AND event_type='ENTRY_ORDER_VOIDED'"
+    ).fetchone()[0] == 0
+
+
+def test_terminal_entry_priority_one_quantum_survives_monitor_waiter_and_scopes_exposure(
+    tmp_path, monkeypatch
+):
+    """The narrow pass may drain one exact candidate while monitor work waits."""
+    from contextlib import nullcontext
+
+    from src.execution import command_recovery as recovery
+    from src.execution import venue_sync_contract
+    from src.state import write_coordinator
+    from src.state.db import init_schema, init_schema_trade_only
+    from src.state.venue_command_repo import append_event
+
+    db_path = tmp_path / "terminal-entry-priority-monitor-waiter.db"
+    seed = sqlite3.connect(db_path)
+    seed.row_factory = sqlite3.Row
+    init_schema(seed)
+    init_schema_trade_only(seed)
+
+    _insert(seed)
+    _advance_to_cancel_pending(seed, venue_order_id="ord-001")
+    append_event(
+        seed,
+        command_id="cmd-001",
+        event_type="CANCEL_ACKED",
+        occurred_at="2026-04-26T00:04:00Z",
+    )
+    _seed_pending_entry_projection(seed)
+    _append_order_fact(seed, state="CANCEL_CONFIRMED", matched_size="0", remaining_size="0")
+
+    _insert(seed, command_id="cmd-positive", position_id="pos-positive", token_id="tok-positive")
+    _advance_to_cancel_pending(seed, command_id="cmd-positive", venue_order_id="ord-positive")
+    append_event(
+        seed,
+        command_id="cmd-positive",
+        event_type="CANCEL_ACKED",
+        occurred_at="2026-04-26T00:04:00Z",
+    )
+    _seed_pending_entry_projection(
+        seed,
+        position_id="pos-positive",
+        command_id="cmd-positive",
+        order_id="ord-positive",
+        token_id="tok-positive",
+    )
+    seed.execute(
+        "UPDATE position_current SET shares=1.0, cost_basis_usd=0.5 "
+        "WHERE position_id='pos-positive'"
+    )
+    _append_order_fact(
+        seed,
+        command_id="cmd-positive",
+        order_id="ord-positive",
+        state="CANCEL_CONFIRMED",
+        matched_size="0",
+        remaining_size="0",
+    )
+    seed.commit()
+    seed.close()
+
+    def trade_factory(**_kwargs):
+        db_conn = sqlite3.connect(db_path)
+        db_conn.row_factory = sqlite3.Row
+        return db_conn
+
+    trade_factory.requires_writer_flocks = True
+    trade_factory.supports_nonblocking_flocks = True
+
+    class MonitorWaitingCoordinator:
+        def lease(self, _dbs, **_kwargs):
+            return nullcontext()
+
+        def has_pending_monitor_waiter(self, _dbs):
+            return True
+
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", trade_factory)
+    monkeypatch.setattr(
+        write_coordinator,
+        "default_runtime_write_coordinator",
+        lambda: MonitorWaitingCoordinator(),
+    )
+    monkeypatch.setenv("ZEUS_CAPITAL_RECOVERY_DB_BUDGET_SECONDS", "1")
+
+    summary = recovery.reconcile_terminal_entry_no_fill_projections_priority()
+
+    assert summary["advanced"] == 1
+    assert summary["errors"] == 0
+    verified = trade_factory()
+    try:
+        assert _get_state(verified, "cmd-001") == "CANCELLED"
+        assert verified.execute(
+            "SELECT phase FROM position_current WHERE position_id='pos-001'"
+        ).fetchone()[0] == "voided"
+        assert verified.execute(
+            "SELECT phase FROM position_current WHERE position_id='pos-positive'"
+        ).fetchone()[0] == "pending_entry"
+        assert verified.execute(
+            "SELECT COUNT(*) FROM position_events "
+            "WHERE position_id='pos-positive' AND event_type='ENTRY_ORDER_VOIDED'"
+        ).fetchone()[0] == 0
+    finally:
+        verified.close()
 
 
 @pytest.mark.parametrize("fact_shape", ["missing", "wrong_order", "nonzero_matched"])
