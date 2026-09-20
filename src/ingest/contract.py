@@ -27,7 +27,8 @@ clock — they must NEVER be gated behind the gridded freshness ceiling. Concret
     models publish on a shared ~00Z/06Z/12Z/18Z schedule and the anchor leg's own availability
     gates when the whole basket is safe to fetch.
   * ``"own_clock"`` — the row's ``clock_check`` consults ONLY that source's own cursor / provider
-    metadata. Station forecast adapters (``hko_fnd``, ``cwa_township`` — see
+    metadata. Station forecast adapters (``hko_fnd``, ``cwa_township_hourly_high``,
+    ``cwa_township_hourly_low`` — see
     ``src/data/station_forecast_adapter.py``) and every non-forecast family (observation, solar,
     market_topology, ...) fall here: they poll on their own native cadence and must never be
     blocked on another source's gridded-model publish state.
@@ -233,9 +234,8 @@ _EXPLICIT_ROWS: tuple[SourceContract, ...] = (
     ),
     # Station forecast adapters — the notepad-law antibody rows: own_clock, never gated behind
     # the gridded ceiling above, per src/data/station_forecast_adapter.py + the
-    # _ingest_station_forecasts_live docstring ("Runs on the download lane [...] refreshes at
-    # the same ~2x/day cadence as the gridded raw inputs [...]" -- own cron, not gated on
-    # anchor cycle availability).
+    # source-local availability cadence configured by each adapter row -- never gated on the
+    # anchor cycle, and never collapsed into one shared station-source interval.
     SourceContract(
         source_id="hko_fnd",
         clock_law="own_clock",
@@ -245,12 +245,20 @@ _EXPLICIT_ROWS: tuple[SourceContract, ...] = (
         notes="station-own-clock antibody row (notepad law)",
     ),
     SourceContract(
-        source_id="cwa_township",
+        source_id="cwa_township_hourly_high",
         clock_law="own_clock",
         family="forecast",
-        fetch_ref="src.data.station_forecast_adapter:ingest_cwa_township_live",
-        parse_ref="src.data.station_forecast_adapter:parse_cwa_township_payload",
-        notes="station-own-clock antibody row (notepad law)",
+        fetch_ref="src.data.station_forecast_adapter:ingest_cwa_township_hourly_extrema_live",
+        parse_ref="src.data.station_forecast_adapter:parse_cwa_township_hourly_extreme_product",
+        notes="CWA F-D0047-061 shared hourly-extrema own-clock row",
+    ),
+    SourceContract(
+        source_id="cwa_township_hourly_low",
+        clock_law="own_clock",
+        family="forecast",
+        fetch_ref="src.data.station_forecast_adapter:ingest_cwa_township_hourly_extrema_live",
+        parse_ref="src.data.station_forecast_adapter:parse_cwa_township_hourly_extreme_product",
+        notes="CWA F-D0047-061 shared hourly-extrema own-clock row",
     ),
 )
 

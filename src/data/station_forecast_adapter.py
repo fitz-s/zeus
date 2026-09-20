@@ -6,50 +6,34 @@
 #   Enters raw_model_forecasts as a single_runs candidate exactly like a gridded model
 #   (src/data/bayes_precision_fusion_download._RMF_INSERT_COLUMNS contract) and is weighted into
 #   the city's served center by the existing source-clock fixed-weight scheme — no bolt-on path.
-"""Reusable adapter for station-calibrated official forecasts (HKO, KMA, CWA, MetMalaysia, TWC...).
+"""Ingest official forecasts with explicit product, point, metric and clock identity.
 
-A *station forecast* is a national met agency's OWN published daily-extreme forecast for the SAME
-station the corresponding market settles on. Unlike a gridded model interpolated to a point, the
-agency's forecast bakes in the station microclimate through its operational MOS, so it is a
-genuinely station-calibrated, decorrelated information source — DATA PRECISION, never a de-bias.
+CWA township forecasts describe a representative point distinct from RCSS.
+Hourly-sampled calendar extrema and native interval extrema are separate products;
+none of these forecast rows establishes a settlement or observed temperature fact.
+Registry-authorized rows enter the existing current-value/raw-precision fusion path.
 
-This module ingests such a forecast into ``raw_model_forecasts`` under a dedicated ``model`` id
-(e.g. ``hko_fnd``) with ``endpoint='single_runs'`` and full request provenance, mirroring the
-Open-Meteo single_runs capture contract. Once a row exists, the model is admitted into the city's
-served center solely by the per-city source-clock scheme weights
-(``src/strategy/live_inference/source_clock_city_weights.py``): there is NO new fusion code path
-and NO hard-coded weight in code — a station source contributes iff (a) its row is persisted AND
-(b) the city's scheme row lists it. Out-of-domain cities (every city whose scheme omits the source)
-are byte-identical to before.
-
-Adding a sibling source is a config addition in ``config/station_forecast_sources.json`` plus a
-per-city scheme-weight entry; only HKO/Hong Kong is wired + walk-forward validated today.
-
-NETWORK: ``fetch_*`` makes a live HTTPS GET. The pure parser/persist functions never touch the
-network — tests pin behaviour with a recorded fixture (tests/data/hko_fnd_sample.json).
+``fetch_*`` performs HTTPS reads; parsers and persistence never fetch data.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Mapping, Sequence
 from zoneinfo import ZoneInfo
 
-UTC = timezone.utc
+# Station rows use the same persisted-row writer as Open-Meteo single_runs, so
+# their schema and logical-key conflict contract stay shared.
+from src.data.bayes_precision_fusion_download import _persist_rows
 
-# The persisted raw_model_forecasts column order — IDENTICAL to
-# src.data.bayes_precision_fusion_download._RMF_INSERT_COLUMNS so a station-forecast row is
-# indistinguishable in shape from an Open-Meteo single_runs row (single-builder for the schema
-# contract; if that tuple changes, this import will surface the drift at call time).
-from src.data.bayes_precision_fusion_download import (
-    _RMF_INSERT_COLUMNS,
-    _persist_rows,
-)
+UTC = timezone.utc
 
 # HKO publishes degC integers; forecast_value_c is ALWAYS degC (SPEC §7 C/F unit-mix antibody).
 _HKO_ENDPOINT = (
@@ -70,6 +54,23 @@ class StationForecastRow:
     forecast_value_c: float   # degC
     source_cycle_time: str    # provider issue/update instant, ISO-8601 (the cycle clock)
     source_available_at: str  # proof-of-possession instant, ISO-8601
+
+
+@dataclass(frozen=True)
+class CwaHourlyProduct:
+    """Authenticated CWA F-D0047-061 raw XML and its publisher clocks.
+
+    ``update_time`` is CWA's timezone-aware DatasetInfo revision timestamp.
+    ``captured_at`` remains Zeus's distinct proof-of-possession time; it is not
+    a CWA issue/update time.
+    """
+
+    raw_xml: bytes
+    issue_time: str
+    update_time: str
+    sent_time: str | None
+    raw_sha256: str
+    captured_at: str
 
 
 def _project_root() -> Path:
@@ -196,6 +197,10 @@ def _row_to_rmf_dict(
     latitude: float | None,
     longitude: float | None,
     captured_at: str,
+    request_params: Mapping[str, object] | None = None,
+    cell_selection: str = "station_official_forecast",
+    elevation_param: str = "station",
+    downscaling_policy: str = "agency_mos",
 ) -> dict[str, object]:
     """Build a raw_model_forecasts insert dict keyed by _RMF_INSERT_COLUMNS for one station row.
 
@@ -203,7 +208,7 @@ def _row_to_rmf_dict(
     request_url_hash binds the logical key to a physical request identity (the B4 contamination
     guard relies on it), product_id = '<model>::single_runs'.
     """
-    request_params = {
+    params = request_params or {
         "dataType": "fnd",
         "lang": "en",
         "metric": row.metric,
@@ -211,7 +216,7 @@ def _row_to_rmf_dict(
         "timezone": city_timezone,
     }
     request_params_json = json.dumps(
-        request_params, sort_keys=True, separators=(",", ":")
+        params, sort_keys=True, separators=(",", ":")
     )
     request_url_hash = hashlib.sha256(
         f"{endpoint}?{request_params_json}".encode("utf-8")
@@ -225,7 +230,7 @@ def _row_to_rmf_dict(
                 "model_name": model_name,
                 "city": row.city,
                 "endpoint_mode": "single_runs",
-                "cell_selection": "station_official_forecast",
+                "cell_selection": cell_selection,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -252,11 +257,9 @@ def _row_to_rmf_dict(
         "latitude_requested": (None if latitude is None else float(latitude)),
         "longitude_requested": (None if longitude is None else float(longitude)),
         "timezone_requested": city_timezone,
-        # Not a gridded cell — the station IS the settlement point. Distinct sentinel so this row
-        # is never mistaken for a grid-interpolated value.
-        "cell_selection": "station_official_forecast",
-        "elevation_param": "station",
-        "downscaling_policy": "agency_mos",
+        "cell_selection": cell_selection,
+        "elevation_param": elevation_param,
+        "downscaling_policy": downscaling_policy,
         "endpoint_mode": "single_runs",
         "model_domain_hash": model_domain_hash,
         "coverage_status": "COVERED",
@@ -272,6 +275,10 @@ def station_rows_to_rmf_dicts(
     latitude: float | None = None,
     longitude: float | None = None,
     captured_at: str | None = None,
+    request_params: Mapping[str, object] | None = None,
+    cell_selection: str = "station_official_forecast",
+    elevation_param: str = "station",
+    downscaling_policy: str = "agency_mos",
 ) -> list[dict[str, object]]:
     """Pure transform: StationForecastRow[] → raw_model_forecasts insert dicts. NETWORK-FREE."""
     cap = captured_at or datetime.now(tz=UTC).isoformat()
@@ -284,6 +291,10 @@ def station_rows_to_rmf_dicts(
             latitude=latitude,
             longitude=longitude,
             captured_at=cap,
+            request_params=request_params,
+            cell_selection=cell_selection,
+            elevation_param=elevation_param,
+            downscaling_policy=downscaling_policy,
         )
         for r in rows
     ]
@@ -299,6 +310,11 @@ def persist_station_forecast_rows(
     latitude: float | None = None,
     longitude: float | None = None,
     captured_at: str | None = None,
+    request_params: Mapping[str, object] | None = None,
+    cell_selection: str = "station_official_forecast",
+    elevation_param: str = "station",
+    downscaling_policy: str = "agency_mos",
+    raw_sha256: str | None = None,
 ) -> int:
     """Persist station rows into raw_model_forecasts via the SAME idempotent writer the Open-Meteo
     capture uses (_persist_rows: B4 logical-key conflict guard + INSERT OR IGNORE). Returns rows
@@ -312,10 +328,36 @@ def persist_station_forecast_rows(
         latitude=latitude,
         longitude=longitude,
         captured_at=captured_at,
+        request_params=request_params,
+        cell_selection=cell_selection,
+        elevation_param=elevation_param,
+        downscaling_policy=downscaling_policy,
     )
     if not rmf_rows:
         return 0
-    return _persist_rows(conn, rmf_rows)
+    written = _persist_rows(conn, rmf_rows)
+    if raw_sha256 is not None:
+        for row in rmf_rows:
+            conn.execute(
+                """
+                UPDATE raw_model_forecasts
+                   SET raw_sha256 = ?
+                 WHERE model = ? AND city = ? AND target_date = ? AND metric = ?
+                   AND source_cycle_time = ? AND endpoint = ?
+                   AND request_url_hash = ?
+                """,
+                (
+                    raw_sha256,
+                    row["model"],
+                    row["city"],
+                    row["target_date"],
+                    row["metric"],
+                    row["source_cycle_time"],
+                    row["endpoint"],
+                    row["request_url_hash"],
+                ),
+            )
+    return written
 
 
 def ingest_hko_fnd_live(
@@ -369,13 +411,10 @@ def ingest_hko_fnd_live(
 # ---------------------------------------------------------------------------
 # CWA Township (Taiwan) — Central Weather Administration 鄉鎮天氣預報 (F-D0047-063)
 # ---------------------------------------------------------------------------
-# A *sibling* station-forecast source, wired exactly like HKO: a national met agency's OWN
-# published daily-max forecast for the district (松山區/Songshan) that contains the SAME station
-# (RCSS/Taipei-Songshan) the Taipei market settles on. The CWA township MOS bakes in the local
-# microclimate, so it is a station-calibrated, decorrelated information source — DATA PRECISION,
-# never a de-bias. It enters raw_model_forecasts under model id ``cwa_township`` via the identical
-# single_runs persist contract; it contributes to Taipei's served center ONLY via the per-city
-# source-clock scheme weight (no new fusion path, no hard-coded weight in code).
+# Legacy F-D0047-063 12-hour daytime maximum adapter.  Its township representative point is not
+# the RCSS settlement sensor and its 06:00→18:00 maximum is not a local-calendar daily maximum.
+# It remains readable only for historical evidence; live entry uses F-D0047-061's complete D+1
+# hourly Temperature grid below.
 #
 # KEY HANDLING: the CWA Open Data API requires an Authorization token. Following the WU_API_KEY
 # pattern (src/data/observation_client.py), the key is read from the ``CWA_API_KEY`` environment
@@ -624,6 +663,318 @@ def ingest_cwa_township_live(
 
 
 # ---------------------------------------------------------------------------
+# CWA township hourly temperatures (F-D0047-061) — D+1 calendar-day LOW
+# ---------------------------------------------------------------------------
+_CWA_HOURLY_LOW_ENDPOINT = (
+    "https://opendata.cwa.gov.tw/fileapi/v1/opendataapi/F-D0047-061"
+)
+
+
+def _xml_name(element: ET.Element) -> str:
+    return element.tag.rsplit("}", 1)[-1]
+
+
+def _xml_child_text(element: ET.Element, name: str) -> str | None:
+    child = next((item for item in element if _xml_name(item) == name), None)
+    if child is None or child.text is None:
+        return None
+    value = child.text.strip()
+    return value or None
+
+
+def _cwa_aware_time(value: str | None, *, field: str) -> datetime:
+    if not value:
+        raise ValueError(f"CWA F-D0047-061 missing {field}")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"CWA F-D0047-061 invalid {field}") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"CWA F-D0047-061 {field} must be timezone-aware")
+    return parsed
+
+
+def parse_cwa_township_hourly_product(raw_xml: bytes, *, captured_at: str) -> CwaHourlyProduct:
+    """Validate the complete CWA fileapi product and extract publisher clocks.
+
+    The REST datastore projection omits DatasetInfo IssueTime/Update.  This parser
+    intentionally accepts only the official fileapi raw XML, where `Update` is
+    the publisher's revision timestamp.  `captured_at` is validated separately
+    and remains the local availability upper bound.
+    """
+    try:
+        root = ET.fromstring(raw_xml)
+    except ET.ParseError as exc:
+        raise ValueError("CWA F-D0047-061 invalid XML") from exc
+    if _xml_name(root) != "cwaopendata":
+        raise ValueError("CWA F-D0047-061 unexpected root")
+    if _xml_child_text(root, "Dataid") != "D0047-061":
+        raise ValueError("CWA fileapi response is not F-D0047-061")
+    dataset = next((item for item in root if _xml_name(item) == "Dataset"), None)
+    info = (
+        next((item for item in dataset if _xml_name(item) == "DatasetInfo"), None)
+        if dataset is not None
+        else None
+    )
+    if info is None:
+        raise ValueError("CWA F-D0047-061 missing DatasetInfo")
+    issue = _cwa_aware_time(_xml_child_text(info, "IssueTime"), field="IssueTime")
+    update = _cwa_aware_time(_xml_child_text(info, "Update"), field="Update")
+    captured = _cwa_aware_time(captured_at, field="captured_at")
+    if update > captured:
+        raise ValueError("CWA F-D0047-061 requires Update <= captured_at")
+    sent_text = _xml_child_text(root, "Sent")
+    sent = None if sent_text is None else _cwa_aware_time(sent_text, field="Sent")
+    return CwaHourlyProduct(
+        raw_xml=raw_xml,
+        issue_time=issue.astimezone(UTC).isoformat(),
+        update_time=update.astimezone(UTC).isoformat(),
+        sent_time=(None if sent is None else sent.astimezone(UTC).isoformat()),
+        raw_sha256=hashlib.sha256(raw_xml).hexdigest(),
+        captured_at=captured.astimezone(UTC).isoformat(),
+    )
+
+
+def fetch_cwa_township_hourly_product(
+    *,
+    api_key: str,
+    endpoint: str = _CWA_HOURLY_LOW_ENDPOINT,
+    timeout_s: float = 30.0,
+) -> CwaHourlyProduct:
+    """Fetch the CWA full XML product whose DatasetInfo carries IssueTime/Update."""
+    import ssl  # noqa: PLC0415
+    import urllib.parse  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+
+    qs = urllib.parse.urlencode(
+        {"Authorization": api_key, "downloadType": "WEB", "format": "XML"}
+    )
+    req = urllib.request.Request(
+        f"{endpoint}?{qs}", headers={"User-Agent": "zeus-station-forecast/1.0"}
+    )
+    ssl_ctx = ssl.create_default_context()
+    try:
+        ssl_ctx.verify_flags &= ~ssl.VerifyFlags.VERIFY_X509_STRICT
+    except AttributeError:
+        pass
+    with urllib.request.urlopen(req, timeout=timeout_s, context=ssl_ctx) as response:  # noqa: S310
+        raw_xml = response.read()
+    return parse_cwa_township_hourly_product(
+        raw_xml, captured_at=datetime.now(tz=UTC).isoformat()
+    )
+
+
+def parse_cwa_township_hourly_extreme_product(
+    product: CwaHourlyProduct,
+    *,
+    city: str = "Taipei",
+    city_timezone: str = "Asia/Taipei",
+    location_name: str = "松山區",
+    location_geocode: str = "63000010",
+    location_latitude: float = 25.051608,
+    location_longitude: float = 121.568983,
+    metric: str,
+    model: str,
+) -> tuple[StationForecastRow, ...]:
+    """Return one complete D+1 calendar extreme from CWA hourly Temperature.
+
+    F-D0047-061's `Temperature` samples are an hourly sampled product, not
+    F-D0047-063's 12-hour `MaxT`/`MinT`.  We accept exactly one D+1 whose
+    Asia/Taipei local clock has each unique whole hour 00..23 with a finite
+    value, then take its max or min. Partial/current days, 3-hour later ranges,
+    sub-hour samples, duplicates, and 12-hour extrema cannot form this source.
+    """
+    if metric not in {"high", "low"}:
+        raise ValueError("CWA hourly extrema metric must be 'high' or 'low'")
+    issue = _cwa_aware_time(product.issue_time, field="IssueTime")
+    zone = ZoneInfo(city_timezone)
+    issue_date = issue.astimezone(zone).date()
+    try:
+        root = ET.fromstring(product.raw_xml)
+    except ET.ParseError as exc:  # product may have been built by a test fixture
+        raise ValueError("CWA F-D0047-061 invalid XML") from exc
+
+    candidates = [
+        location for location in root.iter()
+        if _xml_name(location) == "Location"
+        and _xml_child_text(location, "LocationName") == location_name
+        and _xml_child_text(location, "Geocode") == location_geocode
+    ]
+    if len(candidates) != 1:
+        raise ValueError("CWA F-D0047-061 expected exactly one configured township location")
+    location = candidates[0]
+    try:
+        latitude = float(_xml_child_text(location, "Latitude"))
+        longitude = float(_xml_child_text(location, "Longitude"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("CWA F-D0047-061 township coordinates missing or invalid") from exc
+    if not (
+        math.isclose(latitude, location_latitude, abs_tol=1e-6)
+        and math.isclose(longitude, location_longitude, abs_tol=1e-6)
+    ):
+        raise ValueError("CWA F-D0047-061 township coordinates do not match configured product")
+    by_date: dict[date, dict[int, float]] = {}
+    for weather_element in location:
+        if (
+            _xml_name(weather_element) != "WeatherElement"
+            or _xml_child_text(weather_element, "ElementName") != "溫度"
+        ):
+            continue
+        for point in weather_element:
+            if _xml_name(point) != "Time":
+                continue
+            data_time = _xml_child_text(point, "DataTime")
+            temperature = next(
+                (
+                    _xml_child_text(value, "Temperature")
+                    for value in point
+                    if _xml_name(value) == "ElementValue"
+                ),
+                None,
+            )
+            try:
+                instant = _cwa_aware_time(data_time, field="DataTime")
+                local = instant.astimezone(zone)
+                value_c = float(temperature)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                continue
+            if local.minute or local.second or local.microsecond:
+                continue
+            values = by_date.setdefault(local.date(), {})
+            if local.hour in values:
+                values[local.hour] = float("nan")
+            else:
+                values[local.hour] = value_c
+
+    target = issue_date.fromordinal(issue_date.toordinal() + 1)
+    values = by_date.get(target, {})
+    if set(values) != set(range(24)) or not all(math.isfinite(value) for value in values.values()):
+        return ()
+    return (
+        StationForecastRow(
+            model=model,
+            city=city,
+            metric=metric,
+            target_date=target.isoformat(),
+            lead_days=1,
+            forecast_value_c=(max(values.values()) if metric == "high" else min(values.values())),
+            source_cycle_time=product.update_time,
+            # Update is a provider revision clock; possession is proven only by
+            # the later local capture instant, never inferred from HTTP delivery.
+            source_available_at=product.captured_at,
+        ),
+    )
+
+
+def parse_cwa_township_hourly_low_product(
+    product: CwaHourlyProduct,
+    **kwargs: object,
+) -> tuple[StationForecastRow, ...]:
+    """Compatibility wrapper for the typed F-D0047-061 LOW product."""
+    return parse_cwa_township_hourly_extreme_product(
+        product,
+        metric="low",
+        model="cwa_township_hourly_low",
+        **kwargs,
+    )
+
+
+def _ingest_cwa_township_hourly_extrema_by_metric(
+    conn: sqlite3.Connection,
+    *,
+    city: str = "Taipei",
+    metrics: Sequence[str] = ("high", "low"),
+    city_timezone: str = "Asia/Taipei",
+    location_name: str = "松山區",
+    location_geocode: str = "63000010",
+    location_latitude: float = 25.051608,
+    location_longitude: float = 121.568983,
+    endpoint: str = _CWA_HOURLY_LOW_ENDPOINT,
+    api_key: str | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, int]:
+    """Fetch F-D0047-061 once and return persisted-row counts by typed extreme."""
+    selected = tuple(str(metric).lower() for metric in metrics)
+    if not selected or len(set(selected)) != len(selected) or set(selected) - {"high", "low"}:
+        raise ValueError("CWA hourly extrema metrics must be unique 'high'/'low' values")
+    key = api_key or resolve_cwa_api_key(environ=environ)
+    if not key:
+        return {metric: 0 for metric in selected}
+    product = fetch_cwa_township_hourly_product(api_key=key, endpoint=endpoint)
+    written: dict[str, int] = {}
+    for metric in selected:
+        model = f"cwa_township_hourly_{metric}"
+        rows = parse_cwa_township_hourly_extreme_product(
+            product, city=city, city_timezone=city_timezone,
+            location_name=location_name, location_geocode=location_geocode,
+            location_latitude=location_latitude, location_longitude=location_longitude,
+            metric=metric, model=model,
+        )
+        request_params = {
+            "dataset": "F-D0047-061", "format": "XML", "downloadType": "WEB",
+            "LocationName": location_name, "Geocode": location_geocode,
+            "Latitude": location_latitude, "Longitude": location_longitude,
+            "ElementName": "溫度", "metric": metric,
+            "target_window": "[D00:00,D+1T00:00)_Asia/Taipei",
+            "aggregation": f"{'max' if metric == 'high' else 'min'}_complete_24_unique_hourly_temperature_samples",
+            "timestamp_basis": "DatasetInfo.Update_provider_revision",
+            "issue_time": product.issue_time, "sent_time": product.sent_time,
+            "response_sha256": product.raw_sha256,
+        }
+        written[metric] = persist_station_forecast_rows(
+            conn, rows, provider="cwa_taiwan", endpoint=endpoint,
+            city_timezone=city_timezone, latitude=location_latitude,
+            longitude=location_longitude, captured_at=product.captured_at,
+            request_params=request_params,
+            cell_selection="cwa_township_district_forecast",
+            elevation_param="township_area",
+            downscaling_policy="cwa_operational_township_forecast",
+            raw_sha256=product.raw_sha256,
+        )
+    return written
+
+
+def ingest_cwa_township_hourly_extrema_live(
+    conn: sqlite3.Connection,
+    *,
+    city: str = "Taipei",
+    metrics: Sequence[str] = ("high", "low"),
+    city_timezone: str = "Asia/Taipei",
+    location_name: str = "松山區",
+    location_geocode: str = "63000010",
+    location_latitude: float = 25.051608,
+    location_longitude: float = 121.568983,
+    endpoint: str = _CWA_HOURLY_LOW_ENDPOINT,
+    api_key: str | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> int:
+    """Fetch F-D0047-061 once and persist each complete hourly-sampled calendar extreme."""
+    return sum(
+        _ingest_cwa_township_hourly_extrema_by_metric(
+            conn,
+            city=city,
+            metrics=metrics,
+            city_timezone=city_timezone,
+            location_name=location_name,
+            location_geocode=location_geocode,
+            location_latitude=location_latitude,
+            location_longitude=location_longitude,
+            endpoint=endpoint,
+            api_key=api_key,
+            environ=environ,
+        ).values()
+    )
+
+
+def ingest_cwa_township_hourly_low_live(
+    conn: sqlite3.Connection,
+    **kwargs: object,
+) -> int:
+    """Compatibility wrapper for callers explicitly requesting only LOW."""
+    return ingest_cwa_township_hourly_extrema_live(conn, metrics=("low",), **kwargs)
+
+
+# ---------------------------------------------------------------------------
 # Config-driven live ingest dispatcher — the seam the forecast-download lane calls
 # ---------------------------------------------------------------------------
 # Turns the static config/station_forecast_sources.json into live raw_model_forecasts rows:
@@ -635,6 +986,7 @@ def ingest_cwa_township_live(
 # solely through the per-city source-clock scheme weight downstream.
 _STATION_ADAPTER_DISPATCH: dict[str, str] = {
     "cwa_township_json": "ingest_cwa_township_live",
+    "cwa_township_hourly_xml": "ingest_cwa_township_hourly_extrema_live",
     "hko_fnd_json": "ingest_hko_fnd_live",
 }
 
@@ -649,19 +1001,32 @@ def _station_ingest_kwargs(
     kw: dict[str, object] = {}
     if spec.get("city"):
         kw["city"] = str(spec["city"])
-    if spec.get("metric"):
+    if spec.get("metric") and adapter_kind != "cwa_township_hourly_xml":
         kw["metric"] = str(spec["metric"])
     if adapter_kind == "hko_fnd_json" and spec.get("metrics") is not None:
         raw_metrics = spec["metrics"]
         if not isinstance(raw_metrics, Sequence) or isinstance(raw_metrics, (str, bytes)):
             raise ValueError("hko_fnd metrics must be a sequence")
         kw["metrics"] = tuple(str(value) for value in raw_metrics)
+    if adapter_kind == "cwa_township_hourly_xml" and spec.get("metrics") is not None:
+        raw_metrics = spec["metrics"]
+        if not isinstance(raw_metrics, Sequence) or isinstance(raw_metrics, (str, bytes)):
+            raise ValueError("cwa hourly metrics must be a sequence")
+        kw["metrics"] = tuple(str(value) for value in raw_metrics)
+    elif adapter_kind == "cwa_township_hourly_xml" and spec.get("metric"):
+        kw["metrics"] = (str(spec["metric"]),)
     if spec.get("endpoint"):
         kw["endpoint"] = str(spec["endpoint"])
-    if adapter_kind == "cwa_township_json":
+    if adapter_kind in {"cwa_township_json", "cwa_township_hourly_xml"}:
         if spec.get("location_name"):
             kw["location_name"] = str(spec["location_name"])
-        if spec.get("element_name"):
+        if adapter_kind == "cwa_township_hourly_xml" and spec.get("location_geocode"):
+            kw["location_geocode"] = str(spec["location_geocode"])
+        if adapter_kind == "cwa_township_hourly_xml" and spec.get("location_latitude") is not None:
+            kw["location_latitude"] = float(spec["location_latitude"])
+        if adapter_kind == "cwa_township_hourly_xml" and spec.get("location_longitude") is not None:
+            kw["location_longitude"] = float(spec["location_longitude"])
+        if adapter_kind == "cwa_township_json" and spec.get("element_name"):
             kw["element_name"] = str(spec["element_name"])
         if environ is not None:
             kw["environ"] = environ
@@ -673,20 +1038,31 @@ def ingest_enabled_station_sources_live(
     *,
     root: Path | None = None,
     environ: Mapping[str, str] | None = None,
+    source_ids: Sequence[str] | None = None,
 ) -> dict[str, int]:
-    """Ingest every ENABLED station-forecast source from config, routed by ``adapter_kind``.
+    """Ingest selected ENABLED station forecasts, routed by ``adapter_kind``.
 
     Returns ``{source_id: rows_written}`` for each source that dispatched without error. Per-source
     fail-soft: a source whose ingest raises (or whose ``adapter_kind`` is unknown) is logged and
     omitted, so one provider outage never starves the cycle. NETWORK happens inside the dispatched
-    ingest functions only.
+    ingest functions only. ``source_ids=None`` preserves the all-enabled bootstrap behavior; an
+    explicit sequence lets the scheduler honor each provider's own source clock.
     """
     import logging  # noqa: PLC0415 - keep module import surface lean; called ~2x/cycle
 
     log = logging.getLogger(__name__)
     out: dict[str, int] = {}
     sources = load_station_forecast_config(root=root)
+    selected = None if source_ids is None else {
+        str(source_id).strip() for source_id in source_ids if str(source_id).strip()
+    }
+    handled: set[str] = set()
     for source_id, spec in sources.items():
+        source_id = str(source_id)
+        if source_id in handled:
+            continue
+        if selected is not None and str(source_id) not in selected:
+            continue
         if not isinstance(spec, Mapping) or not spec.get("enabled"):
             continue
         adapter_kind = str(spec.get("adapter_kind") or "")
@@ -703,7 +1079,30 @@ def ingest_enabled_station_sources_live(
             continue
         try:
             kwargs = _station_ingest_kwargs(adapter_kind, spec, environ=environ)
-            out[str(source_id)] = int(fn(conn, **kwargs))
+            fetch_group = str(spec.get("shared_fetch_group") or "").strip()
+            if adapter_kind == "cwa_township_hourly_xml" and fetch_group:
+                siblings = [
+                    (str(sibling_id), sibling_spec)
+                    for sibling_id, sibling_spec in sources.items()
+                    if isinstance(sibling_spec, Mapping)
+                    and sibling_spec.get("enabled")
+                    and str(sibling_spec.get("adapter_kind") or "") == adapter_kind
+                    and str(sibling_spec.get("shared_fetch_group") or "").strip() == fetch_group
+                    and (selected is None or str(sibling_id) in selected)
+                ]
+                metrics = tuple(
+                    str(sibling_spec.get("metric") or "").lower()
+                    for _, sibling_spec in siblings
+                )
+                by_metric = _ingest_cwa_township_hourly_extrema_by_metric(
+                    conn, **{**kwargs, "metrics": metrics}
+                )
+                for sibling_id, sibling_spec in siblings:
+                    metric = str(sibling_spec.get("metric") or "").lower()
+                    out[sibling_id] = int(by_metric[metric])
+                    handled.add(sibling_id)
+                continue
+            out[source_id] = int(fn(conn, **kwargs))
         except Exception as exc:  # noqa: BLE001 - one source must never abort the cycle
             log.warning(
                 "station ingest: source %s (%s) failed fail-soft: %s", source_id, fn_name, exc

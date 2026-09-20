@@ -16,7 +16,7 @@ connection (both tables are FORECAST_CLASS on the same DB -> intra-DB JOIN, INV-
 
 THE NO-LEAK GUARANTEE (IRON RULE #3, structural — not a comment):
   - previous_runs is the default and only history for gridded models.
-  - cwa_township/hko_fnd have no previous-runs product, so positive-lead single_runs may train
+  - CWA F-D0047-061 hourly extrema / hko_fnd have no previous-runs product, so positive-lead single_runs may train
     after per-target-date latest-available-issue selection, provided source_available_at is before
     the target date. Day0 single_runs never train because this interface lacks the decision
     time-of-day needed to align historical issues causally.
@@ -45,6 +45,8 @@ _LOG = logging.getLogger("zeus.bayes_precision_fusion_history_provider")
 
 _STATION_SINGLE_RUNS_HISTORY_TIMEZONES = {
     "cwa_township": {"Taipei": "Asia/Taipei"},
+    "cwa_township_hourly_high": {"Taipei": "Asia/Taipei"},
+    "cwa_township_hourly_low": {"Taipei": "Asia/Taipei"},
     "hko_fnd": {"Hong Kong": "Asia/Hong_Kong"},
 }
 

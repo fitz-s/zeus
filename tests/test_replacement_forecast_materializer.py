@@ -324,6 +324,141 @@ def _request(
     )
 
 
+@pytest.mark.parametrize("frozen_two_source_scheme", (False, True))
+@pytest.mark.parametrize(
+    ("metric", "model", "value_c"),
+    (("high", "cwa_township_hourly_high", 33.0), ("low", "cwa_township_hourly_low", 24.0)),
+)
+def test_hourly_cwa_extreme_persisted_row_enters_real_precision_override_when_cold_start(
+    monkeypatch: pytest.MonkeyPatch,
+    frozen_two_source_scheme: bool,
+    metric: str,
+    model: str,
+    value_c: float,
+) -> None:
+    """Each 061 extreme enters its own q center; retired 063 remains excluded."""
+    from src.config import City
+
+    conn = _conn()
+    target = date(2026, 7, 24)
+    cwa_id = 701
+    conn.execute(
+        """
+        INSERT INTO raw_model_forecasts (
+            raw_model_forecast_id, model, city, target_date, metric,
+            source_cycle_time, source_available_at, captured_at, lead_days,
+            forecast_value_c, endpoint
+        ) VALUES (?, ?, 'Taipei', ?, ?,
+                  '2026-07-23T10:14:00+00:00', '2026-07-23T10:15:00+00:00',
+                  '2026-07-23T10:15:00+00:00', 1, ?, 'single_runs')
+        """,
+        (cwa_id, model, target.isoformat(), metric, value_c),
+    )
+    # The retained F-D0047-063 raw row has the same metric but no entry role.
+    conn.execute(
+        """
+        INSERT INTO raw_model_forecasts (
+            raw_model_forecast_id, model, city, target_date, metric,
+            source_cycle_time, source_available_at, captured_at, lead_days,
+            forecast_value_c, endpoint
+        ) VALUES (702, 'cwa_township', 'Taipei', ?, ?,
+                  '2026-07-23T10:14:00+00:00', '2026-07-23T10:15:00+00:00',
+                  '2026-07-23T10:15:00+00:00', 1, 99.0, 'single_runs')
+        """,
+        (target.isoformat(), metric),
+    )
+    taipei = City(
+        name="Taipei", lat=25.067244, lon=121.552822, timezone="Asia/Taipei",
+        settlement_unit="C", cluster="Taiwan", wu_station="RCSS",
+        settlement_source_type="wu_icao",
+    )
+    monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {"Taipei": taipei})
+
+    # The real override reads the persisted station row and builds its own
+    # _z_by_model/precision-center/current-value provenance.  These only replace
+    # external ENS capture and the already-validated current-shape input.
+    likelihood = SimpleNamespace(
+        model="gfs_global", z=30.0, train_residuals=(), n_train=0,
+        residuals_by_date={},
+    )
+    capture = SimpleNamespace(
+        has_extras=True, anchor_z=25.0, anchor_tau0=1.0,
+        likelihood=(likelihood,), disagree_var=0.0,
+        anchor_raw_m2_native=None, anchor_raw_n_train=0,
+        dropped_models=(),
+        selection=SimpleNamespace(excluded_regionals=(), dropped_aliases=()),
+    )
+    monkeypatch.setattr(
+        "src.data.bayes_precision_fusion_capture.capture_bayes_precision_instruments",
+        lambda **_kwargs: capture,
+    )
+    monkeypatch.setattr(
+        "src.forecast.bayes_precision_fusion.fuse_bayes_precision_posterior",
+        lambda **_kwargs: SimpleNamespace(
+            sd=0.5, method="TEST_FUSION", used_models=("gfs_global",), regional_models=(),
+        ),
+    )
+    if frozen_two_source_scheme:
+        from src.strategy.live_inference.source_clock_city_weights import CityOneScheme
+
+        scheme = CityOneScheme(
+            city="Taipei", scheme_status="ACTIVE",
+            final_sources=("ecmwf_ifs", "gfs_global"),
+            weights={"ecmwf_ifs": 0.6, "gfs_global": 0.4},
+            sample_n=30, walkforward_pass=True, one_scheme_status="ACTIVE",
+        )
+    else:
+        scheme = None
+    monkeypatch.setattr(
+        "src.strategy.live_inference.source_clock_city_weights.scheme_for_city",
+        lambda *_args, **_kwargs: scheme,
+    )
+
+    class _Shape:
+        center_sigma_c = 0.5
+        predictive_sigma_c = 1.2
+        members_c = (23.0, 24.0, 25.0)
+
+        @staticmethod
+        def as_payload() -> dict[str, object]:
+            return {"source": "test-current-ens-shape"}
+
+    monkeypatch.setattr(materializer_mod, "_read_current_evidence_shape", lambda *_a, **_kw: _Shape())
+    request = replace(
+        _request(),
+        city="Taipei", city_id="Taipei", city_timezone="Asia/Taipei",
+        temperature_metric=metric, target_date=target,
+        source_cycle_time=datetime(2026, 7, 23, 10, tzinfo=UTC),
+        computed_at=datetime(2026, 7, 23, 10, 16, tzinfo=UTC),
+    )
+
+    override = materializer_mod._replacement_bayes_precision_fusion_override(
+        request, metric=metric, anchor_value_corrected_c=25.0, conn=conn,
+    )
+
+    assert override is not None
+    assert model in override.used_models
+    assert "cwa_township" not in override.used_models
+    assert cwa_id in override.raw_model_forecast_ids
+    assert override.current_value_serving[model] == {
+        "served_via": "single_runs",
+        "previous_run_substitution": False,
+        "raw_model_forecast_id": cwa_id,
+        "served_cycle": "2026-07-23T10:14:00+00:00",
+        "captured_at": "2026-07-23T10:15:00+00:00",
+        "age_hours": 0.017,
+        "lead_days": 1,
+    }
+    station_basis = override.precision_center_basis[model]
+    assert station_basis["n"] == 0.0
+    assert station_basis["weight"] > 0.0
+    if metric == "low":
+        # Without the 24C station member, the mocked 30C extra + 25C anchor
+        # center at 27.5C; the real raw-precision center must move below 27C.
+        assert override.anchor_value_c < 27.0
+        assert model in override.low_n_prior_weighted_models
+
+
 def _day0_owner_witness(
     request: ReplacementForecastMaterializeRequest,
     *,

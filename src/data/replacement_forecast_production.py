@@ -2972,15 +2972,18 @@ def _replacement_cycle_availability_poll() -> None:
         logger.info("cycle availability poll report: %s", report)
 
 
-def _ingest_station_forecasts_live(cfg: dict[str, object]) -> dict[str, int] | None:
+def _ingest_station_forecasts_live(
+    cfg: dict[str, object],
+    *,
+    source_ids: tuple[str, ...] | None = None,
+) -> dict[str, int] | None:
     """Config-driven station-forecast (CWA/HKO) live ingest into raw_model_forecasts.
 
-    Runs on the download lane (publish-time cron + boot catch-up), so station data refreshes at
-    the same ~2x/day cadence as the gridded raw inputs the lane already fetches. Uses an AUTOCOMMIT
-    connection: each tiny per-row write self-commits, so no write lock is held across a provider
-    network fetch (avoids the forecast-DB "database is locked" contention the heavy capture guards
-    against with BEGIN IMMEDIATE). Fail-soft end to end: returns None on any setup error, and the
-    dispatcher swallows per-source provider errors, so station ingest can never kill the cycle.
+    Runs on the independent station source-clock lane. Uses an AUTOCOMMIT connection: each tiny
+    per-row write self-commits, so no write lock is held across a provider network fetch (avoids the
+    forecast-DB "database is locked" contention the heavy capture guards against with BEGIN
+    IMMEDIATE). Fail-soft end to end: returns None on any setup error, and the dispatcher swallows
+    per-source provider errors, so station ingest can never kill the cycle.
     Returns ``{source_id: rows_written}`` or None.
     """
     forecast_db = cfg.get("forecast_db")
@@ -2997,7 +3000,10 @@ def _ingest_station_forecasts_live(cfg: dict[str, object]) -> dict[str, int] | N
         # function holds no write transaction. _persist_rows is autocommit-safe by contract.
         conn.isolation_level = None
         try:
-            return ingest_enabled_station_sources_live(conn)
+            return ingest_enabled_station_sources_live(
+                conn,
+                source_ids=source_ids,
+            )
         finally:
             conn.close()
     except Exception as exc:  # noqa: BLE001 - station ingest must never break the download cycle
@@ -3009,27 +3015,72 @@ def _ingest_station_forecasts_live(cfg: dict[str, object]) -> dict[str, int] | N
 # gridded download off forecast-live into ingest_main's availability poll, but LEFT BEHIND the station
 # ingest call above (it lived only in the now-descheduled _replacement_forecast_download_cycle). cwa_
 # township/hko_fnd went dark 2026-07-17 as a result. This due-gated wrapper re-homes the call onto the
-# (fast) availability poll: a monotonic-clock gate fetches at most ~1×/interval so the poll never hammers
-# the CWA/HKO provider APIs, matching the original ~4×/day download-cron cadence. Fail-soft throughout.
-_STATION_INGEST_MIN_INTERVAL_S = 3 * 3600
-_last_station_ingest_monotonic: float | None = None
+# (fast) availability poll. Each provider owns its publication clock: HKO may publish unscheduled
+# updates only 30 minutes apart, while credentialed CWA keeps its slower quota posture. A single
+# shared 3h gate delayed live HKO revisions by as much as 177 minutes. Source-local monotonic debt
+# makes the scheduling distinction executable without coupling either provider to a gridded clock.
+_STATION_INGEST_DEFAULT_INTERVAL_S = 3 * 3600.0
+_last_station_ingest_monotonic_by_source: dict[str, float] = {}
+
+
+def _station_forecast_poll_intervals() -> dict[str, float]:
+    """Return enabled station source cadences from their owning config rows."""
+
+    from src.data.station_forecast_adapter import load_station_forecast_config
+
+    intervals: dict[str, float] = {}
+    for source_id, spec in load_station_forecast_config().items():
+        if not isinstance(spec, Mapping) or not spec.get("enabled"):
+            continue
+        try:
+            interval = float(
+                spec.get(
+                    "poll_interval_seconds",
+                    _STATION_INGEST_DEFAULT_INTERVAL_S,
+                )
+            )
+        except (TypeError, ValueError):
+            interval = _STATION_INGEST_DEFAULT_INTERVAL_S
+        intervals[str(source_id)] = max(15.0, interval)
+    return intervals
 
 
 def _ingest_station_forecasts_if_due(cfg: dict[str, object]) -> dict[str, int] | None:
-    """Staleness-gated station-forecast ingest for the availability-poll lane. Returns the ingest
-    report when a fetch was due (and ran), else None. Never raises: the monotonic gate is advanced
-    before the fetch so a transient provider failure waits one interval rather than hammering."""
-    global _last_station_ingest_monotonic
+    """Poll only station sources whose own clocks are due.
+
+    The first attempt reports zero-row results so daemon boot can reseed an issue already present
+    in the DB. Later unchanged polls are silent; otherwise a fast HKO cadence would manufacture
+    no-change reseed debt every tick. The monotonic debt is advanced before network I/O so a
+    transient provider failure waits one source-local interval rather than hammering.
+    """
     import time  # noqa: PLC0415
 
     now = time.monotonic()
-    if (
-        _last_station_ingest_monotonic is not None
-        and (now - _last_station_ingest_monotonic) < _STATION_INGEST_MIN_INTERVAL_S
-    ):
+    intervals = _station_forecast_poll_intervals()
+    due = tuple(
+        source_id
+        for source_id, interval in sorted(intervals.items())
+        if source_id not in _last_station_ingest_monotonic_by_source
+        or now - _last_station_ingest_monotonic_by_source[source_id] >= interval
+    )
+    if not due:
         return None
-    _last_station_ingest_monotonic = now
-    return _ingest_station_forecasts_live(cfg)
+    first_attempt = {
+        source_id
+        for source_id in due
+        if source_id not in _last_station_ingest_monotonic_by_source
+    }
+    for source_id in due:
+        _last_station_ingest_monotonic_by_source[source_id] = now
+    report = _ingest_station_forecasts_live(cfg, source_ids=due)
+    if report is None:
+        return None
+    changed_or_bootstrap = {
+        source_id: int(rows_written)
+        for source_id, rows_written in report.items()
+        if int(rows_written) > 0 or source_id in first_attempt
+    }
+    return changed_or_bootstrap or None
 
 
 @_scheduler_job("replacement_forecast_download")

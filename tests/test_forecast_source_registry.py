@@ -104,11 +104,24 @@ def test_openmeteo_live_ensemble_is_monitor_fallback_not_entry_primary() -> None
 
 
 def test_station_forecast_sources_are_live_entry_primary() -> None:
-    for source_id in ("hko_fnd", "cwa_township"):
+    for source_id in (
+        "hko_fnd",
+        "cwa_township_hourly_high",
+        "cwa_township_hourly_low",
+    ):
         source = SOURCES[source_id]
         assert source.enabled_by_default is True
         assert source.degradation_level == "OK"
         assert "entry_primary" in source.allowed_roles
+        gate_source_role(source, "entry_primary")
+
+
+def test_legacy_cwa_063_is_historical_evidence_not_entry_primary() -> None:
+    source = SOURCES["cwa_township"]
+
+    assert source.enabled_by_default is False
+    assert source.allowed_roles == ("historical_evidence",)
+    with pytest.raises(SourceNotEnabled, match="entry_primary"):
         gate_source_role(source, "entry_primary")
 
 
