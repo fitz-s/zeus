@@ -43794,6 +43794,312 @@ def _saturated_day0_auction_inputs():
     return event.event_id, prepared, payload, kwargs
 
 
+def _insert_day0_ask_snapshot(
+    conn, *, snapshot_id, token_id, captured_at, ask
+):
+    conn.execute(
+        """
+        INSERT INTO executable_market_snapshots (
+            snapshot_id, gamma_market_id, event_id, condition_id, question_id,
+            yes_token_id, no_token_id, selected_outcome_token_id, outcome_label,
+            enable_orderbook, active, closed, min_tick_size, min_order_size,
+            fee_details_json, token_map_json, neg_risk,
+            orderbook_top_bid, orderbook_top_ask, orderbook_depth_json,
+            raw_gamma_payload_hash, raw_clob_market_info_hash, raw_orderbook_hash,
+            authority_tier, captured_at, freshness_deadline
+        ) VALUES (?, 'gm', 'ev', 'cond', 'q', 'yes-token', 'no-token', ?, ?,
+                  1, 1, 0, '0.01', '5', '{}', '{}', 0, '0.40', ?, '{}',
+                  'h1', 'h2', 'h3', 'CLOB', ?, ?)
+        """,
+        (
+            snapshot_id,
+            token_id,
+            "YES" if token_id == "yes-token" else "NO",
+            ask,
+            captured_at.isoformat(),
+            (captured_at + _dt.timedelta(minutes=5)).isoformat(),
+        ),
+    )
+    conn.commit()
+
+
+@pytest.mark.parametrize("token_id", ("yes-token", "no-token"))
+def test_day0_candidate_ask_repricing_reads_two_prior_asks_symmetrically(token_id):
+    conn = sqlite3.connect(":memory:")
+    init_snapshot_schema(conn)
+    captured_at = _dt.datetime(2026, 9, 19, 14, 30, tzinfo=_dt.timezone.utc)
+    _insert_day0_ask_snapshot(
+        conn,
+        snapshot_id=f"prior-a-{token_id}",
+        token_id=token_id,
+        captured_at=captured_at - _dt.timedelta(minutes=8),
+        ask="0.55",
+    )
+    _insert_day0_ask_snapshot(
+        conn,
+        snapshot_id=f"prior-b-{token_id}",
+        token_id=token_id,
+        captured_at=captured_at - _dt.timedelta(minutes=5),
+        ask="0.61",
+    )
+    _insert_day0_ask_snapshot(
+        conn,
+        snapshot_id=f"at-t-{token_id}",
+        token_id=token_id,
+        captured_at=captured_at,
+        ask="0.77",
+    )
+    candidate = SimpleNamespace(
+        action="BUY",
+        token_id=token_id,
+        book_captured_at_utc=captured_at,
+    )
+    counts = {}
+
+    try:
+        reason = era._day0_candidate_ask_repricing_rejection_reason(
+            candidate,
+            event_type="DAY0_EXTREME_UPDATED",
+            trade_conn=conn,
+            counts=counts,
+        )
+        assert reason == "DAY0_ASK_REPRICING_VETO"
+        assert counts[(token_id, captured_at)] == 2
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("row_mode", ("one", "none", "null"))
+def test_day0_candidate_ask_repricing_is_inert_without_two_real_asks(row_mode):
+    conn = sqlite3.connect(":memory:")
+    init_snapshot_schema(conn)
+    captured_at = _dt.datetime(2026, 9, 19, 14, 30, tzinfo=_dt.timezone.utc)
+    if row_mode != "none":
+        _insert_day0_ask_snapshot(
+            conn,
+            snapshot_id=f"single-{row_mode}",
+            token_id="yes-token",
+            captured_at=captured_at - _dt.timedelta(minutes=5),
+            ask="0.55" if row_mode == "one" else "ABSENT",
+        )
+    candidate = SimpleNamespace(
+        action="BUY",
+        token_id="yes-token",
+        book_captured_at_utc=captured_at,
+    )
+    try:
+        assert era._day0_candidate_ask_repricing_rejection_reason(
+            candidate,
+            event_type="DAY0_EXTREME_UPDATED",
+            trade_conn=conn,
+            counts={},
+        ) is None
+    finally:
+        conn.close()
+
+
+def test_day0_candidate_ask_repricing_skips_non_day0_and_sell_without_sql():
+    conn = sqlite3.connect(":memory:")
+    sql_actions = []
+    conn.set_authorizer(lambda action, *_args: sql_actions.append(action) or sqlite3.SQLITE_DENY)
+    captured_at = _dt.datetime(2026, 9, 19, 14, 30, tzinfo=_dt.timezone.utc)
+    try:
+        for event_type, action in (
+            ("FORECAST_SNAPSHOT_READY", "BUY"),
+            ("DAY0_EXTREME_UPDATED", "SELL"),
+        ):
+            assert era._day0_candidate_ask_repricing_rejection_reason(
+                SimpleNamespace(
+                    action=action,
+                    token_id="yes-token",
+                    book_captured_at_utc=captured_at,
+                ),
+                event_type=event_type,
+                trade_conn=conn,
+                counts={},
+            ) is None
+        assert sql_actions == []
+    finally:
+        conn.close()
+
+
+def test_day0_candidate_ask_repricing_cache_is_token_window_scoped(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    init_snapshot_schema(conn)
+    captured_at = _dt.datetime(2026, 9, 19, 14, 30, tzinfo=_dt.timezone.utc)
+    for token_id in ("yes-token", "no-token"):
+        for suffix, minutes, ask in (
+            ("a", 8, "0.55"),
+            ("b", 5, "0.61"),
+        ):
+            _insert_day0_ask_snapshot(
+                conn,
+                snapshot_id=f"{token_id}-{suffix}",
+                token_id=token_id,
+                captured_at=captured_at - _dt.timedelta(minutes=minutes),
+                ask=ask,
+            )
+    quiet_at = captured_at + _dt.timedelta(minutes=20)
+    _insert_day0_ask_snapshot(
+        conn,
+        snapshot_id="quiet",
+        token_id="no-token",
+        captured_at=quiet_at - _dt.timedelta(minutes=5),
+        ask="0.55",
+    )
+    original = era.stamp_day0_held_ask_repricing
+    reads = []
+
+    def stamped(payload, **kwargs):
+        reads.append((kwargs["held_token_id"], kwargs["book_captured_at"]))
+        return original(payload, **kwargs)
+
+    monkeypatch.setattr(era, "stamp_day0_held_ask_repricing", stamped)
+    counts = {}
+    try:
+        for mode in ("TAKER_LIMIT", "MAKER_REST"):
+            reason = era._day0_candidate_ask_repricing_rejection_reason(
+                SimpleNamespace(
+                    action="BUY",
+                    execution_mode=mode,
+                    token_id="yes-token",
+                    book_captured_at_utc=captured_at,
+                ),
+                event_type="DAY0_EXTREME_UPDATED",
+                trade_conn=conn,
+                counts=counts,
+            )
+            assert reason == "DAY0_ASK_REPRICING_VETO"
+        assert reads == [("yes-token", captured_at)]
+
+        assert era._day0_candidate_ask_repricing_rejection_reason(
+            SimpleNamespace(
+                action="BUY", token_id="no-token", book_captured_at_utc=captured_at
+            ),
+            event_type="DAY0_EXTREME_UPDATED",
+            trade_conn=conn,
+            counts=counts,
+        ) == "DAY0_ASK_REPRICING_VETO"
+        assert reads[-1] == ("no-token", captured_at)
+
+        assert era._day0_candidate_ask_repricing_rejection_reason(
+            SimpleNamespace(
+                action="BUY", token_id="no-token", book_captured_at_utc=quiet_at
+            ),
+            event_type="DAY0_EXTREME_UPDATED",
+            trade_conn=conn,
+            counts=counts,
+        ) is None
+        assert reads[-1] == ("no-token", quiet_at)
+        assert len(reads) == 3
+    finally:
+        conn.close()
+
+
+def test_day0_candidate_ask_repricing_read_failure_is_inert():
+    conn = sqlite3.connect(":memory:")
+    conn.close()
+    captured_at = _dt.datetime(2026, 9, 19, 14, 30, tzinfo=_dt.timezone.utc)
+    assert era._day0_candidate_ask_repricing_rejection_reason(
+        SimpleNamespace(
+            action="BUY", token_id="yes-token", book_captured_at_utc=captured_at
+        ),
+        event_type="DAY0_EXTREME_UPDATED",
+        trade_conn=conn,
+        counts={},
+    ) is None
+
+
+def test_live_adapter_day0_ask_repricing_excludes_repriced_side_in_policy(
+    monkeypatch,
+):
+    event_id, prepared, _payload, _kwargs = _saturated_day0_auction_inputs()
+    event = _global_day0_scope_event(city="Chicago", source_run_id="ask-reprice")
+    decision_at = _dt.datetime(2026, 9, 19, 14, 30, tzinfo=_dt.timezone.utc)
+    trade = sqlite3.connect(":memory:")
+    init_snapshot_schema(trade)
+    for suffix, minutes, ask in (("a", 8, "0.55"), ("b", 5, "0.61")):
+        _insert_day0_ask_snapshot(
+            trade,
+            snapshot_id=f"winner-{suffix}",
+            token_id="yes-token",
+            captured_at=decision_at - _dt.timedelta(minutes=minutes),
+            ask=ask,
+        )
+    _insert_day0_ask_snapshot(
+        trade,
+        snapshot_id="alternate-quiet",
+        token_id="no-token",
+        captured_at=decision_at - _dt.timedelta(minutes=5),
+        ask="0.55",
+    )
+    captured = {}
+
+    monkeypatch.setattr(
+        era,
+        "_prepare_current_global_probability_family",
+        lambda *_args, **_kwargs: prepared,
+    )
+    monkeypatch.setattr(
+        era,
+        "_prepared_global_probability_semantics_revision",
+        lambda *_args, **_kwargs: "test-revision",
+    )
+    monkeypatch.setattr(
+        era,
+        "_global_active_entry_duplicate_reason",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        era,
+        "_global_current_entry_feasibility_rejection_reason",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def fake_process(events, **kwargs):
+        captured.update(kwargs)
+        prepared_receipt = kwargs["prepare_event"](events[0], decision_at)
+        assert prepared_receipt.prepared_global_family is prepared
+        policy = kwargs["candidate_policy_rejection_resolver"]
+        repriced = SimpleNamespace(
+            action="BUY",
+            family_key=prepared.probability_witness.family_key,
+            bin_id="bin-0",
+            condition_id="condition-0",
+            side="YES",
+            token_id="yes-token",
+            book_captured_at_utc=decision_at,
+            execution_mode="TAKER_LIMIT",
+        )
+        alternate = SimpleNamespace(
+            **{**vars(repriced), "side": "NO", "token_id": "no-token"}
+        )
+        repriced_reason = policy(repriced)
+        alternate_reason = policy(alternate)
+        assert repriced_reason == "DAY0_ASK_REPRICING_VETO"
+        assert alternate_reason is None
+        proof_policy = kwargs["proof_candidate_policy_rejection_resolver"]
+        assert proof_policy(repriced) == repriced_reason
+        assert proof_policy(alternate) == alternate_reason
+        return SimpleNamespace(repriced_reason=repriced_reason, alternate_reason=alternate_reason)
+
+    monkeypatch.setattr(global_batch_runtime, "process_current_global_batch", fake_process)
+    try:
+        adapter = era.event_bound_live_adapter_from_trade_conn(
+            trade,
+            get_current_level=lambda: era.RiskLevel.GREEN,
+            forecast_conn=sqlite3.connect(":memory:"),
+            topology_conn=sqlite3.connect(":memory:"),
+            calibration_conn=sqlite3.connect(":memory:"),
+        )
+        result = adapter.process_global_batch((event,), decision_at)
+        assert result.repriced_reason == "DAY0_ASK_REPRICING_VETO"
+        assert result.alternate_reason is None
+        assert captured["candidate_policy_rejection_resolver"] is not None
+    finally:
+        trade.close()
+
+
 def _day0_nowcast_context_for_witness(witness, *, candidate_bindings):
     return bridge.Day0DiurnalNowcastContext(
         probability_witness_identity=witness.witness_identity,
@@ -44396,3 +44702,22 @@ def test_day0_saturation_marker_drains_when_same_cut_cap_tightens():
     )
     assert tightened.decision.candidate.side == "NO"
     assert "DAY0_STATISTICAL_CERTAINTY_UNSUPPORTED" not in tightened.decision.rejection_reasons.values()
+
+
+def test_day0_ask_final_stamp_rereads_after_selection_cache(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    init_snapshot_schema(conn)
+    at = _dt.datetime(2026, 9, 19, 14, 30, tzinfo=_dt.timezone.utc)
+    candidate = SimpleNamespace(action="BUY", token_id="yes-token", book_captured_at_utc=at)
+    counts = {}
+    try:
+        _insert_day0_ask_snapshot(conn, snapshot_id="first", token_id="yes-token", captured_at=at-_dt.timedelta(minutes=2), ask="0.40")
+        assert era._day0_candidate_ask_repricing_rejection_reason(candidate, event_type="DAY0_EXTREME_UPDATED", trade_conn=conn, counts=counts) is None
+        _insert_day0_ask_snapshot(conn, snapshot_id="late-observed", token_id="yes-token", captured_at=at-_dt.timedelta(minutes=1), ask="0.41")
+        monkeypatch.setattr(era, "stamp_day0_diurnal_nowcast", lambda *_args, **_kwargs: None)
+        payload = {"event_type": "DAY0_EXTREME_UPDATED"}
+        era._stamp_day0_live_admission_payload(payload, event_payload={}, held_token_id="yes-token", book_captured_at=at, decision_time=at, trade_conn=conn)
+        assert list(counts.values()) == [1]
+        assert payload[era.DAY0_ASK_DISTINCT_10MIN_KEY] == 2
+    finally:
+        conn.close()

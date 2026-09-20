@@ -11675,6 +11675,7 @@ def event_bound_live_adapter_from_trade_conn(
             return min(allocator_limit, flat_cost_usd)
 
         strategy_policy_cache: dict[tuple[str, str], str | None] = {}
+        day0_ask_repricing_cache: dict[tuple[str, datetime], int | None] = {}
 
         def _current_entry_calibration_scope(candidate, prepared):
             family_key = str(getattr(candidate, "family_key", ""))
@@ -11739,6 +11740,14 @@ def event_bound_live_adapter_from_trade_conn(
             if owner is None or side not in {"YES", "NO"}:
                 return "GLOBAL_ENTRY_FEASIBILITY_OWNER_MISSING"
             event_type, metric, day0_truth_by_bin_side = owner
+            repricing_reason = _day0_candidate_ask_repricing_rejection_reason(
+                candidate,
+                event_type=event_type,
+                trade_conn=trade_conn,
+                counts=day0_ask_repricing_cache,
+            )
+            if repricing_reason is not None:
+                return repricing_reason
             bin_id = str(getattr(candidate, "bin_id", "") or "").strip()
             day0_payoff_truth = day0_truth_by_bin_side.get((bin_id, side))
             probability_semantics_revision = (
@@ -23216,6 +23225,43 @@ def stamp_day0_diurnal_nowcast(
 DAY0_ASK_DISTINCT_10MIN_KEY = "_edli_day0_held_ask_distinct_10min"
 DAY0_ASK_WINDOW_START_KEY = "_edli_day0_held_ask_window_start_utc"
 DAY0_ASK_WINDOW_END_KEY = "_edli_day0_held_ask_window_end_utc"
+
+
+def _day0_candidate_ask_repricing_rejection_reason(
+    candidate: object,
+    *,
+    event_type: str,
+    trade_conn: sqlite3.Connection,
+    counts: dict[tuple[str, datetime], int | None],
+) -> str | None:
+    """Exclude already-repriced Day0 BUYs using their exact native book clock.
+
+    SCOPE: this native BUY token and sealed-book window only. DRAIN: each new
+    window reads current evidence. RESET: a quiet window clears the veto; absent
+    evidence stays inert. The final JIT admission still rereads its own window.
+    """
+    from src.engine.day0_admission import DAY0_EVENT_TYPE, DAY0_ASK_REPRICING_MIN_DISTINCT
+
+    if event_type != DAY0_EVENT_TYPE or str(getattr(candidate, "action", "BUY")).upper() != "BUY":
+        return None
+    token = str(getattr(candidate, "token_id", "") or "").strip()
+    captured_at = getattr(candidate, "book_captured_at_utc", None)
+    if not token or not isinstance(captured_at, datetime) or captured_at.tzinfo is None:
+        return None
+    key = (token, captured_at.astimezone(UTC))
+    if key not in counts:
+        payload: dict[str, object] = {"event_type": event_type}
+        stamp_day0_held_ask_repricing(
+            payload, held_token_id=token, book_captured_at=key[1], trade_conn=trade_conn,
+        )
+        counts[key] = (
+            int(payload[DAY0_ASK_DISTINCT_10MIN_KEY])
+            if DAY0_ASK_DISTINCT_10MIN_KEY in payload else None
+        )
+    count = counts[key]
+    if count is not None and count >= DAY0_ASK_REPRICING_MIN_DISTINCT:
+        return "DAY0_ASK_REPRICING_VETO"
+    return None
 
 
 def stamp_day0_held_ask_repricing(
