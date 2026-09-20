@@ -1095,6 +1095,86 @@ def test_candidate_offgrid_metadata_passes_canonical_run_to_parser(monkeypatch, 
     assert calls[0]["models"] == (model,)
 
 
+def test_candidate_coldstart_derives_only_public_offgrid_registered_run(monkeypatch, tmp_path) -> None:
+    """An empty canonical DB may fetch the exact prior MET run, never metadata's 14Z."""
+    from src.data.bayes_precision_fusion_download import _DerivedOffGridSingleRunsRun
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+
+    model = "met_nordic"
+    metadata_run = datetime(2026, 9, 20, 14, tzinfo=timezone.utc)
+    prior_run = datetime(2026, 9, 20, 12, tzinfo=timezone.utc)
+    update = OpenMeteoModelUpdate(
+        model=model,
+        last_run_initialisation_time=metadata_run,
+        last_run_availability_time=datetime(2026, 9, 20, 14, 32, 44, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(dl_mod, "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS", (model,))
+    monkeypatch.setattr(
+        production,
+        "_candidate_public_metadata_updates",
+        lambda **_kwargs: {model: update},
+    )
+    monkeypatch.setattr(
+        "src.data.openmeteo_model_updates.fetch_model_updates",
+        lambda *_args, **_kwargs: (update,),
+    )
+    monkeypatch.setattr(
+        "src.strategy.live_inference.source_clock_vnext.source_publicly_usable_at",
+        lambda _run: datetime(1970, 1, 1, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        production,
+        "_candidate_canonical_single_runs_fallbacks",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        production,
+        "_candidate_accrual_market_scopes",
+        lambda *_args, **_kwargs: (("Helsinki", "2026-09-21", "high"),),
+    )
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        production,
+        "_download_bayes_precision_fusion_extra_raw_inputs_if_needed",
+        lambda _cfg, **kwargs: calls.append(kwargs)
+        or {"status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"},
+    )
+
+    report = production._download_bayes_precision_fusion_candidate_accrual_if_needed(
+        {"forecast_db": tmp_path / "empty.db"}
+    )
+
+    assert report is not None
+    assert calls[0]["frozen_source_runs"] == {
+        model: _DerivedOffGridSingleRunsRun(run=prior_run)
+    }
+    assert calls[0]["planning_cycle"] == prior_run
+
+
+def test_candidate_coldstart_rejects_stale_offgrid_metadata(monkeypatch) -> None:
+    """Donor-free recovery obeys the same existing source-cycle age policy."""
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+
+    model = "met_nordic"
+    run = datetime(2026, 9, 20, 14, tzinfo=timezone.utc)
+    update = OpenMeteoModelUpdate(
+        model=model,
+        last_run_initialisation_time=run,
+        last_run_availability_time=run + timedelta(minutes=32, seconds=44),
+    )
+    monkeypatch.setenv("ZEUS_REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS", "25")
+    monkeypatch.setattr(
+        "src.strategy.live_inference.source_clock_vnext.source_publicly_usable_at",
+        lambda _run: datetime(1970, 1, 1, tzinfo=timezone.utc),
+    )
+
+    assert production._candidate_offgrid_single_runs_prior_runs(
+        models=(model,),
+        updates_by_model={model: update},
+        now=run + timedelta(hours=26),
+    ) == {}
+
+
 def test_candidate_accrual_empty_market_scope_still_reaches_held_union(
     monkeypatch,
     tmp_path,

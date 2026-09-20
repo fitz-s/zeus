@@ -40,10 +40,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event, Lock
-from typing import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Callable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from src.config import settings
+
+if TYPE_CHECKING:
+    from src.data.bayes_precision_fusion_download import _DerivedOffGridSingleRunsRun
 
 logger = logging.getLogger("zeus.replacement_forecast_production")
 
@@ -1049,7 +1052,9 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
     models: Sequence[str] | None = None,
     capture_when_covered: bool = False,
     quota_lane: str = "source_clock",
-    frozen_source_runs: Mapping[str, tuple[datetime, datetime]] | None = None,
+    frozen_source_runs: Mapping[
+        str, tuple[datetime, datetime] | _DerivedOffGridSingleRunsRun
+    ] | None = None,
     planning_cycle: datetime | None = None,
     capture_target_scopes: Sequence[tuple[str, str, str]] | None = None,
     include_previous_runs: bool = True,
@@ -1497,30 +1502,20 @@ def _candidate_public_metadata_updates(
     return selected
 
 
-def _candidate_canonical_single_runs_fallbacks(
-    forecast_db: Path,
+def _candidate_offgrid_single_runs_prior_runs(
     *,
     models: Sequence[str],
     updates_by_model: Mapping[str, object],
     now: datetime,
-    deadline_monotonic: float | None = None,
-) -> dict[str, tuple[datetime, datetime]]:
-    """Recover a cadence-valid candidate run from canonical successful single-runs rows.
-
-    A model-updates feed can advance hourly while the single-runs archive exposes
-    only a coarser cadence.  Canonical rows prove that exact archived run was
-    previously requestable; they do not prove a new off-grid metadata run exists.
-    """
+) -> dict[str, datetime]:
+    """Return exact prior registered runs for public off-grid metadata only."""
     from src.data.bayes_precision_fusion_download import (  # noqa: PLC0415
         MODEL_PUBLISH_CYCLE_HOURS,
-        OPENMETEO_MODEL_IDS,
-        OPENMETEO_PROVIDER,
-        SINGLE_RUNS_SOURCE_FAMILY,
+        source_clock_metadata_run_is_single_runs_served,
     )
     from src.data.replacement_forecast_cycle_policy import (  # noqa: PLC0415
         replacement_source_cycle_max_age_hours,
     )
-    from src.state.db import _connect_read_only  # noqa: PLC0415
     from src.strategy.live_inference.source_clock_vnext import (  # noqa: PLC0415
         source_publicly_usable_at,
     )
@@ -1544,6 +1539,8 @@ def _candidate_canonical_single_runs_fallbacks(
             run_utc > available_utc
             or available_utc > now_utc
             or run_utc > now_utc
+            or now_utc - run_utc > timedelta(hours=max_cycle_age_hours)
+            or source_clock_metadata_run_is_single_runs_served(model, run_utc.hour)
         ):
             continue
         try:
@@ -1565,6 +1562,41 @@ def _candidate_canonical_single_runs_fallbacks(
                 run_utc.replace(hour=cadence_hours[-1], minute=0, second=0, microsecond=0)
                 - timedelta(days=1)
             )
+    return expected_runs
+
+
+def _candidate_canonical_single_runs_fallbacks(
+    forecast_db: Path,
+    *,
+    models: Sequence[str],
+    updates_by_model: Mapping[str, object],
+    now: datetime,
+    deadline_monotonic: float | None = None,
+) -> dict[str, tuple[datetime, datetime]]:
+    """Recover a cadence-valid candidate run from canonical successful single-runs rows.
+
+    A model-updates feed can advance hourly while the single-runs archive exposes
+    only a coarser cadence.  Canonical rows prove that exact archived run was
+    previously requestable; they do not prove a new off-grid metadata run exists.
+    """
+    from src.data.bayes_precision_fusion_download import (  # noqa: PLC0415
+        OPENMETEO_MODEL_IDS,
+        OPENMETEO_PROVIDER,
+        SINGLE_RUNS_SOURCE_FAMILY,
+    )
+    from src.data.replacement_forecast_cycle_policy import (  # noqa: PLC0415
+        replacement_source_cycle_max_age_hours,
+    )
+    from src.state.db import _connect_read_only  # noqa: PLC0415
+    if now.utcoffset() is None:
+        return {}
+    now_utc = now.astimezone(timezone.utc)
+    max_cycle_age_hours = replacement_source_cycle_max_age_hours()
+    expected_runs = _candidate_offgrid_single_runs_prior_runs(
+        models=models,
+        updates_by_model=updates_by_model,
+        now=now,
+    )
     if not expected_runs:
         return {}
 
@@ -1769,6 +1801,20 @@ def _download_bayes_precision_fusion_candidate_accrual_if_needed(
                 "attempted_target_group_count": 0,
                 "candidate_accrual_only": True,
             }
+        from src.data.bayes_precision_fusion_download import (  # noqa: PLC0415
+            _DerivedOffGridSingleRunsRun,
+        )
+
+        # A cold DB has no canonical donor to prove that the prior archived run
+        # was once captured.  The public off-grid metadata can still select that
+        # exact registered cadence run; its availability is established only by
+        # the successful single-runs possession below, never copied from metadata.
+        for model, run in _candidate_offgrid_single_runs_prior_runs(
+            models=tuple(model for model in fallback_models if model not in frozen_source_runs),
+            updates_by_model=updates_by_model,
+            now=now,
+        ).items():
+            frozen_source_runs[model] = _DerivedOffGridSingleRunsRun(run=run)
         if time.monotonic() >= deadline_monotonic:
             return {
                 "status": "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE",
@@ -1808,7 +1854,12 @@ def _download_bayes_precision_fusion_candidate_accrual_if_needed(
                 "attempted_target_group_count": 0,
                 "candidate_accrual_only": True,
             }
-        planning_cycle = max(run for run, _available in frozen_source_runs.values())
+        planning_cycle = max(
+            source_run.run
+            if isinstance(source_run, _DerivedOffGridSingleRunsRun)
+            else source_run[0]
+            for source_run in frozen_source_runs.values()
+        )
         return _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
             cfg,
             max_wall_clock_seconds=_BPF_CANDIDATE_ACCRUAL_MAX_WALL_CLOCK_SECONDS,

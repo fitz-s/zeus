@@ -3801,3 +3801,99 @@ def test_candidate_accrual_uses_its_own_newer_public_metadata_run(tmp_path, monk
             )
         }
     assert endpoints == {"single_runs"}
+
+
+@pytest.mark.parametrize(
+    "failure_kind",
+    ("partial", "transport"),
+)
+def test_derived_offgrid_run_needs_complete_pair_before_possession_write(
+    tmp_path,
+    monkeypatch,
+    failure_kind,
+) -> None:
+    """A derived run writes both target metrics only after complete parsed possession."""
+    import src.data.bayes_precision_fusion_download as dl
+
+    run = datetime(2026, 9, 20, 12, tzinfo=UTC)
+    metadata_available = datetime(2026, 9, 20, 14, 32, 44, tzinfo=UTC)
+    targets = [
+        dl.BayesPrecisionFusionDownloadTarget(
+            city="Helsinki", metric=metric, target_date="2026-09-21", lead_days=1,
+            latitude=60.1699, longitude=24.9384, timezone_name="Europe/Helsinki",
+        )
+        for metric in ("high", "low")
+    ]
+    db = _forecast_db(tmp_path)
+    seen: list[dict[str, object]] = []
+
+    def _failed_fetch(**kwargs):
+        seen.append(kwargs)
+        if failure_kind == "partial":
+            return {"met_nordic": (16.6, None)}
+        return {dl._BATCH_TRANSPORT_ERROR_KEY: ("HTTP 400", {})}
+
+    monkeypatch.setattr(dl, "_default_live_fetch_batched", _failed_fetch)
+    first = dl.download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=db,
+        cycle=metadata_available,
+        targets=targets,
+        models=("met_nordic",),
+        include_previous_runs=False,
+        prune_after=False,
+        frozen_source_runs={"met_nordic": dl._DerivedOffGridSingleRunsRun(run=run)},
+    )
+    assert first["written_row_count"] == 0
+    assert _count(db, endpoint="single_runs") == 0
+    assert seen[0]["run"] == run
+    assert seen[0]["source_available_at"] is None
+    assert seen[0]["allow_standard_meta_fallback"] is False
+
+    fetch_started_at = datetime.now(UTC)
+    completed_at: list[datetime] = []
+    successful_requests: list[dict[str, object]] = []
+
+    def _success_fetch(**kwargs):
+        successful_requests.append(kwargs)
+        completed_at.append(datetime.now(UTC))
+        return {"met_nordic": (16.6, 11.0)}
+
+    def _unexpected_previous_runs(**_kwargs):
+        raise AssertionError("derived current-run recovery must not request previous_runs")
+
+    monkeypatch.setattr(dl, "_default_live_fetch_batched", _success_fetch)
+    monkeypatch.setattr(
+        dl,
+        "_default_previous_runs_fetch_batched",
+        _unexpected_previous_runs,
+    )
+    second = dl.download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=db,
+        cycle=metadata_available,
+        targets=targets,
+        models=("met_nordic",),
+        include_previous_runs=False,
+        prune_after=False,
+        frozen_source_runs={"met_nordic": dl._DerivedOffGridSingleRunsRun(run=run)},
+    )
+    assert second["written_row_count"] == 2
+    assert successful_requests[0]["run"] == run
+    assert successful_requests[0]["source_available_at"] is None
+    assert successful_requests[0]["allow_standard_meta_fallback"] is False
+    conn = sqlite3.connect(str(db))
+    rows = conn.execute(
+        "SELECT metric, source_cycle_time, source_available_at, captured_at, recorded_at, endpoint, product_id "
+        "FROM raw_model_forecasts ORDER BY metric"
+    ).fetchall()
+    conn.close()
+    assert [(row[0], row[1], row[5], row[6]) for row in rows] == [
+        ("high", run.isoformat(), "single_runs", "metno_nordic::single_runs"),
+        ("low", run.isoformat(), "single_runs", "metno_nordic::single_runs"),
+    ]
+    availability = datetime.fromisoformat(rows[0][2])
+    assert availability >= completed_at[0]
+    assert availability > fetch_started_at
+    assert availability != metadata_available
+    assert rows[0][2] == rows[1][2]
+    assert rows[0][2] == rows[0][3]
+    assert availability <= datetime.fromisoformat(rows[0][4])

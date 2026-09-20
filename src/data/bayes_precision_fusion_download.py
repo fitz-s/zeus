@@ -445,7 +445,20 @@ def source_clock_metadata_run_is_single_runs_served(model: str, cycle_hour: int)
 @dataclass(frozen=True)
 class _SourceClockSingleRunsRequest:
     run: datetime
-    source_available_at: str
+    source_available_at: str | None
+    availability_from_successful_possession: bool = False
+
+
+@dataclass(frozen=True)
+class _DerivedOffGridSingleRunsRun:
+    """An exact archived run whose availability is proven only by this fetch.
+
+    This is deliberately distinct from the normal frozen ``(run, available)``
+    tuple: an off-grid metadata update can prove a causally public clock, but it
+    cannot supply the availability of the prior single-runs archive product.
+    """
+
+    run: datetime
 
 
 @dataclass(frozen=True)
@@ -1623,6 +1636,7 @@ def _default_live_fetch_batched(
     forecast_hours: int,
     source_available_at: datetime | str | None = None,
     allow_per_model_fallback: bool = True,
+    allow_standard_meta_fallback: bool = True,
     deadline_monotonic: float | None = None,
 ) -> dict[str, tuple[float | None, float | None]]:
     """R1+R2: ONE single-runs call for ALL `models` at (city, target_date, cycle).
@@ -1733,7 +1747,11 @@ def _default_live_fetch_batched(
         batched_error_text = str(exc)
         batched_outcome = _typed_transport_outcome(exc)
         single_runs_quota = _is_quota_transport_error(batched_error_text)
-        if len(models) == 1 and (models == ["ncep_nbm_conus"] or single_runs_quota):
+        if (
+            allow_standard_meta_fallback
+            and len(models) == 1
+            and (models == ["ncep_nbm_conus"] or single_runs_quota)
+        ):
             model = models[0]
             try:
                 payloads, meta_stamp = _fetch_standard_meta_stamped_payloads(
@@ -1871,6 +1889,7 @@ def _default_live_fetch_locations_batched(
     run: datetime,
     forecast_hours: int,
     source_available_at: datetime | str | None = None,
+    allow_standard_meta_fallback: bool = True,
     deadline_monotonic: float | None = None,
 ) -> list[dict[date, dict[str, tuple[float | None, float | None]]]]:
     """Fetch one run per city and parse every requested target date from its payload."""
@@ -1903,7 +1922,11 @@ def _default_live_fetch_locations_batched(
         ]
     except Exception as exc:
         single_runs_quota = _is_quota_transport_error(exc)
-        if len(models) == 1 and (models == ["ncep_nbm_conus"] or single_runs_quota):
+        if (
+            allow_standard_meta_fallback
+            and len(models) == 1
+            and (models == ["ncep_nbm_conus"] or single_runs_quota)
+        ):
             model = models[0]
             try:
                 payloads, meta_stamp = _fetch_standard_meta_stamped_payloads(
@@ -1962,6 +1985,7 @@ def _default_live_fetch_locations_batched(
                 run=run,
                 forecast_hours=forecast_hours,
                 source_available_at=source_available_at,
+                allow_standard_meta_fallback=allow_standard_meta_fallback,
                 deadline_monotonic=deadline_monotonic,
             ) + _default_live_fetch_locations_batched(
                 models=models,
@@ -1969,6 +1993,7 @@ def _default_live_fetch_locations_batched(
                 run=run,
                 forecast_hours=forecast_hours,
                 source_available_at=source_available_at,
+                allow_standard_meta_fallback=allow_standard_meta_fallback,
                 deadline_monotonic=deadline_monotonic,
             )
         error = {_BATCH_TRANSPORT_ERROR_KEY: _batch_transport_error(exc)}
@@ -2769,7 +2794,9 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     forecast_hours: int = 120,
     retention_days: int = RETENTION_DAYS,
     max_wall_clock_seconds: float | None = None,
-    frozen_source_runs: Mapping[str, tuple[datetime, datetime]] | None = None,
+    frozen_source_runs: Mapping[
+        str, tuple[datetime, datetime] | _DerivedOffGridSingleRunsRun
+    ] | None = None,
     quota_lane: str = "source_clock",
 ) -> dict[str, object]:
     """Capture (forward single_runs + fixed-lead previous_runs) the 8 extra OM models for each
@@ -2882,13 +2909,22 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         source_clock_single_runs: dict[str, _SourceClockSingleRunsRequest] = {}
         for model, source_run in frozen_source_runs.items():
             try:
-                run, available = source_run
-                if run.utcoffset() is None or available.utcoffset() is None:
-                    raise ValueError("frozen source run must be timezone-aware")
-                source_clock_single_runs[str(model)] = _SourceClockSingleRunsRequest(
-                    run=run.astimezone(UTC),
-                    source_available_at=available.astimezone(UTC).isoformat(),
-                )
+                if isinstance(source_run, _DerivedOffGridSingleRunsRun):
+                    if source_run.run.utcoffset() is None:
+                        raise ValueError("derived source run must be timezone-aware")
+                    source_clock_single_runs[str(model)] = _SourceClockSingleRunsRequest(
+                        run=source_run.run.astimezone(UTC),
+                        source_available_at=None,
+                        availability_from_successful_possession=True,
+                    )
+                else:
+                    run, available = source_run
+                    if run.utcoffset() is None or available.utcoffset() is None:
+                        raise ValueError("frozen source run must be timezone-aware")
+                    source_clock_single_runs[str(model)] = _SourceClockSingleRunsRequest(
+                        run=run.astimezone(UTC),
+                        source_available_at=available.astimezone(UTC).isoformat(),
+                    )
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"invalid frozen source run for {model!r}") from exc
     else:
@@ -3064,7 +3100,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     if source_clock_location_fast_path:
         model = requested_models[0]
         locations_by_run: dict[
-            datetime,
+            tuple[datetime, bool],
             dict[
                 str,
                 tuple[
@@ -3118,16 +3154,20 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                 if persisted_metric_count:
                     single_success_models.add(model)
                 continue
-            city_plan = locations_by_run[request.run].get(city)
+            location_key = (
+                request.run,
+                request.availability_from_successful_possession,
+            )
+            city_plan = locations_by_run[location_key].get(city)
             if city_plan is None:
-                locations_by_run[request.run][city] = (
+                locations_by_run[location_key][city] = (
                     ref,
                     [(target_date, date.fromisoformat(target_date))],
                 )
             else:
                 city_plan[1].append((target_date, date.fromisoformat(target_date)))
 
-        for run, city_plans in sorted(locations_by_run.items()):
+        for (run, possession_bound), city_plans in sorted(locations_by_run.items()):
             planned = list(city_plans.items())
             for offset in range(0, len(planned), _SOURCE_CLOCK_LOCATION_BATCH_SIZE):
                 chunk = planned[offset : offset + _SOURCE_CLOCK_LOCATION_BATCH_SIZE]
@@ -3153,6 +3193,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                         source_available_at=_single_runs_request_for_model(
                             model
                         ).source_available_at,
+                        allow_standard_meta_fallback=not possession_bound,
                         deadline_monotonic=(
                             wall_clock_deadline - 0.25
                             if wall_clock_deadline is not None
@@ -3275,7 +3316,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
 
             # Domain gate + source-clock run selection for single_runs.  Models are grouped by
             # their real public run so one Open-Meteo request never mixes 06Z and 12Z identities.
-            single_models_by_run: dict[datetime, list[str]] = defaultdict(list)
+            single_models_by_run: dict[tuple[datetime, bool], list[str]] = defaultdict(list)
             single_request_by_model: dict[str, _SourceClockSingleRunsRequest] = {}
             required_metrics = {target.metric for target in city_targets}
             for model in all_models:
@@ -3334,10 +3375,14 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                         single_success_models.add(model)
                     continue
                 single_request_by_model[model] = request
-                single_models_by_run[request.run].append(model)
+                single_models_by_run[
+                    (request.run, request.availability_from_successful_possession)
+                ].append(model)
 
             # ONE batched single_runs fetch covers all in-domain models + both metrics.
-            for single_run, single_models in sorted(single_models_by_run.items()):
+            for (single_run, possession_bound), single_models in sorted(
+                single_models_by_run.items()
+            ):
                 if _timebox_expired():
                     timeboxed = True
                     break
@@ -3371,6 +3416,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                                 else None
                             ),
                             allow_per_model_fallback=allow_single_runs_fallback,
+                            allow_standard_meta_fallback=not possession_bound,
                             deadline_monotonic=wall_clock_deadline,
                         )
                 single_transport_error = sv_map.pop(_BATCH_TRANSPORT_ERROR_KEY, None)
@@ -3430,6 +3476,21 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                     high_c, low_c = hilo
                     request = single_request_by_model.get(model) or _single_runs_request_for_model(model)
                     request_cycle_iso = request.run.isoformat()
+                    if (
+                        request.availability_from_successful_possession
+                        and (high_c is None or low_c is None)
+                    ):
+                        # A derived cold-start run establishes possession only when
+                        # the original parser recovered the complete HIGH/LOW pair.
+                        dropped.append(f"{model}:single_runs_partial_derived")
+                        continue
+                    proof_of_possession_at = (
+                        datetime.now(UTC).isoformat()
+                        if request.availability_from_successful_possession
+                        else None
+                    )
+                    source_available_at = proof_of_possession_at or request.source_available_at
+                    row_captured_at = proof_of_possession_at or captured_iso
                     # Emit one row per metric × target (both metrics from the one payload).
                     for t in city_targets:
                         val = high_c if t.metric == "high" else low_c
@@ -3450,7 +3511,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                         rows.append({
                             "model": model, "city": t.city, "target_date": t.target_date,
                             "metric": t.metric, "source_cycle_time": request_cycle_iso,
-                            "source_available_at": request.source_available_at, "captured_at": captured_iso,
+                            "source_available_at": source_available_at, "captured_at": row_captured_at,
                             "lead_days": int(t.lead_days), "forecast_value_c": float(val),
                             "endpoint": "single_runs",
                             **_bayes_precision_fusion_product_identity(
