@@ -15662,6 +15662,7 @@ class TestRecoveryResolutionTable:
         )
         client.get_open_orders.return_value = []
         client.get_trades.return_value = []
+        monkeypatch.setattr(command_recovery.time, "monotonic", lambda: 100.0)
 
         with pytest.raises(RuntimeError, match="stop after local recovery passes"):
             command_recovery.reconcile_unresolved_commands(
