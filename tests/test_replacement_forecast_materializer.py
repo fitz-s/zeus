@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-09-10
-# Lifecycle: created=2026-06-06; last_reviewed=2026-09-10; last_reused=2026-09-10
+# Last reused/audited: 2026-09-20
+# Lifecycle: created=2026-06-06; last_reviewed=2026-09-20; last_reused=2026-09-20
 # Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + Bayes-fusion replacement live layer.
 # Reuse: Run before changing replacement forecast live/experiment write path.
 # Authority basis: Operator-directed replacement forecast simple-switch readiness.
@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import sqlite3
@@ -2394,6 +2395,246 @@ def test_hko_spot_request_rebinds_to_current_official_extrema(
     assert rebound.day0_observed_extreme_c == pytest.approx(25.7)
     assert rebound.day0_observed_extreme_observation_time == _dt(17, 50).isoformat()
     assert rebound.day0_observed_extreme_sample_count == 12
+
+
+def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The persisted Chicago carrier must use F members, boundary, bins, and sigma."""
+
+    from zoneinfo import ZoneInfo
+
+    from src.config import runtime_cities_by_name
+    from src.contracts.settlement_semantics import SettlementSemantics
+    from src.data.day0_hourly_vectors import (
+        Day0CurrentTemperatureState,
+        Day0HourlyVector,
+    )
+    from src.signal.ensemble_signal import sigma_instrument_for_city
+
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    city = runtime_cities_by_name()["Chicago"]
+    semantics = SettlementSemantics.for_city(city)
+    assert semantics.measurement_unit == "F"
+    assert semantics.rounding_rule == "wmo_half_up"
+
+    target = date(2026, 6, 7)
+    computed_at = datetime(2026, 6, 7, 18, tzinfo=UTC)
+    native_members_f = (84.0, 88.0)
+
+    def celsius(value_f: float) -> float:
+        return (value_f - 32.0) * 5.0 / 9.0
+
+    native_boundary_f = 86.0
+    current_state = Day0CurrentTemperatureState(
+        value_native=native_boundary_f,
+        observed_at=computed_at,
+        source="aviationweather_metar",
+    )
+    native_bins = (
+        ("under_85", None, 84.0),
+        ("85", 85.0, 85.0),
+        ("86", 86.0, 86.0),
+        ("87", 87.0, 87.0),
+        ("88_plus", 88.0, None),
+    )
+    member_values_c = tuple(celsius(value) for value in native_members_f)
+    local_tz = ZoneInfo("America/Chicago")
+    local_hours = tuple(
+        datetime(2026, 6, 7, hour, tzinfo=local_tz) for hour in range(24)
+    )
+    anchor = OpenMeteoIfs9LocalDayAnchor(
+        city_timezone="America/Chicago",
+        target_local_date=target,
+        high_c=31.0,
+        low_c=22.0,
+        sample_count=24,
+        contributing_local_times=local_hours,
+        contributing_valid_times_utc=tuple(
+            item.astimezone(UTC) for item in local_hours
+        ),
+        source_cycle_time=datetime(2026, 6, 7, 6, tzinfo=UTC),
+    )
+    guard = _precision_guard(
+        city="Chicago",
+        station_id="KORD",
+        city_lat=41.8781,
+        city_lon=-87.6298,
+        station_lat=41.9742,
+        station_lon=-87.9073,
+        requested_lat=41.9742,
+        requested_lon=-87.9073,
+        local_day_start_utc=datetime(2026, 6, 7, 5, tzinfo=UTC),
+        local_day_end_utc=datetime(2026, 6, 8, 5, tzinfo=UTC),
+        timezone_name="America/Chicago",
+        target_local_date=target,
+    )
+    request = ReplacementForecastMaterializeRequest(
+        city="Chicago",
+        city_id="Chicago",
+        city_timezone="America/Chicago",
+        target_date=target,
+        temperature_metric="high",
+        baseline_source_run_id="b0-chicago",
+        baseline_data_version=_current_baseline_data_version("high"),
+        baseline_source_available_at=datetime(2026, 6, 7, 12, tzinfo=UTC),
+        openmeteo_anchor=anchor,
+        openmeteo_source_run_id="om-chicago",
+        openmeteo_source_available_at=datetime(2026, 6, 7, 12, 10, tzinfo=UTC),
+        bins=tuple(
+            _TemperatureBin(
+                bin_id,
+                lower_c=None if lower_f is None else celsius(lower_f),
+                upper_c=None if upper_f is None else celsius(upper_f),
+                display_unit="F",
+                settlement_unit="F",
+            )
+            for bin_id, lower_f, upper_f in native_bins
+        ),
+        source_cycle_time=datetime(2026, 6, 7, 6, tzinfo=UTC),
+        computed_at=computed_at,
+        expires_at=datetime(2026, 6, 7, 20, tzinfo=UTC),
+        openmeteo_precision_guard=guard,
+        day0_observed_extreme_c=celsius(native_boundary_f),
+        day0_observed_extreme_source="aviationweather_metar",
+        day0_observed_extreme_observation_time=computed_at.isoformat(),
+        day0_observed_extreme_sample_count=1,
+        day0_observed_extreme_unit="C",
+    )
+    times = tuple(f"{target.isoformat()}T{hour:02d}:00" for hour in range(24))
+    vectors = [
+        Day0HourlyVector(
+            model=model,
+            city="Chicago",
+            target_date=target.isoformat(),
+            timezone_name="America/Chicago",
+            captured_at="2026-06-07T17:30:00+00:00",
+            times=times,
+            temps_c=tuple(
+                celsius(native_boundary_f) if hour <= 13 else value_c
+                for hour in range(24)
+            ),
+        )
+        for model, value_c in zip(("ecmwf_ifs", "icon_global"), member_values_c)
+    ]
+    likelihood_identity = {
+        "semantics": "same_station_preliminary_report_survival_likelihood_jeffreys_prior_only_v1",
+        "cutoff": computed_at.isoformat(),
+        "successes": [],
+        "failures": [],
+        "unconfirmed_awc_ids": [],
+        "alpha": 0.5,
+        "beta": 0.5,
+        "station_id": "KORD",
+        "source_channel_pair": {
+            "awc": "aviationweather_metar",
+            "ogimet": "ogimet_metar_kord",
+        },
+    }
+    likelihood = {
+        **likelihood_identity,
+        "identity_hash": hashlib.sha256(
+            json.dumps(
+                likelihood_identity, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest(),
+        "boundary_survival_probability": 0.5,
+    }
+    monkeypatch.setattr(
+        "src.data.day0_hourly_vectors.day0_hourly_models_for_city",
+        lambda _city: ["ecmwf_ifs", "icon_global"],
+    )
+    monkeypatch.setattr(
+        "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
+        lambda **_kwargs: vectors,
+    )
+    monkeypatch.setattr(
+        "src.data.day0_hourly_vectors.read_day0_current_temperature_state",
+        lambda **_kwargs: current_state,
+    )
+    monkeypatch.setattr(
+        "src.data.day0_observation_reader.same_station_preliminary_report_survival_likelihood",
+        lambda *_args, **_kwargs: likelihood,
+    )
+    monkeypatch.setattr(
+        "src.data.day0_fast_obs.build_fast_station_residual_likelihood",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = materialize_replacement_forecast_live(conn, request)
+
+    assert result.ok is True
+    row = conn.execute(
+        "SELECT q_json, provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+        (result.posterior_id,),
+    ).fetchone()
+    q = json.loads(row["q_json"])
+    provenance = json.loads(row["provenance_json"])
+    assert provenance["day0_remaining_carrier_future_extremes_c"] == pytest.approx(
+        member_values_c
+    )
+    native_member_sigma_f = math.sqrt(
+        sum(
+            (value - sum(native_members_f) / len(native_members_f)) ** 2
+            for value in native_members_f
+        )
+        / len(native_members_f)
+    )
+    instrument_sigma = sigma_instrument_for_city(city)
+    assert instrument_sigma.unit == "F"
+    # The current-temperature path retains source-clock variance after removing
+    # both the explicit member-center spread and the carrier's native
+    # instrument noise. `_install_live_fusion` supplies 2.0°C total σ.
+    native_path_sigma_f = math.sqrt(
+        max(
+            (2.0 * 9.0 / 5.0) ** 2
+            - native_member_sigma_f**2
+            - instrument_sigma.value**2,
+            0.0,
+        )
+    )
+    native_sigma_f = math.hypot(native_path_sigma_f, instrument_sigma.value)
+    def normal_cdf(value: float, mean: float) -> float:
+        return 0.5 * (1.0 + math.erf((value - mean) / (native_sigma_f * math.sqrt(2.0))))
+
+    def maximum_cdf(value: float, mean: float, boundary: float | None) -> float:
+        if boundary is not None and value < boundary:
+            return 0.0
+        return normal_cdf(value, mean)
+
+    expected = {}
+    for bin_id, lower_f, upper_f in native_bins:
+        lower_edge = -math.inf if lower_f is None else lower_f - 0.5
+        upper_edge = math.inf if upper_f is None else upper_f + 0.5
+        probability = 0.0
+        for mean in native_members_f:
+            for boundary, weight in ((native_boundary_f, 0.5), (None, 0.5)):
+                lower_cdf = 0.0 if math.isinf(lower_edge) else maximum_cdf(lower_edge, mean, boundary)
+                upper_cdf = 1.0 if math.isinf(upper_edge) else maximum_cdf(upper_edge, mean, boundary)
+                probability += weight * (upper_cdf - lower_cdf) / len(native_members_f)
+        expected[bin_id] = probability
+
+    assert set(q) == set(expected)
+    assert all(math.isfinite(value) and value >= 0.0 for value in q.values())
+    assert sum(q.values()) == pytest.approx(1.0)
+    assert q == pytest.approx(expected, abs=1e-12)
+    assert provenance["day0_remaining_carrier_path_error_sigma_c"] == pytest.approx(
+        native_path_sigma_f * 5.0 / 9.0
+    )
+    assert provenance["q_shape"] == "day0_remaining_shared_carrier_v2"
+    assert provenance["day0_remaining_carrier_operator"] == (
+        "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2"
+    )
+    assert provenance["day0_remaining_carrier_content_identity"]
+    assert provenance["day0_remaining_carrier_sample_count"] == 500
+    bootstrap_samples = provenance["q_bootstrap_samples_by_bin"]
+    assert set(bootstrap_samples) == set(q)
+    assert all(len(samples) == 500 for samples in bootstrap_samples.values())
+    assert all(
+        sum(bootstrap_samples[bin_id][index] for bin_id in q) == pytest.approx(1.0)
+        for index in range(500)
+    )
 
 
 def test_wu_fast_residual_is_provisional_while_direct_noaa_fast_is_absorbing() -> None:
