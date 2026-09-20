@@ -3449,17 +3449,35 @@ def test_execution_price_reads_the_native_yes_and_no_snapshot_side(
     assert execution_price.value == expected_price
 
 
-def test_yes_out_of_band_snapshot_is_rejected_at_common_price_boundary():
-    """The YES path must retain the same inclusive live price-band rejection."""
+@pytest.mark.parametrize("ask,bid,in_band", (("0.40", "0.39", True), ("0.96", "0.95", False)))
+def test_yes_quote_reaches_common_price_boundary(monkeypatch, ask, bid, in_band):
+    """YES reaches pricing, and out-of-band prices still cannot authorize it."""
+    import src.engine.event_reactor_adapter as adapter
+
+    # Pricing consumes an already-computed belief; its boundary must not depend
+    # on which source-clock revision produced that belief.
+    monkeypatch.setattr(
+        adapter,
+        "_live_yes_probabilities",
+        lambda **_kwargs: (
+            {"condition-1": 0.8, "condition-2": 0.2},
+            {("condition-1", "buy_yes"): 0.72, ("condition-1", "buy_no"): 0.1,
+             ("condition-2", "buy_yes"): 0.1, ("condition-2", "buy_no"): 0.72},
+            {(c, d): 0.01 for c in ("condition-1", "condition-2") for d in ("buy_yes", "buy_no")},
+            {(c, d): True for c in ("condition-1", "condition-2") for d in ("buy_yes", "buy_no")},
+            {"p_cal_vector_hash": "pricing-test-q", "p_live_vector_hash": "pricing-test-q"},
+        ),
+    )
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot(
-        selected_ask="0.96",
-        selected_bid="0.95",
+        selected_ask=ask,
+        selected_bid=bid,
         snapshot_condition_count=1,
         include_no_snapshot=False,
     )
 
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+    assert receipt.opportunity_book is not None, receipt.reason
     yes_candidate = next(
         candidate
         for candidate in receipt.opportunity_book["candidates"]
@@ -3467,10 +3485,13 @@ def test_yes_out_of_band_snapshot_is_rejected_at_common_price_boundary():
         and candidate["direction"] == "buy_yes"
     )
 
-    assert yes_candidate["execution_price"] is None
-    assert yes_candidate["missing_reason"].startswith(
-        "LIVE_UNIT_PRICE_OUT_OF_BOUNDS:"
-    )
+    if in_band:
+        assert yes_candidate["execution_price"] is not None
+    else:
+        assert yes_candidate["execution_price"] is None
+        assert yes_candidate["missing_reason"].startswith(
+            "LIVE_UNIT_PRICE_OUT_OF_BOUNDS:"
+        )
 
 
 
