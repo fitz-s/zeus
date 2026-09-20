@@ -162,3 +162,48 @@ def test_collection_is_thread_local():
         assert other == {}
     finally:
         _receipt_stages_end()
+
+
+def test_lease_wait_is_recorded_separately_from_the_write() -> None:
+    """The dominant stage must be split into "waiting" and "writing".
+
+    `persist` measured p50 229 ms (full) / 127.7 ms (compact) of a 605 ms total,
+    but a clean 1 MB INSERT+commit is 3.0 ms and the 50-row retention delete is
+    9.3 ms — so the cost is neither. `persist` acquires a write lease first, and
+    without this split that difference stays a residual.
+    """
+    import inspect
+
+    from src.engine import global_batch_runtime
+
+    source = inspect.getsource(global_batch_runtime)
+    assert 'f"{owner}:lease_wait"' in source, (
+        "the lease acquisition inside persist is not timed, so persist_* stays "
+        "an unattributed lump"
+    )
+    assert "lease_wait_started = time.monotonic()" in source
+
+
+def test_record_receipt_stage_accumulates_like_the_context_manager() -> None:
+    """The direct recorder and the `with` form must fill the same structure."""
+    from src.engine.global_batch_runtime import (
+        _receipt_stage,
+        _receipt_stages_begin,
+        _receipt_stages_end,
+        _record_receipt_stage,
+    )
+
+    stages = _receipt_stages_begin()
+    try:
+        _record_receipt_stage("probe", 0.002)
+        _record_receipt_stage("probe", 0.003)
+        with _receipt_stage("other"):
+            pass
+        assert stages["probe"][1] == 2, "call count must accumulate"
+        assert abs(stages["probe"][0] - 5.0) < 0.001, "ms, summed"
+        assert "other" in stages
+    finally:
+        _receipt_stages_end()
+
+    # Outside a collection window it must be a silent no-op, never an error.
+    _record_receipt_stage("probe", 1.0)

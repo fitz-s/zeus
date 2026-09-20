@@ -194,12 +194,22 @@ def _global_auction_artifact_persister(
     from src.state.write_coordinator import bounded_sqlite_write
 
     def persist(artifact: object) -> int | None:
+        # persist_* is the dominant pre-submit stage (p50 229 ms full / 127.7 ms
+        # compact against a 605 ms total), yet a clean 1 MB INSERT+commit measures
+        # 3.0 ms and the 50-row retention delete 9.3 ms. So the time is neither the
+        # write nor the retention. Record how much of it was spent waiting for the
+        # write lease rather than leaving another residual to guess at; the clock
+        # brackets the acquisition only and does not touch control flow.
+        lease_wait_started = time.monotonic()
         with _global_auction_trade_write_lease(
             conn,
             work_context=work_context,
             owner=owner,
             priority=priority,
         ) as lease:
+            _record_receipt_stage(
+                f"{owner}:lease_wait", time.monotonic() - lease_wait_started
+            )
             before_changes = conn.total_changes
             try:
                 sqlite_hold_ms = _GLOBAL_AUCTION_WRITE_MAX_HOLD_MS
@@ -287,6 +297,27 @@ def _receipt_stage(label: str):
         else:
             entry[0] += elapsed_ms
             entry[1] += 1
+
+
+def _record_receipt_stage(label: str, elapsed_s: float) -> None:
+    """Record one already-measured stage, for spans a `with` block cannot wrap.
+
+    `_receipt_stage` brackets a block; a lease acquisition is the block's own
+    `with`, so wrapping it would mean re-entering the context manager by hand and
+    changing exception handling on the money path. Timing it with a plain clock and
+    reporting the span here keeps control flow byte-identical.
+    """
+
+    stages = getattr(_RECEIPT_STAGE_TIMINGS, "stages", None)
+    if stages is None:
+        return
+    elapsed_ms = elapsed_s * 1000.0
+    entry = stages.get(label)
+    if entry is None:
+        stages[label] = [elapsed_ms, 1]
+    else:
+        entry[0] += elapsed_ms
+        entry[1] += 1
 
 
 def _receipt_stages_begin() -> dict[str, list[float]]:
