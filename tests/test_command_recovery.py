@@ -30529,8 +30529,16 @@ class TestRecoveryResolutionTable:
         }
 
     @pytest.mark.parametrize(
-        ("status_first", "fail_after_write"),
-        [(False, False), (True, False), (False, True)],
+        ("status_first", "fail_after_write", "later_authority"),
+        [
+            (False, False, None),
+            (True, False, None),
+            (False, True, None),
+            (True, False, "later_exit_intent"),
+            (True, False, "later_terminal_exit_command"),
+            (True, False, "equal_time_exit_intent"),
+            (True, False, "malformed_exit_command"),
+        ],
     )
     def test_expired_full_exit_underfill_books_partial_economics_once(
         self,
@@ -30539,6 +30547,7 @@ class TestRecoveryResolutionTable:
         monkeypatch,
         status_first,
         fail_after_write,
+        later_authority,
     ):
         """A terminal underfill remains open with exact residual economics."""
         _insert(conn, command_id="cmd-entry", position_id="pos-001", size=14.84, price=0.50)
@@ -30642,6 +30651,47 @@ class TestRecoveryResolutionTable:
                 "WHERE position_id = 'pos-001'"
             )
 
+        if later_authority in {"later_exit_intent", "equal_time_exit_intent"}:
+            _seed_full_exit_intent(
+                conn,
+                position_id="pos-001",
+                shares=1.84,
+                occurred_at=(
+                    "2026-07-28T00:02:30Z"
+                    if later_authority == "later_exit_intent"
+                    else "2026-07-28T00:01:01Z"
+                ),
+            )
+        elif later_authority in {
+            "later_terminal_exit_command",
+            "malformed_exit_command",
+        }:
+            _insert(
+                conn,
+                command_id="cmd-later-exit",
+                position_id="pos-001",
+                intent_kind="EXIT",
+                side="SELL",
+                size=1.84,
+                price=0.85,
+                token_id="tok-001",
+                created_at="2026-07-28T00:02:30Z",
+            )
+            _advance_to_acked(
+                conn,
+                command_id="cmd-later-exit",
+                venue_order_id="ord-later-exit",
+            )
+            conn.execute(
+                "UPDATE venue_commands SET state = 'EXPIRED' "
+                "WHERE command_id = 'cmd-later-exit'"
+            )
+            if later_authority == "malformed_exit_command":
+                conn.execute(
+                    "UPDATE venue_commands SET created_at = 'not-a-time' "
+                    "WHERE command_id = 'cmd-later-exit'"
+                )
+
         from src.execution.command_recovery import (
             reconcile_exit_lifecycle_alignment_repairs,
         )
@@ -30676,6 +30726,38 @@ class TestRecoveryResolutionTable:
                 "WHERE position_id = 'pos-001' "
                 "AND caused_by = 'partial_exit_fill'"
             ).fetchone()[0] == 0
+            return
+        if later_authority is not None:
+            assert summary == {
+                "scanned": 1,
+                "advanced": 0,
+                "stayed": 1,
+                "errors": 0,
+            }
+            current = dict(
+                conn.execute(
+                    """
+                    SELECT phase, shares, chain_shares, cost_basis_usd,
+                           realized_pnl_usd, order_status
+                      FROM position_current
+                     WHERE position_id = 'pos-001'
+                    """
+                ).fetchone()
+            )
+            assert current == {
+                "phase": "pending_exit",
+                "shares": 1.84,
+                "chain_shares": 1.84,
+                "cost_basis_usd": 0.92,
+                "realized_pnl_usd": 4.68,
+                "order_status": "sell_pending_confirmation",
+            }
+            assert conn.execute(
+                "SELECT COUNT(*) FROM position_events "
+                "WHERE position_id = 'pos-001' "
+                "AND caused_by = 'partial_exit_fill'"
+            ).fetchone()[0] == 1
+            assert reconcile_exit_lifecycle_alignment_repairs(conn) == summary
             return
         assert summary == {
             "scanned": 1,
