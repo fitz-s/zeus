@@ -473,6 +473,83 @@ def test_hourly_cwa_extreme_persisted_row_enters_real_precision_override_when_co
         assert model in override.low_n_prior_weighted_models
 
 
+def test_posterior_identity_binds_day0_carrier_operator_and_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Equal q values must not alias carrier certificates across migrations."""
+
+    conn = _conn()
+    request = _request(anchor_artifact_id=17)
+    monkeypatch.setattr(materializer_mod, "emit_materialization_latency", lambda **kwargs: None)
+
+    def result(*, identity: str | None = None, operator: str | None = None) -> SimpleNamespace:
+        provenance = {}
+        if identity is not None:
+            provenance["day0_remaining_carrier_content_identity"] = identity
+        if operator is not None:
+            provenance["day0_remaining_carrier_operator"] = operator
+        return SimpleNamespace(
+            live_eligible=True,
+            q={"cold": 0.2, "warm": 0.8},
+            q_lcb_map={"cold": 0.1, "warm": 0.7},
+            q_ucb_map={"cold": 0.3, "warm": 0.9},
+            data_version="high",
+            source_cycle_time="2026-06-06T00:00:00+00:00",
+            available_at="2026-06-06T03:00:00+00:00",
+            computed_at="2026-06-06T04:00:00+00:00",
+            runtime_layer=LIVE_RUNTIME_LAYER,
+            dependency_payload={"baseline_b0": "b0-run"},
+            dependency_hash="dependency-hash",
+            bin_topology_hash="topology-hash",
+            posterior_config_hash="config-hash",
+            family_id="Shanghai:2026-06-07:high:family",
+            provenance_payload=provenance,
+        )
+
+    ordinary_id = materializer_mod._write_posterior_row(
+        conn, request, metric="high", anchor_id=17, result=result()
+    )
+    assert materializer_mod._write_posterior_row(
+        conn, request, metric="high", anchor_id=17, result=result()
+    ) == ordinary_id
+
+    v1_id = materializer_mod._write_posterior_row(
+        conn,
+        request,
+        metric="high",
+        anchor_id=17,
+        result=result(
+            identity="carrier-content-v1",
+            operator="extreme_observed_then_noisy_future_v1",
+        ),
+    )
+    v2_id = materializer_mod._write_posterior_row(
+        conn,
+        request,
+        metric="high",
+        anchor_id=17,
+        result=result(
+            identity="carrier-content-v1",
+            operator="extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+        ),
+    )
+    v2_content_id = materializer_mod._write_posterior_row(
+        conn,
+        request,
+        metric="high",
+        anchor_id=17,
+        result=result(
+            identity="carrier-content-v2",
+            operator="extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+        ),
+    )
+
+    assert len({ordinary_id, v1_id, v2_id, v2_content_id}) == 4
+    assert conn.execute("SELECT count(*) FROM forecast_posteriors").fetchone()[0] == 4
+    hashes = conn.execute(
+        "SELECT posterior_identity_hash FROM forecast_posteriors ORDER BY posterior_id"
+    ).fetchall()
+    assert len({row[0] for row in hashes}) == 4
+
+
 def test_prewrite_blocks_precision_metadata_from_another_target_day() -> None:
     stale_precision = _precision_guard(
         target_local_date=date(2026, 6, 6),
