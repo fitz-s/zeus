@@ -853,6 +853,7 @@ def test_complete_ens_persists_when_deterministic_fetch_fails(monkeypatch) -> No
     )
     assert counts == {"det": 1, "ens": 1, "persisted": 51}
     assert stats.incomplete_expected_bundles == 1
+    assert stats.ready_city_dates == ()
     assert stats.unavailable_bundles[0].reason == "DAY0_HOURLY_BUNDLE_FETCH_UNAVAILABLE"
 
 
@@ -979,6 +980,9 @@ def test_ens_failure_keeps_deterministic_write_and_next_due_fetches_only_ens(
 
     assert first.vectors_written == 53
     assert first.incomplete_expected_bundles == 1
+    assert first.ready_city_dates == ()
+    assert second.ready_city_dates
+    assert second.incomplete_expected_bundles == 0
     assert second.vectors_written == 51
     assert counts == {
         "det_fetch": 1,
@@ -1066,6 +1070,7 @@ def test_ensemble_persists_when_deterministic_fetch_raises(
     assert counts == {"det": 1, "ens": 1, "persisted": 51}
     assert stats.vectors_written == 51
     assert stats.incomplete_expected_bundles == 1
+    assert stats.ready_city_dates == ()
     assert day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC
 
 
@@ -1149,11 +1154,13 @@ def test_deterministic_persists_when_ensemble_fetch_raises(
     assert counts == {"det": 1, "ens": 1, "det_persisted": 2}
     assert stats.vectors_written == 2
     assert stats.incomplete_expected_bundles == 1
+    assert stats.ready_city_dates == ()
     assert day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC
 
 
+@pytest.mark.parametrize("missing_readback", (None, "2026-09-10"))
 def test_producer_uses_completion_clock_for_deterministic_strict_materialization(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, missing_readback,
 ) -> None:
     """A fetch that crosses D is rejected at D and accepted at completion."""
     from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
@@ -1224,6 +1231,8 @@ def test_producer_uses_completion_clock_for_deterministic_strict_materialization
 
     def strict_readback(**kwargs):
         readback_times.append(kwargs["now"])
+        if kwargs["target_date"] == missing_readback:
+            return []
         return select_ready_day0_hourly_vectors(
             stored,
             target_date=kwargs["target_date"],
@@ -1243,6 +1252,11 @@ def test_producer_uses_completion_clock_for_deterministic_strict_materialization
     )
     assert stats.vectors_written == 2
     assert readback_times == [persisted_readback, persisted_readback]
+    assert stats.ready_city_dates == tuple(
+        (city.name, (decision.date() + timedelta(days=offset)).isoformat())
+        for offset in (0, 1)
+        if (decision.date() + timedelta(days=offset)).isoformat() != missing_readback
+    )
     for target_date, window_start in (
         (decision.date().isoformat(), decision),
         ((decision.date() + timedelta(days=1)).isoformat(), decision + timedelta(days=1)),

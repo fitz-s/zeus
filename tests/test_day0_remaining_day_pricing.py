@@ -11224,8 +11224,9 @@ class TestRequestHashProvenance:
 
         assert [c.name for c in rotated] == ["Wellington", "Paris", "London"]
 
+    @pytest.mark.parametrize("ready,fail_first", ((False, False), (True, False), (True, True)))
     def test_scheduler_readiness_probe_reserves_one_provider_fetch_tranche(
-        self, monkeypatch
+        self, monkeypatch, ready, fail_first
     ):
         import src.config as config_module
         import src.data.day0_hourly_vectors as vectors_module
@@ -11260,6 +11261,7 @@ class TestRequestHashProvenance:
             captured["fetch_budget_s"] = kwargs["budget_s"]
             captured["fetch_timeout_s"] = kwargs["timeout_s"]
             return SimpleNamespace(
+                ready_city_dates=(("Paris", "2026-09-20"),) if ready else (),
                 vectors_written=0,
                 cities_attempted=1,
                 cities_skipped_throttle=0,
@@ -11275,7 +11277,16 @@ class TestRequestHashProvenance:
             refresh,
         )
 
+        reseeds = []
+        def reseed(**scope):
+            assert "fetch_budget_s" in captured  # Fetch/persist returned first.
+            reseeds.append((scope["city"], scope["target_date"], scope["metric"]))
+            if fail_first and len(reseeds) == 1:
+                raise RuntimeError("first metric queue unavailable")
+            return {"seeds_enqueued": 1}
+        monkeypatch.setattr(reactor, "_edli_day0_hourly_vector_revision_reseeder", lambda: reseed)
         reactor.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
+        assert reseeds == ([("Paris", "2026-09-20", "high"), ("Paris", "2026-09-20", "low")] if ready else [])
 
         assert captured["deadline_monotonic"] == 12.0
         assert captured["fetch_budget_s"] == 4.0

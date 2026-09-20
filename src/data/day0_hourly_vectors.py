@@ -1192,6 +1192,7 @@ class Day0HourlyRefreshStats:
     unavailable_bundles: tuple["Day0HourlyBundleUnavailable", ...] = ()
     priority_reserve_exhausted: bool = False
     budget_exhausted: bool = False
+    ready_city_dates: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -3739,6 +3740,7 @@ def maybe_refresh_day0_hourly_vectors(
     skipped_quota = 0
     incomplete_expected_bundles = 0
     unavailable_bundles: list[Day0HourlyBundleUnavailable] = []
+    ready_city_dates: list[tuple[str, str]] = []
     priority_reserve_exhausted = False
     budget_exhausted = False
     now_monotonic = time.monotonic()
@@ -4036,6 +4038,7 @@ def maybe_refresh_day0_hourly_vectors(
                             reason="DAY0_SOURCE_CLOCK_ENSEMBLE_BUNDLE_INCOMPLETE",
                         )
                     else:
+                        ready_city_dates.extend((name, target_date) for target_date in target_dates)
                         with _REFRESH_LOCK:
                             _INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.pop(refresh_key, None)
                             _INCOMPLETE_RETRY_STREAK.pop(refresh_key, None)
@@ -4228,6 +4231,12 @@ def maybe_refresh_day0_hourly_vectors(
                     )
                 )
             )
+            if not ensemble_incomplete:
+                ready_city_dates.extend(
+                    (name, target_date)
+                    for target_date in strict_bundles
+                    if target_date not in pending_target_dates
+                )
             if pending_target_dates or ensemble_incomplete:
                 if ensemble_incomplete:
                     pending_retry_target_dates = tuple(
@@ -4311,5 +4320,6 @@ def maybe_refresh_day0_hourly_vectors(
         unavailable_bundles=tuple(unavailable_bundles),
         priority_reserve_exhausted=priority_reserve_exhausted,
         budget_exhausted=budget_exhausted,
+        ready_city_dates=tuple(dict.fromkeys(ready_city_dates)),
     )
     return stats if return_stats else stats.vectors_written

@@ -6899,6 +6899,20 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
         # its fetch escaped throttle/provider failure. A unit advance is
         # coprime to every segment length, so no city can be skipped forever.
         advance_cursor()
+        ready_city_dates = tuple(getattr(stats, "ready_city_dates", ()) or ())
+        reseed = _edli_day0_hourly_vector_revision_reseeder() if ready_city_dates else None
+        if reseed is not None:
+            # Complete persisted/read-back bundles wake the existing exact-family
+            # materializer now, instead of waiting for an auction to find stale q.
+            for city_name, target_date in ready_city_dates:
+                for metric in ("high", "low"):
+                    try:
+                        reseed(city=city_name, target_date=target_date, metric=metric)
+                    except Exception as exc:  # noqa: BLE001 - preserve sibling progress
+                        _log.warning(
+                            "day0 vector revision enqueue failed: city=%s date=%s metric=%s error=%r",
+                            city_name, target_date, metric, exc,
+                        )
         if vectors_written or priority_city_count:
             _log.info(
                 "edli_day0_hourly_refresh: vectors_written=%d priority_cities=%d "
