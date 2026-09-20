@@ -96,13 +96,20 @@ class _HeldContinuityStatus(StrEnum):
 
 
 def _day0_carrier_identity_reason(provenance: Mapping[str, Any]) -> str | None:
-    """Validate the optional carrier identity pair at a live read boundary."""
+    """Require current identity whenever the posterior declares a shared carrier."""
 
     identity_key = "day0_remaining_carrier_content_identity"
     operator_key = "day0_remaining_carrier_operator"
     has_identity = identity_key in provenance
     has_operator = operator_key in provenance
-    if not has_identity and not has_operator:
+    if (
+        not has_identity
+        and not has_operator
+        and provenance.get("q_shape") not in (
+            "day0_remaining_shared_carrier_v1",
+            "day0_remaining_shared_carrier_v2",
+        )
+    ):
         return None
     identity = provenance.get(identity_key)
     operator = provenance.get(operator_key)

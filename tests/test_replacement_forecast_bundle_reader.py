@@ -1204,6 +1204,9 @@ def _live_provenance() -> dict[str, object]:
     ("carrier", "accepted"),
     (
         ({}, True),
+        ({"q_shape": "day0_remaining_shared_carrier_v1"}, False),
+        ({"q_shape": "day0_remaining_shared_carrier_v2"}, False),
+        ({"q_shape": "fused_day0_fast_residual_likelihood"}, True),
         (
             {
                 "day0_remaining_carrier_content_identity": "content-v1",
@@ -1285,8 +1288,9 @@ def _live_provenance() -> dict[str, object]:
         ),
     ),
 )
+@pytest.mark.parametrize("purpose", tuple(ReplacementForecastAuthorityPurpose))
 def test_live_reader_accepts_only_complete_current_day0_carrier_pair(
-    carrier: dict[str, object], accepted: bool
+    carrier: dict[str, object], accepted: bool, purpose: ReplacementForecastAuthorityPurpose
 ) -> None:
     provenance = {**_live_provenance(), **carrier}
     row = {
@@ -1297,7 +1301,7 @@ def test_live_reader_accepts_only_complete_current_day0_carrier_pair(
     }
     result = reader._live_grade_provenance(
         row,
-        authority_purpose=ReplacementForecastAuthorityPurpose.ENTRY,
+        authority_purpose=purpose,
     )
     assert (result is not None) is accepted, carrier
 

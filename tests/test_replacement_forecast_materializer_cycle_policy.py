@@ -434,6 +434,9 @@ def test_day0_carrier_coverage_requires_complete_current_v2_pair() -> None:
     )
     cases = (
         ({}, True),
+        ({"q_shape": "day0_remaining_shared_carrier_v1"}, False),
+        ({"q_shape": "day0_remaining_shared_carrier_v2"}, False),
+        ({"q_shape": "fused_day0_fast_residual_likelihood"}, True),
         (
             {
                 "day0_remaining_carrier_content_identity": "content-v1",
@@ -530,7 +533,8 @@ def test_day0_carrier_coverage_requires_complete_current_v2_pair() -> None:
         assert bool(count) is expected, carrier
 
 
-def test_day0_v1_coverage_drains_seed_and_v2_coverage_stops_reenqueue(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("legacy_shape_only", (None, "day0_remaining_shared_carrier_v1", "day0_remaining_shared_carrier_v2"))
+def test_day0_v1_coverage_drains_seed_and_v2_coverage_stops_reenqueue(tmp_path, monkeypatch, legacy_shape_only) -> None:
     """The existing queue path retries an old carrier and then honors V2 coverage."""
 
     import src.data.replacement_forecast_live_materialization_queue as queue
@@ -559,6 +563,10 @@ def test_day0_v1_coverage_drains_seed_and_v2_coverage_stops_reenqueue(tmp_path, 
         "day0_remaining_carrier_content_identity": "content-v1",
         "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_v1",
     }
+    if legacy_shape_only is not None:
+        provenance.pop("day0_remaining_carrier_content_identity")
+        provenance.pop("day0_remaining_carrier_operator")
+        provenance["q_shape"] = legacy_shape_only
     conn.execute(
         """
         INSERT INTO forecast_posteriors (

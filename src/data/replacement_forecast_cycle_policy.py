@@ -361,12 +361,14 @@ def tradeable_grade_coverage_sql(
     )
     # SCOPE: the exact city/date/metric family represented by this posterior.
     # DRAIN: the existing seed/materialization loop rematerializes rows whose
-    # carrier pair is V1, unknown, or partial. RESET: both non-empty identity
+    # carrier pair is V1, unknown, partial, or absent on a shared shape. RESET: both non-empty identity
     # fields are present and the operator is the current V2 contract. Ordinary
     # replacement rows have neither declaration and remain covered as before.
     fragments.append(
         "AND (("
-        f"{carrier_identity_type} IS NULL AND {carrier_operator_type} IS NULL"
+        f"{carrier_identity_type} IS NULL AND {carrier_operator_type} IS NULL AND "
+        f"COALESCE(json_extract({provenance_expr}, '$.q_shape'), '') "
+        "NOT IN ('day0_remaining_shared_carrier_v1', 'day0_remaining_shared_carrier_v2')"
         ") OR ("
         f"{carrier_identity_type} = 'text' AND "
         f"length(trim(COALESCE({carrier_identity_value}, ''))) > 0 AND "
