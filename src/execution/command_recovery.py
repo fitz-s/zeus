@@ -32222,7 +32222,9 @@ def _reconcile_passes_short_conn(
         else conn_factory
     )
     scheduler_deadline = deadline_monotonic
-    if scheduler_deadline is None and scope in {"live_tick", "full"}:
+    if scheduler_deadline is None and scope == "restart_preflight":
+        scheduler_deadline = time.monotonic() + _RESTART_ACCOUNT_TRUTH_DEADLINE_SECONDS
+    elif scheduler_deadline is None and scope in {"live_tick", "full"}:
         scheduler_deadline = time.monotonic() + scheduled_recovery_budget_seconds()
 
     live_tick_deadline = None
@@ -33781,12 +33783,102 @@ def _reconcile_passes_short_conn(
     # Confirmed fills are current exposure truth. They outrank absence proofs:
     # if the bounded live-tick DB budget expires, an abandoned command may keep
     # one family reserved for another minute, but a filled command must not stay
-    # invisible to risk, monitoring, and capital accounting.
-    _db_pass(
-        "authenticated_entry_trade_fact",
-        reconcile_authenticated_entry_trade_facts,
-        "authenticated_entry_trade_fact",
-    )
+    # invisible to risk, monitoring, and capital accounting. Restart preflight
+    # snapshots this positive-proof candidate set on a query-only connection so
+    # the broad CTE cannot hold the writer lease while a monitor is waiting.
+    if scope != "restart_preflight":
+        _db_pass(
+            "authenticated_entry_trade_fact",
+            reconcile_authenticated_entry_trade_facts,
+            "authenticated_entry_trade_fact",
+        )
+    else:
+        snapshot_deadline = scheduler_deadline or (
+            time.monotonic() + _RESTART_ACCOUNT_TRUTH_DEADLINE_SECONDS
+        )
+        snapshot_state: dict[str, str] = {}
+        try:
+            with _open_recovery_priming_read_connection(
+                read_conn_factory,
+                deadline_monotonic=snapshot_deadline,
+                preempt_callback=_recovery_priming_monitor_preempt_requested,
+                state=snapshot_state,
+            ) as snapshot_conn:
+                candidate_ids = tuple(
+                    dict.fromkeys(
+                        str(row.get("command_id") or "").strip()
+                        for row in _authenticated_entry_trade_fact_candidates(
+                            snapshot_conn
+                        )
+                        if str(row.get("command_id") or "").strip()
+                    )
+                )
+        except _LiveTickDBBudgetExhausted:
+            summary["db_budget_deferred"] = True
+            summary["db_budget_deferred_at"] = "authenticated_entry_trade_fact"
+            summary["db_budget_deferred_count"] = 1
+            summary["scope"] = scope
+            summary["deferred_full_sweep"] = True
+            return
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            if snapshot_state.get("reason") == "monitor_preempted":
+                summary["monitor_preempted"] = True
+                summary["monitor_preempted_at"] = "authenticated_entry_trade_fact"
+                summary["db_lock_deferred"] = True
+                summary["db_lock_deferred_at"] = "authenticated_entry_trade_fact"
+                summary["db_lock_deferred_count"] = 1
+                summary["scope"] = scope
+                summary["deferred_full_sweep"] = True
+                return
+            if snapshot_state.get("reason") == "deadline" or (
+                "interrupted" in message and time.monotonic() >= snapshot_deadline
+            ):
+                summary["db_budget_deferred"] = True
+                summary["db_budget_deferred_at"] = "authenticated_entry_trade_fact"
+                summary["db_budget_deferred_count"] = 1
+                summary["scope"] = scope
+                summary["deferred_full_sweep"] = True
+                return
+            if apply_deadline is None or (
+                "locked" not in message and "interrupted" not in message
+            ):
+                raise
+            summary["db_lock_deferred"] = True
+            summary["db_lock_deferred_at"] = "authenticated_entry_trade_fact"
+            summary["db_lock_deferred_count"] = 1
+            summary["scope"] = scope
+            summary["deferred_full_sweep"] = True
+            return
+
+        if not candidate_ids:
+            summary["authenticated_entry_trade_fact"] = {
+                "scanned": 0,
+                "advanced": 0,
+                "stayed": 0,
+                "errors": 0,
+            }
+        else:
+            for command_id in candidate_ids:
+                result = _run_pass_with_lock_retry(
+                    "authenticated_entry_trade_fact",
+                    lambda command_id=command_id: run_db_only_pass(
+                        lambda conn: reconcile_authenticated_entry_trade_facts(
+                            conn,
+                            command_id=command_id,
+                        ),
+                        conn_factory=apply_conn_factory,
+                        label=(
+                            "recovery.authenticated_entry_trade_fact."
+                            f"{command_id}"
+                        ),
+                    ),
+                )
+                if result is None:
+                    summary["scope"] = scope
+                    summary["deferred_full_sweep"] = True
+                    return
+                _accumulate(summary, "authenticated_entry_trade_fact", result)
 
     if scope == "live_tick":
         # Recorded trade facts are already local capital truth.  Reproject

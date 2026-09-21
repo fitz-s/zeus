@@ -1634,6 +1634,11 @@ def test_restart_preflight_wires_short_retry_only_to_edli_pass(monkeypatch):
             "condition_ids": set(),
         },
     )
+    monkeypatch.setattr(
+        command_recovery,
+        "_authenticated_entry_trade_fact_candidates",
+        lambda _conn: [],
+    )
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
     command_recovery._reconcile_passes_short_conn(
@@ -1648,6 +1653,347 @@ def test_restart_preflight_wires_short_retry_only_to_edli_pass(monkeypatch):
         command_recovery._CAPITAL_RECOVERY_LOCK_RETRY_DELAYS
     )
     assert delays_by_label["stale_intent_created_no_submit"] == ()
+
+
+def _patch_restart_preflight_authenticated_fill_pass(
+    monkeypatch,
+    *,
+    candidates,
+    outcomes,
+):
+    from contextlib import nullcontext
+
+    from src.execution import command_recovery, venue_sync_contract
+
+    class _Conn:
+        def __init__(self, kind):
+            self.kind = kind
+
+    stages = []
+    apply_labels = []
+    reconciled = []
+
+    def _run(label, fn, **_kwargs):
+        if label == "authenticated_entry_trade_fact":
+            return fn()
+        return None
+
+    def _candidate_query(conn):
+        stages.append(("candidate_query", conn.kind))
+        assert conn.kind == "read"
+        return list(candidates)
+
+    def _reconcile(conn, *, command_id=None):
+        stages.append(("apply_recheck", conn.kind, command_id))
+        assert conn.kind == "apply"
+        assert command_id is not None
+        reconciled.append(command_id)
+        return dict(outcomes[command_id])
+
+    def _run_db_only(pass_fn, *, label, **_kwargs):
+        apply_labels.append(label)
+        return pass_fn(_Conn("apply"))
+
+    monkeypatch.setattr(
+        command_recovery,
+        "_run_recovery_pass_with_lock_policy",
+        _run,
+    )
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "open_tracked",
+        lambda *args, **kwargs: nullcontext(_Conn("read")),
+    )
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "capture_venue_read_snapshot",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_deterministic_terminal_no_fill_review_candidates",
+        lambda _conn: [],
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_open_recovery_priming_read_connection",
+        lambda *args, **kwargs: nullcontext(_Conn("read")),
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_collect_recovery_priming_keys",
+        lambda _conn, *, scope: {
+            "order_ids": set(),
+            "idempotency_keys": set(),
+            "condition_ids": set(),
+        },
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_authenticated_entry_trade_fact_candidates",
+        _candidate_query,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_authenticated_entry_trade_facts",
+        _reconcile,
+    )
+    monkeypatch.setattr(venue_sync_contract, "run_db_only_pass", _run_db_only)
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    command_recovery._reconcile_passes_short_conn(
+        MagicMock(),
+        summary,
+        "2026-09-20T00:00:00+00:00",
+        scope="restart_preflight",
+    )
+    return stages, apply_labels, reconciled, summary
+
+
+def test_restart_preflight_authenticated_fill_snapshot_rechecks_each_id(
+    monkeypatch,
+):
+    stages, apply_labels, reconciled, summary = (
+        _patch_restart_preflight_authenticated_fill_pass(
+            monkeypatch,
+            candidates=[
+                {"command_id": "cmd-z"},
+                {"command_id": "cmd-a"},
+                {"command_id": "cmd-z"},
+            ],
+            outcomes={
+                "cmd-z": {
+                    "scanned": 0,
+                    "advanced": 0,
+                    "stayed": 0,
+                    "errors": 0,
+                },
+                "cmd-a": {
+                    "scanned": 1,
+                    "advanced": 1,
+                    "stayed": 0,
+                    "errors": 0,
+                },
+            },
+        )
+    )
+
+    assert stages[0] == ("candidate_query", "read")
+    assert [stage[:2] for stage in stages[1:]] == [
+        ("apply_recheck", "apply"),
+        ("apply_recheck", "apply"),
+    ]
+    assert reconciled == ["cmd-z", "cmd-a"]
+    assert len(apply_labels) == 2
+    assert summary["authenticated_entry_trade_fact"] == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+
+
+def test_restart_preflight_authenticated_fill_snapshot_skips_writer_when_empty(
+    monkeypatch,
+):
+    stages, apply_labels, reconciled, summary = (
+        _patch_restart_preflight_authenticated_fill_pass(
+            monkeypatch,
+            candidates=[],
+            outcomes={},
+        )
+    )
+
+    assert stages == [("candidate_query", "read")]
+    assert apply_labels == []
+    assert reconciled == []
+    assert summary["authenticated_entry_trade_fact"] == {
+        "scanned": 0,
+        "advanced": 0,
+        "stayed": 0,
+        "errors": 0,
+    }
+
+
+def test_restart_preflight_authenticated_fill_snapshot_monitor_preempt_defers(
+    monkeypatch,
+):
+    from contextlib import contextmanager, nullcontext
+
+    from src.execution import command_recovery, venue_sync_contract
+
+    def _run(_label, _fn, **_kwargs):
+        return None
+
+    @contextmanager
+    def _preempted_snapshot(*_args, state, **_kwargs):
+        state["reason"] = "monitor_preempted"
+        raise sqlite3.OperationalError("interrupted")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(
+        command_recovery,
+        "_run_recovery_pass_with_lock_policy",
+        _run,
+    )
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "open_tracked",
+        lambda *args, **kwargs: nullcontext(None),
+    )
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "capture_venue_read_snapshot",
+        lambda *args, **kwargs: pytest.fail("snapshot preempt must stop before venue I/O"),
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_deterministic_terminal_no_fill_review_candidates",
+        lambda _conn: [],
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_open_recovery_priming_read_connection",
+        _preempted_snapshot,
+    )
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    command_recovery._reconcile_passes_short_conn(
+        MagicMock(),
+        summary,
+        "2026-09-20T00:00:00+00:00",
+        scope="restart_preflight",
+    )
+
+    assert summary["monitor_preempted"] is True
+    assert summary["monitor_preempted_at"] == "authenticated_entry_trade_fact"
+    assert summary["db_lock_deferred"] is True
+    assert summary["deferred_full_sweep"] is True
+
+
+def test_restart_preflight_without_deadline_bounds_all_factories_and_apply(
+    monkeypatch,
+):
+    from contextlib import nullcontext
+
+    from src.execution import command_recovery, venue_sync_contract
+
+    now = 100.0
+    deadlines = {}
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now)
+
+    def _priority(factory, *, scope, deadline_monotonic):
+        deadlines["priority"] = deadline_monotonic
+        return factory
+
+    def _apply(factory, *, scope, deadline_monotonic):
+        deadlines["apply"] = deadline_monotonic
+        return factory
+
+    def _read(factory, *, deadline_monotonic):
+        deadlines["read"] = deadline_monotonic
+        return factory
+
+    monkeypatch.setattr(command_recovery, "_recovery_priority_conn_factory", _priority)
+    monkeypatch.setattr(command_recovery, "_recovery_apply_conn_factory", _apply)
+    monkeypatch.setattr(command_recovery, "_recovery_read_conn_factory", _read)
+    monkeypatch.setattr(
+        command_recovery,
+        "_run_recovery_pass_with_lock_policy",
+        lambda _label, _fn, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_deterministic_terminal_no_fill_review_candidates",
+        lambda _conn: [],
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_open_recovery_priming_read_connection",
+        lambda *args, **kwargs: nullcontext(object()),
+    )
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "open_tracked",
+        lambda *args, **kwargs: nullcontext(object()),
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_authenticated_entry_trade_fact_candidates",
+        lambda _conn: [{"command_id": "cmd-z"}],
+    )
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "capture_venue_read_snapshot",
+        lambda *args, **kwargs: pytest.fail("apply defer must stop before venue I/O"),
+    )
+
+    command_recovery._reconcile_passes_short_conn(
+        MagicMock(), summary, "2026-09-20T00:00:00+00:00", scope="restart_preflight"
+    )
+
+    expected = now + command_recovery._RESTART_ACCOUNT_TRUTH_DEADLINE_SECONDS
+    assert deadlines == {"priority": expected, "apply": expected, "read": expected}
+    assert summary["scope"] == "restart_preflight"
+    assert summary["deferred_full_sweep"] is True
+
+
+@pytest.mark.parametrize(
+    "defer_key",
+    ["db_lock_deferred", "db_budget_deferred", "monitor_preempted"],
+)
+def test_restart_preflight_authenticated_fill_apply_defer_stops_before_network(
+    monkeypatch, defer_key,
+):
+    from contextlib import nullcontext
+
+    from src.execution import command_recovery, venue_sync_contract
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    attempts = []
+
+    def _run(label, _fn, **_kwargs):
+        if label == "authenticated_entry_trade_fact":
+            attempts.append(label)
+            summary[defer_key] = True
+            return None
+        return None
+
+    monkeypatch.setattr(command_recovery, "_run_recovery_pass_with_lock_policy", _run)
+    monkeypatch.setattr(
+        command_recovery,
+        "_deterministic_terminal_no_fill_review_candidates",
+        lambda _conn: [],
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_open_recovery_priming_read_connection",
+        lambda *args, **kwargs: nullcontext(object()),
+    )
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "open_tracked",
+        lambda *args, **kwargs: nullcontext(object()),
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_authenticated_entry_trade_fact_candidates",
+        lambda _conn: [{"command_id": "cmd-z"}, {"command_id": "cmd-a"}],
+    )
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "capture_venue_read_snapshot",
+        lambda *args, **kwargs: pytest.fail("apply defer must stop before venue I/O"),
+    )
+
+    command_recovery._reconcile_passes_short_conn(
+        MagicMock(), summary, "2026-09-20T00:00:00+00:00", scope="restart_preflight"
+    )
+
+    assert attempts == ["authenticated_entry_trade_fact"]
+    assert summary["scope"] == "restart_preflight"
+    assert summary["deferred_full_sweep"] is True
 
 
 def test_capital_recovery_retries_brief_contention_within_bounded_deadline(
