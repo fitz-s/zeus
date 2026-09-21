@@ -30291,10 +30291,13 @@ class TestRecoveryResolutionTable:
         cap = conn.execute("SELECT reservation_status FROM edli_live_cap_usage WHERE usage_id = 'cap-3'").fetchone()
         assert cap["reservation_status"] == "RESERVED"
 
+    @pytest.mark.parametrize("release_failure", (False, True))
     def test_partial_confirmed_fill_absent_from_open_orders_expires_remainder_without_voiding_fill(
         self,
         conn,
         mock_client,
+        monkeypatch,
+        release_failure,
     ):
         _insert(conn, size=5.0)
         _advance_to_partial(conn, venue_order_id="ord-partial")
@@ -30317,12 +30320,39 @@ class TestRecoveryResolutionTable:
              WHERE position_id = 'pos-001'
             """
         )
+        _open_test_entry_obligation(conn, "cmd-001")
         mock_client.get_open_orders.return_value = []
         mock_client.get_order.return_value = {"orderID": "ord-partial", "status": "CANCELED"}
 
+        from src.execution import command_recovery
         from src.execution.command_recovery import reconcile_unresolved_commands
 
-        summary = reconcile_unresolved_commands(conn, mock_client)
+        if release_failure:
+            def fail_release(*_args, **_kwargs):
+                raise RuntimeError("injected obligation release failure")
+
+            monkeypatch.setattr(
+                command_recovery,
+                "reconcile_terminal_entry_exposure_obligations",
+                fail_release,
+            )
+
+        summary = (
+            command_recovery.reconcile_partial_remainders(conn, mock_client)
+            if release_failure
+            else reconcile_unresolved_commands(conn, mock_client)
+        )
+
+        if release_failure:
+            assert summary["errors"] == 1
+            assert _get_state(conn, "cmd-001") == "PARTIAL"
+            assert conn.execute(
+                "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = 'cmd-001' AND state = 'EXPIRED'"
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT status FROM entry_exposure_obligations WHERE command_id = 'cmd-001'"
+            ).fetchone()[0] == "OPEN"
+            return
 
         assert summary["partial_remainders"] == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
         assert _get_state(conn, "cmd-001") == "EXPIRED"
@@ -30367,6 +30397,14 @@ class TestRecoveryResolutionTable:
             "cost_basis_usd": 0.625,
             "order_status": "partial",
         }
+        assert conn.execute(
+            "SELECT status FROM entry_exposure_obligations WHERE command_id = 'cmd-001'"
+        ).fetchone()[0] == "RESOLVED"
+        second = command_recovery.reconcile_terminal_entry_exposure_obligations(
+            conn, command_id="cmd-001"
+        )
+        assert second["advanced"] == 0
+        assert second["errors"] == 0
 
     def test_complete_filled_entry_is_not_a_partial_remainder_candidate(self, conn):
         _insert(conn, size=5.0)
@@ -35014,11 +35052,17 @@ class TestRecoveryResolutionTable:
         self,
         conn,
         mock_client,
+        monkeypatch,
     ):
         from src.execution import command_recovery
 
         _seed_cancel_pending_partial_exit_dust_case(conn)
         _configure_partial_exit_dust_client(mock_client, point_status="CANCELED")
+        monkeypatch.setattr(
+            command_recovery,
+            "reconcile_terminal_entry_exposure_obligations",
+            lambda *_args, **_kwargs: pytest.fail("ENTRY obligation reducer called for EXIT"),
+        )
 
         summary = command_recovery.reconcile_partial_remainders(
             conn,
@@ -35775,6 +35819,7 @@ class TestRecoveryResolutionTable:
         _insert(conn, size=5.0)
         _advance_to_partial(conn, venue_order_id="ord-partial")
         _append_confirmed_trade_fact(conn, order_id="ord-partial")
+        _open_test_entry_obligation(conn, "cmd-001")
         mock_client.get_open_orders.return_value = []
         mock_client.get_order.return_value = {"orderID": "ord-partial", "status": "LIVE"}
 
@@ -35785,6 +35830,9 @@ class TestRecoveryResolutionTable:
         assert summary["partial_remainders"] == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
         assert _get_state(conn, "cmd-001") == "PARTIAL"
         assert "EXPIRED" not in [e["event_type"] for e in _get_events(conn, "cmd-001")]
+        assert conn.execute(
+            "SELECT status FROM entry_exposure_obligations WHERE command_id = 'cmd-001'"
+        ).fetchone()[0] == "OPEN"
 
     def test_partial_remainder_terminalizes_from_order_state(
         self,

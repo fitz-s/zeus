@@ -20431,6 +20431,16 @@ def reconcile_partial_remainders(
                             "resolved_m5_local_orphan_findings": resolved_findings,
                         },
                     )
+                if str(command.get("intent_kind") or "").upper() == "ENTRY":
+                    obligation_release = reconcile_terminal_entry_exposure_obligations(
+                        conn,
+                        command_id=command_id,
+                    )
+                    if int(obligation_release.get("errors", 0) or 0):
+                        raise RuntimeError(
+                            "terminal entry obligation release failed for "
+                            f"{command_id}: {obligation_release}"
+                        )
                 conn.execute("RELEASE SAVEPOINT sp_partial_remainder_repair")
             except Exception:
                 conn.execute("ROLLBACK TO SAVEPOINT sp_partial_remainder_repair")
