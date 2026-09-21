@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Created: 2026-07-17
-# Last reused/audited: 2026-07-17
+# Last reused/audited: 2026-09-20
 # Authority basis: docs/evidence/upstream_physical_2026_07_17/consult_freshness_decoupling_verdict.txt
 #   (basket-governance data-availability tiers >=60/30-59/<30); docs/evidence/
 #   upstream_physical_2026_07_17/combo_experiments_report.md (walk-forward no-leak discipline).
@@ -19,6 +19,7 @@ import os
 import sqlite3
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -29,41 +30,129 @@ import fit_source_clock_city_weights as fscw  # noqa: E402
 from src.forecast.center import raw_second_moment_weights  # noqa: E402
 
 
+_TEST_CITIES: dict[str, SimpleNamespace] = {}
+
+
+def _city(name: str, *, unit: str = "C") -> SimpleNamespace:
+    return _TEST_CITIES.setdefault(
+        name,
+        SimpleNamespace(
+            name=name,
+            settlement_source_type="noaa",
+            previous_settlement_source_type="wu_icao",
+            settlement_source_type_effective_date="2026-02-21",
+            wu_station="KTEST",
+            settlement_unit=unit,
+            settlement_page_view="all",
+        ),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _current_resolver_city_map(monkeypatch: pytest.MonkeyPatch) -> None:
+    _TEST_CITIES.clear()
+    monkeypatch.setattr(fscw, "runtime_cities_by_name", lambda: _TEST_CITIES)
+
+
 def _make_db(rows: list[dict]) -> sqlite3.Connection:
     """rows: each dict has model, city, metric, target_date, lead_days, forecast_value_c,
     settlement_value_c (settlement is always inserted as unit='C' — F-conversion is exercised
     by inserting a raw settlement_value + unit='F' explicitly where needed)."""
     conn = sqlite3.connect(":memory:")
-    conn.execute(
-        "CREATE TABLE raw_model_forecasts (model TEXT, city TEXT, target_date TEXT, "
-        "metric TEXT, lead_days INTEGER, forecast_value_c REAL, endpoint TEXT)"
+    conn.executescript(
+        """
+        CREATE TABLE raw_model_forecasts (
+            raw_model_forecast_id INTEGER PRIMARY KEY,
+            model TEXT, city TEXT, target_date TEXT, metric TEXT, source_cycle_time TEXT,
+            source_available_at TEXT, captured_at TEXT, lead_days INTEGER,
+            forecast_value_c REAL, endpoint TEXT, training_allowed INTEGER,
+            recorded_at TEXT, coverage_status TEXT, source_id TEXT, source_family TEXT,
+            product_id TEXT, request_url_hash TEXT
+        );
+        CREATE TABLE settlement_outcomes (
+            settlement_id INTEGER PRIMARY KEY, city TEXT, target_date TEXT,
+            temperature_metric TEXT, winning_bin TEXT, settlement_value REAL,
+            settlement_source TEXT, settled_at TEXT, authority TEXT,
+            provenance_json TEXT, recorded_at TEXT, settlement_unit TEXT,
+            outcome_type INTEGER, resolution_state TEXT
+        );
+        CREATE TABLE observations (
+            id INTEGER PRIMARY KEY, city TEXT, target_date TEXT, source TEXT,
+            station_id TEXT, unit TEXT, data_source_version TEXT, high_temp REAL,
+            low_temp REAL, high_fetch_utc TEXT, low_fetch_utc TEXT,
+            high_provenance_metadata TEXT, low_provenance_metadata TEXT
+        );
+        """
     )
-    conn.execute(
-        "CREATE TABLE settlement_outcomes (city TEXT, target_date TEXT, temperature_metric TEXT, "
-        "settlement_value REAL, settlement_unit TEXT, authority TEXT)"
-    )
-    conn.execute(
-        "CREATE TABLE observations (city TEXT, target_date TEXT, high_temp REAL, "
-        "low_temp REAL, unit TEXT, authority TEXT)"
-    )
-    seen_settlements: set[tuple[str, str, str]] = set()
+    truth_by_city_date: dict[tuple[str, str], dict[str, dict]] = {}
     for r in rows:
+        unit = r.get("settlement_unit", "C")
+        _city(r["city"], unit=unit)
+        target_instant = f"{r['target_date']}T12:00:00+00:00"
         conn.execute(
-            "INSERT INTO raw_model_forecasts VALUES (?,?,?,?,?,?,?)",
+            """INSERT INTO raw_model_forecasts (
+                model, city, target_date, metric, source_cycle_time, source_available_at,
+                captured_at, lead_days, forecast_value_c, endpoint, training_allowed,
+                recorded_at, coverage_status, source_id, source_family, product_id,
+                request_url_hash
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 r["model"], r["city"], r["target_date"], r["metric"],
+                r.get("source_cycle_time", target_instant),
+                r.get("source_available_at", target_instant),
+                r.get("captured_at", target_instant),
                 r["lead_days"], r["forecast_value_c"], r.get("endpoint", "previous_runs"),
+                r.get("training_allowed", 0), r.get("recorded_at", target_instant),
+                r.get("coverage_status", "COVERED"), r.get("source_id", "openmeteo"),
+                r.get("source_family", "openmeteo"),
+                r.get("product_id", f"{r['model']}::previous_runs"),
+                r.get("request_url_hash", "request-hash"),
             ),
         )
-        key = (r["city"], r["target_date"], r["metric"])
-        if key not in seen_settlements:
-            seen_settlements.add(key)
-            unit = r.get("settlement_unit", "C")
-            value = r.get("settlement_value", r.get("settlement_value_c"))
+        truth_by_city_date.setdefault((r["city"], r["target_date"]), {})[r["metric"]] = r
+    for observation_id, ((city, target_date), by_metric) in enumerate(
+        sorted(truth_by_city_date.items()), start=1
+    ):
+        unit = next(iter(by_metric.values())).get("settlement_unit", "C")
+        values = {
+            metric: item.get("settlement_value", item.get("settlement_value_c"))
+            for metric, item in by_metric.items()
+        }
+        instant = f"{target_date}T12:00:00+00:00"
+        metadata = json.dumps({"settlement_page_view": "all", "station": "KTEST"})
+        conn.execute(
+            """INSERT INTO observations VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                observation_id, city, target_date, "noaa_wrh_ktest", "KTEST", unit,
+                "noaa_wrh_timeseries_v1", values.get("high"), values.get("low"),
+                instant if "high" in values else None, instant if "low" in values else None,
+                metadata if "high" in values else None, metadata if "low" in values else None,
+            ),
+        )
+        for metric, item in by_metric.items():
+            value = values[metric]
             conn.execute(
-                "INSERT INTO settlement_outcomes VALUES (?,?,?,?,?,?)",
-                (r["city"], r["target_date"], r["metric"], value, unit,
-                 r.get("authority", "VERIFIED")),
+                """INSERT INTO settlement_outcomes (
+                    city, target_date, temperature_metric, winning_bin, settlement_value,
+                    settlement_source, settled_at, authority, provenance_json, recorded_at,
+                    settlement_unit, resolution_state
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    city, target_date, metric, "bin", value,
+                    "https://weather.gov/wrh/timeseries?site=KTEST", instant,
+                    item.get("authority", "VERIFIED"),
+                    json.dumps({
+                        "era": "internal_resolver_post_2026_02_21",
+                        "era_start_date_utc": "2026-02-21",
+                        "source_family": "noaa",
+                        "settlement_source_type": "noaa",
+                        "obs_id": observation_id,
+                        "obs_source": "noaa_wrh_ktest",
+                        "data_version": "noaa_wrh_timeseries_v1",
+                        "rounding_rule": "wmo_half_up",
+                    }),
+                    instant, unit, "VENUE_RESOLVED",
+                ),
             )
     conn.commit()
     conn.row_factory = sqlite3.Row
@@ -76,10 +165,10 @@ def _rows_for_city(city: str, metric: str, n: int, *, models: dict[str, float]) 
     for every row (a single archived lead; exact-lead dedup is tested separately)."""
     rows = []
     for i in range(n):
-        month = 1 + (i // 28)
+        month = 3 + (i // 28)
         day = 1 + (i % 28)
         date = f"2026-{month:02d}-{day:02d}"
-        settle_c = 10.0 + (i % 7) * 0.4
+        settle_c = 10.0 + float(i % 7)
         for model, offset in models.items():
             rows.append({
                 "model": model, "city": city, "metric": metric, "target_date": date,
@@ -100,7 +189,7 @@ def test_weight_math_matches_center_raw_second_moment_weights() -> None:
     formula unmodified — this is a parity check against reimplementation drift."""
     rows = _rows_for_city("TestCity", "high", 40, models={"A": 0.5, "B": 2.0})
     conn = _make_db(rows)
-    loaded = fscw.load_walk_forward_rows(conn, as_of="2026-12-31")
+    loaded = fscw.load_walk_forward_rows(conn, as_of="2026-12-31T00:00:00+00:00")
     obs = loaded["obs"][("TestCity", "high")]
     settle = loaded["settle"][("TestCity", "high")]
     stats = fscw.residual_stats_by_model(obs, settle)
@@ -115,19 +204,20 @@ def test_weight_math_matches_center_raw_second_moment_weights() -> None:
     assert got["A"] > got["B"]  # the tighter model (smaller m2) gets more weight
 
 
-def test_exact_lead_prefers_smallest_lead_days() -> None:
-    """A (model, city, metric, target_date) cell with archived lead 0 AND lead 2 keeps ONLY
-    the lead-0 (smallest available) row — never both, never the larger lead."""
+def test_fixed_lead_does_not_substitute_other_archived_leads() -> None:
+    """The source-skill fit uses lead 1 only; lead 0/2 never silently substitute."""
     rows = [
         {"model": "A", "city": "C1", "metric": "high", "target_date": "2026-03-01",
          "lead_days": 2, "forecast_value_c": 99.0, "settlement_value_c": 10.0},
         {"model": "A", "city": "C1", "metric": "high", "target_date": "2026-03-01",
          "lead_days": 0, "forecast_value_c": 10.5, "settlement_value_c": 10.0},
+        {"model": "A", "city": "C1", "metric": "high", "target_date": "2026-03-01",
+         "lead_days": 1, "forecast_value_c": 11.5, "settlement_value_c": 10.0},
     ]
     conn = _make_db(rows)
-    loaded = fscw.load_walk_forward_rows(conn, as_of="2026-12-31")
+    loaded = fscw.load_walk_forward_rows(conn, as_of="2026-12-31T00:00:00+00:00")
     obs = loaded["obs"][("C1", "high")]
-    assert obs["2026-03-01"] == {"A": 10.5}  # the lead-0 value, not the lead-2 99.0 outlier
+    assert obs["2026-03-01"] == {"A": 11.5}
 
 
 def test_settlement_unit_f_converted_to_celsius() -> None:
@@ -137,7 +227,7 @@ def test_settlement_unit_f_converted_to_celsius() -> None:
         "settlement_unit": "F",  # 68F == 20C
     }]
     conn = _make_db(rows)
-    loaded = fscw.load_walk_forward_rows(conn, as_of="2026-12-31")
+    loaded = fscw.load_walk_forward_rows(conn, as_of="2026-12-31T00:00:00+00:00")
     settle = loaded["settle"][("F-City", "high")]
     assert abs(settle["2026-03-01"] - 20.0) < 1e-9
 
@@ -153,7 +243,7 @@ def test_walk_forward_boundary_excludes_as_of_date() -> None:
         "lead_days": 1, "forecast_value_c": 15.0, "settlement_value_c": 15.0,
     })
     conn = _make_db(rows)
-    loaded = fscw.load_walk_forward_rows(conn, as_of=boundary_date)
+    loaded = fscw.load_walk_forward_rows(conn, as_of=f"{boundary_date}T00:00:00+00:00")
     settle = loaded["settle"][("C1", "high")]
     assert boundary_date not in settle
     assert len(settle) == 5  # only the strictly-prior dates
@@ -180,7 +270,7 @@ def _basic_setup(tmp_path: Path, *, n_city_specific=70, n_region=45, n_global=10
 def test_data_availability_tiers_select_expected_basket_source(tmp_path: Path) -> None:
     conn, cities_path, frozen_csv_path = _basic_setup(tmp_path)
     artifact = fscw.build_artifact(
-        conn, as_of="2026-12-31", generated_at="FIXED", cities_path=cities_path,
+        conn, as_of="2026-12-31T00:00:00+00:00", generated_at="FIXED", cities_path=cities_path,
         frozen_csv_path=frozen_csv_path, git_sha="FIXED", servable=None,
     )
     cities = artifact["cities"]
@@ -197,7 +287,7 @@ def test_determinism_same_db_state_and_as_of_byte_identical(tmp_path: Path) -> N
 
     def _run() -> str:
         artifact = fscw.build_artifact(
-            conn, as_of="2026-12-31", generated_at="FIXED", cities_path=cities_path,
+            conn, as_of="2026-12-31T00:00:00+00:00", generated_at="FIXED", cities_path=cities_path,
             frozen_csv_path=frozen_csv_path, git_sha="FIXED", servable=None,
         )
         return json.dumps(artifact, sort_keys=True, indent=2)
@@ -205,12 +295,19 @@ def test_determinism_same_db_state_and_as_of_byte_identical(tmp_path: Path) -> N
     first = _run()
     second = _run()
     assert first == second
+    contract = json.loads(first)["training_contract"]
+    assert contract == {
+        "name": fscw.TRAINING_CONTRACT,
+        "fixed_lead_days": 1,
+        "label_authority": "current_resolver_settlement_history",
+        "oos_or_economic_advantage_claim": False,
+    }
 
 
 def test_weights_keyed_by_exact_model_id_never_positional(tmp_path: Path) -> None:
     conn, cities_path, frozen_csv_path = _basic_setup(tmp_path)
     artifact = fscw.build_artifact(
-        conn, as_of="2026-12-31", generated_at="FIXED", cities_path=cities_path,
+        conn, as_of="2026-12-31T00:00:00+00:00", generated_at="FIXED", cities_path=cities_path,
         frozen_csv_path=frozen_csv_path, git_sha="FIXED", servable=None,
     )
     models = artifact["cities"]["CitySpecific"]["high"]["models"]
@@ -241,7 +338,7 @@ def test_city_specific_greedy_keeps_second_provider_without_mae_gain(tmp_path: P
 
     artifact = fscw.build_artifact(
         conn,
-        as_of="2026-12-31",
+        as_of="2026-12-31T00:00:00+00:00",
         generated_at="FIXED",
         cities_path=cities_path,
         frozen_csv_path=tmp_path / "missing.csv",
@@ -277,7 +374,7 @@ def test_artifact_refuses_second_provider_rounded_out_of_publication(tmp_path: P
     with pytest.raises(ValueError, match=r"sources=\('A',\).*families=\('a',\)"):
         fscw.build_artifact(
             conn,
-            as_of="2026-12-31",
+            as_of="2026-12-31T00:00:00+00:00",
             generated_at="FIXED",
             cities_path=cities_path,
             frozen_csv_path=tmp_path / "missing.csv",
@@ -298,7 +395,7 @@ def test_artifact_refuses_single_servable_domain_provider(tmp_path: Path) -> Non
     with pytest.raises(ValueError, match="at least 2 distinct servable/domain provider families"):
         fscw.build_artifact(
             conn,
-            as_of="2026-12-31",
+            as_of="2026-12-31T00:00:00+00:00",
             generated_at="FIXED",
             cities_path=cities_path,
             frozen_csv_path=tmp_path / "missing.csv",
@@ -329,7 +426,7 @@ def test_greedy_uses_ecmwf_not_second_icon_alias_for_second_family(tmp_path: Pat
 
     artifact = fscw.build_artifact(
         conn,
-        as_of="2026-12-31",
+        as_of="2026-12-31T00:00:00+00:00",
         generated_at="FIXED",
         cities_path=cities_path,
         frozen_csv_path=tmp_path / "missing.csv",
@@ -368,7 +465,7 @@ def test_artifact_refuses_two_models_from_one_provider_family(tmp_path: Path) ->
     with pytest.raises(ValueError, match=r"sources=\(\).*families=\(\)"):
         fscw.build_artifact(
             conn,
-            as_of="2026-12-31",
+            as_of="2026-12-31T00:00:00+00:00",
             generated_at="FIXED",
             cities_path=cities_path,
             frozen_csv_path=tmp_path / "missing.csv",
@@ -385,7 +482,7 @@ def test_default_servable_filter_excludes_retired_archive_models(tmp_path: Path)
     exists to prevent."""
     conn, cities_path, frozen_csv_path = _basic_setup(tmp_path)
     loaded = fscw.load_walk_forward_rows(
-        conn, as_of="2026-12-31", servable=frozenset({"A"})
+        conn, as_of="2026-12-31T00:00:00+00:00", servable=frozenset({"A"})
     )
     for by_date in loaded["obs"].values():
         for models in by_date.values():
@@ -442,7 +539,7 @@ def test_artifact_excludes_models_outside_each_city_domain(tmp_path: Path) -> No
     )
     artifact = fscw.build_artifact(
         conn,
-        as_of="2026-12-31",
+        as_of="2026-12-31T00:00:00+00:00",
         generated_at="FIXED",
         cities_path=cities_path,
         frozen_csv_path=tmp_path / "missing.csv",
@@ -504,7 +601,7 @@ def test_thin_model_cannot_bypass_finite_evidence_floor(
 
     artifact = fscw.build_artifact(
         conn,
-        as_of="2026-12-31",
+        as_of="2026-12-31T00:00:00+00:00",
         generated_at="FIXED",
         cities_path=cities_path,
         frozen_csv_path=tmp_path / "missing.csv",
@@ -515,73 +612,68 @@ def test_thin_model_cannot_bypass_finite_evidence_floor(
     assert "N" not in artifact["cities"]["ThinEvidenceCity"]["high"]["models"]
 
 
-def test_observation_truth_fills_metric_without_venue_settlement(tmp_path: Path) -> None:
-    """A metric with NO venue settlement_outcomes rows but VERIFIED settlement-source
-    observations must still train a CITY_SPECIFIC basket — venue-settled low markets
-    exist for only ~9 cities while the settlement-source low observation exists for
-    every city; observation truth is the sanctioned settlement-source backtest basis."""
-    conn = _make_db([])
-    # Forecast rows for low, but NO settlement_outcomes rows at all.
-    for i in range(70):
-        month = 1 + (i // 28)
-        day = 1 + (i % 28)
-        date = f"2026-{month:02d}-{day:02d}"
-        truth = 10.0 + (i % 7) * 0.4
-        for model, offset in (("A", 0.3), ("B", 1.2)):
-            for metric, base in (("low", truth), ("high", truth + 8.0)):
-                conn.execute(
-                    "INSERT INTO raw_model_forecasts VALUES (?,?,?,?,?,?,?)",
-                    (model, "ObsCity", date, metric, 1, base + offset, "previous_runs"),
-                )
-        conn.execute(
-            "INSERT INTO observations VALUES (?,?,?,?,?,?)",
-            ("ObsCity", date, truth + 8.0, truth, "C", "VERIFIED"),
-        )
+def test_observation_only_rows_do_not_supply_training_labels() -> None:
+    """The fitter requires a current-resolver settlement outcome, never an observation fallback."""
+    rows = _rows_for_city("ObsCity", "low", 2, models={"A": 0.3, "B": 1.2})
+    conn = _make_db(rows)
+    conn.execute("DELETE FROM settlement_outcomes")
     conn.commit()
-    cities_path = _cities_json(
-        tmp_path,
-        [{"name": "ObsCity", "timezone": "Pacific/Fiji", "country_code": "FJ",
-          "lat": -18.0, "lon": 178.0}],
-    )
-    artifact = fscw.build_artifact(
-        conn, as_of="2026-12-31", generated_at="FIXED", cities_path=cities_path,
-        frozen_csv_path=tmp_path / "missing.csv", git_sha="FIXED",
-        servable=frozenset({"A", "B"}),
-    )
-    low = artifact["cities"]["ObsCity"]["low"]
-    assert low["basket_provenance"]["tier"] == "CITY_SPECIFIC"
-    assert low["basket_provenance"]["n_paired_dates"] == 70
-    assert set(low["models"]) == {"A", "B"}
+
+    loaded = fscw.load_walk_forward_rows(conn, as_of="2026-12-31T00:00:00+00:00")
+
+    assert ("ObsCity", "low") not in loaded["settle"]
+    assert loaded["excluded_reason_counts"]["RAW_LABEL_NOT_CURRENT_RESOLVER_ELIGIBLE"] == 4
 
 
-def test_venue_settlement_preferred_over_observation_when_both_exist(tmp_path: Path) -> None:
-    """Where venue settlement and observation disagree, venue settlement (authority of
-    record) must be the residual basis."""
-    conn = _make_db([])
-    for i in range(70):
-        month = 1 + (i // 28)
-        day = 1 + (i % 28)
-        date = f"2026-{month:02d}-{day:02d}"
-        venue = 20.0
-        obs = 25.0  # deliberately different
-        conn.execute(
-            "INSERT INTO raw_model_forecasts VALUES (?,?,?,?,?,?,?)",
-            ("A", "BothCity", date, "high", 1, venue + 0.5, "previous_runs"),
-        )
-        conn.execute(
-            "INSERT INTO raw_model_forecasts VALUES (?,?,?,?,?,?,?)",
-            ("B", "BothCity", date, "high", 1, venue + 1.5, "previous_runs"),
-        )
-        conn.execute(
-            "INSERT INTO settlement_outcomes VALUES (?,?,?,?,?,?)",
-            ("BothCity", date, "high", venue, "C", "VERIFIED"),
-        )
-        conn.execute(
-            "INSERT INTO observations VALUES (?,?,?,?,?,?)",
-            ("BothCity", date, obs, obs - 8.0, "C", "VERIFIED"),
-        )
-    conn.commit()
-    loaded = fscw.load_walk_forward_rows(conn, as_of="2026-12-31")
-    settle = loaded["settle"][("BothCity", "high")]
-    # Every truth value must be the VENUE 20.0, never the observation 25.0.
-    assert all(abs(v - 20.0) < 1e-9 for v in settle.values())
+@pytest.mark.parametrize(
+    ("raw_overrides", "expected_reason"),
+    [
+        ({"training_allowed": 1}, "RAW_TRAINING_ALLOWED_MARKER_INVALID"),
+        ({"coverage_status": "PARTIAL"}, "RAW_COVERAGE_NOT_COVERED"),
+        ({"source_id": ""}, "RAW_SOURCE_IDENTITY_MISSING"),
+        ({"captured_at": "2026-12-31T00:00:00+00:00"},
+         "RAW_AVAILABILITY_NOT_STRICTLY_BEFORE_AS_OF"),
+    ],
+)
+def test_raw_input_contract_rejects_unverified_or_late_forecast_rows(
+    raw_overrides: dict[str, object], expected_reason: str,
+) -> None:
+    row = {
+        "model": "A", "city": "RawContractCity", "metric": "high",
+        "target_date": "2026-03-01", "lead_days": 1,
+        "forecast_value_c": 20.5, "settlement_value_c": 20.0,
+        **raw_overrides,
+    }
+    loaded = fscw.load_walk_forward_rows(
+        _make_db([row]), as_of="2026-04-01T00:00:00+00:00"
+    )
+
+    assert loaded["obs"] == {}
+    assert loaded["settle"] == {}
+    assert loaded["excluded_reason_counts"][expected_reason] == 1
+
+
+def test_loader_preserves_current_label_and_raw_input_availability() -> None:
+    rows = [{
+        "model": "A", "city": "TimingCity", "metric": "high", "target_date": "2026-03-01",
+        "lead_days": 1, "forecast_value_c": 20.5, "settlement_value_c": 20.0,
+        "captured_at": "2026-02-28T12:00:00+00:00",
+        "recorded_at": "2026-02-28T12:01:00+00:00",
+        "source_available_at": "2026-02-28T11:00:00+00:00",
+    }]
+    conn = _make_db(rows)
+
+    loaded = fscw.load_walk_forward_rows(conn, as_of="2026-12-31T00:00:00+00:00")
+
+    label_key = ("TimingCity", "high", "2026-03-01")
+    raw_key = (*label_key, "A")
+    assert loaded["label_availability"][label_key] == "2026-03-01T12:00:00+00:00"
+    assert loaded["forecast_availability"][raw_key] == {
+        "captured_at": "2026-02-28T12:00:00+00:00",
+        "recorded_at": "2026-02-28T12:01:00+00:00",
+        "source_available_at": "2026-02-28T11:00:00+00:00",
+        "source_id": "openmeteo",
+        "source_family": "openmeteo",
+        "product_id": "A::previous_runs",
+        "request_url_hash": "request-hash",
+    }
