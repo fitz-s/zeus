@@ -39,7 +39,7 @@ DAY0_HELD_PINNED_RECOMPUTE_GLOBAL_AUTHORITY = (
 # authorized a fill.  Increment this when the Day0 probability construction
 # changes; the value is stamped into every live Day0 q_version.
 DAY0_PROBABILITY_SEMANTICS_REVISION = (
-    "day0_hourly_ens_source_clock_carrier_v16"
+    "day0_hourly_ens_source_clock_carrier_v17"
 )
 _DAY0_SEMANTIC_Q_VERSION_PREFIX = "day0-semrev:"
 DAY0_DETERMINISTIC_BIN_PAYOFF_Q_SOURCE = "day0_deterministic_bin_payoff"
@@ -162,22 +162,15 @@ def day0_evidence_finality(payload: Mapping[str, object]) -> str:
         return DAY0_PROVISIONAL_CURRENT_SNAPSHOT
     if source == "hko_daily_api" or source.startswith("hko_daily_api_"):
         return DAY0_FINAL_DAILY_SETTLEMENT
-    monotone_source = (
-        source.startswith("ogimet_metar_")
-        or source.startswith("aviationweather_metar")
-        or source.startswith("same_station_fast_tail")
-        # The NOAA settlement page is the product the 48 NOAA markets resolve
-        # against, read from the market's own feed rather than reconstructed
-        # from METAR bodies. Within a running local day it reports the extreme
-        # of the rows shown so far, so it bounds settlement monotonically
-        # exactly as the reconstruction it replaced did — it is not a final
-        # daily value like hko_daily_api. Omitting it left the most
-        # authoritative source classified UNKNOWN and therefore weaker than
-        # the Ogimet lane it superseded.
-        or source.startswith("noaa_wrh_")
-        or source.startswith("observation_prints:ogimet_metar_")
-        or source.startswith("observation_prints:aviationweather_metar")
-        or source.startswith("observation_prints:noaa_wrh_")
+    # Raw station reports and mirrors can contain prints omitted by the
+    # resolver's NOAA WRH page product. Publication maturity or a calibrated
+    # station margin cannot establish membership in that settlement product.
+    if day0_is_noaa_preliminary_source(source) or source.startswith(
+        ("same_station_fast_tail", "observation_prints:same_station_fast_tail")
+    ):
+        return DAY0_PROVISIONAL_CURRENT_SNAPSHOT
+    monotone_source = source.startswith(
+        ("noaa_wrh_", "observation_prints:noaa_wrh_")
     )
     if not monotone_source:
         return DAY0_UNKNOWN_FINALITY

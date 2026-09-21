@@ -14,7 +14,6 @@ import pytest
 from src.data.day0_observation_reader import read_day0_observed_extrema
 from src.events.event_writer import EventWriter
 from src.events.day0_authority import (
-    DAY0_MONOTONE_SETTLEMENT_BOUND,
     DAY0_PROVISIONAL_CURRENT_SNAPSHOT,
     DAY0_WU_FAST_RESIDUAL_SOURCE,
     day0_evidence_finality,
@@ -68,7 +67,7 @@ def _observation(**overrides):
 def test_wu_current_and_fast_residual_sources_are_statistical_not_absorbing() -> None:
     assert (
         day0_evidence_finality({"settlement_source": "aviationweather_metar"})
-        == DAY0_MONOTONE_SETTLEMENT_BOUND
+        == DAY0_PROVISIONAL_CURRENT_SNAPSHOT
     )
     assert (
         day0_evidence_finality(

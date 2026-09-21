@@ -2110,6 +2110,7 @@ def test_day0_pinned_current_local_day_requires_hwm_station_witness(
                 "metric": "high",
                 "unit": "C",
                 "settlement_source": "aviationweather_metar",
+            "station_id": "LLBG",
                 "observation_time": observation_time,
                 "rounded_value": 33,
                 "source_authorized_status": "AUTHORIZED",
@@ -2134,6 +2135,7 @@ def test_day0_pinned_current_local_day_requires_hwm_station_witness(
     likelihood["identity_hash"] = hashlib.sha256(
         json.dumps(likelihood, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+    likelihood["boundary_survival_probability"] = 0.5
     pinned_provenance = {
         "day0_provisional_observation": {
             "active": True,
@@ -2252,8 +2254,11 @@ def test_day0_pinned_current_local_day_requires_hwm_station_witness(
     def capture_global_day0_payload(*_args, **kwargs):
         observed["current_day0_facts"] = kwargs.get("current_day0_facts")
         return {
-            "_edli_global_day0_binding": {"observation_time": observation_time},
+            "_edli_global_day0_binding": {"observation_time": observation_time, "configured_station_id": "LLBG"},
+            "_edli_day0_provisional_revision_likelihood": likelihood,
+            "_edli_day0_provisional_boundary_survival_probability": 0.5,
             "settlement_source": "aviationweather_metar",
+            "station_id": "LLBG",
             "observation_time": observation_time,
             "observed_extreme_native": 33.0,
             "rounded_value": 33.0,
@@ -2353,15 +2358,10 @@ def test_day0_pinned_current_local_day_requires_hwm_station_witness(
         "current_day0_facts": (fact, fact),
     }
     assert prepared.posterior_id == pinned_bundle.posterior_id
-    assert isinstance(
-        prepared.probability_witness,
-        solver.DeterministicBinPayoffWitness,
-    )
-    assert prepared.probability_witness.exact_yes_payoffs == (
-        ("bin-32", 0),
-        ("bin-33", 1),
-    )
-    assert prepared.probability_witness.posterior_identity_hash != (
+    assert isinstance(prepared.probability_witness, _Witness)
+    assert not isinstance(prepared.probability_witness, solver.DeterministicBinPayoffWitness)
+    assert payload_out["_edli_day0_provisional_revision_likelihood"] == likelihood
+    assert prepared.probability_witness.posterior_identity_hash == (
         pinned_bundle.posterior_identity_hash
     )
     assert payload_out["_edli_day0_held_pinned_posterior_identity"] == (
@@ -2657,36 +2657,10 @@ def test_day0_post_local_day_without_observation_still_waits(monkeypatch):
         )
 
 
-def test_day0_live_entry_metar_admission_unaffected_by_held_finality_broadening(
+def test_raw_metar_entry_requires_statistical_confirmation_not_exact_payoff(
     monkeypatch,
 ):
-    """R-BB review of a9a2c139f (FIX-FIRST): the finality broadening for METAR/
-    monotone sources must stay scoped to the held continuation path
-    (`current_day0_redecision_only` / `post_local_incomplete_monitor_authority`,
-    both structurally False whenever `probability_use is ENTRY`). It must NOT
-    also change live intraday ENTRY admission for the same METAR fact. This
-    pins the three consumers R-BB flagged as byte-identical to parent 9408a5658
-    for a live-day (not post-local-day) ENTRY with a METAR settlement-channel
-    fact and a mainline replacement bundle present:
-
-    1. `candidate_payoff_q_lcb_caps` stays populated (not suppressed) --
-       `provisional_day0_observation` is still `False` for METAR (unchanged
-       narrow `==` comparison), so `not provisional_day0_observation` still
-       holds at the caps-assignment site.
-    2. The bundle-bypass / posterior-identity recompute condition still fires
-       (`not provisional_day0_observation` alone already satisfied this before
-       the fix; unchanged).
-    3. `_edli_day0_provisional_revision_likelihood` is NOT stamped into the
-       payload for this live entry -- proving the new
-       `settlement_bound_day0_observation` branch at the carrier-rebuild
-       producer is correctly gated to the held path and never fires here.
-
-    A second scenario in the same test (`readiness is None`, the degraded
-    fallback arm) proves the `direct_day0_entry_carrier` branch stays dead for
-    METAR entries exactly as it did on parent -- it requires
-    `provisional_day0_observation` (unchanged, still False for METAR), never
-    `settlement_bound_day0_observation`.
-    """
+    """Raw station entry needs observed confirmation and stays statistical."""
     import src.data.replacement_forecast_bundle_reader as bundle_reader
     import src.data.replacement_forecast_current_target_plan as target_plan
     import src.data.replacement_forecast_readiness as readiness_reader
@@ -2763,7 +2737,7 @@ def test_day0_live_entry_metar_admission_unaffected_by_held_finality_broadening(
             "Sao Paulo": SimpleNamespace(
                 timezone="America/Sao_Paulo",
                 settlement_unit="C",
-                settlement_source_type="wu",
+                settlement_source_type="noaa",
                 wu_station="SBSP",
             )
         },
@@ -2859,24 +2833,18 @@ def test_day0_live_entry_metar_admission_unaffected_by_held_finality_broadening(
         [[0.4, 0.6], [0.42, 0.58], [0.38, 0.62]] * 200, dtype=np.float64
     )
     point_q = np.array([0.4, 0.6], dtype=np.float64)
+    monkeypatch.setattr(era, "_day0_absorbing_exact_probability_components", lambda **_k: None)
+    monkeypatch.setattr(era, "_replacement_global_probability_components",
+                        lambda *_a, **_k: (samples, point_q, "current-evidence-basis"))
+    def remaining_components(*_args, **kwargs):
+        payload = kwargs["payload"]
+        assert payload["_edli_day0_provisional_revision_likelihood"]["successes"]
+        return samples, point_q, "statistical-remaining-carrier"
+    monkeypatch.setattr(era,"_day0_remaining_global_probability_components",remaining_components)
     monkeypatch.setattr(
-        era,
-        "_day0_absorbing_exact_probability_components",
-        lambda **_k: (samples, point_q, "sp-entry-band-basis"),
-    )
-
-    def fail_remaining_components(*_a, **_k):
-        raise AssertionError(
-            "live METAR entry with an absorbing exact result reached the "
-            "remaining-day builder -- the exact-components mock should have "
-            "short-circuited it"
-        )
-
-    monkeypatch.setattr(
-        era, "_day0_remaining_global_probability_components", fail_remaining_components
-    )
-    monkeypatch.setattr(
-        era, "_day0_global_candidate_payoff_q_lcb_caps", lambda **_k: (("f", "c", "b", "YES", 0.5),)
+        era, "_day0_global_candidate_payoff_q_lcb_caps", lambda **_k: tuple(
+            (family.family_id,c.condition_id,c.condition_id,side,0.3)
+            for c in candidates for side in ("YES","NO"))
     )
     # Orthogonal to this fix: the unconditional exact-payoff-witness lookup near
     # the function's end runs for both entry and held, and only short-circuits
@@ -2888,6 +2856,20 @@ def test_day0_live_entry_metar_admission_unaffected_by_held_finality_broadening(
         era, "_prepare_current_day0_exact_family", lambda *_a, **_k: None
     )
 
+    monkeypatch.setattr("src.config.runtime_cities_by_name", era.runtime_cities_by_name)
+    from src.state.schema.observation_prints_schema import ensure_table, append_print
+    ensure_table(observation_conn)
+    with pytest.raises(ValueError, match="GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE"):
+        era._prepare_current_global_probability_family(
+            event,forecast_conn=observation_conn,topology_conn=observation_conn,
+            observation_conn=observation_conn,decision_time=decision_time,
+            max_age=timedelta(hours=6),allow_provisional_day0_replacement=True,
+            probability_use=era._CurrentProbabilityUse.ENTRY)
+    for channel,fetched in [("aviationweather_metar","2026-06-07T15:05:00+00:00"),
+                            ("ogimet_metar_sbsp","2026-06-07T16:05:00+00:00")]:
+        append_print(observation_conn,city="Sao Paulo",station_id="SBSP",source_channel=channel,
+            publish_ts_utc="2026-06-07T15:00:00+00:00",value_native=29.0,unit="C",
+            fetched_at_utc=fetched,raw_report="METAR SBSP 071500Z 09005KT 9999 FEW020 29/18 Q1015")
     payload_out: dict[str, object] = {}
     prepared = era._prepare_current_global_probability_family(
         event,
@@ -2901,33 +2883,13 @@ def test_day0_live_entry_metar_admission_unaffected_by_held_finality_broadening(
         probability_use=era._CurrentProbabilityUse.ENTRY,
     )
 
-    # (1) caps not suppressed -- `not provisional_day0_observation` (still False
-    # for METAR, unchanged) keeps this assignment identical to parent.
-    assert prepared.candidate_payoff_q_lcb_caps == (("f", "c", "b", "YES", 0.5),)
-    # (2) bundle-bypass / posterior-identity recompute still fires (unchanged:
-    # `not provisional_day0_observation` alone already satisfied this on parent).
-    assert prepared.probability_witness.posterior_identity_hash != (
-        bundle.posterior_identity_hash
-    )
-    # (3) the held-path-only carrier-rebuild producer must not fire for entry.
-    assert "_edli_day0_provisional_revision_likelihood" not in payload_out
-
-    # --- Scenario 2: `readiness is None` degraded fallback arm ---
-    monkeypatch.setattr(
-        readiness_reader, "latest_replacement_readiness", lambda *_a, **_k: None
-    )
-
-    with pytest.raises(ValueError, match="GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING"):
-        era._prepare_current_global_probability_family(
-            event,
-            forecast_conn=observation_conn,
-            topology_conn=observation_conn,
-            observation_conn=observation_conn,
-            decision_time=decision_time,
-            max_age=timedelta(hours=6),
-            allow_provisional_day0_replacement=True,
-            probability_use=era._CurrentProbabilityUse.ENTRY,
-        )
+    assert prepared.candidate_payoff_q_lcb_caps == ()
+    assert prepared.probability_witness.posterior_identity_hash != bundle.posterior_identity_hash
+    likelihood = payload_out["_edli_day0_provisional_revision_likelihood"]
+    assert likelihood["successes"]
+    assert 0.0 < payload_out["_edli_day0_provisional_boundary_survival_probability"] < 1.0
+    assert not hasattr(prepared.probability_witness, "exact_yes_payoffs")
+    observation_conn.close()
 
 
 def test_day0_pinned_carrier_rejects_entry_authority():

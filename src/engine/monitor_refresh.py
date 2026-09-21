@@ -5798,10 +5798,10 @@ def _post_local_day_final_daily_verdict(
     that machinery to CONFIRM a post-day position from a merely partial
     running extreme (e.g. a METAR feed that stopped reporting mid-day) would
     silently authorize a wrong exit. _final_daily_observation_extreme already
-    requires either a VERIFIED settlement-family daily row, or complete hourly
-    coverage of every expected local-day UTC hour plus proof the source
-    advanced to the next day, before returning a value — None here means the
-    complete-day record genuinely is not available yet, not that it was never
+    requires a VERIFIED settlement-product daily row with product-specific
+    provenance and final-day timing. Raw hourly mirrors cannot establish the
+    resolver product's final extreme. None means the final record is not
+    available at this decision, not that it was never
     checked.
     """
     if conn is None:
@@ -5903,19 +5903,8 @@ def _post_local_day_final_daily_verdict(
     return float(belief.held_side_prob), hard_pos, True
 
 
-# Settlement families _post_local_day_final_daily_verdict / evaluate_hard_fact_exit
-# can ever produce a verdict for: evaluate_hard_fact_exit only proceeds past its own
-# gate for "noaa" (explicitly excludes "wu_icao", and implicitly anything else);
-# _final_daily_observation_extreme's VERIFIED-daily-row branch only matches "hko"
-# (_final_daily_source_matches returns False unconditionally for every other
-# source_type — a NOAA/Ogimet daily value alone is not settlement finality), while
-# its hourly-coverage fallback (_final_complete_hourly_observation_extreme) is
-# "noaa"-only. A settlement family outside {"noaa", "hko"} (WU-settled: Auckland,
-# Jinan, Jakarta, Lagos, Taipei, and the cwa_station template) is never on this
-# lane at all and must fall through to its own statistical redecision lane
-# unchanged — this predicate must gate the post-local-day decline, never
-# connection presence (conn is never None live; that guard was inert in
-# production and mistakenly declined every non-eligible post-midnight position).
+# Only NOAA WRH resolver-page evidence and HKO final daily evidence enter this
+# exact lane. Other settlement families retain their statistical redecision.
 _POST_LOCAL_DAY_HARD_FACT_ELIGIBLE_SOURCE_TYPES = frozenset({"noaa", "hko"})
 
 

@@ -52,6 +52,7 @@ import threading
 import time
 from collections.abc import Collection
 from dataclasses import dataclass
+from pathlib import Path
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -265,8 +266,8 @@ def _final_daily_source_matches(city: Any, source: str) -> bool:
         # hko_realtime_api is sampled current-temperature accumulation, not
         # the final daily maximum/minimum product.
         return source == "hko_daily_api" or source.startswith("hko_daily_api_")
-    # WU and NOAA/Ogimet rows require complete hourly coverage plus the first
-    # following-day datapoint; a daily value alone is insufficient.
+    # NOAA page provenance is checked by _noaa_wrh_hard_fact_evidence.
+    # Complete WU/Ogimet hourly mirrors are not final resolver products.
     return False
 
 
@@ -281,25 +282,18 @@ def _as_causal_utc(value: Any, *, now: datetime) -> datetime | None:
     return parsed if parsed <= now.astimezone(UTC) else None
 
 
-def _final_complete_hourly_observation_extreme(
+def _complete_raw_hourly_coverage(
     *,
     city: Any,
     target_date: str,
     metric: str,
     now: datetime,
     conn: Any,
-) -> FinalDailyObservation | None:
-    """Promote a complete settlement-family timeline after day advancement.
+) -> bool:
+    """Whether the raw feed has every local-day hour and the next boundary.
 
-    NOAA/Ogimet has no separate daily-final row in the canonical observation
-    plane. The first causal observation of the following local day proves that
-    the source has advanced past the target day; exact hourly coverage proves
-    that no target-day interval was silently omitted. Both facts are required.
-
-    WU is deliberately excluded. Polymarket settles the WU Daily Observations
-    web product, while ``wu_icao_history`` is a distinct hourly API product.
-    Complete hourly coverage therefore proves neither the value nor the
-    revision state of the settlement product.
+    Ingestion uses this coverage predicate for retries. It carries no resolver
+    product, settlement-value or probability authority.
     """
 
     source_type = str(city.settlement_source_type).strip().lower()
@@ -307,7 +301,7 @@ def _final_complete_hourly_observation_extreme(
     if source_type == "noaa" and station:
         hourly_source = f"ogimet_metar_{station.lower()}"
     else:
-        return None
+        return False
     try:
         target = date.fromisoformat(str(target_date))
         zone = ZoneInfo(str(getattr(city, "timezone", "") or ""))
@@ -316,7 +310,7 @@ def _final_complete_hourly_observation_extreme(
             target + timedelta(days=1), datetime.min.time(), tzinfo=zone
         ).astimezone(UTC)
     except (TypeError, ValueError):
-        return None
+        return False
     expected_hours = {
         start + timedelta(hours=offset)
         for offset in range(int((end - start).total_seconds() // 3600))
@@ -327,10 +321,10 @@ def _final_complete_hourly_observation_extreme(
         else "running_min" if metric == "low" else ""
     )
     if not field or not expected_hours:
-        return None
+        return False
     unit = str(getattr(city, "settlement_unit", "") or "").strip().upper()
     if not station or not unit:
-        return None
+        return False
 
     required = {
         "city",
@@ -447,26 +441,99 @@ def _final_complete_hourly_observation_extreme(
                 )
         if set(target_values) != expected_hours or following_published_at is None:
             continue
+        if not all(math.isfinite(value) for value, _ in target_values.values()):
+            continue
+        return True
+    return False
+
+
+def _noaa_wrh_hard_fact_evidence(
+    *, city: Any, target_date: str, metric: str, now: datetime,
+    world_conn: Any, complete_day: bool = False,
+) -> HardFactEvidence | None:
+    """Read the resolver page's current, provenance-bound daily extreme.
+
+    Raw station feeds and complete hourly mirrors are different products.
+    A past-day exact payoff additionally requires a page fetch after day end.
+    Missing product evidence leaves the statistical lane responsible for q.
+    """
+    if world_conn is None or metric not in {"high", "low"}:
+        return None
+    if str(getattr(city, "settlement_source_type", "")).lower() != "noaa":
+        return None
+    station = str(getattr(city, "wu_station", "") or "").strip().upper()
+    unit = str(getattr(city, "settlement_unit", "") or "").strip().upper()
+    view = str(getattr(city, "settlement_page_view", "all"))
+    if not station or unit not in {"C", "F"} or view not in {"all", "hourly"}:
+        return None
+    try:
+        target = date.fromisoformat(target_date)
+        zone = ZoneInfo(str(city.timezone))
+        end = datetime.combine(target + timedelta(days=1), datetime.min.time(), zone)
+    except (TypeError, ValueError):
+        return None
+    source = f"noaa_wrh_{station.lower()}"
+    try:
+        attached = {str(row[1]): str(row[2]) for row in world_conn.execute("PRAGMA database_list")}
+    except Exception:  # noqa: BLE001 - unknown truth plane cannot authorize q
+        return None
+    if "forecasts" not in attached:
+        main_path = attached.get("main", "")
+        if main_path and Path(main_path).name != "zeus-forecasts.db":
+            return None
+    table = "forecasts.observations" if "forecasts" in attached else "observations"
+    try:
+        rows = world_conn.execute(
+            f"""SELECT {metric}_temp, {metric}_provenance_metadata,
+                       {metric}_fetch_utc, fetched_at, station_id, unit, authority
+                  FROM {table}
+                 WHERE city = ? AND target_date = ? AND source = ?
+                 ORDER BY id DESC""",
+            (str(city.name), target_date, source),
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - canonical read failure cannot use a ghost
+        return None
+    for row in rows:
+        fetched = _as_causal_utc(row[3], now=now)
+        issued = _as_causal_utc(row[2], now=now)
+        if fetched is None or row[4] != station or row[5] != unit or row[6] != "VERIFIED":
+            return None
+        # Only the latest canonical snapshot may authorize a current fact.
+        # A newer invalid/corrected row must not resurrect older certainty.
+        if issued is None or issued > fetched:
+            return None
+        if (complete_day or now >= end) and issued < end:
+            return None
         try:
-            values = [value for value, _ in target_values.values()]
-            raw = max(values) if metric == "high" else min(values)
+            provenance = json.loads(row[1])
+            observed = _as_causal_utc(
+                provenance.get(f"{metric}_local_timestamp"), now=now,
+            )
+            digest = _provenance_payload_digest(row[1])
+            raw = float(row[0])
+            if (
+                provenance.get("upstream") != "weather.gov_wrh_timeseries"
+                or provenance.get("station") != station
+                or provenance.get("settlement_page_view") != view
+                or observed is None or observed > issued
+                or observed.astimezone(zone).date() != target
+                or digest is None or not math.isfinite(raw)
+            ):
+                return None
             from src.contracts.settlement_semantics import SettlementSemantics
 
-            settled = SettlementSemantics.for_city(city).round_single(raw)
-        except Exception:  # noqa: BLE001 - invalid semantics/value cannot authorize q
-            continue
-        fetched_at = max(
-            following_published_at,
-            *(imported for _, imported in target_values.values()),
+            rounded = SettlementSemantics.for_city(city).round_single(raw)
+        except (TypeError, ValueError, AttributeError):
+            return None
+        evidence = HardFactEvidence(
+            source=source, station_id=station,
+            observed_at=observed.isoformat(), issued_at=issued.isoformat(),
+            raw_extreme=raw, rounded_extreme=float(rounded),
+            payload_identity=digest,
+            source_identity=f"{source}:{station}:{view}:{target_date}:{metric}",
+            contributor_payload_identities=(digest,),
         )
-        return FinalDailyObservation(
-            raw_extreme=float(raw),
-            settled_extreme=float(settled),
-            source=f"{hourly_source}:following_day_observed",
-            station_id=station,
-            unit=unit,
-            fetched_at=fetched_at,
-        )
+        return evidence if evidence.is_complete_for(city) else None
     return None
 
 
@@ -488,6 +555,20 @@ def _final_daily_observation_extreme(
     if conn is None or not _target_local_day_complete(city, target_date, now=now):
         return None
     metric = str(metric or "").strip().lower()
+    if str(getattr(city, "settlement_source_type", "")).lower() == "noaa":
+        evidence = _noaa_wrh_hard_fact_evidence(
+            city=city, target_date=target_date, metric=metric, now=now,
+            world_conn=conn, complete_day=True,
+        )
+        if evidence is None:
+            return None
+        return FinalDailyObservation(
+            raw_extreme=evidence.raw_extreme,
+            settled_extreme=evidence.rounded_extreme,
+            source=evidence.source, station_id=evidence.station_id,
+            unit=str(city.settlement_unit).upper(),
+            fetched_at=datetime.fromisoformat(evidence.issued_at),
+        )
     field = "high_temp" if metric == "high" else "low_temp" if metric == "low" else ""
     if not field:
         return None
@@ -557,13 +638,7 @@ def _final_daily_observation_extreme(
                 unit=str(unit).strip().upper(),
                 fetched_at=fetched_at,
             )
-    return _final_complete_hourly_observation_extreme(
-        city=city,
-        target_date=target_date,
-        metric=metric,
-        now=now,
-        conn=conn,
-    )
+    return None
 
 
 def _normalize_direction(direction: Any) -> str:
@@ -1374,7 +1449,17 @@ def _combined_wu_hard_fact_evidence(
 ) -> HardFactEvidence | None:
     """Monotonically combine direct and durable WU facts from one station."""
 
-    complete = [item for item in evidence if item.is_complete_for(city)]
+    from src.events.day0_authority import (
+        DAY0_ABSORBING_FINALITIES,
+        day0_evidence_finality,
+    )
+
+    complete = [
+        item for item in evidence
+        if item.is_complete_for(city)
+        and day0_evidence_finality({"settlement_source": item.source})
+        in DAY0_ABSORBING_FINALITIES
+    ]
     if not complete:
         return None
     selected = (
@@ -1428,6 +1513,11 @@ def _wu_hard_fact_evidence(
 ) -> HardFactEvidence | None:
     """Return the typed evidence classes that may drive held Day0 hard facts."""
 
+    if str(getattr(city, "settlement_source_type", "")).lower() == "noaa":
+        return _noaa_wrh_hard_fact_evidence(
+            city=city, target_date=target_date, metric=metric,
+            now=now, world_conn=world_conn,
+        )
     candidates: list[HardFactEvidence] = []
     if not durable_only:
         try:
@@ -1665,12 +1755,9 @@ def evaluate_hard_fact_exit(
         if evidence_cache is not None and evidence_key in evidence_cache:
             evidence = evidence_cache[evidence_key]
         else:
-            evidence = _durable_fast_tail_hard_fact_evidence(
-                city=city,
-                target_date=target_date,
-                metric=metric,
-                now=moment,
-                world_conn=world_conn,
+            evidence = _noaa_wrh_hard_fact_evidence(
+                city=city, target_date=target_date, metric=metric,
+                now=moment, world_conn=world_conn,
             )
             if evidence_cache is not None:
                 evidence_cache[evidence_key] = evidence

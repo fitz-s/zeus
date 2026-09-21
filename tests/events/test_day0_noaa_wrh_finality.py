@@ -49,11 +49,19 @@ def test_page_source_is_not_a_final_daily_value() -> None:
     )
 
 
-def test_page_source_matches_the_source_it_replaced() -> None:
-    """Parity with the Ogimet lane this cutover superseded, station for station."""
-    assert day0_evidence_finality({"settlement_source": "noaa_wrh_khou"}) == (
-        day0_evidence_finality({"settlement_source": "ogimet_metar_KHOU"})
-    )
+@pytest.mark.parametrize("source", [
+    "aviationweather_metar", "ogimet_metar_WSSS", "same_station_fast_tail",
+    "aviationweather_metar:durable_monotone_bound",
+    "observation_prints:aviationweather_metar",
+    "observation_prints:ogimet_metar_WSSS",
+])
+@pytest.mark.parametrize("declared", [None, DAY0_MONOTONE_SETTLEMENT_BOUND, DAY0_FINAL_DAILY_SETTLEMENT])
+def test_raw_station_feed_cannot_claim_resolver_product_finality(source, declared):
+    # Same station does not imply the same accepted rows: the WRH all-data
+    # product can settle 31C while the raw METAR stream contains a 32C print.
+    assert day0_evidence_finality({
+        "settlement_source": source, "evidence_finality": declared,
+    }) == DAY0_PROVISIONAL_CURRENT_SNAPSHOT
 
 
 def test_live_source_tag_shape_is_the_one_classified() -> None:

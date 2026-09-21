@@ -666,35 +666,20 @@ def _ogimet_target_date_complete(
     target_date: date,
     now_utc: datetime,
 ) -> bool:
-    """Whether ``target_date``'s Ogimet ledger already satisfies the exit
-    authority's own completeness bar.
+    """Whether both metrics have complete raw-feed hourly coverage.
 
-    Calls ``_final_complete_hourly_observation_extreme`` directly (the
-    predicate ``_latest_authorized_day0_fact``'s post-local-day gate is
-    built on, ``src/execution/day0_hard_fact_exit.py:284``) instead of a
-    second, hand-derived copy: exact expected-hour SET (not a count),
-    ``authority='VERIFIED'``/``causality_status='OK'``/
-    ``source_role='historical_hourly'``/``time_basis`` filters on every
-    counted row, and the SPECIFIC UTC boundary hour of the next local day
-    (not "any row of the next day exists"). The hole scanner cannot rescue
-    a city this predicate wrongly marks complete (its coverage grain is
-    presence-of-one-row, not per-hour) -- this is the only line of defense,
-    so it must be the exact bar, not a lookalike.
-
-    Checked for BOTH metrics (high, low): the two share one row per hour
-    bucket today (a single writer sets ``running_max``/``running_min``
-    together), but completeness here does not get to assume that stays
-    true forever.
+    This schedules missing observations; it does not establish settlement or
+    exit authority. The resolver page is a separate product.
     """
     from src.execution.day0_hard_fact_exit import (
-        _final_complete_hourly_observation_extreme,
+        _complete_raw_hourly_coverage,
     )
 
     target_iso = target_date.isoformat()
     for metric in ("high", "low"):
-        if _final_complete_hourly_observation_extreme(
+        if not _complete_raw_hourly_coverage(
             city=city, target_date=target_iso, metric=metric, now=now_utc, conn=conn,
-        ) is None:
+        ):
             return False
     return True
 

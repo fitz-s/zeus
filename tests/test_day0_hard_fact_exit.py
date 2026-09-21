@@ -513,7 +513,7 @@ def test_post_local_day_complete_wu_hours_are_not_daily_observations_final():
     ("metric", "raw_extreme", "settled_extreme"),
     (("high", 35.4, 35.0), ("low", 14.0, 14.0)),
 )
-def test_post_local_day_complete_noaa_hours_are_final(
+def test_post_local_day_complete_raw_noaa_hours_are_not_resolver_final(
     metric,
     raw_extreme,
     settled_extreme,
@@ -533,11 +533,7 @@ def test_post_local_day_complete_noaa_hours_are_final(
         conn=conn,
     )
 
-    assert final is not None
-    assert final.raw_extreme == pytest.approx(raw_extreme)
-    assert final.settled_extreme == settled_extreme
-    assert final.source == "ogimet_metar_ltfm:following_day_observed"
-    assert final.station_id == "LTFM"
+    assert final is None
 
 
 @pytest.mark.parametrize(
@@ -906,7 +902,10 @@ class TestSourceDiscipline:
 
         assert verdict is None
 
-    def test_noaa_same_station_event_authorizes_absorbing_held_probability(self):
+    @pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+    def test_noaa_raw_station_event_cannot_authorize_exact_held_payoff(self, direction):
+        from src.execution.day0_hard_fact_exit import day0_entry_bin_still_alive
+
         conn = self._noaa_fast_hard_fact_conn()
 
         verdict = evaluate_hard_fact_exit(
@@ -914,7 +913,7 @@ class TestSourceDiscipline:
                 city="Istanbul",
                 target_date="2026-08-19",
                 bin_label="28°C on August 19?",
-                direction="buy_no",
+                direction=direction,
                 temperature_metric="high",
             ),
             city=_istanbul(),
@@ -923,14 +922,12 @@ class TestSourceDiscipline:
             durable_only=True,
         )
 
-        assert verdict is not None
-        assert verdict.action == "HOLD_STRUCTURAL_WIN"
-        assert verdict.rounded_extreme == pytest.approx(29.0)
-        assert verdict.evidence is not None
-        assert verdict.evidence.source == "aviationweather_metar:durable_monotone_bound"
-        belief = hard_fact_monitor_belief(verdict=verdict, direction="buy_no")
-        assert belief is not None
-        assert belief.held_side_prob == pytest.approx(1.0)
+        assert verdict is None
+        assert day0_entry_bin_still_alive(
+            city=_istanbul(), target_date="2026-08-19", metric="high",
+            direction=direction, bin_low=28.0, bin_high=28.0,
+            now=datetime(2026, 8, 19, 2, 34, 30, tzinfo=UTC), world_conn=conn,
+        )
 
     @pytest.mark.parametrize(
         ("payload_source_type", "event_station"),
@@ -1810,18 +1807,17 @@ class TestRestingOrderCancel:
 
     def test_entry_bin_still_alive_verdicts(self, monkeypatch):
         """H-2 (Day0 first-principles audit 2026-07-18): the submit-time re-check.
-        A selected Day0 bin whose survival edge the running extreme has crossed in
-        the select→submit window must be refused at submit (False); an alive bin,
-        or missing extreme abstains, while a current anomaly pause refuses submit."""
+        Provisional WU/METAR extrema cannot prove a selected bin dead; the
+        statistical submission law still owns admission. An anomaly pause refuses."""
         _set_metar_memo(monkeypatch, 26)
         conn = _orders_conn()
-        # dead: extreme 26 beyond 25-point bin for buy_yes
+        # A provisional extreme outside the bin cannot authorize a hard veto.
         assert day0_entry_bin_still_alive(
             city=_tokyo(), target_date="2026-06-10", metric="high",
             direction="buy_yes", bin_low=25.0, bin_high=25.0, now=NOW,
             world_conn=conn,
-        ) is False
-        # NO side on the killed bin is a structural WIN: never blocked
+        ) is True
+        # The complementary NO also remains statistical.
         assert day0_entry_bin_still_alive(
             city=_tokyo(), target_date="2026-06-10", metric="high",
             direction="buy_no", bin_low=25.0, bin_high=25.0, now=NOW,
@@ -1833,12 +1829,12 @@ class TestRestingOrderCancel:
             direction="buy_yes", bin_low=26.0, bin_high=27.0, now=NOW,
             world_conn=conn,
         ) is True
-        # shoulder entered: buy_no on '26 or higher' is structurally dead
+        # A provisional shoulder crossing is not exact NO payoff authority.
         assert day0_entry_bin_still_alive(
             city=_tokyo(), target_date="2026-06-10", metric="high",
             direction="buy_no", bin_low=26.0, bin_high=None, now=NOW,
             world_conn=conn,
-        ) is False
+        ) is True
         # no extreme available: fail-soft True (existing gates own freshness)
         _set_metar_memo(monkeypatch, None)
         assert day0_entry_bin_still_alive(
@@ -1865,8 +1861,8 @@ class TestRestingOrderCancel:
             direction="buy_yes", bin_low=25.0, bin_high=25.0, now=NOW,
         ) is True
 
-    def test_entry_bin_submit_recheck_uses_durable_truth_without_network(self, monkeypatch):
-        """Cold submit reads the caller's durable monotone fact and never fetches WU."""
+    def test_entry_bin_submit_recheck_keeps_durable_wu_print_statistical(self, monkeypatch):
+        """Persistence cannot promote a provisional WU print to exact payoff."""
 
         monkeypatch.setattr(
             "src.execution.day0_hard_fact_exit._wu_rounded_extremes",
@@ -1896,7 +1892,7 @@ class TestRestingOrderCancel:
             city=_tokyo(), target_date="2026-06-10", metric="high",
             direction="buy_yes", bin_low=25.0, bin_high=25.0, now=NOW,
             world_conn=conn,
-        ) is False
+        ) is True
 
     @_RETIRED_RAW_CANCEL_TEST
     def test_cancel_sweep_consults_durable_observation_instants_when_memos_cold(self, monkeypatch):
@@ -3287,7 +3283,7 @@ def test_direct_wu_missing_raw_payload_hash_never_authorizes_hard_fact(monkeypat
     assert verdict is None
 
 
-def test_direct_and_durable_evidence_preserves_authentic_payload_identities(monkeypatch):
+def test_provisional_payload_provenance_cannot_be_merged_into_hard_fact(monkeypatch):
     direct_hash = "b" * 64
     monkeypatch.setattr(
         "src.execution.day0_hard_fact_exit._wu_rounded_extremes",
@@ -3316,14 +3312,14 @@ def test_direct_and_durable_evidence_preserves_authentic_payload_identities(monk
         durable_only=False,
     )
 
-    assert evidence is not None
-    assert evidence.payload_identity == direct_hash
-    assert evidence.contributor_payload_identities == (
-        direct_hash,
-        RAW_PAYLOAD_HASH,
+    assert evidence is None
+    from src.execution.day0_hard_fact_exit import _current_source_hard_fact_evidence
+
+    direct = _current_source_hard_fact_evidence(
+        city=_shenzhen(), target_date="2026-06-10", metric="high"
     )
-    assert evidence.source_identity.startswith("wu-hard-fact:")
-    assert evidence.is_complete_for(_shenzhen())
+    assert direct is not None
+    assert direct.payload_identity == direct_hash
 
 
 def test_station_mismatch_is_not_hard_fact_authority(monkeypatch):
@@ -3403,3 +3399,175 @@ def test_complete_hard_fact_evidence_round_trips_to_monitor_refreshed(monkeypatc
     assert probability == pytest.approx(1.0)
     assert fresh is True
     assert receipt["hard_fact_evidence"] == evidence.as_dict()
+
+
+def _wrh_product_conn(*, high=31.0, low=27.0, fetched="2026-09-20T07:00:00+00:00",
+                      provenance_changes=None):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("""CREATE TABLE observations (
+        id INTEGER PRIMARY KEY, city TEXT, target_date TEXT, source TEXT,
+        station_id TEXT, unit TEXT, authority TEXT, high_temp REAL, low_temp REAL,
+        high_provenance_metadata TEXT, low_provenance_metadata TEXT,
+        high_fetch_utc TEXT, low_fetch_utc TEXT, fetched_at TEXT)""")
+    provenance = {
+        "upstream": "weather.gov_wrh_timeseries", "station": "WSSS",
+        "settlement_page_view": "all", "payload_hash": f"sha256:{RAW_PAYLOAD_HASH}",
+        "high_local_timestamp": "2026-09-20T10:30:00+0800",
+        "low_local_timestamp": "2026-09-20T14:00:00+0800",
+    }
+    provenance.update(provenance_changes or {})
+    conn.execute("INSERT INTO observations VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+        "Singapore", "2026-09-20", "noaa_wrh_wsss", "WSSS", "C", "VERIFIED",
+        high, low, json.dumps(provenance), json.dumps(provenance), fetched, fetched, fetched,
+    ))
+    # A conflicting raw product must never strengthen the page's bound.
+    conn.execute("CREATE TABLE observation_instants (source TEXT, running_max REAL, running_min REAL)")
+    conn.execute("INSERT INTO observation_instants VALUES ('ogimet_metar_wsss',32,26)")
+    return conn
+
+
+def _singapore_noaa():
+    return SimpleNamespace(name="Singapore", timezone="Asia/Singapore", wu_station="WSSS",
+                           settlement_source_type="noaa", settlement_unit="C",
+                           settlement_page_view="all")
+
+
+@pytest.mark.parametrize("metric,bin_value", [("high",31.0),("low",27.0)])
+@pytest.mark.parametrize("direction", ["buy_yes","buy_no"])
+@pytest.mark.parametrize("page_killed", [False,True])
+def test_resolver_product_drives_held_entry_and_cancel_together(monkeypatch, metric, bin_value, direction, page_killed):
+    import src.execution.day0_hard_fact_exit as lane
+
+    high = 32.0 if page_killed and metric == "high" else 31.0
+    low = 26.0 if page_killed and metric == "low" else 27.0
+    conn = _wrh_product_conn(high=high, low=low)
+    city = _singapore_noaa()
+    now = datetime(2026,9,20,7,1,tzinfo=UTC)
+    pos = _position(city=city.name, target_date="2026-09-20", direction=direction,
+                    temperature_metric=metric, bin_label=f"{bin_value:g}°C")
+    verdict = evaluate_hard_fact_exit(position=pos, city=city, now=now, world_conn=conn)
+    if page_killed:
+        assert verdict is not None
+        assert verdict.source == "noaa_wrh_wsss"
+        assert verdict.action == ("EXIT_DEAD_BIN" if direction == "buy_yes" else "HOLD_STRUCTURAL_WIN")
+    else:
+        assert verdict is None  # statistical redecision; raw 32/26 cannot freeze q
+    alive = lane.day0_entry_bin_still_alive(city=city,target_date=pos.target_date,
+        metric=metric,direction=direction,bin_low=bin_value,bin_high=bin_value,now=now,world_conn=conn)
+    assert alive is not (page_killed and direction == "buy_yes")
+    monkeypatch.setattr(lane,"_resolve_order_bin_identity",lambda *args,**kwargs: {
+        "city":city.name,"target_date":pos.target_date,"metric":metric,
+        "direction":direction,"range_low":bin_value,"range_high":bin_value,
+    })
+    cancels = lane.classify_day0_dead_bin_entry_cancels(
+        [{"command_side":"BUY","command_id":"command","token_id":"token"}],
+        trade_conn=conn,forecasts_conn=conn,cities_by_name={city.name:city},now=now)
+    assert bool(cancels) == (page_killed and direction == "buy_yes")
+    conn.close()
+
+
+@pytest.mark.parametrize("metric,expected",[("high",31.0),("low",27.0)])
+def test_post_day_exact_page_wins_over_complete_raw_product(metric, expected):
+    conn = _wrh_product_conn(fetched="2026-09-20T17:07:54+00:00")
+    final = _final_daily_observation_extreme(city=_singapore_noaa(),target_date="2026-09-20",
+        metric=metric, now=datetime(2026,9,20,18,tzinfo=UTC),conn=conn)
+    assert final is not None
+    assert final.source == "noaa_wrh_wsss"
+    assert final.settled_extreme == expected
+    conn.close()
+
+
+@pytest.mark.parametrize("changes",[
+    {"settlement_page_view":"hourly"},{"station":"ZBAA"},{"payload_hash":"missing"},
+    {"upstream":"ogimet"},{"high_local_timestamp":"2026-09-19T10:30:00+0800"},
+    {"high_local_timestamp":"2026-09-20T16:30:00+0800"},
+])
+def test_page_authority_requires_exact_product_and_causal_provenance(changes):
+    from src.execution.day0_hard_fact_exit import _noaa_wrh_hard_fact_evidence
+    conn = _wrh_product_conn(provenance_changes=changes)
+    assert _noaa_wrh_hard_fact_evidence(city=_singapore_noaa(),target_date="2026-09-20",
+        metric="high",now=datetime(2026,9,20,7,1,tzinfo=UTC),world_conn=conn) is None
+    conn.close()
+
+
+def test_intraday_page_fetch_cannot_be_promoted_to_final_after_midnight():
+    conn = _wrh_product_conn()
+    assert _final_daily_observation_extreme(city=_singapore_noaa(),target_date="2026-09-20",
+        metric="high",now=datetime(2026,9,20,18,tzinfo=UTC),conn=conn) is None
+    conn.close()
+
+
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+def test_past_day_held_lane_does_not_resurrect_intraday_page_certainty(direction):
+    conn = _wrh_product_conn(high=32.0)
+    verdict = evaluate_hard_fact_exit(
+        position=_position(city="Singapore",target_date="2026-09-20",
+            bin_label="31°C",direction=direction),city=_singapore_noaa(),
+        now=datetime(2026,9,20,18,tzinfo=UTC),world_conn=conn)
+    assert verdict is None
+    conn.close()
+
+
+@pytest.mark.parametrize("bad_fetch", [None,"2026-09-20T19:00:00+00:00","invalid"])
+def test_invalid_canonical_page_cannot_resurrect_legacy_main_snapshot(bad_fetch):
+    from src.execution.day0_hard_fact_exit import _noaa_wrh_hard_fact_evidence
+    conn = _wrh_product_conn(high=32.0)
+    conn.execute("ATTACH DATABASE ':memory:' AS forecasts")
+    conn.execute("CREATE TABLE forecasts.observations AS SELECT * FROM observations")
+    conn.execute("UPDATE forecasts.observations SET fetched_at=?",(bad_fetch,))
+    assert _noaa_wrh_hard_fact_evidence(city=_singapore_noaa(),target_date="2026-09-20",
+        metric="high",now=datetime(2026,9,20,7,1,tzinfo=UTC),world_conn=conn) is None
+    conn.close()
+
+
+def test_empty_canonical_page_surface_cannot_read_legacy_main_snapshot():
+    from src.execution.day0_hard_fact_exit import _noaa_wrh_hard_fact_evidence
+    conn = _wrh_product_conn(high=32.0)
+    conn.execute("ATTACH DATABASE ':memory:' AS forecasts")
+    conn.execute("CREATE TABLE forecasts.observations AS SELECT * FROM observations WHERE 0")
+    assert _noaa_wrh_hard_fact_evidence(city=_singapore_noaa(),target_date="2026-09-20",
+        metric="high",now=datetime(2026,9,20,7,1,tzinfo=UTC),world_conn=conn) is None
+    conn.close()
+
+
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+@pytest.mark.parametrize("page_after_day_end", [False, True])
+def test_real_monitor_overlay_uses_final_page_not_intraday_snapshot(monkeypatch, direction, page_after_day_end):
+    import src.engine.monitor_refresh as monitor
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 9, 20, 18, tzinfo=UTC).astimezone(tz)
+
+    monkeypatch.setattr(monitor, "datetime", Clock)
+    conn = _wrh_product_conn(fetched=("2026-09-20T17:07:54+00:00" if page_after_day_end
+                                     else "2026-09-20T07:00:00+00:00"))
+    pos = _position(city="Singapore",target_date="2026-09-20",bin_label="31°C",
+                    direction=direction,p_posterior=0.6)
+    result = monitor._day0_absorbing_hard_fact_overlay(
+        pos=pos,conn=conn,city=_singapore_noaa(),target_d=Date(2026,9,20))
+    assert result is not None
+    probability, refreshed, fresh = result
+    assert fresh is page_after_day_end
+    if page_after_day_end:
+        assert probability == (1.0 if direction == "buy_yes" else 0.0)
+        assert any("source=noaa_wrh_wsss" in item for item in refreshed.applied_validations)
+    else:
+        assert probability == 0.6
+        assert "POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE" in refreshed.applied_validations
+        assert getattr(refreshed, monitor._DAY0_ZERO_PROBABILITY_EXIT_AUTHORITY_ATTR) is False
+    conn.close()
+
+
+@pytest.mark.parametrize("broken_schema", [False, True])
+def test_broken_canonical_attachment_cannot_use_main_ghost(broken_schema):
+    from src.execution.day0_hard_fact_exit import _noaa_wrh_hard_fact_evidence
+    conn = _wrh_product_conn(high=32.0)
+    conn.execute("ATTACH DATABASE ':memory:' AS forecasts")
+    if broken_schema:
+        conn.execute("CREATE TABLE forecasts.observations (city TEXT)")
+    assert _noaa_wrh_hard_fact_evidence(city=_singapore_noaa(),target_date="2026-09-20",
+        metric="high",now=datetime(2026,9,20,7,1,tzinfo=UTC),world_conn=conn) is None
+    conn.close()

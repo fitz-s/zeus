@@ -60,7 +60,6 @@ from src.data.day0_hourly_vectors import (
     select_ready_day0_hourly_vectors,
     validate_day0_causal_evidence_bundle,
 )
-from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 from src.types.market import Bin
 
 UTC = timezone.utc
@@ -1925,7 +1924,6 @@ def test_shared_remaining_carrier_accepts_valid_market_order_and_preserves_align
 def test_shared_remaining_carrier_normalizes_fahrenheit_round_trip_grid():
     """Celsius storage residue must not invalidate adjacent Fahrenheit bins."""
 
-    assert DAY0_PROBABILITY_SEMANTICS_REVISION.endswith("_v16")
 
     bounds_c = [
         (None, 26.11111111111111),

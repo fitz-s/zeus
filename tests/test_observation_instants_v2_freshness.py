@@ -427,7 +427,7 @@ def test_obs_v2_live_tick_does_not_hold_writer_lock_across_city_fetch(monkeypatc
 
 def _instants_db(tmp_path: Path, name: str = "instants.db") -> Path:
     """Fixture DB with the exact column set
-    ``_final_complete_hourly_observation_extreme`` (day0_hard_fact_exit.py)
+    ``_complete_raw_hourly_coverage`` (day0_hard_fact_exit.py)
     requires -- the exit authority's completeness predicate is what the
     selector now calls directly, so tests exercise the real schema/filters,
     not a hand-rolled lookalike."""
@@ -504,16 +504,12 @@ def _beijing_city() -> SimpleNamespace:
     )
 
 
-def test_final_complete_hourly_observation_extreme_accepts_a_fully_valid_day(
+def test_complete_raw_hourly_coverage_accepts_a_fully_valid_day(
     tmp_path: Path,
 ) -> None:
-    """Positive control for ``_final_complete_hourly_observation_extreme``
-    (day0_hard_fact_exit.py:284): a full local day of VERIFIED/OK/
-    historical_hourly rows plus the following-day boundary row promotes to
-    a ``FinalDailyObservation``. Each rejection-axis test below starts from
-    this same fixture and breaks exactly one property."""
+    """A complete raw ledger stops coverage retries without finality authority."""
     from src.execution.day0_hard_fact_exit import (
-        _final_complete_hourly_observation_extreme,
+        _complete_raw_hourly_coverage,
     )
 
     db_path = _instants_db(tmp_path)
@@ -522,15 +518,13 @@ def test_final_complete_hourly_observation_extreme_accepts_a_fully_valid_day(
         target_date="2026-09-13",
     )
     conn = sqlite3.connect(str(db_path))
-    result = _final_complete_hourly_observation_extreme(
+    result = _complete_raw_hourly_coverage(
         city=_beijing_city(), target_date="2026-09-13", metric="high",
         now=datetime(2026, 9, 13, 18, 15, tzinfo=timezone.utc), conn=conn,
     )
     conn.close()
 
-    assert result is not None
-    assert result.raw_extreme == 20.0
-    assert result.station_id == "ZBAA"
+    assert result is True
 
 
 @pytest.mark.parametrize(
@@ -543,7 +537,7 @@ def test_final_complete_hourly_observation_extreme_accepts_a_fully_valid_day(
         ("temp_unit", "F"),
     ],
 )
-def test_final_complete_hourly_observation_extreme_rejects_one_disqualified_row(
+def test_complete_raw_hourly_coverage_rejects_one_disqualified_row(
     tmp_path: Path, column: str, bad_value: str,
 ) -> None:
     """Every row-level filter the exit authority applies
@@ -553,7 +547,7 @@ def test_final_complete_hourly_observation_extreme_rejects_one_disqualified_row(
     the predicate returns None (not-complete), the same as a hole in the
     ledger, rather than promoting on a partially trustworthy day."""
     from src.execution.day0_hard_fact_exit import (
-        _final_complete_hourly_observation_extreme,
+        _complete_raw_hourly_coverage,
     )
 
     db_path = _instants_db(tmp_path)
@@ -575,23 +569,23 @@ def test_final_complete_hourly_observation_extreme_rejects_one_disqualified_row(
     )
     conn.commit()
 
-    result = _final_complete_hourly_observation_extreme(
+    result = _complete_raw_hourly_coverage(
         city=_beijing_city(), target_date="2026-09-13", metric="high",
         now=datetime(2026, 9, 13, 18, 15, tzinfo=timezone.utc), conn=conn,
     )
     conn.close()
 
-    assert result is None
+    assert result is False
 
 
-def test_final_complete_hourly_observation_extreme_rejects_a_missing_hour(
+def test_complete_raw_hourly_coverage_rejects_a_missing_hour(
     tmp_path: Path,
 ) -> None:
     """23 of the 24 expected local hours present: ``set(target_values) !=
     expected_hours`` even though every present row is otherwise valid --
     exact-set completeness, not a row count, is what the predicate checks."""
     from src.execution.day0_hard_fact_exit import (
-        _final_complete_hourly_observation_extreme,
+        _complete_raw_hourly_coverage,
     )
 
     db_path = _instants_db(tmp_path)
@@ -600,23 +594,23 @@ def test_final_complete_hourly_observation_extreme_rejects_a_missing_hour(
         target_date="2026-09-13", hours=23,
     )
     conn = sqlite3.connect(str(db_path))
-    result = _final_complete_hourly_observation_extreme(
+    result = _complete_raw_hourly_coverage(
         city=_beijing_city(), target_date="2026-09-13", metric="high",
         now=datetime(2026, 9, 13, 18, 15, tzinfo=timezone.utc), conn=conn,
     )
     conn.close()
 
-    assert result is None
+    assert result is False
 
 
-def test_final_complete_hourly_observation_extreme_rejects_missing_following_day_boundary(
+def test_complete_raw_hourly_coverage_rejects_missing_following_day_boundary(
     tmp_path: Path,
 ) -> None:
     """All 24 target-day hours present but no following-day boundary row:
     the source has not yet proven it advanced past the target day, so the
     predicate must not promote."""
     from src.execution.day0_hard_fact_exit import (
-        _final_complete_hourly_observation_extreme,
+        _complete_raw_hourly_coverage,
     )
 
     db_path = _instants_db(tmp_path)
@@ -625,13 +619,13 @@ def test_final_complete_hourly_observation_extreme_rejects_missing_following_day
         target_date="2026-09-13", include_next_day_boundary=False,
     )
     conn = sqlite3.connect(str(db_path))
-    result = _final_complete_hourly_observation_extreme(
+    result = _complete_raw_hourly_coverage(
         city=_beijing_city(), target_date="2026-09-13", metric="high",
         now=datetime(2026, 9, 13, 18, 15, tzinfo=timezone.utc), conn=conn,
     )
     conn.close()
 
-    assert result is None
+    assert result is False
 
 
 def test_ogimet_local_day_end_selection_picks_only_cities_whose_local_day_ended(

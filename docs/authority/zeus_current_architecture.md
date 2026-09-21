@@ -88,6 +88,15 @@ Defines what live same-day observation stream approximates settlement risk
 while the market is still tradable. Day0 truth may differ from final daily
 settlement truth.
 
+Raw METAR, Ogimet mirrors and same-station fast tails remain provisional
+trajectory evidence. Station identity, report maturity and a divergence margin
+do not prove that a print belongs to the resolver product's accepted row set.
+They cannot independently authorize exact q=0/1, structural-win HOLD, bin-death
+EXIT or entry cancellation. Such decisions require the matching settlement
+product's absorbing evidence; otherwise the current statistical BUY/SELL/HOLD
+comparison remains active. An old payload declaring MONOTONE cannot promote a
+provisional source.
+
 ### 4.4 Historical Hourly Truth
 
 Defines which hourly/sub-hourly historical rows can support diurnal,
