@@ -33506,6 +33506,12 @@ def test_global_batch_uses_one_probability_and_book_fence_cut(monkeypatch):
             side_effect_status="SUBMITTED",
         )
 
+    telemetry_calls = []
+
+    def telemetry_failure(*args):
+        telemetry_calls.append(args)
+        raise RuntimeError("telemetry projection failed")
+
     result = global_batch_runtime.process_current_global_batch(
         (event,),
         decision_time=decision_at,
@@ -33529,9 +33535,12 @@ def test_global_batch_uses_one_probability_and_book_fence_cut(monkeypatch):
         current_execution=lambda *_: object(),
         current_time_provider=lambda: decision_at,
         current_book_epoch_provider=book_provider,
+        selection_telemetry_observer=telemetry_failure,
     )
 
     assert calls == {"books": 1, "preflight": 1, "venue": 1}
+    assert len(telemetry_calls) == 1
+    assert telemetry_calls[0][3] is selected
     assert result.venue_submit_count == 1
     assert result.winner_event_id == event.event_id
     assert result.receipts[event.event_id].submitted is True
