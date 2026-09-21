@@ -92,7 +92,7 @@ class PairedBootstrapInterval:
 
 @dataclass(frozen=True)
 class PairedComparison:
-    """Selected minus comparator, resampled by UTC target-date blocks."""
+    """Selected minus comparator, resampled by target-date blocks."""
 
     comparator: str
     paired_case_count: int
@@ -363,6 +363,9 @@ def validate_probability_candidates(
         raise ProbabilityValidationError("at least one validation case is required")
     for case in validated_cases:
         _validate_case(case, predeclared)
+    identities = {(case.city, case.metric, case.target_date) for case in validated_cases}
+    if len(identities) != len(validated_cases):
+        raise ProbabilityValidationError("duplicate city/metric/target-date case")
     ordered_cases = tuple(
         sorted(
             validated_cases,

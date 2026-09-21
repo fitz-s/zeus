@@ -78,6 +78,13 @@ def _evaluation(result, day: int):
     )
 
 
+def test_recomputation_cannot_multiply_a_settled_target():
+    with pytest.raises(ProbabilityValidationError, match="duplicate"):
+        _result([_case(1), _case(1)])
+    result = _result([_case(1), _case(1, metric="low")])
+    assert result.baseline.case_count == 2
+
+
 def test_scores_brier_over_the_whole_categorical_vector():
     """Equal winner mass cannot hide different losing-bin mass under Brier."""
     result = _result([
