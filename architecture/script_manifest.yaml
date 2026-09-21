@@ -2593,6 +2593,37 @@ scripts:
       - src.state.db_writer_lock.db_writer_lock
     required_tests:
       - tests/test_executable_market_snapshots_retention_migration.py
+
+  202609_belief_recency_index.py:
+    class: migration
+    status: active
+    lifecycle: one_shot
+    authority_scope: schema_migration
+    dangerous_if_run: true
+    dry_run_default: false
+    apply_flag: "python3 -m scripts.migrations apply --target=202609_belief_recency_index"
+    target_db: state/zeus-world.db
+    read_targets: [state/zeus-world.db]
+    write_targets: [state/zeus-world.db]
+    canonical_command: "python3 -m scripts.migrations apply --target=202609_belief_recency_index --db-path /tmp/zeus-world.db --db-identity world"
+    external_inputs: []
+    delete_policy: retain_for_audit
+    reuse_when: >
+      Install the additive EDLI belief recency covering index on an existing
+      world DB. The migration creates only the index and refreshes
+      probability_trace_fact statistics; it does not rewrite probability rows
+      or alter the continuous-redecision reader SQL.
+    do_not_use_when: >
+      Do not run against a canonical live DB from this worktree or while its
+      world writer is unfenced; use an isolated fixture or the stopped-daemon
+      restart recovery path for live application.
+    promotion_barrier: "Apply under the existing world BULK writer lock, then prove exact ordered-ID parity, a covering-index/no-TEMP-B-TREE plan, and idempotent re-run on a fixture before live review."
+    unguarded_write_rationale: "Index/statistics-only world DDL under db_writer_lock(BULK); no row data rewrite or cross-DB write."
+    required_helpers:
+      - src.state.db_writer_lock.db_writer_lock
+    required_tests:
+      - tests/test_migration_runner_idempotent.py
+      - tests/test_belief_recency_index_migration.py
   scripts/ops/vacuum_reset_trades_db.py:
     class: migration
     status: active

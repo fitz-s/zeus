@@ -2879,6 +2879,12 @@ def init_schema(
             ON probability_trace_fact(city, target_date, recorded_at);
         CREATE INDEX IF NOT EXISTS idx_probability_trace_snapshot
             ON probability_trace_fact(decision_snapshot_id);
+        -- EDLI belief recency scan: the reader's latest-trace CTE orders by
+        -- recorded_at/trace_id while constraining the belief decision prefix.
+        -- Keep decision_id last so the index is covering without changing the
+        -- reader SQL or its deterministic tie ordering.
+        CREATE INDEX IF NOT EXISTS idx_probability_trace_belief_recency_cover
+            ON probability_trace_fact(recorded_at DESC, trace_id DESC, decision_id);
         -- NB: idx_probability_trace_market_phase lives in the ALTER block
         -- below (must be created AFTER the ALTER TABLE adds the column on
         -- legacy DBs; fresh DBs hit the same path through the

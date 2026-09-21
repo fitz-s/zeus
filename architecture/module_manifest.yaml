@@ -95,6 +95,7 @@ modules:
       - tests/test_order_state_predicates.py
       - tests/test_ddl_copies_normalized_identical.py
       - tests/test_schema_fingerprint.py
+      - tests/test_belief_recency_index_migration.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
   engine:
