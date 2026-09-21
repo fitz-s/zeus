@@ -891,7 +891,7 @@ def test_loader_preserves_current_label_and_raw_input_availability() -> None:
     }
 
 
-def test_main_keeps_active_pointer_without_explicit_activation(
+def test_main_preserves_same_day_active_bytes_until_explicit_atomic_activation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     forecast_db = tmp_path / "forecast.db"
@@ -899,21 +899,56 @@ def test_main_keeps_active_pointer_without_explicit_activation(
     out_dir = tmp_path / "candidates"
     out_dir.mkdir()
     active = out_dir / "ACTIVE.json"
-    active.write_text('{"artifact":"served.json","sha256":"old"}\n', encoding="utf-8")
-    artifact = {"settlement_rows_used": 1, "cities": {}}
+    legacy_candidate = out_dir / "city_weights_20260302.json"
+    legacy_bytes = b'{"served":"legacy"}\n'
+    legacy_candidate.write_bytes(legacy_bytes)
+    legacy_pointer = {
+        "artifact": legacy_candidate.name,
+        "sha256": hashlib.sha256(legacy_bytes).hexdigest(),
+        "as_of": "2026-03-02T00:00:00+00:00",
+    }
+    active.write_text(json.dumps(legacy_pointer, sort_keys=True, indent=2), encoding="utf-8")
+    active_before = active.read_bytes()
+
+    artifact = {"settlement_rows_used": 1, "cities": {"candidate": {}}}
     monkeypatch.setattr(fscw, "build_artifact", lambda *_args, **_kwargs: artifact)
     monkeypatch.setattr(fscw, "_git_sha", lambda: "FIXED")
+    real_atomic_write = fscw.write_json_atomic
+    writes: list[str] = []
+
+    def record_atomic_write(path: Path, payload: object, **kwargs: object) -> dict[str, object]:
+        writes.append(Path(path).name)
+        return real_atomic_write(path, payload, **kwargs)
+
+    monkeypatch.setattr(fscw, "write_json_atomic", record_atomic_write)
     argv = [
         "--fcst", str(forecast_db), "--as-of", "2026-03-02", "--generated-at", "FIXED",
         "--out-dir", str(out_dir),
     ]
 
     assert fscw.main(argv) == 0
-    candidate = out_dir / "city_weights_20260302.json"
+    candidates = sorted(out_dir.glob("city_weights_20260302_*.json"))
+    assert len(candidates) == 1
+    candidate = candidates[0]
     candidate_bytes = candidate.read_bytes()
-    assert active.read_text(encoding="utf-8") == '{"artifact":"served.json","sha256":"old"}\n'
+    candidate_sha = hashlib.sha256(candidate_bytes).hexdigest()
+    assert candidate.name.endswith(f"_{candidate_sha}.json")
+    assert legacy_candidate.read_bytes() == legacy_bytes
+    assert active.read_bytes() == active_before
+    assert writes == [candidate.name]
 
+    # Repeating the same candidate is idempotent and cannot rewrite either artifact.
+    assert fscw.main(argv) == 0
+    assert writes == [candidate.name]
+    assert sorted(out_dir.glob("city_weights_20260302_*.json")) == [candidate]
+
+    # Explicit activation writes the immutable artifact first, then atomically swaps ACTIVE.
     assert fscw.main([*argv, "--activate"]) == 0
     pointer = json.loads(active.read_text(encoding="utf-8"))
-    assert pointer["artifact"] == candidate.name
-    assert pointer["sha256"] == __import__("hashlib").sha256(candidate_bytes).hexdigest()
+    assert pointer == {
+        "artifact": candidate.name,
+        "sha256": candidate_sha,
+        "as_of": "2026-03-02T00:00:00+00:00",
+    }
+    assert candidate.read_bytes() == candidate_bytes
+    assert writes == [candidate.name, "ACTIVE.json"]

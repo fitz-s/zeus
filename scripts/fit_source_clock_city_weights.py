@@ -14,9 +14,10 @@
 
 Replaces ``state/fusion_source_compare/grid_aware_retest_20260625/city_one_scheme_grid_aware.csv``
 (frozen 2026-06-25, never refit, city-only i.e. metric-agnostic) with a reproducible artifact
-written to ``state/source_clock_weights/city_weights_<YYYYMMDD>.json`` as a candidate.
-The existing ``state/source_clock_weights/ACTIVE.json`` pointer is changed only by explicit
-``--activate`` after separate OOS superiority evidence. The consumer switch lives in
+written to a content-addressed
+``state/source_clock_weights/city_weights_<YYYYMMDD>_<sha256>.json`` candidate. The existing
+``state/source_clock_weights/ACTIVE.json`` pointer is changed only by explicit ``--activate``
+after separate OOS validation. The consumer switch lives in
 ``src/strategy/live_inference/source_clock_city_weights.py::scheme_for_city``.
 
 DATA (STRICTLY WALK-FORWARD): the shared current-resolver settlement reader admits only
@@ -57,7 +58,7 @@ pins it).
 Refresh cadence (documented, NOT wired as a scheduler job — that is a deploy decision):
 weekly cron candidate, e.g. ``0 6 * * 1 cd /path/to/zeus && python3
 scripts/fit_source_clock_city_weights.py --as-of <UTC instant>``. This only creates a candidate;
-activation remains an explicit operator action after the outer OOS comparison passes.
+activation remains an explicit operator action after the outer OOS validation passes.
 
 READ-ONLY over state/zeus-forecasts.db (file:...?mode=ro). Writes a candidate artifact under
 state/source_clock_weights/; it changes the active pointer only with ``--activate``. It never
@@ -98,6 +99,7 @@ from src.strategy.live_inference.source_clock_city_weights import (  # noqa: E40
     fixed_weight_center_from_values,
 )
 from src.strategy.live_inference.source_clock_vnext import provider_family_for_source  # noqa: E402
+from src.state.paths import write_json_atomic  # noqa: E402
 
 FCST_DEFAULT = ROOT / "state" / "zeus-forecasts.db"
 CITIES_DEFAULT = ROOT / "config" / "cities.json"
@@ -749,9 +751,26 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     p.add_argument("--out-dir", type=Path, default=OUT_DIR_DEFAULT)
     p.add_argument(
         "--activate", action="store_true",
-        help="replace ACTIVE.json with this candidate after separate OOS approval",
+        help="replace ACTIVE.json with this candidate after separate OOS validation",
     )
     return p.parse_args(argv)
+
+
+def _artifact_payload_bytes(artifact: object) -> bytes:
+    """Serialize exactly as ``write_json_atomic`` will persist the artifact."""
+    return json.dumps(artifact, sort_keys=True, indent=2, default=str).encode("utf-8")
+
+
+def _write_immutable_artifact(path: Path, artifact: object, payload: bytes) -> None:
+    """Create a content-addressed artifact or verify its existing immutable bytes."""
+    if path.exists():
+        if path.read_bytes() != payload:
+            raise RuntimeError(f"content-addressed artifact collision at {path}")
+        return
+    written = write_json_atomic(path, artifact, writer_identity="fit_source_clock_city_weights")
+    expected_sha = hashlib.sha256(payload).hexdigest()
+    if written["sha256"] != expected_sha:
+        raise RuntimeError("atomic artifact serialization checksum mismatch")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -773,17 +792,20 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     cutoff = _as_of_utc(args.as_of)
-    fname = f"city_weights_{cutoff.date().isoformat().replace('-', '')}.json"
-    payload = json.dumps(artifact, sort_keys=True, indent=2) + "\n"
-    (args.out_dir / fname).write_text(payload, encoding="utf-8")
-    sha = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    payload = _artifact_payload_bytes(artifact)
+    sha = hashlib.sha256(payload).hexdigest()
+    fname = f"city_weights_{cutoff.date().isoformat().replace('-', '')}_{sha}.json"
+    artifact_path = args.out_dir / fname
+    _write_immutable_artifact(artifact_path, artifact, payload)
     if args.activate:
         pointer = {"artifact": fname, "sha256": sha, "as_of": cutoff.isoformat()}
-        (args.out_dir / "ACTIVE.json").write_text(
-            json.dumps(pointer, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+        write_json_atomic(
+            args.out_dir / "ACTIVE.json",
+            pointer,
+            writer_identity="fit_source_clock_city_weights",
         )
     print(
-        f"Wrote candidate {args.out_dir / fname} (sha256={sha}); "
+        f"Wrote candidate {artifact_path} (sha256={sha}); "
         f"settlement_rows_used={artifact['settlement_rows_used']}; activated={args.activate}"
     )
     return 0
