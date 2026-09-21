@@ -1318,6 +1318,39 @@ class TestMoneyPathYield:
         assert elapsed < 0.5, f"evidence delivery took {elapsed:.3f}s -- suggests it still shares a lock with the trade DB"
 
 
+@pytest.mark.parametrize("owner", ["trade", "world", "forecasts"])
+@pytest.mark.parametrize("alias", ["same_path", "symlink", "hardlink"])
+@pytest.mark.parametrize("entry", ["write", "read", "bootstrap"])
+def test_evidence_connection_rejects_canonical_alias(tmp_path, monkeypatch, owner, alias, entry):
+    from src.state import db as state_db
+
+    paths = {name: tmp_path / f"{name}.db" for name in ("trade", "world", "forecasts")}
+    monkeypatch.setattr(state_db, "_zeus_trade_db_path", lambda: paths["trade"])
+    monkeypatch.setattr(state_db, "ZEUS_WORLD_DB_PATH", paths["world"])
+    monkeypatch.setattr(state_db, "ZEUS_FORECASTS_DB_PATH", paths["forecasts"])
+    canonical = paths[owner]
+    with sqlite3.connect(canonical) as conn:
+        conn.execute("CREATE TABLE sentinel (value INTEGER)")
+    evidence = tmp_path / "evidence.db"
+    if alias == "same_path":
+        evidence = canonical
+    elif alias == "symlink":
+        evidence.symlink_to(canonical)
+    else:
+        os.link(canonical, evidence)
+    monkeypatch.setattr(state_db, "ZEUS_FAMILY_BOOK_EVIDENCE_DB_PATH", evidence)
+    with pytest.raises(ValueError, match="evidence DB aliases canonical DB"):
+        if entry == "bootstrap":
+            with sqlite3.connect(evidence) as conn:
+                state_db.init_schema_family_book_evidence(conn)
+        elif entry == "read":
+            state_db.get_family_book_evidence_connection_read_only()
+        else:
+            state_db.get_family_book_evidence_connection(write_class="live")
+    with sqlite3.connect(canonical) as conn:
+        assert conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == [("sentinel",)]
+
+
 class TestSpoolHardBounds:
     """Z2: the admission gate is O(1), and the file ceiling is physical."""
 
