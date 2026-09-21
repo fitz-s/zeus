@@ -242,6 +242,7 @@ def test_native_fahrenheit_ensemble_matches_celsius_counterpart(monkeypatch):
 def _market_evidence_db(
     *, stale: bool = False, partial: bool = False, model_mismatch: bool = False,
     duplicate_state_bin: bool = False, side_identity_mismatch: bool = False,
+    wrong_unit: bool = False, future_selection: bool = False,
 ):
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -324,8 +325,10 @@ def _market_evidence_db(
     conn.execute(
         "INSERT INTO family_book_observations VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
-            "obs-1", "family-chicago", "Chicago", "2026-09-19", "high", "F",
-            "2026-09-18T11:59:30+00:00", 1, "state-1", "witness-content-1",
+            "obs-1", "family-chicago", "Chicago", "2026-09-19", "high",
+            "C" if wrong_unit else "F",
+            "2026-09-18T12:00:01+00:00" if future_selection else "2026-09-18T11:59:30+00:00",
+            1, "state-1", "witness-content-1",
             json.dumps(model), json.dumps(market), json.dumps(manifest),
         ),
     )
@@ -364,6 +367,8 @@ def test_market_evidence_requires_full_fresh_exact_baseline_mapping():
     {"model_mismatch": True},
     {"duplicate_state_bin": True},
     {"side_identity_mismatch": True},
+    {"wrong_unit": True},
+    {"future_selection": True},
 ])
 def test_market_evidence_rejects_stale_partial_or_nonbaseline_vectors(kwargs):
     conn, baseline = _market_evidence_db(**kwargs)
