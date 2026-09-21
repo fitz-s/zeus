@@ -311,6 +311,18 @@ def enqueue_family_book_observation(
         _cnt_inc(_CNT_ENQUEUE_ERROR)
 
 
+def enqueue_observation_envelope(envelope: ObservationEnvelope | None) -> None:
+    """Queue an already-projected observation without touching the money path."""
+    if envelope is None or _capture_terminally_disabled or not _telemetry_enabled():
+        return
+    try:
+        _obs_queue.put_nowait(envelope)
+    except queue.Full:
+        _cnt_inc(_CNT_DROP)
+    except Exception:  # noqa: BLE001 -- telemetry remains fail-soft
+        _cnt_inc(_CNT_ENQUEUE_ERROR)
+
+
 def start_worker(
     *,
     spool_conn_factory: Optional[Callable[[], sqlite3.Connection]] = None,

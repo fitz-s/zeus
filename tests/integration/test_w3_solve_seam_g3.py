@@ -26770,6 +26770,7 @@ def test_global_batch_cancelled_selection_skips_holding_coverage_and_receipt(
             winner_event_id=None,
         ),
     )
+    observed = []
 
     result = global_batch_runtime.process_current_global_batch(
         (event,),
@@ -26792,6 +26793,9 @@ def test_global_batch_cancelled_selection_skips_holding_coverage_and_receipt(
         current_execution=lambda *_: object(),
         current_time_provider=lambda: decision_at,
         portfolio_state_provider=lambda: object(),
+        selection_telemetry_observer=lambda probabilities, epoch, prepared, selected, at: observed.append(
+            (probabilities, epoch, prepared, selected, at)
+        ),
     )
 
     assert result.winner_event_id is None
@@ -26800,6 +26804,13 @@ def test_global_batch_cancelled_selection_skips_holding_coverage_and_receipt(
     assert result.receipts[event.event_id].reason == (
         "GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED"
     )
+    assert len(observed) == 1
+    probabilities, observed_epoch, prepared, selected, observed_at = observed[0]
+    assert probabilities == {family_key: witness}
+    assert observed_epoch is None
+    assert prepared[event.event_id].probability_witness is witness
+    assert selected.decision.no_trade_reason == "GLOBAL_SELECTION_CANCELLED"
+    assert observed_at == decision_at
 
 
 def test_global_batch_waits_until_global_winner_family_is_claimed(monkeypatch):

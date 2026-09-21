@@ -1,5 +1,5 @@
 # Created: 2026-07-29
-# Last reused or audited: 2026-07-29
+# Last reused or audited: 2026-09-20
 # Authority basis: docs/operations/current/book_snapshot_persistence/PLAN.md --
 #   redesign after deep-review NO-GO, plus round-3 fixes: H1 (compact
 #   envelope -- project_observation_envelope runs on the decision thread and
@@ -26,6 +26,7 @@ from src.events.family_book_manifest import (
     market_center_and_status,
     market_q_json,
     model_q_json,
+    project_global_selection_observation_envelope,
     project_observation_envelope,
 )
 from src.execution.family_book import ExecutableLadder, MarketBook, build_family_book
@@ -325,6 +326,118 @@ class TestProjectObservationEnvelope:
         assert envelope.market_q_basis == "DEFRICTIONED_FAMILY_BOOK_MIDPOINT_PROJECTION_V1"
         assert envelope.market_q_book_hash == "miq-book-hash"
         assert set(envelope.market_q_by_bin_id) == set(b.bin_id for b in space.bins)
+
+
+class TestGlobalSelectionObservationProjection:
+    def _inputs(self, *, omit_no_bin_id=None):
+        case = _case()
+        omega = _outcome_space(case)
+        family = _family(case)
+        bindings = tuple(
+            SimpleNamespace(
+                bin_id=outcome.bin_id,
+                condition_id=f"cond-{outcome.bin_id}",
+                yes_token_id=f"yes-{outcome.bin_id}",
+                no_token_id=f"no-{outcome.bin_id}",
+            )
+            for outcome in omega.bins
+        )
+        witness = SimpleNamespace(
+            family_key=case.family_id,
+            topology_identity=omega.topology_hash,
+            bindings=bindings,
+            yes_point_q=[1.0 / len(bindings)] * len(bindings),
+            witness_identity="global-q-witness",
+            probability_content_identity="global-q-content",
+        )
+        def curve(token):
+            return SimpleNamespace(
+                token_id=token,
+                snapshot_id=f"snapshot-{token}",
+                book_hash=f"book-{token}",
+                levels=(QuoteLevel(Decimal("0.30"), Decimal("500")),),
+                fee_model=SimpleNamespace(fee_rate=Decimal("0.05")),
+                min_tick=Decimal("0.01"),
+                min_order_size=Decimal("1"),
+            )
+        assets = []
+        states = []
+        for binding in bindings:
+            for side, token in (("YES", binding.yes_token_id), ("NO", binding.no_token_id)):
+                states.append((
+                    case.family_id, binding.bin_id, binding.condition_id,
+                    side, token, "EXECUTABLE",
+                ))
+                if not (side == "NO" and binding.bin_id == omit_no_bin_id):
+                    assets.append(SimpleNamespace(
+                        family_key=case.family_id,
+                        bin_id=binding.bin_id,
+                        condition_id=binding.condition_id,
+                        side=side,
+                        token_id=token,
+                        curve=curve(token),
+                        bid_levels=(QuoteLevel(Decimal("0.20"), Decimal("500")),),
+                        neg_risk=False,
+                        captured_at_utc=_CAPTURED,
+                    ))
+        epoch = SimpleNamespace(
+            assets=tuple(assets), asset_states=tuple(states), captured_at_utc=_CAPTURED,
+        )
+        return family, omega, witness, epoch
+
+    def test_projects_the_actual_native_yes_no_cut(self):
+        family, omega, witness, epoch = self._inputs()
+        selected = SimpleNamespace(
+            decision=SimpleNamespace(candidate=SimpleNamespace(
+                family_key=family.family_id, bin_id="b25", side="NO",
+            )),
+        )
+
+        envelope = project_global_selection_observation_envelope(
+            family=family, omega=omega, probability_witness=witness,
+            book_epoch=epoch, selected=selected, decision_time=_DECISION_TIME,
+            causal_snapshot_id="global-causal",
+        )
+
+        assert envelope.complete_book is True
+        assert envelope.market_q_by_bin_id is not None
+        assert envelope.selected_bin_id == "b25"
+        assert envelope.selected_side == "NO"
+        assert envelope.measurement_unit == "C"
+        assert envelope.bins[0].yes_token_id == "yes-b_low"
+        assert envelope.bins[0].no_token_id == "no-b_low"
+
+    def test_missing_native_side_is_incomplete_and_has_no_market_q(self):
+        family, omega, witness, epoch = self._inputs(omit_no_bin_id="b25")
+
+        envelope = project_global_selection_observation_envelope(
+            family=family, omega=omega, probability_witness=witness,
+            book_epoch=epoch, selected=SimpleNamespace(decision=SimpleNamespace(candidate=None)),
+            decision_time=_DECISION_TIME, causal_snapshot_id="global-causal",
+        )
+
+        assert envelope.complete_book is False
+        assert envelope.market_q_by_bin_id is None
+
+    def test_observation_keeps_out_of_band_quotes_as_market_facts(self):
+        family, omega, witness, epoch = self._inputs()
+        for asset in epoch.assets:
+            if asset.bin_id == "b_low":
+                asset.curve.levels = (QuoteLevel(Decimal("0.01"), Decimal("500")),)
+                asset.bid_levels = (QuoteLevel(Decimal("0.01"), Decimal("500")),)
+            elif asset.bin_id == "b_high":
+                asset.curve.levels = (QuoteLevel(Decimal("0.99"), Decimal("500")),)
+                asset.bid_levels = (QuoteLevel(Decimal("0.99"), Decimal("500")),)
+
+        envelope = project_global_selection_observation_envelope(
+            family=family, omega=omega, probability_witness=witness,
+            book_epoch=epoch, selected=SimpleNamespace(decision=SimpleNamespace(candidate=None)),
+            decision_time=_DECISION_TIME, causal_snapshot_id="global-causal",
+        )
+
+        assert envelope.complete_book is True
+        assert envelope.market_q_by_bin_id["b_low"] < envelope.market_q_by_bin_id["b25"]
+        assert envelope.bins[0].best_yes_ask == 0.01
 
 
 # ---------------------------------------------------------------------------

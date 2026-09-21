@@ -5974,6 +5974,11 @@ def process_current_global_batch(
     final_actuation_cancelled: Callable[[], bool] | None = None,
     held_sell_reauction_requests: tuple[object, ...] = (),
     restrict_to_family_keys: frozenset[str] | None = None,
+    selection_telemetry_observer: Callable[
+        [Mapping[str, object], CurrentGlobalBookEpoch | None, Mapping[str, object], object, datetime],
+        None,
+    ]
+    | None = None,
     _probability_supersession_reauction_count: int = 0,
     _market_authority_supersession_reauction_count: int = 0,
 ) -> GlobalBatchSubmitResult:
@@ -7484,6 +7489,20 @@ def process_current_global_batch(
                     raise RuntimeError(
                         "GLOBAL_CAPITAL_PROOF_COUNTERFACTUAL_VENUE_SIDE_EFFECT"
                     )
+            if selection_telemetry_observer is not None:
+                try:
+                    selection_telemetry_observer(
+                        attempt_probabilities,
+                        attempt_book_epoch,
+                        prepared_for_selection,
+                        selected,
+                        selection_at,
+                    )
+                except Exception:  # noqa: BLE001 -- telemetry cannot alter selection
+                    _LOG.warning(
+                        "global selection telemetry projection failed",
+                        exc_info=True,
+                    )
             if (
                 selected.decision.candidate is None
                 and selected.decision.no_trade_reason
@@ -8369,6 +8388,7 @@ def process_current_global_batch(
                         final_actuation_cancelled=final_actuation_cancelled,
                         work_context=work_context,
                         restrict_to_family_keys=restrict_to_family_keys,
+                        selection_telemetry_observer=selection_telemetry_observer,
                         _probability_supersession_reauction_count=(
                             _probability_supersession_reauction_count
                             + (0 if market_authority_superseded else 1)

@@ -7752,6 +7752,7 @@ def event_bound_live_adapter_from_trade_conn(
         decision_time: datetime,
         *,
         cache_metadata_out: dict[str, str] | None = None,
+        telemetry_context_sink: Callable[[object, object, object], None] | None = None,
     ) -> EventSubmissionReceipt:
         """Prepare current family q without reading or writing executable prices."""
 
@@ -7766,6 +7767,7 @@ def event_bound_live_adapter_from_trade_conn(
                 decision_time=decision_time,
                 max_age=FRESHNESS_WINDOW_DEFAULT,
                 cache_metadata_out=cache_metadata_out,
+                telemetry_context_sink=telemetry_context_sink,
                 allow_partial_deterministic=True,
             )
         except Exception as exc:  # noqa: BLE001 - typed fail-closed batch receipt
@@ -8776,6 +8778,96 @@ def event_bound_live_adapter_from_trade_conn(
             "miss": 0,
             "refresh": 0,
         }
+        global_selection_context: dict[str, tuple[object, object, str | None]] = {}
+        emitted_global_selection_telemetry: set[tuple[str, str]] = set()
+
+        def _telemetry_context_sink(event: OpportunityEvent):
+            def capture(family: object, omega: object, prepared: object) -> None:
+                witness = getattr(prepared, "probability_witness", None)
+                witness_identity = str(
+                    getattr(witness, "witness_identity", "") or ""
+                )
+                if witness_identity:
+                    global_selection_context[witness_identity] = (
+                        family,
+                        omega,
+                        event.causal_snapshot_id,
+                    )
+
+            return capture
+
+        def _capture_global_selection_observations(
+            _probabilities,
+            book_epoch,
+            prepared_by_event,
+            selected,
+            selection_at,
+        ) -> None:
+            from src.events.family_book_manifest import (
+                project_global_selection_observation_envelope,
+            )
+            from src.events.family_book_telemetry_writer import (
+                enqueue_observation_envelope,
+            )
+
+            for prepared in prepared_by_event.values():
+                witness = getattr(prepared, "probability_witness", None)
+                witness_identity = str(
+                    getattr(witness, "witness_identity", "") or ""
+                )
+                context = global_selection_context.get(witness_identity)
+                if context is None:
+                    continue
+                family, omega, causal_snapshot_id = context
+                if (
+                    str(getattr(witness, "family_key", ""))
+                    != str(getattr(family, "family_id", ""))
+                    or str(getattr(witness, "topology_identity", ""))
+                    != str(getattr(omega, "topology_hash", ""))
+                ):
+                    continue
+                expected_bindings = tuple(
+                    (
+                        str(outcome.bin_id),
+                        str(candidate.condition_id),
+                        str(candidate.yes_token_id or ""),
+                        str(candidate.no_token_id or ""),
+                    )
+                    for candidate, outcome in zip(
+                        tuple(getattr(family, "candidates", ()) or ()),
+                        tuple(getattr(omega, "bins", ()) or ()),
+                        strict=True,
+                    )
+                )
+                actual_bindings = tuple(
+                    (
+                        str(binding.bin_id),
+                        str(binding.condition_id),
+                        str(binding.yes_token_id or ""),
+                        str(binding.no_token_id or ""),
+                    )
+                    for binding in tuple(getattr(witness, "bindings", ()) or ())
+                )
+                if actual_bindings != expected_bindings:
+                    continue
+                epoch_identity = str(
+                    getattr(book_epoch, "witness_identity", "") or ""
+                )
+                emission_key = (witness_identity, epoch_identity)
+                if emission_key in emitted_global_selection_telemetry:
+                    continue
+                envelope = project_global_selection_observation_envelope(
+                    family=family,
+                    omega=omega,
+                    probability_witness=witness,
+                    book_epoch=book_epoch,
+                    selected=selected,
+                    decision_time=selection_at,
+                    causal_snapshot_id=causal_snapshot_id,
+                )
+                if envelope is not None:
+                    emitted_global_selection_telemetry.add(emission_key)
+                    enqueue_observation_envelope(envelope)
 
         def _prepare_current_scope_event(event, at):
             payload = _payload(event)
@@ -8868,6 +8960,7 @@ def event_bound_live_adapter_from_trade_conn(
                 event,
                 at,
                 cache_metadata_out=cache_metadata,
+                telemetry_context_sink=_telemetry_context_sink(event),
             )
             prepared = receipt.prepared_global_family
             if prepared is not None:
@@ -11265,6 +11358,9 @@ def event_bound_live_adapter_from_trade_conn(
                 selection_cancelled=_day0_selection_cancelled,
                 final_actuation_cancelled=_hard_day0_authority_cancelled,
                 held_sell_reauction_requests=held_sell_reauction_requests,
+                selection_telemetry_observer=(
+                    _capture_global_selection_observations
+                ),
                 # Ordinary proof-only entry evaluation remains global. An exact
                 # held-SELL completion instead owns only the requested actions:
                 # portfolio wealth still carries every holding, while unrelated
@@ -36926,6 +37022,7 @@ def _prepare_current_global_probability_family(
     before_raw_input_hwm_read: Callable[[], float | None] | None = None,
     _force_day0_redecision_fallback: bool = False,
     pinned_complete_bundle: object | None = None,
+    telemetry_context_sink: Callable[[object, object, object], None] | None = None,
 ):
     """Build current simplex or exact-bin payoff authority without price dependency.
 
@@ -36989,6 +37086,7 @@ def _prepare_current_global_probability_family(
             raw_input_hwm_read_max_seconds=raw_input_hwm_read_max_seconds,
             before_raw_input_hwm_read=before_raw_input_hwm_read,
             _force_day0_redecision_fallback=True,
+            telemetry_context_sink=telemetry_context_sink,
         )
 
     if max_age <= timedelta(0):
@@ -38141,7 +38239,7 @@ def _prepare_current_global_probability_family(
                 payload.update(deterministic_payload)
                 if day0_payload_out is not None:
                     day0_payload_out.update(deterministic_payload)
-                return PreparedGlobalFamily(
+                prepared = PreparedGlobalFamily(
                     decision_id=stable_hash(
                         {
                             "authority_certificate_hash": authority_certificate_hash,
@@ -38170,6 +38268,15 @@ def _prepare_current_global_probability_family(
                         )
                     ),
                 )
+                if telemetry_context_sink is not None:
+                    try:
+                        telemetry_context_sink(family, omega, prepared)
+                    except Exception:  # noqa: BLE001 -- optional telemetry cannot alter authority
+                        logging.getLogger(__name__).warning(
+                            "global probability telemetry context capture failed",
+                            exc_info=True,
+                        )
+                return prepared
             if components is None:
                 components = _day0_remaining_global_probability_components(
                     event,
@@ -38656,7 +38763,7 @@ def _prepare_current_global_probability_family(
         if is_day0
         else "non_day0_family"
     )
-    return PreparedGlobalFamily(
+    prepared = PreparedGlobalFamily(
         decision_id=stable_hash(
             {
                 "authority_certificate_hash": authority_certificate_hash,
@@ -38682,6 +38789,15 @@ def _prepare_current_global_probability_family(
             family=family,
         ),
     )
+    if telemetry_context_sink is not None:
+        try:
+            telemetry_context_sink(family, omega, prepared)
+        except Exception:  # noqa: BLE001 -- optional telemetry cannot alter authority
+            logging.getLogger(__name__).warning(
+                "global probability telemetry context capture failed",
+                exc_info=True,
+            )
+    return prepared
 
 
 def _current_global_probability_components(
