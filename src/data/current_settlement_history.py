@@ -14,9 +14,14 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any, Mapping
+from urllib.parse import urlparse
 
 from src.config import settlement_source_type_for_city
 from src.contracts.residual_key import SettlementIncompleteError, _station_from_settlement_source
+from src.contracts.settlement_axes import (
+    is_learning_eligible_resolution_state,
+    settlement_resolution_state_from_row,
+)
 from src.contracts.settlement_semantics import SettlementSemantics
 
 _CURRENT_RESOLVER_ERA = "internal_resolver_post_2026_02_21"
@@ -101,6 +106,39 @@ def _expected_observation_source(source_type: str, station: str) -> str | None:
     return None
 
 
+def _settlement_url_matches_source_type(source_url: object, source_type: str) -> bool:
+    """Bind the persisted URL host/path to the declared source family."""
+    try:
+        parsed = urlparse(str(source_url or ""))
+    except (TypeError, ValueError):
+        return False
+    host = str(parsed.hostname or "").lower()
+    path = str(parsed.path or "")
+    if parsed.scheme != "https":
+        return False
+    if source_type == "wu_icao":
+        return host == "wunderground.com" or host.endswith(".wunderground.com")
+    if source_type == "noaa":
+        return host in {"weather.gov", "www.weather.gov"} and path == "/wrh/timeseries"
+    if source_type == "hko":
+        return (
+            host in {"weather.gov.hk", "www.weather.gov.hk", "hko.gov.hk", "www.hko.gov.hk"}
+            and path.endswith("/cis/climat.htm")
+        )
+    return False
+
+
+def _source_product_matches_observation(observation: sqlite3.Row, source_type: str) -> bool:
+    version = str(observation["data_source_version"] or "").strip().lower()
+    if source_type == "noaa":
+        return version == "noaa_wrh_timeseries_v1"
+    if source_type == "wu_icao":
+        return version.startswith("wu_icao")
+    if source_type == "hko":
+        return version.startswith("hko_daily")
+    return False
+
+
 def _outcome_rows_for_city(conn: sqlite3.Connection, city: str, start: date) -> list[sqlite3.Row]:
     cursor = conn.cursor()
     cursor.row_factory = sqlite3.Row
@@ -108,7 +146,7 @@ def _outcome_rows_for_city(conn: sqlite3.Connection, city: str, start: date) -> 
         """
         SELECT city, target_date, temperature_metric, winning_bin, settlement_value,
                settlement_source, settled_at, authority, provenance_json, recorded_at,
-               settlement_unit
+               settlement_unit, outcome_type, resolution_state
           FROM settlement_outcomes
          WHERE city = ?
            AND authority = 'VERIFIED'
@@ -174,6 +212,14 @@ def read_current_settlement_history(
                 excluded["OUTCOME_NOT_FINAL"] += 1
                 continue
             try:
+                resolution_state = settlement_resolution_state_from_row(dict(outcome))
+            except (TypeError, ValueError):
+                excluded["OUTCOME_RESOLUTION_STATE_INVALID"] += 1
+                continue
+            if not is_learning_eligible_resolution_state(resolution_state):
+                excluded["OUTCOME_NOT_LEARNING_FINAL"] += 1
+                continue
+            try:
                 value = float(outcome["settlement_value"])
             except (TypeError, ValueError):
                 excluded["OUTCOME_VALUE_INVALID"] += 1
@@ -206,6 +252,7 @@ def read_current_settlement_history(
             if (
                 _normalized_source_type(provenance.get("source_family")) != source_type
                 or _normalized_source_type(provenance.get("settlement_source_type")) != source_type
+                or not _settlement_url_matches_source_type(outcome["settlement_source"], source_type)
             ):
                 excluded["OUTCOME_SOURCE_FAMILY_MISMATCH"] += 1
                 continue
@@ -260,12 +307,12 @@ def read_current_settlement_history(
                 if str(metric_provenance.get("station") or "").strip().upper() != station:
                     excluded["OBSERVATION_PROVENANCE_STATION_MISMATCH"] += 1
                     continue
-                if str(observation["data_source_version"] or "") != "noaa_wrh_timeseries_v1":
-                    excluded["OBSERVATION_PRODUCT_MISMATCH"] += 1
-                    continue
                 page_view: str | None = expected_view
             else:
                 page_view = None
+            if not _source_product_matches_observation(observation, source_type):
+                excluded["OBSERVATION_PRODUCT_MISMATCH"] += 1
+                continue
             try:
                 semantics = SettlementSemantics.for_city(city)
                 rounded_observation = semantics.assert_settlement_value(

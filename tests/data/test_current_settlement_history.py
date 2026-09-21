@@ -21,7 +21,8 @@ def _db() -> sqlite3.Connection:
             settlement_id INTEGER PRIMARY KEY, city TEXT, target_date TEXT,
             temperature_metric TEXT, winning_bin TEXT, settlement_value REAL,
             settlement_source TEXT, settled_at TEXT, authority TEXT,
-            provenance_json TEXT, recorded_at TEXT, settlement_unit TEXT
+            provenance_json TEXT, recorded_at TEXT, settlement_unit TEXT,
+            outcome_type INTEGER, resolution_state TEXT
         )"""
     )
     conn.execute(
@@ -62,6 +63,9 @@ def _insert_pair(
     observation_value: float = 70.0,
     source_family: str = "NOAA",
     era: str = ERA,
+    resolution_state: str | None = None,
+    outcome_type: int | None = None,
+    settlement_url: str | None = None,
 ) -> None:
     provenance = {
         "obs_id": outcome_id,
@@ -72,12 +76,15 @@ def _insert_pair(
         "rounding_rule": "wmo_half_up",
     }
     conn.execute(
-        """INSERT INTO settlement_outcomes VALUES (?, 'Chicago', ?, ?, '70°F', ?, ?, ?,
-           'VERIFIED', ?, ?, 'F')""",
+        """INSERT INTO settlement_outcomes (
+            settlement_id, city, target_date, temperature_metric, winning_bin,
+            settlement_value, settlement_source, settled_at, authority,
+            provenance_json, recorded_at, settlement_unit, outcome_type, resolution_state
+        ) VALUES (?, 'Chicago', ?, ?, '70°F', ?, ?, ?, 'VERIFIED', ?, ?, 'F', ?, ?)""",
         (
             outcome_id, target_date, metric, value,
-            f"https://www.weather.gov/wrh/timeseries?site={outcome_station}",
-            settled_at, json.dumps(provenance), recorded_at,
+            settlement_url or f"https://www.weather.gov/wrh/timeseries?site={outcome_station}",
+            settled_at, json.dumps(provenance), recorded_at, outcome_type, resolution_state,
         ),
     )
     meta = json.dumps({"settlement_page_view": page_view, "station": observation_station})
@@ -138,6 +145,9 @@ def test_rejects_pre_effective_source_epoch_even_when_city_date_join_would_match
         ({"value": float("nan")}, "OUTCOME_VALUE_INVALID"),
         ({"observation_value": 69.0}, "OBSERVATION_VALUE_MISMATCH"),
         ({"era": "uma_oo_v2"}, "NOT_CURRENT_RESOLVER_ERA"),
+        ({"settlement_url": "https://www.wunderground.com/history/daily/us/il/chicago/KORD"}, "OUTCOME_SOURCE_FAMILY_MISMATCH"),
+        ({"resolution_state": "VOID_50_50"}, "OUTCOME_NOT_LEARNING_FINAL"),
+        ({"resolution_state": "DISPUTED"}, "OUTCOME_NOT_LEARNING_FINAL"),
     ],
 )
 def test_rejects_wrong_contract_or_unavailable_label(kwargs: dict[str, object], reason: str) -> None:
@@ -153,3 +163,56 @@ def test_rejects_wrong_contract_or_unavailable_label(kwargs: dict[str, object], 
 def test_requires_aware_as_of() -> None:
     with pytest.raises(ValueError, match="timezone-aware"):
         _read(_db(), datetime(2026, 9, 1))
+
+
+def _hko_cities() -> dict[str, object]:
+    return {
+        "Hong Kong": SimpleNamespace(
+            name="Hong Kong", settlement_source_type="hko",
+            previous_settlement_source_type=None,
+            settlement_source_type_effective_date=None,
+            wu_station=None, settlement_unit="C", settlement_page_view="all",
+        )
+    }
+
+
+@pytest.mark.parametrize(
+    ("settlement_url", "data_version", "expected_rows", "reason"),
+    [
+        ("https://www.weather.gov.hk/en/cis/climat.htm", "hko_dailyextract_live_v1", 1, None),
+        ("https://www.wunderground.com/history/daily/hk/hong-kong/VHHH", "hko_dailyextract_live_v1", 0, "OUTCOME_SOURCE_FAMILY_MISMATCH"),
+        ("https://www.weather.gov.hk/en/cis/climat.htm", "hko_realtime_v1", 0, "OBSERVATION_PRODUCT_MISMATCH"),
+    ],
+)
+def test_hko_requires_explicit_current_url_and_daily_product(
+    settlement_url: str, data_version: str, expected_rows: int, reason: str | None,
+) -> None:
+    conn = _db()
+    provenance = json.dumps({
+        "obs_id": 7, "era": ERA, "era_start_date_utc": "2026-02-21",
+        "source_family": "HKO", "settlement_source_type": "HKO",
+        "rounding_rule": "oracle_truncate",
+    })
+    conn.execute(
+        """INSERT INTO settlement_outcomes (
+            settlement_id, city, target_date, temperature_metric, winning_bin,
+            settlement_value, settlement_source, settled_at, authority,
+            provenance_json, recorded_at, settlement_unit
+        ) VALUES (7, 'Hong Kong', '2026-08-23', 'high', '30°C', 30,
+                  ?, '2026-08-24T00:00:00+08:00', 'VERIFIED', ?,
+                  '2026-08-23 17:00:00', 'C')""",
+        (settlement_url, provenance),
+    )
+    conn.execute(
+        """INSERT INTO observations VALUES (
+            7, 'Hong Kong', '2026-08-23', 'hko_daily_api', NULL, 'C',
+            ?, 30, 25, '2026-08-23T17:00:00+00:00', '2026-08-23T17:00:00+00:00', '{}', '{}'
+        )""",
+        (data_version,),
+    )
+
+    result = read_current_settlement_history(conn, cities_by_name=_hko_cities(), as_of=AS_OF)
+
+    assert len(result.rows) == expected_rows
+    if reason is not None:
+        assert result.excluded_reason_counts[reason] == 1
