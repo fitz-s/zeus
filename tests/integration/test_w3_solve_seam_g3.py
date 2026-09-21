@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-09-20
+# Last reused/audited: 2026-09-21
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -95,6 +95,8 @@ from src.solve.solver import (
     OutcomeTokenBinding,
     PortfolioWealthWitness,
     family_payoff_q_samples,
+    family_payoff_q_lcb,
+    family_payoff_point_q,
     global_auction_universe_identity,
     global_candidate_from_native,
     global_candidates_from_native,
@@ -7216,6 +7218,312 @@ def test_global_day0_uses_remaining_day_probability_builder(monkeypatch):
     assert result[2] == {}
     assert result[3] == {}
     assert result[4]["probability_authority"] == "day0_absorbing_hard_fact"
+
+
+def _prepared_current_day0_entry_fixture(*, with_partial_exact_child=False):
+    bins = (
+        Bin(low=20.0, high=20.0, unit="C", label="20C"),
+        Bin(low=21.0, high=None, unit="C", label="21C or above"),
+    )
+    candidates = tuple(
+        SimpleNamespace(
+            condition_id=f"condition-{index}",
+            yes_token_id=f"yes-{index}",
+            no_token_id=f"no-{index}",
+            bin=bin_value,
+        )
+        for index, bin_value in enumerate(bins)
+    )
+    family = SimpleNamespace(
+        family_id="Moscow|2026-07-10|high",
+        city="Moscow",
+        target_date="2026-07-10",
+        metric="high",
+        candidates=candidates,
+    )
+    bindings = tuple(
+        OutcomeTokenBinding(
+            bin_id=era._candidate_bin_id_from_topology(candidate),
+            condition_id=candidate.condition_id,
+            yes_token_id=candidate.yes_token_id,
+            no_token_id=candidate.no_token_id,
+        )
+        for candidate in candidates
+    )
+    if with_partial_exact_child:
+        samples = np.tile(np.asarray((0.0, 1.0), dtype=float), (400, 1))
+        point_q = np.asarray((0.0, 1.0), dtype=float)
+    else:
+        samples = np.tile(np.asarray((0.25, 0.75), dtype=float), (400, 1))
+        point_q = np.asarray((0.25, 0.75), dtype=float)
+    witness_fields = dict(
+        family_key=family.family_id,
+        bindings=bindings,
+        yes_point_q=point_q,
+        yes_q_samples=samples,
+        q_version=(
+            "day0-semrev:day0_hourly_ens_source_clock_carrier_v17:current"
+        ),
+        resolution_identity="resolution",
+        topology_identity="topology",
+        posterior_identity_hash="posterior-current",
+        source_truth_identity="source-current",
+        authority_certificate_hash="certificate-current",
+        band_alpha=0.05,
+        band_basis=era._GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS,
+        captured_at_utc=_dt.datetime(2026, 7, 10, 20, tzinfo=_dt.timezone.utc),
+    )
+    exact_child = None
+    if with_partial_exact_child:
+        child_fields = dict(
+            family_key=family.family_id,
+            bindings=bindings,
+            exact_yes_payoffs=((bindings[0].bin_id, 0),),
+            q_version=witness_fields["q_version"],
+            resolution_identity=witness_fields["resolution_identity"],
+            topology_identity=witness_fields["topology_identity"],
+            posterior_identity_hash=witness_fields["posterior_identity_hash"],
+            source_truth_identity=witness_fields["source_truth_identity"],
+            authority_certificate_hash=witness_fields["authority_certificate_hash"],
+            band_alpha=witness_fields["band_alpha"],
+            band_basis=witness_fields["band_basis"],
+            captured_at_utc=witness_fields["captured_at_utc"],
+        )
+        exact_child = DeterministicBinPayoffWitness(
+            **child_fields,
+            max_age=_dt.timedelta(minutes=15),
+            witness_identity=deterministic_bin_payoff_witness_identity(**child_fields),
+        )
+    witness_fields["exact_payoff_witness"] = exact_child
+    witness = JointOutcomeProbabilityWitness(
+        **witness_fields,
+        max_age=_dt.timedelta(minutes=15),
+        witness_identity=joint_probability_witness_identity(**witness_fields),
+    )
+    prepared = bridge.PreparedGlobalFamily(
+        decision_id="decision-current",
+        probability_witness=witness,
+        candidate_seeds=(),
+        posterior_id=123,
+        probability_authority="day0_remaining_day_global_probability_v1",
+    )
+    return family, prepared
+
+
+def test_global_day0_current_prepared_witness_bypasses_stale_supporting_replacement(
+    monkeypatch,
+):
+    family, prepared = _prepared_current_day0_entry_fixture()
+    event = SimpleNamespace(event_type="DAY0_EXTREME_UPDATED")
+    selected_candidate = _global_test_buy_candidate(
+        family_key=family.family_id,
+        probability_witness_identity=prepared.probability_witness.witness_identity,
+        book_identity="current-day0",
+        price="0.40",
+        captured_at=_dt.datetime(2026, 7, 10, 20, tzinfo=_dt.timezone.utc),
+        condition_id="condition-0",
+        token_id="yes-0",
+    )
+    global_actuation = SimpleNamespace(
+        decision=SimpleNamespace(candidate=selected_candidate)
+    )
+    assert (
+        era._global_day0_entry_prepared_family_or_none(
+            event=event,
+            global_actuation=global_actuation,
+            prepared_global_family=prepared,
+            current_day0_payload={"_edli_day0_q_mode": "remaining_day"},
+        )
+        is prepared
+    )
+    assert (
+        era._global_day0_entry_prepared_family_or_none(
+            event=SimpleNamespace(event_type="FORECAST_SNAPSHOT_READY"),
+            global_actuation=global_actuation,
+            prepared_global_family=prepared,
+            current_day0_payload={"_edli_day0_q_mode": "remaining_day"},
+        )
+        is None
+    )
+    payload = {
+        "city": "Moscow",
+        "target_date": "2026-07-10",
+        "metric": "high",
+        "rounded_value": 19.0,
+        "_edli_q_source": "day0_remaining_day",
+        "_edli_day0_q_mode": "remaining_day",
+        # This deliberately models the Austin incident: current remaining-path
+        # payload is verified, while the supporting carrier clock is old.
+        "_edli_day0_supporting_carrier_clock": "old-supporting-clock",
+    }
+    current_payload = {
+        "_edli_day0_q_mode": "remaining_day",
+        "probability_authority": "day0_remaining_day_global_probability_v1",
+    }
+    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Moscow": SimpleNamespace(settlement_unit="C")})
+    monkeypatch.setattr(
+        "src.data.day0_oracle_anomaly.is_day0_family_paused",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        "src.events.day0_authority.day0_evidence_finality",
+        lambda _payload: "PROVISIONAL_CURRENT_SNAPSHOT",
+    )
+    monkeypatch.setattr(
+        era,
+        "_replacement_authority_probability_and_fdr_proof",
+        lambda **_kwargs: pytest.fail("current prepared global witness must bypass replacement"),
+    )
+    monkeypatch.setattr(
+        era,
+        "_apply_day0_mask_to_generated_probabilities",
+        lambda **kwargs: (kwargs["q_by_condition"], kwargs["lcb_by_condition"]),
+    )
+    monkeypatch.setattr(
+        era,
+        "_day0_hard_fact_fdr_maps",
+        lambda **_kwargs: ({("condition-0", "buy_yes"): 0.1}, {("condition-0", "buy_yes"): True}),
+    )
+    result = era._live_yes_probabilities(
+        event=event,
+        payload=payload,
+        family=family,
+        conn=sqlite3.connect(":memory:"),
+        calibration_conn=sqlite3.connect(":memory:"),
+        native_costs={},
+        decision_time=_dt.datetime(2026, 7, 10, 20, tzinfo=_dt.timezone.utc),
+        prepared_global_family=prepared,
+        current_day0_payload=current_payload,
+    )
+    assert result[0] == {"condition-0": 0.25, "condition-1": 0.75}
+    assert result[1][("condition-0", "buy_yes")] == pytest.approx(0.25)
+    assert result[1][("condition-0", "buy_no")] == pytest.approx(0.75)
+    assert result[2] == {("condition-0", "buy_yes"): 0.1}
+    assert result[4]["posterior_id"] == 123
+    assert result[4]["probability_semantics_revision"] == (
+        "day0_hourly_ens_source_clock_carrier_v17"
+    )
+
+
+def test_global_day0_payload_marker_alone_keeps_stale_replacement_rejection(monkeypatch):
+    family, _prepared = _prepared_current_day0_entry_fixture()
+    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Moscow": SimpleNamespace(settlement_unit="C")})
+    monkeypatch.setattr(
+        "src.data.day0_oracle_anomaly.is_day0_family_paused",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        "src.events.day0_authority.day0_evidence_finality",
+        lambda _payload: "PROVISIONAL_CURRENT_SNAPSHOT",
+    )
+    monkeypatch.setattr(
+        era,
+        "_replacement_authority_probability_and_fdr_proof",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            ValueError("GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE")
+        ),
+    )
+    with pytest.raises(ValueError, match="GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE"):
+        era._live_yes_probabilities(
+            event=SimpleNamespace(
+                event_type="DAY0_EXTREME_UPDATED",
+                payload_json=json.dumps(
+                    {
+                        "city": "Moscow",
+                        "target_date": "2026-07-10",
+                        "metric": "high",
+                        "rounded_value": 19.0,
+                        "_edli_day0_direct_current_entry_authority": True,
+                        "_edli_global_day0_binding": {},
+                    }
+                ),
+            ),
+            payload={
+                "city": "Moscow",
+                "target_date": "2026-07-10",
+                "metric": "high",
+                "rounded_value": 19.0,
+                "_edli_day0_direct_current_entry_authority": True,
+                "_edli_global_day0_binding": {},
+            },
+            family=family,
+            conn=sqlite3.connect(":memory:"),
+            calibration_conn=sqlite3.connect(":memory:"),
+            native_costs={},
+            decision_time=_dt.datetime(2026, 7, 10, 20, tzinfo=_dt.timezone.utc),
+        )
+
+
+def test_global_day0_prepared_witness_rejects_binding_domain_mismatch():
+    family, prepared = _prepared_current_day0_entry_fixture()
+    family.candidates = family.candidates[:-1]
+    with pytest.raises(ValueError, match="GLOBAL_DAY0_PREPARED_WITNESS_DOMAIN_INVALID"):
+        era._day0_probability_and_fdr_from_prepared_witness(
+            prepared_global_family=prepared,
+            current_day0_payload={},
+            payload={"rounded_value": 19.0, "metric": "high"},
+            family=family,
+            native_costs={},
+            decision_time=_dt.datetime(2026, 7, 10, 20, tzinfo=_dt.timezone.utc),
+        )
+
+
+def test_global_day0_statistical_witness_with_partial_exact_child_keeps_unresolved_bins():
+    family, prepared = _prepared_current_day0_entry_fixture(
+        with_partial_exact_child=True
+    )
+    result = era._day0_probability_and_fdr_from_prepared_witness(
+        prepared_global_family=prepared,
+        current_day0_payload={
+            "probability_authority": "day0_remaining_day_global_probability_v1",
+            "_edli_day0_q_mode": "remaining_day",
+        },
+        payload={"rounded_value": 19.0, "metric": "high"},
+        family=family,
+        native_costs={},
+        decision_time=_dt.datetime(2026, 7, 10, 20, tzinfo=_dt.timezone.utc),
+    )
+    assert result[0]["condition-0"] == pytest.approx(0.0, abs=1e-8)
+    assert result[0]["condition-1"] == pytest.approx(1.0, abs=1e-8)
+    assert ("condition-0", "buy_no") in result[1]
+    assert ("condition-1", "buy_yes") in result[1]
+
+
+def test_day0_direct_current_entry_mapper_retains_legacy_marker_gate(monkeypatch):
+    family, prepared = _prepared_current_day0_entry_fixture()
+    day0_payload = {
+        "_edli_day0_direct_current_entry_authority": True,
+        "probability_authority": "day0_remaining_day_global_probability_v1",
+        "_edli_day0_q_mode": "remaining_day",
+    }
+    monkeypatch.setattr(
+        era,
+        "_prepare_current_global_probability_family",
+        lambda *_args, **kwargs: (
+            kwargs["day0_payload_out"].update(day0_payload) or prepared
+        ),
+    )
+    monkeypatch.setattr(
+        era,
+        "_apply_day0_mask_to_generated_probabilities",
+        lambda **kwargs: (kwargs["q_by_condition"], kwargs["lcb_by_condition"]),
+    )
+    monkeypatch.setattr(
+        era,
+        "_day0_hard_fact_fdr_maps",
+        lambda **_kwargs: ({}, {}),
+    )
+    result = era._direct_day0_entry_probability_and_fdr_proof(
+        event=SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+        payload={"rounded_value": 19.0, "metric": "high"},
+        family=family,
+        forecast_conn=sqlite3.connect(":memory:"),
+        observation_conn=sqlite3.connect(":memory:"),
+        native_costs={},
+        decision_time=_dt.datetime(2026, 7, 10, 20, tzinfo=_dt.timezone.utc),
+    )
+    assert result is not None
+    assert result[0]["condition-0"] == pytest.approx(0.25)
 
 
 def test_global_day0_joint_witness_uses_one_remaining_day_simplex(monkeypatch):
@@ -24425,6 +24733,267 @@ def test_global_actuation_rebinds_day0_probability_type_without_cap_rows():
     assert rebound[0].q_posterior == proof.q_posterior
     assert rebound[0].q_lcb_5pct == proof.q_lcb_5pct
     assert rebound[1] is sibling
+
+
+@pytest.mark.parametrize(
+    "cap_scale", (None, 0.9, 1.1), ids=("no-cap", "cap", "cap-above-point")
+)
+@pytest.mark.parametrize(
+    "missing_reason",
+    (
+        "ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE_MISSING:test",
+        "ADMISSION_BUY_NO_OTHER_REASON:test",
+    ),
+    ids=("allowed-missing", "unrelated-missing"),
+)
+def test_global_current_day0_typed_rebinds_no_from_point_and_cvar(
+    cap_scale, missing_reason
+):
+    base_witness = _current_global_book_probability()
+    family, proofs, _ = _corpus()[0]
+    binding = base_witness.bindings[0]
+    point_q = np.asarray(base_witness.yes_point_q, dtype=np.float64).copy()
+    point_q[0] = max(float(point_q[0]) - 0.01, 0.01)
+    point_q[1] += 0.01
+    witness_fields = dict(
+        family_key=base_witness.family_key,
+        bindings=base_witness.bindings,
+        yes_point_q=point_q,
+        yes_q_samples=base_witness.yes_q_samples,
+        q_version="day0-semrev:day0_hourly_ens_source_clock_carrier_v17:no-cap",
+        resolution_identity=base_witness.resolution_identity,
+        topology_identity=base_witness.topology_identity,
+        posterior_identity_hash=base_witness.posterior_identity_hash,
+        source_truth_identity=base_witness.source_truth_identity,
+        authority_certificate_hash=base_witness.authority_certificate_hash,
+        band_alpha=base_witness.band_alpha,
+        band_basis=era._GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS,
+        captured_at_utc=base_witness.captured_at_utc,
+    )
+    witness = JointOutcomeProbabilityWitness(
+        **witness_fields,
+        max_age=base_witness.max_age,
+        witness_identity=joint_probability_witness_identity(**witness_fields),
+    )
+    proof = next(
+        row
+        for row in proofs
+        if str(row.candidate.condition_id) == binding.condition_id
+        and row.direction == "buy_no"
+    )
+    proof = replace(
+        proof,
+        missing_reason=missing_reason,
+        q_posterior=0.0,
+        q_lcb_5pct=0.0,
+    )
+    sibling = next(
+        row
+        for row in proofs
+        if str(row.candidate.condition_id) == binding.condition_id
+        and row.direction == "buy_yes"
+    )
+    selected_candidate = _global_test_buy_candidate(
+        family_key=family.family_id,
+        probability_witness_identity=witness.witness_identity,
+        book_identity="typed-current-no",
+        price="0.40",
+        captured_at=_dt.datetime(2026, 6, 13, 8, tzinfo=_dt.timezone.utc),
+        bin_id=binding.bin_id,
+        condition_id=binding.condition_id,
+        side="NO",
+        token_id=binding.no_token_id,
+    )
+    expected_lcb = family_payoff_q_lcb(
+        witness,
+        bin_id=binding.bin_id,
+        side="NO",
+    )
+    cap_rows = ()
+    cap_value = (
+        None
+        if cap_scale is None
+        else (
+            0.99
+            if cap_scale > 1.0
+            else float(expected_lcb) * float(cap_scale)
+        )
+    )
+    if cap_value is not None:
+        cap_rows = (
+            (
+                family.family_id,
+                binding.condition_id,
+                binding.bin_id,
+                "NO",
+                cap_value,
+            ),
+        )
+    prepared = bridge.PreparedGlobalFamily(
+        decision_id="typed-current-no",
+        probability_witness=witness,
+        candidate_seeds=(),
+        candidate_payoff_q_lcb_caps=cap_rows,
+    )
+    day0_payload = {
+        "_edli_q_source": "day0_remaining_day",
+        "q_source": "day0_remaining_day",
+        "probability_authority": "day0_remaining_day_global_probability_v1",
+    }
+    rebound = era._global_actuation_current_admission_proofs(
+        proofs=(proof, sibling),
+        global_actuation=SimpleNamespace(
+            decision=SimpleNamespace(candidate=selected_candidate)
+        ),
+        prepared_global_family=prepared,
+        family=family,
+        day0_payload=day0_payload,
+        typed_current_day0_entry=True,
+    )
+    expected_point = 1.0 - float(point_q[0])
+    expected_lcb = family_payoff_q_lcb(
+        witness,
+        bin_id=binding.bin_id,
+        side="NO",
+        payoff_q_lcb_cap=(
+            None
+            if cap_scale is None
+            else cap_value
+        ),
+    )
+    assert expected_point != pytest.approx(float((1.0 - witness.yes_q_samples[:, 0]).mean()))
+    if missing_reason.startswith("ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE_MISSING:"):
+        assert rebound[0].missing_reason is None
+        assert rebound[0].q_posterior == pytest.approx(expected_point)
+        assert rebound[0].q_lcb_5pct == pytest.approx(expected_lcb)
+        assert rebound[0].same_bin_yes_posterior == pytest.approx(float(point_q[0]))
+        assert rebound[0].q_lcb_calibration_source == (
+            "GLOBAL_CURRENT_WITNESS_BAND"
+            if cap_scale is None
+            else "GLOBAL_CURRENT_WITNESS_CAP"
+        )
+    else:
+        assert rebound[0].missing_reason == missing_reason
+    assert rebound[1] is sibling
+
+
+def test_global_current_day0_typed_admission_rejects_wrong_bound_token():
+    family, prepared = _prepared_current_day0_entry_fixture()
+    binding = prepared.probability_witness.bindings[0]
+    candidate = _global_test_buy_candidate(
+        family_key=family.family_id,
+        probability_witness_identity=prepared.probability_witness.witness_identity,
+        book_identity="typed-current-no-wrong-token",
+        price="0.40",
+        captured_at=_dt.datetime(2026, 7, 10, 20, tzinfo=_dt.timezone.utc),
+        bin_id=binding.bin_id,
+        condition_id=binding.condition_id,
+        side="NO",
+        token_id="wrong-token",
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_ACTUATION_CURRENT_ADMISSION_BINDING_MISMATCH",
+    ):
+        era._global_actuation_current_admission_proofs(
+            proofs=(),
+            global_actuation=SimpleNamespace(
+                decision=SimpleNamespace(candidate=candidate)
+            ),
+            prepared_global_family=prepared,
+            family=family,
+            day0_payload={
+                "_edli_q_source": "day0_remaining_day",
+                "probability_authority": (
+                    "day0_remaining_day_global_probability_v1"
+                ),
+            },
+            typed_current_day0_entry=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "day0_payload",
+    (
+        {},
+        {
+            "_edli_q_source": "day0_remaining_day",
+            "probability_authority": "replacement_0_1",
+        },
+    ),
+    ids=("empty-payload", "mutated-authority"),
+)
+def test_global_current_day0_typed_admission_rejects_invalid_route_payload(
+    day0_payload,
+):
+    family, prepared = _prepared_current_day0_entry_fixture()
+    binding = prepared.probability_witness.bindings[0]
+    candidate = _global_test_buy_candidate(
+        family_key=family.family_id,
+        probability_witness_identity=prepared.probability_witness.witness_identity,
+        book_identity="typed-current-no-invalid-payload",
+        price="0.40",
+        captured_at=_dt.datetime(2026, 7, 10, 20, tzinfo=_dt.timezone.utc),
+        bin_id=binding.bin_id,
+        condition_id=binding.condition_id,
+        side="NO",
+        token_id=binding.no_token_id,
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_ACTUATION_CURRENT_ADMISSION_TYPED_ROUTE_INVALID",
+    ):
+        era._global_actuation_current_admission_proofs(
+            proofs=(),
+            global_actuation=SimpleNamespace(
+                decision=SimpleNamespace(candidate=candidate)
+            ),
+            prepared_global_family=prepared,
+            family=family,
+            day0_payload=day0_payload,
+            typed_current_day0_entry=True,
+        )
+
+
+@pytest.mark.parametrize("mutation", ("missing-candidate", "sell-action"))
+def test_global_current_day0_typed_admission_rejects_candidate_route_mutation(
+    mutation,
+):
+    family, prepared = _prepared_current_day0_entry_fixture()
+    binding = prepared.probability_witness.bindings[0]
+    candidate = _global_test_buy_candidate(
+        family_key=family.family_id,
+        probability_witness_identity=prepared.probability_witness.witness_identity,
+        book_identity="typed-current-no-mutated-candidate",
+        price="0.40",
+        captured_at=_dt.datetime(2026, 7, 10, 20, tzinfo=_dt.timezone.utc),
+        bin_id=binding.bin_id,
+        condition_id=binding.condition_id,
+        side="NO",
+        token_id=binding.no_token_id,
+    )
+    if mutation == "sell-action":
+        candidate = SimpleNamespace(action="SELL")
+    selected = None if mutation == "missing-candidate" else candidate
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_ACTUATION_CURRENT_ADMISSION_TYPED_ROUTE_INVALID",
+    ):
+        era._global_actuation_current_admission_proofs(
+            proofs=(),
+            global_actuation=SimpleNamespace(
+                decision=SimpleNamespace(candidate=selected)
+            ),
+            prepared_global_family=prepared,
+            family=family,
+            day0_payload={
+                "_edli_q_source": "day0_remaining_day",
+                "probability_authority": (
+                    "day0_remaining_day_global_probability_v1"
+                ),
+            },
+            typed_current_day0_entry=True,
+        )
 
 
 def test_global_taker_winner_rebinds_local_maker_rejection_without_witness_bypass():

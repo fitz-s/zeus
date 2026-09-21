@@ -18510,6 +18510,7 @@ def _global_actuation_current_admission_proofs(
     family: object,
     day0_payload: Mapping[str, object] | None = None,
     decision_time: datetime | None = None,
+    typed_current_day0_entry: bool = False,
 ) -> tuple["_CandidateProof", ...]:
     """Rebind only the selected proof to its sealed current global authority."""
 
@@ -18520,9 +18521,17 @@ def _global_actuation_current_admission_proofs(
         getattr(prepared_global_family, "candidate_payoff_q_lcb_caps", ()) or ()
     )
     if candidate is None or witness is None:
+        if typed_current_day0_entry:
+            raise ValueError(
+                "GLOBAL_ACTUATION_CURRENT_ADMISSION_TYPED_ROUTE_INVALID"
+            )
         return proofs
     global_action = str(getattr(candidate, "action", "BUY") or "BUY").strip().upper()
     if global_action != "BUY":
+        if typed_current_day0_entry:
+            raise ValueError(
+                "GLOBAL_ACTUATION_CURRENT_ADMISSION_TYPED_ROUTE_INVALID"
+            )
         return proofs
     global_execution_mode = str(
         getattr(candidate, "execution_mode", "") or ""
@@ -18530,6 +18539,7 @@ def _global_actuation_current_admission_proofs(
     if (
         not cap_rows
         and not day0_payload
+        and not typed_current_day0_entry
         and global_execution_mode not in {"TAKER_LIMIT", "MAKER_REST"}
     ):
         return proofs
@@ -18548,6 +18558,53 @@ def _global_actuation_current_admission_proofs(
         != str(getattr(witness, "witness_identity", "") or "")
     ):
         raise ValueError("GLOBAL_ACTUATION_CURRENT_ADMISSION_IDENTITY_MISMATCH")
+    if typed_current_day0_entry:
+        binding_matches = tuple(
+            binding
+            for binding in tuple(getattr(witness, "bindings", ()) or ())
+            if str(getattr(binding, "bin_id", "") or "") == bin_id
+            and str(getattr(binding, "condition_id", "") or "") == condition_id
+        )
+        if len(binding_matches) != 1:
+            raise ValueError("GLOBAL_ACTUATION_CURRENT_ADMISSION_BINDING_MISMATCH")
+        expected_token = (
+            getattr(binding_matches[0], "yes_token_id", None)
+            if side == "YES"
+            else getattr(binding_matches[0], "no_token_id", None)
+        )
+        if str(expected_token or "") != token_id:
+            raise ValueError("GLOBAL_ACTUATION_CURRENT_ADMISSION_BINDING_MISMATCH")
+    typed_current_day0_route = False
+    if typed_current_day0_entry:
+        if not day0_payload:
+            raise ValueError(
+                "GLOBAL_ACTUATION_CURRENT_ADMISSION_TYPED_ROUTE_INVALID"
+            )
+        from src.engine.qkernel_spine_bridge import PreparedGlobalFamily
+        from src.solve.solver import (
+            GlobalSingleOrderCandidate,
+            JointOutcomeProbabilityWitness,
+        )
+
+        typed_current_day0_route = (
+            isinstance(prepared_global_family, PreparedGlobalFamily)
+            and isinstance(candidate, GlobalSingleOrderCandidate)
+            and isinstance(witness, JointOutcomeProbabilityWitness)
+            and witness.band_basis
+            == _GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS
+            and str(
+                day0_payload.get("_edli_q_source")
+                or day0_payload.get("q_source")
+                or ""
+            ).strip().startswith("day0_")
+            and str(day0_payload.get("probability_authority") or "")
+            .strip()
+            .startswith("day0_")
+        )
+        if not typed_current_day0_route:
+            raise ValueError(
+                "GLOBAL_ACTUATION_CURRENT_ADMISSION_TYPED_ROUTE_INVALID"
+            )
 
     matches = tuple(
         proof
@@ -18649,6 +18706,69 @@ def _global_actuation_current_admission_proofs(
             probability_authority=current_probability_authority,
         )
     if not cap_rows:
+        if typed_current_day0_route and side == "NO":
+            missing_reason = str(getattr(selected, "missing_reason", "") or "")
+            if missing_reason.startswith(
+                (
+                    "ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE_MISSING:",
+                    "ADMISSION_BUY_NO_REPLACEMENT_BOUND_CERTIFICATE_MISSING:",
+                )
+            ):
+                from src.solve.solver import family_payoff_point_q, family_payoff_q_lcb
+
+                q_point = family_payoff_point_q(
+                    witness,
+                    bin_id=bin_id,
+                    side=side,
+                )
+                same_bin_yes = family_payoff_point_q(
+                    witness,
+                    bin_id=bin_id,
+                    side="YES",
+                )
+                q_lcb = family_payoff_q_lcb(
+                    witness,
+                    bin_id=bin_id,
+                    side=side,
+                )
+                if (
+                    q_point is None
+                    or same_bin_yes is None
+                    or q_lcb is None
+                    or not all(
+                        math.isfinite(float(value))
+                        for value in (q_point, same_bin_yes, q_lcb)
+                    )
+                    or not 0.0 <= float(q_lcb) <= float(q_point) <= 1.0
+                    or not math.isclose(
+                        float(q_point) + float(same_bin_yes),
+                        1.0,
+                        rel_tol=0.0,
+                        abs_tol=1e-12,
+                    )
+                ):
+                    raise ValueError(
+                        "GLOBAL_ACTUATION_CURRENT_ADMISSION_PROBABILITY_INVALID"
+                    )
+                sample_identity = str(
+                    getattr(witness, "sample_matrix_identity", "") or ""
+                ).strip()
+                if not sample_identity:
+                    raise ValueError(
+                        "GLOBAL_ACTUATION_CURRENT_ADMISSION_IDENTITY_MISSING"
+                    )
+                selected = dataclass_replace(
+                    selected,
+                    q_posterior=float(q_point),
+                    q_lcb_5pct=float(q_lcb),
+                    same_bin_yes_posterior=float(same_bin_yes),
+                    q_source=current_q_source,
+                    q_lcb_calibration_source="GLOBAL_CURRENT_WITNESS_BAND",
+                    probability_authority=current_probability_authority,
+                    p_cal_vector_hash=sample_identity,
+                    p_live_vector_hash=sample_identity,
+                    missing_reason=None,
+                )
         return tuple(
             selected if proof is selected_proof else proof
             for proof in proofs
@@ -18667,33 +18787,63 @@ def _global_actuation_current_admission_proofs(
     if side != "NO":
         raise ValueError("GLOBAL_ACTUATION_CURRENT_ADMISSION_SIDE_MISMATCH")
 
-    from src.solve.solver import family_payoff_q_samples
-
-    payoff_samples = family_payoff_q_samples(witness, bin_id=bin_id, side=side)
-    yes_samples = family_payoff_q_samples(witness, bin_id=bin_id, side="YES")
     cap = _prepared_candidate_payoff_q_lcb_cap(
         prepared_global_family,
         candidate,
     )
-    if payoff_samples is None or yes_samples is None or cap is None:
+    if cap is None:
         raise ValueError("GLOBAL_ACTUATION_CURRENT_ADMISSION_PROBABILITY_MISSING")
-    q_point = float(payoff_samples.mean())
-    same_bin_yes = float(yes_samples.mean())
+    if typed_current_day0_route:
+        from src.solve.solver import family_payoff_point_q, family_payoff_q_lcb
+
+        q_point = family_payoff_point_q(witness, bin_id=bin_id, side=side)
+        same_bin_yes = family_payoff_point_q(
+            witness, bin_id=bin_id, side="YES"
+        )
+        q_lcb = family_payoff_q_lcb(
+            witness,
+            bin_id=bin_id,
+            side=side,
+            payoff_q_lcb_cap=cap,
+        )
+    else:
+        from src.solve.solver import family_payoff_q_samples
+
+        payoff_samples = family_payoff_q_samples(
+            witness, bin_id=bin_id, side=side
+        )
+        yes_samples = family_payoff_q_samples(
+            witness, bin_id=bin_id, side="YES"
+        )
+        if payoff_samples is None or yes_samples is None:
+            raise ValueError("GLOBAL_ACTUATION_CURRENT_ADMISSION_PROBABILITY_MISSING")
+        q_point = float(payoff_samples.mean())
+        same_bin_yes = float(yes_samples.mean())
+        q_lcb = cap
+    if q_point is None or same_bin_yes is None or q_lcb is None:
+        raise ValueError("GLOBAL_ACTUATION_CURRENT_ADMISSION_PROBABILITY_MISSING")
     if (
-        not all(math.isfinite(value) for value in (q_point, same_bin_yes, cap))
+        not all(
+            math.isfinite(float(value))
+            for value in (q_point, same_bin_yes, q_lcb)
+        )
         or not 0.0 <= cap <= 1.0
-        or not 0.0 <= q_point <= 1.0
-        or cap > q_point + 1e-12
-        or not 0.0 <= same_bin_yes <= 1.0
+        or not 0.0 <= float(q_lcb) <= float(q_point) + 1e-12
+        or (
+            not typed_current_day0_route
+            and float(cap) > float(q_point) + 1e-12
+        )
+        or not 0.0 <= float(same_bin_yes) <= 1.0
         or not math.isclose(
-            q_point + same_bin_yes,
+            float(q_point) + float(same_bin_yes),
             1.0,
             rel_tol=0.0,
             abs_tol=1e-12,
         )
     ):
         raise ValueError("GLOBAL_ACTUATION_CURRENT_ADMISSION_PROBABILITY_INVALID")
-    cap = min(cap, q_point)
+    q_lcb = min(float(q_lcb), float(q_point))
+    cap = min(cap, float(q_point))
     sample_identity = str(
         getattr(witness, "sample_matrix_identity", "") or ""
     ).strip()
@@ -18701,9 +18851,9 @@ def _global_actuation_current_admission_proofs(
         raise ValueError("GLOBAL_ACTUATION_CURRENT_ADMISSION_IDENTITY_MISSING")
     rebound = dataclass_replace(
         selected,
-        q_posterior=q_point,
-        q_lcb_5pct=cap,
-        same_bin_yes_posterior=same_bin_yes,
+        q_posterior=float(q_point),
+        q_lcb_5pct=float(q_lcb),
+        same_bin_yes_posterior=float(same_bin_yes),
         q_source=(
             current_q_source or "global_current_probability_witness"
         ),
@@ -19190,6 +19340,48 @@ def _current_global_actuation_prepared_family(
     )
 
 
+def _global_day0_entry_prepared_family_or_none(
+    *,
+    event: OpportunityEvent,
+    global_actuation: object,
+    prepared_global_family: object,
+    current_day0_payload: Mapping[str, object],
+) -> object | None:
+    """Select the sealed current Day0 ENTRY witness route.
+
+    The route is deliberately narrower than the generic global revalidation seam:
+    only a typed global BUY candidate and a statistical ``PreparedGlobalFamily``
+    may reuse its already verified current remaining-path witness.  SELL, exact
+    deterministic children, non-global events, and payload-only markers retain
+    their existing proof paths.
+    """
+
+    from src.engine.qkernel_spine_bridge import PreparedGlobalFamily
+    from src.solve.solver import GlobalSingleOrderCandidate, JointOutcomeProbabilityWitness
+
+    if event.event_type != "DAY0_EXTREME_UPDATED":
+        return None
+    candidate = getattr(getattr(global_actuation, "decision", None), "candidate", None)
+    if not isinstance(candidate, GlobalSingleOrderCandidate):
+        return None
+    if str(getattr(candidate, "action", "BUY") or "BUY").strip().upper() != "BUY":
+        return None
+    if not isinstance(prepared_global_family, PreparedGlobalFamily):
+        return None
+    witness = getattr(prepared_global_family, "probability_witness", None)
+    if not isinstance(witness, JointOutcomeProbabilityWitness):
+        return None
+    if str(getattr(candidate, "family_key", "") or "") != str(witness.family_key):
+        return None
+    if str(getattr(candidate, "probability_witness_identity", "") or "") != str(
+        witness.witness_identity
+    ):
+        return None
+    if not isinstance(current_day0_payload, Mapping):
+        return None
+    return prepared_global_family
+
+
 def _bind_current_global_day0_payload(
     payload: dict[str, object],
     provenance_capture: dict[str, Any],
@@ -19251,6 +19443,7 @@ def _build_event_bound_no_submit_receipt_core(
     payload = _payload(event)
     current_actuation_family = None
     current_actuation_day0_payload: dict[str, object] = {}
+    current_global_day0_entry_family = None
     global_candidate = None
     if global_actuation is not None:
         if str(getattr(global_actuation, "winner_event_id", "") or "") != event.event_id:
@@ -19311,6 +19504,12 @@ def _build_event_bound_no_submit_receipt_core(
             payload,
             provenance_capture,
             current_actuation_day0_payload,
+        )
+        current_global_day0_entry_family = _global_day0_entry_prepared_family_or_none(
+            event=event,
+            global_actuation=global_actuation,
+            prepared_global_family=current_actuation_family,
+            current_day0_payload=current_actuation_day0_payload,
         )
     source_conn = forecast_conn
     topology_authority_conn = topology_conn
@@ -19664,6 +19863,12 @@ def _build_event_bound_no_submit_receipt_core(
             calibration_conn=calibration_conn,
             decision_time=decision_time,
             provenance_capture=provenance_capture,
+            prepared_global_family=current_global_day0_entry_family,
+            current_day0_payload=(
+                current_actuation_day0_payload
+                if current_global_day0_entry_family is not None
+                else None
+            ),
         )
     except ValueError as exc:
         missing_reason = str(exc)
@@ -19718,6 +19923,9 @@ def _build_event_bound_no_submit_receipt_core(
                 family=family,
                 day0_payload=current_actuation_day0_payload,
                 decision_time=decision_time,
+                typed_current_day0_entry=(
+                    current_global_day0_entry_family is not None
+                ),
             )
         except ValueError as exc:
             reason = str(exc)
@@ -32524,6 +32732,8 @@ def _generate_candidate_proofs(
     calibration_conn: sqlite3.Connection,
     decision_time: datetime,
     provenance_capture: dict[str, Any] | None = None,
+    prepared_global_family: object | None = None,
+    current_day0_payload: Mapping[str, object] | None = None,
 ) -> tuple[_CandidateProof, ...]:
     native_costs = _native_costs_by_candidate_direction(family=family, snapshot_rows=snapshot_rows)
     (
@@ -32541,6 +32751,8 @@ def _generate_candidate_proofs(
         native_costs=native_costs,
         decision_time=decision_time,
         provenance_capture=provenance_capture,
+        prepared_global_family=prepared_global_family,
+        current_day0_payload=current_day0_payload,
     )
     if getattr(event, "event_type", None) == "DAY0_EXTREME_UPDATED":
         _day0_metric = str(payload.get("metric") or payload.get("temperature_metric") or getattr(family, "metric", "") or "")
@@ -35565,8 +35777,6 @@ def _direct_day0_entry_probability_and_fdr_proof(
     """Reproduce the direct hourly-ENS witness for the legacy proof seam."""
 
     from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
-    from src.solve.solver import _lower_cvar
-
     day0_payload: dict[str, object] = {}
     prepared = _prepare_current_global_probability_family(
         event,
@@ -35583,22 +35793,106 @@ def _direct_day0_entry_probability_and_fdr_proof(
     if day0_payload.get("_edli_day0_direct_current_entry_authority") is not True:
         return None
     payload.update(day0_payload)
-    witness = prepared.probability_witness
-    samples = np.asarray(
-        getattr(witness, "yes_q_samples", ()), dtype=np.float64
+    return _day0_probability_and_fdr_from_prepared_witness(
+        prepared_global_family=prepared,
+        current_day0_payload=day0_payload,
+        payload=payload,
+        family=family,
+        native_costs=native_costs,
+        decision_time=decision_time,
+        provenance_capture=provenance_capture,
+        evidence_label="DAY0_DIRECT_CURRENT_HOURLY_ENS",
+        require_direct_authority=True,
     )
-    point_q = np.asarray(
-        getattr(witness, "yes_point_q", ()), dtype=np.float64
-    )
+
+
+def _day0_probability_and_fdr_from_prepared_witness(
+    *,
+    prepared_global_family: object,
+    current_day0_payload: Mapping[str, object],
+    payload: dict[str, object],
+    family: object,
+    native_costs: dict[
+        tuple[str, str],
+        tuple[
+            dict[str, Any] | None,
+            ExecutionPrice | None,
+            float,
+            float | None,
+            str | None,
+        ],
+    ],
+    decision_time: datetime,
+    provenance_capture: dict[str, Any] | None = None,
+    evidence_label: str = "DAY0_PREPARED_CURRENT_GLOBAL_WITNESS",
+    require_direct_authority: bool = False,
+) -> tuple[
+    dict[str, float],
+    dict[tuple[str, str], float],
+    dict[tuple[str, str], float],
+    dict[tuple[str, str], bool],
+    dict[str, str],
+]:
+    """Map one sealed current Day0 witness onto q/LCB/FDR proof surfaces."""
+
+    from src.engine.qkernel_spine_bridge import PreparedGlobalFamily
+    from src.events.day0_authority import day0_probability_semantics_revision
+    from src.solve.solver import JointOutcomeProbabilityWitness, _lower_cvar
+
+    if not isinstance(prepared_global_family, PreparedGlobalFamily):
+        raise ValueError("GLOBAL_DAY0_PREPARED_FAMILY_TYPE_INVALID")
+    if not isinstance(current_day0_payload, Mapping):
+        raise ValueError("GLOBAL_DAY0_CURRENT_PAYLOAD_INVALID")
+    if require_direct_authority and current_day0_payload.get(
+        "_edli_day0_direct_current_entry_authority"
+    ) is not True:
+        raise ValueError("GLOBAL_DAY0_DIRECT_CURRENT_ENTRY_AUTHORITY_REQUIRED")
+    witness = getattr(prepared_global_family, "probability_witness", None)
+    if not isinstance(witness, JointOutcomeProbabilityWitness):
+        raise ValueError("GLOBAL_DAY0_PREPARED_WITNESS_TYPE_INVALID")
+    if witness.band_basis != _GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS:
+        raise ValueError("GLOBAL_DAY0_PREPARED_WITNESS_BASIS_INVALID")
+    if str(witness.family_key) != str(getattr(family, "family_id", "")):
+        raise ValueError("GLOBAL_DAY0_PREPARED_WITNESS_FAMILY_MISMATCH")
+
+    candidates = tuple(getattr(family, "candidates", ()) or ())
     bindings = tuple(getattr(witness, "bindings", ()) or ())
+    if not candidates or len(bindings) != len(candidates):
+        raise ValueError("GLOBAL_DAY0_PREPARED_WITNESS_DOMAIN_INVALID")
+    for candidate, binding in zip(candidates, bindings, strict=True):
+        if (
+            str(getattr(candidate, "condition_id", "") or "") != str(
+                getattr(binding, "condition_id", "") or ""
+            )
+            or _candidate_bin_id_from_topology(candidate)
+            != str(getattr(binding, "bin_id", "") or "")
+            or str(getattr(candidate, "yes_token_id", "") or "")
+            != str(getattr(binding, "yes_token_id", "") or "")
+            or str(getattr(candidate, "no_token_id", "") or "")
+            != str(getattr(binding, "no_token_id", "") or "")
+        ):
+            raise ValueError("GLOBAL_DAY0_PREPARED_WITNESS_BINDING_INVALID")
+
+    samples = np.asarray(getattr(witness, "yes_q_samples", ()), dtype=np.float64)
+    point_q = np.asarray(getattr(witness, "yes_point_q", ()), dtype=np.float64)
+    simplex_atol = 1e-9
     if (
         samples.ndim != 2
+        or samples.shape[0] < 2
         or samples.shape[1] != len(bindings)
         or point_q.shape != (len(bindings),)
         or not np.isfinite(samples).all()
         or not np.isfinite(point_q).all()
+        or (samples < -simplex_atol).any()
+        or (samples > 1.0 + simplex_atol).any()
+        or (point_q < -simplex_atol).any()
+        or (point_q > 1.0 + simplex_atol).any()
+        or not np.allclose(samples.sum(axis=1), 1.0, rtol=0.0, atol=simplex_atol)
+        or not math.isclose(float(point_q.sum()), 1.0, rel_tol=0.0, abs_tol=simplex_atol)
     ):
-        raise ValueError("DAY0_DIRECT_ENTRY_PROOF_WITNESS_INVALID")
+        raise ValueError("GLOBAL_DAY0_PREPARED_WITNESS_SIMPLEX_INVALID")
+
+    payload.update(dict(current_day0_payload))
     weights = np.ones(samples.shape[0], dtype=np.float64)
     q_by_condition: dict[str, float] = {}
     lcb_by_condition: dict[tuple[str, str], float] = {}
@@ -35606,7 +35900,7 @@ def _direct_day0_entry_probability_and_fdr_proof(
     for index, binding in enumerate(bindings):
         condition_id = str(getattr(binding, "condition_id", "") or "").strip()
         if not condition_id or condition_id in q_by_condition:
-            raise ValueError("DAY0_DIRECT_ENTRY_PROOF_BINDING_INVALID")
+            raise ValueError("GLOBAL_DAY0_PREPARED_WITNESS_BINDING_INVALID")
         q_by_condition[condition_id] = float(point_q[index])
         lcb_by_condition[(condition_id, "buy_yes")] = _lower_cvar(
             samples[:, index], weights, float(witness.band_alpha)
@@ -35614,7 +35908,8 @@ def _direct_day0_entry_probability_and_fdr_proof(
         lcb_by_condition[(condition_id, "buy_no")] = _lower_cvar(
             1.0 - samples[:, index], weights, float(witness.band_alpha)
         )
-        evidence[condition_id] = "DAY0_DIRECT_CURRENT_HOURLY_ENS"
+        evidence[condition_id] = evidence_label
+
     masked_q, masked_lcb = _apply_day0_mask_to_generated_probabilities(
         payload=payload,
         family=family,
@@ -35626,6 +35921,35 @@ def _direct_day0_entry_probability_and_fdr_proof(
         family=family,
         native_costs=native_costs,
         masked_lcb_by_condition=masked_lcb,
+    )
+    posterior_id = getattr(prepared_global_family, "posterior_id", None)
+    if posterior_id is None:
+        posterior_id = payload.get("_edli_spine_posterior_id")
+    probability_authority = str(
+        payload.get("probability_authority")
+        or getattr(prepared_global_family, "probability_authority", None)
+        or ""
+    ).strip()
+    semantics_revision = day0_probability_semantics_revision(
+        getattr(witness, "q_version", None)
+    )
+    if not probability_authority or not semantics_revision:
+        raise ValueError("GLOBAL_DAY0_PREPARED_WITNESS_METADATA_MISSING")
+    p_cal_vector_hash = _probability_vector_hash(
+        float(point_q[index]) for index in range(len(bindings))
+    )
+    p_live_vector_hash = _probability_vector_hash(
+        masked_q[str(candidate.condition_id or "")] for candidate in candidates
+    )
+    evidence.update(
+        {
+            "probability_authority": probability_authority,
+            "posterior_id": posterior_id,
+            "posterior_identity_hash": str(witness.posterior_identity_hash),
+            "probability_semantics_revision": semantics_revision,
+            "p_cal_vector_hash": p_cal_vector_hash,
+            "p_live_vector_hash": p_live_vector_hash,
+        }
     )
     if provenance_capture is not None:
         probability_block = _global_day0_probability_authority_payload(payload)
@@ -35644,6 +35968,8 @@ def _live_yes_probabilities(
     native_costs: dict[tuple[str, str], tuple[dict[str, Any] | None, ExecutionPrice | None, float, float | None, str | None]],
     decision_time: datetime,
     provenance_capture: dict[str, Any] | None = None,
+    prepared_global_family: object | None = None,
+    current_day0_payload: Mapping[str, object] | None = None,
 ) -> tuple[
     dict[str, float],
     dict[tuple[str, str], float],
@@ -35696,6 +36022,17 @@ def _live_yes_probabilities(
             DAY0_PROVISIONAL_CURRENT_SNAPSHOT,
             day0_evidence_finality,
         )
+
+        if prepared_global_family is not None:
+            return _day0_probability_and_fdr_from_prepared_witness(
+                prepared_global_family=prepared_global_family,
+                current_day0_payload=(current_day0_payload or {}),
+                payload=payload,
+                family=family,
+                native_costs=native_costs,
+                decision_time=decision_time,
+                provenance_capture=provenance_capture,
+            )
 
         if day0_evidence_finality(payload) == DAY0_PROVISIONAL_CURRENT_SNAPSHOT:
             city = runtime_cities_by_name().get(str(family.city))
