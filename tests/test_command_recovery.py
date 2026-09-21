@@ -15997,6 +15997,8 @@ class TestRecoveryResolutionTable:
 
     def test_live_tick_full_exit_preserves_prior_partial_realized_pnl(self, tmp_path, monkeypatch):
         """A recovered terminal fill must add every exact earlier reduction."""
+        # This checks recovery semantics, not the production tick time budget.
+        monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "300")
         from src.execution import command_recovery, venue_sync_contract
         from src.state.collateral_ledger import init_collateral_schema
         from src.state.db import init_schema, init_schema_trade_only
@@ -16609,6 +16611,8 @@ class TestRecoveryResolutionTable:
         scope,
     ):
         """Narrow live scopes must not leave matched held entries stranded."""
+        # This checks recovery semantics, not the production tick time budget.
+        monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "300")
         from src.execution import command_recovery, venue_sync_contract
         from src.state.db import init_schema, init_schema_trade_only
         from src.state.collateral_ledger import init_collateral_schema
