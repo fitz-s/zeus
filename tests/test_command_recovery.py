@@ -1504,6 +1504,152 @@ def test_live_tick_lock_contention_defers_once_without_sleep(monkeypatch, lock_e
     }
 
 
+def test_restart_preflight_edli_lock_retry_allows_next_pass(monkeypatch):
+    from src.execution import command_recovery
+
+    attempts = []
+    now = [10.0]
+
+    def _edli_pass():
+        attempts.append("edli")
+        if len(attempts) == 1:
+            raise command_recovery.WriteLeaseTimeout("restart recovery writer busy")
+        return "edli-repaired"
+
+    def _sleep(delay):
+        now[0] += delay
+
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(command_recovery.time, "sleep", _sleep)
+    summary = {}
+
+    assert command_recovery._run_recovery_pass_with_lock_policy(
+        "edli_confirmed_legacy_command_repair",
+        _edli_pass,
+        scope="restart_preflight",
+        summary=summary,
+        deadline_monotonic=11.0,
+        bounded_lock_retry_delays=(0.05,),
+    ) == "edli-repaired"
+    assert command_recovery._run_recovery_pass_with_lock_policy(
+        "stale_intent_created_no_submit",
+        lambda: "next-pass-ran",
+        scope="restart_preflight",
+        summary=summary,
+        deadline_monotonic=11.0,
+    ) == "next-pass-ran"
+    assert attempts == ["edli", "edli"]
+    assert summary == {}
+
+
+def test_restart_preflight_persistent_edli_lock_still_defers_remaining_passes(
+    monkeypatch,
+):
+    from src.execution import command_recovery
+
+    attempts = []
+    now = [20.0]
+
+    def _edli_pass():
+        attempts.append("edli")
+        raise command_recovery.WriteLeaseTimeout("restart recovery writer busy")
+
+    def _sleep(delay):
+        now[0] += delay
+
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(command_recovery.time, "sleep", _sleep)
+    summary = {}
+
+    assert command_recovery._run_recovery_pass_with_lock_policy(
+        "edli_confirmed_legacy_command_repair",
+        _edli_pass,
+        scope="restart_preflight",
+        summary=summary,
+        deadline_monotonic=21.0,
+        bounded_lock_retry_delays=(0.05,),
+    ) is None
+    assert command_recovery._run_recovery_pass_with_lock_policy(
+        "stale_intent_created_no_submit",
+        lambda: pytest.fail("deferred restart pass must not execute"),
+        scope="restart_preflight",
+        summary=summary,
+        deadline_monotonic=21.0,
+    ) is None
+    assert attempts == ["edli", "edli"]
+    assert summary == {
+        "db_lock_deferred": True,
+        "db_lock_deferred_at": "edli_confirmed_legacy_command_repair",
+        "db_lock_deferred_count": 1,
+    }
+
+
+def test_restart_preflight_wires_short_retry_only_to_edli_pass(monkeypatch):
+    from contextlib import nullcontext
+
+    from src.execution import command_recovery, venue_sync_contract
+
+    calls = []
+
+    def _record_pass(label, fn, **kwargs):
+        calls.append((label, tuple(kwargs.get("bounded_lock_retry_delays") or ())))
+        return None
+
+    monkeypatch.setattr(
+        command_recovery,
+        "_run_recovery_pass_with_lock_policy",
+        _record_pass,
+    )
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "open_tracked",
+        lambda *args, **kwargs: nullcontext(None),
+    )
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "assert_no_open_connection",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "capture_venue_read_snapshot",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_deterministic_terminal_no_fill_review_candidates",
+        lambda _conn: [],
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_open_recovery_priming_read_connection",
+        lambda *args, **kwargs: nullcontext(None),
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_collect_recovery_priming_keys",
+        lambda _conn, *, scope: {
+            "order_ids": set(),
+            "idempotency_keys": set(),
+            "condition_ids": set(),
+        },
+    )
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    command_recovery._reconcile_passes_short_conn(
+        MagicMock(),
+        summary,
+        "2026-09-20T00:00:00+00:00",
+        scope="restart_preflight",
+    )
+
+    delays_by_label = dict(calls)
+    assert delays_by_label["edli_confirmed_legacy_command_repair"] == (
+        command_recovery._CAPITAL_RECOVERY_LOCK_RETRY_DELAYS
+    )
+    assert delays_by_label["stale_intent_created_no_submit"] == ()
+
+
 def test_capital_recovery_retries_brief_contention_within_bounded_deadline(
     monkeypatch,
 ):

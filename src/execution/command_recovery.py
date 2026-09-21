@@ -32274,13 +32274,19 @@ def _reconcile_passes_short_conn(
         deadline_monotonic=full_deadline or scheduler_deadline,
     )
 
-    def _run_pass_with_lock_retry(label: str, fn):
+    def _run_pass_with_lock_retry(
+        label: str,
+        fn,
+        *,
+        bounded_lock_retry_delays: Sequence[float] = (),
+    ):
         return _run_recovery_pass_with_lock_policy(
             label,
             fn,
             scope=scope,
             summary=summary,
             deadline_monotonic=apply_deadline,
+            bounded_lock_retry_delays=bounded_lock_retry_delays,
         )
 
     def _client_pass(
@@ -32320,7 +32326,16 @@ def _reconcile_passes_short_conn(
             ),
         )
 
-    def _db_pass(label, pass_fn, summary_key, *, advanced_key="advanced", fold_stayed=True, **pass_kwargs):
+    def _db_pass(
+        label,
+        pass_fn,
+        summary_key,
+        *,
+        advanced_key="advanced",
+        fold_stayed=True,
+        bounded_lock_retry_delays: Sequence[float] = (),
+        **pass_kwargs,
+    ):
         def _apply(conn):
             ps = pass_fn(conn, **pass_kwargs)
             _accumulate(summary, summary_key, ps, advanced_key=advanced_key, fold_stayed=fold_stayed)
@@ -32333,6 +32348,7 @@ def _reconcile_passes_short_conn(
                 conn_factory=apply_conn_factory,
                 label=f"recovery.{label}",
             ),
+            bounded_lock_retry_delays=bounded_lock_retry_delays,
         )
 
     def _post_submit_unknown_absence_fast_pass():
@@ -34122,9 +34138,16 @@ def _reconcile_passes_short_conn(
         return
 
     # Order mirrors the legacy inline body exactly.
-    _db_pass("edli_confirmed_legacy_command_repair",
-             reconcile_edli_confirmed_legacy_command_repairs,
-             "edli_confirmed_legacy_command_repair")
+    _db_pass(
+        "edli_confirmed_legacy_command_repair",
+        reconcile_edli_confirmed_legacy_command_repairs,
+        "edli_confirmed_legacy_command_repair",
+        bounded_lock_retry_delays=(
+            _CAPITAL_RECOVERY_LOCK_RETRY_DELAYS
+            if scope == "restart_preflight"
+            else ()
+        ),
+    )
 
     _db_pass("stale_intent_created_no_submit",
              reconcile_stale_intent_created_no_submit,
