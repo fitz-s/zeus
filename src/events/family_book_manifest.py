@@ -425,7 +425,7 @@ def project_global_selection_observation_envelope(
             else None
         )
     else:
-        point_q = tuple(getattr(probability_witness, "yes_point_q", ()) or ())
+        point_q = tuple(getattr(probability_witness, "yes_point_q", ()))
         if len(point_q) != len(bindings):
             return None
         q_by_bin_id = {
