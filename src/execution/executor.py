@@ -23,7 +23,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from src.config import get_mode, settings
 from src.riskguard.discord_alerts import alert_trade
@@ -6915,6 +6915,7 @@ def execute_exit_order(
     conn: Optional[sqlite3.Connection] = None,
     decision_id: str = "",
     q_version: str = "",
+    pre_venue_cancelled: Callable[[], bool] | None = None,
 ) -> "OrderResult":
     """Place a live sell order via the executor and return a normalized OrderResult.
 
@@ -7820,6 +7821,38 @@ def execute_exit_order(
         # -----------------------------------------------------------------------
         # submit phase — SDK call (INV-30: row already SUBMITTING)
         # -----------------------------------------------------------------------
+        if pre_venue_cancelled is not None:
+            try:
+                pre_venue_abort = bool(pre_venue_cancelled())
+                abort_reason = "global_final_authority_revoked_pre_venue"
+            except Exception as exc:  # noqa: BLE001 - final authority fails closed.
+                pre_venue_abort = True
+                abort_reason = (
+                    "global_final_authority_unavailable_pre_venue:"
+                    f"{type(exc).__name__}"
+                )
+            if pre_venue_abort:
+                abort_at = datetime.now(timezone.utc).isoformat()
+                append_event(
+                    conn,
+                    command_id=command_id,
+                    event_type="SUBMIT_REJECTED",
+                    occurred_at=abort_at,
+                    payload={"reason": abort_reason},
+                )
+                conn.commit()
+                return OrderResult(
+                    trade_id=intent.trade_id,
+                    status="rejected",
+                    reason=abort_reason,
+                    submitted_price=limit_price,
+                    shares=shares,
+                    order_role="exit",
+                    intent_id=intent.intent_id,
+                    idempotency_key=idem.value,
+                    command_id=command_id,
+                    command_state="REJECTED",
+                )
         try:
             client = prepared_client or PolymarketClient()
         except Exception as exc:

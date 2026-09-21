@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-09-14
-# Lifecycle: created=2026-04-27; last_reviewed=2026-09-04; last_reused=2026-09-12
+# Last reused/audited: 2026-09-20
+# Lifecycle: created=2026-04-27; last_reviewed=2026-09-20; last_reused=2026-09-20
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
@@ -6730,6 +6730,74 @@ def test_exit_writer_lease_timeout_has_no_venue_call_or_partial_rows(conn, monke
         assert conn.execute("SELECT COUNT(*) FROM collateral_reservations").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
         assert conn.in_transaction is False
+    finally:
+        _clear_exit_submit_prereqs()
+
+
+def test_exit_prevenue_final_cancel_terminalizes_command_without_sdk_call(
+    conn,
+    monkeypatch,
+):
+    """A final authority revocation closes the prepared command pre-venue."""
+    from src.execution import executor
+    from src.execution.executor import create_exit_order_intent, execute_exit_order
+
+    _enable_exit_submit_prereqs(conn, monkeypatch)
+    snapshot_id = _ensure_snapshot(conn, snapshot_id="snap-exit-final-cancel")
+    conn.commit()
+    calls = []
+
+    class FakeClient:
+        def _ensure_v2_adapter(self):
+            return self
+
+        def get_ctf_collateral_payload(self, *, token_ids):
+            assert token_ids == [YES_TOKEN]
+            calls.append("collateral")
+            return {
+                "authority_tier": "CHAIN",
+                "ctf_token_balances": {YES_TOKEN: 50},
+                "ctf_token_allowances": {YES_TOKEN: 50},
+            }
+
+        def place_limit_order(self, **_kwargs):  # pragma: no cover - tripwire
+            raise AssertionError("final cancellation must prevent SDK placement")
+
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClient)
+    monkeypatch.setattr(executor, "_trade_writer_lease_required", lambda _conn: True)
+    try:
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="pos-exit-final-cancel",
+                token_id=YES_TOKEN,
+                shares=5.0,
+                current_price=0.50,
+                best_bid=0.49,
+                executable_snapshot_id=snapshot_id,
+            ),
+            conn=conn,
+            decision_id="exit-final-cancel",
+            pre_venue_cancelled=lambda: True,
+        )
+
+        assert result.status == "rejected"
+        assert result.reason == "global_final_authority_revoked_pre_venue"
+        assert result.command_state == "REJECTED"
+        assert calls == ["collateral"]
+        assert conn.execute(
+            "SELECT state FROM venue_commands WHERE command_id = ?",
+            (result.command_id,),
+        ).fetchone()[0] == "REJECTED"
+        assert conn.execute(
+            "SELECT event_type FROM venue_command_events WHERE command_id = ? "
+            "ORDER BY sequence_no",
+            (result.command_id,),
+        ).fetchall()[-1][0] == "SUBMIT_REJECTED"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM collateral_reservations "
+            "WHERE command_id = ? AND released_at IS NULL",
+            (result.command_id,),
+        ).fetchone()[0] == 0
     finally:
         _clear_exit_submit_prereqs()
 

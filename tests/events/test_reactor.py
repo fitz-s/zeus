@@ -1039,6 +1039,30 @@ def test_generic_held_completion_deadline_is_not_restarted_in_adapter():
     ) == 145.0
 
 
+def test_generic_final_actuation_fence_cancels_after_stable_preflight():
+    from src.engine.event_reactor_adapter import _generic_final_actuation_is_cancelled
+
+    clock = [129.0]
+    exact_pending = [False]
+    superseded = [False]
+    fence = lambda: _generic_final_actuation_is_cancelled(
+        enabled=True,
+        deadline_monotonic=130.0,
+        exact_completion_pending=lambda: exact_pending[0],
+        epoch_superseded=lambda: superseded[0],
+        monotonic=lambda: clock[0],
+    )
+    assert fence() is False
+    superseded[0] = True
+    assert fence() is True
+    superseded[0] = False
+    exact_pending[0] = True
+    assert fence() is True
+    exact_pending[0] = False
+    clock[0] = 130.0
+    assert fence() is True
+
+
 def test_generic_required_family_wake_coalesces_and_resets_only_after_terminal_cut(
     tmp_path,
 ):

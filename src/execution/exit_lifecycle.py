@@ -3588,6 +3588,7 @@ def place_sell_order(
     execution_authority_deadline_utc: str = "",
     global_sell_receipt_closure: GlobalSellReceiptClosure | None = None,
     red_handoff: Mapping[str, object] | None = None,
+    pre_venue_cancelled: Callable[[], bool] | None = None,
 ) -> OrderResult:
     """Thin compatibility adapter over the executor-level exit-order path."""
 
@@ -3642,9 +3643,21 @@ def place_sell_order(
             kwargs["decision_id"] = decision_id
         if q_version and ("q_version" in params or accepts_kwargs):
             kwargs["q_version"] = q_version
+        if (
+            pre_venue_cancelled is not None
+            and ("pre_venue_cancelled" in params or accepts_kwargs)
+        ):
+            kwargs["pre_venue_cancelled"] = pre_venue_cancelled
         if kwargs:
             return execute_exit_order(intent, **kwargs)
-    return execute_exit_order(intent)
+    return execute_exit_order(
+        intent,
+        **(
+            {"pre_venue_cancelled": pre_venue_cancelled}
+            if pre_venue_cancelled is not None
+            else {}
+        ),
+    )
 
 
 # Statuses that indicate final fill authority. MATCHED/MINED/FILLED are
@@ -7761,6 +7774,7 @@ def execute_exit(
     hard_fact_authority: object | None = None,
     global_sell_prefetched_orderbook: Mapping[str, object] | None = None,
     global_sell_required_snapshot_id: str | None = None,
+    final_actuation_cancelled: Callable[[], bool] | None = None,
 ) -> str:
     """Execute an exit decision. Returns outcome description.
 
@@ -7879,6 +7893,7 @@ def execute_exit(
         hard_fact_authority=hard_fact_authority,
         global_sell_prefetched_orderbook=global_sell_prefetched_orderbook,
         global_sell_required_snapshot_id=global_sell_required_snapshot_id,
+        final_actuation_cancelled=final_actuation_cancelled,
         exit_intent_already_recorded=is_red_force_exit,
     )
 
@@ -7900,6 +7915,7 @@ def _execute_live_exit(
     global_sell_prefetched_orderbook: Mapping[str, object] | None = None,
     global_sell_required_snapshot_id: str | None = None,
     exit_intent_already_recorded: bool = False,
+    final_actuation_cancelled: Callable[[], bool] | None = None,
 ) -> str:
     """Live exit: place sell, check fill, retry on failure."""
     if conn is not None:
@@ -8664,6 +8680,11 @@ def _execute_live_exit(
                     executor_intent,
                     decision_id=decision_id,
                     q_version=q_version,
+                    **(
+                        {"pre_venue_cancelled": final_actuation_cancelled}
+                        if final_actuation_cancelled is not None
+                        else {}
+                    ),
                 )
             )
         else:
@@ -8671,6 +8692,7 @@ def _execute_live_exit(
                 decision_id=decision_id,
                 q_version=q_version,
                 execution_proof_verified=True,
+                pre_venue_cancelled=final_actuation_cancelled,
                 **executor_kwargs,
             )
         sell_result = _coerce_sell_result(position.trade_id, raw_sell_result)

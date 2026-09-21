@@ -2652,6 +2652,26 @@ def _global_batch_deadline_monotonic(
     return deadline
 
 
+def _generic_final_actuation_is_cancelled(
+    *,
+    enabled: bool,
+    deadline_monotonic: float | None,
+    exact_completion_pending: Callable[[], bool],
+    epoch_superseded: Callable[[], bool],
+    monotonic: Callable[[], float] = _time.monotonic,
+) -> bool:
+    """Fail closed at the actual venue seam for one generic held completion."""
+
+    if not enabled:
+        return False
+    if deadline_monotonic is None or monotonic() >= deadline_monotonic:
+        return True
+    try:
+        return bool(exact_completion_pending() or epoch_superseded())
+    except Exception:  # noqa: BLE001 - final authority is fail closed.
+        return True
+
+
 def _global_projected_book_refresh_tokens(
     events: Iterable[object],
 ) -> dict[str, frozenset[str] | None]:
@@ -9283,6 +9303,24 @@ def event_bound_live_adapter_from_trade_conn(
                 == "day0_extreme_event_committed"
             )
 
+        def _generic_final_actuation_cancelled() -> bool:
+            """Keep the generic 30-second/fresh-fact fence through venue I/O."""
+
+            return _generic_final_actuation_is_cancelled(
+                enabled=family_scoped_held_completion,
+                deadline_monotonic=generic_completion_deadline_monotonic,
+                exact_completion_pending=lambda: bool(
+                    exact_held_sell_completion_wake_ids(fail_on_error=True)
+                ),
+                epoch_superseded=_epoch_superseded,
+            )
+
+        final_actuation_cancelled = (
+            _generic_final_actuation_cancelled
+            if family_scoped_held_completion
+            else _hard_day0_authority_cancelled
+        )
+
         def _day0_selection_cancelled() -> bool:
             try:
                 hard_cancelled = _hard_day0_authority_cancelled()
@@ -9293,6 +9331,9 @@ def event_bound_live_adapter_from_trade_conn(
                 _stable_preflight_monitor_handoff[0] = False
                 return True
             if hard_cancelled:
+                _stable_preflight_monitor_handoff[0] = False
+                return True
+            if _generic_final_actuation_cancelled():
                 _stable_preflight_monitor_handoff[0] = False
                 return True
             if _stable_preflight_monitor_handoff[0]:
@@ -9967,7 +10008,7 @@ def event_bound_live_adapter_from_trade_conn(
                 )
             final_block = _global_final_actuation_block_reason(
                 deadline=token.expires_at,
-                hard_authority_cancelled=_hard_day0_authority_cancelled,
+                hard_authority_cancelled=final_actuation_cancelled,
                 checked_at=now,
             )
             if final_block is not None:
@@ -10015,7 +10056,7 @@ def event_bound_live_adapter_from_trade_conn(
                     global_actuation=actuation,
                     preflight_receipt=token.receipt,
                     final_authority_deadline=token.expires_at,
-                    hard_authority_cancelled=_hard_day0_authority_cancelled,
+                    hard_authority_cancelled=final_actuation_cancelled,
                     jit_handoff=token.jit_handoff,
                 )
             )
@@ -12227,7 +12268,7 @@ def event_bound_live_adapter_from_trade_conn(
                 ),
                 epoch_superseded=_epoch_superseded,
                 selection_cancelled=_day0_selection_cancelled,
-                final_actuation_cancelled=_hard_day0_authority_cancelled,
+                final_actuation_cancelled=final_actuation_cancelled,
                 held_sell_reauction_requests=held_sell_reauction_requests,
                 required_held_family_keys=required_held_family_keys,
                 selection_telemetry_observer=(
@@ -15474,6 +15515,7 @@ def _submit_current_global_sell(
                 global_sell_required_snapshot_id=str(
                     market_authority.snapshot.snapshot_id
                 ),
+                final_actuation_cancelled=hard_authority_cancelled,
             )
     except Exception as exc:  # noqa: BLE001 - exit safety remains fail closed
         if exit_evidence is not None and exit_evidence.venue_call_started:
