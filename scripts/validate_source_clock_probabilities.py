@@ -420,7 +420,7 @@ def main():
                 if result is not None
                 else {"status": "INSUFFICIENT_CAUSAL_EVIDENCE"},
                 cases=evidence,
-                candidate_policy="source-policy independent-family pairs/triples/quartets; absent combinations retain zero coverage",
+                candidate_policy="distinct provider-family pairs/triples/quartets; absence retains zero coverage; distinct families do not imply independent errors",
                 excluded=excluded,
                 market_comparison="UNAVAILABLE: requires matching complete contemporaneous family-book evidence",
                 sampling="one fixed local-noon day-ahead case per city/metric/date; stored baseline versus current-law counterfactuals",
