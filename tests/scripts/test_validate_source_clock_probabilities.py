@@ -2,7 +2,7 @@
 # Last reused/audited: 2026-09-21
 # Purpose: Defend causal extraction and native-unit probability comparisons.
 # Reuse: Run before changing source-basket validation; no live database needed.
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import json
 import math
 import sqlite3
@@ -12,6 +12,28 @@ import pytest
 
 from scripts import validate_source_clock_probabilities as validation
 from src.config import City
+
+
+def test_declared_universe_preserves_never_observed_combinations(monkeypatch):
+    monkeypatch.setattr(validation, "OPENMETEO_MODEL_IDS", {
+        "icon_global": "icon_global", "jma_msm": "jma_msm",
+    })
+    declared = validation.declared_baskets()
+    assert "ecmwf_ifs+icon_global" in declared
+    assert "icon_global+jma_msm" in declared
+    assert "ecmwf_ifs+icon_global+jma_msm" in declared
+    # No database, sampled case, or outcome enters the predeclaration.
+    clock = datetime(2026, 9, 18, 12, tzinfo=timezone.utc)
+    vector = validation.ProbabilityVector(("cold", "warm"), (0.7, 0.3), clock)
+    case = validation.ProbabilityValidationCase(
+        city="Chicago", metric="high", target_date=date(2026, 9, 19),
+        decision_at=clock, label_known_at=datetime(2026, 9, 20, tzinfo=timezone.utc),
+        bin_ids=vector.bin_ids, winner_index=0,
+        candidates={"ecmwf_ifs+icon_global": vector}, baseline=vector,
+    )
+    result = validation.validate_probability_candidates([case], predeclared_candidates=declared)
+    assert result.best_tested_direction is None
+    assert result.selected_vs_candidates["icon_global+jma_msm"].coverage == 0.0
 
 
 def city():

@@ -51,6 +51,17 @@ from src.forecast.probability_validation import (  # noqa: E402
 from src.strategy.live_inference.source_clock_vnext import provider_family_for_source  # noqa: E402
 
 
+def declared_baskets():
+    """Fix the comparison universe from source policy, including absent products."""
+    models = sorted({"ecmwf_ifs", *OPENMETEO_MODEL_IDS})
+    return tuple(
+        "+".join(basket)
+        for size in range(2, 5)
+        for basket in itertools.combinations(models, size)
+        if len({provider_family_for_source(model) for model in basket}) == size
+    )
+
+
 def aware(value: object, *, sqlite_utc: bool = False) -> datetime:
     result = (
         value
@@ -165,7 +176,7 @@ def make_candidates(conn, row, provenance, city, decision, history, bins):
         source_cycle_time_iso=row["source_cycle_time"],
         decision_time_iso=decision.isoformat(),
     )
-    # Predeclare the global core plus the decision-time incumbent basket. Do not
+    # Evaluate the global core plus the decision-time incumbent basket. Do not
     # use today's winning basket to define yesterday's candidate universe.
     universe = {"ecmwf_ifs", "icon_global", "ukmo_global_deterministic_10km"}
     universe.update(
@@ -385,6 +396,7 @@ def main():
     parser.add_argument("--start-date", type=date.fromisoformat, required=True)
     parser.add_argument("--exclude-city", action="append", default=[])
     args = parser.parse_args()
+    predeclared = declared_baskets()
     conn = _connect_read_only(
         args.forecasts, deadline_monotonic=clock.monotonic() + 3.0
     )
@@ -406,9 +418,7 @@ def main():
     result = (
         validate_probability_candidates(
             cases,
-            predeclared_candidates=sorted(
-                {name for case in cases for name in case.candidates}
-            ),
+            predeclared_candidates=predeclared,
         )
         if cases
         else None
@@ -420,6 +430,7 @@ def main():
                 if result is not None
                 else {"status": "INSUFFICIENT_CAUSAL_EVIDENCE"},
                 cases=evidence,
+                candidate_policy="source-policy independent-family pairs/triples/quartets; absent combinations retain zero coverage",
                 excluded=excluded,
                 market_comparison="UNAVAILABLE: requires matching complete contemporaneous family-book evidence",
                 sampling="one fixed local-noon day-ahead case per city/metric/date; stored baseline versus current-law counterfactuals",
