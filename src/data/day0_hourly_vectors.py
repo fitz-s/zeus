@@ -3432,7 +3432,8 @@ def read_day0_current_temperature_state(
              WHERE city = ?
                AND source_channel IN ({placeholders})
                AND publish_ts_utc >= ? AND publish_ts_utc < ?
-               AND publish_ts_utc <= ? AND julianday(fetched_at_utc) <= julianday(?)
+               AND julianday(publish_ts_utc) <= julianday(?)
+               AND julianday(fetched_at_utc) <= julianday(?)
              ORDER BY publish_ts_utc DESC, id DESC
             """,
             (
@@ -3446,6 +3447,9 @@ def read_day0_current_temperature_state(
         ).fetchall()
     except sqlite3.Error:
         return None
+    latest_state = None
+    latest_clock = None
+    decision_utc = decision_time.astimezone(UTC)
     for publish_raw, value_raw, unit_raw, station_raw, channel_raw, raw_report, fetched_raw in rows:
         channel = str(channel_raw or "").strip().lower()
         station_raw = str(station_raw or "").strip().upper()
@@ -3457,7 +3461,11 @@ def read_day0_current_temperature_state(
             value = float(value_raw)
         except (TypeError, ValueError):
             continue
-        if published.tzinfo is None or fetched.tzinfo is None or fetched.astimezone(UTC) > decision_time.astimezone(UTC):
+        if published.tzinfo is None or fetched.tzinfo is None:
+            continue
+        published = published.astimezone(UTC)
+        fetched = fetched.astimezone(UTC)
+        if published > decision_utc or fetched > decision_utc:
             continue
         observation_time = published
         if channel == "aviationweather_metar":
@@ -3481,14 +3489,24 @@ def read_day0_current_temperature_state(
                 value = precise_c * 9.0 / 5.0 + 32.0
         elif str(unit_raw or "").strip().upper() != unit:
             continue
-        if observation_time.astimezone(tz).date() != target or not math.isfinite(value):
+        observation_time = observation_time.astimezone(UTC)
+        if (
+            observation_time > decision_utc
+            or observation_time.astimezone(tz).date() != target
+            or not math.isfinite(value)
+        ):
             continue
-        return Day0CurrentTemperatureState(
-            value_native=value,
-            observed_at=observation_time.astimezone(UTC),
-            source=str(channel_raw),
-        )
-    return None
+        # Publication can lag physical observation. Delayed older reports
+        # cannot roll back the current state used by entry and held paths.
+        clock = (observation_time, published, fetched)
+        if latest_clock is None or clock > latest_clock:
+            latest_clock = clock
+            latest_state = Day0CurrentTemperatureState(
+                value_native=value,
+                observed_at=observation_time,
+                source=str(channel_raw),
+            )
+    return latest_state
 
 
 def remaining_day_extremes_c_with_current_state(

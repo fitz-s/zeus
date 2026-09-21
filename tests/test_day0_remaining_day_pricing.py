@@ -1814,6 +1814,20 @@ def test_attached_world_witness_keeps_producer_and_held_paths_identical(
                 "2026-06-10T19:43:00+00:00",
                 "METAR KJFK 101942Z 18008KT 10SM CLR 28/16 A2998 T02800161",
             ),
+            # A delayed old report must not replace the newer physical state.
+            (
+                4, "NYC", "KLGA", "aviationweather_metar",
+                "2026-06-10T19:43:00+00:00", 28.0, "C",
+                "2026-06-10T19:44:00+00:00",
+                "METAR KLGA 101900Z 18008KT 10SM CLR 28/16 A2998 T02800161",
+            ),
+            # A report with future valid time cannot hide a causal witness.
+            (
+                5, "NYC", "KLGA", "aviationweather_metar",
+                "2026-06-10T19:44:00+00:00", 29.0, "C",
+                "2026-06-10T19:44:30+00:00",
+                "METAR KLGA 101950Z 18008KT 10SM CLR 29/16 A2998 T02900161",
+            ),
         ),
     )
     world.commit()
@@ -12299,3 +12313,55 @@ class TestNativeHourlyGrid:
             ), settlement_unit="C", fallback_window_start=observed,
         )
         assert values == [20.0]
+
+
+@pytest.mark.parametrize("unit", ["C", "F"])
+@pytest.mark.parametrize("case", ["delayed", "future", "utc_alias", "correction"])
+def test_current_temperature_selects_latest_causal_observation(unit, case):
+    from src.data.day0_hourly_vectors import read_day0_current_temperature_state
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("""CREATE TABLE observation_prints (
+        id INTEGER PRIMARY KEY, city TEXT, station_id TEXT, source_channel TEXT,
+        publish_ts_utc TEXT, value_native REAL, unit TEXT,
+        fetched_at_utc TEXT, raw_report TEXT
+    )""")
+    cutoff = datetime(2026, 6, 10, 19, 45, tzinfo=UTC)
+    rows = [
+        (1, "Test", "KLGA", "aviationweather_metar",
+         "2026-06-10T19:31:00+00:00", 26.0, "C",
+         "2026-06-10T19:32:00+00:00", "METAR KLGA 101930Z 26/16 T02560161"),
+    ]
+    expected_c = 26.0 if unit == "C" else 25.6
+    expected_at = cutoff.replace(minute=30)
+    if case in {"delayed", "future"}:
+        valid_time = "101900Z" if case == "delayed" else "101950Z"
+        rows.append((2, "Test", "KLGA", "aviationweather_metar",
+                     "2026-06-10T19:44:00+00:00", 29.0, "C",
+                     "2026-06-10T19:44:00+00:00",
+                     f"METAR KLGA {valid_time} 29/16 T02900161"))
+    elif case == "utc_alias":
+        rows.append((2, "Test", "KLGA", "aviationweather_metar",
+                     "2026-06-10T19:45:00Z", 27.0, "C",
+                     "2026-06-10T19:45:00Z", "METAR KLGA 101945Z 27/16 T02700161"))
+        expected_c, expected_at = 27.0, cutoff
+    else:
+        rows.append((2, "Test", "KLGA", "aviationweather_metar",
+                     "2026-06-10T19:44:00+00:00", 27.0, "C",
+                     "2026-06-10T19:44:00+00:00", "METAR KLGA 101930Z 27/16 T02700161"))
+        expected_c = 27.0
+    conn.executemany("INSERT INTO observation_prints VALUES (?,?,?,?,?,?,?,?,?)", rows)
+    try:
+        state = read_day0_current_temperature_state(
+            conn=conn,
+            city=SimpleNamespace(name="Test", timezone="UTC", settlement_unit=unit,
+                                 settlement_source_type="wu_icao", wu_station="KLGA"),
+            target_date="2026-06-10", decision_time=cutoff,
+        )
+        assert state is not None
+        assert state.observed_at == expected_at
+        assert state.value_native == pytest.approx(
+            expected_c if unit == "C" else expected_c * 9.0 / 5.0 + 32.0
+        )
+    finally:
+        conn.close()
