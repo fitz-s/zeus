@@ -10897,6 +10897,258 @@ def test_monitor_incomplete_keeps_canonical_debt_without_false_coverage(monkeypa
             main._held_position_monitor_claim.release()
 
 
+def test_full_book_monitor_success_clears_cadence_debt_before_generic_listener(
+    monkeypatch,
+):
+    import src.main as main
+    from src.execution import exit_lifecycle
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+    from src.runtime import reactor_wake
+
+    family = ("Chicago", "2026-09-21", "high")
+    generic = reactor_wake.ReactorWake(
+        "strict-generic-after-monitor",
+        "2026-09-21T04:30:00+00:00",
+        "held_position_monitor",
+        reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        forecast_families=(family,),
+    )
+    dispatched: list[dict[str, object]] = []
+
+    class ReactorGate:
+        def acquire(self, *, timeout):
+            return True
+
+        def release(self):
+            return None
+
+        def locked(self):
+            return False
+
+    def run_core(**kwargs):
+        # The lifecycle releases this callback only after its core artifact
+        # commits; the scheduler finally remains an idempotent backstop.
+        kwargs["mark_held_position_monitor_complete"]()
+        return True
+
+    monkeypatch.setattr(main, "_edli_reactor_active_lock", ReactorGate())
+    monkeypatch.setattr(main, "_current_periodic_monitor_obligation_count", lambda: 1)
+    monkeypatch.setattr(main, "_day0_exit_monitor_priority_pending", lambda: False)
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(exit_lifecycle, "run_exit_monitor_cycle", run_core)
+    monkeypatch.setattr(main, "_held_position_monitor_recovery_evidence", lambda: {})
+    monkeypatch.setattr(
+        main,
+        "_held_position_monitor_recovery_counts",
+        lambda _evidence: (0, 0, {}),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "exact_held_sell_completion_wake_ids",
+        lambda **_kwargs: frozenset(),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "read_reactor_wake",
+        lambda **_kwargs: generic,
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "coalescible_reactor_wakes",
+        lambda selected: (selected,),
+    )
+    monkeypatch.setattr(
+        main,
+        "_edli_event_reactor_cycle",
+        lambda **kwargs: dispatched.append(kwargs) or False,
+    )
+    previous_last_wake_id = main._edli_last_reactor_wake_id
+    main._held_position_monitor_canonical_debt.set()
+    main._periodic_held_position_monitor_fairness_debt.set()
+    main._held_position_monitor_handoff_pending.clear()
+    main._periodic_held_position_monitor_handoff_pending.clear()
+    main._periodic_held_position_monitor_successor_pending.clear()
+    try:
+        assert main._exit_monitor_cycle() is True
+        assert not main._held_position_monitor_canonical_debt.is_set()
+        assert not main._periodic_held_position_monitor_fairness_debt.is_set()
+
+        # The ordinary listener can now admit the existing strict generic
+        # completion through its unchanged reactor path.
+        assert main._edli_reactor_wake_poll_once() is False
+        assert [item["producer_wake_ids"] for item in dispatched] == [
+            (generic.wake_id,)
+        ]
+        assert dispatched[0]["producer_family_scoped_held_completion"] is True
+    finally:
+        main._edli_last_reactor_wake_id = previous_last_wake_id
+        main._held_position_monitor_canonical_debt.clear()
+        main._periodic_held_position_monitor_fairness_debt.clear()
+        main._held_position_monitor_handoff_pending.clear()
+        main._periodic_held_position_monitor_handoff_pending.clear()
+        main._periodic_held_position_monitor_successor_pending.clear()
+        if main._held_position_monitor_claim.locked():
+            main._held_position_monitor_claim.release()
+
+
+@pytest.mark.parametrize(
+    "pending_event_name",
+    (
+        "_held_position_monitor_handoff_pending",
+        "_periodic_held_position_monitor_successor_pending",
+    ),
+)
+def test_active_monitor_handoff_observes_but_cannot_claim_generic_completion(
+    monkeypatch, pending_event_name
+):
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    generic = reactor_wake.ReactorWake(
+        "strict-generic-during-monitor-handoff",
+        "2026-09-21T04:31:00+00:00",
+        "held_position_monitor",
+        reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        forecast_families=(("Chicago", "2026-09-21", "high"),),
+    )
+    read_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        reactor_wake,
+        "exact_held_sell_completion_wake_ids",
+        lambda **_kwargs: frozenset(),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "read_reactor_wake",
+        lambda **kwargs: read_calls.append(kwargs) or generic,
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "coalescible_reactor_wakes",
+        lambda _wake: pytest.fail("active monitor handoff must not select generic work"),
+    )
+    monkeypatch.setattr(
+        main,
+        "_edli_event_reactor_cycle",
+        lambda **_kwargs: pytest.fail("active monitor handoff must not claim generic work"),
+    )
+    main._held_position_monitor_canonical_debt.clear()
+    main._periodic_held_position_monitor_fairness_debt.clear()
+    main._held_position_monitor_handoff_pending.clear()
+    main._periodic_held_position_monitor_successor_pending.clear()
+    getattr(main, pending_event_name).set()
+    try:
+        assert main._edli_reactor_wake_poll_once() is False
+        # This is only the existing Day0-priority probe. A generic top wake
+        # must not be selected, coalesced, acknowledged, or executed while a
+        # monitor handoff is active.
+        assert read_calls == [{"fail_on_error": True}]
+    finally:
+        main._held_position_monitor_handoff_pending.clear()
+        main._periodic_held_position_monitor_successor_pending.clear()
+
+
+@pytest.mark.parametrize(
+    ("counts", "evidence_error"),
+    (
+        ((1, 0, {}), None),
+        ((0, 1, {}), None),
+        (None, OSError("cadence unreadable")),
+    ),
+)
+def test_full_book_monitor_success_retains_cadence_debt_when_recovery_is_not_current(
+    monkeypatch, counts, evidence_error
+):
+    import src.main as main
+    from src.execution import exit_lifecycle
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+
+    class ReactorGate:
+        def acquire(self, *, timeout):
+            return True
+
+        def release(self):
+            return None
+
+    monkeypatch.setattr(main, "_edli_reactor_active_lock", ReactorGate())
+    monkeypatch.setattr(main, "_current_periodic_monitor_obligation_count", lambda: 1)
+    monkeypatch.setattr(main, "_day0_exit_monitor_priority_pending", lambda: False)
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(exit_lifecycle, "run_exit_monitor_cycle", lambda **_kwargs: True)
+    if evidence_error is not None:
+        monkeypatch.setattr(
+            main,
+            "_held_position_monitor_recovery_evidence",
+            lambda: (_ for _ in ()).throw(evidence_error),
+        )
+    else:
+        monkeypatch.setattr(main, "_held_position_monitor_recovery_evidence", lambda: {})
+        monkeypatch.setattr(
+            main,
+            "_held_position_monitor_recovery_counts",
+            lambda _evidence: counts,
+        )
+
+    main._held_position_monitor_canonical_debt.set()
+    main._held_position_monitor_handoff_pending.clear()
+    main._periodic_held_position_monitor_handoff_pending.clear()
+    main._periodic_held_position_monitor_successor_pending.clear()
+    try:
+        assert main._exit_monitor_cycle() is True
+        assert main._held_position_monitor_canonical_debt.is_set()
+    finally:
+        main._held_position_monitor_canonical_debt.clear()
+        main._periodic_held_position_monitor_fairness_debt.clear()
+        main._held_position_monitor_handoff_pending.clear()
+        main._periodic_held_position_monitor_handoff_pending.clear()
+        main._periodic_held_position_monitor_successor_pending.clear()
+        if main._held_position_monitor_claim.locked():
+            main._held_position_monitor_claim.release()
+
+
+def test_targeted_monitor_success_cannot_clear_canonical_cadence_debt(monkeypatch):
+    import src.main as main
+    from src.execution import exit_lifecycle
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+
+    class ReactorGate:
+        def acquire(self, *, timeout):
+            return True
+
+        def release(self):
+            return None
+
+    monkeypatch.setattr(main, "_edli_reactor_active_lock", ReactorGate())
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(exit_lifecycle, "run_exit_monitor_cycle", lambda **_kwargs: True)
+    monkeypatch.setattr(
+        main,
+        "_canonical_overdue_monitor_families",
+        lambda **_kwargs: frozenset(),
+    )
+    monkeypatch.setattr(
+        main,
+        "_held_position_monitor_recovery_evidence",
+        lambda: pytest.fail("targeted monitor must not clear full-book cadence debt"),
+    )
+
+    main._held_position_monitor_canonical_debt.set()
+    main._held_position_monitor_handoff_pending.clear()
+    try:
+        assert main._exit_monitor_cycle(
+            target_families=frozenset({("Chicago", "2026-09-21", "high")}),
+        ) is True
+        assert main._held_position_monitor_canonical_debt.is_set()
+    finally:
+        main._held_position_monitor_canonical_debt.clear()
+        main._held_position_monitor_handoff_pending.clear()
+        if main._held_position_monitor_claim.locked():
+            main._held_position_monitor_claim.release()
+
+
 @pytest.mark.parametrize(
     ("monitor_kwargs", "periodic_pending"),
     (

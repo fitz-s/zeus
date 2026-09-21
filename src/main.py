@@ -10484,6 +10484,24 @@ def _exit_monitor_cycle(
             # missing executable books; that is not coverage.
             _periodic_exit_monitor_urgent_yielded.clear()
             _forecast_held_monitor_preempt_requested.clear()
+            try:
+                evidence = _held_position_monitor_recovery_evidence()
+                overdue_count, future_count, _groups = (
+                    _held_position_monitor_recovery_counts(evidence)
+                )
+            except Exception as exc:  # noqa: BLE001 - unknown cadence stays debt.
+                _held_position_monitor_canonical_debt.set()
+                logger.warning(
+                    "full-book held-position monitor cadence evidence unavailable; "
+                    "retaining canonical debt: %s",
+                    exc,
+                    exc_info=True,
+                )
+            else:
+                if overdue_count <= 0 and future_count <= 0:
+                    _held_position_monitor_canonical_debt.clear()
+                else:
+                    _held_position_monitor_canonical_debt.set()
         return True
     finally:
         _release_monitor_claim()
