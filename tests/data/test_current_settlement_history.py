@@ -1,3 +1,7 @@
+# Created: 2026-09-20
+# Last reused/audited: 2026-09-21
+# Purpose: Defend current-resolver identity and chronological probability validation.
+# Reuse: Run before changing its source/validation reader; isolated fixtures only.
 from __future__ import annotations
 
 import json

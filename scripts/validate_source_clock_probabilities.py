@@ -1,0 +1,435 @@
+#!/usr/bin/env python3
+# Created: 2026-09-20
+# Purpose: Compare causal source baskets against current-resolver settlement truth.
+# Reuse: Read-only canonical inputs; stdout evidence never activates a live artifact.
+"""Day-ahead, fixed-local-noon source-basket validation using production math.
+
+One case per city/metric/date prevents busy cities and repeated recomputations
+from manufacturing sample size. Historical labels retain their actual knowledge
+times. Missing evidence is counted, never reconstructed as an earlier capture.
+"""
+
+from __future__ import annotations
+
+import argparse
+from collections import Counter
+from dataclasses import asdict
+from datetime import date, datetime, time, timedelta, timezone
+import itertools
+import json
+import math
+from pathlib import Path
+import sqlite3
+import sys
+import time as clock
+from zoneinfo import ZoneInfo
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.calibration.emos import bin_probability_settlement  # noqa: E402
+from src.calibration.scoring import validate_probability_group  # noqa: E402
+from src.config import runtime_cities_by_name  # noqa: E402
+from src.contracts.settlement_semantics import SettlementSemantics  # noqa: E402
+from src.data.current_settlement_history import read_current_settlement_history  # noqa: E402
+from src.data.bayes_precision_fusion_download import OPENMETEO_MODEL_IDS  # noqa: E402
+from src.data.replacement_current_value_serving import read_current_instrument_values  # noqa: E402
+from src.data.replacement_forecast_cycle_policy import (  # noqa: E402
+    replacement_source_cycle_max_age_hours,
+)  # noqa: E402
+from src.data.replacement_forecast_materializer import (  # noqa: E402
+    _current_evidence_shape_from_values,
+)  # noqa: E402
+from src.forecast.center import raw_second_moment_weights  # noqa: E402
+from src.state.db import _connect_read_only  # noqa: E402
+from src.forecast.probability_validation import (  # noqa: E402
+    ProbabilityValidationCase,
+    ProbabilityVector,
+    validate_probability_candidates,
+)
+from src.strategy.live_inference.source_clock_vnext import provider_family_for_source  # noqa: E402
+
+
+def aware(value: object, *, sqlite_utc: bool = False) -> datetime:
+    result = (
+        value
+        if isinstance(value, datetime)
+        else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    )
+    if result.tzinfo is None:
+        if not sqlite_utc:
+            raise ValueError("missing timezone")
+        result = result.replace(tzinfo=timezone.utc)
+    return result.astimezone(timezone.utc)
+
+
+def bounded(conn: sqlite3.Connection) -> None:
+    deadline = clock.monotonic() + 3.0
+    conn.set_progress_handler(lambda: clock.monotonic() > deadline, 10000)
+
+
+def native_value(value_c: float, unit: str) -> float:
+    return value_c * 1.8 + 32.0 if unit == "F" else value_c
+
+
+def ordered_bins(provenance: dict, city, settlement: float):
+    semantics = SettlementSemantics.for_city(city)
+    semantics.assert_settlement_value(settlement)
+    bins = sorted(
+        provenance["bin_topology"],
+        key=lambda b: -math.inf if b["lower_c"] is None else float(b["lower_c"]),
+    )
+    if (
+        len(bins) < 2
+        or bins[0]["lower_c"] is not None
+        or bins[-1]["upper_c"] is not None
+    ):
+        raise ValueError("incomplete bin partition")
+    last = None
+    winners = []
+    for i, b in enumerate(bins):
+        if (
+            b["settlement_unit"] != city.settlement_unit
+            or b["rounding_rule"] != semantics.rounding_rule
+        ):
+            raise ValueError("bin settlement identity mismatch")
+        lo = (
+            None
+            if b["lower_c"] is None
+            else native_value(float(b["lower_c"]), city.settlement_unit)
+        )
+        hi = (
+            None
+            if b["upper_c"] is None
+            else native_value(float(b["upper_c"]), city.settlement_unit)
+        )
+        for value in (lo, hi):
+            if value is not None and (
+                not math.isfinite(value) or abs(value - round(value)) > 1e-7
+            ):
+                raise ValueError("noninteger native bin label")
+        if i and (lo is None or last is None or abs(lo - last - 1.0) > 1e-7):
+            raise ValueError("overlapping or missing native bin")
+        if (lo is None or settlement >= lo - 1e-7) and (
+            hi is None or settlement <= hi + 1e-7
+        ):
+            winners.append(i)
+        last = hi
+    if len(winners) != 1:
+        raise ValueError("ambiguous settlement winner")
+    return bins, winners[0]
+
+
+def make_candidates(conn, row, provenance, city, decision, history, bins):
+    fusion = provenance["bayes_precision_fusion"]
+    shape_identity = fusion["current_evidence_shape"]
+    bounded(conn)
+    snapshot = conn.execute(
+        "SELECT * FROM ensemble_snapshots WHERE snapshot_id=?",
+        (shape_identity["snapshot_id"],),
+    ).fetchone()
+    if snapshot is None:
+        raise ValueError("ensemble snapshot missing")
+    s = dict(snapshot)
+    if (s["city"], s["target_date"], s["temperature_metric"]) != (
+        row["city"],
+        row["target_date"],
+        row["temperature_metric"],
+    ):
+        raise ValueError("ensemble target mismatch")
+    if s["authority"] != "VERIFIED" or s["boundary_ambiguous"]:
+        raise ValueError("ensemble physical identity unavailable")
+    ens_known = max(
+        aware(s[k], sqlite_utc=k == "recorded_at")
+        for k in ("source_available_at", "fetch_time", "recorded_at")
+    )
+    if ens_known > decision or aware(s["source_cycle_time"]) != aware(
+        row["source_cycle_time"]
+    ):
+        raise ValueError("ensemble not same-cycle causal")
+    members = tuple(
+        float(value) for value in json.loads(s["members_json"]) if value is not None
+    )
+    members_unit = str(s["members_unit"] or "").strip().lower()
+    if members_unit in {"degf", "f", "°f"}:
+        members = tuple((value - 32.0) * 5.0 / 9.0 for value in members)
+    elif members_unit not in {"degc", "c", "°c"}:
+        raise ValueError("ensemble unit unavailable")
+    bounded(conn)
+    served = read_current_instrument_values(
+        conn,
+        city=row["city"],
+        metric=row["temperature_metric"],
+        target_date=row["target_date"],
+        source_cycle_time_iso=row["source_cycle_time"],
+        decision_time_iso=decision.isoformat(),
+    )
+    # Predeclare the global core plus the decision-time incumbent basket. Do not
+    # use today's winning basket to define yesterday's candidate universe.
+    universe = {"ecmwf_ifs", "icon_global", "ukmo_global_deterministic_10km"}
+    universe.update(
+        (fusion.get("source_clock_one_scheme") or {}).get("configured_sources", ())
+    )
+    values, cycles, known, raw_ids = {}, {}, {}, {}
+    for model in sorted(universe.intersection(served)):
+        item = served[model]
+        age_hours = (decision - aware(item.served_cycle)).total_seconds() / 3600.0
+        if not 0.0 <= age_hours <= replacement_source_cycle_max_age_hours():
+            continue
+        bounded(conn)
+        raw = conn.execute(
+            "SELECT * FROM raw_model_forecasts WHERE raw_model_forecast_id=?",
+            (item.raw_model_forecast_id,),
+        ).fetchone()
+        if raw is None:
+            continue
+        r = dict(raw)
+        try:
+            stamp = max(
+                aware(r[k], sqlite_utc=k == "recorded_at")
+                for k in ("source_available_at", "captured_at", "recorded_at")
+            )
+            if (
+                stamp > decision
+                or r["endpoint"] != "single_runs"
+                or r["coverage_status"] != "COVERED"
+            ):
+                continue
+            if not all(r[k] for k in ("source_id", "product_id", "request_url_hash")):
+                continue
+            addressed_model = OPENMETEO_MODEL_IDS.get(model, model)
+            if r["model_name"] != addressed_model or not r["product_id"].startswith(
+                addressed_model + "::"
+            ):
+                continue
+            request = json.loads(r["request_params_json"])
+            if (
+                request.get("models") != addressed_model
+                or request.get("temperature_unit") != "celsius"
+            ):
+                continue
+            if (
+                abs(float(r["latitude_requested"]) - city.lat) > 0.01
+                or abs(float(r["longitude_requested"]) - city.lon) > 0.01
+            ):
+                continue
+            if r["timezone_requested"] != city.timezone or not math.isfinite(
+                item.value_c
+            ):
+                continue
+        except (TypeError, ValueError):
+            continue
+        values[model], cycles[model], known[model], raw_ids[model] = (
+            item.value_c,
+            item.served_cycle,
+            stamp,
+            item.raw_model_forecast_id,
+        )
+    stats = {}
+    for model in values:
+        errors = [
+            (h["values"][model] - h["settlement_c"]) ** 2
+            for h in history
+            if h["target_date"] < row["target_date"]
+            and h["known_at"] < decision
+            and model in h["values"]
+        ]
+        stats[model] = (sum(errors) / len(errors), len(errors)) if errors else (None, 0)
+    ids = tuple(b["bin_id"] for b in bins)
+    out = {}
+    for size in range(2, min(4, len(values)) + 1):
+        for basket in itertools.combinations(sorted(values), size):
+            if len({provider_family_for_source(m) for m in basket}) != size:
+                continue
+            weights = raw_second_moment_weights({m: stats[m] for m in basket}, unit="C")
+            center = sum(weights[m] * values[m] for m in basket)
+            try:
+                shape = _current_evidence_shape_from_values(
+                    snapshot_id=s["snapshot_id"],
+                    source_cycle_time=s["source_cycle_time"],
+                    source_available_at=s["source_available_at"],
+                    members_c=members,
+                    provider_values_c={m: values[m] for m in basket},
+                    provider_weights=weights,
+                    center_c=center,
+                    carrier_cycle_time=row["source_cycle_time"],
+                    provider_cycles={m: cycles[m] for m in basket},
+                )
+                q = tuple(
+                    bin_probability_settlement(
+                        center,
+                        shape.predictive_sigma_c,
+                        b["lower_c"],
+                        b["upper_c"],
+                        half_step=float(b["settlement_step_c"]) / 2.0,
+                        rounding_rule=b["rounding_rule"],
+                    )
+                    for b in bins
+                )
+                validate_probability_group(q)
+            except ValueError:
+                continue
+            out["+".join(basket)] = ProbabilityVector(
+                values=q,
+                available_at=max(ens_known, *(known[m] for m in basket)),
+                bin_ids=ids,
+            )
+    return out, values, raw_ids
+
+
+def extract_cases(conn, *, cities, as_of, start_date):
+    bounded(conn)
+    settlements = read_current_settlement_history(
+        conn, cities_by_name=cities, as_of=as_of
+    )
+    excluded = Counter(settlements.excluded_reason_counts)
+    cases, evidence, past = [], [], {}
+    for truth in sorted(
+        settlements.rows, key=lambda x: (str(x.target_date), x.city, x.metric)
+    ):
+        target = date.fromisoformat(str(truth.target_date))
+        if target < start_date:
+            continue
+        city = cities[truth.city]
+        decision = datetime.combine(
+            target - timedelta(days=1), time(12), ZoneInfo(city.timezone)
+        ).astimezone(timezone.utc)
+        bounded(conn)
+        row = conn.execute(
+            "SELECT * FROM forecast_posteriors WHERE city=? AND target_date=? AND temperature_metric=? "
+            "AND julianday(computed_at)<=julianday(?) AND julianday(recorded_at)<=julianday(?) "
+            "AND julianday(computed_at)>=julianday(?) ORDER BY computed_at DESC,posterior_id DESC LIMIT 1",
+            (
+                truth.city,
+                str(target),
+                truth.metric,
+                decision.isoformat(),
+                decision.isoformat(),
+                (decision - timedelta(hours=1)).isoformat(),
+            ),
+        ).fetchone()
+        if row is None:
+            excluded["no_causal_day_ahead_posterior"] += 1
+            continue
+        try:
+            row = dict(row)
+            provenance = json.loads(row["provenance_json"])
+            bins, winner = ordered_bins(provenance, city, truth.settlement_value)
+            ids = tuple(b["bin_id"] for b in bins)
+            baseline_q = json.loads(row["q_json"])
+            if set(baseline_q) != set(ids):
+                raise ValueError("posterior bin identity mismatch")
+            baseline = ProbabilityVector(
+                values=tuple(baseline_q[k] for k in ids),
+                available_at=max(
+                    aware(row["computed_at"]),
+                    aware(row["recorded_at"], sqlite_utc=True),
+                ),
+                bin_ids=ids,
+            )
+            key = (truth.city, truth.metric)
+            history = past.setdefault(key, [])
+            candidates, values, raw_ids = make_candidates(
+                conn, row, provenance, city, decision, history, bins
+            )
+            known_at = aware(truth.label_known_at)
+            settlement_c = (
+                (truth.settlement_value - 32.0) / 1.8
+                if truth.settlement_unit == "F"
+                else truth.settlement_value
+            )
+            history.append(
+                dict(
+                    target_date=str(target),
+                    known_at=known_at,
+                    values=values,
+                    settlement_c=settlement_c,
+                )
+            )
+            if not candidates:
+                raise ValueError("no_qualified_source_combination")
+            cases.append(
+                ProbabilityValidationCase(
+                    city=truth.city,
+                    metric=truth.metric,
+                    target_date=target,
+                    decision_at=decision,
+                    label_known_at=known_at,
+                    bin_ids=ids,
+                    winner_index=winner,
+                    candidates=candidates,
+                    baseline=baseline,
+                )
+            )
+            evidence.append(
+                dict(
+                    city=truth.city,
+                    metric=truth.metric,
+                    target_date=str(target),
+                    decision_at=decision.isoformat(),
+                    posterior_id=row["posterior_id"],
+                    source_row_ids=raw_ids,
+                    label_known_at=known_at.isoformat(),
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            excluded[str(exc)] += 1
+    return cases, evidence, dict(excluded)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--forecasts", type=Path, required=True)
+    parser.add_argument("--as-of", required=True)
+    parser.add_argument("--start-date", type=date.fromisoformat, required=True)
+    parser.add_argument("--exclude-city", action="append", default=[])
+    args = parser.parse_args()
+    conn = _connect_read_only(
+        args.forecasts, deadline_monotonic=clock.monotonic() + 3.0
+    )
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only=1")
+    try:
+        cases, evidence, excluded = extract_cases(
+            conn,
+            cities={
+                name: city
+                for name, city in runtime_cities_by_name().items()
+                if name not in args.exclude_city
+            },
+            as_of=aware(args.as_of),
+            start_date=args.start_date,
+        )
+    finally:
+        conn.close()
+    result = (
+        validate_probability_candidates(
+            cases,
+            predeclared_candidates=sorted(
+                {name for case in cases for name in case.candidates}
+            ),
+        )
+        if cases
+        else None
+    )
+    print(
+        json.dumps(
+            dict(
+                validation=asdict(result)
+                if result is not None
+                else {"status": "INSUFFICIENT_CAUSAL_EVIDENCE"},
+                cases=evidence,
+                excluded=excluded,
+                market_comparison="UNAVAILABLE: requires matching complete contemporaneous family-book evidence",
+                sampling="one fixed local-noon day-ahead case per city/metric/date; stored baseline versus current-law counterfactuals",
+                latency_advantage_proven=False,
+            ),
+            default=str,
+            sort_keys=True,
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()

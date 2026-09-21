@@ -1,6 +1,8 @@
 # Created: 2026-09-20
 # Last reused/audited: 2026-09-20
-# Authority basis: PR528 chronological candidate-validation contract.
+# Purpose: Validate chronological full-vector comparisons without future-label leakage.
+# Reuse: Run before changing candidate selection or superiority claims.
+# Authority basis: current-resolver probability validation operator request, 2026-09-20.
 """Antibodies for causal, full-vector probability candidate validation."""
 from __future__ import annotations
 
