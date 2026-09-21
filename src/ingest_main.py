@@ -4062,10 +4062,10 @@ _ARTIFACT_FIT_SCRIPTS = (
 def _artifact_refit_tick():
     """Weekly walk-forward refit of the four fitted serving artifacts.
 
-    Each fitter is read-only over zeus-forecasts.db (registered read_only_ro_uri in
-    db_writer_lock) and writes only its state/<name>/ artifact + ACTIVE.json pointer.
-    Consumers hot-reload on the pointer's mtime (loader wrappers, 2021b8bea), so a
-    refit lands in live serving on the next call — no daemon restart. Fail-soft
+    Each fitter is read-only over zeus-forecasts.db. Source-clock weights emit a
+    candidate for causal validation; this job does not activate that candidate.
+    Other fitters retain their own publication contracts. Consumers hot-reload
+    activated artifacts on the pointer's mtime, without a daemon restart. Fail-soft
     per-script: one fitter failing must not block the others; the stale artifact
     simply stays active (fail-open consumers already price that)."""
     import subprocess
