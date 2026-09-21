@@ -1,6 +1,6 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-09-19
-# Lifecycle: created=2026-05-24; last_reviewed=2026-09-19; last_reused=2026-09-19
+# Last reused/audited: 2026-09-20
+# Lifecycle: created=2026-05-24; last_reviewed=2026-09-20; last_reused=2026-09-20
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -887,6 +887,156 @@ def test_generic_family_completion_contract_is_separate_from_exact_v4_scope():
     assert "GLOBAL_REQUIRED_HELD_FAMILY_SCOPE_MIXED_WITH_EXACT" in adapter_source
     assert "GLOBAL_AUCTION_REQUIRED_HELD_FAMILY_PREPARATION_INCOMPLETE" in batch_source
     assert "GLOBAL_AUCTION_REQUIRED_HELD_FAMILY_BOOK_INCOMPLETE" in batch_source
+    assert "completion_family_keys = required_held_family_keys" in adapter_source
+    assert "restrict_to_family_keys=completion_family_keys" in adapter_source
+    assert "or family_scoped_held_completion" in reactor_source
+    assert "and not family_scoped_held_completion" in reactor_source
+
+
+def test_generic_held_completion_qualification_requires_an_unmixed_no_v4_batch():
+    import src.main as main
+    from src.runtime.reactor_wake import GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+
+    valid = SimpleNamespace(
+        source="held_position_monitor",
+        reason=GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        event_ids=(),
+        forecast_families=(("Chicago", "2026-05-25", "high"),),
+        held_sell_reauction_requests=(),
+    )
+    assert main._is_strict_generic_held_family_completion_wake_batch(
+        (valid,),
+        exact_held_sell_wake_ids=frozenset(),
+    )
+    def altered(**changes):
+        fields = vars(valid) | changes
+        return SimpleNamespace(**fields)
+
+    for invalid in (
+        altered(source="forecast"),
+        altered(reason="forecast_posterior_advanced"),
+        altered(event_ids=("event",)),
+        altered(forecast_families=()),
+        altered(held_sell_reauction_requests=(object(),)),
+    ):
+        assert not main._is_strict_generic_held_family_completion_wake_batch(
+            (valid, invalid),
+            exact_held_sell_wake_ids=frozenset(),
+        )
+    assert not main._is_strict_generic_held_family_completion_wake_batch(
+        (valid,),
+        exact_held_sell_wake_ids=frozenset({"exact-v4"}),
+    )
+
+
+def test_generic_held_completion_latch_is_bounded_and_fails_closed():
+    from src.events import reactor
+
+    exact_pending = [False]
+    monitor_debt = [False]
+    clock = [100.0]
+    deadline = reactor._try_latch_generic_held_completion(
+        qualified=True,
+        durable_exact_completion_pending=lambda: exact_pending[0],
+        monitor_debt_pending=lambda: monitor_debt[0],
+        monotonic=lambda: clock[0],
+    )
+    assert deadline == 130.0
+    monitor_debt[0] = True
+    assert not reactor._generic_held_completion_latch_cancelled(
+        deadline_monotonic=deadline,
+        durable_exact_completion_pending=lambda: exact_pending[0],
+        monotonic=lambda: clock[0],
+    )
+    exact_pending[0] = True
+    assert reactor._generic_held_completion_latch_cancelled(
+        deadline_monotonic=deadline,
+        durable_exact_completion_pending=lambda: exact_pending[0],
+        monotonic=lambda: clock[0],
+    )
+    assert reactor._try_latch_generic_held_completion(
+        qualified=True,
+        durable_exact_completion_pending=lambda: False,
+        monitor_debt_pending=lambda: True,
+        monotonic=lambda: clock[0],
+    ) is None
+    assert reactor._try_latch_generic_held_completion(
+        qualified=True,
+        durable_exact_completion_pending=lambda: (
+            (_ for _ in ()).throw(OSError())
+        ),
+        monitor_debt_pending=lambda: False,
+        monotonic=lambda: clock[0],
+    ) is None
+    clock[0] = 130.0
+    assert reactor._generic_held_completion_latch_cancelled(
+        deadline_monotonic=deadline,
+        durable_exact_completion_pending=lambda: False,
+        monotonic=lambda: clock[0],
+    )
+
+
+def test_generic_held_completion_latch_applies_to_selection_until_deadline(
+    monkeypatch,
+):
+    from src.events import reactor
+
+    clock = [100.0]
+    monkeypatch.setattr(reactor.time, "monotonic", lambda: clock[0])
+    monitor_debt = [True]
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    try:
+        _, cancelled = reactor._global_auction_monitor_cancellation_probe(
+            None,
+            monitor_debt_pending=lambda: monitor_debt[0],
+            completion_due=True,
+            monitor_debt_grace_deadline_monotonic=130.0,
+        )
+        assert cancelled() is False
+        clock[0] = 130.0
+        assert cancelled() is True
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+def test_generic_held_completion_wake_supersession_truth_table():
+    from src.engine.event_reactor_adapter import (
+        _generic_held_completion_wakes_supersede,
+    )
+    from src.runtime.reactor_wake import GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+
+    def wake(reason, requests=()):
+        return SimpleNamespace(
+            reason=reason,
+            held_sell_reauction_requests=requests,
+        )
+
+    assert not _generic_held_completion_wakes_supersede(
+        (wake("market_price_advanced"), wake("money_path_substrate_refreshed"))
+    )
+    assert not _generic_held_completion_wakes_supersede(
+        (wake(GLOBAL_AUCTION_COMPLETION_WAKE_REASON),)
+    )
+    for superseding in (
+        wake("forecast_posterior_advanced"),
+        wake("day0_extreme_event_committed"),
+        wake(GLOBAL_AUCTION_COMPLETION_WAKE_REASON, (object(),)),
+        wake("unknown_producer_fact"),
+    ):
+        assert _generic_held_completion_wakes_supersede((superseding,))
+
+
+def test_generic_held_completion_deadline_is_not_restarted_in_adapter():
+    from src.engine.event_reactor_adapter import _global_batch_deadline_monotonic
+
+    assert _global_batch_deadline_monotonic(
+        started_monotonic=100.0,
+        generic_completion_deadline_monotonic=130.0,
+    ) == 130.0
+    assert _global_batch_deadline_monotonic(
+        started_monotonic=100.0,
+        generic_completion_deadline_monotonic=None,
+    ) == 145.0
 
 
 def test_generic_required_family_wake_coalesces_and_resets_only_after_terminal_cut(
@@ -1519,7 +1669,8 @@ def test_targeted_forecast_wake_uses_carrier_exception_at_both_pause_gates():
     assert "forecast_posterior_wake" in source
     assert source.count("allow_forecast_carrier_progress=forecast_posterior_wake") == 2
     assert "forecast_posterior_wake and not targeted_event_ids" in source
-    assert "forecast_posterior_wake or bool(targeted_event_ids)" in source
+    assert "forecast_posterior_wake" in source
+    assert "or bool(targeted_event_ids)" in source
     assert "allow_paused_forecast_snapshot_completion" in source
 
 
@@ -5854,8 +6005,9 @@ def test_position_fill_wake_is_an_exact_targeted_reactor_fast_path():
     assert 'producer_wake_reason == "position_fill_projected"' in source
     assert "committed_position_fill_wake" in source
     assert "or committed_position_fill_wake" in source
-    assert "targeted_only=producer_fast_path" in source
-    assert "forecast_posterior_wake or bool(targeted_event_ids)" in source
+    assert "targeted_only=targeted_only_fast_path" in source
+    assert "forecast_posterior_wake" in source
+    assert "or bool(targeted_event_ids)" in source
 
 
 def test_targeted_forecast_wake_ignores_only_older_remaining_backlog(monkeypatch):
@@ -6478,6 +6630,26 @@ def test_process_pending_cancellation_includes_monitor_debt_for_protected_comple
     assert cancelled() is False
     debt_pending[0] = True
     assert cancelled() is True
+    latched_cancelled = _process_pending_cancelled(
+        committed_day0_wake=False,
+        producer_fast_path=True,
+        urgent_wake_pending=any_urgent,
+        urgent_day0_pending=lambda: False,
+        held_position_monitor_debt_pending=lambda: True,
+        generic_completion_latch_cancelled=lambda: False,
+    )
+    assert latched_cancelled is not None
+    assert latched_cancelled() is False
+    latched_expired = _process_pending_cancelled(
+        committed_day0_wake=False,
+        producer_fast_path=True,
+        urgent_wake_pending=any_urgent,
+        urgent_day0_pending=lambda: False,
+        held_position_monitor_debt_pending=lambda: True,
+        generic_completion_latch_cancelled=lambda: True,
+    )
+    assert latched_expired is not None
+    assert latched_expired() is True
     exact_cancelled = _process_pending_cancelled(
         committed_day0_wake=False,
         producer_fast_path=False,
@@ -7476,7 +7648,6 @@ def test_late_durable_monitor_debt_preempts_reserved_completion():
             exact_executable_held_completion=True,
         )
         assert exact_cancelled() is False
-
         _, no_monitor_cancelled = reactor._global_auction_monitor_cancellation_probe(
             None,
             completion_due=True,
@@ -10924,6 +11095,28 @@ def test_global_batch_targeted_wake_claims_only_committed_event():
     assert _processing_status(conn, ordinary.event_id) == "pending"
 
 
+def test_empty_targeted_completion_never_claims_ordinary_pending_event():
+    """A held-family completion cut may be empty without consuming backlog."""
+    conn, store = _store()
+    ordinary = _forecast_event(
+        "global-ordinary-held-completion",
+        target_date="2026-05-25",
+    )
+    store.insert_or_ignore(ordinary)
+    observations = {}
+    reactor = _global_batch_probe_reactor(store, observations)
+
+    reactor.process_pending(
+        decision_time=_DT_VENUE_OPEN,
+        limit=12,
+        targeted_only=True,
+        allow_empty_global_completion=True,
+    )
+
+    assert observations["batch_event_ids"] == ()
+    assert _processing_status(conn, ordinary.event_id) == "pending"
+
+
 def test_global_batch_producer_bridge_claims_target_and_one_oldest_debt():
     import src.events.reactor as reactor_module
 
@@ -10962,7 +11155,7 @@ def test_global_batch_producer_bridge_claims_target_and_one_oldest_debt():
     )
     assert _processing_status(conn, newer_debt.event_id) == "pending"
     source = inspect.getsource(reactor_module.run_edli_event_reactor_cycle)
-    assert "bridge_stale_debt_slots=1 if targeted_only_fast_path else 0" in source
+    assert "and not family_scoped_held_completion" in source
     process_source = inspect.getsource(OpportunityEventReactor.process_pending)
     assert 'fetch_kwargs["bridge_stale_debt_slots"] = 0' in process_source
 

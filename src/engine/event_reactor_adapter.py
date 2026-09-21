@@ -2614,6 +2614,44 @@ def _global_batch_wakes_supersede(
     return False
 
 
+def _generic_held_completion_wakes_supersede(wakes: Iterable[object]) -> bool:
+    """Whether a new wake invalidates a bounded generic held completion."""
+
+    from src.runtime.reactor_wake import GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+
+    for wake in wakes:
+        reason = str(getattr(wake, "reason", "") or "")
+        if reason in {
+            "market_price_advanced",
+            "money_path_substrate_refreshed",
+        }:
+            continue
+        if reason == "forecast_posterior_advanced":
+            return True
+        if reason == "day0_extreme_event_committed":
+            return True
+        if (
+            reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+            and not getattr(wake, "held_sell_reauction_requests", ())
+        ):
+            continue
+        return True
+    return False
+
+
+def _global_batch_deadline_monotonic(
+    *,
+    started_monotonic: float,
+    generic_completion_deadline_monotonic: float | None,
+) -> float:
+    """Keep a generic completion's absolute deadline across adapter stages."""
+
+    deadline = started_monotonic + _GLOBAL_AUCTION_WORK_CUT_SECONDS
+    if generic_completion_deadline_monotonic is not None:
+        deadline = min(deadline, generic_completion_deadline_monotonic)
+    return deadline
+
+
 def _global_projected_book_refresh_tokens(
     events: Iterable[object],
 ) -> dict[str, frozenset[str] | None]:
@@ -7963,6 +8001,8 @@ def event_bound_live_adapter_from_trade_conn(
     selection_cancelled: Callable[[], bool] | None = None,
     selection_completion_fairness_reserved: bool = False,
     selection_completion_reserved: bool = False,
+    family_scoped_held_completion: bool = False,
+    generic_completion_deadline_monotonic: float | None = None,
     selection_completion_sell_keys: frozenset[tuple[str, str]] = frozenset(),
     held_sell_reauction_requests: tuple[object, ...] = (),
     required_held_family_keys: frozenset[str] = frozenset(),
@@ -8052,7 +8092,19 @@ def event_bound_live_adapter_from_trade_conn(
         raise ValueError("GLOBAL_REQUIRED_HELD_FAMILY_SCOPE_INVALID")
     if required_held_family_keys and exact_completion_sell_keys:
         raise ValueError("GLOBAL_REQUIRED_HELD_FAMILY_SCOPE_MIXED_WITH_EXACT")
-    exact_completion_family_keys: frozenset[str] | None = None
+    if family_scoped_held_completion and (
+        not selection_completion_reserved
+        or not required_held_family_keys
+        or exact_completion_sell_keys
+        or held_sell_reauction_requests
+    ):
+        raise ValueError("GLOBAL_GENERIC_HELD_COMPLETION_SCOPE_INVALID")
+    if (
+        generic_completion_deadline_monotonic is not None
+        and not family_scoped_held_completion
+    ):
+        raise ValueError("GLOBAL_GENERIC_HELD_COMPLETION_DEADLINE_SCOPE_INVALID")
+    completion_family_keys: frozenset[str] | None = None
     if (
         selection_completion_reserved
         and exact_completion_sell_keys
@@ -8089,8 +8141,15 @@ def event_bound_live_adapter_from_trade_conn(
             )
         if request_sell_keys != exact_completion_sell_keys:
             raise ValueError("GLOBAL_EXACT_HELD_COMPLETION_REQUEST_SCOPE_MISMATCH")
-        exact_completion_family_keys = frozenset(request_family_keys)
+        completion_family_keys = frozenset(request_family_keys)
+    elif family_scoped_held_completion:
+        # This generic wake carries a named held family but deliberately lacks
+        # V4 lineage.  Its current SELL/HOLD/CASH decision uses the full
+        # portfolio wealth witness while limiting this bounded completion turn
+        # to that family's actions and executable tokens.
+        completion_family_keys = required_held_family_keys
     from src.runtime.reactor_wake import (
+        exact_held_sell_completion_wake_ids,
         reactor_urgent_wake_identity,
         reactor_urgent_wake_reason,
         reactor_urgent_wake_revision,
@@ -9121,6 +9180,35 @@ def event_bound_live_adapter_from_trade_conn(
                 _global_batch_wake_cutoff,
                 exclude_wake_ids=_global_batch_owned_wake_ids,
             )
+            if family_scoped_held_completion:
+                # This bounded generic completion owns only a named held family,
+                # but its full-portfolio wealth witness means every new forecast,
+                # any Day0 fact, or newly queued exact completion supersedes it.
+                # Book/substrate wakes remain JIT-rebound rather than restarting.
+                try:
+                    if exact_held_sell_completion_wake_ids(fail_on_error=True):
+                        return True
+                except (OSError, ValueError):
+                    return True
+                if _generic_held_completion_wakes_supersede(pending_wakes):
+                    return True
+                if not pending_wakes:
+                    marker = reactor_urgent_wake_identity()
+                    if marker is None:
+                        return True
+                    marker_wake_id, marker_reason = marker
+                    if marker_wake_id not in _global_batch_owned_wake_ids:
+                        if marker_reason in {
+                            "market_price_advanced",
+                            "money_path_substrate_refreshed",
+                        }:
+                            _global_batch_urgent_wake_revision[0] = current
+                            return False
+                        # A marker lacks family scope, so a forecast/completion
+                        # fact cannot safely be declared independent here.
+                        return True
+                _global_batch_urgent_wake_revision[0] = current
+                return False
             if (
                 selection_completion_fairness_reserved
                 or selection_completion_reserved
@@ -9231,8 +9319,11 @@ def event_bound_live_adapter_from_trade_conn(
             # time for the observed ~26s selected-family JIT revalidation after
             # the global scope/book/solve stages.  Do not borrow the 180s book
             # TTL as whole-batch authority.
-            deadline_monotonic=(
-                global_batch_started + _GLOBAL_AUCTION_WORK_CUT_SECONDS
+            deadline_monotonic=_global_batch_deadline_monotonic(
+                started_monotonic=global_batch_started,
+                generic_completion_deadline_monotonic=(
+                    generic_completion_deadline_monotonic
+                ),
             ),
             cancel_requested=_day0_selection_cancelled,
             monotonic=_time.monotonic,
@@ -10039,6 +10130,11 @@ def event_bound_live_adapter_from_trade_conn(
                         target_date=str(target_date or ""),
                         metric=str(metric or "").lower(),
                     )
+                    if (
+                        completion_family_keys is not None
+                        and family_key not in completion_family_keys
+                    ):
+                        continue
                     held_tokens_by_family.setdefault(family_key, set()).add(
                         held_token
                     )
@@ -10053,7 +10149,7 @@ def event_bound_live_adapter_from_trade_conn(
                 # it back to every held token through the None sentinel.
                 reduce_only_book_tokens = (
                     held_book_tokens
-                    if exact_completion_sell_keys
+                    if completion_family_keys is not None
                     else held_book_tokens or None
                 )
             _book_started = _time.monotonic()
@@ -12141,7 +12237,7 @@ def event_bound_live_adapter_from_trade_conn(
                 # held-SELL completion instead owns only the requested actions:
                 # portfolio wealth still carries every holding, while unrelated
                 # speculative families cannot consume its bounded exit deadline.
-                restrict_to_family_keys=exact_completion_family_keys,
+                restrict_to_family_keys=completion_family_keys,
             )
             logging.getLogger(__name__).debug(
                 "global probability family cache: hits=%d ineligible_hits=%d "

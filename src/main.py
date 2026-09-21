@@ -4933,6 +4933,7 @@ def _edli_event_reactor_cycle(
     producer_wake_event_ids: tuple[str, ...] = (),
     producer_wake_families: tuple[tuple[str, str, str], ...] = (),
     producer_held_sell_reauction_requests: tuple[object, ...] = (),
+    producer_family_scoped_held_completion: bool = False,
     allow_paused_forecast_snapshot_completion: bool = False,
 ) -> bool:
     """Scheduler hook -- body owned by src.events.reactor (R4-b3 reactor+prune
@@ -4991,6 +4992,9 @@ def _edli_event_reactor_cycle(
         producer_wake_families=producer_wake_families,
         producer_held_sell_reauction_requests=(
             producer_held_sell_reauction_requests
+        ),
+        producer_family_scoped_held_completion=(
+            producer_family_scoped_held_completion
         ),
         allow_paused_forecast_snapshot_completion=(
             allow_paused_forecast_snapshot_completion
@@ -6784,6 +6788,28 @@ def _paused_forecast_carrier_priority_allowed(
         return False
 
 
+def _is_strict_generic_held_family_completion_wake_batch(
+    wakes: tuple[object, ...],
+    *,
+    exact_held_sell_wake_ids: frozenset[str],
+) -> bool:
+    """Whether a coalesced wake batch may receive the bounded generic turn."""
+
+    from src.runtime.reactor_wake import GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+
+    return bool(wakes) and not exact_held_sell_wake_ids and all(
+        str(getattr(queued, "source", "") or "") == "held_position_monitor"
+        and str(getattr(queued, "reason", "") or "")
+        == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+        and not tuple(getattr(queued, "event_ids", ()) or ())
+        and bool(tuple(getattr(queued, "forecast_families", ()) or ()))
+        and not tuple(
+            getattr(queued, "held_sell_reauction_requests", ()) or ()
+        )
+        for queued in wakes
+    )
+
+
 def _edli_reactor_wake_poll_once() -> bool:
     """Run the canonical reactor once for a new durable-producer wake hint."""
 
@@ -7116,6 +7142,10 @@ def _edli_reactor_wake_poll_once() -> bool:
         for request in held_sell_reauction_requests
         if not held_sell_reauction_requests_completed((request,))
     )
+    family_scoped_held_completion = _is_strict_generic_held_family_completion_wake_batch(
+        wakes,
+        exact_held_sell_wake_ids=exact_held_sell_wake_ids,
+    )
     allow_paused_forecast_snapshot_completion = (
         paused_forecast_carrier_priority_allowed
         and wake.reason == "forecast_posterior_advanced"
@@ -7335,6 +7365,9 @@ def _edli_reactor_wake_poll_once() -> bool:
             "producer_wake_published_at": wake.published_at,
             "producer_wake_event_ids": wake_event_ids,
             "producer_wake_families": wake_families,
+            "producer_family_scoped_held_completion": (
+                family_scoped_held_completion
+            ),
         }
         if pending_held_sell_reauction_requests:
             reactor_kwargs["producer_held_sell_reauction_requests"] = (

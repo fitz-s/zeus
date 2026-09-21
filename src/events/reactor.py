@@ -7600,6 +7600,7 @@ def _process_pending_cancelled(
     urgent_wake_pending: Callable[[], bool],
     urgent_day0_pending: Callable[[], bool] | None,
     held_position_monitor_debt_pending: Callable[[], bool] | None = None,
+    generic_completion_latch_cancelled: Callable[[], bool] | None = None,
     exact_held_completion: bool = False,
     exact_executable_held_completion: bool = False,
 ) -> Callable[[], bool] | None:
@@ -7620,6 +7621,18 @@ def _process_pending_cancelled(
     def cancelled() -> bool:
         if base_cancelled is not None and base_cancelled():
             return True
+        if (
+            generic_completion_latch_cancelled is not None
+        ):
+            if generic_completion_latch_cancelled():
+                return True
+            if _EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set():
+                return True
+            # The caller passed this predicate only after its last-yield exact
+            # queue and monitor-debt recheck succeeded. Keep a late monitor
+            # debt out of this single bounded turn; deadline/unknown exact debt
+            # cancels above and leaves the durable generic wake pending.
+            return False
         # SCOPE: only an ordinary replayable cycle; exact held completion and
         # committed Day0 hard-fact work are protected. DRAIN: the ordinary cut
         # exits at this safe checkpoint and the durable exact wake owns the next
@@ -8512,6 +8525,7 @@ def _global_auction_monitor_cancellation_probe(
     monitor_pending: Callable[[], bool] | None,
     *,
     monitor_debt_pending: Callable[[], bool] | None = None,
+    monitor_debt_grace_deadline_monotonic: float | None = None,
     completion_due: bool = False,
     exact_held_completion: bool = False,
     exact_executable_held_completion: bool = False,
@@ -8548,6 +8562,14 @@ def _global_auction_monitor_cancellation_probe(
         ):
             cancelled_this_cycle = True
             return True
+        if (
+            monitor_debt_grace_deadline_monotonic is not None
+            and time.monotonic() < monitor_debt_grace_deadline_monotonic
+        ):
+            # A strictly-qualified generic held completion received one bounded
+            # turn after the last monitor yield. The latch never masks exact
+            # completion debt above, and expiry returns control to the monitor.
+            return False
         debt_pending = False
         if monitor_debt_pending is not None:
             try:
@@ -8604,6 +8626,59 @@ def _global_auction_monitor_cancellation_probe(
         return True
 
     return completion_due_at_start, _cancelled
+
+
+def _try_latch_generic_held_completion(
+    *,
+    qualified: bool,
+    durable_exact_completion_pending: Callable[[], bool] | None,
+    monitor_debt_pending: Callable[[], bool] | None,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> float | None:
+    """Return one bounded generic-completion deadline after the final yield.
+
+    The caller supplies the already-strict aggregate qualification. An
+    unreadable/new exact completion or monitor debt never receives this
+    exception. The returned deadline is absolute and is not renewed by later
+    construction stages.
+    """
+
+    if (
+        not qualified
+        or durable_exact_completion_pending is None
+        or monitor_debt_pending is None
+    ):
+        return None
+    try:
+        if durable_exact_completion_pending() or monitor_debt_pending():
+            return None
+    except Exception:  # noqa: BLE001 - unknown debt cannot receive priority.
+        return None
+    from src.execution.exit_lifecycle import (
+        GLOBAL_SELL_REAUCTION_COMPLETION_DEADLINE_SECONDS,
+    )
+
+    return monotonic() + GLOBAL_SELL_REAUCTION_COMPLETION_DEADLINE_SECONDS
+
+
+def _generic_held_completion_latch_cancelled(
+    *,
+    deadline_monotonic: float | None,
+    durable_exact_completion_pending: Callable[[], bool] | None,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> bool:
+    """Cancel a latched generic cut at expiry or on new/unknown exact debt."""
+
+    if deadline_monotonic is None:
+        return False
+    if monotonic() >= deadline_monotonic:
+        return True
+    if durable_exact_completion_pending is None:
+        return True
+    try:
+        return bool(durable_exact_completion_pending())
+    except Exception:  # noqa: BLE001 - exact queue unknown must preempt.
+        return True
 
 
 @dataclass(frozen=True)
@@ -8971,6 +9046,7 @@ def run_edli_event_reactor_cycle(
     producer_wake_event_ids: tuple[str, ...] = (),
     producer_wake_families: tuple[tuple[str, str, str], ...] = (),
     producer_held_sell_reauction_requests: tuple[object, ...] = (),
+    producer_family_scoped_held_completion: bool = False,
     allow_paused_forecast_snapshot_completion: bool = False,
     urgent_day0_pending: Callable[[], bool] | None = None,
     held_position_monitor_pending: Callable[[], bool] | None = None,
@@ -9034,6 +9110,13 @@ def run_edli_event_reactor_cycle(
     edli_cfg = _settings_section("edli", {})
     completion_wake = (
         producer_wake_reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+    )
+    family_scoped_held_completion = bool(
+        producer_family_scoped_held_completion
+        and completion_wake
+        and producer_wake_families
+        and not producer_wake_event_ids
+        and not producer_held_sell_reauction_requests
     )
     completion_wake_needs_retry = False
     committed_day0_wake = (
@@ -9777,6 +9860,22 @@ def run_edli_event_reactor_cycle(
             return False
         if _yield_for_held_position_monitor("reactor_construct"):
             return False
+        generic_completion_deadline_monotonic = _try_latch_generic_held_completion(
+            qualified=family_scoped_held_completion,
+            durable_exact_completion_pending=(
+                _durable_exact_held_sell_completion_pending
+            ),
+            monitor_debt_pending=held_position_monitor_debt_pending,
+        )
+
+        def _generic_completion_latch_cancelled() -> bool:
+            return _generic_held_completion_latch_cancelled(
+                deadline_monotonic=generic_completion_deadline_monotonic,
+                durable_exact_completion_pending=(
+                    _durable_exact_held_sell_completion_pending
+                ),
+            )
+
         try:
             construct_cut_seconds = float(
                 edli_cfg.get(
@@ -9805,13 +9904,22 @@ def run_edli_event_reactor_cycle(
                 completion_due=False,
                 exact_held_completion=held_sell_completion_cycle,
                 exact_executable_held_completion=exact_final_actuation_window,
+                monitor_debt_grace_deadline_monotonic=(
+                    generic_completion_deadline_monotonic
+                ),
             )
         )
         construct_context = WorkContext(
-            deadline_monotonic=time.monotonic() + construct_cut_seconds,
+            deadline_monotonic=min(
+                time.monotonic() + construct_cut_seconds,
+                generic_completion_deadline_monotonic,
+            )
+            if generic_completion_deadline_monotonic is not None
+            else time.monotonic() + construct_cut_seconds,
             cancel_requested=lambda: (
                 _urgent_wake_pending()
                 or _construct_monitor_cancelled()
+                or _generic_completion_latch_cancelled()
                 or (
                     not exact_final_actuation_window
                     and _EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
@@ -10031,6 +10139,9 @@ def run_edli_event_reactor_cycle(
             ),
             exact_held_completion=active_held_sell_completion_cycle,
             exact_executable_held_completion=exact_executable_held_completion,
+            monitor_debt_grace_deadline_monotonic=(
+                generic_completion_deadline_monotonic
+            ),
         )
         _construct_checkpoint("before_completion_mode")
         _completion_risk_level = get_current_level()
@@ -10116,12 +10227,20 @@ def run_edli_event_reactor_cycle(
             auction_capital_authority=_auction_capital_authority,
             producer_wake_ids=producer_wake_ids,
             producer_wake_published_at=producer_wake_published_at,
-            selection_cancelled=_monitor_selection_cancelled,
+            selection_cancelled=lambda: (
+                _monitor_selection_cancelled()
+                or _generic_completion_latch_cancelled()
+            ),
             selection_completion_fairness_reserved=(
                 _monitor_completion_mode.fairness_reserved
             ),
             selection_completion_reserved=(
                 _monitor_completion_mode.reduce_only
+                or family_scoped_held_completion
+            ),
+            family_scoped_held_completion=family_scoped_held_completion,
+            generic_completion_deadline_monotonic=(
+                generic_completion_deadline_monotonic
             ),
             selection_completion_sell_keys=(
                 frozenset(
@@ -10202,8 +10321,13 @@ def run_edli_event_reactor_cycle(
         _construct_checkpoint("after_reactor")
         _log_stage("reactor_construct")
         _reactor_construct_complete = True
+        # A qualified generic held-completion wake owes an empty current cut
+        # for only its named held family.  It must not claim an unrelated
+        # pending opportunity merely because that ordinary queue is nonempty.
         targeted_only_fast_path = producer_fast_path and (
-            forecast_posterior_wake or bool(targeted_event_ids)
+            forecast_posterior_wake
+            or bool(targeted_event_ids)
+            or family_scoped_held_completion
         )
         exact_final_actuation_window = exact_executable_held_completion
         try:
@@ -10212,7 +10336,12 @@ def run_edli_event_reactor_cycle(
                 limit=proof_limit,
                 targeted_event_ids=frozenset(targeted_event_ids),
                 targeted_only=targeted_only_fast_path,
-                bridge_stale_debt_slots=1 if targeted_only_fast_path else 0,
+                bridge_stale_debt_slots=(
+                    1
+                    if targeted_only_fast_path
+                    and not family_scoped_held_completion
+                    else 0
+                ),
             # Generic monitor fairness is owed one *global* current cut, even
             # when no opportunity event is pending.  The adapter still owns the
             # full q/book/wealth comparison and can only produce HOLD/CASH here.
@@ -10226,6 +10355,11 @@ def run_edli_event_reactor_cycle(
                     urgent_wake_pending=_urgent_wake_pending,
                     urgent_day0_pending=urgent_day0_pending,
                     held_position_monitor_debt_pending=held_position_monitor_debt_pending,
+                    generic_completion_latch_cancelled=(
+                        _generic_completion_latch_cancelled
+                        if generic_completion_deadline_monotonic is not None
+                        else None
+                    ),
                     exact_held_completion=active_held_sell_completion_cycle,
                     exact_executable_held_completion=exact_final_actuation_window,
                 ),
