@@ -351,6 +351,7 @@ _REPLACEMENT_NO_CERT = {
 }
 _REPLACEMENT_NO_EXPECTED = replacement_no_bound_expected_from_parents(
     {
+        "replacement_probability_authority": "replacement_0_1",
         "replacement_posterior_id": 271828,
         "posterior_identity_hash": "1" * 64,
         "replacement_family_id": "Wellington|2026-07-12|high",
@@ -523,7 +524,12 @@ def test_current_qkernel_mean_redecision_binds_action_q_not_point_q() -> None:
     assert reason(unsealed) == "qkernel_current_state:current_state_identity_hash"
 
 
-def test_global_current_redecision_preserves_certified_replacement_parent() -> None:
+@pytest.mark.parametrize("current_authority", (
+    "replacement_0_1",
+    "day0_conditioned_replacement_global_probability_v1",
+    "global_current_probability_witness",
+))
+def test_global_current_redecision_preserves_certified_replacement_parent(current_authority) -> None:
     economics = _sealed_global_current_jit_economics()
     for field in (
         "global_robust_delta_log_wealth",
@@ -549,7 +555,7 @@ def test_global_current_redecision_preserves_certified_replacement_parent() -> N
     )
     economics.update(
         {
-            "global_probability_authority": "replacement_0_1",
+            "global_probability_authority": current_authority,
             "global_posterior_id": 271828,
             "global_condition_id": "cond-wellington-high-24c",
             "global_family_key": "Wellington|2026-07-12|high",
@@ -599,10 +605,11 @@ def test_global_current_redecision_preserves_certified_replacement_parent() -> N
         "execution_price": 0.32,
         "q_lcb_calibration_source": "FORECAST_BOOTSTRAP",
         "same_bin_yes_posterior": 0.35,
+        "replacement_parent_probability_authority": "replacement_0_1",
         "replacement_no_bound_certificate": _REPLACEMENT_NO_CERT,
         "replacement_no_bound_expected": _REPLACEMENT_NO_EXPECTED,
         "qkernel_execution_economics": economics,
-        "probability_authority": "replacement_0_1",
+        "probability_authority": current_authority,
         "posterior_id": 271828,
         "condition_id": "cond-wellington-high-24c",
         "token_id": "token-no-current",
@@ -612,6 +619,65 @@ def test_global_current_redecision_preserves_certified_replacement_parent() -> N
     }
 
     assert live_buy_no_conservative_evidence_rejection_reason(**kwargs) is None
+    # Current witness identity and immutable source identity are independent.
+    assert _REPLACEMENT_NO_EXPECTED["probability_authority"] == "replacement_0_1"
+    for missing_certificate in (None, {}, "malformed"):
+        assert live_buy_no_conservative_evidence_rejection_reason(
+            **{**kwargs, "replacement_no_bound_certificate": missing_certificate}
+        ).startswith(
+            "ADMISSION_BUY_NO_GLOBAL_CURRENT_STATE_INVALID:receipt_scalar_mismatch:replacement_parent:"
+        )
+    for parent_authority in (None, "unlicensed_parent", current_authority + "_wrong"):
+        changed_parent = dict(_REPLACEMENT_NO_EXPECTED)
+        if parent_authority is None:
+            changed_parent.pop("probability_authority")
+        else:
+            changed_parent["probability_authority"] = parent_authority
+        reason = live_buy_no_conservative_evidence_rejection_reason(
+            **{**kwargs, "replacement_no_bound_expected": changed_parent}
+        )
+        assert reason.endswith("replacement_parent:parent_field:probability_authority")
+    deleted_carriers = {
+        **kwargs,
+        "replacement_no_bound_certificate": None,
+        "replacement_no_bound_expected": None,
+        "same_bin_yes_posterior": 1.0 - action_q,
+    }
+    assert live_buy_no_conservative_evidence_rejection_reason(
+        **deleted_carriers
+    ).endswith("replacement_parent:parent_mapping_missing")
+    assert live_buy_no_conservative_evidence_rejection_reason(
+        **{**deleted_carriers, "replacement_parent_probability_authority": None}
+    ) is None
+    assert live_buy_no_conservative_evidence_rejection_reason(
+        **{**kwargs, "replacement_parent_probability_authority": "different_source"}
+    ).endswith("replacement_parent:served_probability_authority")
+    assert live_buy_no_conservative_evidence_rejection_reason(
+        **{**kwargs, "replacement_parent_probability_authority": None}
+    ).endswith("replacement_parent:served_probability_authority")
+    for field, value, failure in (
+        ("posterior_id", 271829, "served_posterior_id_mismatch"),
+        ("posterior_identity_hash", "9" * 64, "parent_field:posterior_identity_hash"),
+        ("probability_authority", "different_source", "certificate_probability_authority"),
+    ):
+        changed_certificate = {**_REPLACEMENT_NO_CERT_BODY, field: value}
+        changed_certificate["certificate_hash"] = stable_hash(changed_certificate)
+        reason = live_buy_no_conservative_evidence_rejection_reason(
+            **{**kwargs, "replacement_no_bound_certificate": changed_certificate}
+        )
+        assert reason.endswith("replacement_parent:" + failure)
+    assert live_buy_no_conservative_evidence_rejection_reason(
+        **{**kwargs, "replacement_no_bound_certificate": {
+            **_REPLACEMENT_NO_CERT, "certificate_hash": "0" * 64,
+        }}
+    ).endswith("replacement_parent:certificate_hash_mismatch")
+    for changed in (
+        {"probability_authority": current_authority + "_mismatch"},
+        {"global_probability_witness_identity": "different-current-witness"},
+    ):
+        reason = live_buy_no_conservative_evidence_rejection_reason(**{**kwargs, **changed})
+        assert reason.startswith("ADMISSION_BUY_NO_GLOBAL_CURRENT_STATE_INVALID:")
+        assert "replacement_parent" not in reason
     assert (
         live_buy_no_conservative_evidence_rejection_reason(
             **{**kwargs, "same_bin_yes_posterior": 0.34}
@@ -1181,7 +1247,8 @@ def test_replacement_builder_binds_raw_complement_and_served_shrink() -> None:
     )
     expected = replacement_no_bound_expected_from_parents(
         {
-            "replacement_posterior_id": certificate["posterior_id"],
+            "replacement_probability_authority": "replacement_0_1",
+        "replacement_posterior_id": certificate["posterior_id"],
             "posterior_identity_hash": certificate["posterior_identity_hash"],
             "replacement_family_id": certificate["family_id"],
             "replacement_bin_topology_hash": certificate["bin_topology_hash"],
@@ -1362,7 +1429,8 @@ def test_coherently_rehashed_fake_selected_scalars_cannot_override_forecast_maps
 def test_forecast_parent_map_change_with_old_digest_fails_closed() -> None:
     expected = replacement_no_bound_expected_from_parents(
         {
-            "replacement_posterior_id": 271828,
+            "replacement_probability_authority": "replacement_0_1",
+        "replacement_posterior_id": 271828,
             "posterior_identity_hash": "1" * 64,
             "replacement_family_id": "Wellington|2026-07-12|high",
             "replacement_bin_topology_hash": _REPLACEMENT_TOPOLOGY_HASH,

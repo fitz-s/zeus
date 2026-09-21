@@ -4316,6 +4316,7 @@ class _CandidateProof:
     # selected-leg evidence the proof-generation gate saw.
     settlement_coverage_status: str | None = None
     replacement_calibration_credential: dict[str, Any] | None = None
+    replacement_parent_probability_authority: str | None = None
     replacement_no_bound_certificate: dict[str, Any] | None = None
     replacement_no_bound_expected: dict[str, Any] | None = None
     # H2_E2E (REAUDIT_0_1.md §2/§4): carry the bundle posterior_id +
@@ -20435,6 +20436,7 @@ def _build_event_bound_no_submit_receipt_core(
             q_lcb_calibration_source=proof.q_lcb_calibration_source,
             same_bin_yes_posterior=proof.same_bin_yes_posterior,
             settlement_coverage_status=proof.settlement_coverage_status,
+            replacement_parent_probability_authority=proof.replacement_parent_probability_authority,
             replacement_no_bound_certificate=proof.replacement_no_bound_certificate,
             posterior_id=proof.posterior_id,
             probability_authority=proof.probability_authority,
@@ -21523,6 +21525,7 @@ def _build_event_bound_no_submit_receipt_core(
             q_lcb_calibration_source=proof.q_lcb_calibration_source,
             same_bin_yes_posterior=proof.same_bin_yes_posterior,
             settlement_coverage_status=proof.settlement_coverage_status,
+            replacement_parent_probability_authority=proof.replacement_parent_probability_authority,
             replacement_no_bound_certificate=proof.replacement_no_bound_certificate,
             posterior_id=proof.posterior_id,
             probability_authority=proof.probability_authority,
@@ -21637,6 +21640,7 @@ def _build_event_bound_no_submit_receipt_core(
             # twin gate (events.reactor._receipt_money_path_blocker) evaluates the
             # SAME settled-record evidence — lockstep, never starved.
             "settlement_coverage_status": proof.settlement_coverage_status,
+            "replacement_parent_probability_authority": proof.replacement_parent_probability_authority,
             "replacement_no_bound_certificate": _json_finite(
                 proof.replacement_no_bound_certificate
             ),
@@ -22224,6 +22228,7 @@ def _event_submission_receipt_from_typed_receipt_payload(
             if raw_receipt.get("settlement_coverage_status") is not None
             else None
         ),
+        replacement_parent_probability_authority=raw_receipt.get("replacement_parent_probability_authority"),
         replacement_no_bound_certificate=(
             raw_receipt.get("replacement_no_bound_certificate")
             if isinstance(raw_receipt.get("replacement_no_bound_certificate"), dict)
@@ -25424,6 +25429,7 @@ def _actionable_payload_from_receipt(
         "q_lcb_calibration_source": receipt.q_lcb_calibration_source,
         "same_bin_yes_posterior": receipt.same_bin_yes_posterior,
         "settlement_coverage_status": receipt.settlement_coverage_status,
+        "replacement_parent_probability_authority": receipt.replacement_parent_probability_authority,
         "replacement_no_bound_certificate": _json_finite(
             receipt.replacement_no_bound_certificate
         ),
@@ -25599,6 +25605,7 @@ def _live_decision_audit_payload(
         "q_lcb_calibration_source": receipt.q_lcb_calibration_source,
         "same_bin_yes_posterior": receipt.same_bin_yes_posterior,
         "settlement_coverage_status": receipt.settlement_coverage_status,
+        "replacement_parent_probability_authority": receipt.replacement_parent_probability_authority,
         "replacement_no_bound_certificate": _json_finite(
             receipt.replacement_no_bound_certificate
         ),
@@ -26146,6 +26153,7 @@ def _pre_submit_revalidation_payload_from_final_intent(
         "q_lcb_calibration_source": payload.get("q_lcb_calibration_source"),
         "same_bin_yes_posterior": payload.get("same_bin_yes_posterior"),
         "settlement_coverage_status": payload.get("settlement_coverage_status"),
+        "replacement_parent_probability_authority": payload.get("replacement_parent_probability_authority"),
         "replacement_no_bound_certificate": payload.get(
             "replacement_no_bound_certificate"
         ),
@@ -27807,15 +27815,21 @@ def _build_pre_submit_proof_bundle_from_adapter_evidence(
         persisted_at=_parse_utc(event.created_at) or decision_time,
     )
     decision_clock = EvidenceClock(decision_time, decision_time, decision_time)
-    bound_forecast_posterior_id = (
-        proof.posterior_id
-        if str(getattr(proof, "probability_authority", "") or "") == "replacement_0_1"
-        else None
-    )
-    if (
+    replacement_forecast_bound = (
         str(getattr(proof, "probability_authority", "") or "") == "replacement_0_1"
-        and bound_forecast_posterior_id is None
-    ):
+        or (
+            proof.direction == "buy_no"
+            and (
+                proof.replacement_parent_probability_authority is not None
+                or proof.replacement_no_bound_certificate is not None
+                or proof.replacement_no_bound_expected is not None
+            )
+        )
+    )
+    bound_forecast_posterior_id = (
+        proof.posterior_id if replacement_forecast_bound else None
+    )
+    if replacement_forecast_bound and bound_forecast_posterior_id is None:
         raise ValueError("FORECAST_AUTHORITY_EVIDENCE_MISSING:replacement_posterior_id")
     quote_clock = _evidence_clock_from_row(selected_snapshot_row, fallback=decision_time)
     forecast_payload, forecast_clock = _forecast_authority_payload_and_clock(
@@ -27897,13 +27911,15 @@ def _build_pre_submit_proof_bundle_from_adapter_evidence(
     # trigger-row projection.
     raw_receipt["neg_risk"] = executable_snapshot_neg_risk
     replacement_candidate_fields: dict[str, object] = {}
-    if (
-        str(proof.probability_authority or "") == "replacement_0_1"
-        and proof.direction == "buy_no"
-    ):
+    if replacement_forecast_bound and proof.direction == "buy_no":
         certificate = proof.replacement_no_bound_certificate
         if not isinstance(certificate, Mapping):
             raise ValueError("REPLACEMENT_NO_BOUND_CERTIFICATE_MISSING")
+        if (
+            proof.replacement_parent_probability_authority is not None
+            and not isinstance(proof.replacement_no_bound_expected, Mapping)
+        ):
+            raise ValueError("REPLACEMENT_NO_BOUND_CERTIFICATE_PARENT_MISMATCH:parent_mapping_missing")
         canonical_bin_id = _candidate_replacement_bin_id_from_topology(
             proof.candidate,
             forecast_payload.get("replacement_bin_topology"),
@@ -27920,6 +27936,7 @@ def _build_pre_submit_proof_bundle_from_adapter_evidence(
         if served_lcb is None:
             raise ValueError("REPLACEMENT_NO_BOUND_SERVED_LCB_MISSING")
         replacement_candidate_fields = {
+            "replacement_parent_probability_authority": proof.replacement_parent_probability_authority,
             "replacement_no_bound_bin_id": canonical_bin_id,
             "replacement_no_bound_served_lcb": served_lcb,
         }
@@ -27937,7 +27954,7 @@ def _build_pre_submit_proof_bundle_from_adapter_evidence(
             q_lcb=float(proof.q_lcb_5pct),
             same_bin_yes_posterior=float(proof.same_bin_yes_posterior),
             qkernel_execution_economics=proof.qkernel_execution_economics,
-            probability_authority=proof.probability_authority,
+            probability_authority=proof.replacement_parent_probability_authority,
             posterior_id=proof.posterior_id,
             condition_id=str(raw_receipt.get("condition_id") or ""),
         )
@@ -28668,6 +28685,7 @@ def _forecast_authority_payload_from_posterior(
         "source_run_id": source_run_id,
         "coverage_id": str(p_identity_hash),
         "posterior_identity_hash": str(p_identity_hash),
+        "replacement_probability_authority": "replacement_0_1",
         "replacement_posterior_id": p_posterior_id,
         "replacement_family_id": p_family_id,
         "replacement_bin_topology_hash": p_bin_topology_hash,
@@ -32951,6 +32969,7 @@ def _generate_candidate_proofs(
                     coverage_verdict=coverage_verdict_by_direction.get(coverage_key),
                     family=family,
                 )
+            replacement_parent_probability_authority = None
             replacement_no_bound_certificate = None
             replacement_no_bound_expected = None
             if direction == "buy_no" and replacement_bundle_for_credential is not None:
@@ -32968,6 +32987,7 @@ def _generate_candidate_proofs(
                     authority = probability_evidence.get(
                         "replacement_no_bound_authority"
                     )
+                    replacement_parent_probability_authority = authority["probability_authority"]
                     canonical_bin_id = _candidate_replacement_bin_id(
                         candidate,
                         replacement_bundle_for_credential,
@@ -33148,6 +33168,7 @@ def _generate_candidate_proofs(
                 q_lcb_calibration_source=q_lcb_source,
                 same_bin_yes_posterior=yes_q,
                 settlement_coverage_status=settlement_coverage_status,
+                replacement_parent_probability_authority=replacement_parent_probability_authority,
                 replacement_no_bound_certificate=replacement_no_bound_certificate,
                 replacement_no_bound_expected=replacement_no_bound_expected,
                 qkernel_execution_economics=None,
@@ -33255,6 +33276,7 @@ def _generate_candidate_proofs(
                     same_bin_yes_posterior=yes_q,
                     settlement_coverage_status=settlement_coverage_status,
                     replacement_calibration_credential=replacement_calibration_credential,
+                    replacement_parent_probability_authority=replacement_parent_probability_authority,
                     replacement_no_bound_certificate=replacement_no_bound_certificate,
                     replacement_no_bound_expected=replacement_no_bound_expected,
                     # H2_E2E: carry posterior_id + probability_authority from the
@@ -37304,6 +37326,8 @@ def _build_replacement_no_bound_certificate(
         return None
     if not isinstance(authority, Mapping):
         return None
+    if authority.get("probability_authority") != "replacement_0_1":
+        return None
     if authority.get("posterior_id") != posterior_id:
         return None
     if calibration_credential.get("q_mode") != authority.get("q_mode"):
@@ -37421,6 +37445,7 @@ def _replacement_no_bound_authority(
         q_ucb=q_ucb,
     )
     authority = {
+        "probability_authority": "replacement_0_1",
         "posterior_id": posterior_id,
         "posterior_identity_hash": identity_hash,
         "family_id": family_id,

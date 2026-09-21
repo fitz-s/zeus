@@ -91,6 +91,7 @@ def _replacement_actionable_overrides() -> tuple[dict, dict[str, dict]]:
         "q_lcb_calibration_source": "FORECAST_BOOTSTRAP",
         "settlement_coverage_status": "INSUFFICIENT_DATA",
         "probability_authority": "replacement_0_1",
+        "replacement_parent_probability_authority": "replacement_0_1",
         "posterior_id": 29872,
         "replacement_no_bound_certificate": bound,
         "qkernel_execution_economics": {
@@ -109,6 +110,7 @@ def _replacement_actionable_overrides() -> tuple[dict, dict[str, dict]]:
     }
     parent = {
         claims.FORECAST_AUTHORITY: {
+            "replacement_probability_authority": "replacement_0_1",
             "posterior_identity_hash": "1" * 64,
             "replacement_posterior_id": 29872,
             "replacement_family_id": "family-1",
@@ -138,6 +140,7 @@ def _replacement_actionable_overrides() -> tuple[dict, dict[str, dict]]:
             "hypothesis_id": "family-1:no-1",
             "replacement_no_bound_bin_id": "11C",
             "replacement_no_bound_served_lcb": 0.617,
+            "replacement_parent_probability_authority": "replacement_0_1",
         },
         claims.FDR: {"selected_hypotheses": ("family-1:no-1",)},
     }
@@ -167,6 +170,243 @@ def test_actionable_replacement_no_bound_rejects_canonical_parent_mismatch():
     with pytest.raises(
         CertificateVerificationError,
         match="replacement NO bound certificate invalid",
+    ):
+        verify_actionable_trade(action, parents)
+
+
+def test_actionable_replacement_no_bound_rejects_parent_authority_mismatch():
+    action_payload, parent_overrides = _replacement_actionable_overrides()
+    parent_overrides[claims.FORECAST_AUTHORITY][
+        "replacement_probability_authority"
+    ] = "forged_replacement_authority"
+    parents, action = actionable_graph(
+        action_payload=action_payload,
+        parent_overrides=parent_overrides,
+    )
+
+    with pytest.raises(
+        CertificateVerificationError,
+        match="replacement NO bound certificate invalid",
+    ):
+        verify_actionable_trade(action, parents)
+
+
+def test_actionable_replacement_no_bound_rejects_parent_posterior_mismatch():
+    action_payload, parent_overrides = _replacement_actionable_overrides()
+    parent_overrides[claims.FORECAST_AUTHORITY]["replacement_posterior_id"] = 29873
+    parents, action = actionable_graph(
+        action_payload=action_payload,
+        parent_overrides=parent_overrides,
+    )
+
+    with pytest.raises(
+        CertificateVerificationError,
+        match="replacement NO bound certificate invalid",
+    ):
+        verify_actionable_trade(action, parents)
+
+
+def test_actionable_replacement_no_bound_rejects_missing_independent_parent_authority():
+    action_payload, parent_overrides = _replacement_actionable_overrides()
+    parent_overrides[claims.FORECAST_AUTHORITY].pop(
+        "replacement_probability_authority"
+    )
+    parents, action = actionable_graph(
+        action_payload=action_payload,
+        parent_overrides=parent_overrides,
+    )
+
+    with pytest.raises(
+        CertificateVerificationError,
+        match="replacement NO bound certificate invalid",
+    ):
+        verify_actionable_trade(action, parents)
+
+
+def test_actionable_replacement_parent_marker_must_match_candidate_parent():
+    action_payload, parent_overrides = _replacement_actionable_overrides()
+    parent_overrides[claims.CANDIDATE_EVIDENCE][
+        "replacement_parent_probability_authority"
+    ] = "other_source"
+    parents, action = actionable_graph(
+        action_payload=action_payload,
+        parent_overrides=parent_overrides,
+    )
+
+    with pytest.raises(
+        CertificateVerificationError,
+        match="replacement parent authority marker mismatch",
+    ):
+        verify_actionable_trade(action, parents)
+
+
+def test_actionable_replacement_parent_marker_must_match_forecast_expected_source():
+    action_payload, parent_overrides = _replacement_actionable_overrides()
+    parent_overrides[claims.FORECAST_AUTHORITY][
+        "replacement_probability_authority"
+    ] = "other_source"
+    parents, action = actionable_graph(
+        action_payload=action_payload,
+        parent_overrides=parent_overrides,
+    )
+
+    with pytest.raises(
+        CertificateVerificationError,
+        match="replacement NO bound certificate invalid",
+    ):
+        verify_actionable_trade(action, parents)
+
+
+def test_actionable_replacement_parent_marker_keeps_deleted_carriers_rejected():
+    action_payload, parent_overrides = _replacement_actionable_overrides()
+    action_payload["replacement_no_bound_certificate"] = None
+    parent_overrides[claims.CANDIDATE_EVIDENCE].pop(
+        "replacement_no_bound_bin_id"
+    )
+    parent_overrides[claims.CANDIDATE_EVIDENCE].pop(
+        "replacement_no_bound_served_lcb"
+    )
+    parents, action = actionable_graph(
+        action_payload=action_payload,
+        parent_overrides=parent_overrides,
+    )
+
+    with pytest.raises(
+        CertificateVerificationError,
+        match="replacement NO bound certificate invalid",
+    ):
+        verify_actionable_trade(action, parents)
+
+
+def test_actionable_replacement_parent_marker_deletion_is_not_fallback_authority():
+    action_payload, parent_overrides = _replacement_actionable_overrides()
+    action_payload.pop("replacement_parent_probability_authority")
+    parents, action = actionable_graph(
+        action_payload=action_payload,
+        parent_overrides=parent_overrides,
+    )
+
+    with pytest.raises(
+        CertificateVerificationError,
+        match="replacement parent authority marker missing",
+    ):
+        verify_actionable_trade(action, parents)
+
+
+def test_actionable_replacement_source_rejects_missing_bound_certificate():
+    action_payload, parent_overrides = _replacement_actionable_overrides()
+    action_payload.pop("replacement_no_bound_certificate")
+    parents, action = actionable_graph(
+        action_payload=action_payload,
+        parent_overrides=parent_overrides,
+    )
+
+    with pytest.raises(
+        CertificateVerificationError,
+        match="replacement NO bound certificate invalid",
+    ):
+        verify_actionable_trade(action, parents)
+
+
+def test_actionable_global_day0_buy_no_rejects_malformed_present_bound_certificate():
+    action_payload, parent_overrides, extra_parents = (
+        _replacement_day0_actionable_fixture("buy_no")
+    )
+    for field in (
+        "replacement_no_bound_bin_id",
+        "replacement_no_bound_served_lcb",
+        "replacement_parent_probability_authority",
+    ):
+        parent_overrides[claims.CANDIDATE_EVIDENCE].pop(field, None)
+    action_payload["replacement_no_bound_certificate"] = {}
+    parents, action = actionable_graph(
+        action_payload=action_payload,
+        parent_overrides=parent_overrides,
+        extra_parent_payloads=extra_parents,
+    )
+
+    with pytest.raises(
+        CertificateVerificationError,
+        match="replacement NO bound certificate invalid",
+    ):
+        verify_actionable_trade(action, parents)
+
+
+def test_actionable_global_day0_buy_yes_without_bound_parent_is_unchanged():
+    action_payload, parent_overrides, extra_parents = (
+        _replacement_day0_actionable_fixture("buy_yes")
+    )
+    action_payload.pop("replacement_no_bound_certificate", None)
+    parents, action = actionable_graph(
+        action_payload=action_payload,
+        parent_overrides=parent_overrides,
+        extra_parent_payloads=extra_parents,
+    )
+
+    verify_actionable_trade(action, parents)
+
+
+def test_actionable_global_day0_buy_no_rejects_deleted_bound_certificate():
+    action_payload, parent_overrides, extra_parents = (
+        _replacement_day0_actionable_fixture("buy_no")
+    )
+    action_payload.pop("replacement_no_bound_certificate", None)
+    parents, action = actionable_graph(
+        action_payload=action_payload,
+        parent_overrides=parent_overrides,
+        extra_parent_payloads=extra_parents,
+    )
+
+    with pytest.raises(
+        CertificateVerificationError,
+        match="replacement NO bound certificate invalid",
+    ):
+        verify_actionable_trade(action, parents)
+
+
+def test_actionable_global_day0_buy_no_without_bound_parent_is_unchanged():
+    action_payload, parent_overrides, extra_parents = (
+        _replacement_day0_actionable_fixture("buy_no")
+    )
+    for field in (
+        "replacement_no_bound_bin_id",
+        "replacement_no_bound_served_lcb",
+        "replacement_parent_probability_authority",
+    ):
+        parent_overrides[claims.CANDIDATE_EVIDENCE].pop(field, None)
+    action_payload.pop("replacement_parent_probability_authority", None)
+    action_payload["replacement_no_bound_certificate"] = None
+    parents, action = actionable_graph(
+        action_payload=action_payload,
+        parent_overrides=parent_overrides,
+        extra_parent_payloads=extra_parents,
+    )
+
+    verify_actionable_trade(action, parents)
+
+
+def test_actionable_rejects_wrong_side_replacement_parent_declaration_without_cert():
+    action_payload, parent_overrides, extra_parents = (
+        _replacement_day0_actionable_fixture("buy_yes")
+    )
+    action_payload["replacement_parent_probability_authority"] = "replacement_0_1"
+    action_payload["replacement_no_bound_certificate"] = None
+    parent_overrides[claims.CANDIDATE_EVIDENCE].update(
+        {
+            "replacement_parent_probability_authority": "replacement_0_1",
+            "replacement_no_bound_bin_id": "11C",
+            "replacement_no_bound_served_lcb": 0.617,
+        }
+    )
+    parents, action = actionable_graph(
+        action_payload=action_payload,
+        parent_overrides=parent_overrides,
+        extra_parent_payloads=extra_parents,
+    )
+
+    with pytest.raises(
+        CertificateVerificationError,
+        match="replacement parent authority is only valid for buy_no",
     ):
         verify_actionable_trade(action, parents)
 
@@ -1093,6 +1333,7 @@ def _replacement_day0_actionable_fixture(direction: str):
     action, parent_overrides = _replacement_actionable_overrides()
     if direction == "buy_yes":
         action.pop("replacement_no_bound_certificate", None)
+        action.pop("replacement_parent_probability_authority", None)
         action.update(
             {
                 "token_id": "yes-1",
@@ -1169,6 +1410,7 @@ def _replacement_day0_actionable_fixture(direction: str):
             "rounded_value": 72,
             "observation_time": "2026-05-25T11:30:00+00:00",
             "observation_available_at": "2026-05-25T11:35:00+00:00",
+            "probability_authority": "replacement_provisional_day0_global_probability_v1",
             "q_source": "replacement_0_1",
             "_edli_q_source": "replacement_0_1",
             "day0_probability_authority": probability_authority,
@@ -1198,16 +1440,16 @@ def _replacement_day0_actionable_fixture(direction: str):
 
 
 @pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
-def test_actionable_accepts_provisional_replacement_day0_without_hard_fact_parents(
+def test_actionable_accepts_provisional_replacement_day0_with_hard_fact_parents(
     direction,
 ):
-    action_payload, parent_overrides, _extra_parents = (
+    action_payload, parent_overrides, extra_parents = (
         _replacement_day0_actionable_fixture(direction)
     )
     parents, action = actionable_graph(
         action_payload=action_payload,
         parent_overrides=parent_overrides,
-        extra_parent_payloads={},
+        extra_parent_payloads=extra_parents,
     )
 
     verify_actionable_trade(action, parents)
@@ -1234,7 +1476,27 @@ def test_actionable_rejects_replacement_day0_posterior_binding_mismatch():
         verify_actionable_trade(action, parents)
 
 
-def test_actionable_rejects_replacement_day0_posterior_identity_parent_mismatch():
+def test_actionable_rejects_replacement_day0_current_authority_mismatch():
+    action_payload, parent_overrides, extra_parents = (
+        _replacement_day0_actionable_fixture("buy_yes")
+    )
+    authority = dict(action_payload["day0_probability_authority"])
+    authority["probability_authority"] = "replacement_current_global_probability_v1"
+    action_payload["day0_probability_authority"] = authority
+    parents, action = actionable_graph(
+        action_payload=action_payload,
+        parent_overrides=parent_overrides,
+        extra_parent_payloads=extra_parents,
+    )
+
+    with pytest.raises(
+        CertificateVerificationError,
+        match="replacement_day0_probability_authority",
+    ):
+        verify_actionable_trade(action, parents)
+
+
+def test_actionable_rejects_replacement_day0_current_global_identity_mismatch():
     action_payload, parent_overrides, _extra_parents = (
         _replacement_day0_actionable_fixture("buy_yes")
     )
@@ -1242,19 +1504,18 @@ def test_actionable_rejects_replacement_day0_posterior_identity_parent_mismatch(
     authority["probability_base_identity"] = "forged-not-current-posterior-hash"
     observation = dict(authority["global_current_observation_payload"])
     binding = dict(observation["_edli_global_day0_binding"])
-    binding["probability_base_identity"] = "forged-not-current-posterior-hash"
     observation["_edli_global_day0_binding"] = binding
     authority["global_current_observation_payload"] = observation
     action_payload["day0_probability_authority"] = authority
     parents, action = actionable_graph(
         action_payload=action_payload,
         parent_overrides=parent_overrides,
-        extra_parent_payloads={},
+        extra_parent_payloads=_extra_parents,
     )
 
     with pytest.raises(
         CertificateVerificationError,
-        match="posterior identity",
+        match="posterior_identity mismatch",
     ):
         verify_actionable_trade(action, parents)
 

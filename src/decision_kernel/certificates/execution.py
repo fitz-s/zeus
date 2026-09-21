@@ -277,6 +277,9 @@ def build_final_intent_certificate_from_actionable(
         "q_lcb_calibration_source": action.get("q_lcb_calibration_source"),
         "same_bin_yes_posterior": action.get("same_bin_yes_posterior"),
         "settlement_coverage_status": action.get("settlement_coverage_status"),
+        "replacement_parent_probability_authority": action.get(
+            "replacement_parent_probability_authority"
+        ),
         "replacement_no_bound_certificate": action.get(
             "replacement_no_bound_certificate"
         ),

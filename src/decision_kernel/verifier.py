@@ -1002,11 +1002,31 @@ def _verify_actionable_parent_consistency(
                 belief.get(belief_field),
             )
 
-    if (
-        payload.get("probability_authority") == "replacement_0_1"
-        and payload.get("direction") == "buy_no"
+    replacement_current_authority = str(
+        payload.get("probability_authority") or ""
+    ).strip()
+    replacement_expected = replacement_no_bound_expected_from_parents(
+        forecast, candidate
+    )
+    if payload.get("direction") == "buy_no" and (
+        replacement_current_authority == "replacement_0_1"
+        or payload.get("replacement_parent_probability_authority") is not None
+        # A non-None value is a declaration even when malformed; serialized
+        # optional fields commonly carry None and do not declare a parent.
+        or payload.get("replacement_no_bound_certificate") is not None
+        # The candidate declaration is written only when the immutable parent
+        # was bound upstream; preserve that declaration as an independent
+        # trigger even if the certificate field is later deleted.
+        or any(
+            field in candidate
+            for field in (
+                "replacement_no_bound_bin_id",
+                "replacement_no_bound_served_lcb",
+            )
+        )
+        or isinstance(replacement_expected, Mapping)
     ):
-        expected = replacement_no_bound_expected_from_parents(forecast, candidate)
+        expected = replacement_expected
         if not replacement_no_bound_certificate_matches(
             payload.get("replacement_no_bound_certificate"),
             expected=expected,
@@ -1017,13 +1037,23 @@ def _verify_actionable_parent_consistency(
                 "actionable same_bin_yes_posterior",
             ),
             qkernel_execution_economics=payload.get("qkernel_execution_economics"),
-            probability_authority=payload.get("probability_authority"),
+            probability_authority=(
+                expected.get("probability_authority")
+                if isinstance(expected, Mapping)
+                else None
+            ),
             posterior_id=payload.get("posterior_id"),
             condition_id=payload.get("condition_id"),
         ):
             raise CertificateVerificationError(
                 "actionable replacement NO bound certificate invalid"
             )
+
+    _verify_replacement_parent_probability_authority(
+        payload,
+        forecast=forecast,
+        candidate=candidate,
+    )
 
     _require_equal("actionable.event_id", payload.get("event_id"), "causal.event_id", causal.get("event_id"))
     _require_equal(
@@ -1076,6 +1106,72 @@ def _verify_actionable_parent_consistency(
     if live_cap.get("stale_book_directional_strategy") is True:
         raise CertificateVerificationError("stale-book directional strategy parent is forbidden")
     _validate_cost_sources(quote, cost, {"direction": payload.get("direction")})
+
+
+def _verify_replacement_parent_probability_authority(
+    payload: Mapping[str, object],
+    *,
+    forecast: Mapping[str, object],
+    candidate: Mapping[str, object],
+) -> None:
+    """Bind the established replacement source parent across actionable carriers.
+
+    The marker is an obligation witness, not a second probability regime.  A
+    missing marker keeps the ordinary global path backward-compatible only when
+    the candidate carries no replacement-parent declaration either.
+
+    INV-47 gate disposition: SCOPE is the candidate/receipt carrying this
+    explicit parent obligation; DRAIN is candidate-to-receipt reconstruction
+    on the next decision cycle; RESET is a valid exact source-parent marker
+    plus current witness, without requiring the source parent to be newest.
+    """
+
+    marker = payload.get("replacement_parent_probability_authority")
+    candidate_marker = candidate.get("replacement_parent_probability_authority")
+    expected = replacement_no_bound_expected_from_parents(forecast, candidate)
+    candidate_declares_parent = (
+        candidate_marker is not None
+        or any(
+            field in candidate
+            for field in (
+                "replacement_no_bound_bin_id",
+                "replacement_no_bound_served_lcb",
+            )
+        )
+    )
+    parent_declared = (
+        marker is not None
+        or payload.get("replacement_no_bound_certificate") is not None
+        or candidate_declares_parent
+        or isinstance(expected, Mapping)
+    )
+    if not parent_declared:
+        return
+    if str(payload.get("direction") or "").strip() != "buy_no":
+        raise CertificateVerificationError(
+            "replacement parent authority is only valid for buy_no"
+        )
+    if marker is None:
+        raise CertificateVerificationError(
+            "actionable replacement parent authority marker missing"
+        )
+    if marker != "replacement_0_1":
+        raise CertificateVerificationError(
+            "actionable replacement parent authority marker invalid"
+        )
+    if candidate_marker != "replacement_0_1":
+        raise CertificateVerificationError(
+            "actionable replacement parent authority marker mismatch"
+        )
+    expected_authority = (
+        expected.get("probability_authority")
+        if isinstance(expected, Mapping)
+        else None
+    )
+    if expected_authority != marker:
+        raise CertificateVerificationError(
+            "actionable replacement parent authority does not match forecast parent"
+        )
 
 
 def _verify_execution_command_payload(
@@ -1249,6 +1345,12 @@ def _verify_pre_submit_revalidation_for_command(
         pre_submit.get("replacement_no_bound_certificate"),
         "final_intent.replacement_no_bound_certificate",
         final_intent.get("replacement_no_bound_certificate"),
+    )
+    _require_equal(
+        "pre_submit.replacement_parent_probability_authority",
+        pre_submit.get("replacement_parent_probability_authority"),
+        "final_intent.replacement_parent_probability_authority",
+        final_intent.get("replacement_parent_probability_authority"),
     )
     if not pre_submit.get("aggregate_event_hash"):
         raise CertificateVerificationError("pre-submit revalidation aggregate_event_hash missing")
@@ -1434,6 +1536,12 @@ def _verify_final_intent_payload(
         payload.get("replacement_no_bound_certificate"),
         "actionable.replacement_no_bound_certificate",
         actionable.get("replacement_no_bound_certificate"),
+    )
+    _require_equal(
+        "final_intent.replacement_parent_probability_authority",
+        payload.get("replacement_parent_probability_authority"),
+        "actionable.replacement_parent_probability_authority",
+        actionable.get("replacement_parent_probability_authority"),
     )
     if payload.get("strategy_key") in (None, ""):
         raise CertificateVerificationError("final intent strategy_key missing")

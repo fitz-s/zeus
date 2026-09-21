@@ -182,14 +182,17 @@ def test_receipt_json_omits_posterior_when_none_keeps_hash_stable() -> None:
     )
     legacy_json = json.loads(_receipt_json(legacy))
     assert "same_bin_yes_posterior" not in legacy_json
+    assert "replacement_parent_probability_authority" not in legacy_json
 
     carrying = _money_path_clean_buy_no_receipt(
         same_bin_yes_posterior=_SHANGHAI_YES_Q,
         probability_semantics_revision="current_evidence_v4",
+        replacement_parent_probability_authority="replacement_0_1",
     )
     carrying_json = json.loads(_receipt_json(carrying))
     assert carrying_json["same_bin_yes_posterior"] == _SHANGHAI_YES_Q
     assert carrying_json["probability_semantics_revision"] == "current_evidence_v4"
+    assert carrying_json["replacement_parent_probability_authority"] == "replacement_0_1"
 
 
 def test_receipt_projection_round_trips_posterior_through_raw_receipt() -> None:
@@ -222,6 +225,7 @@ def test_receipt_projection_round_trips_posterior_through_raw_receipt() -> None:
         "trade_score": _SHANGHAI_TRADE_SCORE,
         "q_lcb_calibration_source": "FORECAST_BOOTSTRAP",
         "same_bin_yes_posterior": _SHANGHAI_YES_Q,
+        "replacement_parent_probability_authority": "replacement_0_1",
         "replacement_no_bound_certificate": {
             "schema": "replacement_native_no_bound_v1",
             "certificate_hash": "a" * 64,
@@ -238,3 +242,4 @@ def test_receipt_projection_round_trips_posterior_through_raw_receipt() -> None:
         "replacement_no_bound_certificate"
     ]
     assert receipt.probability_semantics_revision == "current_evidence_v4"
+    assert receipt.replacement_parent_probability_authority == "replacement_0_1"

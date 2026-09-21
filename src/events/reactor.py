@@ -709,6 +709,7 @@ class EventSubmissionReceipt:
     # posterior as YES: q_no=1-q_yes, raw_lcb_no=1-ucb_yes, and any served
     # settlement shrink only lowers that raw bound. None on canonical/legacy/YES
     # receipts; the admission helper revalidates every scalar and identity hash.
+    replacement_parent_probability_authority: str | None = None
     replacement_no_bound_certificate: dict[str, Any] | None = None
     # Exact source-parent expectation already verified when the candidate proof
     # was built. Keep it separate from ``decision_proof_bundle`` because live
@@ -5070,6 +5071,7 @@ def _receipt_money_path_blocker(
             # Twin-authority reconciliation #7: the SAME family coverage verdict the
             # adapter gate evaluated (carried on the receipt; single computation).
             settlement_coverage_status=receipt.settlement_coverage_status,
+            replacement_parent_probability_authority=receipt.replacement_parent_probability_authority,
             replacement_no_bound_certificate=receipt.replacement_no_bound_certificate,
             replacement_no_bound_expected=replacement_expected,
             qkernel_execution_economics=receipt.qkernel_execution_economics,

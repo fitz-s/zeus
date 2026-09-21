@@ -363,6 +363,7 @@ def live_buy_no_conservative_evidence_rejection_reason(
     q_lcb_calibration_source: str | None,
     same_bin_yes_posterior: float | int | None = None,
     settlement_coverage_status: str | None = None,
+    replacement_parent_probability_authority: str | None = None,
     replacement_no_bound_certificate: Mapping[str, object] | None = None,
     replacement_no_bound_expected: Mapping[str, object] | None = None,
     qkernel_execution_economics: Mapping[str, object] | None = None,
@@ -506,7 +507,13 @@ def live_buy_no_conservative_evidence_rejection_reason(
             ("q_lcb", q_lcb_value, certified_lcb),
             ("execution_price", price, certified_cost),
         ]
-        if isinstance(replacement_no_bound_certificate, Mapping):
+        if (
+            replacement_parent_probability_authority is not None
+            or replacement_no_bound_certificate is not None
+            or replacement_no_bound_expected is not None
+        ):
+            # The global witness above binds current action authority. This
+            # independent forecast parent retains its source-clock authority.
             replacement_parent_reason = (
                 replacement_no_bound_certificate_mismatch_reason(
                     replacement_no_bound_certificate,
@@ -515,7 +522,7 @@ def live_buy_no_conservative_evidence_rejection_reason(
                     q_lcb=q_lcb_value,
                     same_bin_yes_posterior=yes_posterior,
                     qkernel_execution_economics=qkernel_execution_economics,
-                    probability_authority=probability_authority,
+                    probability_authority=replacement_parent_probability_authority,
                     posterior_id=posterior_id,
                     condition_id=condition_id,
                 )
@@ -689,6 +696,7 @@ def replacement_no_bound_certificate_mismatch_reason(
     if stable_hash(certificate_body) != certificate_hash:
         return "certificate_hash_mismatch"
     for field in (
+        "probability_authority",
         "posterior_id",
         "posterior_identity_hash",
         "family_id",
@@ -868,6 +876,7 @@ def replacement_no_bound_expected_from_parents(
     if not isinstance(forecast, Mapping) or not isinstance(candidate, Mapping):
         return None
     field_map = {
+        "probability_authority": "replacement_probability_authority",
         "posterior_id": "replacement_posterior_id",
         "posterior_identity_hash": "posterior_identity_hash",
         "family_id": "replacement_family_id",

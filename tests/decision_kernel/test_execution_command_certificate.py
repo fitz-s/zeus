@@ -477,6 +477,81 @@ def test_replacement_no_bound_certificate_survives_final_presubmit_and_command()
     verify_execution_command(command, parents)
 
 
+def test_final_intent_builder_transfers_replacement_parent_marker():
+    _, final_intent, _, _ = builder_chain(
+        actionable_payload={
+            "replacement_parent_probability_authority": "replacement_0_1",
+        }
+    )
+
+    assert final_intent.payload["replacement_parent_probability_authority"] == (
+        "replacement_0_1"
+    )
+
+
+@pytest.mark.parametrize("replacement_marker", [None, "wrong_source"])
+def test_final_intent_rejects_replacement_parent_marker_drift_from_actionable(
+    replacement_marker,
+):
+    parents, _command = execution_graph(
+        actionable_payload={
+            "replacement_parent_probability_authority": "replacement_0_1",
+        },
+        final_payload={
+            "replacement_parent_probability_authority": replacement_marker,
+        },
+    )
+    final_intent = next(
+        parent for parent in parents if parent.certificate_type == claims.FINAL_INTENT
+    )
+
+    with pytest.raises(
+        CertificateVerificationError,
+        match="final_intent.replacement_parent_probability_authority",
+    ):
+        verify_final_intent(final_intent, parents)
+
+
+@pytest.mark.parametrize("replacement_marker", [None, "wrong_source"])
+def test_pre_submit_revalidation_rejects_replacement_parent_marker_drift_from_final(
+    replacement_marker,
+):
+    parents, command = execution_graph(
+        actionable_payload={
+            "replacement_parent_probability_authority": "replacement_0_1",
+        }
+    )
+    by_type = {parent.certificate_type: parent for parent in parents}
+    final_intent = by_type[claims.FINAL_INTENT]
+    live_cap = by_type[claims.LIVE_CAP]
+    pre_submit = by_type[claims.PRE_SUBMIT_REVALIDATION]
+    tampered_pre_submit = _cert(
+        claims.PRE_SUBMIT_REVALIDATION,
+        "pre-submit:event-1:intent-1:marker-drift",
+        {
+            **pre_submit.payload,
+            "replacement_parent_probability_authority": replacement_marker,
+        },
+        parents=(final_intent, live_cap),
+    )
+    tampered_parents = tuple(
+        tampered_pre_submit if parent.certificate_type == claims.PRE_SUBMIT_REVALIDATION else parent
+        for parent in parents
+    )
+    tampered_command = _cert(
+        claims.EXECUTION_COMMAND,
+        "execution-command:marker-drift",
+        command.payload,
+        parents=tampered_parents,
+    )
+
+    with pytest.raises(
+        CertificateVerificationError,
+        match="pre_submit.replacement_parent_probability_authority",
+    ):
+        verify_execution_command(tampered_command, tampered_parents)
+
+
 def test_final_intent_rejects_wrong_token():
     parents, final_intent = final_intent_graph(final_payload={"token_id": "other-token"})
 
@@ -1541,6 +1616,10 @@ def _pre_submit_cert(final_intent, live_cap, command_payload: dict | None = None
         "replacement_no_bound_certificate": final_intent.payload.get(
             "replacement_no_bound_certificate"
         ),
+        "replacement_parent_probability_authority": command_payload.get(
+            "replacement_parent_probability_authority",
+            final_intent.payload.get("replacement_parent_probability_authority"),
+        ),
         "would_cross_book": False,
         "tick_size": command_payload.get("tick_size", 0.01),
         "tick_aligned": command_payload.get("tick_aligned", True),
@@ -1620,6 +1699,9 @@ def _final_intent_payload(actionable) -> dict:
         "qkernel_execution_economics": payload.get("qkernel_execution_economics"),
         "replacement_no_bound_certificate": payload.get(
             "replacement_no_bound_certificate"
+        ),
+        "replacement_parent_probability_authority": payload.get(
+            "replacement_parent_probability_authority"
         ),
         "size": 10.0,
         "notional_usd": 4.0,

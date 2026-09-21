@@ -50,6 +50,10 @@ from src.decision_kernel.canonicalization import (
     stable_hash,
 )
 from src.decision_kernel.certificate import build_certificate
+from src.strategy.live_inference.live_admission import (
+    replacement_no_bound_expected_from_parents,
+    replacement_probability_bundle_hash,
+)
 from src.solve.solver import (
     CurrentMakerFillWitness,
     MakerFillOutcome,
@@ -6714,7 +6718,8 @@ def test_replacement_forecast_authority_binds_selected_proof_posterior_id(
             source_cycle_time TEXT,
             source_available_at TEXT,
             computed_at TEXT,
-                posterior_identity_hash TEXT,
+            runtime_layer TEXT DEFAULT 'live',
+                    posterior_identity_hash TEXT,
                 family_id TEXT,
                 bin_topology_hash TEXT,
                 q_json TEXT,
@@ -6855,6 +6860,554 @@ def test_replacement_forecast_authority_binds_selected_proof_posterior_id(
             ),
             bound_posterior_id=42,
         )
+
+
+def _replacement_pre_submit_builder_fixture(
+    monkeypatch,
+    *,
+    current_authority: str = "day0_conditioned_replacement_global_probability_v1",
+):
+    """Keep the pre-submit seam real while stubbing unrelated certificate plumbing."""
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    topology = [{"bin_id": "25C", "lower_c": 25.0, "upper_c": 25.0}]
+    topology_hash = stable_hash(topology)
+    q = {"25C": 1.0}
+    q_lcb = {"25C": 0.8}
+    q_ucb = {"25C": 1.0}
+    identity_42 = "a" * 64
+    provenance = {
+        "bin_topology": topology,
+        "replacement_q_mode": "FUSED_NORMAL_FULL",
+        "q_lcb_basis": "fused_center_bootstrap_p05",
+        "q_ucb_json_role": "fused_center_bootstrap_ucb",
+        "q_lcb_bootstrap_draws": 200,
+        "q_bootstrap_samples_hash": "b" * 64,
+        "bayes_precision_fusion": {
+            "used_models": ["a", "b", "c"],
+            "current_value_serving": {
+                model: {
+                    "raw_model_forecast_id": index,
+                    "served_via": "single_runs",
+                    "served_cycle": "2026-07-08T06:00:00+00:00",
+                }
+                for index, model in enumerate(("a", "b", "c"), start=1)
+            },
+        },
+    }
+    conn.execute(
+        """
+        CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY,
+            product_id TEXT,
+            source_id TEXT,
+            data_version TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            source_cycle_time TEXT,
+            source_available_at TEXT,
+            computed_at TEXT,
+            runtime_layer TEXT DEFAULT 'live',
+            posterior_identity_hash TEXT,
+            family_id TEXT,
+            bin_topology_hash TEXT,
+            q_json TEXT,
+            q_lcb_json TEXT,
+            q_ucb_json TEXT,
+            provenance_json TEXT
+        )
+        """
+    )
+    for posterior_id, computed_at, identity in (
+        (41, "2026-07-08T12:49:13+00:00", "f" * 64),
+        (42, "2026-07-08T12:38:00+00:00", identity_42),
+    ):
+        conn.execute(
+            """
+            INSERT INTO forecast_posteriors (
+                posterior_id, product_id, source_id, data_version, city,
+                target_date, temperature_metric, source_cycle_time,
+                source_available_at, computed_at, posterior_identity_hash,
+                family_id, bin_topology_hash, q_json, q_lcb_json, q_ucb_json,
+                provenance_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                posterior_id,
+                "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+                "openmeteo_ecmwf_ifs9_bayes_fusion",
+                "openmeteo_ecmwf_ifs9_bayes_fusion_high_v1",
+                "Seoul",
+                "2026-07-10",
+                "high",
+                "2026-07-08T06:00:00+00:00",
+                "2026-07-08T12:31:30+00:00",
+                computed_at,
+                identity,
+                "Seoul|2026-07-10|high",
+                topology_hash,
+                json.dumps(q),
+                json.dumps(q_lcb),
+                json.dumps(q_ucb),
+                json.dumps(provenance, sort_keys=True),
+            ),
+        )
+    conn.commit()
+
+    monkeypatch.setattr(
+        era,
+        "runtime_cities_by_name",
+        lambda: {"Seoul": SimpleNamespace(timezone="Asia/Seoul", settlement_unit="C")},
+    )
+    monkeypatch.setattr(
+        era,
+        "_posterior_bound_multimodel_members",
+        lambda *_args, **_kwargs: (25.0, 26.0, 27.0),
+    )
+    monkeypatch.setattr(
+        era,
+        "_replacement_live_input_lag_reason",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        era,
+        "_calibration_authority_payload_and_clock",
+        lambda *_args, **_kwargs: (
+            {
+                "calibrator_model_key": "test-calibrator",
+                "model_hash": "calibrator-hash",
+                "input_space": "width_normalized_density",
+            },
+            era.EvidenceClock(
+                datetime(2026, 7, 8, 12, 38, tzinfo=timezone.utc),
+                datetime(2026, 7, 8, 12, 38, tzinfo=timezone.utc),
+                datetime(2026, 7, 8, 12, 38, tzinfo=timezone.utc),
+            ),
+        ),
+    )
+    snapshot = SimpleNamespace(
+        snapshot_id="snapshot-42",
+        executable_snapshot_hash="snapshot-hash-42",
+        selected_outcome_token_id=None,
+        outcome_label=None,
+        orderbook_top_bid=Decimal("0.30"),
+        orderbook_top_ask=Decimal("0.40"),
+        neg_risk=False,
+        min_tick_size=Decimal("0.01"),
+        min_order_size=Decimal("1"),
+    )
+    monkeypatch.setattr(era, "get_snapshot", lambda *_args, **_kwargs: snapshot)
+    monkeypatch.setattr(
+        era,
+        "_require_cost_basis",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            cost_basis_id="cost_basis:test",
+            cost_basis_hash="cost-hash",
+        ),
+    )
+
+    event_time = "2026-07-08T13:00:00+00:00"
+    event = SimpleNamespace(
+        event_id="event-day0-replacement-parent",
+        event_type="DAY0_EXTREME_UPDATED",
+        source="forecast_source",
+        available_at=event_time,
+        received_at=event_time,
+        created_at=event_time,
+        causal_snapshot_id="rmf-Seoul|2026-07-10|high|2026-07-08",
+        payload_hash="event-payload-hash",
+    )
+    candidate = SimpleNamespace(
+        condition_id="condition-25c",
+        bin=SimpleNamespace(low=25.0, high=25.0, unit="C", label="25C"),
+    )
+    family = SimpleNamespace(
+        family_id="Seoul|2026-07-10|high",
+        city="Seoul",
+        target_date="2026-07-10",
+        metric="high",
+        candidates=(candidate,),
+        yes_token_ids=("yes-25c",),
+        no_token_ids=("no-25c",),
+    )
+    expected_parent = {
+        "probability_authority": "replacement_0_1",
+        "posterior_id": 42,
+        "posterior_identity_hash": identity_42,
+        "family_id": family.family_id,
+        "bin_topology_hash": topology_hash,
+        "q_mode": provenance["replacement_q_mode"],
+        "q_lcb_basis": provenance["q_lcb_basis"],
+        "q_ucb_role": provenance["q_ucb_json_role"],
+        "bootstrap_draws": provenance["q_lcb_bootstrap_draws"],
+        "joint_samples_hash": provenance["q_bootstrap_samples_hash"],
+        "canonical_bound_hash": replacement_probability_bundle_hash(
+            posterior_id=42,
+            posterior_identity_hash=identity_42,
+            family_id=family.family_id,
+            bin_topology_hash=topology_hash,
+            q_mode=provenance["replacement_q_mode"],
+            q_lcb_basis=provenance["q_lcb_basis"],
+            q_ucb_role=provenance["q_ucb_json_role"],
+            bootstrap_draws=provenance["q_lcb_bootstrap_draws"],
+            joint_samples_hash=provenance["q_bootstrap_samples_hash"],
+            q=q,
+            q_lcb=q_lcb,
+            q_ucb=q_ucb,
+        ),
+        "yes_q": 1.0,
+        "yes_q_ucb": 1.0,
+        "condition_id": "condition-25c",
+        "bin_id": "25C",
+        "side_q_lcb_served": 0.0,
+    }
+    cert_body = {
+        "schema": "replacement_native_no_bound_v1",
+        "probability_authority": "replacement_0_1",
+        "posterior_id": 42,
+        "posterior_identity_hash": identity_42,
+        "family_id": family.family_id,
+        "bin_topology_hash": topology_hash,
+        "condition_id": "condition-25c",
+        "bin_id": "25C",
+        "q_mode": provenance["replacement_q_mode"],
+        "q_lcb_basis": provenance["q_lcb_basis"],
+        "q_ucb_role": provenance["q_ucb_json_role"],
+        "bootstrap_draws": provenance["q_lcb_bootstrap_draws"],
+        "joint_samples_hash": provenance["q_bootstrap_samples_hash"],
+        "canonical_bound_hash": expected_parent["canonical_bound_hash"],
+        "side": "buy_no",
+        "yes_q": 1.0,
+        "yes_q_ucb": 1.0,
+        "side_q_point": 0.0,
+        "side_q_lcb_raw": 0.0,
+        "side_q_lcb_served": 0.0,
+        "coverage_shrink_applied": False,
+    }
+    certificate = {
+        **cert_body,
+        "certificate_hash": stable_hash(cert_body),
+    }
+    proof = SimpleNamespace(
+        candidate=candidate,
+        token_id="no-25c",
+        direction="buy_no",
+        row={"snapshot_id": "snapshot-42"},
+        executable_snapshot_id="snapshot-42",
+        execution_price=ExecutionPrice(
+            value=0.40,
+            price_type="fee_adjusted",
+            fee_deducted=True,
+            currency="probability_units",
+        ),
+        q_posterior=0.0,
+        q_lcb_5pct=0.0,
+        c_cost_95pct=0.40,
+        p_fill_lcb=0.5,
+        trade_score=0.1,
+        p_value=0.01,
+        passed_prefilter=True,
+        native_quote_available=True,
+        p_cal_vector_hash="p-cal",
+        p_live_vector_hash="p-live",
+        q_source="qkernel_spine",
+        replacement_calibration_credential=None,
+        replacement_parent_probability_authority="replacement_0_1",
+        same_bin_yes_posterior=1.0,
+        replacement_no_bound_certificate=certificate,
+        replacement_no_bound_expected=expected_parent,
+        posterior_id=42,
+        probability_authority=current_authority,
+        qkernel_execution_economics=None,
+    )
+    raw_receipt = {
+        "event_id": event.event_id,
+        "final_intent_id": "intent-day0-replacement",
+        "side_effect_status": "NO_SUBMIT",
+        "proof_accepted": True,
+        "submitted": False,
+        "executable_snapshot_id": "snapshot-42",
+        "condition_id": "condition-25c",
+        "token_id": "no-25c",
+        "candidate_id": "candidate-no-25c",
+        "bin_label": "25C",
+        "c_fee_adjusted": 0.40,
+    }
+    family_topology_rows = [
+        {
+            "condition_id": "condition-25c",
+            "discovered_at": event_time,
+            "received_at": event_time,
+            "persisted_at": event_time,
+            "captured_at": event_time,
+            "source_available_at": event_time,
+            "computed_at": event_time,
+        }
+    ]
+    selected_snapshot_row = {
+        "snapshot_id": "snapshot-42",
+        "condition_id": "condition-25c",
+        "yes_token_id": "yes-25c",
+        "no_token_id": "no-25c",
+        "orderbook_top_bid": 0.30,
+        "orderbook_top_ask": 0.40,
+        "orderbook_depth_json": "{}",
+        "fee_details_json": "{}",
+        "captured_at": event_time,
+        "freshness_deadline": "2026-07-08T13:30:00+00:00",
+        "active": 1,
+        "closed": 0,
+    }
+    return {
+        "conn": conn,
+        "event": event,
+        "family": family,
+        "proof": proof,
+        "raw_receipt": raw_receipt,
+        "topology_rows": family_topology_rows,
+        "snapshot_rows": [selected_snapshot_row],
+        "selected_snapshot_row": selected_snapshot_row,
+        "expected_parent": expected_parent,
+        "identity_42": identity_42,
+    }
+
+
+def _run_replacement_pre_submit_builder(fixture, *, proof=None):
+    proof = proof or fixture["proof"]
+    return era._build_pre_submit_proof_bundle_from_adapter_evidence(
+        event=fixture["event"],
+        payload={"source_id": "openmeteo_ecmwf_ifs9_bayes_fusion"},
+        decision_time=datetime(2026, 7, 8, 13, tzinfo=timezone.utc),
+        family=fixture["family"],
+        family_topology_rows=fixture["topology_rows"],
+        family_snapshot_rows=fixture["snapshot_rows"],
+        selected_snapshot_row=fixture["selected_snapshot_row"],
+        trade_conn=sqlite3.connect(":memory:"),
+        forecast_conn=fixture["conn"],
+        calibration_conn=sqlite3.connect(":memory:"),
+        proof=proof,
+        raw_receipt=fixture["raw_receipt"],
+        fdr=SimpleNamespace(
+            fdr_family_id=fixture["family"].family_id,
+            attempted_hypotheses=1,
+            selected_hypotheses=("h",),
+            selected_post_fdr=("h",),
+            passed=True,
+        ),
+        kelly=SimpleNamespace(kelly_decision_id="kelly-day0", size_usd=1.0, passed=True),
+        risk=SimpleNamespace(risk_decision_id="risk-day0", level=RiskLevel.GREEN, passed=True),
+        bankroll_usd=100.0,
+        kelly_multiplier=1.0,
+    )
+
+
+@pytest.mark.parametrize(
+    "current_authority",
+    (
+        "day0_conditioned_replacement_global_probability_v1",
+        "global_current_probability_witness",
+    ),
+)
+def test_day0_current_authority_pre_submit_binds_replacement_forecast_parent(
+    monkeypatch,
+    current_authority,
+):
+    fixture = _replacement_pre_submit_builder_fixture(
+        monkeypatch,
+        current_authority=current_authority,
+    )
+    parent_checks = []
+    original_parent_builder = era.replacement_no_bound_expected_from_parents
+
+    def record_parent_check(forecast, candidate):
+        parent_checks.append((dict(forecast), dict(candidate)))
+        return original_parent_builder(forecast, candidate)
+
+    monkeypatch.setattr(
+        era,
+        "replacement_no_bound_expected_from_parents",
+        record_parent_check,
+    )
+    bundle = _run_replacement_pre_submit_builder(fixture)
+
+    assert bundle.forecast_authority.payload["replacement_posterior_id"] == 42
+    assert bundle.forecast_authority.payload["raw_payload_hash"] == fixture["identity_42"]
+    assert (
+        bundle.forecast_authority.payload["replacement_probability_authority"]
+        == "replacement_0_1"
+    )
+    assert len(parent_checks) == 1
+    assert parent_checks[0][0]["replacement_posterior_id"] == 42
+    assert parent_checks[0][0]["replacement_probability_authority"] == "replacement_0_1"
+    receipt = EventSubmissionReceipt(
+        False,
+        fixture["event"].event_id,
+        fixture["event"].causal_snapshot_id,
+        proof_accepted=True,
+        strategy_key="forecast_qkernel_entry",
+        family_id=fixture["family"].family_id,
+        condition_id="condition-25c",
+        token_id="no-25c",
+        candidate_id="candidate-no-25c",
+        direction="buy_no",
+        q_live=0.0,
+        q_lcb_5pct=0.0,
+        q_source="qkernel_spine",
+        replacement_parent_probability_authority="replacement_0_1",
+        replacement_no_bound_certificate=fixture["proof"].replacement_no_bound_certificate,
+        posterior_id=42,
+        probability_authority=current_authority,
+    )
+    transported = era._actionable_payload_from_receipt(
+        receipt,
+        SimpleNamespace(
+            payload={"usage_id": "usage-day0", "reserved_notional_usd": 1.0}
+        ),
+    )
+    assert transported["replacement_parent_probability_authority"] == "replacement_0_1"
+    assert transported["replacement_no_bound_certificate"]["posterior_id"] == 42
+    assert transported["probability_authority"] == current_authority
+
+
+def test_pre_submit_current_non_replacement_leg_keeps_unbound_latest_reader_path(
+    monkeypatch,
+):
+    fixture = _replacement_pre_submit_builder_fixture(monkeypatch)
+    proof = fixture["proof"]
+    proof.direction = "buy_yes"
+    proof.token_id = "yes-25c"
+    proof.q_posterior = 0.7
+    proof.q_lcb_5pct = 0.6
+    proof.same_bin_yes_posterior = None
+    proof.replacement_no_bound_certificate = None
+    proof.replacement_no_bound_expected = None
+    proof.replacement_parent_probability_authority = None
+    fixture["event"].event_type = "FORECAST_SNAPSHOT_READY"
+    fixture["raw_receipt"]["token_id"] = "yes-25c"
+    parent_checks = []
+    original_parent_builder = era.replacement_no_bound_expected_from_parents
+    monkeypatch.setattr(
+        era,
+        "replacement_no_bound_expected_from_parents",
+        lambda forecast, candidate: (
+            parent_checks.append((forecast, candidate))
+            or original_parent_builder(forecast, candidate)
+        ),
+    )
+
+    bundle = _run_replacement_pre_submit_builder(fixture, proof=proof)
+
+    assert bundle.forecast_authority.payload["replacement_posterior_id"] == 41
+    assert bundle.forecast_authority.payload["raw_payload_hash"] == "f" * 64
+    assert parent_checks == []
+
+
+def test_pre_submit_ordinary_buy_no_without_parent_marker_stays_unbound(
+    monkeypatch,
+):
+    fixture = _replacement_pre_submit_builder_fixture(monkeypatch)
+    proof = fixture["proof"]
+    proof.direction = "buy_no"
+    proof.token_id = "no-25c"
+    proof.q_posterior = 0.0
+    proof.q_lcb_5pct = 0.0
+    proof.replacement_parent_probability_authority = None
+    proof.replacement_no_bound_certificate = None
+    proof.replacement_no_bound_expected = None
+    fixture["event"].event_type = "FORECAST_SNAPSHOT_READY"
+    fixture["raw_receipt"]["token_id"] = "no-25c"
+
+    bundle = _run_replacement_pre_submit_builder(fixture, proof=proof)
+
+    assert bundle.forecast_authority.payload["replacement_posterior_id"] == 41
+    assert bundle.forecast_authority.payload["raw_payload_hash"] == "f" * 64
+    assert bundle.candidate_evidence.payload.get(
+        "replacement_parent_probability_authority"
+    ) is None
+
+
+def test_day0_declared_replacement_parent_requires_certificate_and_expected(
+    monkeypatch,
+):
+    fixture = _replacement_pre_submit_builder_fixture(monkeypatch)
+    proof = fixture["proof"]
+    proof.replacement_parent_probability_authority = "replacement_0_1"
+    proof.replacement_no_bound_certificate = None
+    proof.replacement_no_bound_expected = None
+
+    with pytest.raises(
+        ValueError,
+        match="REPLACEMENT_NO_BOUND_CERTIFICATE_MISSING",
+    ):
+        _run_replacement_pre_submit_builder(fixture)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    (
+        ("missing_posterior", "FORECAST_AUTHORITY_EVIDENCE_MISSING:replacement_posterior_id"),
+        ("wrong_id", "REPLACEMENT_NO_BOUND_CERTIFICATE_PARENT_MISMATCH"),
+        ("cert_parent", "REPLACEMENT_NO_BOUND_CERTIFICATE_PARENT_MISMATCH"),
+        ("cert_hash", "REPLACEMENT_NO_BOUND_CERTIFICATE_PARENT_MISMATCH"),
+        ("marker_missing", "REPLACEMENT_NO_BOUND_CERTIFICATE_PARENT_MISMATCH"),
+        ("current_vs_source_marker", "REPLACEMENT_NO_BOUND_CERTIFICATE_PARENT_MISMATCH"),
+        ("expected_missing", "REPLACEMENT_NO_BOUND_CERTIFICATE_PARENT_MISMATCH"),
+        ("expected_authority", "REPLACEMENT_NO_BOUND_CERTIFICATE_PARENT_MISMATCH"),
+    ),
+)
+def test_day0_current_authority_pre_submit_rejects_replacement_parent_mutations(
+    monkeypatch,
+    mutation,
+    match,
+):
+    fixture = _replacement_pre_submit_builder_fixture(monkeypatch)
+    proof = fixture["proof"]
+    if mutation == "missing_posterior":
+        proof.posterior_id = None
+    elif mutation == "wrong_id":
+        proof.posterior_id = 41
+    elif mutation == "cert_parent":
+        proof.replacement_no_bound_certificate = {
+            **proof.replacement_no_bound_certificate,
+            "posterior_identity_hash": "f" * 64,
+            "certificate_hash": "0" * 64,
+        }
+    elif mutation == "cert_hash":
+        proof.replacement_no_bound_certificate = {
+            **proof.replacement_no_bound_certificate,
+            "canonical_bound_hash": "0" * 64,
+            "certificate_hash": "0" * 64,
+        }
+    elif mutation == "marker_missing":
+        proof.replacement_parent_probability_authority = None
+    elif mutation == "current_vs_source_marker":
+        proof.replacement_parent_probability_authority = (
+            "global_current_probability_witness"
+        )
+    elif mutation == "expected_missing":
+        proof.replacement_no_bound_expected = None
+    elif mutation == "expected_authority":
+        original_forecast_reader = era._forecast_authority_payload_and_clock
+
+        def wrong_forecast_authority(*args, **kwargs):
+            forecast, clock = original_forecast_reader(*args, **kwargs)
+            return {
+                **forecast,
+                "replacement_probability_authority": (
+                    "global_current_probability_witness"
+                ),
+            }, clock
+
+        monkeypatch.setattr(
+            era,
+            "_forecast_authority_payload_and_clock",
+            wrong_forecast_authority,
+        )
+
+    with pytest.raises(ValueError, match=match):
+        _run_replacement_pre_submit_builder(fixture, proof=proof)
 
 
 def test_posterior_cycle_members_do_not_depend_on_forecast_carrier(monkeypatch):

@@ -24331,8 +24331,20 @@ def test_global_actuation_rebinds_only_selected_buy_no_admission(missing_reason)
     )
     assert rebound[1] is sibling
 
+    parent_authority = {
+        "probability_authority": "replacement_0_1",
+        "posterior_id": 42,
+    }
+    parent_certificate = {**parent_authority, "schema": "replacement_native_no_bound_v1"}
     current_typed = era._global_actuation_current_admission_proofs(
-        proofs=(replace(proof, missing_reason=None), sibling),
+        proofs=(replace(
+            proof,
+            missing_reason=None,
+            posterior_id=42,
+            replacement_parent_probability_authority="replacement_0_1",
+            replacement_no_bound_certificate=parent_certificate,
+            replacement_no_bound_expected=parent_authority,
+        ), sibling),
         global_actuation=SimpleNamespace(
             decision=SimpleNamespace(candidate=selected_candidate)
         ),
@@ -24350,6 +24362,11 @@ def test_global_actuation_rebinds_only_selected_buy_no_admission(missing_reason)
     assert current_typed[0].probability_authority == (
         "day0_conditioned_replacement_global_probability_v1"
     )
+    assert current_typed[0].posterior_id == 42
+    assert current_typed[0].replacement_parent_probability_authority == "replacement_0_1"
+    assert current_typed[0].replacement_no_bound_expected is parent_authority
+    assert current_typed[0].replacement_no_bound_certificate is parent_certificate
+    assert current_typed[0].same_bin_yes_posterior == proof.same_bin_yes_posterior
     assert current_typed[1] is sibling
 
 
