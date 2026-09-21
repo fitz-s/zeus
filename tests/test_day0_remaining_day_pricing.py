@@ -3663,6 +3663,183 @@ def test_canonical_entry_seam_rebuilds_changed_current_state_carrier(monkeypatch
     assert provenance["probability_base_identity"] == "posterior-77"
 
 
+@pytest.mark.parametrize(
+    "validation_mode", ("valid", "none", "raises", "mismatch")
+)
+def test_held_scope_none_rebuilds_shared_current_remaining_carrier(
+    monkeypatch, validation_mode
+):
+    """HELD scope=None uses the validated current bundle, matching ENTRY q."""
+    import src.data.day0_hourly_vectors as hourly
+    import src.engine.event_reactor_adapter as era
+
+    decision_time = datetime(2026, 8, 24, 12, 30, tzinfo=UTC)
+    family = SimpleNamespace(
+        city="Paris",
+        target_date="2026-08-24",
+        metric="high",
+        candidates=[
+            SimpleNamespace(bin=Bin(None, 24, "C", "24C or below")),
+            SimpleNamespace(bin=Bin(25, 25, "C", "25C")),
+            SimpleNamespace(bin=Bin(26, None, "C", "26C or above")),
+        ],
+    )
+    witness = {
+        "vector_id": "same-vector",
+        "vector_ids_by_model": {"icon_d2": "same-vector"},
+        "expected_models": ["icon_d2"],
+        "actual_models": ["icon_d2"],
+        "capture_times_by_model_utc": {"icon_d2": decision_time.isoformat()},
+        "provider_source_cycle_time_by_model_utc": {
+            "icon_d2": decision_time.isoformat()
+        },
+        "provider_source_available_at_by_model_utc": {
+            "icon_d2": decision_time.isoformat()
+        },
+        "source_run_id_by_model": {"icon_d2": "source-run"},
+        "provider_run_id_by_model": {"icon_d2": "provider-run"},
+        "request_hash_by_model": {"icon_d2": "request-hash"},
+    }
+    base_payload = {
+        "metric": "high",
+        "target_date": "2026-08-24",
+        "rounded_value": 25.0,
+        "high_so_far": 25.0,
+        "settlement_source": "aviationweather_metar",
+        "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
+        "_edli_q_source": "day0_remaining_day",
+        "q_source": "day0_remaining_day",
+        "_edli_day0_probability_boundary_native": 25.0,
+        "_edli_day0_provisional_boundary_survival_probability": 0.95,
+        "_edli_day0_provisional_revision_likelihood": _noaa_test_likelihood(
+            station="LFPG", cutoff=decision_time.isoformat()
+        ),
+    }
+    vectors = [
+        Day0HourlyVector(
+            model="icon_d2",
+            city="Paris",
+            target_date="2026-08-24",
+            timezone_name="Europe/Paris",
+            captured_at=decision_time.isoformat(),
+            times=tuple(f"2026-08-24T{hour:02d}:00" for hour in range(24)),
+            temps_c=tuple(20.0 + hour * 0.1 for hour in range(24)),
+        )
+    ]
+    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Paris": _paris()})
+    monkeypatch.setattr(
+        hourly, "day0_hourly_models_for_city", lambda _city: ("icon_d2",)
+    )
+    monkeypatch.setattr(
+        hourly, "read_freshest_day0_hourly_vectors", lambda **_kwargs: vectors
+    )
+    monkeypatch.setattr(era, "_day0_current_vector_witness", lambda **_kwargs: witness)
+    if validation_mode == "valid":
+        monkeypatch.setattr(
+            era,
+            "_validate_day0_causal_bundle_successor",
+            lambda **kwargs: {
+                "bundle_identity": "validated-current-bundle",
+                "carrier_vector_witness": kwargs["vector_witness"],
+            },
+        )
+    elif validation_mode == "none":
+        monkeypatch.setattr(
+            era, "_validate_day0_causal_bundle_successor", lambda **_kwargs: None
+        )
+    elif validation_mode == "raises":
+        def _validation_error(**_kwargs):
+            raise ValueError("DAY0_CAUSAL_EVIDENCE_BUNDLE_MISMATCH")
+
+        monkeypatch.setattr(era, "_validate_day0_causal_bundle_successor", _validation_error)
+    else:
+        monkeypatch.setattr(
+            era,
+            "_validate_day0_causal_bundle_successor",
+            lambda **kwargs: {
+                "bundle_identity": "different-bundle",
+                "carrier_vector_witness": kwargs["vector_witness"],
+            },
+        )
+    monkeypatch.setattr(era, "_pinned_station_extreme_providers_c", lambda **_kwargs: ())
+    monkeypatch.setattr(era, "_day0_extra_member_sigma_native", lambda **_kwargs: 0.0)
+
+    def run(*, entry_authority):
+        payload = dict(base_payload)
+        payload["_edli_day0_causal_evidence_bundle"] = {
+            "bundle_identity": "validated-current-bundle",
+            "carrier_vector_witness": witness,
+        }
+        members = era._day0_remaining_day_members(
+            payload=payload,
+            family=family,
+            unit="C",
+            decision_time=decision_time,
+            forecast_conn=object(),
+            entry_authority=entry_authority,
+        )
+        assert members is not None
+        q = era._day0_remaining_p_raw_vector(
+            np.asarray(payload["_edli_day0_unclamped_remaining_extrema_native"]),
+            city=_paris(),
+            settlement_semantics=SettlementSemantics.for_city(_paris()),
+            bins=[candidate.bin for candidate in family.candidates],
+            payload=payload,
+            extra_member_sigma=0.0,
+            decision_time=decision_time,
+        )
+        return payload, q
+
+    if validation_mode != "valid":
+        invalid_payload = dict(base_payload)
+        invalid_payload["_edli_day0_causal_evidence_bundle"] = {
+            "bundle_identity": "validated-current-bundle",
+            "carrier_vector_witness": witness,
+        }
+        members = era._day0_remaining_day_members(
+            payload=invalid_payload,
+            family=family,
+            unit="C",
+            decision_time=decision_time,
+            forecast_conn=object(),
+            entry_authority=False,
+        )
+        if validation_mode == "raises":
+            assert members is None
+        else:
+            assert members is not None
+        assert invalid_payload.get("_edli_day0_decision_carrier_rebuild_basis") != (
+            "held_shared_current_remaining_path_vector_witness_v1"
+        )
+        return
+
+    entry_payload, entry_q = run(entry_authority=True)
+    held_payload, held_q = run(entry_authority=False)
+    assert entry_payload["_edli_day0_decision_carrier_rebuild_basis"] == (
+        "entry_current_state_same_vector_witness_v1"
+    )
+    assert held_payload["_edli_day0_decision_carrier_rebuild_basis"] == (
+        "held_shared_current_remaining_path_vector_witness_v1"
+    )
+    assert held_payload["_edli_day0_remaining_content_identity"] == (
+        entry_payload["_edli_day0_remaining_content_identity"]
+    )
+    assert np.array_equal(held_q, entry_q)
+    assert np.array_equal(
+        np.asarray(held_payload["_edli_day0_remaining_probability_samples"]),
+        np.asarray(entry_payload["_edli_day0_remaining_probability_samples"]),
+    )
+
+    vectors[0] = replace(
+        vectors[0], temps_c=tuple(value + 3.0 for value in vectors[0].temps_c)
+    )
+    later_payload, later_q = run(entry_authority=False)
+    assert later_payload["_edli_day0_decision_carrier_rebuild_basis"] == (
+        "held_shared_current_remaining_path_vector_witness_v1"
+    )
+    assert later_q.tolist() != pytest.approx(held_q.tolist())
+
+
 def test_live_day0_entry_explicitly_marks_canonical_authority(monkeypatch):
     """The live ENTRY dispatcher cannot silently use canonical's held default."""
     import src.engine.event_reactor_adapter as era
@@ -3703,6 +3880,7 @@ def test_live_day0_entry_explicitly_marks_canonical_authority(monkeypatch):
         for authority_kind in (
             "entry_current_remaining_path",
             "held_current_remaining_path",
+            "held_shared_current_remaining_path",
             "held_a_prime",
         )
     ],
@@ -3807,6 +3985,9 @@ def test_noaa_actual_producer_consumer_reuses_canonical_path_sigma(
         future_extremes_c=future_c,
         authority_kind=authority_kind,
         entry_authority=entry_authority,
+        held_shared_current_remaining_path=(
+            authority_kind == "held_shared_current_remaining_path"
+        ),
     )
 
     expected_sigma_native = captured_sigma[-1]

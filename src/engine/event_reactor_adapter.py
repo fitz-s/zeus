@@ -47920,6 +47920,7 @@ def _rebuild_decision_time_day0_carrier(
     future_extremes_c: object,
     authority_kind: str,
     entry_authority: bool,
+    held_shared_current_remaining_path: bool = False,
 ) -> None:
     """Rebuild the effective Day0 carrier from current causal hourly vectors.
 
@@ -47942,6 +47943,14 @@ def _rebuild_decision_time_day0_carrier(
         ):
             raise ValueError("DAY0_HELD_CURRENT_CARRIER_AUTHORITY_REQUIRED")
         rebuild_basis = "held_current_bundle_current_state_vector_witness_v1"
+    elif authority_kind == "held_shared_current_remaining_path":
+        if (
+            entry_authority is not False
+            or held_scope is not None
+            or held_shared_current_remaining_path is not True
+        ):
+            raise ValueError("DAY0_HELD_SHARED_CURRENT_CARRIER_AUTHORITY_REQUIRED")
+        rebuild_basis = "held_shared_current_remaining_path_vector_witness_v1"
     elif authority_kind == "held_a_prime":
         if (
             entry_authority is not False
@@ -49241,6 +49250,7 @@ def _day0_remaining_day_members(
             and payload.get("_edli_day0_direct_current_entry_authority") is True
         )
         validated_bundle = None
+        validated_source_clock_bundle: Mapping[str, object] | None = None
         if direct_entry_authority:
             # The entry certificate additionally binds the predictive sigma
             # computed below from this deterministic path set and the exact
@@ -49269,6 +49279,7 @@ def _day0_remaining_day_members(
                     vector_witness=current_vector_witness,
                     vectors=vectors,
                 )
+                validated_source_clock_bundle = validated_bundle
             except ValueError as exc:
                 held_bundle_scope = (
                     payload.get("_edli_day0_redecision_authority_scope")
@@ -49564,6 +49575,27 @@ def _day0_remaining_day_members(
         has_likelihood = isinstance(
             payload.get("_edli_day0_provisional_revision_likelihood"), Mapping
         )
+        validated_current_bundle = (
+            isinstance(validated_source_clock_bundle, Mapping)
+            and isinstance(
+                validated_source_clock_bundle.get("carrier_vector_witness"), Mapping
+            )
+            and bool(
+                str(validated_source_clock_bundle.get("bundle_identity") or "").strip()
+            )
+            and isinstance(
+                payload.get("_edli_day0_causal_evidence_bundle"), Mapping
+            )
+            and str(
+                payload["_edli_day0_causal_evidence_bundle"].get(
+                    "bundle_identity"
+                )
+                or ""
+            ).strip()
+            == str(
+                validated_source_clock_bundle.get("bundle_identity") or ""
+            ).strip()
+        )
         if entry_authority and is_shared_provisional_carrier and has_likelihood:
             _rebuild_decision_time_day0_carrier(
                 payload=payload,
@@ -49588,6 +49620,23 @@ def _day0_remaining_day_members(
                 future_extremes_c=extremes_c,
                 authority_kind="held_current_remaining_path",
                 entry_authority=False,
+            )
+        elif (
+            not entry_authority
+            and payload.get("_edli_day0_redecision_authority_scope") is None
+            and validated_current_bundle
+            and is_shared_provisional_carrier
+            and has_likelihood
+        ):
+            _rebuild_decision_time_day0_carrier(
+                payload=payload,
+                family=family,
+                unit=unit,
+                decision_time=decision_time,
+                future_extremes_c=extremes_c,
+                authority_kind="held_shared_current_remaining_path",
+                entry_authority=False,
+                held_shared_current_remaining_path=True,
             )
         elif (
             payload.get("_edli_day0_redecision_authority_scope")
