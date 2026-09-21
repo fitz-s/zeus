@@ -8777,43 +8777,14 @@ _forecasts_wal_checkpoint_cycle = _make_wal_checkpoint_cycle("forecasts", defer_
 
 @_scheduler_job("family_book_telemetry_ingest")
 def _family_book_telemetry_ingest_cycle() -> None:
-    """book_snapshot_persistence: canonical delivery of the family-book
-    telemetry outbox runs HERE, on an ordinary scheduler job with its own
-    short-lived ``write_class="live"`` connection to the family-book EVIDENCE
-    DB (state/zeus-family-book-evidence.db) -- a physically separate file
-    from zeus_trades.db (DB split, 2026-08-19).
+    """Deliver one bounded outbox batch to the physically separate evidence DB.
 
-    What actually makes this safe against the money path: the DB BOUNDARY,
-    not the guard below. family_book_states/family_book_observations used to
-    be trade-class tables, so this job's connection and the reactor's live
-    money-path connection both opened the SAME file (zeus_trades.db) and
-    contended for its single SQLite writer lock -- the guard below (yield
-    while a cycle is active) was the ONLY thing standing between an optional
-    write and the money path. After the split, this job's connection targets
-    a DIFFERENT file entirely; there is no shared writer lock left to contend
-    for, so an evidence write is now STRUCTURALLY incapable of blocking or
-    being blocked by a money-path write, independent of timing or guard
-    correctness. See ``tests/events/test_family_book_telemetry_writer.py``
-    ``TestMoneyPathYield`` for the deterministic proof (holding a write
-    transaction open on the trade DB does not delay evidence delivery at
-    all).
-
-    The guard below is kept anyway, as a COURTESY, not a safety requirement:
-    it still avoids doing optional I/O -- however cheap and non-contending --
-    while the daemon is mid-decision-cycle, matching the same idiom every
-    other periodic optional job in this daemon uses
-    (``_run_ws_gap_reconcile_if_required``, ``_run_venue_background_maintenance_once``).
-    Combined with the spool-only pending precheck (no canonical connection is
-    opened at all when there is nothing to deliver, the common case),
-    evidence delivery touches its DB only when it has work.
-
-    One bounded batch per tick; @_scheduler_job never re-raises, so an ordinary
-    SQLite/I/O failure degrades to the next tick, never to a daemon crash.
+    Continuous reactor activity must not starve delivery. This connection
+    never writes the trade DB; row/byte budgets and the scheduler's single
+    instance bound the work. Canonical commit precedes private-spool ACK.
     """
     from src.events.family_book_telemetry_writer import outbox_has_pending, run_bounded_ingest
 
-    if _cycle_lock.locked() or _edli_reactor_active():
-        return
     # Idle-tick fast path: decided against the PRIVATE spool, so an empty
     # outbox never opens the evidence DB at all.
     if not outbox_has_pending():
