@@ -16,7 +16,6 @@ from datetime import UTC, date, datetime
 from typing import Any, Mapping
 from urllib.parse import urlparse
 
-from src.config import settlement_source_type_for_city
 from src.contracts.residual_key import SettlementIncompleteError, _station_from_settlement_source
 from src.contracts.settlement_axes import (
     is_learning_eligible_resolution_state,
@@ -222,8 +221,8 @@ def read_current_settlement_history(
             except ValueError:
                 excluded["TARGET_DATE_INVALID"] += 1
                 continue
-            source_type = settlement_source_type_for_city(city, target)
-            if target < epoch_start or source_type != str(getattr(city, "settlement_source_type", "")):
+            source_type = str(getattr(city, "settlement_source_type", ""))
+            if target < epoch_start:
                 excluded["PRE_CURRENT_SOURCE_EPOCH"] += 1
                 continue
             metric = str(outcome["temperature_metric"] or "").lower()
