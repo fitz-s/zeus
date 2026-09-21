@@ -14952,7 +14952,7 @@ def run_edli_continuous_redecision_screen_cycle(
     reach-back import just binds the same live object reference -- no duplication.
     """
 
-    global _edli_belief_scan_consecutive_defers
+    global _edli_belief_scan_consecutive_defers, _edli_redecision_screen_belief_cursor
     import logging as _logging
     from src.config import get_mode
     from src.main import (
@@ -15057,7 +15057,7 @@ def run_edli_continuous_redecision_screen_cycle(
         # fixed fair-cursor batch (wraps modulo family count → full coverage, no tail drop).
         rd_cap = _EDLI_REDECISION_FAIR_BATCH
 
-        # 1) ENTRY screen + rest screen on RO connections (pure read, no HTTP).
+        # 1) Rest management and ENTRY screen on RO connections (pure read, no HTTP).
         screen_fence.stage = "belief_scan"
         world_ro = get_world_connection_read_only()
         trade_ro = get_trade_connection_with_world_required(write_class=None)
@@ -15091,46 +15091,6 @@ def run_edli_continuous_redecision_screen_cycle(
                     started_monotonic=screen_started,
                 ),
             )
-            screen_fence.stage = "price_screen"
-            beliefs, screened_belief_keys, total_beliefs = _edli_redecision_screen_belief_batch(
-                all_beliefs,
-                max_families=rd_cap,
-            )
-            if total_beliefs and len(beliefs) < total_beliefs:
-                _log.info(
-                    "edli_redecision_screen: entry belief fair batch size=%d total=%d cursor=%d",
-                    len(beliefs),
-                    total_beliefs,
-                    _edli_redecision_screen_belief_cursor,
-                )
-            probe_acted_state = dict(_edli_redecision_acted_state)
-            redecisions = screen_entry_redecisions(
-                world_ro,
-                trade_ro,
-                decision_time=received_at,
-                min_edge=min_edge,
-                acted_state=probe_acted_state,
-                beliefs=beliefs,
-            )
-            try:
-                forecasts_filter_ro = get_forecasts_connection_read_only()
-                try:
-                    entry_redecisions = filter_redecisions_with_spine_members(
-                        forecasts_filter_ro,
-                        redecisions,
-                        beliefs=beliefs,
-                        decision_time=received_at,
-                    )
-                finally:
-                    forecasts_filter_ro.close()
-            except Exception as exc:  # noqa: BLE001
-                _log.warning(
-                    "edli_redecision_screen: spine availability read failed; "
-                    "entry redecisions not admitted this tick: %r",
-                    exc,
-                )
-                entry_redecisions = []
-            raw_entry_family_keys = screened_family_keys(world_ro, entry_redecisions, beliefs=beliefs)
             # Open maker rests are already-live order-management obligations.
             # They must be screened every cycle even when their family is outside
             # the entry fair-batch cursor; the fair batch limits new entry scans,
@@ -15139,13 +15099,6 @@ def run_edli_continuous_redecision_screen_cycle(
                 trade_ro,
                 world_ro,
                 beliefs=management_beliefs,
-            )
-            entry_refresh_condition_scope = entry_substrate_refresh_scope(
-                trade_ro,
-                beliefs=beliefs,
-                decision_time=received_at,
-                max_families=rd_cap,
-                min_edge=min_edge,
             )
             rest_pulls = screen_resting_orders(
                 world_ro,
@@ -15177,12 +15130,168 @@ def run_edli_continuous_redecision_screen_cycle(
                     pair for pair in rest_pulls
                     if pair[0].command_id not in policy_blocks
                 ]
-            entry_condition_scope = _edli_redecision_condition_scope(entry_redecisions, beliefs)
             open_rest_condition_scope = _edli_open_rest_condition_scope(
                 open_rests,
                 management_beliefs,
             )
-            rest_condition_scope = _edli_rest_pull_condition_scope(rest_pulls, beliefs)
+            rest_condition_scope = _edli_rest_pull_condition_scope(
+                rest_pulls, management_beliefs
+            )
+
+            # Rest management owns a bounded share of the existing cycle budget.
+            # A speculative ENTRY price scan may consume only the earlier two
+            # thirds when a submitted maker rest exists; on its local deadline,
+            # the final third remains for fresh rest confirmation, re-emission,
+            # and the durable cancel journal.  No-rest ticks retain the original
+            # single-connection entry scan and do not add a second belief read.
+            screen_fence.stage = "price_screen"
+            entry_screen_deferred = False
+            entry_fence = None
+            entry_world_ro = world_ro
+            entry_trade_ro = trade_ro
+            entry_filter_conn = None
+            entry_connections_owned = False
+            if open_rests:
+                entry_fence = SqliteDeadlineFence(
+                    deadline_monotonic=(
+                        screen_started
+                        + (screen_fence.deadline_monotonic - screen_started) * (2.0 / 3.0)
+                    ),
+                    generation=_next_edli_redecision_screen_generation(),
+                    cancel_requested=monitor_preempt_requested,
+                )
+                entry_world_ro = _open_world_ro()
+                entry_trade_ro = _open_trade_with_world(write_class=None)
+                entry_trade_ro.execute("PRAGMA query_only=ON")
+                entry_connections_owned = True
+            entry_chunk_size = 8 if open_rests else rd_cap
+            beliefs = []
+            screened_belief_keys = set()
+            redecisions = []
+            entry_redecisions = []
+            raw_entry_family_keys = set()
+            entry_refresh_condition_scope = {}
+            total_beliefs = 0
+            try:
+                while len(beliefs) < rd_cap:
+                    entry_cursor_before = _edli_redecision_screen_belief_cursor
+                    chunk, chunk_keys, total_beliefs = _edli_redecision_screen_belief_batch(
+                        all_beliefs,
+                        max_families=min(entry_chunk_size, rd_cap - len(beliefs)),
+                    )
+                    if not chunk:
+                        break
+                    if total_beliefs and len(chunk) < total_beliefs:
+                        _log.info(
+                            "edli_redecision_screen: entry belief fair batch size=%d total=%d cursor=%d",
+                            len(chunk),
+                            total_beliefs,
+                            _edli_redecision_screen_belief_cursor,
+                        )
+                    entry_stack = contextlib.ExitStack()
+                    try:
+                        if entry_fence is not None:
+                            entry_stack.enter_context(sqlite_deadline_bound(entry_world_ro, entry_fence))
+                            entry_stack.enter_context(sqlite_deadline_bound(entry_trade_ro, entry_fence))
+                        probe_acted_state = dict(_edli_redecision_acted_state)
+                        chunk_redecisions = screen_entry_redecisions(
+                            entry_world_ro,
+                            entry_trade_ro,
+                            decision_time=received_at,
+                            min_edge=min_edge,
+                            acted_state=probe_acted_state,
+                            beliefs=chunk,
+                        )
+                        if entry_fence is not None:
+                            entry_filter_conn = _open_forecasts_ro()
+                            entry_stack.enter_context(
+                                sqlite_deadline_bound(entry_filter_conn, entry_fence)
+                            )
+                        else:
+                            entry_filter_conn = get_forecasts_connection_read_only()
+                        try:
+                            chunk_entry_redecisions = filter_redecisions_with_spine_members(
+                                entry_filter_conn,
+                                chunk_redecisions,
+                                beliefs=chunk,
+                                decision_time=received_at,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            _log.warning(
+                                "edli_redecision_screen: spine availability read failed; "
+                                "entry redecisions not admitted this tick: %r",
+                                exc,
+                            )
+                            chunk_entry_redecisions = []
+                        chunk_raw_entry_family_keys = screened_family_keys(
+                            entry_world_ro, chunk_entry_redecisions, beliefs=chunk
+                        )
+                        chunk_refresh_condition_scope = entry_substrate_refresh_scope(
+                            entry_trade_ro,
+                            beliefs=chunk,
+                            decision_time=received_at,
+                            max_families=len(chunk),
+                            min_edge=min_edge,
+                        )
+                        # Commit a chunk to the fair cursor only after every
+                        # read that defines its scope completed.  An interrupt
+                        # before this point restores its cursor and leaves no
+                        # partial candidate/result behind.
+                        beliefs.extend(chunk)
+                        screened_belief_keys.update(chunk_keys)
+                        redecisions.extend(chunk_redecisions)
+                        entry_redecisions.extend(chunk_entry_redecisions)
+                        raw_entry_family_keys.update(chunk_raw_entry_family_keys)
+                        entry_refresh_condition_scope = _edli_merge_condition_scopes(
+                            entry_refresh_condition_scope,
+                            chunk_refresh_condition_scope,
+                        )
+                    finally:
+                        entry_stack.close()
+                        if entry_filter_conn is not None:
+                            entry_filter_conn.close()
+                            entry_filter_conn = None
+                    if len(chunk) < entry_chunk_size:
+                        break
+                entry_condition_scope = _edli_redecision_condition_scope(
+                    entry_redecisions, beliefs
+                )
+            except sqlite3.OperationalError as exc:
+                if (
+                    entry_fence is None
+                    or not entry_fence.expired()
+                    or screen_fence.expired()
+                    or (
+                        "interrupted" not in str(exc).lower()
+                        and not _edli_is_sqlite_lock_error(exc)
+                    )
+                ):
+                    raise
+                # Only the interrupted chunk is retried.  Earlier chunks have
+                # already completed and keep their cursor progress, fresh
+                # confirmation, and re-emission opportunity in this cycle.
+                _edli_redecision_screen_belief_cursor = entry_cursor_before
+                entry_screen_deferred = True
+                entry_condition_scope = _edli_redecision_condition_scope(
+                    entry_redecisions, beliefs
+                )
+                _log.info(
+                    "edli_redecision_screen: entry fair chunk deferred for rest "
+                    "management completed=%d total=%d cursor=%d",
+                    len(beliefs),
+                    total_beliefs,
+                    _edli_redecision_screen_belief_cursor,
+                )
+            finally:
+                if entry_connections_owned:
+                    try:
+                        entry_world_ro.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    try:
+                        entry_trade_ro.close()
+                    except Exception:  # noqa: BLE001
+                        pass
             _screen_check_deadline()
             _log.info(
                 "edli_redecision_screen receipt=%s",
@@ -15417,33 +15526,44 @@ def run_edli_continuous_redecision_screen_cycle(
                     all_beliefs,
                     screened_belief_keys,
                 )
-                redecisions = screen_entry_redecisions(
-                    world_ro,
-                    trade_ro,
-                    decision_time=received_at,
-                    min_edge=min_edge,
-                    acted_state=_edli_redecision_acted_state,
-                    beliefs=beliefs,
-                )
-                try:
-                    forecasts_filter_ro = get_forecasts_connection_read_only()
-                    try:
-                        entry_redecisions = filter_redecisions_with_spine_members(
-                            forecasts_filter_ro,
-                            redecisions,
-                            beliefs=beliefs,
-                            decision_time=received_at,
-                        )
-                    finally:
-                        forecasts_filter_ro.close()
-                except Exception as exc:  # noqa: BLE001
-                    _log.warning(
-                        "edli_redecision_screen: post-confirm spine availability read failed; "
-                        "entry redecisions not admitted this tick: %r",
-                        exc,
+                if entry_screen_deferred:
+                    # The rest confirmation/emit path owns the budget that the
+                    # interrupted entry phase reserved.  Keep completed chunks
+                    # that were already fresh: the final scoped-freshness check
+                    # below is their emit authority.  Families needing a later
+                    # confirmation refresh remain excluded rather than using a
+                    # pre-refresh price/probability to authorize an event.
+                    pass
+                else:
+                    redecisions = screen_entry_redecisions(
+                        world_ro,
+                        trade_ro,
+                        decision_time=received_at,
+                        min_edge=min_edge,
+                        acted_state=_edli_redecision_acted_state,
+                        beliefs=beliefs,
                     )
-                    entry_redecisions = []
-                raw_entry_family_keys = screened_family_keys(world_ro, entry_redecisions, beliefs=beliefs)
+                    try:
+                        forecasts_filter_ro = get_forecasts_connection_read_only()
+                        try:
+                            entry_redecisions = filter_redecisions_with_spine_members(
+                                forecasts_filter_ro,
+                                redecisions,
+                                beliefs=beliefs,
+                                decision_time=received_at,
+                            )
+                        finally:
+                            forecasts_filter_ro.close()
+                    except Exception as exc:  # noqa: BLE001
+                        _log.warning(
+                            "edli_redecision_screen: post-confirm spine availability read failed; "
+                            "entry redecisions not admitted this tick: %r",
+                            exc,
+                        )
+                        entry_redecisions = []
+                    raw_entry_family_keys = screened_family_keys(
+                        world_ro, entry_redecisions, beliefs=beliefs
+                    )
                 open_rests = _edli_open_maker_rests_for_screen(
                     trade_ro,
                     world_ro,
@@ -15455,8 +15575,13 @@ def run_edli_continuous_redecision_screen_cycle(
                     open_rests=open_rests,
                     decision_time=received_at,
                 )
-                entry_condition_scope = _edli_redecision_condition_scope(entry_redecisions, beliefs)
-                rest_condition_scope = _edli_rest_pull_condition_scope(rest_pulls, beliefs)
+                if not entry_screen_deferred:
+                    entry_condition_scope = _edli_redecision_condition_scope(
+                        entry_redecisions, beliefs
+                    )
+                rest_condition_scope = _edli_rest_pull_condition_scope(
+                    rest_pulls, management_beliefs
+                )
             finally:
                 try:
                     world_ro.close()

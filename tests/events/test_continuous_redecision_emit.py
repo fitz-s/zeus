@@ -1,6 +1,7 @@
 # Created: 2026-05-31
-# Last reused/audited: 2026-08-28
-# Authority basis: GOAL #36 continuous trading + PLAN_CONTINUOUS_REDECISION_MAX_ALPHA_2026-05-31.md.
+# Last reused/audited: 2026-09-21
+# Authority basis: GOAL #36 continuous trading + PLAN_CONTINUOUS_REDECISION_MAX_ALPHA_2026-05-31.md;
+# 2026-09-21 rest-management priority repair.
 #   Proves the continuous re-decision emit: scan_committed_snapshots(source=<per-cycle>) re-emits a
 #   fresh FSR-equivalent each cycle (distinct event_id) instead of deduping to the consumed FSR, so
 #   the reactor re-decides every cycle (fix for EDLI-mode "hours per order"). default source/None →
@@ -15,6 +16,7 @@ import json
 import sqlite3
 import threading
 import time
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -327,6 +329,362 @@ def test_redecision_screen_nondeadline_sqlite_error_is_not_swallowed(
     with pytest.raises(sqlite3.OperationalError, match="synthetic nondeadline"):
         reactor.run_edli_continuous_redecision_screen_cycle(screen_lock=lock)
     assert lock.locked() is False
+
+
+def _screen_priority_beliefs(count: int = 61):
+    from src.events.continuous_redecision import CachedBelief
+
+    return [
+        CachedBelief(
+            family_id=f"family-{index:03d}",
+            city=f"City-{index:03d}",
+            target_date="2026-09-21",
+            snapshot_id="snapshot",
+            calibrator_model_hash="calibrator",
+            bin_labels=[],
+            p_posterior_vec=[],
+            recorded_at="2026-09-21T00:00:00+00:00",
+            condition_ids=[],
+            metric="high",
+        )
+        for index in range(count)
+    ]
+
+
+def _install_rest_priority_cycle_fakes(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    entry_screen,
+    complete_rest_flow: bool = False,
+    emit_completed_entry: bool = False,
+):
+    """Stop at scoped-freshness admission after exercising the two read phases."""
+
+    import src.state.db as db
+    from src.events.continuous_redecision import RepriceDecision
+
+    class ReachedRestFreshness(RuntimeError):
+        pass
+
+    rest = dataclasses.make_dataclass(
+        "Rest",
+        [
+            ("command_id", str), ("venue_order_id", str), ("family_id", str),
+            ("bin_label", str), ("side", str), ("city", str),
+            ("target_date", str), ("metric", str), ("condition_id", str),
+        ],
+    )(
+        "command-1", "order-1", "family-000", "31C", "buy_yes",
+        "City-000", "2026-09-21", "high", "condition-1",
+    )
+    pull = (
+        rest,
+        RepriceDecision(
+            family_id=rest.family_id,
+            bin_label=rest.bin_label,
+            side=rest.side,
+            action="CANCEL_REPLACE",
+            reason="BOOK_MOVED",
+        ),
+    )
+    beliefs = _screen_priority_beliefs()
+    entry_family = ("City-000", "2026-09-21", "high")
+    seen: dict[str, object] = {
+        "rest_screens": 0,
+        "fresh_scopes": [],
+        "cancellations": [],
+        "emitted": [],
+    }
+
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _name: False)
+    monkeypatch.setattr(
+        main,
+        "_settings_section",
+        lambda _name, _default: {"continuous_redecision_screen_budget_seconds": 1.0},
+    )
+    monkeypatch.setattr(db, "get_world_connection_read_only", lambda: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(db, "get_trade_connection_with_world_required", lambda **_kw: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(db, "get_trade_connection_read_only", lambda: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(db, "get_forecasts_connection_read_only", lambda: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(db, "get_world_connection", lambda: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(reactor, "_edli_open_maker_rests_for_screen", lambda *_a, **_kw: [rest])
+    monkeypatch.setattr(reactor, "_edli_policy_blocked_open_rest_commands", lambda *_a, **_kw: {})
+    monkeypatch.setattr(
+        reactor,
+        "_edli_redecision_condition_scope",
+        lambda *_a, **_kw: {entry_family: {"condition-1"}} if emit_completed_entry else {},
+    )
+    monkeypatch.setattr(
+        reactor,
+        "_edli_current_held_position_family_keys",
+        lambda **_kw: set(),
+    )
+    monkeypatch.setattr(
+        reactor,
+        "_edli_reemittable_held_position_family_keys",
+        lambda *_a, **_kw: set(),
+    )
+    monkeypatch.setattr(
+        reactor,
+        "_edli_current_held_position_family_condition_scope",
+        lambda *_a, **_kw: {},
+    )
+    monkeypatch.setattr(
+        reactor,
+        "_edli_entry_redecision_family_keys",
+        lambda raw, *_a, **_kw: set(raw) if emit_completed_entry else set(),
+    )
+    if complete_rest_flow:
+        monkeypatch.setattr(
+            reactor,
+            "_edli_families_with_fresh_scoped_executable_substrate",
+            lambda scope, **_kw: seen["fresh_scopes"].append(scope) or set(scope),
+        )
+        monkeypatch.setattr(reactor, "_edli_plan_unadmitted_redecision_expiry", lambda *_a, **_kw: None)
+        monkeypatch.setattr(reactor, "_edli_apply_unadmitted_redecision_expiry", lambda *_a, **_kw: 0)
+        monkeypatch.setattr(reactor, "_edli_supersede_pending_redecisions_for_rest_pull_families", lambda *_a, **_kw: 0)
+        monkeypatch.setattr(reactor, "_begin_world_write_without_convoy", lambda *_a, **_kw: True)
+        monkeypatch.setattr(
+            reactor,
+            "_edli_cancel_rest_pulls",
+            lambda pulls, **_kw: seen["cancellations"].append(pulls) or len(pulls),
+        )
+        monkeypatch.setattr(db, "world_write_mutex", threading.Lock)
+        monkeypatch.setattr(main, "_edli_acquire_mutex", lambda lock, **_kw: lock.acquire(False))
+        monkeypatch.setattr(
+            main,
+            "_edli_pending_entity_keys",
+            lambda *_a, **_kw: (
+                set() if emit_completed_entry else {"City-000|2026-09-21|high|pending"}
+            ),
+        )
+        import src.events.event_writer as event_writer
+
+        class _NoopEventWriter:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def write_many(self, events):
+                seen["emitted"].extend(events)
+                return list(events)
+
+        monkeypatch.setattr(event_writer, "EventWriter", _NoopEventWriter)
+        if emit_completed_entry:
+            import src.events.triggers.forecast_snapshot_ready as forecast_snapshot_ready
+
+            class _EntryTrigger:
+                def __init__(self, *_args, **_kwargs):
+                    pass
+
+                def build_committed_snapshot_events(self, **_kwargs):
+                    return [
+                        SimpleNamespace(
+                            entity_key="City-000|2026-09-21|high|entry",
+                            payload_json=json.dumps(
+                                {"city": "City-000", "target_date": "2026-09-21", "metric": "high"}
+                            ),
+                        )
+                    ]
+
+            monkeypatch.setattr(forecast_snapshot_ready, "ForecastSnapshotReadyTrigger", _EntryTrigger)
+            monkeypatch.setattr(main, "_redecision_event_with_origin", lambda event, _origin: event)
+    else:
+        monkeypatch.setattr(reactor, "_edli_families_with_fresh_scoped_executable_substrate", lambda scope, **_kw: (
+            seen["fresh_scopes"].append(scope)
+            or (_ for _ in ()).throw(ReachedRestFreshness())
+            if scope else set()
+        ))
+
+    import src.events.continuous_redecision as continuous_redecision
+
+    monkeypatch.setattr(continuous_redecision, "_all_latest_beliefs", lambda *_a, **_kw: beliefs)
+    monkeypatch.setattr(
+        continuous_redecision,
+        "filter_beliefs_forecast_only_admissible",
+        lambda values, **_kw: values,
+    )
+    monkeypatch.setattr(continuous_redecision, "screen_entry_redecisions", entry_screen)
+    monkeypatch.setattr(
+        continuous_redecision,
+        "filter_redecisions_with_spine_members",
+        lambda *_a, **_kw: [],
+    )
+    monkeypatch.setattr(
+        continuous_redecision,
+        "screened_family_keys",
+        lambda *_a, **_kw: {entry_family} if emit_completed_entry else set(),
+    )
+    monkeypatch.setattr(continuous_redecision, "entry_substrate_refresh_scope", lambda *_a, **_kw: {})
+
+    def _screen_resting(*_args, **_kwargs):
+        seen["rest_screens"] = int(seen["rest_screens"]) + 1
+        return [pull]
+
+    monkeypatch.setattr(continuous_redecision, "screen_resting_orders", _screen_resting)
+    return ReachedRestFreshness, seen
+
+
+def test_rest_freshness_survives_locally_timed_out_entry_screen(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A speculative entry timeout must not discard a submitted rest's fresh-bid recheck."""
+
+    from src.events import continuous_redecision
+
+    calls = 0
+    generations = iter((101, 102))
+    original_expired = continuous_redecision.SqliteDeadlineFence.expired
+    monkeypatch.setattr(reactor, "_next_edli_redecision_screen_generation", lambda: next(generations))
+
+    def _entry_only_timeout(fence):
+        return fence.generation == 102 and calls >= 3 or original_expired(fence)
+
+    monkeypatch.setattr(continuous_redecision.SqliteDeadlineFence, "expired", _entry_only_timeout)
+
+    def _slow_entry(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls >= 3:
+            raise sqlite3.OperationalError("interrupted")
+        return []
+
+    marker, seen = _install_rest_priority_cycle_fakes(monkeypatch, entry_screen=_slow_entry)
+    reactor._edli_redecision_screen_belief_cursor = 0
+
+    with pytest.raises(marker):
+        reactor.run_edli_continuous_redecision_screen_cycle(screen_lock=threading.Lock())
+
+    assert seen["rest_screens"] == 1
+    assert seen["fresh_scopes"] == [{("City-000", "2026-09-21", "high"): {"condition-1"}}]
+    assert 0 < reactor._edli_redecision_screen_belief_cursor < reactor._EDLI_REDECISION_FAIR_BATCH
+
+
+def test_persistent_rest_still_allows_completed_entry_fair_batch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A healthy entry phase advances its fair cursor even while a maker rest is managed."""
+
+    entry_calls: list[int] = []
+
+    def _fast_entry(*_args, **kwargs):
+        entry_calls.append(len(kwargs["beliefs"]))
+        return []
+
+    marker, seen = _install_rest_priority_cycle_fakes(monkeypatch, entry_screen=_fast_entry)
+    reactor._edli_redecision_screen_belief_cursor = 0
+
+    with pytest.raises(marker):
+        reactor.run_edli_continuous_redecision_screen_cycle(screen_lock=threading.Lock())
+
+    assert entry_calls == [8, 8, 8, 8, 8, 8, 8, 4]
+    assert seen["rest_screens"] == 1
+    assert reactor._edli_redecision_screen_belief_cursor == reactor._EDLI_REDECISION_FAIR_BATCH
+
+
+def test_entry_timeout_keeps_rest_cancel_journal_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A locally deferred entry chunk still emits the rest flow before its existing journal call."""
+
+    from src.events import continuous_redecision
+
+    calls = 0
+    generations = iter((201, 202))
+    original_expired = continuous_redecision.SqliteDeadlineFence.expired
+    monkeypatch.setattr(reactor, "_next_edli_redecision_screen_generation", lambda: next(generations))
+    monkeypatch.setattr(
+        continuous_redecision.SqliteDeadlineFence,
+        "expired",
+        lambda fence: fence.generation == 202 and calls >= 3 or original_expired(fence),
+    )
+
+    def _partial_entry(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls >= 3:
+            raise sqlite3.OperationalError("interrupted")
+        return []
+
+    _marker, seen = _install_rest_priority_cycle_fakes(
+        monkeypatch,
+        entry_screen=_partial_entry,
+        complete_rest_flow=True,
+    )
+    reactor._edli_redecision_screen_belief_cursor = 0
+
+    reactor.run_edli_continuous_redecision_screen_cycle(screen_lock=threading.Lock())
+
+    assert len(seen["cancellations"]) == 1
+    assert len(seen["cancellations"][0]) == 1
+    assert seen["cancellations"][0][0][1].reason == "BOOK_MOVED"
+    assert 0 < reactor._edli_redecision_screen_belief_cursor < reactor._EDLI_REDECISION_FAIR_BATCH
+
+
+def test_timeout_after_fresh_entry_chunks_still_reemits_them(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A rest's reserved phase cannot erase already-fresh entry chunks before re-emission."""
+
+    from src.events import continuous_redecision
+
+    calls = 0
+    generations = iter((301, 302))
+    original_expired = continuous_redecision.SqliteDeadlineFence.expired
+    monkeypatch.setattr(reactor, "_next_edli_redecision_screen_generation", lambda: next(generations))
+    monkeypatch.setattr(
+        continuous_redecision.SqliteDeadlineFence,
+        "expired",
+        lambda fence: fence.generation == 302 and calls >= 3 or original_expired(fence),
+    )
+
+    def _partial_entry(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls >= 3:
+            raise sqlite3.OperationalError("interrupted")
+        return [SimpleNamespace(family_id="family-000")]
+
+    _marker, seen = _install_rest_priority_cycle_fakes(
+        monkeypatch,
+        entry_screen=_partial_entry,
+        complete_rest_flow=True,
+        emit_completed_entry=True,
+    )
+    reactor._edli_redecision_screen_belief_cursor = 0
+
+    reactor.run_edli_continuous_redecision_screen_cycle(screen_lock=threading.Lock())
+
+    assert [event.entity_key for event in seen["emitted"]] == ["City-000|2026-09-21|high|entry"]
+    assert 0 < reactor._edli_redecision_screen_belief_cursor < reactor._EDLI_REDECISION_FAIR_BATCH
+
+
+def test_repeated_rest_phase_timeouts_continue_fair_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Repeated tail timeouts retry only their own chunk and cover later families next cycle."""
+
+    from src.events import continuous_redecision
+
+    calls = 0
+    generations = iter((401, 402, 403, 404))
+    original_expired = continuous_redecision.SqliteDeadlineFence.expired
+    monkeypatch.setattr(reactor, "_next_edli_redecision_screen_generation", lambda: next(generations))
+    monkeypatch.setattr(
+        continuous_redecision.SqliteDeadlineFence,
+        "expired",
+        lambda fence: (
+            fence.generation in {402, 404} and calls > 0 and calls % 3 == 0
+        ) or original_expired(fence),
+    )
+
+    def _partial_entry(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls % 3 == 0:
+            raise sqlite3.OperationalError("interrupted")
+        return []
+
+    marker, _seen = _install_rest_priority_cycle_fakes(monkeypatch, entry_screen=_partial_entry)
+    reactor._edli_redecision_screen_belief_cursor = 0
+
+    with pytest.raises(marker):
+        reactor.run_edli_continuous_redecision_screen_cycle(screen_lock=threading.Lock())
+    assert reactor._edli_redecision_screen_belief_cursor == 16
+
+    calls = 0
+    with pytest.raises(marker):
+        reactor.run_edli_continuous_redecision_screen_cycle(screen_lock=threading.Lock())
+    assert reactor._edli_redecision_screen_belief_cursor == 32
 
 
 @pytest.fixture(autouse=True)
