@@ -74,6 +74,8 @@ def _insert_pair(
         "source_family": source_family,
         "settlement_source_type": source_family,
         "rounding_rule": "wmo_half_up",
+        "obs_source": f"noaa_wrh_{observation_station.lower()}",
+        "data_version": "noaa_wrh_timeseries_v1",
     }
     conn.execute(
         """INSERT INTO settlement_outcomes (
@@ -191,7 +193,8 @@ def test_hko_requires_explicit_current_url_and_daily_product(
     provenance = json.dumps({
         "obs_id": 7, "era": ERA, "era_start_date_utc": "2026-02-21",
         "source_family": "HKO", "settlement_source_type": "HKO",
-        "rounding_rule": "oracle_truncate",
+        "rounding_rule": "oracle_truncate", "obs_source": "hko_daily_api",
+        "data_version": "hko_daily_api",
     })
     conn.execute(
         """INSERT INTO settlement_outcomes (
@@ -216,3 +219,53 @@ def test_hko_requires_explicit_current_url_and_daily_product(
     assert len(result.rows) == expected_rows
     if reason is not None:
         assert result.excluded_reason_counts[reason] == 1
+
+
+def _replace_outcome_observation_id(conn: sqlite3.Connection, observation_id: int) -> None:
+    raw = conn.execute("SELECT provenance_json FROM settlement_outcomes WHERE settlement_id=1").fetchone()[0]
+    provenance = json.loads(raw)
+    provenance["obs_id"] = observation_id
+    conn.execute("UPDATE settlement_outcomes SET provenance_json=? WHERE settlement_id=1", (json.dumps(provenance),))
+
+
+def test_never_falls_back_when_exact_outcome_observation_is_missing() -> None:
+    conn = _db()
+    _insert_pair(conn, outcome_id=1)
+    _replace_outcome_observation_id(conn, 999)
+
+    result = _read(conn)
+
+    assert not result.rows
+    assert result.excluded_reason_counts["EXACT_OBSERVATION_MISSING"] == 1
+
+
+def test_never_falls_back_from_future_exact_observation_revision() -> None:
+    conn = _db()
+    _insert_pair(conn, outcome_id=1)
+    conn.execute(
+        """INSERT INTO observations
+        SELECT 2, city, target_date, source, station_id, unit, data_source_version,
+               high_temp, low_temp, '2026-09-02T00:00:00+00:00', low_fetch_utc,
+               high_provenance_metadata, low_provenance_metadata
+          FROM observations WHERE id=1"""
+    )
+    _replace_outcome_observation_id(conn, 2)
+
+    result = _read(conn)
+
+    assert not result.rows
+    assert result.excluded_reason_counts["OBSERVATION_NOT_KNOWN_AS_OF"] == 1
+
+
+def test_rejects_conflicting_outcome_observation_provenance_claim() -> None:
+    conn = _db()
+    _insert_pair(conn, outcome_id=1)
+    raw = conn.execute("SELECT provenance_json FROM settlement_outcomes WHERE settlement_id=1").fetchone()[0]
+    provenance = json.loads(raw)
+    provenance["obs_source"] = "noaa_wrh_kmdw"
+    conn.execute("UPDATE settlement_outcomes SET provenance_json=? WHERE settlement_id=1", (json.dumps(provenance),))
+
+    result = _read(conn)
+
+    assert not result.rows
+    assert result.excluded_reason_counts["OUTCOME_OBSERVATION_PROVENANCE_MISMATCH"] == 1

@@ -139,6 +139,25 @@ def _source_product_matches_observation(observation: sqlite3.Row, source_type: s
     return False
 
 
+def _provenance_matches_exact_observation(
+    provenance: Mapping[str, Any], observation: sqlite3.Row, source_type: str,
+) -> bool:
+    """Reject a provenance claim that contradicts its exact linked observation.
+
+    ``data_version`` is a harvester product identity for WU/HKO (the canonical
+    value equals the source tag) but the technical observation version for NOAA.
+    The mapping mirrors the writer's stamped values without accepting an
+    arbitrary alias.
+    """
+    source = str(observation["source"] or "").strip()
+    if provenance.get("obs_source") != source:
+        return False
+    version = str(provenance.get("data_version") or "").strip()
+    if source_type == "noaa":
+        return version == str(observation["data_source_version"] or "").strip()
+    return version == source
+
+
 def _outcome_rows_for_city(conn: sqlite3.Connection, city: str, start: date) -> list[sqlite3.Row]:
     cursor = conn.cursor()
     cursor.row_factory = sqlite3.Row
@@ -312,6 +331,9 @@ def read_current_settlement_history(
                 page_view = None
             if not _source_product_matches_observation(observation, source_type):
                 excluded["OBSERVATION_PRODUCT_MISMATCH"] += 1
+                continue
+            if not _provenance_matches_exact_observation(provenance, observation, source_type):
+                excluded["OUTCOME_OBSERVATION_PROVENANCE_MISMATCH"] += 1
                 continue
             try:
                 semantics = SettlementSemantics.for_city(city)
