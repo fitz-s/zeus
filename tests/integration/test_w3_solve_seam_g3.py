@@ -11090,6 +11090,161 @@ def test_live_adapter_cache_hit_rehydrates_selection_telemetry_once(monkeypatch)
     assert len(enqueued) == 1
 
 
+@pytest.mark.parametrize("kind", ["joint", "deterministic"])
+def test_live_adapter_projects_only_exact_token_completion_rebind(monkeypatch, kind):
+    from src.solve.solver import deterministic_bin_payoff_witness_identity
+    import src.engine.global_auction_universe as universe
+    import src.events.family_book_manifest as family_book_manifest
+    import src.events.family_book_telemetry_writer as telemetry_writer
+
+    trade = sqlite3.connect(":memory:")
+    forecast = sqlite3.connect(":memory:")
+    topology = sqlite3.connect(":memory:")
+    world = sqlite3.connect(":memory:")
+    hooks, projected, enqueued = [], [], []
+    event = _global_scope_event(city="Dallas", source_run_id="run-dallas")
+    at = _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc)
+    family_key = era.weather_family_id(city="Dallas", target_date="2026-07-11", metric="high")
+    complete_bindings = (
+        OutcomeTokenBinding("low", "condition-low", "yes-low", "no-low"),
+        OutcomeTokenBinding("high", "condition-high", "yes-high", "no-high"),
+    )
+    original_bindings = tuple(
+        OutcomeTokenBinding(binding.bin_id, binding.condition_id, binding.yes_token_id, None)
+        for binding in complete_bindings
+    )
+    family = SimpleNamespace(
+        family_id=family_key,
+        candidates=tuple(SimpleNamespace(
+            condition_id=b.condition_id, yes_token_id=b.yes_token_id, no_token_id=b.no_token_id,
+        ) for b in original_bindings),
+    )
+    omega = SimpleNamespace(
+        topology_hash="topology",
+        bins=tuple(SimpleNamespace(bin_id=b.bin_id) for b in complete_bindings),
+    )
+    samples = np.tile(np.asarray(((0.4, 0.6),)), (400, 1))
+    identity = joint_probability_witness_identity(
+        family_key=family_key, bindings=original_bindings, q_version="q",
+        resolution_identity="resolution", topology_identity=omega.topology_hash,
+        posterior_identity_hash="posterior", source_truth_identity="source",
+        authority_certificate_hash="certificate", band_alpha=0.05,
+        band_basis="test-band", yes_point_q=np.mean(samples, axis=0),
+        yes_q_samples=samples, captured_at_utc=at,
+    )
+    original_witness = JointOutcomeProbabilityWitness(
+        family_key=family_key, bindings=original_bindings, yes_point_q=np.mean(samples, axis=0),
+        yes_q_samples=samples, q_version="q", resolution_identity="resolution",
+        topology_identity=omega.topology_hash, posterior_identity_hash="posterior",
+        source_truth_identity="source", authority_certificate_hash="certificate",
+        band_alpha=0.05, band_basis="test-band", captured_at_utc=at,
+        max_age=_dt.timedelta(seconds=30), witness_identity=identity,
+    )
+    identity_fields = (
+        "family_key", "bindings", "q_version", "resolution_identity",
+        "topology_identity", "posterior_identity_hash", "source_truth_identity",
+        "authority_certificate_hash", "band_alpha", "band_basis", "captured_at_utc",
+    )
+    if kind == "deterministic":
+        params = {name: getattr(original_witness, name) for name in identity_fields}
+        params["exact_yes_payoffs"] = (("low", 0),)
+        original_witness = DeterministicBinPayoffWitness(
+            **params, max_age=original_witness.max_age,
+            witness_identity=deterministic_bin_payoff_witness_identity(**params),
+        )
+
+    def changed_witness(witness, **changes):
+        names = identity_fields + (
+            ("yes_point_q", "yes_q_samples", "exact_payoff_witness")
+            if kind == "joint" else ("exact_yes_payoffs",)
+        )
+        params = {name: changes.get(name, getattr(witness, name)) for name in names}
+        mint_identity = (
+            joint_probability_witness_identity if kind == "joint"
+            else deterministic_bin_payoff_witness_identity
+        )
+        return replace(witness, **changes, witness_identity=mint_identity(**params))
+
+    original_prepared = bridge.PreparedGlobalFamily(
+        decision_id="original", probability_witness=original_witness, candidate_seeds=(),
+    )
+    rebound_witness = universe._rebind_probability_witness_tokens(
+        original_witness,
+        token_map_by_condition={
+            binding.condition_id: (binding.yes_token_id, binding.no_token_id)
+            for binding in complete_bindings
+        },
+        required_token_ids=frozenset(
+            token for binding in complete_bindings
+            for token in (binding.yes_token_id, binding.no_token_id)
+        ),
+    )
+    rebound_prepared = replace(
+        original_prepared, probability_witness=rebound_witness, decision_id="rebound",
+    )
+
+    def fake_prepare(_event, **kwargs):
+        kwargs["telemetry_context_sink"](family, omega, original_prepared)
+        # A later HELD/refresh context for this family must not hide ENTRY's q.
+        other = changed_witness(original_witness, source_truth_identity="other-source")
+        kwargs["telemetry_context_sink"](
+            family, omega, replace(original_prepared, probability_witness=other)
+        )
+        return original_prepared
+
+    monkeypatch.setattr(era, "_prepare_current_global_probability_family", fake_prepare)
+    monkeypatch.setattr(
+        global_batch_runtime, "process_current_global_batch",
+        lambda events, **kwargs: hooks.append(kwargs) or SimpleNamespace(events=tuple(events)),
+    )
+    monkeypatch.setattr(
+        family_book_manifest, "project_global_selection_observation_envelope",
+        lambda **kwargs: projected.append(kwargs) or SimpleNamespace(),
+    )
+    monkeypatch.setattr(telemetry_writer, "enqueue_observation_envelope", enqueued.append)
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        trade, get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=forecast, topology_conn=topology, calibration_conn=world,
+    )
+    try:
+        adapter.process_global_batch((event,), at)
+        hooks[-1]["prepare_event"](event, at)
+        observer = hooks[-1]["selection_telemetry_observer"]
+        epoch = SimpleNamespace(witness_identity="book")
+        observer({}, epoch, {event.event_id: rebound_prepared}, SimpleNamespace(), at)
+        observer({}, epoch, {event.event_id: rebound_prepared}, SimpleNamespace(), at)
+        mutations = [
+            {"source_truth_identity": "changed-source"},
+            {"captured_at_utc": at + _dt.timedelta(seconds=1)},
+            {"max_age": _dt.timedelta(seconds=60)},
+            {"topology_identity": "changed-topology"},
+            {"q_version": "changed-q-version"},
+            {"bindings": (replace(complete_bindings[0], condition_id="wrong-condition"), complete_bindings[1])},
+            {"bindings": (replace(complete_bindings[0], yes_token_id="wrong-known-token"), complete_bindings[1])},
+        ]
+        mutations.append(
+            {"yes_point_q": np.asarray((0.5, 0.5)),
+             "yes_q_samples": np.tile(np.asarray(((0.5, 0.5),)), (400, 1))}
+            if kind == "joint" else {"exact_yes_payoffs": (("low", 1),)}
+        )
+        for index, changes in enumerate(mutations):
+            changed = changed_witness(rebound_witness, **changes)
+            observer(
+                {}, SimpleNamespace(witness_identity=f"bad-book-{index}"),
+                {event.event_id: replace(rebound_prepared, probability_witness=changed)},
+                SimpleNamespace(), at,
+            )
+            assert len(projected) == len(enqueued) == 1, changes
+    finally:
+        trade.close()
+        forecast.close()
+        topology.close()
+        world.close()
+
+    assert len(projected) == len(enqueued) == 1
+    assert projected[0]["probability_witness"] is rebound_witness
+
+
 def test_live_adapter_enqueues_partial_deterministic_day0_observation(monkeypatch):
     import src.events.family_book_telemetry_writer as telemetry_writer
 

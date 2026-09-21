@@ -8864,7 +8864,12 @@ def event_bound_live_adapter_from_trade_conn(
             "miss": 0,
             "refresh": 0,
         }
-        global_selection_context: dict[str, tuple[object, object, str | None]] = {}
+        global_selection_context: dict[
+            str, tuple[object, object, str | None, object]
+        ] = {}
+        global_selection_context_by_family: dict[
+            str, dict[str, tuple[object, object, str | None, object]]
+        ] = {}
         emitted_global_selection_telemetry: set[tuple[str, str]] = set()
 
         def _record_global_selection_context(
@@ -8886,7 +8891,11 @@ def event_bound_live_adapter_from_trade_conn(
                 family,
                 omega,
                 event.causal_snapshot_id,
+                witness,
             )
+            global_selection_context_by_family.setdefault(str(witness.family_key), {})[
+                witness_identity
+            ] = global_selection_context[witness_identity]
 
         def _telemetry_context_sink(event: OpportunityEvent):
             return lambda family, omega, prepared: _record_global_selection_context(
@@ -8898,6 +8907,46 @@ def event_bound_live_adapter_from_trade_conn(
             witness_identity = str(getattr(witness, "witness_identity", "") or "")
             context = global_selection_context.get(witness_identity)
             return (context[0], context[1]) if context is not None else None
+
+        def _rebound_global_selection_context(witness: object):
+            """Accept only the book seam's exact token-completion rebind."""
+
+            from src.engine.global_auction_universe import (
+                _rebind_probability_witness_tokens,
+            )
+
+            family_key = str(getattr(witness, "family_key", "") or "")
+            bindings = tuple(getattr(witness, "bindings", ()) or ())
+            token_map = {
+                str(binding.condition_id): (
+                    str(binding.yes_token_id or ""),
+                    str(binding.no_token_id or ""),
+                )
+                for binding in bindings
+            }
+            required_tokens = frozenset(
+                token for pair in token_map.values() for token in pair if token
+            )
+            for context in global_selection_context_by_family.get(family_key, {}).values():
+                family, omega, _causal_snapshot_id, original = context
+                if not _global_selection_telemetry_context_matches(
+                    SimpleNamespace(probability_witness=original), family, omega
+                ):
+                    continue
+                try:
+                    reproduced = _rebind_probability_witness_tokens(
+                        original,
+                        token_map_by_condition=token_map,
+                        required_token_ids=required_tokens,
+                    )
+                except (AttributeError, TypeError, ValueError):
+                    continue
+                if (
+                    reproduced.witness_identity == getattr(witness, "witness_identity", None)
+                    and reproduced.max_age == getattr(witness, "max_age", None)
+                ):
+                    return context
+            return None
 
         def _capture_global_selection_observations(
             _probabilities,
@@ -8920,10 +8969,14 @@ def event_bound_live_adapter_from_trade_conn(
                         getattr(witness, "witness_identity", "") or ""
                     )
                     context = global_selection_context.get(witness_identity)
+                    rebound = False
                     if context is None:
-                        continue
-                    family, omega, causal_snapshot_id = context
-                    if not _global_selection_telemetry_context_matches(
+                        context = _rebound_global_selection_context(witness)
+                        if context is None:
+                            continue
+                        rebound = True
+                    family, omega, causal_snapshot_id, _original = context
+                    if not rebound and not _global_selection_telemetry_context_matches(
                         prepared, family, omega
                     ):
                         continue
