@@ -11190,7 +11190,7 @@ def test_live_adapter_enqueues_partial_deterministic_day0_observation(monkeypatc
         world.close()
 
     assert len(enqueued) == 1
-    assert enqueued[0].model_q_by_bin_id == {"low": 1.0}
+    assert enqueued[0].model_q_by_bin_id is None
     assert enqueued[0].measurement_unit == "F"
     assert enqueued[0].bins[0].upper_native == 68.0
 

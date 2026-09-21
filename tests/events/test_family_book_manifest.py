@@ -444,7 +444,7 @@ class TestGlobalSelectionObservationProjection:
         assert envelope.market_q_by_bin_id["b_low"] < envelope.market_q_by_bin_id["b25"]
         assert envelope.bins[0].best_yes_ask == 0.01
 
-    def test_partial_day0_exact_payoffs_keep_unknown_bins_missing(self):
+    def test_partial_day0_exact_payoffs_do_not_become_a_sparse_model_q(self):
         family, omega, _witness, epoch = self._inputs()
         bindings = tuple(
             OutcomeTokenBinding(
@@ -483,9 +483,30 @@ class TestGlobalSelectionObservationProjection:
         )
 
         assert envelope.complete_book is True
-        assert envelope.model_q_by_bin_id == {"b25": 1.0}
-        assert "b26" not in envelope.model_q_by_bin_id
+        assert envelope.model_q_by_bin_id is None
         assert envelope.market_q_by_bin_id is not None
+
+        full_fields = {
+            **fields,
+            "exact_yes_payoffs": tuple(
+                (binding.bin_id, int(binding.bin_id == "b25"))
+                for binding in bindings
+            ),
+        }
+        full_witness = DeterministicBinPayoffWitness(
+            **full_fields,
+            max_age=timedelta(seconds=30),
+            witness_identity=deterministic_bin_payoff_witness_identity(**full_fields),
+        )
+        full_envelope = project_global_selection_observation_envelope(
+            family=family, omega=omega, probability_witness=full_witness,
+            book_epoch=epoch, selected=SimpleNamespace(decision=SimpleNamespace(candidate=None)),
+            decision_time=_DECISION_TIME, causal_snapshot_id="global-causal",
+        )
+        assert full_envelope.model_q_by_bin_id == {
+            binding.bin_id: float(binding.bin_id == "b25")
+            for binding in bindings
+        }
 
     def test_fahrenheit_native_bounds_and_yes_no_books_are_preserved(self):
         family, _omega, witness, epoch = self._inputs()

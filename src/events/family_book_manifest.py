@@ -405,13 +405,19 @@ def project_global_selection_observation_envelope(
     from src.solve.solver import DeterministicBinPayoffWitness
 
     if isinstance(probability_witness, DeterministicBinPayoffWitness):
-        # Day0 exact payoff authority is deliberately partial: an omitted bin
-        # is unknown, never a zero inferred from the observed sibling. Preserve
-        # only typed 0/1 facts in the existing model-q projection surface.
-        q_by_bin_id = {
+        # ``model_q_json`` is an ordered full-family simplex. A partial Day0
+        # witness names exact facts, not a model distribution, so its unknown
+        # siblings must remain NULL rather than looking like a sparse q vector.
+        exact_q_by_bin_id = {
             str(bin_id): float(value)
             for bin_id, value in probability_witness.exact_yes_payoffs
         }
+        q_by_bin_id = (
+            exact_q_by_bin_id
+            if set(exact_q_by_bin_id) == {str(binding.bin_id) for binding in bindings}
+            and sum(exact_q_by_bin_id.values()) == 1.0
+            else None
+        )
     else:
         point_q = tuple(getattr(probability_witness, "yes_point_q", ()) or ())
         if len(point_q) != len(bindings):

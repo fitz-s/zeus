@@ -34,6 +34,7 @@ import src.events.family_book_telemetry_writer as writer
 from src.config import City
 from src.decision.family_decision_engine import FamilyDecision
 from src.events.candidate_binding import EventBoundCandidateFamily
+from src.events.family_book_manifest import ObservationEnvelope, _BinProjection
 from src.execution.family_book import ExecutableLadder, MarketBook, build_family_book
 from src.forecast.day0_conditioner import Day0ObservationState
 from src.forecast.debias_authority import DebiasAuthority
@@ -383,6 +384,88 @@ class TestNonblockingEnqueue:
 # ---------------------------------------------------------------------------
 
 class TestBoundedOutbox:
+    def test_partial_exact_model_q_is_null_in_the_canonical_observation_row(self, tmp_path):
+        spool_path = _start(tmp_path)
+        evidence_path = tmp_path / "evidence.db"
+        _bootstrap_canonical(evidence_path)
+        bins = tuple(
+            _BinProjection(
+                bin_id=bin_id,
+                executable=True,
+                lower_native=None,
+                upper_native=None,
+                condition_id=f"condition-{bin_id}",
+                yes_token_id=f"yes-{bin_id}",
+                no_token_id=f"no-{bin_id}",
+                neg_risk=False,
+                min_tick_size="0.01",
+                min_order_size="1",
+                fee_rate=0.0,
+                best_yes_ask=0.30,
+                best_yes_bid=0.20,
+                executable_snapshot_id=f"snapshot-{bin_id}",
+                raw_orderbook_hash=f"book-{bin_id}",
+                source_captured_at=_CAPTURED.isoformat(),
+            )
+            for bin_id in ("low", "high")
+        )
+        common = dict(
+            family_id="day0-exact-family",
+            city="Dallas",
+            target_date="2026-07-11",
+            temperature_metric="high",
+            topology_hash="topology",
+            complete_book=True,
+            measurement_unit="F",
+            our_mu_native=None,
+            our_sigma_native=None,
+            predictive_identity_hash=None,
+            model_q_identity_hash="day0-exact-content",
+            market_q_by_bin_id={"low": 0.5, "high": 0.5},
+            market_q_basis="derived",
+            market_q_depth_score=1.0,
+            market_q_spread_score=0.0,
+            market_q_projection_error=0.0,
+            market_q_book_hash="market-book",
+            pre_veto_selected=True,
+            selected_bin_id=None,
+            selected_side=None,
+            bins=bins,
+            causal_snapshot_id="causal",
+        )
+        partial = ObservationEnvelope(
+            **common,
+            decision_id="partial-exact",
+            receipt_hash="partial-receipt",
+            model_q_by_bin_id=None,
+            decision_time=_CAPTURED,
+        )
+        full = ObservationEnvelope(
+            **common,
+            decision_id="full-exact",
+            receipt_hash="full-receipt",
+            model_q_by_bin_id={"low": 1.0, "high": 0.0},
+            decision_time=_CAPTURED + timedelta(minutes=1),
+        )
+
+        writer.enqueue_observation_envelope(partial)
+        writer.enqueue_observation_envelope(full)
+        assert writer.drain(timeout=3.0)
+        outcome = _ingest(evidence_path, spool_path)
+        assert outcome.ingested_observations == 2
+        conn = sqlite3.connect(str(evidence_path))
+        try:
+            rows = conn.execute(
+                "SELECT decision_id, complete_book, model_q_json "
+                "FROM family_book_observations ORDER BY decision_time"
+            ).fetchall()
+        finally:
+            conn.close()
+        assert rows == [
+            ("partial-exact", 1, None),
+            ("full-exact", 1, '{"high":0.0,"low":1.0}'),
+        ]
+
     def test_ingest_deletes_the_acknowledged_batch_from_the_spool(self, tmp_path):
         spool_path = _start(tmp_path)
         trade_path = tmp_path / "trade.db"
