@@ -335,6 +335,8 @@ class TestProjectObservationEnvelope:
 
 class TestGlobalSelectionObservationProjection:
     def _inputs(self, *, omit_no_bin_id=None):
+        import numpy as np
+
         case = _case()
         omega = _outcome_space(case)
         family = _family(case)
@@ -351,7 +353,7 @@ class TestGlobalSelectionObservationProjection:
             family_key=case.family_id,
             topology_identity=omega.topology_hash,
             bindings=bindings,
-            yes_point_q=[1.0 / len(bindings)] * len(bindings),
+            yes_point_q=np.full(len(bindings), 1.0 / len(bindings)),
             witness_identity="global-q-witness",
             probability_content_identity="global-q-content",
         )
