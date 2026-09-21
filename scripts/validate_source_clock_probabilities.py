@@ -33,6 +33,7 @@ from src.calibration.scoring import validate_probability_group  # noqa: E402
 from src.config import runtime_cities_by_name  # noqa: E402
 from src.contracts.settlement_semantics import SettlementSemantics  # noqa: E402
 from src.data.current_settlement_history import read_current_settlement_history  # noqa: E402
+from src.data.bayes_precision_fusion_history_provider import raw_product_matches_live_source  # noqa: E402
 from src.data.bayes_precision_fusion_download import OPENMETEO_MODEL_IDS  # noqa: E402
 from src.data.replacement_current_value_serving import read_current_instrument_values  # noqa: E402
 from src.data.replacement_forecast_cycle_policy import (  # noqa: E402
@@ -207,29 +208,18 @@ def make_candidates(conn, row, provenance, city, decision, history, bins):
                 or r["coverage_status"] != "COVERED"
             ):
                 continue
-            if not all(r[k] for k in ("source_id", "product_id", "request_url_hash")):
-                continue
-            addressed_model = OPENMETEO_MODEL_IDS.get(model, model)
-            if r["model_name"] != addressed_model or not r["product_id"].startswith(
-                addressed_model + "::"
-            ):
-                continue
-            request = json.loads(r["request_params_json"])
             if (
-                request.get("models") != addressed_model
-                or request.get("temperature_unit") != "celsius"
+                (r["city"], r["metric"], r["target_date"], r["model"])
+                != (row["city"], row["temperature_metric"], row["target_date"], model)
+                or aware(r["source_cycle_time"]) != aware(item.served_cycle)
+                or float(r["forecast_value_c"]) != item.value_c
             ):
                 continue
-            if (
-                abs(float(r["latitude_requested"]) - city.lat) > 0.01
-                or abs(float(r["longitude_requested"]) - city.lon) > 0.01
+            if not math.isfinite(item.value_c) or not raw_product_matches_live_source(
+                r, city, lead_days=1,
             ):
                 continue
-            if r["timezone_requested"] != city.timezone or not math.isfinite(
-                item.value_c
-            ):
-                continue
-        except (TypeError, ValueError):
+        except (KeyError, TypeError, ValueError):
             continue
         values[model], cycles[model], known[model], raw_ids[model] = (
             item.value_c,

@@ -4,6 +4,7 @@
 # Reuse: Run before changing source-basket validation; no live database needed.
 from datetime import date, datetime, timezone
 import json
+import hashlib
 import math
 import sqlite3
 from types import SimpleNamespace
@@ -99,20 +100,33 @@ def input_db():
         "INSERT INTO ensemble_snapshots VALUES(1,'Chicago','2026-09-19','high','VERIFIED',0,'C','2026-09-18T07:00:00Z','2026-09-18T07:00:01Z','2026-09-18 07:00:02','2026-09-18T06:00:00Z',?)",
         (json.dumps([25.0, 27.0] * 10),),
     )
-    conn.execute(
-        "CREATE TABLE raw_model_forecasts(raw_model_forecast_id,source_available_at,captured_at,recorded_at,endpoint,coverage_status,source_id,product_id,request_url_hash,raw_sha256,latitude_requested,longitude_requested,timezone_requested,model_name,request_params_json)"
-    )
+    from src.data.openmeteo_ecmwf_ifs9_anchor import SINGLE_RUNS_FORECAST_URL
+
     for i in (1, 2):
         model = "icon_global" if i == 1 else "ukmo_global_deterministic_10km"
+        params = json.dumps(dict(
+            latitude=41.9742, longitude=-87.9073, timezone="America/Chicago",
+            models=model, temperature_unit="celsius", cell_selection="land",
+            hourly="temperature_2m",
+        ), sort_keys=True, separators=(",", ":"))
+        raw = dict(
+            raw_model_forecast_id=i, model=model, city="Chicago", metric="high",
+            target_date="2026-09-19", source_cycle_time="2026-09-18T06:00:00Z",
+            forecast_value_c=25.0 if i == 1 else 27.0,
+            source_available_at="2026-09-18T07:00:00Z",
+            captured_at="2026-09-18T07:00:01Z", recorded_at="2026-09-18 07:00:02",
+            endpoint="single_runs", endpoint_mode="single_runs", coverage_status="COVERED",
+            source_id=model + "_single_runs", source_family="openmeteo_single_runs",
+            provider="open-meteo", product_id=model + "::single_runs",
+            request_url_hash=hashlib.sha256(f"{SINGLE_RUNS_FORECAST_URL}?{params}".encode()).hexdigest(),
+            raw_sha256=None, latitude_requested=41.9742, longitude_requested=-87.9073,
+            timezone_requested="America/Chicago", model_name=model, request_params_json=params,
+        )
+        if i == 1:
+            conn.execute("CREATE TABLE raw_model_forecasts(" + ",".join(raw) + ")")
         conn.execute(
-            "INSERT INTO raw_model_forecasts VALUES(?,'2026-09-18T07:00:00Z','2026-09-18T07:00:01Z','2026-09-18 07:00:02','single_runs','COVERED',?,?,'requesthash','rawhash',41.9742,-87.9073,'America/Chicago',?,?)",
-            (
-                i,
-                model + "_single_runs",
-                model + "::single_runs",
-                model,
-                json.dumps({"models": model, "temperature_unit": "celsius"}),
-            ),
+            "INSERT INTO raw_model_forecasts VALUES(" + ",".join("?" for _ in raw) + ")",
+            tuple(raw.values()),
         )
     return conn
 
@@ -170,6 +184,10 @@ def test_candidate_uses_real_shape_and_settlement_integration(monkeypatch):
         ("latitude_requested", 0),
         ("coverage_status", "PARTIAL"),
         ("request_url_hash", None),
+        ("request_url_hash", "wrong-nonempty-hash"),
+        ("forecast_value_c", 24),
+        ("source_cycle_time", "2026-09-18T00:00:00Z"),
+        ("target_date", "2026-09-20"),
     ],
 )
 def test_bad_source_proof_cannot_form_a_candidate(monkeypatch, column, value):
@@ -179,6 +197,9 @@ def test_bad_source_proof_cannot_form_a_candidate(monkeypatch, column, value):
         "recorded_at",
         "latitude_requested",
         "coverage_status",
+        "forecast_value_c",
+        "source_cycle_time",
+        "target_date",
         "request_url_hash",
     }
     conn.execute(
