@@ -291,7 +291,7 @@ class BayesPrecisionFusionHistoryProvider:
                        timezone_requested
                   FROM raw_model_forecasts INDEXED BY idx_raw_model_forecasts_history_join
                  WHERE city = ? AND metric = ? AND lead_days = ?
-                   AND endpoint IN ('previous_runs', 'single_runs')
+                   AND endpoint = 'single_runs'
                    AND model IN ({placeholders})
                    AND target_date >= ? AND target_date < ?
                  ORDER BY model, target_date, raw_model_forecast_id

@@ -30,6 +30,7 @@ import json
 import sqlite3
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -87,7 +88,7 @@ def _insert_raw(
     target_date: str,
     metric: str,
     forecast_value_c: float,
-    endpoint: str = "previous_runs",
+    endpoint: str = "single_runs",
     lead_days: int = 1,
     source_cycle_time: str | None = None,
     source_available_at: str | None = None,
@@ -102,6 +103,12 @@ def _insert_raw(
     city_config = _TEST_CITIES[city]
     expected_model = OPENMETEO_MODEL_IDS.get(model, model)
     endpoint_mode = endpoint_mode or endpoint
+    target_start = datetime.combine(
+        date.fromisoformat(target_date), datetime.min.time(), tzinfo=ZoneInfo(city_config.timezone),
+    ).astimezone(UTC)
+    default_source_cycle = (target_start - timedelta(hours=3)).isoformat()
+    default_source_available = (target_start - timedelta(hours=2)).isoformat()
+    default_captured = (target_start - timedelta(hours=1)).isoformat()
     params: dict[str, object] = {
         "latitude": city_config.lat,
         "longitude": city_config.lon,
@@ -117,7 +124,7 @@ def _insert_raw(
         params["forecast_hours"] = 120
     if request_params_mutation:
         params.update(request_params_mutation)
-    source_cycle_time = source_cycle_time or (target_date + "T00:00:00+00:00")
+    source_cycle_time = source_cycle_time or default_source_cycle
     if endpoint == "previous_runs":
         source_id = OPENMETEO_PREVIOUS_RUNS_SOURCE_ID.get(model, f"{model}_previous_runs")
         source_family = PREVIOUS_RUNS_SOURCE_FAMILY
@@ -148,9 +155,9 @@ def _insert_raw(
         (
             model, city, target_date, metric,
             source_cycle_time,
-            source_available_at or (target_date + "T06:00:00+00:00"),
-            captured_at or (target_date + "T07:00:00+00:00"),
-            lead_days, forecast_value_c, endpoint, recorded_at or (target_date + "T07:00:00+00:00"),
+            source_available_at or default_source_available,
+            captured_at or default_captured,
+            lead_days, forecast_value_c, endpoint, recorded_at or default_captured,
             source_id, source_family, product_id or default_product_id,
             OPENMETEO_PROVIDER, expected_model, canonical_params,
             request_url_hash or default_hash, city_config.lat, city_config.lon,
@@ -325,10 +332,11 @@ def test_history_excludes_non_verified_settlement() -> None:
 # =====================================================================================
 # (3) ENDPOINT GATE — single_runs (live capture) must NOT train
 # =====================================================================================
-def test_history_accepts_current_equivalent_gridded_single_and_previous_runs() -> None:
+def test_history_excludes_previous_runs_operator_but_keeps_fixed_run_single() -> None:
 
     conn = _conn()
-    # Both products bind the current model/cell/request identity; each target date is one sample.
+    # The archive row may be physically identified, but its daily extrema are assembled from
+    # hourly rolling leads and are not a fixed-run daily operator.
     _insert_raw(conn, model="gfs_global", city="Paris", target_date="2026-04-01", metric="high", forecast_value_c=20.0, endpoint="previous_runs")
     _insert_settlement(conn, city="Paris", target_date="2026-04-01", metric="high", settlement_value=19.0)
     _insert_raw(
@@ -342,7 +350,7 @@ def test_history_accepts_current_equivalent_gridded_single_and_previous_runs() -
 
     provider = _provider(conn)
     hist = provider(city="Paris", metric="high", lead_days=1, target_date=date(2026, 5, 1), models=["gfs_global"])
-    assert hist["gfs_global"].n_train == 2
+    assert hist["gfs_global"].target_dates == ("2026-04-02",)
 
 
 def test_gridded_model_rejects_wrong_current_product_without_fallback() -> None:
@@ -579,7 +587,7 @@ def test_history_rejects_standard_product_without_modified_stamp_or_valid_reques
     assert history.target_dates == ("2026-04-03",)
 
 
-def test_day0_previous_runs_uses_current_temperature_hourly_identity() -> None:
+def test_day0_previous_runs_is_physically_identified_but_not_fixed_run_history() -> None:
     conn = _conn()
     _insert_raw(
         conn, model="gfs_global", city="Paris", target_date="2026-04-01",
@@ -587,11 +595,16 @@ def test_day0_previous_runs_uses_current_temperature_hourly_identity() -> None:
     )
     _insert_settlement(conn, city="Paris", target_date="2026-04-01", metric="high", settlement_value=19.0)
 
+    from src.data.bayes_precision_fusion_history_provider import raw_product_matches_live_source
+
+    raw = conn.execute("SELECT * FROM raw_model_forecasts").fetchone()
+    assert raw is not None
+    assert raw_product_matches_live_source(raw, _TEST_CITIES["Paris"], lead_days=0)
     history = _provider(conn)(
         city="Paris", metric="high", lead_days=0,
         target_date=date(2026, 5, 1), models=["gfs_global"],
-    )["gfs_global"]
-    assert history.n_train == 1
+    )
+    assert history == {}
 
 
 def test_history_rejects_partial_or_after_target_start_single_runs() -> None:
