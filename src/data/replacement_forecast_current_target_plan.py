@@ -904,7 +904,10 @@ def _latest_authorized_day0_fact(
             "hko": "LOWER(COALESCE(source, '')) = 'hko_hourly_accumulator'",
         }.get(source_type, "0 = 1")
         if source_type == "noaa":
-            if not expected_station:
+            if not expected_station or require_settlement_channel:
+                # Raw METAR instants serve physical conditioning only. NOAA
+                # settlement-channel facts come from the WRH event/print lanes
+                # below; absence must not promote the raw reconstruction.
                 source_identity_clause = "0 = 1"
             else:
                 source_identity_clause = "LOWER(COALESCE(source, '')) = ?"

@@ -449,7 +449,7 @@ def test_day0_fact_prefers_attached_canonical_world_over_empty_main_ghost(
         target_date="2026-08-29",
         temperature_metric="high",
         decision_time=datetime(2026, 8, 29, 10, 30, tzinfo=timezone.utc),
-        require_settlement_channel=True,
+        require_settlement_channel=False,
     )
 
     assert fact is not None
@@ -1415,6 +1415,74 @@ def _day0_source_switch_conn() -> sqlite3.Connection:
         """
     )
     return conn
+
+
+@pytest.mark.parametrize("metric,raw_value,fast_value,page_value", [
+    ("high", 30.0, 32.0, 31.0),
+    ("low", 19.0, 17.0, 18.0),
+])
+def test_noaa_durable_raw_fact_cannot_satisfy_settlement_channel(
+    monkeypatch, metric, raw_value, fast_value, page_value,
+) -> None:
+    city = SimpleNamespace(
+        name="Sao Paulo", timezone="America/Sao_Paulo",
+        settlement_unit="C", settlement_source_type="noaa", wu_station="SBGR",
+    )
+    monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {city.name: city})
+    conn = _day0_source_switch_conn()
+    conn.execute(
+        "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (city.name, "2026-09-03", "ogimet_metar_sbgr", "SBGR", "C",
+         "2026-09-03T09:05:00+00:00", "2026-09-03T06:00:00-03:00",
+         "2026-09-03T09:00:00+00:00", raw_value, raw_value,
+         "VERIFIED", 1, "OK", "historical_hourly"),
+    )
+    query = dict(
+        city=city.name, target_date="2026-09-03", temperature_metric=metric,
+        decision_time=datetime(2026, 9, 3, 11, tzinfo=timezone.utc),
+    )
+    physical = _latest_authorized_day0_fact(conn, **query)
+    assert physical is not None
+    assert physical["observed_extreme_native"] == raw_value
+    assert physical["observation_source"] == "ogimet_metar_sbgr"
+    assert _latest_authorized_day0_fact(
+        conn, **query, require_settlement_channel=True,
+    ) is None
+
+    for source, value, clock in (
+        ("aviationweather_metar", fast_value, "2026-09-03T10:00:00+00:00"),
+        ("noaa_wrh_sbgr", page_value, "2026-09-03T09:30:00+00:00"),
+    ):
+        payload = {
+            "city": city.name, "target_date": "2026-09-03", "metric": metric,
+            "settlement_source": source, "settlement_source_type": "noaa",
+            "station_id": "SBGR", "observation_time": clock,
+            "observation_available_at": clock, "raw_value": value,
+            "rounded_value": int(value), f"{metric}_so_far": value,
+            "settlement_unit": "C", "source_match_status": "MATCH",
+            "local_date_status": "MATCH", "station_match_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS", "metric_match_status": "MATCH",
+            "rounding_status": "MATCH", "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
+        }
+        conn.execute(
+            "INSERT INTO opportunity_events VALUES (?,?,?,?,?,?)",
+            (source, "DAY0_EXTREME_UPDATED", clock, clock, clock, json.dumps(payload)),
+        )
+        physical = _latest_authorized_day0_fact(conn, **query)
+        assert physical is not None
+        assert physical["observed_extreme_native"] == fast_value
+        assert physical["observation_source"] == "aviationweather_metar"
+        settlement = _latest_authorized_day0_fact(
+            conn, **query, require_settlement_channel=True,
+        )
+        if source == "aviationweather_metar":
+            assert settlement is None
+        else:
+            assert settlement is not None
+            assert settlement["observed_extreme_native"] == page_value
+            assert settlement["observation_source"] == "noaa_wrh_sbgr"
+    conn.close()
 
 
 def test_day0_ledger_deduplicates_same_metar_report_across_writer_prefixes(
