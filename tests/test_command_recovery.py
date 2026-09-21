@@ -10638,6 +10638,225 @@ class TestRecoveryResolutionTable:
         assert after_count == 0
         assert after_markets == ()
 
+    @pytest.mark.parametrize("point_read_complete", (True, False))
+    def test_post_ack_review_required_live_order_without_local_fact_restores_acked(
+        self, conn, mock_client, point_read_complete
+    ):
+        """An authenticated zero-fill LIVE point read repairs a missing fact first."""
+        from src.risk_allocator.governor import count_unknown_side_effects
+        from src.state.venue_command_repo import append_event
+
+        command_id = "cmd-post-ack-live-no-fact"
+        order_id = "ord-post-ack-live-no-fact"
+        _insert(conn, command_id=command_id, position_id="pos-post-ack-live-no-fact")
+        _advance_to_acked(conn, command_id=command_id, venue_order_id=order_id)
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:03:00Z",
+            payload={
+                "reason": "entry_ack_persistence_failed_after_side_effect",
+                "venue_order_id": order_id,
+                "side_effect_boundary_crossed": True,
+                "sdk_submit_returned_order_id": True,
+            },
+        )
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+        object.__setattr__(
+            mock_client, "authenticated_point_reads_are_complete", point_read_complete
+        )
+        object.__setattr__(
+            mock_client.get_order,
+            "authenticated_point_reads_are_complete",
+            point_read_complete,
+        )
+        mock_client.get_order.side_effect = [
+            {
+                "orderID": order_id,
+                "asset_id": "tok-001",
+                "side": "BUY",
+                "price": "0.50",
+                "size": "10",
+                "status": "OPEN",
+                "size_matched": "0",
+            },
+            {
+                "orderID": order_id,
+                "asset_id": "tok-001",
+                "side": "BUY",
+                "price": "0.50",
+                "size": "10",
+                "status": "LIVE",
+                "size_matched": "0",
+            },
+        ]
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        before_count, _ = count_unknown_side_effects(conn)
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert before_count == 1
+        if not point_read_complete:
+            assert _get_state(conn, command_id) == "REVIEW_REQUIRED", json.loads(
+                _get_events(conn, command_id)[-1]["payload_json"]
+            )
+            assert conn.execute(
+                "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = ?",
+                (command_id,),
+            ).fetchone()[0] == 0
+            return
+        assert summary["advanced"] == 1
+        assert _get_state(conn, command_id) == "ACKED"
+        events = _get_events(conn, command_id)
+        assert events[-1]["event_type"] == "REVIEW_CLEARED_VENUE_ORDER_LIVE"
+        payload = json.loads(events[-1]["payload_json"])
+        assert payload["required_predicates"]["latest_order_fact_live"] is True
+        fact = conn.execute(
+            """
+            SELECT state, matched_size, remaining_size, source, observed_at
+              FROM venue_order_facts
+             WHERE command_id = ?
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        assert dict(fact) == {
+            "state": "LIVE",
+            "matched_size": "0",
+            "remaining_size": "10",
+            "source": "REST",
+            "observed_at": payload["cleared_at"],
+        }
+        assert payload["venue_order_live_proof"]["point_order_status"] == "LIVE"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()[0] == 1
+        after_count, after_markets = count_unknown_side_effects(conn)
+        assert after_count == 0
+        assert after_markets == ()
+
+    @pytest.mark.parametrize(
+        "point_order",
+        (
+            {
+                "orderID": "ord-recovery-proof",
+                "asset_id": "tok-other",
+                "side": "BUY",
+                "price": "0.50",
+                "size": "10",
+                "status": "LIVE",
+                "size_matched": "0",
+            },
+            {
+                "orderID": "ord-recovery-proof",
+                "asset_id": "tok-001",
+                "side": "BUY",
+                "price": "0.50",
+                "size": "10",
+                "status": "LIVE",
+                "size_matched": "1",
+            },
+            {
+                "orderID": "ord-recovery-proof",
+                "asset_id": "tok-001",
+                "side": "BUY",
+                "price": "0.50",
+                "size": "10",
+                "status": "LIVE",
+            },
+        ),
+    )
+    def test_recovery_live_fact_rejects_incomplete_or_positive_fill_point(
+        self, conn, point_order
+    ):
+        from src.execution import command_recovery as recovery
+
+        command = {
+            "command_id": "cmd-recovery-proof",
+            "venue_order_id": "ord-recovery-proof",
+            "token_id": "tok-001",
+            "side": "BUY",
+            "price": "0.50",
+            "size": "10",
+        }
+        assert (
+            recovery._append_recovery_live_order_fact(
+                conn,
+                command_id=command["command_id"],
+                venue_order_id=command["venue_order_id"],
+                observed_at="2026-09-21T20:30:00Z",
+                venue_status="LIVE",
+                venue_response=point_order,
+                submitted_size=command["size"],
+                side=command["side"],
+                source_reason="test_incomplete_or_positive_fill",
+                command=command,
+            )
+            is None
+        )
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = ?",
+            (command["command_id"],),
+        ).fetchone()[0] == 0
+
+    def test_post_ack_live_fact_repair_rolls_back_if_clear_event_fails(
+        self, conn, mock_client, monkeypatch
+    ):
+        from src.risk_allocator.governor import count_unknown_side_effects
+        from src.state.venue_command_repo import append_event
+        from src.execution import command_recovery as recovery
+
+        command_id = "cmd-post-ack-live-rollback"
+        order_id = "ord-post-ack-live-rollback"
+        _insert(conn, command_id=command_id, position_id="pos-post-ack-live-rollback")
+        _advance_to_acked(conn, command_id=command_id, venue_order_id=order_id)
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:03:00Z",
+            payload={
+                "reason": "entry_ack_persistence_failed_after_side_effect",
+                "venue_order_id": order_id,
+                "side_effect_boundary_crossed": True,
+                "sdk_submit_returned_order_id": True,
+            },
+        )
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+        mock_client.get_order.return_value = {
+            "orderID": order_id,
+            "asset_id": "tok-001",
+            "side": "BUY",
+            "price": "0.50",
+            "size": "10",
+            "status": "LIVE",
+            "size_matched": "0",
+        }
+        original_append_event = recovery.append_event
+
+        def fail_clear_event(*args, **kwargs):
+            if kwargs.get("event_type") == "REVIEW_CLEARED_VENUE_ORDER_LIVE":
+                raise RuntimeError("clear event write failed")
+            return original_append_event(*args, **kwargs)
+
+        monkeypatch.setattr(recovery, "append_event", fail_clear_event)
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+        assert summary["errors"] == 1
+        assert _get_state(conn, command_id) == "REVIEW_REQUIRED"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()[0] == 0
+        assert count_unknown_side_effects(conn)[0] == 1
+
     def test_post_ack_review_required_live_order_restores_from_local_fact_when_account_read_fails(
         self, conn, mock_client
     ):

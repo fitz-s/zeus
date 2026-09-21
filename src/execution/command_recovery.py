@@ -17152,6 +17152,7 @@ def _append_recovery_live_order_fact(
     submitted_size: object,
     side: str | None,
     source_reason: str,
+    command: dict | None = None,
 ) -> int | None:
     """Persist the resting order fact that a recovery ACK just authenticated.
 
@@ -17189,6 +17190,15 @@ def _append_recovery_live_order_fact(
     # writing a fact here would pin a guessed size ahead of that proof.
     if str(venue_status or "").upper() not in {"LIVE", "OPEN", "RESTING"}:
         return None
+    if command is not None:
+        if (
+            str(_extract_order_id(venue_response or {}) or "") != venue_order_id
+            or not _raw_matches_command_submit_identity(venue_response or {}, command)
+        ):
+            return None
+        explicit_matched = _explicit_point_order_matched_size(venue_response)
+        if explicit_matched is None or not _decimal_is_zero(explicit_matched):
+            return None
     matched_size = _point_order_matched_size(
         venue_response,
         fallback="0",
@@ -23819,6 +23829,57 @@ def _review_required_post_ack_terminal_no_fill_recovery(
         and _decimal_is_zero(point_order_matched)
         and _trade_fact_count(conn, cmd.command_id) == 0
     ):
+        repair_sp_name: str | None = None
+        if not latest_fact_is_live:
+            point_read = _client_point_order_read(client, venue_order_id)
+            if not point_read.query_complete or point_read.point_order is None:
+                logger.info(
+                    "recovery: command %s REVIEW_REQUIRED post-ACK live point "
+                    "read lacks complete zero-fill identity proof",
+                    cmd.command_id,
+                )
+                return "stayed"
+            point_order = point_read.point_order
+            point_order_status_normalized = _order_status(point_order)
+            point_order_matched = _point_order_matched_size(point_order, side=command.get("side"))
+            if (
+                point_order_status_normalized not in _LIVE_ORDER_STATUSES
+                or not _decimal_is_zero(point_order_matched)
+            ):
+                return "stayed"
+            point_order_status = point_order_status_normalized
+            now = _now_iso()
+            safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in cmd.command_id)
+            repair_sp_name = f"sp_post_ack_live_fact_{safe_command_id}"
+            conn.execute(f"SAVEPOINT {repair_sp_name}")
+            try:
+                _append_recovery_live_order_fact(
+                    conn,
+                    command_id=cmd.command_id,
+                    venue_order_id=venue_order_id,
+                    observed_at=now,
+                    venue_status=point_order_status_normalized,
+                    venue_response=point_order,
+                    submitted_size=command.get("size"),
+                    side=command.get("side"),
+                    source_reason="acked_submit_authenticated_live_point_order_repair",
+                    command=command,
+                )
+                latest_fact = _latest_order_fact_for_command(conn, cmd.command_id)
+                latest_fact_is_live = (
+                    latest_fact is not None
+                    and str(latest_fact.get("venue_order_id") or "") == venue_order_id
+                    and str(latest_fact.get("state") or "").upper() in _LIVE_ORDER_STATUSES
+                    and _decimal_is_zero(latest_fact.get("matched_size"))
+                )
+                if not latest_fact_is_live:
+                    conn.execute(f"ROLLBACK TO SAVEPOINT {repair_sp_name}")
+                    conn.execute(f"RELEASE SAVEPOINT {repair_sp_name}")
+                    return "stayed"
+            except Exception:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {repair_sp_name}")
+                conn.execute(f"RELEASE SAVEPOINT {repair_sp_name}")
+                raise
         payload = {
             "schema_version": 1,
             "reason": "review_cleared_venue_order_live",
@@ -23863,13 +23924,21 @@ def _review_required_post_ack_terminal_no_fill_recovery(
             "reviewed_by": "command_recovery",
             "cleared_at": now,
         }
-        append_event(
-            conn,
-            command_id=cmd.command_id,
-            event_type=CommandEventType.REVIEW_CLEARED_VENUE_ORDER_LIVE.value,
-            occurred_at=now,
-            payload=payload,
-        )
+        try:
+            append_event(
+                conn,
+                command_id=cmd.command_id,
+                event_type=CommandEventType.REVIEW_CLEARED_VENUE_ORDER_LIVE.value,
+                occurred_at=now,
+                payload=payload,
+            )
+            if repair_sp_name is not None:
+                conn.execute(f"RELEASE SAVEPOINT {repair_sp_name}")
+        except Exception:
+            if repair_sp_name is not None:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {repair_sp_name}")
+                conn.execute(f"RELEASE SAVEPOINT {repair_sp_name}")
+            raise
         logger.info(
             "recovery: command %s REVIEW_REQUIRED post-ACK -> ACKED "
             "(venue_order_id=%s live order still present)",
