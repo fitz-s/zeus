@@ -1,3 +1,7 @@
+# Created: 2026-09-18
+# Last reused/audited: 2026-09-21
+# Authority basis: held-filled-entry cohort hotfix and ENTRY provenance gate
+
 """Entry provenance must refuse CONFLICT, not ABSENCE.
 
 `load_held_entry_calibration` gates held-entry calibration, and a refusal is
@@ -45,11 +49,11 @@ def _ledger(entry_identities: list[str | None]) -> sqlite3.Connection:
         """
         CREATE TABLE position_events (
             position_id TEXT, sequence_no INTEGER, event_type TEXT,
-            decision_id TEXT, payload_json TEXT
+            decision_id TEXT, payload_json TEXT, command_id TEXT
         );
         CREATE TABLE position_decision_attribution (
             position_id TEXT, intent_kind TEXT, resolution TEXT,
-            decision_certificate_hash TEXT
+            decision_certificate_hash TEXT, command_id TEXT
         );
         CREATE TABLE position_current (position_id TEXT, token_id TEXT, direction TEXT);
         """
@@ -57,12 +61,19 @@ def _ledger(entry_identities: list[str | None]) -> sqlite3.Connection:
     types = ["POSITION_OPEN_INTENT", "ENTRY_ORDER_POSTED", "ENTRY_ORDER_FILLED"]
     for index, (event_type, identity) in enumerate(zip(types, entry_identities)):
         conn.execute(
-            "INSERT INTO position_events VALUES (?,?,?,?,?)",
-            (_POSITION, index + 1, event_type, identity, '{"decision_log_id": 7}'),
+            "INSERT INTO position_events VALUES (?,?,?,?,?,?)",
+            (
+                _POSITION,
+                index + 1,
+                event_type,
+                identity,
+                '{"decision_log_id": 7}',
+                "command-filled",
+            ),
         )
     conn.execute(
-        "INSERT INTO position_decision_attribution VALUES (?,?,?,?)",
-        (_POSITION, "ENTRY", "ATTRIBUTED", _CERT),
+        "INSERT INTO position_decision_attribution VALUES (?,?,?,?,?)",
+        (_POSITION, "ENTRY", "ATTRIBUTED", _CERT, "command-filled"),
     )
     conn.commit()
     return conn
@@ -124,8 +135,8 @@ class TestProvenanceGate:
 
         conn = _ledger([_IDENTITY, _IDENTITY, None])
         conn.execute(
-            "INSERT INTO position_decision_attribution VALUES (?,?,?,?)",
-            (_POSITION, "ENTRY", "ATTRIBUTED", "d" * 64),
+            "INSERT INTO position_decision_attribution VALUES (?,?,?,?,?)",
+            (_POSITION, "ENTRY", "ATTRIBUTED", "d" * 64, "command-filled"),
         )
         conn.commit()
         assert "ENTRY_PROVENANCE_AMBIGUOUS" in _refusal(conn)

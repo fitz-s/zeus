@@ -3492,8 +3492,140 @@ def load_held_entry_calibration(
     certificate_conn = world_conn or trade_conn
     certificate_schema = "main" if world_conn is not None and world_schema_alias == "world" else world_schema_alias
     try:
-        event_status = trade_conn.execute(
+        def _canonical_command(raw: object) -> tuple[str | None, bool]:
+            """Return an exact command id; never trim malformed stored ids."""
+
+            if raw is None:
+                return None, False
+            if not isinstance(raw, str) or not raw or raw != raw.strip():
+                return None, True
+            return raw, False
+
+        def _event_commands(
+            event_command_raw: object, payload_json: object,
+        ) -> tuple[str | None, str | None, bool, bool, bool, bool]:
+            """Normalize column/payload ids with column precedence.
+
+            The booleans are (event_command_invalid, payload_command_invalid,
+            payload_object_invalid, command_conflict).  A missing payload
+            command is distinct from a malformed command and never silently
+            becomes a fallback.
             """
+
+            event_command, event_invalid = _canonical_command(event_command_raw)
+            try:
+                payload = json.loads(str(payload_json or ""))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return event_command, None, event_invalid, False, True, False
+            if not isinstance(payload, Mapping):
+                return event_command, None, event_invalid, False, True, False
+            payload_command = None
+            payload_command_invalid = False
+            if "command_id" in payload:
+                payload_command, payload_command_invalid = _canonical_command(
+                    payload.get("command_id")
+                )
+            return (
+                event_command,
+                payload_command,
+                event_invalid,
+                payload_command_invalid,
+                False,
+                bool(event_command and payload_command and event_command != payload_command),
+            )
+
+        all_attribution_rows = trade_conn.execute(
+            """
+            SELECT DISTINCT decision_certificate_hash
+              FROM position_decision_attribution
+             WHERE position_id = ?
+               AND intent_kind = 'ENTRY'
+               AND resolution = 'ATTRIBUTED'
+               AND decision_certificate_hash IS NOT NULL
+             LIMIT 2
+            """,
+            (position_id,),
+        ).fetchall()
+        all_position_certificate_hashes = {
+            str(row[0]).strip() for row in all_attribution_rows if str(row[0]).strip()
+        }
+        legacy_single_certificate = len(all_position_certificate_hashes) == 1
+
+        filled_command_ids: set[str] = set()
+        commandless_fill_count = 0
+        filled_command_rows = trade_conn.execute(
+            """
+            SELECT command_id, payload_json
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'ENTRY_ORDER_FILLED'
+            """,
+            (position_id,),
+        ).fetchall()
+        for event_command_id, payload_json in filled_command_rows:
+            event_command, payload_command, event_invalid, payload_invalid, payload_object_invalid, conflict = (
+                _event_commands(event_command_id, payload_json)
+            )
+            if conflict:
+                raise _held_correction_unavailable("ENTRY_FILL_COMMAND_MISMATCH")
+            if event_invalid or payload_object_invalid or payload_invalid:
+                raise _held_correction_unavailable("ENTRY_FILL_COMMAND_UNAVAILABLE")
+            command_id = event_command or payload_command
+            if not command_id:
+                commandless_fill_count += 1
+            else:
+                filled_command_ids.add(command_id)
+        if not filled_command_rows and not legacy_single_certificate:
+            raise _held_correction_unavailable("ENTRY_FILL_COMMAND_UNAVAILABLE")
+        # Gate scope: this position only.  Drain: reconcile every canonical
+        # fill with its ENTRY attribution.  Reset: an exact complete cohort
+        # (or the authenticated legacy single-certificate shape).
+        # A mixed legacy rowset cannot establish one exact command cohort;
+        # retain the authenticated single-certificate compatibility path.
+        command_linked = (
+            not legacy_single_certificate
+            and bool(filled_command_ids)
+            and not commandless_fill_count
+        )
+        if legacy_single_certificate and filled_command_ids:
+            linked_placeholders = ",".join("?" for _ in filled_command_ids)
+            linked_attributions = trade_conn.execute(
+                f"""
+                SELECT command_id, intent_kind, resolution, decision_certificate_hash
+                  FROM position_decision_attribution
+                 WHERE position_id = ?
+                   AND command_id IN ({linked_placeholders})
+                """,
+                (position_id, *sorted(filled_command_ids)),
+            ).fetchall()
+            linked_by_command: dict[str, list[tuple[object, ...]]] = {}
+            for row in linked_attributions:
+                linked_by_command.setdefault(str(row[0]), []).append(tuple(row))
+            if any(
+                len(linked_by_command.get(command_id, ())) != 1
+                or linked_by_command[command_id][0][1] != "ENTRY"
+                or linked_by_command[command_id][0][2] != "ATTRIBUTED"
+                or linked_by_command[command_id][0][3] != next(iter(all_position_certificate_hashes))
+                for command_id in filled_command_ids
+            ):
+                raise _held_correction_unavailable("ENTRY_PROVENANCE_AMBIGUOUS")
+        filled_command_cohort = tuple(sorted(filled_command_ids))
+        placeholders = ",".join("?" for _ in filled_command_cohort)
+        cohort_predicate = (
+            f"""
+                CASE
+                    WHEN command_id IS NOT NULL THEN command_id
+                    WHEN json_valid(payload_json) = 1
+                     AND json_type(payload_json, '$.command_id') = 'text'
+                    THEN json_extract(payload_json, '$.command_id')
+                END IN ({placeholders})
+            """
+            if command_linked else ""
+        )
+        cohort_params = filled_command_cohort if command_linked else ()
+        cohort_clause = f"AND {cohort_predicate}" if command_linked else ""
+        event_status = trade_conn.execute(
+            f"""
             SELECT
                 COUNT(*),
                 SUM(CASE
@@ -3515,51 +3647,102 @@ def load_held_entry_calibration(
               FROM position_events
              WHERE position_id = ?
                AND event_type IN ('POSITION_OPEN_INTENT', 'ENTRY_ORDER_POSTED', 'ENTRY_ORDER_FILLED')
+               {cohort_clause}
             """,
-            (position_id,),
+            (position_id, *cohort_params),
         ).fetchone()
+        if command_linked:
+            event_rows = trade_conn.execute(
+                """
+                SELECT command_id, payload_json
+                  FROM position_events
+                 WHERE position_id = ?
+                   AND event_type IN ('POSITION_OPEN_INTENT', 'ENTRY_ORDER_POSTED', 'ENTRY_ORDER_FILLED')
+                """,
+                (position_id,),
+            ).fetchall()
+            selected_event_count = 0
+            for event_command_id, payload_json in event_rows:
+                event_command, payload_command, event_invalid, payload_invalid, payload_object_invalid, conflict = (
+                    _event_commands(event_command_id, payload_json)
+                )
+                canonical_command = event_command or payload_command
+                intersects = bool(
+                    (event_command in filled_command_ids)
+                    or (payload_command in filled_command_ids)
+                )
+                if conflict and intersects:
+                    raise _held_correction_unavailable("ENTRY_FILL_COMMAND_MISMATCH")
+                if (event_invalid or payload_invalid) and intersects:
+                    raise _held_correction_unavailable("ENTRY_FILL_COMMAND_UNAVAILABLE")
+                if payload_object_invalid:
+                    if event_command in filled_command_ids:
+                        selected_event_count += 1
+                    continue
+                if canonical_command in filled_command_ids:
+                    selected_event_count += 1
+            if event_status is None or int(event_status[0] or 0) != selected_event_count:
+                raise _held_correction_unavailable("ENTRY_PROVENANCE_AMBIGUOUS")
         # Count the entry DECISION IDENTITIES, not the rows. A row that carries
         # no identity is an absence; ambiguity is two identities that disagree.
-        # Selecting rows (NULL included) conflated the two, and the LIMIT 3 plus
-        # a "1..2 rows" allowance could only ever have meant "one identity, with
-        # a NULL row tolerated" -- while a separate clause rejected exactly that
-        # and let two CONFLICTING identities through.
+        # Selecting rows (NULL included) conflated the two: a "1..2 rows"
+        # allowance could only ever have meant "one identity, with a NULL row
+        # tolerated" while a separate clause rejected exactly that and let two
+        # CONFLICTING identities through.
         event_identity_rows = trade_conn.execute(
-            """
+            f"""
             SELECT DISTINCT decision_id FROM position_events
              WHERE position_id = ?
                AND event_type IN ('POSITION_OPEN_INTENT', 'ENTRY_ORDER_POSTED', 'ENTRY_ORDER_FILLED')
                AND typeof(decision_id) = 'text'
                AND trim(decision_id) <> ''
-             LIMIT 3
+               {cohort_clause}
             """,
-            (position_id,),
+            (position_id, *cohort_params),
         ).fetchall()
         payload_receipt_rows = trade_conn.execute(
-            """
+            f"""
             SELECT DISTINCT json_extract(payload_json, '$.decision_log_id')
               FROM position_events
              WHERE position_id = ?
                AND event_type IN ('POSITION_OPEN_INTENT', 'ENTRY_ORDER_POSTED', 'ENTRY_ORDER_FILLED')
                AND json_valid(payload_json) = 1
                AND json_type(payload_json, '$.decision_log_id') = 'integer'
-             LIMIT 3
+               {cohort_clause}
             """,
-            (position_id,),
+            (position_id, *cohort_params),
         ).fetchall()
-        attribution_rows = trade_conn.execute(
-            """
-            SELECT DISTINCT decision_certificate_hash
-              FROM position_decision_attribution
-             WHERE position_id = ?
-               AND intent_kind = 'ENTRY'
-               AND resolution = 'ATTRIBUTED'
-               AND decision_certificate_hash IS NOT NULL
-             LIMIT 2
-            """,
-            (position_id,),
-        ).fetchall()
-        certificate_hashes = {str(row[0]).strip() for row in attribution_rows if str(row[0]).strip()}
+        if command_linked:
+            attribution_command_rows = trade_conn.execute(
+                f"""
+                SELECT command_id, intent_kind, resolution, decision_certificate_hash
+                  FROM position_decision_attribution
+                 WHERE position_id = ?
+                   AND command_id IN ({placeholders})
+                """,
+                (position_id, *filled_command_cohort),
+            ).fetchall()
+            attribution_by_command: dict[str, list[tuple[object, ...]]] = {}
+            for row in attribution_command_rows:
+                attribution_by_command.setdefault(str(row[0]), []).append(tuple(row))
+            if any(
+                len(attribution_by_command.get(command_id, ())) != 1
+                or attribution_by_command[command_id][0][1] != "ENTRY"
+                or attribution_by_command[command_id][0][2] != "ATTRIBUTED"
+                or not isinstance(attribution_by_command[command_id][0][3], str)
+                or not attribution_by_command[command_id][0][3]
+                or attribution_by_command[command_id][0][3] != attribution_by_command[command_id][0][3].strip()
+                for command_id in filled_command_cohort
+            ):
+                raise _held_correction_unavailable("ENTRY_PROVENANCE_AMBIGUOUS")
+            certificate_hashes = {
+                attribution_by_command[command_id][0][3]
+                for command_id in filled_command_cohort
+            }
+        else:
+            certificate_hashes = all_position_certificate_hashes
+    except PayoffQCorrectionUnavailable:
+        raise
     except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise _held_correction_unavailable("ENTRY_PROVENANCE_UNAVAILABLE") from exc
     if (

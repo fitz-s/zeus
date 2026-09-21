@@ -45,6 +45,7 @@ from src.contracts.payoff_q_correction import (
     CalibrationPolicySpec,
     CanonicalTrainingManifest,
     PayoffQCorrection,
+    PayoffQCorrectionUnavailable,
     SourceIdentityBaseline,
 )
 from src.calibration.market_anchored_residual import (
@@ -3791,8 +3792,8 @@ def _held_entry_reader_fixture(monkeypatch, *, side="NO"):
 
     trade = sqlite3.connect(":memory:")
     world = sqlite3.connect(":memory:")
-    trade.execute("CREATE TABLE position_events (position_id TEXT, event_type TEXT, sequence_no INTEGER, decision_id TEXT, payload_json TEXT)")
-    trade.execute("CREATE TABLE position_decision_attribution (position_id TEXT, intent_kind TEXT, resolution TEXT, decision_certificate_hash TEXT)")
+    trade.execute("CREATE TABLE position_events (position_id TEXT, event_type TEXT, sequence_no INTEGER, decision_id TEXT, payload_json TEXT, command_id TEXT)")
+    trade.execute("CREATE TABLE position_decision_attribution (position_id TEXT, intent_kind TEXT, resolution TEXT, decision_certificate_hash TEXT, command_id TEXT)")
     world.execute("CREATE TABLE decision_certificates (certificate_hash TEXT, certificate_type TEXT, mode TEXT, verifier_status TEXT, payload_json TEXT, payload_hash TEXT)")
     scope = CalibrationFitScope("high", "TAKER_LIMIT", "FOK_FULL_OR_ZERO", "raw-revision-v1")
     policy = CalibrationPolicySpec(
@@ -3851,10 +3852,10 @@ def _held_entry_reader_fixture(monkeypatch, *, side="NO"):
         "event_id": "event-a", "final_intent_id": "intent-a",
     }
     trade.execute(
-        "INSERT INTO position_events VALUES (?,?,?,?,?)",
-        ("position-a", "ENTRY_ORDER_FILLED", 1, "cert-a", json.dumps({"decision_log_id": 7})),
+        "INSERT INTO position_events VALUES (?,?,?,?,?,?)",
+        ("position-a", "ENTRY_ORDER_FILLED", 1, "cert-a", json.dumps({"decision_log_id": 7}), "command-filled"),
     )
-    trade.execute("INSERT INTO position_decision_attribution VALUES (?,?,?,?)", ("position-a", "ENTRY", "ATTRIBUTED", "cert-a"))
+    trade.execute("INSERT INTO position_decision_attribution VALUES (?,?,?,?,?)", ("position-a", "ENTRY", "ATTRIBUTED", "cert-a", "command-filled"))
     from src.decision_kernel.canonicalization import stable_hash
 
     world.execute(
@@ -3918,8 +3919,8 @@ def test_held_entry_reader_accepts_normal_entry_writer_provenance(monkeypatch):
         assert all("decision_log_id" not in json.loads(event["payload_json"]) for event in events)
         trade.executemany(
             """
-            INSERT INTO position_events (position_id, event_type, sequence_no, decision_id, payload_json)
-            VALUES (:position_id, :event_type, :sequence_no, :decision_id, :payload_json)
+            INSERT INTO position_events (position_id, event_type, sequence_no, decision_id, payload_json, command_id)
+            VALUES (:position_id, :event_type, :sequence_no, :decision_id, :payload_json, :command_id)
             """,
             events,
         )
@@ -3938,15 +3939,280 @@ def test_held_entry_reader_allows_unbounded_repeated_entry_identity(monkeypatch)
     trade, world, _artifact, token, side, _correction = _held_entry_reader_fixture(monkeypatch)
     try:
         trade.executemany(
-            "INSERT INTO position_events VALUES (?,?,?,?,?)",
+            "INSERT INTO position_events VALUES (?,?,?,?,?,?)",
             [
-                ("position-a", "ENTRY_ORDER_FILLED", sequence, "cert-a", "{}")
+                ("position-a", "ENTRY_ORDER_FILLED", sequence, "cert-a", "{}", "command-filled")
                 for sequence in range(2, 22)
             ],
         )
         assert live_fit.load_held_entry_calibration(
             trade, position_id="position-a", token_id=token, side=side, world_conn=world,
         ).decision_certificate_hash == "cert-a"
+    finally:
+        trade.close()
+        world.close()
+
+
+def test_held_entry_reader_accepts_four_actual_fills_same_certificate(monkeypatch):
+    trade, world, _artifact, token, side, _correction = _held_entry_reader_fixture(monkeypatch)
+    try:
+        trade.execute("DELETE FROM position_events")
+        trade.execute("DELETE FROM position_decision_attribution")
+        command_ids = [f"command-filled-{index}" for index in range(4)]
+        trade.executemany(
+            "INSERT INTO position_events VALUES (?,?,?,?,?,?)",
+            [
+                ("position-a", "ENTRY_ORDER_FILLED", index + 1, "cert-a", "{}", command_id)
+                for index, command_id in enumerate(command_ids)
+            ],
+        )
+        trade.executemany(
+            "INSERT INTO position_decision_attribution VALUES (?,?,?,?,?)",
+            [("position-a", "ENTRY", "ATTRIBUTED", "cert-a", command_id) for command_id in command_ids],
+        )
+        trade.execute(
+            "INSERT INTO position_decision_attribution VALUES (?,?,?,?,?)",
+            ("position-a", "ENTRY", "ATTRIBUTED", "cert-b", "command-unfilled"),
+        )
+        binding = live_fit.load_held_entry_calibration(
+            trade, position_id="position-a", token_id=token, side=side, world_conn=world,
+        )
+        assert binding.decision_certificate_hash == "cert-a"
+    finally:
+        trade.close()
+        world.close()
+
+
+def test_held_entry_reader_rejects_missing_attribution_for_any_actual_fill(monkeypatch):
+    trade, world, _artifact, token, side, _correction = _held_entry_reader_fixture(monkeypatch)
+    try:
+        trade.execute("DELETE FROM position_decision_attribution")
+        with pytest.raises(PayoffQCorrectionUnavailable, match="ENTRY_PROVENANCE_AMBIGUOUS"):
+            live_fit.load_held_entry_calibration(
+                trade, position_id="position-a", token_id=token, side=side, world_conn=world,
+            )
+    finally:
+        trade.close()
+        world.close()
+
+
+def test_held_entry_reader_rejects_known_second_fill_without_attribution(monkeypatch):
+    trade, world, _artifact, token, side, _correction = _held_entry_reader_fixture(monkeypatch)
+    try:
+        trade.execute(
+            "INSERT INTO position_events VALUES (?,?,?,?,?,?)",
+            ("position-a", "ENTRY_ORDER_FILLED", 2, "cert-a", "{}", "command-filled-2"),
+        )
+        with pytest.raises(PayoffQCorrectionUnavailable, match="ENTRY_PROVENANCE_AMBIGUOUS"):
+            live_fit.load_held_entry_calibration(
+                trade, position_id="position-a", token_id=token, side=side, world_conn=world,
+            )
+    finally:
+        trade.close()
+        world.close()
+
+
+def test_held_entry_reader_rejects_multiple_certificates_for_commandless_fills(monkeypatch):
+    trade, world, _artifact, token, side, _correction = _held_entry_reader_fixture(monkeypatch)
+    try:
+        trade.execute("UPDATE position_events SET command_id = NULL")
+        trade.execute("UPDATE position_decision_attribution SET command_id = NULL")
+        trade.execute(
+            "INSERT INTO position_events VALUES (?,?,?,?,?,?)",
+            ("position-a", "ENTRY_ORDER_FILLED", 2, "cert-a", "{}", None),
+        )
+        trade.execute(
+            "INSERT INTO position_decision_attribution VALUES (?,?,?,?,?)",
+            ("position-a", "ENTRY", "ATTRIBUTED", "cert-b", None),
+        )
+        with pytest.raises(PayoffQCorrectionUnavailable, match="ENTRY_PROVENANCE_AMBIGUOUS"):
+            live_fit.load_held_entry_calibration(
+                trade, position_id="position-a", token_id=token, side=side, world_conn=world,
+            )
+    finally:
+        trade.close()
+        world.close()
+
+
+def test_held_entry_reader_accepts_mixed_commandless_and_linked_fills_with_one_cert(monkeypatch):
+    trade, world, _artifact, token, side, _correction = _held_entry_reader_fixture(monkeypatch)
+    try:
+        trade.execute("UPDATE position_events SET command_id = NULL")
+        trade.execute(
+            "INSERT INTO position_events VALUES (?,?,?,?,?,?)",
+            ("position-a", "ENTRY_ORDER_FILLED", 2, "cert-a", "{}", "command-filled-2"),
+        )
+        trade.execute(
+            "INSERT INTO position_decision_attribution VALUES (?,?,?,?,?)",
+            ("position-a", "ENTRY", "ATTRIBUTED", "cert-a", "command-filled-2"),
+        )
+        assert live_fit.load_held_entry_calibration(
+            trade, position_id="position-a", token_id=token, side=side, world_conn=world,
+        ).decision_certificate_hash == "cert-a"
+    finally:
+        trade.close()
+        world.close()
+
+
+def test_held_entry_reader_rejects_different_certificates_across_actual_fills(monkeypatch):
+    trade, world, _artifact, token, side, _correction = _held_entry_reader_fixture(monkeypatch)
+    try:
+        trade.execute("UPDATE position_events SET command_id = NULL")
+        trade.execute("UPDATE position_decision_attribution SET command_id = NULL")
+        trade.execute(
+            "INSERT INTO position_events VALUES (?,?,?,?,?,?)",
+            ("position-a", "ENTRY_ORDER_FILLED", 2, "cert-a", "{}", "command-filled-2"),
+        )
+        trade.execute(
+            "INSERT INTO position_decision_attribution VALUES (?,?,?,?,?)",
+            ("position-a", "ENTRY", "ATTRIBUTED", "cert-b", "command-filled-2"),
+        )
+        with pytest.raises(PayoffQCorrectionUnavailable, match="ENTRY_PROVENANCE_AMBIGUOUS"):
+            live_fit.load_held_entry_calibration(
+                trade, position_id="position-a", token_id=token, side=side, world_conn=world,
+            )
+    finally:
+        trade.close()
+        world.close()
+
+
+def test_held_entry_reader_rejects_different_certificates_across_linked_fills(monkeypatch):
+    trade, world, _artifact, token, side, _correction = _held_entry_reader_fixture(monkeypatch)
+    try:
+        trade.execute(
+            "INSERT INTO position_events VALUES (?,?,?,?,?,?)",
+            ("position-a", "ENTRY_ORDER_FILLED", 2, "cert-a", "{}", "command-filled-2"),
+        )
+        trade.execute(
+            "INSERT INTO position_decision_attribution VALUES (?,?,?,?,?)",
+            ("position-a", "ENTRY", "ATTRIBUTED", "cert-b", "command-filled-2"),
+        )
+        with pytest.raises(PayoffQCorrectionUnavailable, match="ENTRY_PROVENANCE_AMBIGUOUS"):
+            live_fit.load_held_entry_calibration(
+                trade, position_id="position-a", token_id=token, side=side, world_conn=world,
+            )
+    finally:
+        trade.close()
+        world.close()
+
+
+def test_held_entry_reader_excludes_unfilled_attempt_events_and_attribution(monkeypatch):
+    trade, world, _artifact, token, side, _correction = _held_entry_reader_fixture(monkeypatch)
+    try:
+        trade.executemany(
+            "INSERT INTO position_events VALUES (?,?,?,?,?,?)",
+            [
+                ("position-a", "POSITION_OPEN_INTENT", 2, "cancelled-cert", json.dumps({"command_id": "command-other"}), "command-cancelled"),
+                ("position-a", "ENTRY_ORDER_POSTED", 3, "cancelled-cert", json.dumps({"command_id": "command-other"}), "command-cancelled"),
+            ],
+        )
+        trade.execute(
+            "INSERT INTO position_decision_attribution VALUES (?,?,?,?,?)",
+            ("position-a", "ENTRY", "ATTRIBUTED", "cancelled-cert", "command-cancelled"),
+        )
+        assert live_fit.load_held_entry_calibration(
+            trade, position_id="position-a", token_id=token, side=side, world_conn=world,
+        ).decision_certificate_hash == "cert-a"
+    finally:
+        trade.close()
+        world.close()
+
+
+def test_held_entry_reader_keeps_partial_fill_when_later_cancelled(monkeypatch):
+    trade, world, _artifact, token, side, _correction = _held_entry_reader_fixture(monkeypatch)
+    try:
+        trade.execute(
+            "INSERT INTO position_decision_attribution VALUES (?,?,?,?,?)",
+            ("position-a", "ENTRY", "ATTRIBUTED", "cert-b", "command-unfilled"),
+        )
+        trade.execute(
+            "INSERT INTO position_events VALUES (?,?,?,?,?,?)",
+            ("position-a", "ENTRY_ORDER_CANCELLED", 2, "cert-a", "{}", "command-filled"),
+        )
+        assert live_fit.load_held_entry_calibration(
+            trade, position_id="position-a", token_id=token, side=side, world_conn=world,
+        ).decision_certificate_hash == "cert-a"
+    finally:
+        trade.close()
+        world.close()
+
+
+@pytest.mark.parametrize("event_type", ["ENTRY_ORDER_FILLED", "POSITION_OPEN_INTENT", "ENTRY_ORDER_POSTED"])
+def test_held_entry_reader_rejects_column_payload_command_conflict(monkeypatch, event_type):
+    trade, world, _artifact, token, side, _correction = _held_entry_reader_fixture(monkeypatch)
+    try:
+        trade.execute(
+            "INSERT INTO position_decision_attribution VALUES (?,?,?,?,?)",
+            ("position-a", "ENTRY", "ATTRIBUTED", "cert-b", "command-other"),
+        )
+        if event_type == "ENTRY_ORDER_FILLED":
+            trade.execute(
+                "UPDATE position_events SET payload_json = ? WHERE event_type = ?",
+                (json.dumps({"command_id": "command-other"}), event_type),
+            )
+        else:
+            trade.execute(
+                "INSERT INTO position_events VALUES (?,?,?,?,?,?)",
+                ("position-a", event_type, 2, "cert-a", json.dumps({"command_id": "command-filled"}), "command-filled"),
+            )
+            trade.execute(
+                "UPDATE position_events SET payload_json = ? WHERE event_type = ? AND sequence_no = 2",
+                (json.dumps({"command_id": "command-other"}), event_type),
+            )
+        with pytest.raises(PayoffQCorrectionUnavailable, match="ENTRY_FILL_COMMAND_MISMATCH"):
+            live_fit.load_held_entry_calibration(
+                trade, position_id="position-a", token_id=token, side=side, world_conn=world,
+            )
+    finally:
+        trade.close()
+        world.close()
+
+
+def test_held_entry_reader_uses_payload_command_only_when_column_is_null(monkeypatch):
+    trade, world, _artifact, token, side, _correction = _held_entry_reader_fixture(monkeypatch)
+    try:
+        trade.execute(
+            "INSERT INTO position_decision_attribution VALUES (?,?,?,?,?)",
+            ("position-a", "ENTRY", "ATTRIBUTED", "cert-b", "command-other"),
+        )
+        trade.execute(
+            "UPDATE position_events SET command_id = NULL, payload_json = ?",
+            (json.dumps({"decision_log_id": 7, "command_id": "command-filled"}),),
+        )
+        assert live_fit.load_held_entry_calibration(
+            trade, position_id="position-a", token_id=token, side=side, world_conn=world,
+        ).decision_certificate_hash == "cert-a"
+    finally:
+        trade.close()
+        world.close()
+
+
+@pytest.mark.parametrize("mutation", ["column_whitespace", "column_type", "payload_whitespace", "payload_type"])
+def test_held_entry_reader_rejects_noncanonical_or_typed_command_carriers(monkeypatch, mutation):
+    trade, world, _artifact, token, side, _correction = _held_entry_reader_fixture(monkeypatch)
+    try:
+        trade.execute(
+            "INSERT INTO position_decision_attribution VALUES (?,?,?,?,?)",
+            ("position-a", "ENTRY", "ATTRIBUTED", "cert-b", "command-other"),
+        )
+        if mutation == "column_whitespace":
+            trade.execute("UPDATE position_events SET command_id = ?", (" command-filled",))
+        elif mutation == "column_type":
+            trade.execute("UPDATE position_events SET command_id = ?", (7,))
+        elif mutation == "payload_whitespace":
+            trade.execute(
+                "UPDATE position_events SET payload_json = ?",
+                (json.dumps({"command_id": " command-filled "}),),
+            )
+        else:
+            trade.execute(
+                "UPDATE position_events SET payload_json = ?",
+                (json.dumps({"command_id": 7}),),
+            )
+        with pytest.raises(PayoffQCorrectionUnavailable, match="ENTRY_(?:FILL_COMMAND_UNAVAILABLE|PROVENANCE_AMBIGUOUS)"):
+            live_fit.load_held_entry_calibration(
+                trade, position_id="position-a", token_id=token, side=side, world_conn=world,
+            )
     finally:
         trade.close()
         world.close()
@@ -3959,9 +4225,9 @@ def test_held_entry_reader_authenticates_edli_opening_decision_identity(monkeypa
         decision_id = f"edli_exec_cmd:event-a:intent-a:{token}:buy_no"
         trade.execute("DELETE FROM position_events")
         trade.executemany(
-            "INSERT INTO position_events VALUES (?,?,?,?,?)",
+            "INSERT INTO position_events VALUES (?,?,?,?,?,?)",
             [
-                ("position-a", event_type, sequence, "cert-a" if mixed_writer_and_recovery and sequence == 1 else decision_id, "{}")
+                ("position-a", event_type, sequence, "cert-a" if mixed_writer_and_recovery and sequence == 1 else decision_id, "{}", "command-filled")
                 for sequence, event_type in enumerate(
                     ("POSITION_OPEN_INTENT", "ENTRY_ORDER_POSTED", "ENTRY_ORDER_FILLED"), start=1,
                 )
@@ -3979,11 +4245,11 @@ def test_held_entry_reader_rejects_ninth_conflicting_entry_identity(monkeypatch)
     trade, world, _artifact, token, side, _correction = _held_entry_reader_fixture(monkeypatch)
     try:
         trade.executemany(
-            "INSERT INTO position_events VALUES (?,?,?,?,?)",
+            "INSERT INTO position_events VALUES (?,?,?,?,?,?)",
             [
-                ("position-a", "ENTRY_ORDER_FILLED", sequence, "cert-a", "{}")
+                ("position-a", "ENTRY_ORDER_FILLED", sequence, "cert-a", "{}", "command-filled")
                 for sequence in range(2, 10)
-            ] + [("position-a", "ENTRY_ORDER_FILLED", 10, "other-cert", "{}")],
+            ] + [("position-a", "ENTRY_ORDER_FILLED", 10, "other-cert", "{}", "command-filled")],
         )
         with pytest.raises(live_fit.PayoffQCorrectionUnavailable):
             live_fit.load_held_entry_calibration(

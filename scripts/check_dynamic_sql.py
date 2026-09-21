@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-05-01
-# Last reused/audited: 2026-08-27
-# Lifecycle: created=2026-05-01; last_reviewed=2026-05-21; last_reused=2026-05-21
+# Last reused/audited: 2026-09-21
+# Lifecycle: created=2026-05-01; last_reviewed=2026-09-21; last_reused=2026-09-21
 # Authority basis: ultrareview25_remediation 2026-05-01 P2 (security review §10
 #                  "30+ f-string SQL interpolations, no whitelist enforcement")
 # Purpose: per-file baseline of dynamic SQL (f-string interpolation in
@@ -106,6 +106,10 @@ _BASELINE_PER_FILE: dict[str, int] = {
     "src/analysis/event_opportunity_report.py": 3,
     "src/backtest/economics.py": 1,
     "src/calibration/effective_sample_size.py": 2,
+    # Audited 2026-09-21: closed schema/table aliases, integer PRAGMA values,
+    # and held-entry cohort clauses built only from '?' placeholders. All
+    # command identities and other data remain bound parameters.
+    "src/calibration/market_anchored_live_fit.py": 15,
     # 2026-05-26 PR #332 promotion-gate pass: ens_bias_repo grew from 2 → 4.
     # Both additional sites build WHERE fragments from closed internal
     # contributor-policy branches; values remain bound parameters.
