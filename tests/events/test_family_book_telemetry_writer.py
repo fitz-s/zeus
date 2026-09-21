@@ -22,7 +22,7 @@ import os
 import sqlite3
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -34,6 +34,7 @@ import src.events.family_book_telemetry_writer as writer
 from src.config import City
 from src.decision.family_decision_engine import FamilyDecision
 from src.events.candidate_binding import EventBoundCandidateFamily
+from src.events.family_book_manifest import ObservationEnvelope, _BinProjection
 from src.execution.family_book import ExecutableLadder, MarketBook, build_family_book
 from src.forecast.day0_conditioner import Day0ObservationState
 from src.forecast.debias_authority import DebiasAuthority
@@ -383,6 +384,158 @@ class TestNonblockingEnqueue:
 # ---------------------------------------------------------------------------
 
 class TestBoundedOutbox:
+    def test_partial_exact_model_q_is_null_in_the_canonical_observation_row(self, tmp_path):
+        spool_path = _start(tmp_path)
+        evidence_path = tmp_path / "evidence.db"
+        _bootstrap_canonical(evidence_path)
+        bins = tuple(
+            _BinProjection(
+                bin_id=bin_id,
+                executable=True,
+                lower_native=lower_native,
+                upper_native=upper_native,
+                condition_id=f"condition-{bin_id}",
+                yes_token_id=f"yes-{bin_id}",
+                no_token_id=f"no-{bin_id}",
+                neg_risk=False,
+                min_tick_size="0.01",
+                min_order_size="1",
+                fee_rate=0.0,
+                best_yes_ask=0.30,
+                best_yes_bid=0.20,
+                executable_snapshot_id=f"snapshot-{bin_id}",
+                raw_orderbook_hash=f"book-{bin_id}",
+                source_captured_at=_CAPTURED.isoformat(),
+                no_executable_snapshot_id=f"snapshot-no-{bin_id}",
+                no_raw_orderbook_hash=f"book-no-{bin_id}",
+                no_source_captured_at=(
+                    _CAPTURED + timedelta(seconds=7)
+                ).isoformat(),
+            )
+            for bin_id, lower_native, upper_native in (
+                ("low", None, 68.0),
+                ("mid", 77.0, 77.0),
+                ("high", 86.0, None),
+            )
+        )
+        common = dict(
+            family_id="day0-exact-family",
+            city="Dallas",
+            target_date="2026-07-11",
+            temperature_metric="high",
+            topology_hash="topology",
+            complete_book=True,
+            measurement_unit="F",
+            our_mu_native=None,
+            our_sigma_native=None,
+            predictive_identity_hash=None,
+            model_q_identity_hash="day0-exact-content",
+            market_q_by_bin_id={"low": 0.5, "high": 0.5},
+            market_q_basis="derived",
+            market_q_depth_score=1.0,
+            market_q_spread_score=0.0,
+            market_q_projection_error=0.0,
+            market_q_book_hash="market-book",
+            pre_veto_selected=True,
+            selected_bin_id=None,
+            selected_side=None,
+            bins=bins,
+            causal_snapshot_id="causal",
+        )
+        partial = ObservationEnvelope(
+            **common,
+            decision_id="partial-exact",
+            receipt_hash="partial-receipt",
+            model_q_by_bin_id=None,
+            decision_time=_CAPTURED,
+        )
+        full = ObservationEnvelope(
+            **common,
+            decision_id="full-exact",
+            receipt_hash="full-receipt",
+            model_q_by_bin_id={"low": 1.0, "mid": 0.0, "high": 0.0},
+            decision_time=_CAPTURED + timedelta(minutes=1),
+        )
+        no_only_base = replace(
+            full,
+            family_id="no-only-change-family",
+            receipt_hash="no-only-base",
+            pre_veto_selected=False,
+            decision_time=_CAPTURED + timedelta(minutes=3),
+        )
+        no_only_changed = replace(
+            no_only_base,
+            receipt_hash="no-only-changed",
+            decision_time=_CAPTURED + timedelta(minutes=3, seconds=1),
+            bins=tuple(
+                replace(bin_projection, no_raw_orderbook_hash="book-no-mid-changed")
+                if bin_projection.bin_id == "mid"
+                else bin_projection
+                for bin_projection in no_only_base.bins
+            ),
+        )
+        first_no_row = writer._build_outbox_row(no_only_base)
+        changed_no_row = writer._build_outbox_row(no_only_changed)
+        assert first_no_row is not None
+        assert changed_no_row is not None
+        assert changed_no_row["state_id"] != first_no_row["state_id"]
+        assert changed_no_row["sampling_reason"] == "STATE_CHANGE"
+
+        writer.enqueue_observation_envelope(partial)
+        writer.enqueue_observation_envelope(full)
+        assert writer.drain(timeout=3.0)
+        legacy = replace(
+            full,
+            family_id="legacy-v1-family",
+            decision_id="legacy-v1",
+            receipt_hash="legacy-v1-receipt",
+            decision_time=_CAPTURED + timedelta(minutes=2),
+        )
+        legacy_row = writer._build_outbox_row(legacy)
+        assert legacy_row is not None
+        legacy_row["hash_version"] = 1
+        legacy_row["payload_schema_version"] = 1
+        spool_conn = sqlite3.connect(str(spool_path))
+        try:
+            writer.insert_outbox_row(spool_conn, legacy_row)
+            spool_conn.commit()
+        finally:
+            spool_conn.close()
+        outcome = _ingest(evidence_path, spool_path)
+        assert outcome.ingested_observations == 3
+        conn = sqlite3.connect(str(evidence_path))
+        try:
+            rows = conn.execute(
+                "SELECT decision_id, complete_book, model_q_json, source_manifest_json "
+                "FROM family_book_observations ORDER BY decision_time"
+            ).fetchall()
+            state_versions = conn.execute(
+                "SELECT hash_version, payload_schema_version FROM family_book_states "
+                "ORDER BY family_id"
+            ).fetchall()
+        finally:
+            conn.close()
+        assert [row[:3] for row in rows[:2]] == [
+            ("partial-exact", 1, None),
+            ("full-exact", 1, '{"high":0.0,"low":1.0,"mid":0.0}'),
+        ]
+        assert rows[2][0] == "legacy-v1"
+        assert state_versions == [(2, 2), (1, 1)]
+        persisted = json.loads(rows[0][3])
+        assert persisted["low"]["lower_native"] is None
+        assert persisted["low"]["upper_native"] == 68.0
+        assert persisted["mid"]["lower_native"] == persisted["mid"]["upper_native"] == 77.0
+        assert persisted["high"]["lower_native"] == 86.0
+        assert persisted["high"]["upper_native"] is None
+        assert persisted["mid"]["executable_snapshot_id"] == "snapshot-mid"
+        assert persisted["mid"]["raw_orderbook_hash"] == "book-mid"
+        assert persisted["mid"]["source_captured_at"] == _CAPTURED.isoformat()
+        assert persisted["mid"]["no_executable_snapshot_id"] == "snapshot-no-mid"
+        assert persisted["mid"]["no_raw_orderbook_hash"] == "book-no-mid"
+        assert persisted["mid"]["no_source_captured_at"] == (
+            _CAPTURED + timedelta(seconds=7)
+        ).isoformat()
+
     def test_ingest_deletes_the_acknowledged_batch_from_the_spool(self, tmp_path):
         spool_path = _start(tmp_path)
         trade_path = tmp_path / "trade.db"

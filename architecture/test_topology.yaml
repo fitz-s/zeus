@@ -28,6 +28,9 @@ test_trust_policy:
   # Machine-readable registry: tests with valid lifecycle headers.
   # Tests not in this list require audit before running.
   trusted_tests:
+    tests/data/test_current_settlement_history.py: {created: "2026-09-20", last_used: "2026-09-21", note: "Current-resolver causal probability validation and physical identity antibodies."}
+    tests/forecast/test_probability_validation.py: {created: "2026-09-20", last_used: "2026-09-21", note: "Current-resolver causal probability validation and physical identity antibodies."}
+    tests/scripts/test_validate_source_clock_probabilities.py: {created: "2026-09-20", last_used: "2026-09-21", note: "Current-resolver causal probability validation and physical identity antibodies."}
     tests/test_day0_analytic_carrier.py: {created: "2026-09-20", last_used: "2026-09-20", note: "Exact HIGH/LOW settlement-preimage integration, boundary atoms, zero noise, V1 replay and unchanged confidence draws."}
     tests/test_fill_cash_proof.py: {created: "2026-09-10", last_used: "2026-09-10", note: "Finalized receipt cash identity, exact-once economics, unknown preservation and caller-owned transaction antibodies."}
     tests/test_fill_cash_observer.py: {created: "2026-09-10", last_used: "2026-09-10", note: "Finalized receipt cash identity, exact-once economics, unknown preservation and caller-owned transaction antibodies."}
@@ -1170,6 +1173,9 @@ categories:
     - tests/engine/test_monitor_held_belief_readthrough.py
 
   useful_regression:
+    - tests/data/test_current_settlement_history.py
+    - tests/forecast/test_probability_validation.py
+    - tests/scripts/test_validate_source_clock_probabilities.py
     - tests/test_fit_bias_scale.py
     - tests/test_alpha_target_coherence.py
     - tests/test_auto_pause_entries.py

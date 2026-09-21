@@ -7716,6 +7716,11 @@ def process_current_global_batch(
     held_sell_reauction_requests: tuple[object, ...] = (),
     required_held_family_keys: frozenset[str] = frozenset(),
     restrict_to_family_keys: frozenset[str] | None = None,
+    selection_telemetry_observer: Callable[
+        [Mapping[str, object], CurrentGlobalBookEpoch | None, Mapping[str, object], object, datetime],
+        None,
+    ]
+    | None = None,
     _probability_supersession_reauction_count: int = 0,
     _market_authority_supersession_reauction_count: int = 0,
 ) -> GlobalBatchSubmitResult:
@@ -9369,6 +9374,20 @@ def process_current_global_batch(
                 if proof_submit_count_after != proof_submit_count_before:
                     raise RuntimeError(
                         "GLOBAL_CAPITAL_PROOF_COUNTERFACTUAL_VENUE_SIDE_EFFECT"
+                    )
+            if selection_telemetry_observer is not None:
+                try:
+                    selection_telemetry_observer(
+                        attempt_probabilities,
+                        attempt_book_epoch,
+                        prepared_for_selection,
+                        selected,
+                        selection_at,
+                    )
+                except Exception:  # noqa: BLE001 -- telemetry cannot alter selection
+                    _LOG.warning(
+                        "global selection telemetry projection failed",
+                        exc_info=True,
                     )
             # An unevaluated result (every whole-scope abort before candidate
             # materialization, plus the cancelled-mid-solve case constructed

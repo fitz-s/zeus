@@ -61,6 +61,9 @@ class _BinProjection:
     executable_snapshot_id: Optional[str]
     raw_orderbook_hash: Optional[str]
     source_captured_at: Optional[str]
+    no_executable_snapshot_id: Optional[str] = None
+    no_raw_orderbook_hash: Optional[str] = None
+    no_source_captured_at: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -206,6 +209,262 @@ def project_observation_envelope(
     )
 
 
+def project_global_selection_observation_envelope(
+    *,
+    family: Any,
+    omega: Any,
+    probability_witness: Any,
+    book_epoch: Any,
+    selected: Any,
+    decision_time: datetime,
+    causal_snapshot_id: Optional[str],
+) -> Optional[ObservationEnvelope]:
+    """Project one actual global-auction input cut without re-deciding it.
+
+    This is deliberately a telemetry-only reconstruction from the selected
+    cut's typed probability witness and native YES/NO curves.  A missing or
+    mismatched native side leaves the family structurally incomplete and never
+    manufactures a market-implied distribution.
+    """
+    if book_epoch is None:
+        return None
+    bindings = tuple(getattr(probability_witness, "bindings", ()) or ())
+    if not bindings or str(getattr(probability_witness, "family_key", "")) != str(
+        getattr(family, "family_id", "")
+    ):
+        return None
+    if str(getattr(probability_witness, "topology_identity", "")) != str(
+        getattr(omega, "topology_hash", "")
+    ):
+        return None
+
+    expected: dict[tuple[str, str], tuple[str, str, str]] = {}
+    for binding in bindings:
+        bin_id = str(getattr(binding, "bin_id", "") or "")
+        condition_id = str(getattr(binding, "condition_id", "") or "")
+        yes_token = str(getattr(binding, "yes_token_id", "") or "")
+        no_token = str(getattr(binding, "no_token_id", "") or "")
+        if not all((bin_id, condition_id, yes_token, no_token)):
+            return None
+        expected[(bin_id, "YES")] = (condition_id, yes_token, no_token)
+        expected[(bin_id, "NO")] = (condition_id, yes_token, no_token)
+
+    family_key = str(getattr(probability_witness, "family_key", "") or "")
+    state_keys = {
+        (str(row[1]), str(row[3]), str(row[2]), str(row[4]))
+        for row in tuple(getattr(book_epoch, "asset_states", ()) or ())
+        if len(row) >= 5 and str(row[0]) == family_key
+    }
+    assets = {
+        (str(asset.bin_id), str(asset.side)): asset
+        for asset in tuple(getattr(book_epoch, "assets", ()) or ())
+        if str(getattr(asset, "family_key", "") or "") == family_key
+    }
+
+    from src.decision.market_coherence import build_market_implied_q
+    from src.execution.family_book import ExecutableLadder, MarketBook, build_family_book
+    from src.strategy.live_inference.executable_cost import QuoteLevel
+
+    markets: dict[str, MarketBook] = {}
+    complete_book = True
+    bin_rows: list[_BinProjection] = []
+    omega_by_id = {str(outcome.bin_id): outcome for outcome in tuple(omega.bins)}
+    if set(omega_by_id) != {str(getattr(binding, "bin_id", "")) for binding in bindings}:
+        return None
+
+    def append_incomplete_bin(
+        *,
+        bin_id: str,
+        outcome: Any,
+        condition_id: str,
+        yes_token: str,
+        no_token: str,
+    ) -> None:
+        bin_rows.append(
+            _BinProjection(
+                bin_id=bin_id,
+                executable=bool(getattr(outcome, "executable", False)),
+                lower_native=getattr(outcome, "lower_native", None),
+                upper_native=getattr(outcome, "upper_native", None),
+                condition_id=condition_id,
+                yes_token_id=yes_token,
+                no_token_id=no_token,
+                neg_risk=False,
+                min_tick_size="",
+                min_order_size="",
+                fee_rate=0.0,
+                best_yes_ask=None,
+                best_yes_bid=None,
+                executable_snapshot_id=None,
+                raw_orderbook_hash=None,
+                source_captured_at=None,
+            )
+        )
+
+    for binding in bindings:
+        bin_id = str(binding.bin_id)
+        condition_id, yes_token, no_token = expected[(bin_id, "YES")]
+        yes_asset = assets.get((bin_id, "YES"))
+        no_asset = assets.get((bin_id, "NO"))
+        valid_sides = (
+            yes_asset is not None
+            and no_asset is not None
+            and (bin_id, "YES", condition_id, yes_token) in state_keys
+            and (bin_id, "NO", condition_id, no_token) in state_keys
+            and str(getattr(yes_asset, "condition_id", "")) == condition_id
+            and str(getattr(no_asset, "condition_id", "")) == condition_id
+            and str(getattr(yes_asset, "token_id", "")) == yes_token
+            and str(getattr(no_asset, "token_id", "")) == no_token
+        )
+        outcome = omega_by_id[bin_id]
+        if not valid_sides:
+            complete_book = False
+            append_incomplete_bin(
+                bin_id=bin_id,
+                outcome=outcome,
+                condition_id=condition_id,
+                yes_token=yes_token,
+                no_token=no_token,
+            )
+            continue
+        yes_curve = yes_asset.curve
+        no_curve = no_asset.curve
+        if (
+            yes_curve.min_tick != no_curve.min_tick
+            or yes_curve.min_order_size != no_curve.min_order_size
+            or yes_curve.fee_model.fee_rate != no_curve.fee_model.fee_rate
+            or bool(yes_asset.neg_risk) != bool(no_asset.neg_risk)
+        ):
+            complete_book = False
+            append_incomplete_bin(
+                bin_id=bin_id,
+                outcome=outcome,
+                condition_id=condition_id,
+                yes_token=yes_token,
+                no_token=no_token,
+            )
+            continue
+        fee_rate = float(yes_curve.fee_model.fee_rate)
+        def ladder(levels: Sequence[Any], side: Literal["ask", "bid"]):
+            return ExecutableLadder(
+                levels=tuple(QuoteLevel(level.price, level.size) for level in levels),
+                side=side,
+                fee_rate=fee_rate,
+                min_tick_size=yes_curve.min_tick,
+                min_order_size=yes_curve.min_order_size,
+            )
+        markets[bin_id] = MarketBook(
+            condition_id=condition_id,
+            bin_id=bin_id,
+            yes_token_id=yes_token,
+            no_token_id=no_token,
+            yes_asks=ladder(yes_curve.levels, "ask"),
+            yes_bids=ladder(yes_asset.bid_levels, "bid"),
+            no_asks=ladder(no_curve.levels, "ask"),
+            no_bids=ladder(no_asset.bid_levels, "bid"),
+            neg_risk=bool(yes_asset.neg_risk),
+        )
+        bin_rows.append(
+            _BinProjection(
+                bin_id=bin_id,
+                executable=bool(getattr(outcome, "executable", False)),
+                lower_native=getattr(outcome, "lower_native", None),
+                upper_native=getattr(outcome, "upper_native", None),
+                condition_id=condition_id,
+                yes_token_id=yes_token,
+                no_token_id=no_token,
+                neg_risk=bool(yes_asset.neg_risk),
+                min_tick_size=str(yes_curve.min_tick),
+                min_order_size=str(yes_curve.min_order_size),
+                fee_rate=fee_rate,
+                best_yes_ask=float(yes_curve.levels[0].price),
+                best_yes_bid=(
+                    float(yes_asset.bid_levels[0].price)
+                    if yes_asset.bid_levels else None
+                ),
+                executable_snapshot_id=str(yes_curve.snapshot_id),
+                raw_orderbook_hash=str(yes_curve.book_hash),
+                source_captured_at=yes_asset.captured_at_utc.isoformat(),
+                no_executable_snapshot_id=str(no_curve.snapshot_id),
+                no_raw_orderbook_hash=str(no_curve.book_hash),
+                no_source_captured_at=no_asset.captured_at_utc.isoformat(),
+            )
+        )
+
+    family_book = build_family_book(
+        omega=omega,
+        markets=markets,
+        captured_at_utc=book_epoch.captured_at_utc,
+    )
+    complete_book = complete_book and family_book.complete_book
+    implied = build_market_implied_q(family_book) if complete_book else None
+    candidate = getattr(getattr(selected, "decision", None), "candidate", None)
+    selected_bin_id = (
+        str(getattr(candidate, "bin_id", ""))
+        if candidate is not None and str(getattr(candidate, "family_key", "")) == family_key
+        else None
+    )
+    selected_side = (
+        str(getattr(candidate, "side", ""))
+        if selected_bin_id is not None else None
+    )
+    from src.solve.solver import DeterministicBinPayoffWitness
+
+    if isinstance(probability_witness, DeterministicBinPayoffWitness):
+        # ``model_q_json`` is an ordered full-family simplex. A partial Day0
+        # witness names exact facts, not a model distribution, so its unknown
+        # siblings must remain NULL rather than looking like a sparse q vector.
+        exact_q_by_bin_id = {
+            str(bin_id): float(value)
+            for bin_id, value in probability_witness.exact_yes_payoffs
+        }
+        q_by_bin_id = (
+            exact_q_by_bin_id
+            if set(exact_q_by_bin_id) == {str(binding.bin_id) for binding in bindings}
+            and sum(exact_q_by_bin_id.values()) == 1.0
+            else None
+        )
+    else:
+        point_q = tuple(getattr(probability_witness, "yes_point_q", ()) or ())
+        if len(point_q) != len(bindings):
+            return None
+        q_by_bin_id = {
+            str(binding.bin_id): float(value)
+            for binding, value in zip(bindings, point_q, strict=True)
+        }
+    return ObservationEnvelope(
+        family_id=family_key,
+        city=str(getattr(family, "city", "")),
+        target_date=str(getattr(family, "target_date", "")),
+        temperature_metric=str(getattr(family, "metric", "")),
+        decision_id=str(getattr(probability_witness, "witness_identity", "")),
+        receipt_hash=str(getattr(probability_witness, "witness_identity", "")),
+        topology_hash=str(getattr(omega, "topology_hash", "")),
+        complete_book=complete_book,
+        measurement_unit=str(getattr(getattr(omega, "resolution", None), "measurement_unit", "")),
+        our_mu_native=None,
+        our_sigma_native=None,
+        predictive_identity_hash=None,
+        model_q_by_bin_id=q_by_bin_id,
+        model_q_identity_hash=str(getattr(probability_witness, "probability_content_identity", "")),
+        market_q_by_bin_id=(
+            {binding.bin_id: float(value) for binding, value in zip(bindings, implied.q, strict=True)}
+            if implied is not None else None
+        ),
+        market_q_basis=implied.basis if implied is not None else None,
+        market_q_depth_score=float(implied.depth_score) if implied is not None else None,
+        market_q_spread_score=float(implied.spread_score) if implied is not None else None,
+        market_q_projection_error=float(implied.projection_error) if implied is not None else None,
+        market_q_book_hash=implied.book_hash if implied is not None else None,
+        pre_veto_selected=selected_bin_id is not None,
+        selected_bin_id=selected_bin_id,
+        selected_side=selected_side,
+        bins=tuple(bin_rows),
+        decision_time=decision_time,
+        causal_snapshot_id=causal_snapshot_id,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Writer-side (off decision thread): state identity + per-observation
 # provenance, both derived from the already-extracted envelope.
@@ -217,7 +476,7 @@ def project_observation_envelope(
 # FIRST capture's provenance).
 _HASH_FIELDS = (
     "bin_id", "raw_orderbook_hash", "condition_id", "yes_token_id", "no_token_id",
-    "neg_risk", "min_tick_size", "min_order_size", "fee_rate",
+    "no_raw_orderbook_hash", "neg_risk", "min_tick_size", "min_order_size", "fee_rate",
 )
 
 
@@ -260,8 +519,14 @@ def build_source_manifest(envelope: ObservationEnvelope) -> str:
     return canonical_json(
         {
             b.bin_id: {
+                "lower_native": b.lower_native,
+                "upper_native": b.upper_native,
                 "executable_snapshot_id": b.executable_snapshot_id,
+                "raw_orderbook_hash": b.raw_orderbook_hash,
                 "source_captured_at": b.source_captured_at,
+                "no_executable_snapshot_id": b.no_executable_snapshot_id,
+                "no_raw_orderbook_hash": b.no_raw_orderbook_hash,
+                "no_source_captured_at": b.no_source_captured_at,
             }
             for b in sorted(envelope.bins, key=lambda b: b.bin_id)
         }

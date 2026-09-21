@@ -36,8 +36,8 @@ from __future__ import annotations
 
 import sqlite3
 
-HASH_VERSION = 1
-PAYLOAD_SCHEMA_VERSION = 1
+HASH_VERSION = 2
+PAYLOAD_SCHEMA_VERSION = 2
 SCHEMA_VERSION = 1
 
 CREATE_TABLE_SQL = """

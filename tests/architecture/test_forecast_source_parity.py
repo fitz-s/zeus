@@ -36,6 +36,40 @@ def _read(rel: str) -> str:
     return (ROOT / rel).read_text()
 
 
+def test_precision_history_uses_actual_decision_clock(monkeypatch) -> None:
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from src.data import bayes_precision_fusion_history_provider as history
+    from src.engine import event_reactor_adapter as era
+    from src.forecast import grid_representativeness_loader as grid
+
+    decision = datetime(2026, 9, 20, 15, 37, tzinfo=timezone.utc)
+    family = SimpleNamespace(city="Chicago", target_date="2026-09-21", metric="high")
+    event = SimpleNamespace(
+        event_type=next(iter(era._FORECAST_DECISION_EVENT_TYPES)),
+        causal_snapshot_id="rmf-Chicago|2026-09-21|high|2026-09-20",
+    )
+    seen = []
+
+    def precision(_conn, **kwargs):
+        seen.append(kwargs["as_of"])
+        return {"icon_global": (4.0, 7)}
+
+    monkeypatch.setattr(history, "raw_second_moment_by_model", precision)
+    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Chicago": SimpleNamespace(settlement_unit="F")})
+    monkeypatch.setattr(era, "_raw_model_members_for_cycle", lambda *args, **kwargs: {
+        "icon_global": 20.0, "ecmwf_ifs": 21.0, "ncep_nbm_conus": 22.0,
+    })
+    monkeypatch.setattr(grid, "sigma_repr_sq_for", lambda *args: 0.0)
+    result = era._spine_multimodel_members_for_event(
+        None, event=event, family=family, decision_time=decision,
+    )
+    assert seen == [decision]
+    assert result is not None
+    assert result[2][0] == ("icon_global", 4.0 * (9.0 / 5.0) ** 2, 7, 0.0)
+
+
 # ---------------------------------------------------------------------------------
 # (a) The LIVE ENTRY SPINE producer sources raw_model_forecasts, NOT ensemble_snapshots.
 #     The live producer block in _generate_candidate_proofs calls the multi-model

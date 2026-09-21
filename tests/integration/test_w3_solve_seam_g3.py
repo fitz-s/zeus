@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-09-19
+# Last reused/audited: 2026-09-20
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -12121,6 +12121,330 @@ def test_live_adapter_reuses_unchanged_probability_and_evicts_changed_family(
     assert expired_refresh.probability_witness.captured_at_utc == at_expired
 
 
+def test_live_adapter_cache_hit_rehydrates_selection_telemetry_once(monkeypatch):
+    """A reissued q must retain its verified physical context for this cut."""
+
+    import src.events.family_book_manifest as family_book_manifest
+    import src.events.family_book_telemetry_writer as telemetry_writer
+
+    trade = sqlite3.connect(":memory:")
+    forecast = sqlite3.connect(":memory:")
+    topology = sqlite3.connect(":memory:")
+    world = sqlite3.connect(":memory:")
+    hooks = []
+    projected = []
+    enqueued = []
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE", None)
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE", {})
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE", {})
+    family_key = era.weather_family_id(
+        city="Dallas", target_date="2026-07-11", metric="high",
+    )
+    bindings = (
+        OutcomeTokenBinding("low", "condition-low", "yes-low", "no-low"),
+        OutcomeTokenBinding("high", "condition-high", "yes-high", "no-high"),
+    )
+    family = SimpleNamespace(
+        family_id=family_key,
+        candidates=tuple(
+            SimpleNamespace(
+                condition_id=binding.condition_id,
+                yes_token_id=binding.yes_token_id,
+                no_token_id=binding.no_token_id,
+            )
+            for binding in bindings
+        ),
+    )
+    omega = SimpleNamespace(
+        topology_hash="topology",
+        bins=tuple(SimpleNamespace(bin_id=binding.bin_id) for binding in bindings),
+    )
+    samples = np.tile(np.asarray(((0.4, 0.6),)), (400, 1))
+    prepare_calls = []
+
+    def fake_prepare(_event, *, decision_time, max_age, cache_metadata_out=None, **kwargs):
+        prepare_calls.append(decision_time)
+        if cache_metadata_out is not None:
+            cache_metadata_out["family_binding_hash"] = "family-binding"
+        identity = joint_probability_witness_identity(
+            family_key=family_key, bindings=bindings, q_version="q",
+            resolution_identity="resolution", topology_identity=omega.topology_hash,
+            posterior_identity_hash="posterior", source_truth_identity="source",
+            authority_certificate_hash="certificate", band_alpha=0.05,
+            band_basis="test-band", yes_point_q=np.mean(samples, axis=0),
+            yes_q_samples=samples, captured_at_utc=decision_time,
+        )
+        witness = JointOutcomeProbabilityWitness(
+            family_key=family_key, bindings=bindings, yes_point_q=np.mean(samples, axis=0),
+            yes_q_samples=samples, q_version="q", resolution_identity="resolution",
+            topology_identity=omega.topology_hash, posterior_identity_hash="posterior",
+            source_truth_identity="source", authority_certificate_hash="certificate",
+            band_alpha=0.05, band_basis="test-band", captured_at_utc=decision_time,
+            max_age=max_age, witness_identity=identity,
+        )
+        prepared = bridge.PreparedGlobalFamily(
+            decision_id="decision", probability_witness=witness, candidate_seeds=(),
+        )
+        kwargs["telemetry_context_sink"](family, omega, prepared)
+        return prepared
+
+    monkeypatch.setattr(era, "_prepare_current_global_probability_family", fake_prepare)
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "process_current_global_batch",
+        lambda events, **kwargs: hooks.append(kwargs) or SimpleNamespace(events=tuple(events)),
+    )
+    monkeypatch.setattr(
+        family_book_manifest,
+        "project_global_selection_observation_envelope",
+        lambda **kwargs: projected.append(kwargs) or SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        telemetry_writer, "enqueue_observation_envelope", lambda envelope: enqueued.append(envelope),
+    )
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        trade, get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=forecast, topology_conn=topology, calibration_conn=world,
+    )
+    scope_event = _global_scope_event(city="Dallas", source_run_id="run-dallas")
+    book_event = replace(scope_event, event_type="BOOK_SNAPSHOT")
+    at_0 = _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc)
+    at_1 = at_0 + _dt.timedelta(seconds=1)
+    try:
+        adapter.process_global_batch((book_event,), at_0)
+        hooks[-1]["prepare_event"](scope_event, at_0)
+
+        adapter.process_global_batch((book_event,), at_1)
+        current_event = replace(scope_event, causal_snapshot_id="current-cut")
+        cached = hooks[-1]["prepare_event"](current_event, at_1).prepared_global_family
+        observer = hooks[-1]["selection_telemetry_observer"]
+        epoch = SimpleNamespace(witness_identity="book-epoch")
+        observer({}, epoch, {current_event.event_id: cached}, SimpleNamespace(), at_1)
+        observer({}, epoch, {current_event.event_id: cached}, SimpleNamespace(), at_1)
+    finally:
+        trade.close()
+        forecast.close()
+        topology.close()
+        world.close()
+
+    assert len(prepare_calls) == 1
+    assert len(projected) == 1
+    assert projected[0]["causal_snapshot_id"] == "current-cut"
+    assert len(enqueued) == 1
+
+
+def test_live_adapter_enqueues_partial_deterministic_day0_observation(monkeypatch):
+    import src.events.family_book_telemetry_writer as telemetry_writer
+
+    trade = sqlite3.connect(":memory:")
+    forecast = sqlite3.connect(":memory:")
+    topology = sqlite3.connect(":memory:")
+    world = sqlite3.connect(":memory:")
+    hooks = []
+    enqueued = []
+    event = _global_day0_scope_event(city="Dallas", source_run_id="run-dallas")
+    at = _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc)
+    family_key = era.weather_family_id(city="Dallas", target_date="2026-07-11", metric="high")
+    bindings = (
+        OutcomeTokenBinding("low", "condition-low", "yes-low", "no-low"),
+        OutcomeTokenBinding("high", "condition-high", "yes-high", "no-high"),
+    )
+    family = SimpleNamespace(
+        family_id=family_key, city="Dallas", target_date="2026-07-11", metric="high",
+        candidates=tuple(SimpleNamespace(
+            condition_id=b.condition_id, yes_token_id=b.yes_token_id, no_token_id=b.no_token_id,
+        ) for b in bindings),
+    )
+    omega = SimpleNamespace(
+        topology_hash="day0-topology", resolution=SimpleNamespace(measurement_unit="F"),
+        bins=(
+            SimpleNamespace(bin_id="low", executable=True, lower_native=None, upper_native=68.0),
+            SimpleNamespace(bin_id="high", executable=True, lower_native=69.0, upper_native=None),
+        ),
+    )
+    exact = (("low", 1),)
+    fields = dict(
+        family_key=family_key, bindings=bindings, exact_yes_payoffs=exact,
+        q_version="day0-exact", resolution_identity="resolution",
+        topology_identity=omega.topology_hash, posterior_identity_hash="posterior",
+        source_truth_identity="source", authority_certificate_hash="certificate",
+        band_alpha=0.05, band_basis="day0_deterministic_bin_payoff_v1", captured_at_utc=at,
+    )
+    witness = DeterministicBinPayoffWitness(
+        **fields, max_age=_dt.timedelta(seconds=30),
+        witness_identity=deterministic_bin_payoff_witness_identity(**fields),
+    )
+    prepared = bridge.PreparedGlobalFamily(
+        decision_id="day0-decision", probability_witness=witness, candidate_seeds=(),
+    )
+
+    def fake_prepare(_event, *, cache_metadata_out=None, **kwargs):
+        if cache_metadata_out is not None:
+            cache_metadata_out["family_binding_hash"] = "binding"
+        kwargs["telemetry_context_sink"](family, omega, prepared)
+        return prepared
+
+    def asset(binding, side, token):
+        curve = ExecutableCostCurve(
+            token_id=token, side=side, snapshot_id=f"snapshot-{token}",
+            book_hash=f"book-{token}", levels=(BookLevel(Decimal("0.30"), Decimal("500")),),
+            fee_model=FeeModel(fee_rate=Decimal("0.05")), min_tick=Decimal("0.01"),
+            min_order_size=Decimal("1"), quote_ttl=_dt.timedelta(seconds=30),
+        )
+        return CurrentGlobalBookAsset(
+            family_key=family_key, bin_id=binding.bin_id, condition_id=binding.condition_id,
+            gamma_market_id=f"gamma-{binding.bin_id}", market_event_id=f"event-{binding.bin_id}",
+            side=side, token_id=token, curve=curve, captured_at_utc=at, neg_risk=False,
+            bid_levels=(BidBookLevel(Decimal("0.20"), Decimal("500")),),
+        )
+
+    assets = tuple(
+        asset(binding, side, token)
+        for binding in bindings
+        for side, token in (("YES", binding.yes_token_id), ("NO", binding.no_token_id))
+    )
+    states = tuple(
+        (family_key, binding.bin_id, binding.condition_id, side, token, "EXECUTABLE")
+        for binding in bindings
+        for side, token in (("YES", binding.yes_token_id), ("NO", binding.no_token_id))
+    )
+    epoch = CurrentGlobalBookEpoch(
+        assets=assets, asset_states=states, captured_at_utc=at, max_age=_dt.timedelta(seconds=30),
+        witness_identity=current_global_book_epoch_identity(asset_states=states, captured_at_utc=at),
+    )
+    monkeypatch.setattr(era, "_prepare_current_global_probability_family", fake_prepare)
+    monkeypatch.setattr(
+        global_batch_runtime, "process_current_global_batch",
+        lambda events, **kwargs: hooks.append(kwargs) or SimpleNamespace(events=tuple(events)),
+    )
+    monkeypatch.setattr(telemetry_writer, "enqueue_observation_envelope", enqueued.append)
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        trade, get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=forecast, topology_conn=topology, calibration_conn=world,
+    )
+    try:
+        adapter.process_global_batch((event,), at)
+        prepared_by_event = {event.event_id: hooks[-1]["prepare_event"](event, at).prepared_global_family}
+        hooks[-1]["selection_telemetry_observer"]({}, epoch, prepared_by_event, SimpleNamespace(), at)
+    finally:
+        trade.close()
+        forecast.close()
+        topology.close()
+        world.close()
+
+    assert len(enqueued) == 1
+    assert enqueued[0].model_q_by_bin_id is None
+    assert enqueued[0].measurement_unit == "F"
+    assert enqueued[0].bins[0].upper_native == 68.0
+
+
+def test_live_adapter_selection_telemetry_isolates_unsupported_family(monkeypatch):
+    import src.events.family_book_manifest as family_book_manifest
+    import src.events.family_book_telemetry_writer as telemetry_writer
+
+    trade = sqlite3.connect(":memory:")
+    forecast = sqlite3.connect(":memory:")
+    topology = sqlite3.connect(":memory:")
+    world = sqlite3.connect(":memory:")
+    hooks = []
+    enqueued = []
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE", None)
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE", {})
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE", {})
+    samples = np.tile(np.asarray(((0.4, 0.6),)), (400, 1))
+
+    def fake_prepare(event, *, decision_time, max_age, cache_metadata_out=None, **kwargs):
+        payload = json.loads(event.payload_json)
+        family_key = era.weather_family_id(
+            city=payload["city"], target_date=payload["target_date"], metric=payload["metric"],
+        )
+        bindings = (
+            OutcomeTokenBinding("low", "condition-low", "yes-low", "no-low"),
+            OutcomeTokenBinding("high", "condition-high", "yes-high", "no-high"),
+        )
+        family = SimpleNamespace(
+            family_id=family_key,
+            candidates=tuple(
+                SimpleNamespace(
+                    condition_id=binding.condition_id, yes_token_id=binding.yes_token_id,
+                    no_token_id=binding.no_token_id,
+                )
+                for binding in bindings
+            ),
+        )
+        omega = SimpleNamespace(
+            topology_hash=f"topology-{family_key}",
+            bins=tuple(SimpleNamespace(bin_id=binding.bin_id) for binding in bindings),
+        )
+        identity = joint_probability_witness_identity(
+            family_key=family_key, bindings=bindings, q_version="q",
+            resolution_identity="resolution", topology_identity=omega.topology_hash,
+            posterior_identity_hash="posterior", source_truth_identity="source",
+            authority_certificate_hash="certificate", band_alpha=0.05,
+            band_basis="test-band", yes_point_q=np.mean(samples, axis=0),
+            yes_q_samples=samples, captured_at_utc=decision_time,
+        )
+        witness = JointOutcomeProbabilityWitness(
+            family_key=family_key, bindings=bindings, yes_point_q=np.mean(samples, axis=0),
+            yes_q_samples=samples, q_version="q", resolution_identity="resolution",
+            topology_identity=omega.topology_hash, posterior_identity_hash="posterior",
+            source_truth_identity="source", authority_certificate_hash="certificate",
+            band_alpha=0.05, band_basis="test-band", captured_at_utc=decision_time,
+            max_age=max_age, witness_identity=identity,
+        )
+        prepared = bridge.PreparedGlobalFamily(
+            decision_id=f"decision-{family_key}", probability_witness=witness, candidate_seeds=(),
+        )
+        if cache_metadata_out is not None:
+            cache_metadata_out["family_binding_hash"] = f"binding-{family_key}"
+        kwargs["telemetry_context_sink"](family, omega, prepared)
+        return prepared
+
+    monkeypatch.setattr(era, "_prepare_current_global_probability_family", fake_prepare)
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "process_current_global_batch",
+        lambda events, **kwargs: hooks.append(kwargs) or SimpleNamespace(events=tuple(events)),
+    )
+
+    def project(**kwargs):
+        if kwargs["family"].family_id == era.weather_family_id(
+            city="Dallas", target_date="2026-07-11", metric="high"
+        ):
+            raise ValueError("unsupported deterministic projection")
+        return SimpleNamespace(family_id=kwargs["family"].family_id)
+
+    monkeypatch.setattr(family_book_manifest, "project_global_selection_observation_envelope", project)
+    monkeypatch.setattr(telemetry_writer, "enqueue_observation_envelope", enqueued.append)
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        trade, get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=forecast, topology_conn=topology, calibration_conn=world,
+    )
+    first = _global_scope_event(city="Dallas", source_run_id="run-dallas")
+    second = _global_scope_event(city="Chicago", source_run_id="run-chicago")
+    at = _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc)
+    try:
+        adapter.process_global_batch(
+            (replace(first, event_type="BOOK_SNAPSHOT"), replace(second, event_type="BOOK_SNAPSHOT")), at,
+        )
+        prepared = {
+            first.event_id: hooks[-1]["prepare_event"](first, at).prepared_global_family,
+            second.event_id: hooks[-1]["prepare_event"](second, at).prepared_global_family,
+        }
+        hooks[-1]["selection_telemetry_observer"](
+            {}, SimpleNamespace(witness_identity="book"), prepared, SimpleNamespace(), at,
+        )
+    finally:
+        trade.close()
+        forecast.close()
+        topology.close()
+        world.close()
+
+    assert [envelope.family_id for envelope in enqueued] == [
+        era.weather_family_id(city="Chicago", target_date="2026-07-11", metric="high")
+    ]
+
+
 @pytest.mark.parametrize(
     "supersession_reason",
     (
@@ -12397,19 +12721,20 @@ def test_live_adapter_keeps_held_forecast_q_outside_entry_phase_gate(
     assert "EVENT_BOUND_MARKET_PHASE_CLOSED:settlement_day:" in entry_receipt.reason
     assert held_receipt.prepared_global_family is prepared
     assert held_receipt.reason == "GLOBAL_CURRENT_PROBABILITY_PREPARED"
-    assert prepare_calls == [
-        {
-            "forecast_conn": forecast,
-            "topology_conn": topology,
-            "observation_conn": world,
-            "decision_time": settlement_day,
-            "max_age": FRESHNESS_WINDOW_DEFAULT,
-            "allow_unobserved_day0_replacement": False,
-            "allow_provisional_day0_replacement": False,
-            "probability_use": era._CurrentProbabilityUse.HELD_MONITOR,
-            "cache_metadata_out": {"family_binding_hash": "held-binding"},
-        }
-    ]
+    assert len(prepare_calls) == 1
+    telemetry_context_sink = prepare_calls[0].pop("telemetry_context_sink")
+    assert callable(telemetry_context_sink)
+    assert prepare_calls == [{
+        "forecast_conn": forecast,
+        "topology_conn": topology,
+        "observation_conn": world,
+        "decision_time": settlement_day,
+        "max_age": FRESHNESS_WINDOW_DEFAULT,
+        "allow_unobserved_day0_replacement": False,
+        "allow_provisional_day0_replacement": False,
+        "probability_use": era._CurrentProbabilityUse.HELD_MONITOR,
+        "cache_metadata_out": {"family_binding_hash": "held-binding"},
+    }]
     assert len(cache_stores) == 1
     assert cache_stores[0][1]["family_key"] == weather_family_id(
         city="Dallas",
@@ -31276,6 +31601,11 @@ def test_global_batch_cancelled_selection_skips_holding_coverage_and_receipt(
             winner_event_id=None,
         ),
     )
+    telemetry_calls = []
+
+    def telemetry_failure(*args):
+        telemetry_calls.append(args)
+        raise RuntimeError("telemetry projection failed")
 
     result = global_batch_runtime.process_current_global_batch(
         (event,),
@@ -31298,8 +31628,10 @@ def test_global_batch_cancelled_selection_skips_holding_coverage_and_receipt(
         current_execution=lambda *_: object(),
         current_time_provider=lambda: decision_at,
         portfolio_state_provider=lambda: object(),
+        selection_telemetry_observer=telemetry_failure,
     )
 
+    assert len(telemetry_calls) == 1
     assert result.winner_event_id is None
     assert result.venue_submit_count == 0
     assert result.economic_cut_completed is False
@@ -31400,6 +31732,7 @@ def test_global_batch_unevaluated_no_trade_skips_book_materialization_proof(
     monkeypatch.setattr(
         global_batch_runtime, "select_prepared_global_auction", select
     )
+    observed = []
 
     try:
         result = global_batch_runtime.process_current_global_batch(
@@ -31431,6 +31764,9 @@ def test_global_batch_unevaluated_no_trade_skips_book_materialization_proof(
                 probabilities,
                 book_epoch,
             ),
+            selection_telemetry_observer=lambda probabilities, epoch, prepared, selected, at: observed.append(
+                (probabilities, epoch, prepared, selected, at)
+            ),
         )
     finally:
         trade_conn.close()
@@ -31440,6 +31776,13 @@ def test_global_batch_unevaluated_no_trade_skips_book_materialization_proof(
     receipt = result.receipts[event.event_id]
     assert receipt.submitted is False
     assert receipt.reason == "GLOBAL_AUCTION_NO_TRADE:GLOBAL_BOOK_EPOCH_EXPIRED"
+    assert len(observed) == 1
+    probabilities, observed_epoch, prepared, selected, observed_at = observed[0]
+    assert probabilities == {family_key: witness}
+    assert observed_epoch is book_epoch
+    assert prepared[event.event_id].probability_witness is witness
+    assert selected.decision.no_trade_reason == "GLOBAL_BOOK_EPOCH_EXPIRED"
+    assert observed_at == decision_at
 
 
 def test_global_batch_waits_until_global_winner_family_is_claimed(monkeypatch):
@@ -38125,6 +38468,12 @@ def test_global_batch_uses_one_probability_and_book_fence_cut(monkeypatch):
             side_effect_status="SUBMITTED",
         )
 
+    telemetry_calls = []
+
+    def telemetry_failure(*args):
+        telemetry_calls.append(args)
+        raise RuntimeError("telemetry projection failed")
+
     result = global_batch_runtime.process_current_global_batch(
         (event,),
         decision_time=decision_at,
@@ -38148,9 +38497,12 @@ def test_global_batch_uses_one_probability_and_book_fence_cut(monkeypatch):
         current_execution=lambda *_: object(),
         current_time_provider=lambda: decision_at,
         current_book_epoch_provider=book_provider,
+        selection_telemetry_observer=telemetry_failure,
     )
 
     assert calls == {"books": 1, "preflight": 1, "venue": 1}
+    assert len(telemetry_calls) == 1
+    assert telemetry_calls[0][3] is selected
     assert result.venue_submit_count == 1
     assert result.winner_event_id == event.event_id
     assert result.receipts[event.event_id].submitted is True
