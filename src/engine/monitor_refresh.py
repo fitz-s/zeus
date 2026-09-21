@@ -5985,6 +5985,16 @@ def _day0_absorbing_hard_fact_overlay(
             durable_only=True,
         )
         if verdict is None:
+            # A missing exact verdict can defer only to the qualified global
+            # held-monitor reader. Positions without that canonical route must
+            # retain the existing post-local-day stale result.
+            if (
+                is_after_target_day
+                and _post_local_day_hard_fact_lane_applies(city)
+                and _would_use_day0_monitor_lane(pos, city, target_d)
+                and _canonical_condition_id(pos) is not None
+            ):
+                return None
             return _post_local_day_final_observation_unavailable()
         evidence = getattr(verdict, "evidence", None)
         if evidence is None or not evidence.is_complete_for(city):

@@ -10,8 +10,8 @@ remaining tests below cover ``monitor_refresh._fetch_day0_observation``,
 directly — none of which depend on the discovery pipeline.
 """
 # Created: 2026-04-30
-# Last reused/audited: 2026-07-06
-# Authority basis: Day0 observation context and shared Open-Meteo client contract.
+# Last reused/audited: 2026-09-21
+# Authority basis: Day0 observation context, held post-local-day continuity, and shared Open-Meteo client contract.
 
 from __future__ import annotations
 
@@ -314,3 +314,169 @@ def test_day0_nowcast_context_trusts_canonical_observation_sources(source):
     assert context["trusted_source"] is True
     assert context["fresh_observation"] is True
     assert context["blend_weight"] > 0.0
+
+def _post_local_day_position(
+    *, metric: str, direction: str, condition_id: str | None = "0x" + "1" * 64
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        trade_id=f"held-{metric}-{direction}",
+        city="Test City",
+        target_date="2000-01-01",
+        temperature_metric=metric,
+        direction=direction,
+        entry_method="qkernel_spine",
+        state="holding",
+        condition_id=condition_id,
+        p_posterior=0.4,
+        selected_method="qkernel_spine",
+        applied_validations=[],
+    )
+
+
+@pytest.mark.parametrize(
+    ("metric", "direction"),
+    [
+        ("high", "buy_yes"),
+        ("high", "buy_no"),
+        ("low", "buy_yes"),
+        ("low", "buy_no"),
+    ],
+)
+def test_post_local_day_missing_verdict_uses_current_global_held_reader(
+    monkeypatch, metric, direction
+):
+    """A missing exact verdict must defer to the qualified global reader."""
+    from src.execution import day0_hard_fact_exit
+
+    pos = _post_local_day_position(metric=metric, direction=direction)
+    city = _city(settlement_source_type="noaa")
+    global_calls: list[object] = []
+
+    monkeypatch.setattr(monitor_refresh, "_post_local_day_final_daily_verdict", lambda **_: None)
+    monkeypatch.setattr(day0_hard_fact_exit, "evaluate_hard_fact_exit", lambda **_: None)
+
+    def _global_reader(position, **kwargs):
+        global_calls.append((position, kwargs))
+        return 0.37, position, True
+
+    monkeypatch.setattr(monitor_refresh, "_refresh_current_global_day0_probability", _global_reader)
+
+    result = monitor_refresh.monitor_probability_refresh(
+        pos,
+        conn=object(),
+        city=city,
+        target_d=date(2000, 1, 1),
+    )
+
+    assert result[0] == pytest.approx(0.37)
+    assert result[2] is True
+    assert len(global_calls) == 1
+
+
+@pytest.mark.parametrize("settlement_source_type", ["noaa", "hko"])
+@pytest.mark.parametrize("condition_id", [None, "malformed"])
+def test_post_local_day_missing_condition_stays_stale(
+    monkeypatch, settlement_source_type, condition_id
+):
+    from src.execution import day0_hard_fact_exit
+
+    pos = _post_local_day_position(
+        metric="high",
+        direction="buy_yes",
+        condition_id=condition_id,
+    )
+    city = _city(settlement_source_type=settlement_source_type)
+
+    monkeypatch.setattr(monitor_refresh, "_post_local_day_final_daily_verdict", lambda **_: None)
+    monkeypatch.setattr(day0_hard_fact_exit, "evaluate_hard_fact_exit", lambda **_: None)
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_refresh_current_global_day0_probability",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("missing canonical condition must not use global q")
+        ),
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_refresh_day0_monitor_probability",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("missing canonical condition must not use legacy q")
+        ),
+    )
+
+    probability, refreshed, fresh = monitor_refresh.monitor_probability_refresh(
+        pos,
+        conn=object(),
+        city=city,
+        target_d=date(2000, 1, 1),
+    )
+
+    assert probability == pytest.approx(pos.p_posterior)
+    assert fresh is False
+    assert "POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE" in refreshed.applied_validations
+
+
+def test_post_local_day_exact_final_verdict_precedes_global_reader(monkeypatch):
+    from src.execution import day0_hard_fact_exit
+
+    pos = _post_local_day_position(metric="high", direction="buy_yes")
+    city = _city(settlement_source_type="noaa")
+    exact_position = SimpleNamespace(selected_method="final_daily_observation_exact")
+    exact_result = (1.0, exact_position, True)
+
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_post_local_day_final_daily_verdict",
+        lambda **_: exact_result,
+    )
+    monkeypatch.setattr(
+        day0_hard_fact_exit,
+        "evaluate_hard_fact_exit",
+        lambda **_: (_ for _ in ()).throw(AssertionError("intraday verdict must not run")),
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_refresh_current_global_day0_probability",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("global reader must not override exact final evidence")
+        ),
+    )
+
+    assert (
+        monitor_refresh.monitor_probability_refresh(
+            pos,
+            conn=object(),
+            city=city,
+            target_d=date(2000, 1, 1),
+        )
+        == exact_result
+    )
+
+
+def test_post_local_day_malformed_hard_fact_stays_stale(monkeypatch):
+    from src.execution import day0_hard_fact_exit
+
+    pos = _post_local_day_position(metric="low", direction="buy_no")
+    city = _city(settlement_source_type="noaa")
+    malformed = SimpleNamespace(evidence=SimpleNamespace(is_complete_for=lambda _: False))
+
+    monkeypatch.setattr(monitor_refresh, "_post_local_day_final_daily_verdict", lambda **_: None)
+    monkeypatch.setattr(day0_hard_fact_exit, "evaluate_hard_fact_exit", lambda **_: malformed)
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_refresh_current_global_day0_probability",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("malformed hard fact must not upgrade through global q")
+        ),
+    )
+
+    probability, refreshed, fresh = monitor_refresh.monitor_probability_refresh(
+        pos,
+        conn=object(),
+        city=city,
+        target_d=date(2000, 1, 1),
+    )
+
+    assert probability == pytest.approx(pos.p_posterior)
+    assert fresh is False
+    assert "day0_absorbing_hard_fact_evidence_incomplete:read_only" in refreshed.applied_validations
