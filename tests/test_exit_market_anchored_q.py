@@ -595,3 +595,44 @@ def test_authenticated_identity_holding_uses_current_source_without_residual(dir
     assert q == raw
     assert valid is fresh_quote
     assert source == ("source_identity_baseline" if fresh_quote else "entry_calibration_unavailable")
+
+
+def test_authenticated_identity_cohort_holding_uses_current_source_without_full_witness():
+    from src.calibration.market_anchored_live_fit import (
+        HeldSourceIdentityBinding,
+        HeldSourceIdentityCohortBinding,
+        HeldSourceIdentityEntryParent,
+    )
+    from src.contracts.payoff_q_correction import SourceIdentityBaseline
+
+    baseline = SourceIdentityBaseline(
+        family_key="family", bin_id="bin", side="YES", token_id="yes-token",
+        raw_q=0.9, p0=0.4, raw_probability_revision="entry-revision",
+        q_version="entry-q", probability_witness_identity="entry-witness",
+        probability_content_identity="entry-content", source_truth_identity="entry-source",
+        sample_matrix_identity="entry-samples",
+    )
+    cohort = HeldSourceIdentityCohortBinding(
+        parents=tuple(
+            HeldSourceIdentityEntryParent(
+                command_id,
+                HeldSourceIdentityBinding(
+                    baseline=baseline, position_id="pos-market-anchored-exit",
+                    decision_log_id=index, decision_certificate_hash=f"certificate-{index}",
+                ),
+            )
+            for index, command_id in enumerate(("entry-a", "entry-b"), start=1)
+        )
+    )
+    register_active_provider(SimpleNamespace(load=lambda **_: cohort))
+    ctx = replace(
+        _exit_context(fresh_prob=0.3, current_market_price=0.5, best_bid=0.5),
+        current_market_price_is_fresh=True,
+    )
+    position = _held_position("buy_yes")
+    raw, raw_ok = position._held_side_point_with_confidence(ctx)
+    q, valid, source = position._exit_q_mean_and_source(ctx)
+    assert raw_ok
+    assert q == raw
+    assert valid
+    assert source == "source_identity_baseline"

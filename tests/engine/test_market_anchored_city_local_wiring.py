@@ -811,6 +811,69 @@ def test_entry_resolver_uses_source_baseline_only_for_exact_current_insufficient
         resolver(candidate, .61, .32, now)
 
 
+def test_sell_entry_resolver_binds_source_identity_cohort_and_audits_all_parents(monkeypatch):
+    from src.calibration import market_anchored_live_fit as live_fit
+    from src.contracts.payoff_q_correction import SourceIdentityBaseline
+
+    now = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    witness = SimpleNamespace(
+        family_key="one", q_version="q-v3", witness_identity="witness-v3",
+        probability_content_identity="content-v3", source_truth_identity="source-v3",
+        sample_matrix_identity="samples-v3", captured_at_utc=now,
+        max_age=timedelta(hours=1), bindings=(SimpleNamespace(
+            bin_id="bin-a", yes_token_id="yes-token", no_token_id="no-token",
+        ),),
+    )
+    prepared = SimpleNamespace(probability_witness=witness)
+    current = SourceIdentityBaseline(
+        family_key="one", bin_id="bin-a", side="YES", token_id="yes-token",
+        raw_q=.6, p0=.4, raw_probability_revision="current-raw-v3",
+        q_version=witness.q_version, probability_witness_identity=witness.witness_identity,
+        probability_content_identity=witness.probability_content_identity,
+        source_truth_identity=witness.source_truth_identity,
+        sample_matrix_identity=witness.sample_matrix_identity,
+    )
+    cohort = live_fit.HeldSourceIdentityCohortBinding(tuple(
+        live_fit.HeldSourceIdentityEntryParent(
+            command_id,
+            live_fit.HeldSourceIdentityBinding(
+                baseline=replace(current, raw_q=old_q, p0=old_p0),
+                position_id="position-a", decision_log_id=index,
+                decision_certificate_hash=f"cert-{index}",
+            ),
+        )
+        for index, (command_id, old_q, old_p0) in enumerate(
+            (("command-a", .2, .3), ("command-b", .3, .35)), start=1
+        )
+    ))
+    monkeypatch.setattr(live_fit, "load_held_entry_calibration", lambda *_a, **_k: cohort)
+    monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {
+        "Tokyo": SimpleNamespace(timezone="Asia/Tokyo"),
+    })
+    monkeypatch.setattr(
+        adapter, "_prepared_global_probability_semantics_revision",
+        lambda *_a: "current-raw-v3",
+    )
+    audit: dict[str, object] = {}
+    resolver = _entry_resolver(
+        object(), target_context_by_family={"one": ("Tokyo", date(2026, 1, 2))},
+        prepared_by_family={"one": prepared},
+        market_anchored_fit_artifact_audit=audit,
+    )
+    candidate = SimpleNamespace(
+        action="SELL", family_key="one", position_id="position-a",
+        token_id="yes-token", side="YES",
+        economic_sell_curve=SimpleNamespace(levels=(SimpleNamespace(price=.4),)),
+    )
+    baseline = resolver(candidate, .6, .4, now)
+    assert baseline == current
+    recorded = audit["held_source_identity_bindings"]["position-a"]
+    assert [row["command_id"] for row in recorded["entry_parents"]] == ["command-a", "command-b"]
+    assert [row["certificate_hash"] for row in recorded["entry_parents"]] == ["cert-1", "cert-2"]
+    assert [row["decision_log_id"] for row in recorded["entry_parents"]] == [1, 2]
+    assert recorded["current_baseline_hash"] == current.as_payload()["baseline_hash"]
+
+
 def test_entry_resolver_records_each_consulted_fit_artifact(monkeypatch):
     artifact = _artifact(snapshot=(("Tokyo", "Asia/Tokyo"),))
     policy = CalibrationPolicySpec(

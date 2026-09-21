@@ -3468,6 +3468,86 @@ class HeldSourceIdentityBinding:
         return current
 
 
+@dataclass(frozen=True)
+class HeldSourceIdentityEntryParent:
+    """One authenticated command parent in a multi-fill source cohort."""
+
+    command_id: str
+    binding: HeldSourceIdentityBinding
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.command_id, str)
+            or not self.command_id
+            or self.command_id != self.command_id.strip()
+            or not isinstance(self.binding, HeldSourceIdentityBinding)
+        ):
+            raise _held_correction_unavailable("MULTI_ENTRY_PARENT_INVALID")
+
+
+@dataclass(frozen=True)
+class HeldSourceIdentityCohortBinding:
+    """All source-only ENTRY parents for one exact filled-command cohort."""
+
+    parents: tuple[HeldSourceIdentityEntryParent, ...]
+
+    def __post_init__(self) -> None:
+        parents = tuple(self.parents)
+        if len(parents) < 2 or any(
+            not isinstance(parent, HeldSourceIdentityEntryParent) for parent in parents
+        ):
+            raise _held_correction_unavailable("MULTI_ENTRY_PARENT_INVALID")
+        command_ids = tuple(parent.command_id for parent in parents)
+        if len(set(command_ids)) != len(command_ids) or command_ids != tuple(sorted(command_ids)):
+            raise _held_correction_unavailable("MULTI_ENTRY_PARENT_INVALID")
+        first = parents[0].binding
+        identity = (first.position_id, first.baseline.family_key, first.baseline.bin_id,
+                    first.baseline.token_id, first.baseline.side)
+        if any(
+            (parent.binding.position_id, parent.binding.baseline.family_key,
+             parent.binding.baseline.bin_id, parent.binding.baseline.token_id,
+             parent.binding.baseline.side) != identity
+            for parent in parents[1:]
+        ):
+            raise _held_correction_unavailable("MULTI_ENTRY_SOURCE_MAPPING_MISMATCH")
+        object.__setattr__(self, "parents", parents)
+
+    def at_decision(
+        self, provider: CanonicalMarketAnchoredFitProvider | None, *,
+        decision_at: datetime, current_raw_revision: str | None,
+        deadline_monotonic: float | None = None,
+    ) -> "HeldSourceIdentityCohortBinding":
+        return replace(
+            self,
+            parents=tuple(
+                replace(
+                    parent,
+                    binding=parent.binding.at_decision(
+                        provider,
+                        decision_at=decision_at,
+                        current_raw_revision=current_raw_revision,
+                        deadline_monotonic=deadline_monotonic,
+                    ),
+                )
+                for parent in self.parents
+            ),
+        )
+
+    def bind_current(
+        self, *, witness: object, raw_revision: str, raw_q: float, p0: float,
+    ) -> SourceIdentityBaseline:
+        baselines = tuple(
+            parent.binding.bind_current(
+                witness=witness, raw_revision=raw_revision, raw_q=raw_q, p0=p0,
+            )
+            for parent in self.parents
+        )
+        first = baselines[0].as_payload()
+        if any(baseline.as_payload() != first for baseline in baselines[1:]):
+            raise _held_correction_unavailable("MULTI_ENTRY_SOURCE_MAPPING_MISMATCH")
+        return baselines[0]
+
+
 def load_held_entry_calibration(
     trade_conn: sqlite3.Connection,
     *,
@@ -3476,7 +3556,57 @@ def load_held_entry_calibration(
     side: str,
     world_conn: sqlite3.Connection | None = None,
     world_schema_alias: str = "world",
-) -> HeldEntryCalibrationBinding | HeldSourceIdentityBinding:
+) -> HeldEntryCalibrationBinding | HeldSourceIdentityBinding | HeldSourceIdentityCohortBinding:
+    """Load one position's immutable ENTRY calibration or source cohort."""
+
+    binding = _load_held_entry_calibration_impl(
+        trade_conn,
+        position_id=position_id,
+        token_id=token_id,
+        side=side,
+        world_conn=world_conn,
+        world_schema_alias=world_schema_alias,
+    )
+    if not isinstance(binding, _MultiEntryPendingBinding):
+        return binding
+    parent_rows: list[HeldSourceIdentityEntryParent] = []
+    for certificate_hash, commands in binding.by_certificate:
+        for command_id in commands:
+            parent_binding = _load_held_entry_calibration_impl(
+                trade_conn,
+                position_id=position_id,
+                token_id=token_id,
+                side=side,
+                world_conn=world_conn,
+                world_schema_alias=world_schema_alias,
+                _cohort_command_ids=(command_id,),
+                _expected_certificate_hash=certificate_hash,
+            )
+            if not isinstance(parent_binding, HeldSourceIdentityBinding):
+                raise _held_correction_unavailable("MULTI_ENTRY_POLICY_UNSUPPORTED")
+            parent_rows.append(HeldSourceIdentityEntryParent(command_id, parent_binding))
+    parents = tuple(sorted(parent_rows, key=lambda parent: parent.command_id))
+    if any(not isinstance(parent.binding, HeldSourceIdentityBinding) for parent in parents):
+        raise _held_correction_unavailable("MULTI_ENTRY_POLICY_UNSUPPORTED")
+    return HeldSourceIdentityCohortBinding(parents=parents)
+
+
+@dataclass(frozen=True)
+class _MultiEntryPendingBinding:
+    by_certificate: tuple[tuple[str, tuple[str, ...]], ...]
+
+
+def _load_held_entry_calibration_impl(
+    trade_conn: sqlite3.Connection,
+    *,
+    position_id: str,
+    token_id: str,
+    side: str,
+    world_conn: sqlite3.Connection | None = None,
+    world_schema_alias: str = "world",
+    _cohort_command_ids: tuple[str, ...] | None = None,
+    _expected_certificate_hash: str | None = None,
+) -> HeldEntryCalibrationBinding | HeldSourceIdentityBinding | _MultiEntryPendingBinding:
     """Load one position's immutable ENTRY calibration without fitting or opening DBs."""
 
     if (
@@ -3577,6 +3707,12 @@ def load_held_entry_calibration(
                 filled_command_ids.add(command_id)
         if not filled_command_rows and not legacy_single_certificate:
             raise _held_correction_unavailable("ENTRY_FILL_COMMAND_UNAVAILABLE")
+        if _cohort_command_ids is not None:
+            if not _cohort_command_ids or tuple(sorted(set(_cohort_command_ids))) != tuple(_cohort_command_ids):
+                raise _held_correction_unavailable("MULTI_ENTRY_PARENT_INVALID")
+            filled_command_ids = set(_cohort_command_ids)
+            commandless_fill_count = 0
+            legacy_single_certificate = False
         # Gate scope: this position only.  Drain: reconcile every canonical
         # fill with its ENTRY attribution.  Reset: an exact complete cohort
         # (or the authenticated legacy single-certificate shape).
@@ -3739,6 +3875,22 @@ def load_held_entry_calibration(
                 attribution_by_command[command_id][0][3]
                 for command_id in filled_command_cohort
             }
+            if _cohort_command_ids is None and len(filled_command_cohort) > 1:
+                groups: dict[str, list[str]] = {}
+                for command_id in filled_command_cohort:
+                    certificate = attribution_by_command[command_id][0][3]
+                    groups.setdefault(certificate, []).append(command_id)
+                if len(groups) > 1:
+                    return _MultiEntryPendingBinding(
+                        by_certificate=tuple(
+                            (certificate, tuple(sorted(commands)))
+                            for certificate, commands in sorted(groups.items())
+                        )
+                    )
+                if not groups:
+                    raise _held_correction_unavailable("ENTRY_PROVENANCE_AMBIGUOUS")
+            if _expected_certificate_hash is not None and certificate_hashes != {_expected_certificate_hash}:
+                raise _held_correction_unavailable("ENTRY_PROVENANCE_AMBIGUOUS")
         else:
             certificate_hashes = all_position_certificate_hashes
     except PayoffQCorrectionUnavailable:
@@ -3990,7 +4142,7 @@ class HeldEntryCalibrationProvider:
     def load(
         self, *, position_id: str, token_id: str, side: str, decision_at: datetime,
         current_raw_revision: str | None,
-    ) -> HeldEntryCalibrationBinding | HeldSourceIdentityBinding:
+    ) -> HeldEntryCalibrationBinding | HeldSourceIdentityBinding | HeldSourceIdentityCohortBinding:
         binding = load_held_entry_calibration(
             self._trade_conn,
             position_id=position_id,
@@ -4008,5 +4160,5 @@ class HeldEntryCalibrationProvider:
 class UnavailableHeldEntryCalibrationProvider:
     """Explicit live-monitor sentinel; required ENTRY proof cannot become raw q."""
 
-    def load(self, **_kwargs) -> HeldEntryCalibrationBinding | HeldSourceIdentityBinding:
+    def load(self, **_kwargs) -> HeldEntryCalibrationBinding | HeldSourceIdentityBinding | HeldSourceIdentityCohortBinding:
         raise _held_correction_unavailable("READER_UNAVAILABLE")

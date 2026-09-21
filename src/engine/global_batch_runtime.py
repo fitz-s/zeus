@@ -6883,6 +6883,7 @@ def _market_anchored_correction_resolver(
     def resolve_current(candidate, raw_q: float, p0: float, decision_at_utc: datetime):
         if str(getattr(candidate, "action", "BUY")) == "SELL":
             from src.calibration.market_anchored_live_fit import (
+                HeldSourceIdentityCohortBinding,
                 HeldSourceIdentityBinding,
                 load_held_entry_calibration,
             )
@@ -6908,22 +6909,41 @@ def _market_anchored_correction_resolver(
                 provider, decision_at=decision_at_utc, current_raw_revision=current_raw_revision,
                 deadline_monotonic=deadline_monotonic,
             )
-            if isinstance(binding, HeldSourceIdentityBinding):
-                prepared = prepared_by_family.get(str(candidate.family_key))
-                witness = getattr(prepared, "probability_witness", None)
+            if isinstance(binding, (HeldSourceIdentityBinding, HeldSourceIdentityCohortBinding)):
                 try:
                     p0 = float(candidate.economic_sell_curve.levels[0].price)
                 except (AttributeError, IndexError, TypeError, ValueError) as exc:
                     raise PayoffQCorrectionUnavailable(
                         "CURRENT_SELL_PRICE_UNAVAILABLE"
                     ) from exc
+                prepared = prepared_by_family.get(str(candidate.family_key))
+                witness = getattr(prepared, "probability_witness", None)
                 baseline = binding.bind_current(
                     witness=witness,
                     raw_revision=current_raw_revision or "",
                     raw_q=raw_q,
                     p0=p0,
                 )
-                if market_anchored_fit_artifact_audit is not None:
+                if market_anchored_fit_artifact_audit is not None and isinstance(
+                    binding, HeldSourceIdentityCohortBinding
+                ):
+                    market_anchored_fit_artifact_audit.setdefault(
+                        "held_source_identity_bindings", {}
+                    )[candidate.position_id] = {
+                        "entry_parents": [
+                            {
+                                "command_id": parent.command_id,
+                                "certificate_hash": parent.binding.decision_certificate_hash,
+                                "decision_log_id": parent.binding.decision_log_id,
+                                "baseline_hash": parent.binding.baseline.as_payload()["baseline_hash"],
+                            }
+                            for parent in binding.parents
+                        ],
+                        "current_baseline_hash": baseline.as_payload()["baseline_hash"],
+                        "current_raw_revision": current_raw_revision,
+                        "policy": baseline._POLICY,
+                    }
+                elif market_anchored_fit_artifact_audit is not None:
                     market_anchored_fit_artifact_audit.setdefault(
                         "held_source_identity_bindings", {}
                     )[candidate.position_id] = {

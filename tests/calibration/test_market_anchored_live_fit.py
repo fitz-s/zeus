@@ -3956,8 +3956,17 @@ def test_held_entry_reader_allows_unbounded_repeated_entry_identity(monkeypatch)
 def test_held_entry_reader_accepts_four_actual_fills_same_certificate(monkeypatch):
     trade, world, _artifact, token, side, _correction = _held_entry_reader_fixture(monkeypatch)
     try:
+        from src.decision_kernel.canonicalization import stable_hash
+
         trade.execute("DELETE FROM position_events")
         trade.execute("DELETE FROM position_decision_attribution")
+        certificate = json.loads(world.execute(
+            "SELECT payload_json FROM decision_certificates WHERE certificate_hash = 'cert-a'"
+        ).fetchone()[0])
+        world.execute(
+            "INSERT INTO decision_certificates VALUES (?,?,?,?,?,?)",
+            ("cert-b", "ActionableTradeCertificate", "LIVE", "VERIFIED", json.dumps(certificate), stable_hash(certificate)),
+        )
         command_ids = [f"command-filled-{index}" for index in range(4)]
         trade.executemany(
             "INSERT INTO position_events VALUES (?,?,?,?,?,?)",
@@ -3970,6 +3979,15 @@ def test_held_entry_reader_accepts_four_actual_fills_same_certificate(monkeypatc
             "INSERT INTO position_decision_attribution VALUES (?,?,?,?,?)",
             [("position-a", "ENTRY", "ATTRIBUTED", "cert-a", command_id) for command_id in command_ids],
         )
+        trade.executemany(
+            "INSERT INTO position_events VALUES (?,?,?,?,?,?)",
+            [
+                ("position-a", event_type, 10 + index, "cert-b",
+                 json.dumps({"command_id": "command-unfilled", "decision_log_id": 7}),
+                 "command-unfilled")
+                for index, event_type in enumerate(("POSITION_OPEN_INTENT", "ENTRY_ORDER_POSTED"))
+            ],
+        )
         trade.execute(
             "INSERT INTO position_decision_attribution VALUES (?,?,?,?,?)",
             ("position-a", "ENTRY", "ATTRIBUTED", "cert-b", "command-unfilled"),
@@ -3977,6 +3995,7 @@ def test_held_entry_reader_accepts_four_actual_fills_same_certificate(monkeypatc
         binding = live_fit.load_held_entry_calibration(
             trade, position_id="position-a", token_id=token, side=side, world_conn=world,
         )
+        assert isinstance(binding, live_fit.HeldEntryCalibrationBinding)
         assert binding.decision_certificate_hash == "cert-a"
     finally:
         trade.close()
@@ -4087,7 +4106,7 @@ def test_held_entry_reader_rejects_different_certificates_across_linked_fills(mo
             "INSERT INTO position_decision_attribution VALUES (?,?,?,?,?)",
             ("position-a", "ENTRY", "ATTRIBUTED", "cert-b", "command-filled-2"),
         )
-        with pytest.raises(PayoffQCorrectionUnavailable, match="ENTRY_PROVENANCE_AMBIGUOUS"):
+        with pytest.raises(PayoffQCorrectionUnavailable, match="MULTI_ENTRY_POLICY_UNSUPPORTED"):
             live_fit.load_held_entry_calibration(
                 trade, position_id="position-a", token_id=token, side=side, world_conn=world,
             )
@@ -4121,6 +4140,21 @@ def test_held_entry_reader_excludes_unfilled_attempt_events_and_attribution(monk
 def test_held_entry_reader_keeps_partial_fill_when_later_cancelled(monkeypatch):
     trade, world, _artifact, token, side, _correction = _held_entry_reader_fixture(monkeypatch)
     try:
+        from src.decision_kernel.canonicalization import stable_hash
+
+        certificate = json.loads(world.execute(
+            "SELECT payload_json FROM decision_certificates WHERE certificate_hash = 'cert-a'"
+        ).fetchone()[0])
+        world.execute(
+            "INSERT INTO decision_certificates VALUES (?,?,?,?,?,?)",
+            ("cert-b", "ActionableTradeCertificate", "LIVE", "VERIFIED", json.dumps(certificate), stable_hash(certificate)),
+        )
+        trade.execute(
+            "INSERT INTO position_events VALUES (?,?,?,?,?,?)",
+            ("position-a", "ENTRY_ORDER_POSTED", 3, "cert-b",
+             json.dumps({"command_id": "command-unfilled", "decision_log_id": 7}),
+             "command-unfilled"),
+        )
         trade.execute(
             "INSERT INTO position_decision_attribution VALUES (?,?,?,?,?)",
             ("position-a", "ENTRY", "ATTRIBUTED", "cert-b", "command-unfilled"),
@@ -4171,10 +4205,6 @@ def test_held_entry_reader_rejects_column_payload_command_conflict(monkeypatch, 
 def test_held_entry_reader_uses_payload_command_only_when_column_is_null(monkeypatch):
     trade, world, _artifact, token, side, _correction = _held_entry_reader_fixture(monkeypatch)
     try:
-        trade.execute(
-            "INSERT INTO position_decision_attribution VALUES (?,?,?,?,?)",
-            ("position-a", "ENTRY", "ATTRIBUTED", "cert-b", "command-other"),
-        )
         trade.execute(
             "UPDATE position_events SET command_id = NULL, payload_json = ?",
             (json.dumps({"decision_log_id": 7, "command_id": "command-filled"}),),
@@ -4659,3 +4689,161 @@ def test_held_source_identity_loader_authenticates_baseline_without_fit_audit(mo
     finally:
         trade.close()
         world.close()
+
+
+def test_held_source_identity_cohort_binds_every_parent_to_one_current_witness(monkeypatch):
+    trade, world, _artifact, token, side, correction = _held_entry_reader_fixture(monkeypatch)
+    try:
+        from src.decision_kernel.canonicalization import stable_hash
+
+        baselines = tuple(
+            SourceIdentityBaseline(
+                family_key=correction.family_key, bin_id=correction.bin_id, side=side,
+                token_id=token, raw_q=raw_q, p0=p0,
+                raw_probability_revision="raw-revision-v1", q_version="entry-q",
+                probability_witness_identity="entry-witness",
+                probability_content_identity="entry-content",
+                source_truth_identity="entry-source", sample_matrix_identity="entry-samples",
+            )
+            for raw_q, p0 in ((.60, .30), (.45, .35))
+        )
+        cert_a = json.loads(world.execute(
+            "SELECT payload_json FROM decision_certificates WHERE certificate_hash = 'cert-a'"
+        ).fetchone()[0])
+        cert_a["market_anchored_correction"] = baselines[0].as_cert_fields()
+        cert_b = dict(cert_a)
+        cert_b["market_anchored_correction"] = baselines[1].as_cert_fields()
+        world.execute(
+            "UPDATE decision_certificates SET payload_json = ?, payload_hash = ? WHERE certificate_hash = 'cert-a'",
+            (json.dumps(cert_a), stable_hash(cert_a)),
+        )
+        world.execute(
+            "INSERT INTO decision_certificates VALUES (?,?,?,?,?,?)",
+            ("cert-b", "ActionableTradeCertificate", "LIVE", "VERIFIED", json.dumps(cert_b), stable_hash(cert_b)),
+        )
+        trade.execute("DELETE FROM position_events")
+        trade.execute("DELETE FROM position_decision_attribution")
+        trade.executemany(
+            "INSERT INTO position_events VALUES (?,?,?,?,?,?)",
+            [
+                ("position-a", "ENTRY_ORDER_FILLED", index, None, json.dumps({"decision_log_id": 7}), command_id)
+                for index, command_id in enumerate(("command-a", "command-b"), start=1)
+            ],
+        )
+        alias = f"edli_exec_cmd:event-a:intent-a:{token}:buy_no"
+        trade.executemany(
+            "INSERT INTO position_events VALUES (?,?,?,?,?,?)",
+            [
+                ("position-a", event_type, sequence, alias, json.dumps({"decision_log_id": 7}), command_id)
+                for command_id, sequence in (("command-a", 3), ("command-b", 4))
+                for event_type in ("POSITION_OPEN_INTENT", "ENTRY_ORDER_POSTED")
+            ],
+        )
+        trade.execute(
+            "UPDATE position_events SET decision_id = ? WHERE command_id = ?",
+            (alias, "command-a"),
+        )
+        trade.executemany(
+            "INSERT INTO position_decision_attribution VALUES (?,?,?,?,?)",
+            [
+                ("position-a", "ENTRY", "ATTRIBUTED", certificate_hash, command_id)
+                for certificate_hash, command_id in (("cert-a", "command-a"), ("cert-b", "command-b"))
+            ],
+        )
+        scope = CalibrationFitScope("high", "TAKER_LIMIT", "FOK_FULL_OR_ZERO", "raw-revision-v1")
+        audit = {
+            "revision": "canonical_entry_fit_artifact_audit_v1",
+            "source_identity_baselines": {
+                f"parent-{index}": {
+                    "status": "SOURCE_IDENTITY_BASELINE",
+                    "scope": scope.as_payload(),
+                    "baseline": baseline.as_payload(),
+                }
+                for index, baseline in enumerate(baselines)
+            },
+        }
+        monkeypatch.setattr(
+            live_fit, "_load_held_audit_context",
+            lambda *_args, **_kwargs: {"market_anchored_fit_artifact_audit": audit},
+        )
+        binding = live_fit.load_held_entry_calibration(
+            trade, position_id="position-a", token_id=token, side=side, world_conn=world,
+        )
+        assert isinstance(binding, live_fit.HeldSourceIdentityCohortBinding)
+        assert tuple(parent.command_id for parent in binding.parents) == ("command-a", "command-b")
+        witness = SimpleNamespace(
+            family_key=correction.family_key,
+            q_version="current-q", witness_identity="current-witness",
+            probability_content_identity="current-content", source_truth_identity="current-source",
+            sample_matrix_identity="current-samples", captured_at_utc=NOW,
+            max_age=timedelta(minutes=5),
+            bindings=(SimpleNamespace(bin_id=correction.bin_id, yes_token_id=token if side == "YES" else "yes", no_token_id=token if side == "NO" else "no"),),
+        )
+        current = binding.at_decision(
+            None, decision_at=NOW, current_raw_revision="current-revision",
+        ).bind_current(
+            witness=witness, raw_revision="current-revision", raw_q=.55, p0=.42,
+        )
+        assert current.raw_q == pytest.approx(.55)
+        assert all(parent.binding.baseline.raw_q != current.raw_q for parent in binding.parents)
+        assert all(parent.binding.baseline.raw_q in (.60, .45) for parent in binding.parents)
+        # Sharing a certificate cannot borrow another filled command's alias.
+        trade.execute(
+            "INSERT INTO position_events VALUES (?,?,?,?,?,?)",
+            ("position-a", "ENTRY_ORDER_FILLED", 5, None,
+             json.dumps({"decision_log_id": 7}), "command-c"),
+        )
+        trade.execute(
+            "INSERT INTO position_decision_attribution VALUES (?,?,?,?,?)",
+            ("position-a", "ENTRY", "ATTRIBUTED", "cert-a", "command-c"),
+        )
+        with pytest.raises(live_fit.PayoffQCorrectionUnavailable, match="ENTRY_PROVENANCE_AMBIGUOUS"):
+            live_fit.load_held_entry_calibration(
+                trade, position_id="position-a", token_id=token, side=side, world_conn=world,
+            )
+        trade.execute(
+            "UPDATE position_events SET decision_id = ? WHERE command_id = ?",
+            (alias, "command-c"),
+        )
+        repaired = live_fit.load_held_entry_calibration(
+            trade, position_id="position-a", token_id=token, side=side, world_conn=world,
+        )
+        assert tuple(parent.command_id for parent in repaired.parents) == (
+            "command-a", "command-b", "command-c",
+        )
+    finally:
+        trade.close()
+        world.close()
+
+
+def test_held_source_identity_cohort_rejects_incomplete_parent_mapping():
+    from src.calibration.market_anchored_live_fit import (
+        HeldSourceIdentityBinding,
+        HeldSourceIdentityCohortBinding,
+        HeldSourceIdentityEntryParent,
+    )
+
+    baseline = SourceIdentityBaseline(
+        family_key="family", bin_id="bin", side="YES", token_id="yes-token",
+        raw_q=.5, p0=.4, raw_probability_revision="raw-revision",
+        q_version="q", probability_witness_identity="witness",
+        probability_content_identity="content", source_truth_identity="source",
+        sample_matrix_identity="samples",
+    )
+    binding = HeldSourceIdentityBinding(
+        baseline=baseline, position_id="position-a", decision_log_id=1,
+        decision_certificate_hash="cert-a",
+    )
+    with pytest.raises(PayoffQCorrectionUnavailable, match="MULTI_ENTRY_PARENT_INVALID"):
+        HeldSourceIdentityCohortBinding((HeldSourceIdentityEntryParent("command-a", binding),))
+    with pytest.raises(PayoffQCorrectionUnavailable, match="MULTI_ENTRY_SOURCE_MAPPING_MISMATCH"):
+        HeldSourceIdentityCohortBinding((
+            HeldSourceIdentityEntryParent("command-a", binding),
+            HeldSourceIdentityEntryParent(
+                "command-b", HeldSourceIdentityBinding(
+                    baseline=replace(baseline, token_id="other-token"),
+                    position_id="position-a", decision_log_id=2,
+                    decision_certificate_hash="cert-b",
+                ),
+            ),
+        ))

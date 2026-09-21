@@ -44177,6 +44177,81 @@ def test_global_sell_revalidates_sealed_entry_policy_on_current_raw_q(monkeypatc
     assert calls[0]['decision_at'] == actuation.decision_at_utc
 
 
+def test_global_sell_revalidates_source_identity_cohort_all_parents(monkeypatch):
+    from src.calibration import market_anchored_live_fit as live_fit
+    from src.contracts.payoff_q_correction import SourceIdentityBaseline
+
+    actuation = _calibrated_sell_actuation_fixture()
+    candidate = actuation.decision.candidate
+    witness = actuation.probability_witness
+    witness.captured_at_utc = actuation.decision_at_utc
+    witness.max_age = _dt.timedelta(hours=1)
+    witness.bindings = (SimpleNamespace(
+        bin_id=candidate.bin_id, yes_token_id=candidate.token_id, no_token_id="no-token",
+    ),)
+    raw_q = actuation.decision.expected_terminal_wealth.held_probability_mean
+    current = SourceIdentityBaseline(
+        family_key=candidate.family_key, bin_id=candidate.bin_id, side=candidate.side,
+        token_id=candidate.token_id, raw_q=raw_q, p0=.70,
+        raw_probability_revision="entry-revision", q_version=witness.q_version,
+        probability_witness_identity=witness.witness_identity,
+        probability_content_identity=witness.probability_content_identity,
+        source_truth_identity=witness.source_truth_identity,
+        sample_matrix_identity=witness.sample_matrix_identity,
+    )
+    parents = []
+    for index, (old_q, old_p0) in enumerate(((.22, .61), (.41, .73)), start=1):
+        parents.append(
+            live_fit.HeldSourceIdentityEntryParent(
+                f"entry-command-{index}",
+                live_fit.HeldSourceIdentityBinding(
+                    baseline=replace(current, raw_q=old_q, p0=old_p0),
+                    position_id=candidate.position_id,
+                    decision_log_id=index, decision_certificate_hash=f"certificate-{index}",
+                ),
+            )
+        )
+    cohort = live_fit.HeldSourceIdentityCohortBinding(tuple(parents))
+    monkeypatch.setattr(
+        live_fit, "load_held_entry_calibration", lambda *_args, **_kwargs: cohort,
+    )
+    decision = replace(actuation.decision, payoff_q_correction=current)
+    new_actuation_identity = global_single_order_actuation_identity(
+        decision=decision,
+        winner_event_id=actuation.winner_event_id,
+        universe_witness_identity=actuation.universe_witness_identity,
+        wealth_witness_identity=actuation.wealth_witness_identity,
+        selection_epoch_identity=actuation.selection_epoch_identity,
+        selection_cut_at_utc=actuation.selection_cut_at_utc,
+        decision_at_utc=actuation.decision_at_utc,
+    )
+    actuation = replace(
+        actuation,
+        decision=decision,
+        actuation_identity=new_actuation_identity,
+        economic_identity=global_single_order_economic_identity(
+            decision=decision,
+            probability_witness=actuation.probability_witness,
+            wealth_economic_identity=actuation.wealth_economic_identity,
+        ),
+        auction_receipt_ref=replace(
+            actuation.auction_receipt_ref,
+            winner_actuation_identity=new_actuation_identity,
+        ),
+    )
+    position = SimpleNamespace(city="Alpha", target_date="2026-07-14")
+    era._revalidate_global_sell_calibration(
+        None, None, None, actuation=actuation, position=position,
+        current_raw_revision="entry-revision", deadline_monotonic=None,
+    )
+    witness.source_truth_identity = "tampered-source"
+    with pytest.raises(ValueError, match="GLOBAL_SELL_ENTRY_CALIBRATION_SUPERSEDED|CURRENT_SOURCE_IDENTITY_MISMATCH"):
+        era._revalidate_global_sell_calibration(
+            None, None, None, actuation=actuation, position=position,
+            current_raw_revision="entry-revision", deadline_monotonic=None,
+        )
+
+
 def test_calibrated_sell_reauctions_when_entry_price_feature_is_missing():
     from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
 

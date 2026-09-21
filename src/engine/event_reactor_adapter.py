@@ -14592,7 +14592,10 @@ def _revalidate_global_sell_calibration(
     if correction is None:
         return
     from src.calibration.market_anchored_live_fit import (
-        CanonicalMarketAnchoredFitProvider, load_held_entry_calibration,
+        CanonicalMarketAnchoredFitProvider,
+        HeldSourceIdentityBinding,
+        HeldSourceIdentityCohortBinding,
+        load_held_entry_calibration,
     )
     from src.solve.solver import family_payoff_point_q
     candidate = decision.candidate
@@ -14608,9 +14611,7 @@ def _revalidate_global_sell_calibration(
         side=candidate.side,
         world_conn=world_conn,
     )
-    from src.calibration.market_anchored_live_fit import HeldSourceIdentityBinding
-
-    if isinstance(binding, HeldSourceIdentityBinding):
+    if isinstance(binding, (HeldSourceIdentityBinding, HeldSourceIdentityCohortBinding)):
         binding = binding.at_decision(
             None, decision_at=actuation.decision_at_utc,
             current_raw_revision=current_raw_revision,
