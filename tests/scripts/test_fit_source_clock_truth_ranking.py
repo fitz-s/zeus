@@ -5,11 +5,14 @@
 """Current-resolver labels are the only fitter truth surface."""
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from types import SimpleNamespace
 
 import pytest
+
+from src.data.openmeteo_ecmwf_ifs9_anchor import SINGLE_RUNS_FORECAST_URL
 
 
 def _city(*, effective_date: str = "2026-08-23") -> SimpleNamespace:
@@ -59,6 +62,19 @@ def conn() -> sqlite3.Connection:
         """
     )
     target = "2026-09-11"
+    request_params = {
+        "cell_selection": "land",
+        "hourly": "temperature_2m",
+        "latitude": 29.64582,
+        "longitude": -95.28214,
+        "models": "ecmwf_ifs",
+        "temperature_unit": "celsius",
+        "timezone": "America/Chicago",
+    }
+    request_params_json = json.dumps(request_params, sort_keys=True, separators=(",", ":"))
+    request_url_hash = hashlib.sha256(
+        f"{SINGLE_RUNS_FORECAST_URL}?{request_params_json}".encode("utf-8")
+    ).hexdigest()
     c.execute(
         "INSERT INTO observations VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
@@ -98,12 +114,11 @@ def conn() -> sqlite3.Connection:
             '2026-09-10T00:00:00+00:00', '2026-09-10T06:00:00+00:00',
             '2026-09-10T06:01:00+00:00', 1, 34.0, 'single_runs', 0,
             '2026-09-10 06:02:00', 'COVERED', 'ecmwf_ifs_single_runs',
-            'openmeteo_single_runs', 'ecmwf_ifs::single_runs', 'request-hash',
-            'ecmwf_ifs', 'open-meteo', 'single_runs',
-            '{"cell_selection":"land","hourly":"temperature_2m","latitude":29.64582,"longitude":-95.28214,"models":"ecmwf_ifs","temperature_unit":"celsius","timezone":"America/Chicago"}',
+            'openmeteo_single_runs', 'ecmwf_ifs::single_runs', ?,
+            'ecmwf_ifs', 'open-meteo', 'single_runs', ?,
             29.64582, -95.28214, 'America/Chicago'
         )""",
-        (target,),
+        (target, request_url_hash, request_params_json),
     )
     c.commit()
     return c

@@ -14,6 +14,7 @@ CITY_SPECIFIC / REGION_POOLED / GLOBAL_CORE respectively.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -28,10 +29,21 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 import fit_source_clock_city_weights as fscw  # noqa: E402
 
+from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS  # noqa: E402
+from src.data.openmeteo_client import PREVIOUS_RUNS_URL  # noqa: E402
+from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: E402
+    SINGLE_RUNS_FORECAST_URL,
+    STANDARD_FORECAST_URL,
+)
 from src.forecast.center import raw_second_moment_weights  # noqa: E402
 
 
 _TEST_CITIES: dict[str, SimpleNamespace] = {}
+
+
+def _canonical_request_identity(base_url: str, params: dict[str, object]) -> tuple[str, str]:
+    canonical = json.dumps(params, sort_keys=True, separators=(",", ":"))
+    return canonical, hashlib.sha256(f"{base_url}?{canonical}".encode("utf-8")).hexdigest()
 
 
 def _city(name: str, *, unit: str = "C") -> SimpleNamespace:
@@ -95,34 +107,72 @@ def _make_db(rows: list[dict]) -> sqlite3.Connection:
         unit = r.get("settlement_unit", "C")
         _city(r["city"], unit=unit)
         city_config = _city(r["city"], unit=unit)
-        endpoint = r.get("endpoint", "single_runs" if r["model"] == "ecmwf_ifs" else "previous_runs")
-        model_name = r.get("model_name", fscw.OPENMETEO_MODEL_IDS.get(r["model"], r["model"]))
+        endpoint = r.get("endpoint", "single_runs")
+        endpoint_mode = r.get("endpoint_mode", endpoint)
+        model_name = r.get("model_name", OPENMETEO_MODEL_IDS.get(r["model"], r["model"]))
         target_instant = f"{r['target_date']}T12:00:00+00:00"
         prior_instant = (
             f"{date.fromisoformat(r['target_date']) - timedelta(days=1)}T12:00:00+00:00"
         )
         source_id = r.get(
             "source_id",
-            f"{r['model']}_single_runs" if endpoint == "single_runs" else
-            fscw.OPENMETEO_PREVIOUS_RUNS_SOURCE_ID.get(
-                r["model"], f"{r['model']}_previous_runs"
-            ),
+            f"{r['model']}_standard_meta_stamped"
+            if endpoint_mode == "standard_api_meta_stamped"
+            else f"{r['model']}_previous_runs"
+            if endpoint == "previous_runs"
+            else f"{r['model']}_single_runs",
         )
         source_family = r.get(
-            "source_family", "openmeteo_single_runs" if endpoint == "single_runs" else "openmeteo_previous_runs"
+            "source_family",
+            "openmeteo_standard_meta_stamped"
+            if endpoint_mode == "standard_api_meta_stamped"
+            else "openmeteo_previous_runs"
+            if endpoint == "previous_runs"
+            else "openmeteo_single_runs",
         )
-        product_id = r.get("product_id", f"{model_name}::{endpoint}")
+        product_id = r.get(
+            "product_id",
+            f"{model_name}::previous_runs"
+            if endpoint == "previous_runs"
+            else f"{model_name}::single_runs"
+            if endpoint_mode == "single_runs"
+            else (
+                f"{model_name}::standard_api_meta_stamped::"
+                f"run={r.get('source_cycle_time', prior_instant)}::"
+                "modified=2026-02-28T01:00:00+00:00"
+            ),
+        )
         request_params = {
             "latitude": city_config.lat,
             "longitude": city_config.lon,
-            "hourly": "temperature_2m" if endpoint == "single_runs" else "temperature_2m_previous_day1",
+            "hourly": "temperature_2m",
             "models": model_name,
             "temperature_unit": "celsius",
             "timezone": city_config.timezone,
             "cell_selection": "land",
         }
         if endpoint == "previous_runs":
-            request_params.update(start_date=r["target_date"], end_date=r["target_date"])
+            request_params.update(
+                hourly=f"temperature_2m_previous_day{r['lead_days']}",
+                start_date=r["target_date"],
+                end_date=r["target_date"],
+            )
+        if endpoint_mode == "standard_api_meta_stamped":
+            request_params["forecast_hours"] = r.get("forecast_hours", 120)
+        supplied_params = r.get("request_params_json")
+        if supplied_params is not None:
+            request_params = json.loads(str(supplied_params))
+        base_url = (
+            STANDARD_FORECAST_URL
+            if endpoint_mode == "standard_api_meta_stamped"
+            else PREVIOUS_RUNS_URL
+            if endpoint == "previous_runs"
+            else SINGLE_RUNS_FORECAST_URL
+        )
+        request_params_json, canonical_request_hash = _canonical_request_identity(
+            base_url, request_params
+        )
+        request_url_hash = r.get("request_url_hash", canonical_request_hash)
         conn.execute(
             """INSERT INTO raw_model_forecasts (
                 model, city, target_date, metric, source_cycle_time, source_available_at,
@@ -139,9 +189,8 @@ def _make_db(rows: list[dict]) -> sqlite3.Connection:
                 r["lead_days"], r["forecast_value_c"], endpoint,
                 r.get("training_allowed", 0), r.get("recorded_at", target_instant),
                 r.get("coverage_status", "COVERED"), source_id, source_family,
-                product_id, r.get("request_url_hash", "request-hash"), model_name,
-                r.get("provider", "open-meteo"), r.get("endpoint_mode", endpoint),
-                r.get("request_params_json", json.dumps(request_params, sort_keys=True)),
+                product_id, request_url_hash, model_name,
+                r.get("provider", "open-meteo"), endpoint_mode, request_params_json,
                 r.get("latitude_requested", city_config.lat),
                 r.get("longitude_requested", city_config.lon),
                 r.get("timezone_requested", city_config.timezone),
@@ -663,7 +712,23 @@ def test_observation_only_rows_do_not_supply_training_labels() -> None:
     assert loaded["excluded_reason_counts"]["RAW_LABEL_NOT_CURRENT_RESOLVER_ELIGIBLE"] == 4
 
 
-def test_anchor_ifs025_previous_runs_cannot_train_current_ifs9_weight() -> None:
+def test_previous_runs_only_row_cannot_train_fixed_run_daily_weight() -> None:
+    row = {
+        "model": "A", "city": "PreviousOnlyCity", "metric": "high",
+        "target_date": "2026-03-01", "lead_days": 1,
+        "forecast_value_c": 99.0, "settlement_value_c": 20.0,
+        "endpoint": "previous_runs",
+    }
+
+    loaded = fscw.load_walk_forward_rows(
+        _make_db([row]), as_of="2026-04-01T00:00:00+00:00"
+    )
+
+    assert loaded["obs"] == {}
+    assert loaded["settle"] == {}
+
+
+def test_previous_runs_cannot_train_fixed_run_daily_weight() -> None:
     rows = [
         {
             "model": "ecmwf_ifs", "city": "AnchorCity", "metric": "high",
@@ -685,7 +750,7 @@ def test_anchor_ifs025_previous_runs_cannot_train_current_ifs9_weight() -> None:
     )
 
     assert loaded["obs"][("AnchorCity", "high")]["2026-03-01"] == {"ecmwf_ifs": 20.5}
-    assert loaded["excluded_reason_counts"]["RAW_PRODUCT_NOT_CURRENT_LIVE_EQUIVALENT"] == 1
+    assert "RAW_PRODUCT_NOT_CURRENT_LIVE_EQUIVALENT" not in loaded["excluded_reason_counts"]
 
 
 def test_standard_meta_stamped_single_runs_product_is_current_equivalent() -> None:
@@ -720,10 +785,9 @@ def test_request_params_cannot_relabel_a_different_physical_product() -> None:
         "forecast_value_c": 20.5, "settlement_value_c": 20.0,
         "request_params_json": json.dumps({
             "latitude": 10.0, "longitude": 20.0,
-            "hourly": "temperature_2m_previous_day1", "models": "A",
+            "hourly": "temperature_2m", "models": "A",
             "temperature_unit": "celsius", "timezone": "UTC",
-            "cell_selection": "nearest", "start_date": "2026-03-01",
-            "end_date": "2026-03-01",
+            "cell_selection": "nearest",
         }),
     }
     loaded = fscw.load_walk_forward_rows(
@@ -813,10 +877,17 @@ def test_loader_preserves_current_label_and_raw_input_availability() -> None:
         "captured_at": "2026-02-28T12:00:00+00:00",
         "recorded_at": "2026-02-28T12:01:00+00:00",
         "source_available_at": "2026-02-28T11:00:00+00:00",
-        "source_id": "A_previous_runs",
-        "source_family": "openmeteo_previous_runs",
-        "product_id": "A::previous_runs",
-        "request_url_hash": "request-hash",
+        "source_id": "A_single_runs",
+        "source_family": "openmeteo_single_runs",
+        "product_id": "A::single_runs",
+        "request_url_hash": _canonical_request_identity(
+            SINGLE_RUNS_FORECAST_URL,
+            {
+                "latitude": 10.0, "longitude": 20.0, "hourly": "temperature_2m",
+                "models": "A", "temperature_unit": "celsius", "timezone": "UTC",
+                "cell_selection": "land",
+            },
+        )[1],
     }
 
 

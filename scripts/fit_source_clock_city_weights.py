@@ -24,7 +24,8 @@ settlements whose resolver era, source identity, station, unit, rounding and pag
 CURRENT contract, and whose durable ``label_known_at`` is strictly before an explicit UTC
 ``as_of`` instant. Observation-only labels and every pre-cutover source epoch are excluded.
 ``raw_model_forecasts`` contributes a physical-skill residual only when its fixed lead-1
-``previous_runs`` row is COVERED, finite, carries full source identity, retains the raw-input
+fixed-run ``single_runs`` or ``standard_api_meta_stamped`` row is COVERED, finite, carries
+full source identity, retains the raw-input
 ``training_allowed=0`` marker, and was captured and recorded before ``as_of``. These rows do
 not prove publication-time or economic advantage; a separate outer validation owns that claim.
 
@@ -81,15 +82,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.config import runtime_cities_by_name  # noqa: E402
-from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS  # noqa: E402
-from src.data.bayes_precision_fusion_download import (  # noqa: E402
-    BAYES_PRECISION_FUSION_CELL_SELECTION,
-    OPENMETEO_PREVIOUS_RUNS_SOURCE_ID,
-    OPENMETEO_PROVIDER,
-    PREVIOUS_RUNS_SOURCE_FAMILY,
-    SINGLE_RUNS_SOURCE_FAMILY,
-    STANDARD_META_STAMPED_SOURCE_FAMILY,
-    _model_in_domain,
+from src.data.bayes_precision_fusion_download import _model_in_domain  # noqa: E402
+from src.data.bayes_precision_fusion_history_provider import (  # noqa: E402
+    raw_product_matches_live_source,
 )
 from src.data.current_settlement_history import read_current_settlement_history  # noqa: E402
 from src.forecast.center import MIN_SETTLED_N, raw_second_moment_weights  # noqa: E402
@@ -136,7 +131,7 @@ _RAW_FORECAST_QUERY = """
            product_id, model_name, request_url_hash, provider, endpoint_mode,
            request_params_json, latitude_requested, longitude_requested, timezone_requested
       FROM raw_model_forecasts
-     WHERE endpoint IN ('previous_runs', 'single_runs')
+     WHERE endpoint = 'single_runs'
        AND lead_days = ?
        AND target_date >= ?
        AND target_date < ?
@@ -216,89 +211,6 @@ def _target_local_day_start(city: object, target_date: str) -> _dt.datetime | No
         return None
 
 
-def _request_params_match_current_source(
-    row: sqlite3.Row, city: object, *, expected_model_name: str,
-) -> bool:
-    try:
-        params = json.loads(str(row["request_params_json"] or ""))
-        if not isinstance(params, dict):
-            return False
-        coordinates_match = (
-            math.isclose(float(params["latitude"]), float(city.lat), abs_tol=1e-6)
-            and math.isclose(float(params["longitude"]), float(city.lon), abs_tol=1e-6)
-        )
-    except (AttributeError, KeyError, TypeError, ValueError, json.JSONDecodeError):
-        return False
-    endpoint = str(row["endpoint"] or "").strip()
-    expected_hourly = "temperature_2m"
-    if endpoint == "previous_runs":
-        expected_hourly = f"temperature_2m_previous_day{TRAINING_LEAD_DAYS}"
-    if not (
-        coordinates_match
-        and params.get("models") == expected_model_name
-        and params.get("temperature_unit") == "celsius"
-        and params.get("timezone") == str(city.timezone)
-        and params.get("cell_selection") == BAYES_PRECISION_FUSION_CELL_SELECTION
-        and params.get("hourly") == expected_hourly
-    ):
-        return False
-    if endpoint == "previous_runs":
-        return (
-            params.get("start_date") == str(row["target_date"])
-            and params.get("end_date") == str(row["target_date"])
-        )
-    return True
-
-
-def _raw_product_matches_live_source(row: sqlite3.Row, city: object) -> bool:
-    """Bind a residual to the current source product and station request identity."""
-    model = str(row["model"] or "").strip()
-    endpoint = str(row["endpoint"] or "").strip()
-    endpoint_mode = str(row["endpoint_mode"] or "").strip()
-    expected_model_name = str(OPENMETEO_MODEL_IDS.get(model, model))
-    product_id = str(row["product_id"] or "").strip()
-    if endpoint == "single_runs" and endpoint_mode == "single_runs":
-        expected_source_id = f"{model}_single_runs"
-        expected_source_family = SINGLE_RUNS_SOURCE_FAMILY
-        product_matches = product_id == f"{expected_model_name}::single_runs"
-    elif endpoint == "single_runs" and endpoint_mode == "standard_api_meta_stamped":
-        expected_source_id = f"{model}_standard_meta_stamped"
-        expected_source_family = STANDARD_META_STAMPED_SOURCE_FAMILY
-        source_cycle = _parse_utc(row["source_cycle_time"])
-        product_matches = (
-            source_cycle is not None
-            and product_id.startswith(f"{expected_model_name}::standard_api_meta_stamped::run=")
-            and f"::run={source_cycle.isoformat()}::modified=" in product_id
-        )
-    elif endpoint == "previous_runs" and model != "ecmwf_ifs" and endpoint_mode == "previous_runs":
-        expected_source_id = OPENMETEO_PREVIOUS_RUNS_SOURCE_ID.get(
-            model, f"{model}_previous_runs"
-        )
-        expected_source_family = PREVIOUS_RUNS_SOURCE_FAMILY
-        product_matches = product_id == f"{expected_model_name}::previous_runs"
-    else:
-        return False
-    try:
-        coordinates_match = (
-            math.isclose(float(row["latitude_requested"]), float(city.lat), abs_tol=1e-6)
-            and math.isclose(float(row["longitude_requested"]), float(city.lon), abs_tol=1e-6)
-        )
-    except (AttributeError, TypeError, ValueError):
-        return False
-    return (
-        coordinates_match
-        and str(row["timezone_requested"] or "").strip() == str(city.timezone)
-        and str(row["provider"] or "").strip() == OPENMETEO_PROVIDER
-        and str(row["source_id"] or "").strip() == expected_source_id
-        and str(row["source_family"] or "").strip() == expected_source_family
-        and product_matches
-        and str(row["model_name"] or "").strip() == expected_model_name
-        and _request_params_match_current_source(
-            row, city, expected_model_name=expected_model_name
-        )
-    )
-
-
 def _is_later_actual_capture(
     candidate: tuple[_dt.datetime, _dt.datetime, int],
     current: tuple[_dt.datetime, _dt.datetime, int] | None,
@@ -315,10 +227,10 @@ def load_walk_forward_rows(
 ) -> dict[str, dict]:
     """Load a fixed-lead physical-skill corpus under the current resolver contract.
 
-    ``previous_runs`` rows reconstruct physical forecast skill only.  They are
-    not evidence that a quote, publication, or executable advantage was known
-    at an historical decision.  The returned availability maps retain every
-    label and raw-input instant needed by the outer rolling validator.
+    Only single-runs and standard-meta-stamped fixed-run rows reconstruct daily
+    physical skill. Previous-runs daily extrema are excluded because their hourly
+    values are not one fixed-run product. The returned availability maps retain
+    every label and raw-input instant needed by the outer rolling validator.
     """
     cutoff = _as_of_utc(as_of)
     if cities_by_name is None:
@@ -403,7 +315,9 @@ def load_walk_forward_rows(
         if any(value is None for value in source_identity.values()):
             exclude("RAW_SOURCE_IDENTITY_MISSING")
             continue
-        if not _raw_product_matches_live_source(row, city_config):
+        if not raw_product_matches_live_source(
+            row, city_config, lead_days=TRAINING_LEAD_DAYS
+        ):
             exclude("RAW_PRODUCT_NOT_CURRENT_LIVE_EQUIVALENT")
             continue
         if servable is not None and model not in servable:
