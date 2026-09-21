@@ -13800,7 +13800,7 @@ def _edli_policy_blocked_open_rest_commands(
           LEFT JOIN main.position_decision_attribution pda
             ON pda.command_id = vc.command_id
           LEFT JOIN world.decision_certificates dc
-            ON lower(dc.certificate_hash) = lower(pda.decision_certificate_hash)
+            ON dc.certificate_hash = lower(pda.decision_certificate_hash)
          WHERE vc.command_id IN ({placeholders})
         """,
         tuple(command_ids),

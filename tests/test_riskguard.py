@@ -1,8 +1,8 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-08-27
+# Last reused/audited: 2026-09-21
 # Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation; Wave26 verification-noise helper alignment; PR90 current-env fallback review fix; 2026-08-15 economic-settlement trailing-loss hotfix.
 #                  2026-05-17 live lock remediation: RiskGuard trade/world DB lock degrades to fresh DATA_DEGRADED rather than stale RED.
-# Lifecycle: created=2026-03-30; last_reviewed=2026-08-27; last_reused=2026-08-27
+# Lifecycle: created=2026-03-30; last_reviewed=2026-09-21; last_reused=2026-09-21
 # Purpose: Guard RiskGuard protective metrics, policy resolution, source authority, and portfolio loader invariants.
 # Reuse: Run after RiskGuard risk details, portfolio loader, settlement source, bankroll, or risk-action changes.
 # 2026-08-17: Brier strategy-gate evidence is independent by target date.
@@ -8509,8 +8509,9 @@ class TestStrategyPolicyResolver:
         assert current.sources == ["manual_override:gate"]
         conn.close()
 
+    @pytest.mark.parametrize("uppercase_reference", [False, True])
     def test_open_rest_revalidates_its_exact_certificate_revision(
-        self, monkeypatch, tmp_path,
+        self, monkeypatch, tmp_path, uppercase_reference,
     ):
         from src.events.reactor import _edli_policy_blocked_open_rest_commands
 
@@ -8556,7 +8557,8 @@ class TestStrategyPolicyResolver:
             "INSERT INTO position_current VALUES ('position-1', 'forecast_qkernel_entry')"
         )
         trade_conn.execute(
-            "INSERT INTO position_decision_attribution VALUES ('rest-1', 'cert-1')"
+            "INSERT INTO position_decision_attribution VALUES ('rest-1', ?)",
+            ("CERT-1" if uppercase_reference else "cert-1",),
         )
         trade_conn.execute(
             "INSERT INTO risk_actions VALUES (?,?,?,?,?,?,?,?)",
@@ -8606,6 +8608,8 @@ class TestStrategyPolicyResolver:
         world_conn.close()
         trade_conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
         rest = SimpleNamespace(command_id="rest-1")
+        statements = []
+        trade_conn.set_trace_callback(statements.append)
 
         blocked = _edli_policy_blocked_open_rest_commands(
             trade_conn,
@@ -8613,6 +8617,17 @@ class TestStrategyPolicyResolver:
             decision_time=now,
         )
         assert blocked == {"rest-1": "STRATEGY_POLICY_GATED"}
+        trade_conn.set_trace_callback(None)
+        authority_query = next(
+            sql for sql in statements
+            if "LEFT JOIN world.decision_certificates dc" in sql
+        )
+        plan = [
+            str(row[3])
+            for row in trade_conn.execute("EXPLAIN QUERY PLAN " + authority_query)
+        ]
+        assert any("SEARCH dc USING INDEX" in detail for detail in plan), plan
+        assert not any("SCAN dc" in detail for detail in plan), plan
 
         trade_conn.execute(
             "UPDATE world.decision_certificates SET payload_json = ? WHERE certificate_hash = ?",
