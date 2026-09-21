@@ -1,5 +1,5 @@
 # Created: 2026-07-29
-# Last reused or audited: 2026-07-29
+# Last reused or audited: 2026-09-21
 # Authority basis: docs/operations/current/book_snapshot_persistence/PLAN.md --
 #   redesign after three deep-review NO-GOs. Round-5 (this suite) covers:
 #   Y1 bounded outbox (watermarked batches, ack-delete, disk budget,
@@ -1180,8 +1180,7 @@ class TestSingleConnectAntibody:
 # ---------------------------------------------------------------------------
 
 class TestMoneyPathYield:
-    """Z1: delivery yields to the money path and never touches the live-money
-    DB when it has nothing to deliver."""
+    """Z1: delivery is independent of the money path and skips empty outboxes."""
 
     def test_idle_tick_opens_no_canonical_connection(self, tmp_path):
         """An empty outbox must be decided against the PRIVATE spool alone."""
@@ -1203,36 +1202,48 @@ class TestMoneyPathYield:
         assert writer.drain(timeout=3.0)
         assert writer.outbox_has_pending(spool_conn_factory=spool_factory) is True
 
-    def test_ingest_job_skips_while_reactor_cycle_is_active(self, tmp_path, monkeypatch):
-        """The daemon job must return WITHOUT opening a trade connection while
-        a reactor/decision cycle holds the money path.
-
-        The outbox is deliberately NON-empty: with nothing pending the job
-        would skip anyway via the idle fast path, and the test would pass even
-        with the yield guard deleted (verified by mutation). Pending work is
-        what makes the guard the only thing standing between this job and the
-        live-money DB.
-        """
+    def test_ingest_job_delivers_while_reactor_cycle_is_active(self, tmp_path, monkeypatch):
+        """Continuous decisions cannot starve the physically separate evidence DB."""
         import src.main as main_module
 
         _start(tmp_path)
+        evidence_path = tmp_path / "evidence.db"
+        _bootstrap_canonical(evidence_path)
         case = _case()
         space = _outcome_space(case)
         _enqueue(_decision(case, space, _family_book(case, space)), _family(case),
-                 _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC))
+                 _proofs_for(space), _CAPTURED)
         assert writer.drain(timeout=3.0)
-        assert writer.outbox_has_pending() is True  # precondition: work IS waiting
+        assert writer.outbox_has_pending()
 
-        opened: list[int] = []
+        from src.state import db as state_db
 
-        def _tripwire(**kw):
-            opened.append(1)
-            raise AssertionError("opened the evidence DB while the money path was active")
-
+        monkeypatch.setattr(state_db, "ZEUS_FAMILY_BOOK_EVIDENCE_DB_PATH", evidence_path)
+        cycle_lock = threading.Lock()
+        cycle_lock.acquire()
+        monkeypatch.setattr(main_module, "_cycle_lock", cycle_lock)
         monkeypatch.setattr(main_module, "_edli_reactor_active", lambda: True)
-        monkeypatch.setattr(main_module, "get_family_book_evidence_connection", _tripwire)
+        monkeypatch.setattr(main_module, "_write_scheduler_health", lambda *a, **kw: None)
+        trade = sqlite3.connect(str(tmp_path / "trade.db"))
+        trade.execute("CREATE TABLE money (value INTEGER)")
+        trade.execute("BEGIN IMMEDIATE")
+        trade.execute("INSERT INTO money VALUES (1)")
+        try:
+            main_module._family_book_telemetry_ingest_cycle()
+            assert cycle_lock.locked()
+            assert trade.in_transaction
+            assert trade.execute("SELECT value FROM money").fetchone()[0] == 1
+        finally:
+            cycle_lock.release()
+            trade.rollback()
+            trade.close()
+        with sqlite3.connect(str(evidence_path)) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM family_book_observations").fetchone()[0] == 1
+        assert not writer.outbox_has_pending()
+        opens = []
+        monkeypatch.setattr(main_module, "get_family_book_evidence_connection", lambda **kw: opens.append(kw))
         main_module._family_book_telemetry_ingest_cycle()
-        assert opened == []
+        assert opens == []
 
     def test_kill_switch_off_performs_zero_canonical_work(self, tmp_path, monkeypatch):
         """Flipping the switch off stops DELIVERY, not merely new enqueues."""
@@ -1305,6 +1316,39 @@ class TestMoneyPathYield:
         # touches must not have waited at all -- structurally impossible to
         # contend, not merely fast this run.
         assert elapsed < 0.5, f"evidence delivery took {elapsed:.3f}s -- suggests it still shares a lock with the trade DB"
+
+
+@pytest.mark.parametrize("owner", ["trade", "world", "forecasts"])
+@pytest.mark.parametrize("alias", ["same_path", "symlink", "hardlink"])
+@pytest.mark.parametrize("entry", ["write", "read", "bootstrap"])
+def test_evidence_connection_rejects_canonical_alias(tmp_path, monkeypatch, owner, alias, entry):
+    from src.state import db as state_db
+
+    paths = {name: tmp_path / f"{name}.db" for name in ("trade", "world", "forecasts")}
+    monkeypatch.setattr(state_db, "_zeus_trade_db_path", lambda: paths["trade"])
+    monkeypatch.setattr(state_db, "ZEUS_WORLD_DB_PATH", paths["world"])
+    monkeypatch.setattr(state_db, "ZEUS_FORECASTS_DB_PATH", paths["forecasts"])
+    canonical = paths[owner]
+    with sqlite3.connect(canonical) as conn:
+        conn.execute("CREATE TABLE sentinel (value INTEGER)")
+    evidence = tmp_path / "evidence.db"
+    if alias == "same_path":
+        evidence = canonical
+    elif alias == "symlink":
+        evidence.symlink_to(canonical)
+    else:
+        os.link(canonical, evidence)
+    monkeypatch.setattr(state_db, "ZEUS_FAMILY_BOOK_EVIDENCE_DB_PATH", evidence)
+    with pytest.raises(ValueError, match="evidence DB aliases canonical DB"):
+        if entry == "bootstrap":
+            with sqlite3.connect(evidence) as conn:
+                state_db.init_schema_family_book_evidence(conn)
+        elif entry == "read":
+            state_db.get_family_book_evidence_connection_read_only()
+        else:
+            state_db.get_family_book_evidence_connection(write_class="live")
+    with sqlite3.connect(canonical) as conn:
+        assert conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == [("sentinel",)]
 
 
 class TestSpoolHardBounds:
