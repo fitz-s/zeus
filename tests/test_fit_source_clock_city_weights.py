@@ -18,6 +18,7 @@ import json
 import os
 import sqlite3
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -44,6 +45,9 @@ def _city(name: str, *, unit: str = "C") -> SimpleNamespace:
             wu_station="KTEST",
             settlement_unit=unit,
             settlement_page_view="all",
+            lat=10.0,
+            lon=20.0,
+            timezone="UTC",
         ),
     )
 
@@ -67,7 +71,9 @@ def _make_db(rows: list[dict]) -> sqlite3.Connection:
             source_available_at TEXT, captured_at TEXT, lead_days INTEGER,
             forecast_value_c REAL, endpoint TEXT, training_allowed INTEGER,
             recorded_at TEXT, coverage_status TEXT, source_id TEXT, source_family TEXT,
-            product_id TEXT, request_url_hash TEXT
+            product_id TEXT, request_url_hash TEXT, model_name TEXT, provider TEXT,
+            endpoint_mode TEXT, request_params_json TEXT, latitude_requested REAL,
+            longitude_requested REAL, timezone_requested TEXT
         );
         CREATE TABLE settlement_outcomes (
             settlement_id INTEGER PRIMARY KEY, city TEXT, target_date TEXT,
@@ -88,25 +94,57 @@ def _make_db(rows: list[dict]) -> sqlite3.Connection:
     for r in rows:
         unit = r.get("settlement_unit", "C")
         _city(r["city"], unit=unit)
+        city_config = _city(r["city"], unit=unit)
+        endpoint = r.get("endpoint", "single_runs" if r["model"] == "ecmwf_ifs" else "previous_runs")
+        model_name = r.get("model_name", fscw.OPENMETEO_MODEL_IDS.get(r["model"], r["model"]))
         target_instant = f"{r['target_date']}T12:00:00+00:00"
+        prior_instant = (
+            f"{date.fromisoformat(r['target_date']) - timedelta(days=1)}T12:00:00+00:00"
+        )
+        source_id = r.get(
+            "source_id",
+            f"{r['model']}_single_runs" if endpoint == "single_runs" else
+            fscw.OPENMETEO_PREVIOUS_RUNS_SOURCE_ID.get(
+                r["model"], f"{r['model']}_previous_runs"
+            ),
+        )
+        source_family = r.get(
+            "source_family", "openmeteo_single_runs" if endpoint == "single_runs" else "openmeteo_previous_runs"
+        )
+        product_id = r.get("product_id", f"{model_name}::{endpoint}")
+        request_params = {
+            "latitude": city_config.lat,
+            "longitude": city_config.lon,
+            "hourly": "temperature_2m" if endpoint == "single_runs" else "temperature_2m_previous_day1",
+            "models": model_name,
+            "temperature_unit": "celsius",
+            "timezone": city_config.timezone,
+            "cell_selection": "land",
+        }
+        if endpoint == "previous_runs":
+            request_params.update(start_date=r["target_date"], end_date=r["target_date"])
         conn.execute(
             """INSERT INTO raw_model_forecasts (
                 model, city, target_date, metric, source_cycle_time, source_available_at,
                 captured_at, lead_days, forecast_value_c, endpoint, training_allowed,
                 recorded_at, coverage_status, source_id, source_family, product_id,
-                request_url_hash
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                request_url_hash, model_name, provider, endpoint_mode, request_params_json,
+                latitude_requested, longitude_requested, timezone_requested
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 r["model"], r["city"], r["target_date"], r["metric"],
-                r.get("source_cycle_time", target_instant),
-                r.get("source_available_at", target_instant),
-                r.get("captured_at", target_instant),
-                r["lead_days"], r["forecast_value_c"], r.get("endpoint", "previous_runs"),
+                r.get("source_cycle_time", prior_instant),
+                r.get("source_available_at", prior_instant),
+                r.get("captured_at", prior_instant),
+                r["lead_days"], r["forecast_value_c"], endpoint,
                 r.get("training_allowed", 0), r.get("recorded_at", target_instant),
-                r.get("coverage_status", "COVERED"), r.get("source_id", "openmeteo"),
-                r.get("source_family", "openmeteo"),
-                r.get("product_id", f"{r['model']}::previous_runs"),
-                r.get("request_url_hash", "request-hash"),
+                r.get("coverage_status", "COVERED"), source_id, source_family,
+                product_id, r.get("request_url_hash", "request-hash"), model_name,
+                r.get("provider", "open-meteo"), r.get("endpoint_mode", endpoint),
+                r.get("request_params_json", json.dumps(request_params, sort_keys=True)),
+                r.get("latitude_requested", city_config.lat),
+                r.get("longitude_requested", city_config.lon),
+                r.get("timezone_requested", city_config.timezone),
             ),
         )
         truth_by_city_date.setdefault((r["city"], r["target_date"]), {})[r["metric"]] = r
@@ -625,6 +663,109 @@ def test_observation_only_rows_do_not_supply_training_labels() -> None:
     assert loaded["excluded_reason_counts"]["RAW_LABEL_NOT_CURRENT_RESOLVER_ELIGIBLE"] == 4
 
 
+def test_anchor_ifs025_previous_runs_cannot_train_current_ifs9_weight() -> None:
+    rows = [
+        {
+            "model": "ecmwf_ifs", "city": "AnchorCity", "metric": "high",
+            "target_date": "2026-03-01", "lead_days": 1,
+            "forecast_value_c": 99.0, "settlement_value_c": 20.0,
+            "endpoint": "previous_runs", "model_name": "ecmwf_ifs025",
+            "source_id": "ecmwf_previous_runs",
+            "source_family": "openmeteo_previous_runs",
+            "product_id": "ecmwf_ifs025::previous_runs",
+        },
+        {
+            "model": "ecmwf_ifs", "city": "AnchorCity", "metric": "high",
+            "target_date": "2026-03-01", "lead_days": 1,
+            "forecast_value_c": 20.5, "settlement_value_c": 20.0,
+        },
+    ]
+    loaded = fscw.load_walk_forward_rows(
+        _make_db(rows), as_of="2026-04-01T00:00:00+00:00"
+    )
+
+    assert loaded["obs"][("AnchorCity", "high")]["2026-03-01"] == {"ecmwf_ifs": 20.5}
+    assert loaded["excluded_reason_counts"]["RAW_PRODUCT_NOT_CURRENT_LIVE_EQUIVALENT"] == 1
+
+
+def test_standard_meta_stamped_single_runs_product_is_current_equivalent() -> None:
+    row = {
+        "model": "ncep_nbm_conus", "city": "StampedCity", "metric": "high",
+        "target_date": "2026-03-01", "lead_days": 1,
+        "forecast_value_c": 20.5, "settlement_value_c": 20.0,
+        "endpoint": "single_runs", "endpoint_mode": "standard_api_meta_stamped",
+        "source_cycle_time": "2026-02-28T00:00:00+00:00",
+        "source_available_at": "2026-02-28T06:00:00+00:00",
+        "captured_at": "2026-02-28T06:01:00+00:00",
+        "source_id": "ncep_nbm_conus_standard_meta_stamped",
+        "source_family": "openmeteo_standard_meta_stamped",
+        "product_id": (
+            "ncep_nbm_conus::standard_api_meta_stamped::"
+            "run=2026-02-28T00:00:00+00:00::modified=2026-02-28T01:00:00+00:00"
+        ),
+    }
+    loaded = fscw.load_walk_forward_rows(
+        _make_db([row]), as_of="2026-04-01T00:00:00+00:00"
+    )
+
+    assert loaded["obs"][("StampedCity", "high")]["2026-03-01"] == {
+        "ncep_nbm_conus": 20.5
+    }
+
+
+def test_request_params_cannot_relabel_a_different_physical_product() -> None:
+    row = {
+        "model": "A", "city": "RequestCity", "metric": "high",
+        "target_date": "2026-03-01", "lead_days": 1,
+        "forecast_value_c": 20.5, "settlement_value_c": 20.0,
+        "request_params_json": json.dumps({
+            "latitude": 10.0, "longitude": 20.0,
+            "hourly": "temperature_2m_previous_day1", "models": "A",
+            "temperature_unit": "celsius", "timezone": "UTC",
+            "cell_selection": "nearest", "start_date": "2026-03-01",
+            "end_date": "2026-03-01",
+        }),
+    }
+    loaded = fscw.load_walk_forward_rows(
+        _make_db([row]), as_of="2026-04-01T00:00:00+00:00"
+    )
+
+    assert loaded["obs"] == {}
+    assert loaded["excluded_reason_counts"]["RAW_PRODUCT_NOT_CURRENT_LIVE_EQUIVALENT"] == 1
+
+
+def test_loader_uses_latest_eligible_actual_source_cycle_per_model_target() -> None:
+    rows = [
+        {
+            "model": "A", "city": "LatestCity", "metric": "high",
+            "target_date": "2026-03-01", "lead_days": 1,
+            "forecast_value_c": 19.0, "settlement_value_c": 20.0,
+            "source_cycle_time": "2026-02-27T00:00:00+00:00",
+            "source_available_at": "2026-02-27T06:00:00+00:00",
+            "captured_at": "2026-02-27T06:01:00+00:00",
+        },
+        {
+            "model": "A", "city": "LatestCity", "metric": "high",
+            "target_date": "2026-03-01", "lead_days": 1,
+            "forecast_value_c": 20.5, "settlement_value_c": 20.0,
+            "source_cycle_time": "2026-02-28T00:00:00+00:00",
+            "source_available_at": "2026-02-28T06:00:00+00:00",
+            "captured_at": "2026-02-28T06:01:00+00:00",
+        },
+    ]
+    loaded = fscw.load_walk_forward_rows(
+        _make_db(rows), as_of="2026-04-01T00:00:00+00:00"
+    )
+
+    assert loaded["obs"][("LatestCity", "high")]["2026-03-01"] == {"A": 20.5}
+
+
+def test_as_of_date_means_explicit_utc_midnight() -> None:
+    assert fscw._as_of_utc("2026-03-02").isoformat() == "2026-03-02T00:00:00+00:00"
+    with pytest.raises(ValueError, match="UTC offset"):
+        fscw._as_of_utc("2026-03-02T00:00:00")
+
+
 @pytest.mark.parametrize(
     ("raw_overrides", "expected_reason"),
     [
@@ -658,7 +799,7 @@ def test_loader_preserves_current_label_and_raw_input_availability() -> None:
         "model": "A", "city": "TimingCity", "metric": "high", "target_date": "2026-03-01",
         "lead_days": 1, "forecast_value_c": 20.5, "settlement_value_c": 20.0,
         "captured_at": "2026-02-28T12:00:00+00:00",
-        "recorded_at": "2026-02-28T12:01:00+00:00",
+        "recorded_at": "2026-02-28 12:01:00",
         "source_available_at": "2026-02-28T11:00:00+00:00",
     }]
     conn = _make_db(rows)
@@ -672,8 +813,36 @@ def test_loader_preserves_current_label_and_raw_input_availability() -> None:
         "captured_at": "2026-02-28T12:00:00+00:00",
         "recorded_at": "2026-02-28T12:01:00+00:00",
         "source_available_at": "2026-02-28T11:00:00+00:00",
-        "source_id": "openmeteo",
-        "source_family": "openmeteo",
+        "source_id": "A_previous_runs",
+        "source_family": "openmeteo_previous_runs",
         "product_id": "A::previous_runs",
         "request_url_hash": "request-hash",
     }
+
+
+def test_main_keeps_active_pointer_without_explicit_activation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    forecast_db = tmp_path / "forecast.db"
+    sqlite3.connect(forecast_db).close()
+    out_dir = tmp_path / "candidates"
+    out_dir.mkdir()
+    active = out_dir / "ACTIVE.json"
+    active.write_text('{"artifact":"served.json","sha256":"old"}\n', encoding="utf-8")
+    artifact = {"settlement_rows_used": 1, "cities": {}}
+    monkeypatch.setattr(fscw, "build_artifact", lambda *_args, **_kwargs: artifact)
+    monkeypatch.setattr(fscw, "_git_sha", lambda: "FIXED")
+    argv = [
+        "--fcst", str(forecast_db), "--as-of", "2026-03-02", "--generated-at", "FIXED",
+        "--out-dir", str(out_dir),
+    ]
+
+    assert fscw.main(argv) == 0
+    candidate = out_dir / "city_weights_20260302.json"
+    candidate_bytes = candidate.read_bytes()
+    assert active.read_text(encoding="utf-8") == '{"artifact":"served.json","sha256":"old"}\n'
+
+    assert fscw.main([*argv, "--activate"]) == 0
+    pointer = json.loads(active.read_text(encoding="utf-8"))
+    assert pointer["artifact"] == candidate.name
+    assert pointer["sha256"] == __import__("hashlib").sha256(candidate_bytes).hexdigest()

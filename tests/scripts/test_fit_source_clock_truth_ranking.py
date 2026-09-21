@@ -21,6 +21,9 @@ def _city(*, effective_date: str = "2026-08-23") -> SimpleNamespace:
         wu_station="KHOU",
         settlement_unit="F",
         settlement_page_view="all",
+        lat=29.64582,
+        lon=-95.28214,
+        timezone="America/Chicago",
     )
 
 
@@ -49,7 +52,9 @@ def conn() -> sqlite3.Connection:
             source_available_at TEXT, captured_at TEXT, lead_days INTEGER,
             forecast_value_c REAL, endpoint TEXT, training_allowed INTEGER,
             recorded_at TEXT, coverage_status TEXT, source_id TEXT,
-            source_family TEXT, product_id TEXT, request_url_hash TEXT
+            source_family TEXT, product_id TEXT, request_url_hash TEXT,
+            model_name TEXT, provider TEXT, endpoint_mode TEXT, request_params_json TEXT,
+            latitude_requested REAL, longitude_requested REAL, timezone_requested TEXT
         );
         """
     )
@@ -91,9 +96,12 @@ def conn() -> sqlite3.Connection:
         """INSERT INTO raw_model_forecasts VALUES (
             1, 'ecmwf_ifs', 'Houston', ?, 'high',
             '2026-09-10T00:00:00+00:00', '2026-09-10T06:00:00+00:00',
-            '2026-09-10T06:01:00+00:00', 1, 34.0, 'previous_runs', 0,
-            '2026-09-10T06:02:00+00:00', 'COVERED', 'openmeteo',
-            'openmeteo', 'ecmwf_ifs::previous_runs', 'request-hash'
+            '2026-09-10T06:01:00+00:00', 1, 34.0, 'single_runs', 0,
+            '2026-09-10 06:02:00', 'COVERED', 'ecmwf_ifs_single_runs',
+            'openmeteo_single_runs', 'ecmwf_ifs::single_runs', 'request-hash',
+            'ecmwf_ifs', 'open-meteo', 'single_runs',
+            '{"cell_selection":"land","hourly":"temperature_2m","latitude":29.64582,"longitude":-95.28214,"models":"ecmwf_ifs","temperature_unit":"celsius","timezone":"America/Chicago"}',
+            29.64582, -95.28214, 'America/Chicago'
         )""",
         (target,),
     )
