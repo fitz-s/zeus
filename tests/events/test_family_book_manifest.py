@@ -36,6 +36,11 @@ from src.forecast.predictive_distribution_builder import PredictiveDistributionB
 from src.forecast.types import ForecastCase, FreshModelSet, RawModelMember
 from src.probability.event_resolution import EventResolution, event_resolution_for_city
 from src.probability.outcome_space import OutcomeBin, OutcomeSpace, compute_topology_hash
+from src.solve.solver import (
+    DeterministicBinPayoffWitness,
+    OutcomeTokenBinding,
+    deterministic_bin_payoff_witness_identity,
+)
 from src.strategy.live_inference.executable_cost import QuoteLevel
 
 ISSUE = datetime(2026, 6, 14, 0, 0, 0)
@@ -438,6 +443,97 @@ class TestGlobalSelectionObservationProjection:
         assert envelope.complete_book is True
         assert envelope.market_q_by_bin_id["b_low"] < envelope.market_q_by_bin_id["b25"]
         assert envelope.bins[0].best_yes_ask == 0.01
+
+    def test_partial_day0_exact_payoffs_keep_unknown_bins_missing(self):
+        family, omega, _witness, epoch = self._inputs()
+        bindings = tuple(
+            OutcomeTokenBinding(
+                outcome.bin_id,
+                f"cond-{outcome.bin_id}",
+                f"yes-{outcome.bin_id}",
+                f"no-{outcome.bin_id}",
+            )
+            for outcome in omega.bins
+        )
+        exact = (("b25", 1),)
+        fields = {
+            "family_key": family.family_id,
+            "bindings": bindings,
+            "exact_yes_payoffs": exact,
+            "q_version": "day0-exact",
+            "resolution_identity": "resolution",
+            "topology_identity": omega.topology_hash,
+            "posterior_identity_hash": "posterior",
+            "source_truth_identity": "source",
+            "authority_certificate_hash": "certificate",
+            "band_alpha": 0.05,
+            "band_basis": "day0_deterministic_bin_payoff_v1",
+            "captured_at_utc": _DECISION_TIME,
+        }
+        witness = DeterministicBinPayoffWitness(
+            **fields,
+            max_age=timedelta(seconds=30),
+            witness_identity=deterministic_bin_payoff_witness_identity(**fields),
+        )
+
+        envelope = project_global_selection_observation_envelope(
+            family=family, omega=omega, probability_witness=witness,
+            book_epoch=epoch, selected=SimpleNamespace(decision=SimpleNamespace(candidate=None)),
+            decision_time=_DECISION_TIME, causal_snapshot_id="global-causal",
+        )
+
+        assert envelope.complete_book is True
+        assert envelope.model_q_by_bin_id == {"b25": 1.0}
+        assert "b26" not in envelope.model_q_by_bin_id
+        assert envelope.market_q_by_bin_id is not None
+
+    def test_fahrenheit_native_bounds_and_yes_no_books_are_preserved(self):
+        family, _omega, witness, epoch = self._inputs()
+        f_bins = tuple(
+            SimpleNamespace(
+                bin_id=outcome.bin_id,
+                executable=outcome.executable,
+                lower_native=(
+                    None
+                    if outcome.lower_native is None
+                    else outcome.lower_native * 9.0 / 5.0 + 32.0
+                ),
+                upper_native=(
+                    None
+                    if outcome.upper_native is None
+                    else outcome.upper_native * 9.0 / 5.0 + 32.0
+                ),
+            )
+            for outcome in _outcome_space(_case()).bins
+        )
+        omega = SimpleNamespace(
+            bins=f_bins,
+            topology_hash="fahrenheit-topology",
+            resolution=SimpleNamespace(measurement_unit="F"),
+        )
+        witness = SimpleNamespace(
+            **{
+                **vars(witness),
+                "topology_identity": omega.topology_hash,
+                "yes_point_q": [1.0 / len(f_bins)] * len(f_bins),
+            }
+        )
+
+        envelope = project_global_selection_observation_envelope(
+            family=family, omega=omega, probability_witness=witness,
+            book_epoch=epoch, selected=SimpleNamespace(decision=SimpleNamespace(candidate=None)),
+            decision_time=_DECISION_TIME, causal_snapshot_id="global-causal",
+        )
+
+        assert envelope.measurement_unit == "F"
+        by_bin = {row.bin_id: row for row in envelope.bins}
+        assert by_bin["b_low"].upper_native == 68.0
+        assert by_bin["b25"].lower_native == by_bin["b25"].upper_native == 77.0
+        assert by_bin["b_high"].lower_native == 86.0
+        assert by_bin["b_low"].yes_token_id == "yes-b_low"
+        assert by_bin["b_low"].no_token_id == "no-b_low"
+        assert envelope.model_q_by_bin_id is not None
+        assert envelope.market_q_by_bin_id is not None
 
 
 # ---------------------------------------------------------------------------

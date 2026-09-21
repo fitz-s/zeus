@@ -402,10 +402,24 @@ def project_global_selection_observation_envelope(
         str(getattr(candidate, "side", ""))
         if selected_bin_id is not None else None
     )
-    q_by_bin_id = {
-        str(binding.bin_id): float(value)
-        for binding, value in zip(bindings, probability_witness.yes_point_q, strict=True)
-    }
+    from src.solve.solver import DeterministicBinPayoffWitness
+
+    if isinstance(probability_witness, DeterministicBinPayoffWitness):
+        # Day0 exact payoff authority is deliberately partial: an omitted bin
+        # is unknown, never a zero inferred from the observed sibling. Preserve
+        # only typed 0/1 facts in the existing model-q projection surface.
+        q_by_bin_id = {
+            str(bin_id): float(value)
+            for bin_id, value in probability_witness.exact_yes_payoffs
+        }
+    else:
+        point_q = tuple(getattr(probability_witness, "yes_point_q", ()) or ())
+        if len(point_q) != len(bindings):
+            return None
+        q_by_bin_id = {
+            str(binding.bin_id): float(value)
+            for binding, value in zip(bindings, point_q, strict=True)
+        }
     return ObservationEnvelope(
         family_id=family_key,
         city=str(getattr(family, "city", "")),
