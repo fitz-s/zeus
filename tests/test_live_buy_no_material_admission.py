@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-07; last_reviewed=2026-08-29; last_reused=2026-08-29
+# Lifecycle: created=2026-06-07; last_reviewed=2026-09-21; last_reused=2026-09-21
 # Purpose: Prove material-bin BUY_NO admission uses native side uncertainty without weakening live gates.
 # Reuse: Re-audit replacement bound identity, receipt plumbing, and legacy-source behavior before relying on it.
 # Authority basis: PR_SPEC.md §2 FIX-4 (close the buy_no escape hatch; allow-list ⊆ carrier
@@ -616,7 +616,7 @@ def test_global_current_redecision_preserves_certified_replacement_parent() -> N
         live_buy_no_conservative_evidence_rejection_reason(
             **{**kwargs, "same_bin_yes_posterior": 0.34}
         )
-        == "ADMISSION_BUY_NO_GLOBAL_CURRENT_STATE_INVALID:receipt_scalar_mismatch"
+        == "ADMISSION_BUY_NO_GLOBAL_CURRENT_STATE_INVALID:receipt_scalar_mismatch:replacement_parent:served_yes_q"
     )
 
 
@@ -1073,14 +1073,28 @@ def test_receipt_gate_binds_mean_action_point_and_yes_complement() -> None:
         live_buy_no_conservative_evidence_rejection_reason(
             **{**kwargs, "q_direction": 0.65}
         )
-        == "ADMISSION_BUY_NO_GLOBAL_CURRENT_STATE_INVALID:receipt_scalar_mismatch"
+        == "ADMISSION_BUY_NO_GLOBAL_CURRENT_STATE_INVALID:receipt_scalar_mismatch:q_direction:actual=0.65:certified=0.7"
     )
     assert (
         live_buy_no_conservative_evidence_rejection_reason(
             **{**kwargs, "same_bin_yes_posterior": 0.42}
         )
-        == "ADMISSION_BUY_NO_GLOBAL_CURRENT_STATE_INVALID:receipt_scalar_mismatch"
+        == "ADMISSION_BUY_NO_GLOBAL_CURRENT_STATE_INVALID:receipt_scalar_mismatch:same_bin_yes_posterior:actual=0.42:certified=0.30000000000000004"
     )
+
+
+    for field, value, expected_field, certified in (
+        ("q_lcb", 0.60, "q_lcb", 0.61),
+        ("execution_price", 0.33, "execution_price", 0.32),
+    ):
+        reason = live_buy_no_conservative_evidence_rejection_reason(
+            **{**kwargs, field: value}
+        )
+        assert reason == (
+            "ADMISSION_BUY_NO_GLOBAL_CURRENT_STATE_INVALID:receipt_scalar_mismatch:"
+            f"{expected_field}:actual={value!r}:certified={certified!r}"
+        )
+
 
 
 def test_immaterial_yes_buy_no_is_not_gated_by_source() -> None:

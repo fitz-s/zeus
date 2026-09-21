@@ -502,9 +502,9 @@ def live_buy_no_conservative_evidence_rejection_reason(
                 certified_cost
             ) = float("nan")
         scalar_pairs = [
-            (q_value, certified_action_q),
-            (q_lcb_value, certified_lcb),
-            (price, certified_cost),
+            ("q_direction", q_value, certified_action_q),
+            ("q_lcb", q_lcb_value, certified_lcb),
+            ("execution_price", price, certified_cost),
         ]
         if isinstance(replacement_no_bound_certificate, Mapping):
             replacement_parent_reason = (
@@ -523,19 +523,20 @@ def live_buy_no_conservative_evidence_rejection_reason(
             if replacement_parent_reason is not None:
                 return (
                     "ADMISSION_BUY_NO_GLOBAL_CURRENT_STATE_INVALID:"
-                    "receipt_scalar_mismatch"
+                    f"receipt_scalar_mismatch:replacement_parent:{replacement_parent_reason}"
                 )
         else:
             # Without a separately certified source-clock parent, the current
             # global witness owns both sides of the binary pair.  A replacement
             # certificate is different: it freezes the source-clock YES parent
             # while qkernel may legitimately re-decide the current NO action.
-            scalar_pairs.append((yes_posterior, 1.0 - certified_point_q))
-        if not all(
-            math.isclose(actual, certified, rel_tol=0.0, abs_tol=1e-12)
-            for actual, certified in scalar_pairs
-        ):
-            return "ADMISSION_BUY_NO_GLOBAL_CURRENT_STATE_INVALID:receipt_scalar_mismatch"
+            scalar_pairs.append(("same_bin_yes_posterior", yes_posterior, 1.0 - certified_point_q))
+        for field, actual, certified in scalar_pairs:
+            if not math.isclose(actual, certified, rel_tol=0.0, abs_tol=1e-12):
+                return (
+                    "ADMISSION_BUY_NO_GLOBAL_CURRENT_STATE_INVALID:"
+                    f"receipt_scalar_mismatch:{field}:actual={actual!r}:certified={certified!r}"
+                )
         return None
     if replacement_no_bound_certificate_matches(
         replacement_no_bound_certificate,
