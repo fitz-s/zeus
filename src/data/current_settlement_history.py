@@ -214,7 +214,13 @@ def read_current_settlement_history(
         if epoch_start is None:
             excluded["CONFIG_EFFECTIVE_DATE_INVALID"] += 1
             continue
-        for outcome in _outcome_rows_for_city(conn, str(city_name), date.min):
+        old_count = conn.execute(
+            "SELECT COUNT(*) FROM settlement_outcomes WHERE city = ? "
+            "AND authority = 'VERIFIED' AND target_date >= ? AND target_date < ?",
+            (str(city_name), date.min.isoformat(), epoch_start.isoformat()),
+        ).fetchone()[0]
+        excluded["PRE_CURRENT_SOURCE_EPOCH"] += int(old_count)
+        for outcome in _outcome_rows_for_city(conn, str(city_name), epoch_start):
             target_raw = str(outcome["target_date"] or "")
             try:
                 target = date.fromisoformat(target_raw[:10])
