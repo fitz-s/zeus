@@ -39959,6 +39959,7 @@ def _spine_multimodel_members_for_event(
         _lead_days = max(0, (_target_d - _cycle_d).days)
         raw_m2_by_model = raw_second_moment_by_model(
             conn,
+            as_of=decision_time,
             city=str(family.city),
             metric=str(family.metric),
             lead_days=_lead_days,
