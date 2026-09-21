@@ -28142,8 +28142,21 @@ def _reconcile_authenticated_entry_trade_fact(
         )
     command_state = str(command.get("state") or "")
     already_filled = command_state == CommandState.FILLED.value
+    size_complete = _fill_size_completes_limit_order(
+        filled,
+        requested,
+        side=command.get("side"),
+    )
+    complete = bool(
+        size_complete
+        and (
+            command_state != CommandState.PARTIAL.value
+            or all_trade_facts_confirmed
+        )
+    )
     partial_control_fold_complete = bool(
         command_state == CommandState.PARTIAL.value
+        and not complete
         and _latest_order_fact_matched_size(
             conn,
             command_id=command_id,
@@ -28166,12 +28179,6 @@ def _reconcile_authenticated_entry_trade_fact(
         fill_price=fill_price,
     ):
         return "stayed"
-
-    complete = _fill_size_completes_limit_order(
-        filled,
-        requested,
-        side=command.get("side"),
-    )
     if already_filled and not complete:
         raise ValueError(
             "terminal FILLED entry lacks complete authenticated fill economics"
@@ -28338,6 +28345,16 @@ def _reconcile_authenticated_entry_trade_fact(
                 occurred_at=observed_at,
                 payload=fill_event_payload,
             )
+            if complete:
+                canonical_command = conn.execute(
+                    "SELECT * FROM venue_commands WHERE command_id = ?",
+                    (command_id,),
+                ).fetchone()
+                if canonical_command is not None:
+                    projection_command = {
+                        **projection_command,
+                        "state": str(canonical_command["state"] or ""),
+                    }
         _ensure_entry_fill_position_event(
             conn,
             command=projection_command,
@@ -30944,6 +30961,63 @@ def _terminal_filled_entry_projection_blocker_count(
     return len(_terminal_filled_entry_projection_blocker_command_ids(conn))
 
 
+def _authenticated_nonterminal_entry_projection_command_ids(
+    conn: sqlite3.Connection,
+) -> tuple[str, ...]:
+    """Return authenticated nonterminal ENTRY fills missing canonical projection."""
+
+    authenticated_nonterminal_states = (
+        CommandState.SUBMITTING.value,
+        CommandState.POST_ACKED.value,
+        CommandState.ACKED.value,
+        CommandState.PARTIAL.value,
+        CommandState.CANCEL_PENDING.value,
+        CommandState.REVIEW_REQUIRED.value,
+    )
+    command_ids: set[str] = set()
+    for candidate in _bounded_authenticated_entry_trade_fact_candidates(
+        conn,
+        states=authenticated_nonterminal_states,
+    ):
+        command_id = str(candidate.get("command_id") or "").strip()
+        if not command_id:
+            continue
+        facts = _confirmed_entry_trade_fact_summary(
+            conn,
+            command_id=command_id,
+            venue_order_id=str(candidate.get("venue_order_id") or ""),
+        )
+        filled_size = _positive_decimal_or_none(facts.get("filled_size"))
+        fill_price = _positive_decimal_or_none(facts.get("fill_price"))
+        if filled_size is None or fill_price is None:
+            continue
+        if not _authenticated_entry_fill_projection_complete(
+            conn,
+            command_id=command_id,
+            position_id=str(candidate.get("position_id") or ""),
+            venue_order_id=str(candidate.get("venue_order_id") or ""),
+            filled_size=filled_size,
+            fill_price=fill_price,
+        ):
+            command_ids.add(command_id)
+    return tuple(sorted(command_ids))
+
+
+def _bounded_rotating_command_id_slice(
+    command_ids: Sequence[str],
+    *,
+    limit: int,
+    rotation_slot: int,
+) -> tuple[str, ...]:
+    """Return one deterministic, wraparound bounded command-id tranche."""
+
+    ordered = tuple(dict.fromkeys(str(command_id) for command_id in command_ids if str(command_id)))
+    if not ordered or limit <= 0:
+        return ()
+    start = (max(0, int(rotation_slot)) * limit) % len(ordered)
+    return (ordered[start:] + ordered[:start])[:limit]
+
+
 def _partial_exit_projection_absorbs_terminal_fill(
     conn: sqlite3.Connection,
     *,
@@ -31276,39 +31350,9 @@ def capital_blocking_command_scope(
                 not in existing_command_ids
             )
         )
-    authenticated_entry_projection_command_ids: set[str] = set()
-    authenticated_nonterminal_states = (
-        CommandState.SUBMITTING.value,
-        CommandState.POST_ACKED.value,
-        CommandState.ACKED.value,
-        CommandState.PARTIAL.value,
-        CommandState.CANCEL_PENDING.value,
-        CommandState.REVIEW_REQUIRED.value,
+    authenticated_entry_projection_command_ids = set(
+        _authenticated_nonterminal_entry_projection_command_ids(conn)
     )
-    for candidate in _bounded_authenticated_entry_trade_fact_candidates(
-        conn,
-        states=authenticated_nonterminal_states,
-    ):
-        facts = _confirmed_entry_trade_fact_summary(
-            conn,
-            command_id=str(candidate.get("command_id") or ""),
-            venue_order_id=str(candidate.get("venue_order_id") or ""),
-        )
-        filled_size = _positive_decimal_or_none(facts.get("filled_size"))
-        fill_price = _positive_decimal_or_none(facts.get("fill_price"))
-        if filled_size is None or fill_price is None:
-            continue
-        if not _authenticated_entry_fill_projection_complete(
-            conn,
-            command_id=str(candidate.get("command_id") or ""),
-            position_id=str(candidate.get("position_id") or ""),
-            venue_order_id=str(candidate.get("venue_order_id") or ""),
-            filled_size=filled_size,
-            fill_price=fill_price,
-        ):
-            authenticated_entry_projection_command_ids.add(
-                str(candidate["command_id"])
-            )
     projection_count = (
         len(
             authenticated_entry_projection_command_ids
@@ -32498,11 +32542,12 @@ def _reconcile_passes_short_conn(
         return True
 
     def _capital_recovery_fast_pass():
-        """Resolve capital-blocking terminal orders before maintenance.
+        """Resolve current authenticated fills and capital-blocking orders before maintenance.
 
         The general live-tick sweep has a deliberately tiny cumulative DB
-        budget.  A large maintenance query must not repeatedly consume that
-        budget before command-specific terminal facts can release collateral.
+        budget. Current authenticated fill debt must not repeatedly yield to a
+        large maintenance query before command-specific projection can release
+        collateral.
         Venue reads remain bounded to the currently affected order ids and run
         with no DB connection open.
         """
@@ -32580,16 +32625,23 @@ def _reconcile_passes_short_conn(
                 if canonical_terminal_entry_order_full_fill_proven(conn, str(row["command_id"]))
             }
             review_ids = sorted(terminal_fill_review_command_ids | point_full_fill_review_command_ids)
+            all_review_command_ids = frozenset(review_ids)
             if review_ids:
                 limit = _LIVE_TICK_IDENTITY_BOUND_MAX_CANDIDATES
                 start = (_identity_bound_rotation_slot() * limit) % len(review_ids)
                 terminal_fill_review_command_ids = set((review_ids[start:] + review_ids[:start])[:limit])
-            terminal_entry_projection_command_ids = tuple(
+            entry_projection_candidates = tuple(
                 command_id
-                for command_id in (
-                    _terminal_filled_entry_projection_blocker_command_ids(conn)
+                for command_id in dict.fromkeys(
+                    _authenticated_nonterminal_entry_projection_command_ids(conn)
+                    + _terminal_filled_entry_projection_blocker_command_ids(conn)
                 )
-                if command_id not in terminal_fill_review_command_ids
+                if command_id not in all_review_command_ids
+            )
+            entry_projection_command_ids = _bounded_rotating_command_id_slice(
+                entry_projection_candidates,
+                limit=_LIVE_TICK_IDENTITY_BOUND_MAX_CANDIDATES,
+                rotation_slot=_identity_bound_rotation_slot(),
             )
             submitting_probe, _submitting_probe_deferred = (
                 _identity_bound_submitting_candidates(
@@ -32686,6 +32738,45 @@ def _reconcile_passes_short_conn(
                     summary,
                     "authenticated_terminal_fill_review_fast",
                     terminal_fill_review_result,
+                )
+        entry_projection_result = None
+        if entry_projection_command_ids:
+            # An authenticated cumulative ENTRY fill without a matching
+            # position event/execution fact is current exposure, not historical
+            # repair. Process exact blocker identities before monitor traffic
+            # or a broad recovery scan can consume this tick.
+            entry_projection_deadline = _capital_deadline()
+            entry_projection_conn_factory = _capital_apply_conn_factory(
+                entry_projection_deadline
+            )
+
+            def _fold_entry_projections(conn):
+                folded = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+                for command_id in entry_projection_command_ids:
+                    result = reconcile_authenticated_entry_trade_facts(
+                        conn,
+                        command_id=command_id,
+                    )
+                    for key in folded:
+                        folded[key] += int(result.get(key, 0) or 0)
+                return folded
+
+            entry_projection_result = _run_capital_pass(
+                "authenticated_entry_projection_fast",
+                lambda: run_db_only_pass(
+                    _fold_entry_projections,
+                    conn_factory=entry_projection_conn_factory,
+                    label=(
+                        "recovery.authenticated_entry_projection_fast"
+                    ),
+                ),
+                deadline_monotonic=entry_projection_deadline,
+            )
+            if entry_projection_result is not None:
+                _accumulate(
+                    summary,
+                    "authenticated_entry_projection_fast",
+                    entry_projection_result,
                 )
         post_ack_review_result = None
         post_ack_review_ids = frozenset(
@@ -32793,46 +32884,6 @@ def _reconcile_passes_short_conn(
                         "post_ack_review_full_snapshot_fast",
                         post_ack_review_result,
                     )
-        terminal_entry_projection_result = None
-        if terminal_entry_projection_command_ids:
-            # A FILLED command with authenticated trade truth but no matching
-            # position event/execution fact is current exposure, not historical
-            # repair. Process only the exact blocker identities before monitor
-            # traffic or a broad recovery scan can consume this tick.
-            entry_projection_deadline = _capital_deadline()
-            entry_projection_conn_factory = _capital_apply_conn_factory(
-                entry_projection_deadline
-            )
-
-            def _fold_terminal_entry_projections(conn):
-                folded = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
-                for command_id in terminal_entry_projection_command_ids:
-                    result = reconcile_authenticated_entry_trade_facts(
-                        conn,
-                        command_id=command_id,
-                    )
-                    for key in folded:
-                        folded[key] += int(result.get(key, 0) or 0)
-                return folded
-
-            terminal_entry_projection_result = _run_capital_pass(
-                "authenticated_terminal_entry_projection_fast",
-                lambda: run_db_only_pass(
-                    _fold_terminal_entry_projections,
-                    conn_factory=entry_projection_conn_factory,
-                    label=(
-                        "recovery."
-                        "authenticated_terminal_entry_projection_fast"
-                    ),
-                ),
-                deadline_monotonic=entry_projection_deadline,
-            )
-            if terminal_entry_projection_result is not None:
-                _accumulate(
-                    summary,
-                    "authenticated_terminal_entry_projection_fast",
-                    terminal_entry_projection_result,
-                )
         exit_fill_result = None
         if exit_fill_projection_open:
             # A confirmed EXIT fill is already executable capital truth.
@@ -33188,6 +33239,7 @@ def _reconcile_passes_short_conn(
                 # cancel/terminal capital release work.
                 return (
                     terminal_fill_review_result
+                    or entry_projection_result
                     or post_ack_review_result
                     or exit_fill_result
                     or existing_position_terminal_cancel_result
@@ -33200,6 +33252,7 @@ def _reconcile_passes_short_conn(
         if not cancel_candidates and not terminal_candidates and not partial_candidates:
             return (
                 terminal_fill_review_result
+                or entry_projection_result
                 or post_ack_review_result
                 or exit_fill_result
                 or existing_position_terminal_cancel_result
@@ -33356,6 +33409,7 @@ def _reconcile_passes_short_conn(
                 )
         return (
             terminal_fill_review_result
+            or entry_projection_result
             or post_ack_review_result
             or exit_fill_result
             or existing_position_terminal_cancel_result

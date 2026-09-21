@@ -2674,7 +2674,10 @@ def test_live_tick_terminal_fill_review_has_own_capital_deadline(monkeypatch):
     def _candidates(_conn, *, command_id=None):
         if command_id is not None:
             return [{"command_id": command_id, "state": "REVIEW_REQUIRED"}]
-        return [{"command_id": "cmd-current-review", "state": "REVIEW_REQUIRED"}]
+        return [
+            {"command_id": f"cmd-current-review-{index}", "state": "REVIEW_REQUIRED"}
+            for index in range(6)
+        ]
 
     def _authenticated(_conn, *, command_id=None):
         calls.append(("authenticated_terminal_fill_review_fast", command_id))
@@ -2687,10 +2690,18 @@ def test_live_tick_terminal_fill_review_has_own_capital_deadline(monkeypatch):
 
     monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
     monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(command_recovery, "_identity_bound_rotation_slot", lambda: 0)
     monkeypatch.setattr(
         command_recovery,
         "_bounded_authenticated_entry_trade_fact_candidates",
         lambda _conn, *, states: _candidates(_conn),
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_authenticated_nonterminal_entry_projection_command_ids",
+        lambda _conn: tuple(
+            f"cmd-current-review-{index}" for index in range(6)
+        ) + ("cmd-current-partial",),
     )
     monkeypatch.setattr(
         command_recovery,
@@ -2712,12 +2723,15 @@ def test_live_tick_terminal_fill_review_has_own_capital_deadline(monkeypatch):
     )
 
     assert calls == [
-        ("authenticated_terminal_fill_review_fast", "cmd-current-review"),
+        ("authenticated_terminal_fill_review_fast", f"cmd-current-review-{index}")
+        for index in range(4)
+    ] + [
+        ("authenticated_terminal_fill_review_fast", "cmd-current-partial"),
         ("review_required_matched_submit_trade_fact", None),
     ]
     assert summary["authenticated_terminal_fill_review_fast"] == {
-        "scanned": 1,
-        "advanced": 1,
+        "scanned": 4,
+        "advanced": 4,
         "stayed": 0,
         "errors": 0,
     }
@@ -2729,7 +2743,7 @@ def test_live_tick_terminal_fill_review_has_own_capital_deadline(monkeypatch):
 def test_live_tick_terminal_filled_entry_projection_has_own_capital_deadline(
     monkeypatch,
 ):
-    """A confirmed FILLED increment projects before general recovery work."""
+    """Authenticated PARTIAL and terminal fills project before network work."""
     from src.execution import command_recovery
     from src.execution import venue_sync_contract
 
@@ -2742,7 +2756,7 @@ def test_live_tick_terminal_filled_entry_projection_has_own_capital_deadline(
         return conn
 
     def _authenticated(_conn, *, command_id=None):
-        calls.append(("authenticated_terminal_entry_projection_fast", command_id))
+        calls.append(("authenticated_entry_projection_fast", command_id))
         return {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
 
     def _later_review(_conn):
@@ -2756,6 +2770,11 @@ def test_live_tick_terminal_filled_entry_projection_has_own_capital_deadline(
         command_recovery,
         "_bounded_authenticated_entry_trade_fact_candidates",
         lambda _conn, *, states: [],
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_authenticated_nonterminal_entry_projection_command_ids",
+        lambda _conn: ("cmd-current-partial",),
     )
     monkeypatch.setattr(
         command_recovery,
@@ -2782,18 +2801,35 @@ def test_live_tick_terminal_filled_entry_projection_has_own_capital_deadline(
     )
 
     assert calls == [
-        ("authenticated_terminal_entry_projection_fast", "cmd-current-filled"),
+        ("authenticated_entry_projection_fast", "cmd-current-partial"),
+        ("authenticated_entry_projection_fast", "cmd-current-filled"),
         ("review_required_matched_submit_trade_fact", None),
     ]
-    assert summary["authenticated_terminal_entry_projection_fast"] == {
-        "scanned": 1,
-        "advanced": 1,
+    assert summary["authenticated_entry_projection_fast"] == {
+        "scanned": 2,
+        "advanced": 2,
         "stayed": 0,
         "errors": 0,
     }
     assert summary["db_budget_deferred_at"] == (
         "review_required_matched_submit_trade_fact"
     )
+
+
+
+def test_live_tick_entry_projection_rotation_bounds_and_wraps():
+    from src.execution import command_recovery
+
+    command_ids = tuple(f"cmd-{index}" for index in range(6))
+    first = command_recovery._bounded_rotating_command_id_slice(
+        command_ids, limit=4, rotation_slot=0,
+    )
+    second = command_recovery._bounded_rotating_command_id_slice(
+        command_ids, limit=4, rotation_slot=1,
+    )
+    assert first == ("cmd-0", "cmd-1", "cmd-2", "cmd-3")
+    assert second == ("cmd-4", "cmd-5", "cmd-0", "cmd-1")
+    assert set(first) | set(second) == set(command_ids)
 
 
 def test_recorded_exit_projection_candidate_excludes_completed_partial_reduction():
@@ -6675,7 +6711,7 @@ class TestAuthenticatedEntryTradeFactProjection:
             command_id=command_id,
             order_id=order_id,
             trade_id="trade-authenticated-partial-1",
-            state="MATCHED",
+            state="CONFIRMED",
             filled_size="4",
             fill_price="0.40",
             source="WS_USER",
@@ -6726,6 +6762,78 @@ class TestAuthenticatedEntryTradeFactProjection:
             "entry_price": 0.46,
             "order_status": "filled",
         }
+
+    def test_partial_control_fold_retries_cumulative_dust_complete_fill(self, conn):
+        from src.execution.command_recovery import (
+            capital_blocking_command_count,
+            reconcile_authenticated_entry_trade_facts,
+        )
+
+        command_id = "cmd-authenticated-partial-dust"
+        position_id = "pos-authenticated-partial-dust"
+        order_id = "ord-authenticated-partial-dust"
+        requested = Decimal("62.55")
+        cumulative = Decimal("62.542633")
+        _insert(
+            conn,
+            command_id=command_id,
+            position_id=position_id,
+            decision_id="dec-authenticated-partial-dust",
+            token_id="tok-authenticated-partial-dust",
+            size=float(requested),
+            price=0.50,
+        )
+        _advance_to_acked(conn, command_id=command_id, venue_order_id=order_id)
+        _seed_pending_entry_projection(
+            conn,
+            position_id=position_id,
+            command_id=command_id,
+            order_id=order_id,
+            token_id="tok-authenticated-partial-dust",
+        )
+        _append_trade_fact(
+            conn,
+            command_id=command_id,
+            order_id=order_id,
+            trade_id="trade-authenticated-partial-dust-1",
+            state="CONFIRMED",
+            filled_size="31",
+            fill_price="0.40",
+            source="WS_USER",
+        )
+        first = reconcile_authenticated_entry_trade_facts(conn, command_id=command_id)
+        assert first == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert _get_state(conn, command_id) == "PARTIAL"
+        _append_order_fact(
+            conn,
+            command_id=command_id,
+            order_id=order_id,
+            state="MATCHED",
+            remaining_size=str(requested - cumulative),
+            matched_size=str(cumulative),
+            source="WS_USER",
+        )
+        _append_confirmed_trade_fact(
+            conn,
+            command_id=command_id,
+            order_id=order_id,
+            trade_id="trade-authenticated-partial-dust-2",
+            filled_size=str(cumulative - Decimal("31")),
+            fill_price="0.50",
+        )
+        assert capital_blocking_command_count(conn) == 1
+        second = reconcile_authenticated_entry_trade_facts(conn, command_id=command_id)
+        assert second == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert _get_state(conn, command_id) == "FILLED"
+        projected = conn.execute(
+            "SELECT shares, cost_basis_usd, order_status FROM position_current WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+        assert Decimal(str(projected["shares"])) == cumulative
+        assert Decimal(str(projected["cost_basis_usd"])) == Decimal("28.1713165")
+        assert capital_blocking_command_count(conn) == 0
+        replay = reconcile_authenticated_entry_trade_facts(conn, command_id=command_id)
+        assert replay == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
         assert conn.execute(
             """
             SELECT COUNT(*)
@@ -21873,6 +21981,7 @@ class TestRecoveryResolutionTable:
             "stayed": 0,
             "errors": 0,
         }
+        assert summary["authenticated_entry_projection_fast"]["advanced"] == 1
         verified = _conn_factory()
         try:
             assert _get_state(verified, "cmd-001") == "EXPIRED"
@@ -21887,7 +21996,7 @@ class TestRecoveryResolutionTable:
                 "phase": "active",
                 "shares": 1.149423,
                 "chain_shares": 1.149423,
-                "cost_basis_usd": 0.149425,
+                "cost_basis_usd": 0.14942499,
             }
         finally:
             verified.close()

@@ -521,6 +521,31 @@ def _command_state(c) -> str:
     return c.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-ws'").fetchone()["state"]
 
 
+def _seed_bound_projection_position(c, *, shares: float = 0.0, cost_basis: float = 0.0) -> None:
+    """Provide a real pending position for the authenticated-fill reducer."""
+
+    c.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, market_id, city, cluster, target_date,
+            bin_label, direction, unit, size_usd, shares, cost_basis_usd,
+            entry_price, p_posterior, entry_ci_width, decision_snapshot_id,
+            entry_method, strategy_key, edge_source, discovery_mode, chain_state,
+            chain_shares, chain_cost_basis_usd, token_id, no_token_id,
+            condition_id, order_id, order_status, updated_at, temperature_metric
+        ) VALUES (
+            '1', 'pending_entry', '1', 'condition-ws', 'Test City', 'Test City',
+            '2026-04-28', '20-21', 'buy_yes', 'F', 0.0, ?, ?, 0.5, 0.6, 0.1,
+            'snap-ws', 'qkernel_spine', 'opening_inertia', 'test', 'test',
+            'synced', ?, ?, 'yes-token-ws', 'no-token-ws', 'condition-ws',
+            'ord-ws', 'pending', ?, 'high'
+        )
+        """,
+        (shares, cost_basis, shares, cost_basis, NOW.isoformat()),
+    )
+    c.commit()
+
+
 class _LockedConnection:
     def execute(self, *args, **kwargs):
         raise sqlite3.OperationalError("database is locked")
@@ -1100,6 +1125,212 @@ def test_maker_side_partial_fill_lifecycle_uses_zeus_maker_leg_economics(conn):
     ]
     assert [r["event_type"] for r in _rows(conn, "venue_command_events")].count("FILL_CONFIRMED") == 0
     assert _command_state(conn) == "PARTIAL"
+
+
+def test_confirmed_ws_partial_projects_canonical_fill_before_legacy_bridge(conn):
+    _seed_bound_projection_position(conn)
+
+    result = _ingestor(conn).handle_message(
+        _trade_message("CONFIRMED", size="5", confirmation_count=3)
+    )
+
+    assert result["projection_applied"] is True
+    assert result["command_event"] is None
+    assert _command_state(conn) == "PARTIAL"
+    event = conn.execute(
+        """
+        SELECT event_type
+          FROM position_events
+         WHERE position_id = '1'
+           AND event_type = 'ENTRY_ORDER_FILLED'
+        """
+    ).fetchone()
+    assert event is not None
+    execution = conn.execute(
+        """
+        SELECT shares, fill_price, terminal_exec_status
+          FROM execution_fact
+         WHERE position_id = '1' AND command_id = 'cmd-ws' AND order_role = 'entry'
+        """
+    ).fetchone()
+    assert dict(execution) == {
+        "shares": 5.0,
+        "fill_price": 0.5,
+        "terminal_exec_status": "partial",
+    }
+    position = conn.execute(
+        "SELECT shares, cost_basis_usd FROM position_current WHERE position_id = '1'"
+    ).fetchone()
+    assert dict(position) == {"shares": 5.0, "cost_basis_usd": 2.5}
+    confirmed_lots = conn.execute(
+        """
+        SELECT source_trade_fact_id
+          FROM position_lots
+         WHERE state = 'CONFIRMED_EXPOSURE'
+        """
+    ).fetchall()
+    assert len(confirmed_lots) == 1
+    assert confirmed_lots[0]["source_trade_fact_id"] == result["trade_fact_id"]
+
+
+def test_confirmed_ws_full_projects_canonical_fill_and_filled_command(conn):
+    _seed_bound_projection_position(conn)
+
+    result = _ingestor(conn).handle_message(
+        _trade_message("CONFIRMED", size="10", confirmation_count=3)
+    )
+
+    assert result["projection_applied"] is True
+    assert result["command_event"] is None
+    assert _command_state(conn) == "FILLED"
+    execution = conn.execute(
+        """
+        SELECT shares, fill_price, terminal_exec_status
+          FROM execution_fact
+         WHERE position_id = '1' AND command_id = 'cmd-ws' AND order_role = 'entry'
+        """
+    ).fetchone()
+    assert dict(execution) == {
+        "shares": 10.0,
+        "fill_price": 0.5,
+        "terminal_exec_status": "filled",
+    }
+
+
+def test_confirmed_partial_then_cumulative_order_and_confirmed_trade_complete_fill(conn):
+    _seed_bound_projection_position(conn)
+    ingestor = _ingestor(conn)
+
+    first = ingestor.handle_message(
+        _trade_message("CONFIRMED", size="5", confirmation_count=3)
+    )
+    ingestor.handle_message(
+        _order_message(type="UPDATE", original_size="10", size_matched="10")
+    )
+    second = ingestor.handle_message(
+        _trade_message(
+            "CONFIRMED",
+            id="trade-ws-2",
+            size="5",
+            confirmation_count=3,
+        )
+    )
+
+    assert first["projection_applied"] is True
+    assert second["projection_applied"] is True
+    assert _command_state(conn) == "FILLED"
+    position = conn.execute(
+        "SELECT shares, cost_basis_usd FROM position_current WHERE position_id = '1'"
+    ).fetchone()
+    assert dict(position) == {"shares": 10.0, "cost_basis_usd": 5.0}
+    execution = conn.execute(
+        """
+        SELECT shares, fill_price, terminal_exec_status
+          FROM execution_fact
+         WHERE position_id = '1' AND command_id = 'cmd-ws' AND order_role = 'entry'
+        """
+    ).fetchall()
+    assert len(execution) == 1
+    assert dict(execution[0]) == {
+        "shares": 10.0,
+        "fill_price": 0.5,
+        "terminal_exec_status": "filled",
+    }
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_lots WHERE state = 'CONFIRMED_EXPOSURE'"
+    ).fetchone()[0] == 2
+
+
+def test_confirmed_prefix_with_separate_matched_fact_defers_projection(conn):
+    _seed_bound_projection_position(conn)
+    ingestor = _ingestor(conn)
+
+    ingestor.handle_message(_trade_message("MATCHED", id="trade-matched", size="2"))
+    result = ingestor.handle_message(
+        _trade_message(
+            "CONFIRMED",
+            id="trade-confirmed",
+            size="5",
+            confirmation_count=3,
+        )
+    )
+
+    assert result["projection_applied"] is False
+    assert result["projection_reason"] == "ws_confirmed_projection_deferred"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE event_type = 'ENTRY_ORDER_FILLED'"
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM execution_fact WHERE command_id = 'cmd-ws'"
+    ).fetchone()[0] == 0
+    assert [row["state"] for row in _rows(conn, "position_lots")] == [
+        "OPTIMISTIC_EXPOSURE",
+        "CONFIRMED_EXPOSURE",
+    ]
+
+
+def test_same_trade_confirmed_replay_projects_once_and_deduplicates(conn):
+    _seed_bound_projection_position(conn)
+    ingestor = _ingestor(conn)
+
+    ingestor.handle_message(_trade_message("MATCHED", size="5"))
+    first = ingestor.handle_message(
+        _trade_message("CONFIRMED", size="5", confirmation_count=3)
+    )
+    duplicate = ingestor.handle_message(
+        _trade_message("CONFIRMED", size="5", confirmation_count=3)
+    )
+
+    assert first["projection_applied"] is True
+    assert duplicate["reason"] == "duplicate_trade_fact"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE event_type = 'ENTRY_ORDER_FILLED'"
+    ).fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM execution_fact WHERE command_id = 'cmd-ws'"
+    ).fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_lots WHERE state = 'CONFIRMED_EXPOSURE'"
+    ).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("reducer_mode", ["errors", "exception"])
+def test_confirmed_projection_savepoint_defers_to_original_bridge_on_failure(
+    conn,
+    monkeypatch,
+    reducer_mode,
+):
+    _seed_bound_projection_position(conn)
+    from src.execution import command_recovery
+
+    def fake_reducer(connection, *, command_id):
+        connection.execute(
+            "UPDATE position_current SET shares = 99, cost_basis_usd = 99 WHERE position_id = '1'"
+        )
+        if reducer_mode == "exception":
+            raise RuntimeError("forced reducer failure")
+        return {"scanned": 1, "advanced": 0, "stayed": 0, "errors": 1}
+
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_authenticated_entry_trade_facts",
+        fake_reducer,
+    )
+    result = _ingestor(conn).handle_message(
+        _trade_message("CONFIRMED", size="5", confirmation_count=3)
+    )
+
+    assert result["projection_applied"] is False
+    assert result["projection_reason"] == "ws_confirmed_projection_deferred"
+    position = conn.execute(
+        "SELECT shares, cost_basis_usd FROM position_current WHERE position_id = '1'"
+    ).fetchone()
+    assert dict(position) == {"shares": 0.0, "cost_basis_usd": 0.0}
+    assert conn.execute("SELECT COUNT(*) FROM venue_trade_facts").fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_lots WHERE state = 'CONFIRMED_EXPOSURE'"
+    ).fetchone()[0] == 1
+    assert result["command_event"] == "PARTIAL_FILL_OBSERVED"
 
 
 def test_same_trade_id_different_order_requires_review_not_rebinding(conn):

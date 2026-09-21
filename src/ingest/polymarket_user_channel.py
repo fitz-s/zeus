@@ -1105,6 +1105,80 @@ class PolymarketUserChannelIngestor:
                 confirmation_count=message.get("confirmation_count"),
             )
             command_event = None
+            confirmed_projection_applied = False
+            confirmed_projection_reason: str | None = None
+            confirmed_projection_error: BaseException | None = None
+            if status == "CONFIRMED" and _is_entry_buy_command(command):
+                try:
+                    from src.execution.command_recovery import (
+                        _confirmed_entry_trade_fact_summary,
+                        reconcile_authenticated_entry_trade_facts,
+                    )
+
+                    # Keep the WS fact append outside this savepoint. A
+                    # confirmed projection may be deferred without losing the
+                    # authenticated fact or the legacy bridge.
+                    conn.execute("SAVEPOINT ws_confirmed_projection")
+                    try:
+                        facts = _confirmed_entry_trade_fact_summary(
+                            conn,
+                            command_id=str(command["command_id"]),
+                            venue_order_id=venue_order_id,
+                        )
+                        states = tuple(
+                            str(state or "").upper()
+                            for state in facts.get("states", ())
+                        )
+                        if int(facts.get("count") or 0) > 0 and states and all(
+                            state == "CONFIRMED" for state in states
+                        ):
+                            projection = reconcile_authenticated_entry_trade_facts(
+                                conn,
+                                command_id=str(command["command_id"]),
+                            )
+                            if (
+                                int(projection.get("advanced") or 0) > 0
+                                and int(projection.get("errors") or 0) == 0
+                            ):
+                                conn.execute(
+                                    "RELEASE SAVEPOINT ws_confirmed_projection"
+                                )
+                                confirmed_projection_applied = True
+                            else:
+                                confirmed_projection_reason = (
+                                    "reducer_stayed_or_reported_errors"
+                                )
+                        else:
+                            confirmed_projection_reason = (
+                                "aggregate_trade_facts_not_all_confirmed"
+                            )
+                        if not confirmed_projection_applied:
+                            conn.execute(
+                                "ROLLBACK TO SAVEPOINT ws_confirmed_projection"
+                            )
+                            conn.execute(
+                                "RELEASE SAVEPOINT ws_confirmed_projection"
+                            )
+                    except Exception:
+                        conn.execute(
+                            "ROLLBACK TO SAVEPOINT ws_confirmed_projection"
+                        )
+                        conn.execute(
+                            "RELEASE SAVEPOINT ws_confirmed_projection"
+                        )
+                        raise
+                except Exception as exc:
+                    confirmed_projection_reason = "projection_exception"
+                    confirmed_projection_error = exc
+                if not confirmed_projection_applied:
+                    logger.warning(
+                        "ws_confirmed_projection_deferred command_id=%s "
+                        "trade_id=%s reason=%s error=%s",
+                        command["command_id"],
+                        trade_id,
+                        confirmed_projection_reason or "unknown",
+                        confirmed_projection_error,
+                    )
             if status in {"MATCHED", "MINED"}:
                 command_event = "PARTIAL_FILL_OBSERVED"
                 if self._optimistic_trade_fact_for_trade(conn, trade_id) is None:
@@ -1119,17 +1193,18 @@ class PolymarketUserChannelIngestor:
                         fill_price=fill_price,
                     )
             elif status == "CONFIRMED":
-                command_event = "FILL_CONFIRMED" if _command_fill_is_complete(conn, command) else "PARTIAL_FILL_OBSERVED"
-                self._append_position_lot(
-                    conn,
-                    command,
-                    fact_id,
-                    "CONFIRMED_EXPOSURE",
-                    message,
-                    observed,
-                    filled_size=filled_size,
-                    fill_price=fill_price,
-                )
+                if not confirmed_projection_applied:
+                    command_event = "FILL_CONFIRMED" if _command_fill_is_complete(conn, command) else "PARTIAL_FILL_OBSERVED"
+                    self._append_position_lot(
+                        conn,
+                        command,
+                        fact_id,
+                        "CONFIRMED_EXPOSURE",
+                        message,
+                        observed,
+                        filled_size=filled_size,
+                        fill_price=fill_price,
+                    )
             elif status == "FAILED":
                 self._rollback_failed_trade(conn, trade_id, fact_id, observed)
             if command_event:
@@ -1141,7 +1216,12 @@ class PolymarketUserChannelIngestor:
                     {"source": "WS_USER", "trade_id": trade_id, "trade_fact_id": fact_id},
                 )
             conn.commit()
-            return {"trade_fact_id": fact_id, "command_event": command_event}
+            result = {"trade_fact_id": fact_id, "command_event": command_event}
+            if status == "CONFIRMED" and _is_entry_buy_command(command):
+                result["projection_applied"] = confirmed_projection_applied
+                if not confirmed_projection_applied:
+                    result["projection_reason"] = "ws_confirmed_projection_deferred"
+            return result
         finally:
             if self.own_connection:
                 conn.close()
