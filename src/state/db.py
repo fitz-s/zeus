@@ -100,8 +100,8 @@ WAL_RETAINED_BYTES = 64 * 1024 * 1024
 # co-located with executable_market_snapshots; splitting it out means an
 # optional, evidence-only writer can never open a second connection to the
 # live-money DB at all — the DB boundary itself is what removes the
-# money-path contention class, not the yield guard around it (which stays as
-# a courtesy — see _family_book_telemetry_ingest_cycle in src/main.py).
+# money-path contention class. Connection and bootstrap checks reject path
+# and inode aliases; bounded delivery also runs during continuous decisions.
 ZEUS_FAMILY_BOOK_EVIDENCE_DB_PATH = STATE_DIR / "zeus-family-book-evidence.db"
 
 def _canonical_strategy_keys_from_registry() -> frozenset[str]:
@@ -697,6 +697,20 @@ def get_forecasts_connection(
     return _connect(ZEUS_FORECASTS_DB_PATH, write_class=write_class)
 
 
+def _assert_family_book_evidence_path(path: Path) -> None:
+    # SCOPE: evidence connections/DDL only. DRAIN: restore an independent file;
+    # the next scheduled ingest retries. RESET: path and inode no longer alias.
+    for canonical in (ZEUS_WORLD_DB_PATH, ZEUS_FORECASTS_DB_PATH, _zeus_trade_db_path()):
+        aliases = path.resolve() == canonical.resolve()
+        if not aliases:
+            try:
+                aliases = path.samefile(canonical)
+            except FileNotFoundError:
+                pass
+        if aliases:
+            raise ValueError(f"family-book evidence DB aliases canonical DB: {canonical}")
+
+
 def get_family_book_evidence_connection(
     *,
     write_class: WriteClass | str | None = None,
@@ -717,6 +731,7 @@ def get_family_book_evidence_connection(
     same "optional derived publication may choose a shorter budget" carve-out
     documented on ``_connect``.
     """
+    _assert_family_book_evidence_path(ZEUS_FAMILY_BOOK_EVIDENCE_DB_PATH)
     return _connect(
         ZEUS_FAMILY_BOOK_EVIDENCE_DB_PATH,
         write_class=write_class,
@@ -729,6 +744,7 @@ def get_family_book_evidence_connection_read_only() -> sqlite3.Connection:
     T1 thin wrapper — encodes read-only intent in the call site name.
     INV-37: single-DB read; no ATTACH path.
     """
+    _assert_family_book_evidence_path(ZEUS_FAMILY_BOOK_EVIDENCE_DB_PATH)
     return _connect_read_only(ZEUS_FAMILY_BOOK_EVIDENCE_DB_PATH)
 
 
@@ -7098,11 +7114,13 @@ def init_schema_family_book_evidence(conn: sqlite3.Connection) -> None:
     their own physical file means an optional writer can structurally never
     open a second connection to the live-money DB (zeus_trades.db) at all,
     closing the money-path-contention class at the DB-boundary level rather
-    than relying only on the cooperative yield guard around it (see
-    src/main.py _family_book_telemetry_ingest_cycle, which still keeps that
-    guard as a courtesy). See src/events/family_book_telemetry_writer.py and
+    than yielding to reactor activity. Path and inode aliases are rejected
+    before DDL. See src/events/family_book_telemetry_writer.py and
     docs/operations/current/book_snapshot_persistence/PLAN.md.
     """
+    for _seq, name, filename in conn.execute("PRAGMA database_list"):
+        if name == "main" and filename:
+            _assert_family_book_evidence_path(Path(filename))
     _busy_ms = int(os.environ.get("ZEUS_DB_BUSY_TIMEOUT_MS", "30000"))
     conn.execute(f"PRAGMA busy_timeout = {_busy_ms}")
     _install_connection_functions(conn)

@@ -1032,10 +1032,10 @@ dependency: `family_book_states`/`family_book_observations` move off
 evidence writes and money-path writes never share a file's WAL writer lock,
 full stop — a telemetry write is now structurally incapable of contending
 with, or being contended by, the reactor's trade-DB transaction, independent
-of timing or whether the yield guard is ever reached. The guard is kept
-anyway as a courtesy (see `_family_book_telemetry_ingest_cycle`'s docstring
-in `src/main.py`), but the DB boundary — not the guard — is what now makes
-this safe. `tests/events/test_family_book_telemetry_writer.py`
+of reactor activity. Connection and bootstrap checks reject canonical path,
+symlink and hardlink aliases before evidence I/O. Bounded scheduler delivery
+runs during continuous decisions, preserving the DB boundary without an
+idle-only guard that can starve the outbox. `tests/events/test_family_book_telemetry_writer.py`
 `test_evidence_delivery_cannot_contend_with_a_held_trade_db_write` is the
 deterministic proof: holding an exclusive write transaction open on the
 trade DB has zero measurable effect on evidence delivery, because
