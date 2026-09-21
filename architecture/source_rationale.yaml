@@ -3405,3 +3405,14 @@ files:
     zone: K2_runtime
     authority_role: regret_decompositions_schema_owner
     why: DDL owner for the derived regret decomposition table; canonical trade and settlement facts remain upstream authority.
+
+  src/data/current_settlement_history.py:
+    zone: K2_runtime
+    authority_role: current_resolver_history_reader
+    why: Read-only exact settlement-to-observation binding; excludes prior source/resolver regimes and labels unavailable at the fit cutoff.
+    hazards: [SOURCE_TRUTH_PLANE_COLLAPSE, NO_WRITE_PATH]
+  src/forecast/probability_validation.py:
+    zone: K3_extension
+    authority_role: chronological_probability_validation
+    why: Full-vector proper scores and causal city-metric candidate selection with paired date-block uncertainty; never activates a strategy.
+    hazards: [DERIVED_ONLY, NO_WRITE_PATH]

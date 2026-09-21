@@ -14,25 +14,21 @@
 
 Replaces ``state/fusion_source_compare/grid_aware_retest_20260625/city_one_scheme_grid_aware.csv``
 (frozen 2026-06-25, never refit, city-only i.e. metric-agnostic) with a reproducible artifact
-written to ``state/source_clock_weights/city_weights_<YYYYMMDD>.json`` plus a pointer file
-``state/source_clock_weights/ACTIVE.json`` (artifact filename + sha256). The consumer switch
-lives in ``src/strategy/live_inference/source_clock_city_weights.py::scheme_for_city``.
+written to a content-addressed
+``state/source_clock_weights/city_weights_<YYYYMMDD>_<sha256>.json`` candidate. The existing
+``state/source_clock_weights/ACTIVE.json`` pointer is changed only by explicit ``--activate``
+after separate OOS validation. The consumer switch lives in
+``src/strategy/live_inference/source_clock_city_weights.py::scheme_for_city``.
 
-DATA (STRICTLY WALK-FORWARD): ``raw_model_forecasts`` (endpoint='previous_runs', lead_days in
-0-2) JOINed to ``settlement_outcomes`` (authority='VERIFIED') on (city, target_date, metric),
-restricted to ``target_date < as_of``. Settlement values in degF are converted to degC before
-computing residuals (settlement_unit='F') so every residual is unit-coherent degC — the SAME
-no-leak WHERE-clause discipline as
-``src/data/bayes_precision_fusion_history_provider.py::BayesPrecisionFusionHistoryProvider``
-(endpoint/authority/strict-< gates), read as ONE bulk query here rather than per-decision calls
-since this script computes population statistics across the whole walk-forward history, not a
-single live decision.
-
-EXACT-LEAD PREFERENCE: a (model, city, metric, target_date) cell can have up to 3 archived
-lead_days (0, 1, 2). We keep exactly one row per cell, preferring the SMALLEST available
-lead_days (0 before 1 before 2) — the freshest/closest-to-target archived run for that cell —
-so a single settled date never contributes more than one residual per model (no
-double-counting a target_date's evidence across leads).
+DATA (STRICTLY WALK-FORWARD): the shared current-resolver settlement reader admits only
+settlements whose resolver era, source identity, station, unit, rounding and page view match the
+CURRENT contract, and whose durable ``label_known_at`` is strictly before an explicit UTC
+``as_of`` instant. Observation-only labels and every pre-cutover source epoch are excluded.
+``raw_model_forecasts`` contributes a physical-skill residual only when its fixed lead-1
+fixed-run ``single_runs`` or ``standard_api_meta_stamped`` row is COVERED, finite, carries
+full source identity, retains the raw-input
+``training_allowed=0`` marker, and was captured and recorded before ``as_of``. These rows do
+not prove publication-time or economic advantage; a separate outer validation owns that claim.
 
 WEIGHT MATH: mirrors ``src/forecast/center.py::raw_second_moment_weights`` EXACTLY (imported,
 not reimplemented — source-identity law). Every weights computation in this file calls that
@@ -61,11 +57,12 @@ pins it).
 
 Refresh cadence (documented, NOT wired as a scheduler job — that is a deploy decision):
 weekly cron candidate, e.g. ``0 6 * * 1 cd /path/to/zeus && python3
-scripts/fit_source_clock_city_weights.py`` (mirrors the consult's "activate weekly, refit
-nightly, freeze >=28 days" cadence collapsed to weekly for this generator's single-pass form).
+scripts/fit_source_clock_city_weights.py --as-of <UTC instant>``. This only creates a candidate;
+activation remains an explicit operator action after the outer OOS validation passes.
 
-READ-ONLY over state/zeus-forecasts.db (file:...?mode=ro). Writes ONLY the new artifact +
-pointer files under state/source_clock_weights/; never touches the legacy CSV or any DB.
+READ-ONLY over state/zeus-forecasts.db (file:...?mode=ro). Writes a candidate artifact under
+state/source_clock_weights/; it changes the active pointer only with ``--activate``. It never
+touches the legacy CSV or any DB.
 """
 from __future__ import annotations
 
@@ -74,6 +71,7 @@ import datetime as _dt
 import hashlib
 import json
 import math
+import re
 import sqlite3
 import subprocess
 import sys
@@ -84,7 +82,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.config import runtime_cities_by_name  # noqa: E402
 from src.data.bayes_precision_fusion_download import _model_in_domain  # noqa: E402
+from src.data.bayes_precision_fusion_history_provider import (  # noqa: E402
+    raw_product_matches_live_source,
+)
+from src.data.current_settlement_history import read_current_settlement_history  # noqa: E402
 from src.forecast.center import MIN_SETTLED_N, raw_second_moment_weights  # noqa: E402
 from src.forecast.model_selection import (  # noqa: E402
     ANCHOR_MODEL,
@@ -96,11 +99,15 @@ from src.strategy.live_inference.source_clock_city_weights import (  # noqa: E40
     fixed_weight_center_from_values,
 )
 from src.strategy.live_inference.source_clock_vnext import provider_family_for_source  # noqa: E402
+from src.state.paths import write_json_atomic  # noqa: E402
 
 FCST_DEFAULT = ROOT / "state" / "zeus-forecasts.db"
 CITIES_DEFAULT = ROOT / "config" / "cities.json"
 OUT_DIR_DEFAULT = ROOT / "state" / "source_clock_weights"
 METRICS = ("high", "low")
+TRAINING_LEAD_DAYS = 1
+TRAINING_CONTRACT = "source_skill_current_resolver_precision_fit_v2"
+_CURRENT_RESOLVER_EARLIEST_DATE = "2026-02-21"
 GLOBAL_CORE_BASKET = ("icon_global", "ecmwf_ifs", "ukmo_global_deterministic_10km")
 # Candidate universe = models the live pipeline actually fetches (anchor + globals +
 # regionals, src/forecast/model_selection.py). The previous_runs archive also carries
@@ -119,48 +126,18 @@ MIN_ENTRY_PROVIDER_FAMILIES = 2
 CONUS_LAT = (24.0, 50.0)
 CONUS_LON = (-125.0, -66.0)
 
-# TRUTH = the settlement-source ground value, one row per (city, target_date, metric):
-# venue-VERIFIED settlement_outcomes wins where present (authority of record); otherwise the
-# VERIFIED settlement-source observation (observations: WU/HKO/Ogimet per city_truth_contract
-# routing — the SAME physical station value the venue settles on; measured agreement where both
-# exist: high 98.8%, low 97.9%). This is exactly the one sanctioned backtest ("settlement-source
-# data accuracy"), and it is what lets low-metric baskets train: venue low markets have settled
-# in only ~9 cities, but the settlement-source low observation exists for every city (~900/city).
-# Without the fallback 46/54 low cells fell to the coarse GLOBAL_CORE basket on n_paired=0.
-_FIT_QUERY = """
-    WITH truth_all AS (
-        SELECT city, target_date, temperature_metric AS metric,
-               settlement_value AS value, settlement_unit AS unit, 0 AS pref
-        FROM settlement_outcomes
-        WHERE authority = 'VERIFIED' AND settlement_value IS NOT NULL
-        UNION ALL
-        SELECT city, target_date, 'high', high_temp, unit, 1
-        FROM observations
-        WHERE authority = 'VERIFIED' AND high_temp IS NOT NULL
-        UNION ALL
-        SELECT city, target_date, 'low', low_temp, unit, 1
-        FROM observations
-        WHERE authority = 'VERIFIED' AND low_temp IS NOT NULL
-    ),
-    truth AS (
-        SELECT city, target_date, metric, value, unit FROM (
-            SELECT t.*, ROW_NUMBER() OVER (
-                PARTITION BY city, target_date, metric ORDER BY pref
-            ) AS rn
-            FROM truth_all AS t
-        ) WHERE rn = 1
-    )
-    SELECT r.city AS city, r.metric AS metric, r.model AS model,
-           r.target_date AS target_date, r.lead_days AS lead_days,
-           r.forecast_value_c AS forecast_value_c,
-           s.value AS settlement_value, s.unit AS settlement_unit
-    FROM raw_model_forecasts AS r
-    JOIN truth AS s
-      ON s.city = r.city AND s.target_date = r.target_date AND s.metric = r.metric
-    WHERE r.endpoint = 'previous_runs'
-      AND r.lead_days IN (0, 1, 2)
-      AND r.target_date < ?
-    ORDER BY r.city, r.metric, r.model, r.target_date, r.lead_days
+_RAW_FORECAST_QUERY = """
+    SELECT raw_model_forecast_id, endpoint, model, city, target_date, metric,
+           forecast_value_c, source_cycle_time, source_available_at, captured_at,
+           recorded_at, training_allowed, coverage_status, source_id, source_family,
+           product_id, model_name, request_url_hash, provider, endpoint_mode,
+           request_params_json, latitude_requested, longitude_requested, timezone_requested
+      FROM raw_model_forecasts
+     WHERE endpoint = 'single_runs'
+       AND lead_days = ?
+       AND target_date >= ?
+       AND target_date < ?
+     ORDER BY city, metric, model, target_date, raw_model_forecast_id
 """
 
 
@@ -168,6 +145,43 @@ def _settlement_to_celsius(value: float, unit: str | None) -> float:
     if unit == "F":
         return (float(value) - 32.0) * 5.0 / 9.0
     return float(value)
+
+
+def _as_of_utc(value: str | _dt.datetime) -> _dt.datetime:
+    if isinstance(value, _dt.datetime):
+        parsed = value
+    else:
+        raw = str(value).strip()
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+            try:
+                return _dt.datetime.combine(_dt.date.fromisoformat(raw), _dt.time(), _dt.UTC)
+            except ValueError as exc:
+                raise ValueError("as_of must be an ISO-8601 UTC timestamp") from exc
+        try:
+            parsed = _dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("as_of must be an ISO-8601 UTC timestamp") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("as_of must include a UTC offset")
+    return parsed.astimezone(_dt.UTC)
+
+
+def _parse_utc(value: object, *, allow_sqlite_utc: bool = False) -> _dt.datetime | None:
+    raw = str(value or "").strip()
+    try:
+        parsed = _dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        if allow_sqlite_utc and re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", raw):
+            return parsed.replace(tzinfo=_dt.UTC)
+        return None
+    return parsed.astimezone(_dt.UTC)
+
+
+def _text(value: object) -> str | None:
+    text = str(value or "").strip()
+    return text or None
 
 
 def _region_for_city(cfg: Mapping[str, object]) -> str:
@@ -188,49 +202,175 @@ def _region_for_city(cfg: Mapping[str, object]) -> str:
     return "OTHER"
 
 
+def _target_local_day_start(city: object, target_date: str) -> _dt.datetime | None:
+    try:
+        from zoneinfo import ZoneInfo
+
+        return _dt.datetime.combine(
+            _dt.date.fromisoformat(target_date), _dt.time(), ZoneInfo(str(city.timezone))
+        ).astimezone(_dt.UTC)
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _is_later_actual_capture(
+    candidate: tuple[_dt.datetime, _dt.datetime, int],
+    current: tuple[_dt.datetime, _dt.datetime, int] | None,
+) -> bool:
+    return current is None or candidate > current
+
+
 def load_walk_forward_rows(
     conn: sqlite3.Connection,
     *,
-    as_of: str,
+    as_of: str | _dt.datetime,
     servable: frozenset[str] | None = None,
+    cities_by_name: Mapping[str, object] | None = None,
 ) -> dict[str, dict]:
-    """Returns ``{"obs": {(city, metric): {target_date: {model: forecast_c}}},
-    "settle": {(city, metric): {target_date: settlement_c}}}``.
+    """Load a fixed-lead physical-skill corpus under the current resolver contract.
 
-    Exact-lead preference: the smallest lead_days (0 before 1 before 2) wins per
-    (city, metric, model, target_date) cell — the ``ORDER BY ... lead_days`` in
-    ``_FIT_QUERY`` plus the ``seen_cells`` guard below implements this.
+    Only single-runs and standard-meta-stamped fixed-run rows reconstruct daily
+    physical skill. Previous-runs daily extrema are excluded because their hourly
+    values are not one fixed-run product. The returned availability maps retain
+    every label and raw-input instant needed by the outer rolling validator.
     """
+    cutoff = _as_of_utc(as_of)
+    if cities_by_name is None:
+        cities_by_name = runtime_cities_by_name()
+    history = read_current_settlement_history(
+        conn,
+        cities_by_name=cities_by_name,
+        as_of=cutoff,
+    )
+    labels = {
+        (row.city, row.metric, row.target_date): row
+        for row in history.rows
+    }
     cur = conn.cursor()
     cur.row_factory = sqlite3.Row
-    rows = cur.execute(_FIT_QUERY, (as_of,)).fetchall()
+    rows = cur.execute(
+        _RAW_FORECAST_QUERY,
+        (TRAINING_LEAD_DAYS, _CURRENT_RESOLVER_EARLIEST_DATE, cutoff.date().isoformat()),
+    ).fetchall()
     obs: dict[tuple[str, str], dict[str, dict[str, float]]] = {}
     settle: dict[tuple[str, str], dict[str, float]] = {}
-    seen_cells: set[tuple[str, str, str, str]] = set()
+    label_availability: dict[tuple[str, str, str], str] = {
+        key: row.label_known_at.isoformat() for key, row in labels.items()
+    }
+    forecast_availability: dict[tuple[str, str, str, str], dict[str, str]] = {}
+    excluded_reason_counts = dict(history.excluded_reason_counts)
+    accepted_rows: dict[tuple[str, str, str, str], tuple[sqlite3.Row, float, object, _dt.datetime, _dt.datetime, _dt.datetime, dict[str, str | None]]] = {}
+
+    def exclude(reason: str) -> None:
+        excluded_reason_counts[reason] = excluded_reason_counts.get(reason, 0) + 1
+
     for row in rows:
         city, metric, model, target_date = (
             str(row["city"]), str(row["metric"]), str(row["model"]), str(row["target_date"]),
         )
-        key = (city, metric)
-        if target_date not in settle.get(key, {}):
-            try:
-                settle.setdefault(key, {})[target_date] = _settlement_to_celsius(
-                    row["settlement_value"], row["settlement_unit"]
-                )
-            except (TypeError, ValueError):
-                continue
+        label = labels.get((city, metric, target_date))
+        if label is None:
+            exclude("RAW_LABEL_NOT_CURRENT_RESOLVER_ELIGIBLE")
+            continue
+        city_config = cities_by_name.get(city)
+        if city_config is None:
+            exclude("RAW_CITY_NOT_CURRENT_RUNTIME_CITY")
+            continue
+        if row["training_allowed"] != 0:
+            exclude("RAW_TRAINING_ALLOWED_MARKER_INVALID")
+            continue
+        if str(row["coverage_status"] or "").strip().upper() != "COVERED":
+            exclude("RAW_COVERAGE_NOT_COVERED")
+            continue
+        source_cycle_at = _parse_utc(row["source_cycle_time"])
+        captured_at = _parse_utc(row["captured_at"])
+        recorded_at = _parse_utc(row["recorded_at"], allow_sqlite_utc=True)
+        source_available_at = _parse_utc(row["source_available_at"])
+        if (
+            source_cycle_at is None
+            or captured_at is None
+            or recorded_at is None
+            or source_available_at is None
+            or captured_at >= cutoff
+            or recorded_at >= cutoff
+            or source_available_at >= cutoff
+        ):
+            exclude("RAW_AVAILABILITY_NOT_STRICTLY_BEFORE_AS_OF")
+            continue
+        target_start = _target_local_day_start(city_config, target_date)
+        if target_start is None:
+            exclude("RAW_CITY_TIMEZONE_INVALID")
+            continue
+        if (
+            source_cycle_at >= target_start
+            or source_available_at >= target_start
+            or captured_at >= target_start
+        ):
+            exclude("RAW_NOT_AVAILABLE_BEFORE_TARGET_LOCAL_DAY")
+            continue
+        source_identity = {
+            "source_id": _text(row["source_id"]),
+            "source_family": _text(row["source_family"]),
+            "product_id": _text(row["product_id"]),
+            "request_url_hash": _text(row["request_url_hash"]),
+        }
+        if any(value is None for value in source_identity.values()):
+            exclude("RAW_SOURCE_IDENTITY_MISSING")
+            continue
+        if not raw_product_matches_live_source(
+            row, city_config, lead_days=TRAINING_LEAD_DAYS
+        ):
+            exclude("RAW_PRODUCT_NOT_CURRENT_LIVE_EQUIVALENT")
+            continue
         if servable is not None and model not in servable:
             continue  # archive-only/retired model: unservable at decision time
-        cell = (city, metric, model, target_date)
-        if cell in seen_cells:
-            continue  # a costlier lead for a cell already captured at a smaller lead
-        seen_cells.add(cell)
         try:
             fc = float(row["forecast_value_c"])
         except (TypeError, ValueError):
+            exclude("RAW_FORECAST_VALUE_INVALID")
             continue
+        if not math.isfinite(fc):
+            exclude("RAW_FORECAST_VALUE_INVALID")
+            continue
+        try:
+            settle_value = _settlement_to_celsius(
+                label.settlement_value, label.settlement_unit
+            )
+        except (TypeError, ValueError):
+            exclude("CURRENT_RESOLVER_SETTLEMENT_VALUE_INVALID")
+            continue
+        cell = (city, metric, model, target_date)
+        candidate = (source_cycle_at, captured_at, int(row["raw_model_forecast_id"]))
+        current = accepted_rows.get(cell)
+        if current is not None:
+            existing = (current[3], current[4], int(current[0]["raw_model_forecast_id"]))
+        else:
+            existing = None
+        if _is_later_actual_capture(candidate, existing):
+            accepted_rows[cell] = (
+                row, fc, label, source_cycle_at, captured_at, recorded_at, source_identity
+            )
+
+    for (city, metric, model, target_date), (
+        row, fc, label, _source_cycle_at, captured_at, recorded_at, source_identity,
+    ) in accepted_rows.items():
+        key = (city, metric)
+        settle_value = _settlement_to_celsius(label.settlement_value, label.settlement_unit)
+        settle.setdefault(key, {})[target_date] = settle_value
         obs.setdefault(key, {}).setdefault(target_date, {})[model] = fc
-    return {"obs": obs, "settle": settle}
+        forecast_availability[(city, metric, target_date, model)] = {
+            "captured_at": captured_at.isoformat(),
+            "recorded_at": recorded_at.isoformat(),
+            "source_available_at": _parse_utc(row["source_available_at"]).isoformat(),
+            **{name: str(value) for name, value in source_identity.items()},
+        }
+    return {
+        "obs": obs,
+        "settle": settle,
+        "label_availability": label_availability,
+        "forecast_availability": forecast_availability,
+        "excluded_reason_counts": excluded_reason_counts,
+    }
 
 
 def residual_stats_by_model(
@@ -482,17 +622,24 @@ def city_metric_entry(
 def build_artifact(
     conn: sqlite3.Connection,
     *,
-    as_of: str,
+    as_of: str | _dt.datetime,
     generated_at: str,
     cities_path: Path,
     frozen_csv_path: Path,
     git_sha: str,
     servable: frozenset[str] | None = LIVE_SERVABLE_MODELS,
+    cities_by_name: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     cities_cfg = json.loads(cities_path.read_text(encoding="utf-8"))["cities"]
     region_by_city = {str(c["name"]): _region_for_city(c) for c in cities_cfg}
 
-    loaded = load_walk_forward_rows(conn, as_of=as_of, servable=servable)
+    cutoff = _as_of_utc(as_of)
+    loaded = load_walk_forward_rows(
+        conn,
+        as_of=cutoff,
+        servable=servable,
+        cities_by_name=cities_by_name,
+    )
     obs_all: Mapping[tuple[str, str], Mapping[str, Mapping[str, float]]] = loaded["obs"]
     settle_all: Mapping[tuple[str, str], Mapping[str, float]] = loaded["settle"]
     settlement_rows_used = sum(len(v) for v in settle_all.values())
@@ -570,10 +717,17 @@ def build_artifact(
 
     return {
         "schema_version": 1,
-        "as_of": as_of,
+        "as_of": cutoff.isoformat(),
         "generated_at": generated_at,
         "git_sha": git_sha,
         "settlement_rows_used": settlement_rows_used,
+        "training_contract": {
+            "name": TRAINING_CONTRACT,
+            "fixed_lead_days": TRAINING_LEAD_DAYS,
+            "label_authority": "current_resolver_settlement_history",
+            "oos_or_economic_advantage_claim": False,
+        },
+        "exclusion_counts": loaded["excluded_reason_counts"],
         "cities": cities_out,
     }
 
@@ -590,12 +744,33 @@ def _git_sha() -> str:
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--fcst", type=Path, default=FCST_DEFAULT)
-    p.add_argument("--as-of", default=_dt.date.today().isoformat())
+    p.add_argument("--as-of", required=True, help="UTC ISO-8601 cutoff instant")
     p.add_argument("--generated-at", default=None, help="Override for determinism tests")
     p.add_argument("--cities", type=Path, default=CITIES_DEFAULT)
     p.add_argument("--frozen-csv", type=Path, default=DEFAULT_CITY_ONE_SCHEME_PATH)
     p.add_argument("--out-dir", type=Path, default=OUT_DIR_DEFAULT)
+    p.add_argument(
+        "--activate", action="store_true",
+        help="replace ACTIVE.json with this candidate after separate OOS validation",
+    )
     return p.parse_args(argv)
+
+
+def _artifact_payload_bytes(artifact: object) -> bytes:
+    """Serialize exactly as ``write_json_atomic`` will persist the artifact."""
+    return json.dumps(artifact, sort_keys=True, indent=2, default=str).encode("utf-8")
+
+
+def _write_immutable_artifact(path: Path, artifact: object, payload: bytes) -> None:
+    """Create a content-addressed artifact or verify its existing immutable bytes."""
+    if path.exists():
+        if path.read_bytes() != payload:
+            raise RuntimeError(f"content-addressed artifact collision at {path}")
+        return
+    written = write_json_atomic(path, artifact, writer_identity="fit_source_clock_city_weights")
+    expected_sha = hashlib.sha256(payload).hexdigest()
+    if written["sha256"] != expected_sha:
+        raise RuntimeError("atomic artifact serialization checksum mismatch")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -616,17 +791,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         conn.close()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    fname = f"city_weights_{args.as_of.replace('-', '')}.json"
-    payload = json.dumps(artifact, sort_keys=True, indent=2) + "\n"
-    (args.out_dir / fname).write_text(payload, encoding="utf-8")
-    sha = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-    pointer = {"artifact": fname, "sha256": sha, "as_of": args.as_of}
-    (args.out_dir / "ACTIVE.json").write_text(
-        json.dumps(pointer, sort_keys=True, indent=2) + "\n", encoding="utf-8"
-    )
+    cutoff = _as_of_utc(args.as_of)
+    payload = _artifact_payload_bytes(artifact)
+    sha = hashlib.sha256(payload).hexdigest()
+    fname = f"city_weights_{cutoff.date().isoformat().replace('-', '')}_{sha}.json"
+    artifact_path = args.out_dir / fname
+    _write_immutable_artifact(artifact_path, artifact, payload)
+    if args.activate:
+        pointer = {"artifact": fname, "sha256": sha, "as_of": cutoff.isoformat()}
+        write_json_atomic(
+            args.out_dir / "ACTIVE.json",
+            pointer,
+            writer_identity="fit_source_clock_city_weights",
+        )
     print(
-        f"Wrote {args.out_dir / fname} (sha256={sha}); "
-        f"settlement_rows_used={artifact['settlement_rows_used']}"
+        f"Wrote candidate {artifact_path} (sha256={sha}); "
+        f"settlement_rows_used={artifact['settlement_rows_used']}; activated={args.activate}"
     )
     return 0
 

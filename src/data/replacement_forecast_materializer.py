@@ -3512,8 +3512,8 @@ def _replacement_bayes_precision_fusion_override(
         # Optional injected seams (live wiring / tests). An explicitly-assigned
         # _history_provider attribute wins (tests inject a fixture). When none is assigned AND
         # the materialization connection is available, the LIVE default is the real walk-forward
-        # history provider reading the PERSISTED previous-runs raw_model_forecasts JOINed to
-        # VERIFIED settlement on the SAME zeus-forecasts.db connection (intra-DB, INV-37; no-leak
+        # history provider reading persisted physical raw forecasts and current-resolver VERIFIED
+        # labels on the SAME zeus-forecasts.db connection (intra-DB, INV-37; no-leak
         # target_date<decision, IRON RULE #3). This assignment is THE switch that lets
         # fuse_bayes_precision_posterior reach T2_BAYES once n_train>=MIN_TRAIN. The provider
         # never raises, but an empty result is fail-closed below.
@@ -3521,7 +3521,7 @@ def _replacement_bayes_precision_fusion_override(
         if history_provider is None and conn is not None:
             from src.data.bayes_precision_fusion_history_provider import BayesPrecisionFusionHistoryProvider  # noqa: PLC0415
 
-            history_provider = BayesPrecisionFusionHistoryProvider(conn)
+            history_provider = BayesPrecisionFusionHistoryProvider(conn, as_of=computed_at)
 
         # BLOCKER 5: the CURRENT values feeding the traded q come from the PERSISTED single_runs
         # rows the download job wrote — NEVER a network fetch inside the q path. Read each
