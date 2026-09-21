@@ -13,6 +13,12 @@ import pytest
 
 from scripts import validate_source_clock_probabilities as validation
 from src.config import City
+from src.events.family_book_manifest import (
+    ObservationEnvelope,
+    _BinProjection,
+    build_source_manifest,
+    compute_state_identity,
+)
 
 
 def test_declared_universe_preserves_never_observed_combinations(monkeypatch):
@@ -231,3 +237,196 @@ def test_native_fahrenheit_ensemble_matches_celsius_counterpart(monkeypatch):
     )
     after = next(iter(candidate_run(conn, monkeypatch)[0].values())).values
     assert after == pytest.approx(before, abs=1e-12)
+
+
+def _market_evidence_db(
+    *, stale: bool = False, partial: bool = False, model_mismatch: bool = False,
+    duplicate_state_bin: bool = False, side_identity_mismatch: bool = False,
+):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE family_book_states (
+            state_id TEXT PRIMARY KEY, family_id TEXT, topology_hash TEXT,
+            complete_book INTEGER, canonical_payload TEXT
+        );
+        CREATE TABLE family_book_observations (
+            observation_id TEXT PRIMARY KEY, family_id TEXT, city TEXT,
+            target_date TEXT, temperature_metric TEXT, measurement_unit TEXT,
+            decision_time TEXT, complete_book INTEGER, state_id TEXT,
+            model_q_identity_hash TEXT, model_q_json TEXT, market_q_json TEXT,
+            source_manifest_json TEXT
+        );
+        """
+    )
+    baseline_ids = tuple(str(i) for i in range(5))
+    baseline_values = (0.10, 0.15, 0.20, 0.25, 0.30)
+    token_ids = tuple(reversed([f"token-{i}" for i in range(5)]))
+    native_by_baseline = {
+        str(index): interval
+        for index, interval in enumerate([(None, 75), (76, 76), (77, 77), (78, 78), (79, None)])
+    }
+    baseline_by_token = {
+        token_id: baseline_id for token_id, baseline_id in zip(token_ids, baseline_ids, strict=True)
+    }
+    captured_at = "2026-09-18T11:56:00+00:00" if stale else "2026-09-18T11:59:00+00:00"
+    envelope = ObservationEnvelope(
+        family_id="family-chicago", city="Chicago", target_date="2026-09-19",
+        temperature_metric="high", decision_id="witness-1", receipt_hash="receipt-1",
+        topology_hash="topology-1", complete_book=True, measurement_unit="F",
+        our_mu_native=None, our_sigma_native=None, predictive_identity_hash=None,
+        model_q_by_bin_id=None, model_q_identity_hash="witness-content-1",
+        market_q_by_bin_id=None, market_q_basis=None, market_q_depth_score=None,
+        market_q_spread_score=None, market_q_projection_error=None,
+        market_q_book_hash=None, pre_veto_selected=False, selected_bin_id=None,
+        selected_side=None,
+        bins=tuple(
+            _BinProjection(
+                bin_id=token_id, executable=True,
+                lower_native=native_by_baseline[baseline_by_token[token_id]][0],
+                upper_native=native_by_baseline[baseline_by_token[token_id]][1],
+                condition_id=f"condition-{token_id}", yes_token_id=f"yes-{token_id}",
+                no_token_id=f"no-{token_id}", neg_risk=False, min_tick_size="0.01",
+                min_order_size="1", fee_rate=0.0, best_yes_ask=0.2, best_yes_bid=0.1,
+                executable_snapshot_id=f"yes-snapshot-{token_id}",
+                raw_orderbook_hash=f"yes-book-{token_id}",
+                source_captured_at=captured_at,
+                no_executable_snapshot_id=f"no-snapshot-{token_id}",
+                no_raw_orderbook_hash=f"no-book-{token_id}",
+                no_source_captured_at=captured_at,
+            )
+            for token_id in token_ids
+        ),
+        decision_time=datetime(2026, 9, 18, 11, 59, 30, tzinfo=timezone.utc),
+        causal_snapshot_id="causal-1",
+    )
+    manifest = json.loads(build_source_manifest(envelope))
+    model = {
+        token_id: baseline_values[baseline_ids.index(baseline_by_token[token_id])]
+        for token_id in token_ids
+    }
+    if model_mismatch:
+        model[token_ids[0]] = 0.11
+        model[token_ids[1]] = 0.14
+    market = {token_id: 0.20 for token_id in token_ids}
+    if partial:
+        market.pop(token_ids[-1])
+    payload = json.loads(compute_state_identity(envelope)[2])
+    if side_identity_mismatch:
+        payload["bins"][0]["no_raw_orderbook_hash"] = "mismatched-no-book"
+    if duplicate_state_bin:
+        payload["bins"].append(dict(payload["bins"][0]))
+    conn.execute(
+        "INSERT INTO family_book_states VALUES (?,?,?,?,?)",
+        ("state-1", "family-chicago", "topology-1", 1, json.dumps(payload)),
+    )
+    conn.execute(
+        "INSERT INTO family_book_observations VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "obs-1", "family-chicago", "Chicago", "2026-09-19", "high", "F",
+            "2026-09-18T11:59:30+00:00", 1, "state-1", "witness-content-1",
+            json.dumps(model), json.dumps(market), json.dumps(manifest),
+        ),
+    )
+    baseline = validation.ProbabilityVector(
+        bin_ids=baseline_ids,
+        values=baseline_values,
+        available_at=datetime(2026, 9, 18, 11, 58, tzinfo=timezone.utc),
+    )
+    return conn, baseline
+
+
+def test_market_evidence_requires_full_fresh_exact_baseline_mapping():
+    conn, baseline = _market_evidence_db()
+    vector, reason = validation._market_vector_for_case(
+        conn,
+        city="Chicago",
+        target_date=date(2026, 9, 19),
+        metric="high",
+        unit="F",
+        decision_at=datetime(2026, 9, 18, 12, tzinfo=timezone.utc),
+        baseline=baseline,
+        bins=bins(),
+    )
+
+    assert reason == "market_covered"
+    assert vector is not None
+    assert vector.bin_ids == baseline.bin_ids
+    assert vector.values == (0.20,) * 5
+    assert vector.observed_at == datetime(2026, 9, 18, 11, 59, 30, tzinfo=timezone.utc)
+    assert vector.quality_proven is True
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"stale": True},
+    {"partial": True},
+    {"model_mismatch": True},
+    {"duplicate_state_bin": True},
+    {"side_identity_mismatch": True},
+])
+def test_market_evidence_rejects_stale_partial_or_nonbaseline_vectors(kwargs):
+    conn, baseline = _market_evidence_db(**kwargs)
+    vector, reason = validation._market_vector_for_case(
+        conn,
+        city="Chicago",
+        target_date=date(2026, 9, 19),
+        metric="high",
+        unit="F",
+        decision_at=datetime(2026, 9, 18, 12, tzinfo=timezone.utc),
+        baseline=baseline,
+        bins=bins(),
+    )
+
+    assert vector is None
+    assert reason == "market_no_exact_complete_fresh_match"
+
+
+def test_market_evidence_missing_schema_has_zero_coverage():
+    baseline = validation.ProbabilityVector(
+        bin_ids=tuple(str(i) for i in range(5)),
+        values=(0.10, 0.15, 0.20, 0.25, 0.30),
+        available_at=datetime(2026, 9, 18, 11, 58, tzinfo=timezone.utc),
+    )
+    vector, reason = validation._market_vector_for_case(
+        sqlite3.connect(":memory:"),
+        city="Chicago",
+        target_date=date(2026, 9, 19),
+        metric="high",
+        unit="F",
+        decision_at=datetime(2026, 9, 18, 12, tzinfo=timezone.utc),
+        baseline=baseline,
+        bins=bins(),
+    )
+
+    assert vector is None
+    assert reason == "market_evidence_schema_unavailable"
+
+
+def test_missing_market_evidence_file_reports_zero_coverage_without_creating_it(
+    tmp_path, monkeypatch, capsys,
+):
+    forecasts = tmp_path / "forecasts.db"
+    sqlite3.connect(forecasts).close()
+    missing = tmp_path / "missing-family-book.db"
+    captured = {}
+
+    def fake_extract(_conn, **kwargs):
+        captured.update(kwargs)
+        return [], [], {kwargs["market_evidence_unavailable_reason"]: 1}
+
+    monkeypatch.setattr(validation, "extract_cases", fake_extract)
+    monkeypatch.setattr(validation, "runtime_cities_by_name", lambda: {})
+    validation.main([
+        "--forecasts", str(forecasts),
+        "--market-evidence", str(missing),
+        "--as-of", "2026-09-20T00:00:00+00:00",
+        "--start-date", "2026-09-01",
+    ])
+
+    output = json.loads(capsys.readouterr().out)
+    assert not missing.exists()
+    assert captured["market_evidence_conn"] is None
+    assert captured["market_evidence_unavailable_reason"] == "market_evidence_file_unavailable"
+    assert output["excluded"] == {"market_evidence_file_unavailable": 1}
+    assert output["market_comparison"] == "UNAVAILABLE: market_evidence_file_unavailable"

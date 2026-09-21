@@ -45,10 +45,12 @@ from src.data.replacement_forecast_materializer import (  # noqa: E402
 from src.forecast.center import raw_second_moment_weights  # noqa: E402
 from src.state.db import _connect_read_only  # noqa: E402
 from src.forecast.probability_validation import (  # noqa: E402
+    MarketVector,
     ProbabilityValidationCase,
     ProbabilityVector,
     validate_probability_candidates,
 )
+from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT  # noqa: E402
 from src.strategy.live_inference.source_clock_vnext import provider_family_for_source  # noqa: E402
 
 
@@ -279,7 +281,173 @@ def make_candidates(conn, row, provenance, city, decision, history, bins):
     return out, values, raw_ids
 
 
-def extract_cases(conn, *, cities, as_of, start_date):
+def _native_interval(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError("market_native_interval_invalid")
+    number = float(value)
+    if not math.isfinite(number) or abs(number - round(number)) > 1e-7:
+        raise ValueError("market_native_interval_invalid")
+    return int(round(number))
+
+
+def _market_vector_for_case(
+    evidence_conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: date,
+    metric: str,
+    unit: str,
+    decision_at: datetime,
+    baseline: ProbabilityVector,
+    bins: list[dict],
+) -> tuple[MarketVector | None, str]:
+    """Return only a complete fresh family-book market vector for this exact baseline.
+
+    The evidence store records token bin ids while forecast posteriors use venue
+    question ids. Native integer interval equality is the only permitted bridge.
+    """
+    try:
+        bounded(evidence_conn)
+        selection_floor = max(baseline.available_at, decision_at - FRESHNESS_WINDOW_DEFAULT)
+        rows = evidence_conn.execute(
+            """
+            SELECT o.*, s.family_id AS state_family_id, s.topology_hash,
+                   s.complete_book AS state_complete_book, s.canonical_payload
+              FROM family_book_observations AS o
+              JOIN family_book_states AS s ON s.state_id = o.state_id
+             WHERE o.city = ? AND o.target_date = ? AND o.temperature_metric = ?
+               AND o.measurement_unit = ? AND o.complete_book = 1
+               AND julianday(o.decision_time) >= julianday(?)
+               AND julianday(o.decision_time) <= julianday(?)
+             ORDER BY o.decision_time DESC, o.observation_id DESC
+             LIMIT 256
+            """,
+            (
+                city, target_date.isoformat(), metric, unit,
+                selection_floor.isoformat(), decision_at.isoformat(),
+            ),
+        ).fetchall()
+    except sqlite3.Error:
+        return None, "market_evidence_schema_unavailable"
+
+    expected_by_interval: dict[tuple[int | None, int | None], str] = {}
+    try:
+        for bin_row in bins:
+            interval = (
+                _native_interval(native_value(bin_row["lower_c"], unit))
+                if bin_row["lower_c"] is not None
+                else None,
+                _native_interval(native_value(bin_row["upper_c"], unit))
+                if bin_row["upper_c"] is not None
+                else None,
+            )
+            if interval in expected_by_interval:
+                raise ValueError("market_native_topology_ambiguous")
+            expected_by_interval[interval] = str(bin_row["bin_id"])
+    except (KeyError, TypeError, ValueError):
+        return None, "market_baseline_topology_invalid"
+
+    for raw in rows:
+        try:
+            row = dict(raw)
+            selected_at = aware(row["decision_time"])
+            if not baseline.available_at <= selected_at <= decision_at:
+                raise ValueError("market_decision_clock_mismatch")
+            if str(row["family_id"] or "") != str(row["state_family_id"] or ""):
+                raise ValueError("market_state_family_mismatch")
+            if not str(row["topology_hash"] or "").strip() or int(row["state_complete_book"]) != 1:
+                raise ValueError("market_state_topology_unavailable")
+            if not str(row["model_q_identity_hash"] or "").strip():
+                raise ValueError("market_model_identity_missing")
+            model_q = json.loads(str(row["model_q_json"] or ""))
+            market_q = json.loads(str(row["market_q_json"] or ""))
+            manifest = json.loads(str(row["source_manifest_json"] or ""))
+            payload = json.loads(str(row["canonical_payload"] or ""))
+            if not all(isinstance(value, dict) for value in (model_q, market_q, manifest, payload)):
+                raise ValueError("market_vector_or_manifest_invalid")
+            payload_bins = payload.get("bins")
+            if (
+                str(payload.get("family_id") or "") != str(row["family_id"])
+                or str(payload.get("topology_hash") or "") != str(row["topology_hash"])
+                or payload.get("complete_book") is not True
+                or not isinstance(payload_bins, list)
+            ):
+                raise ValueError("market_state_payload_invalid")
+            state_by_bin = {
+                str(item.get("bin_id") or ""): item
+                for item in payload_bins
+                if isinstance(item, dict) and str(item.get("bin_id") or "")
+            }
+            keys = set(model_q)
+            if (
+                len(state_by_bin) != len(payload_bins)
+                or not keys
+                or keys != set(market_q)
+                or keys != set(manifest)
+                or keys != set(state_by_bin)
+            ):
+                raise ValueError("market_bin_set_incomplete")
+            if any(not str(state_by_bin[key].get("raw_orderbook_hash") or "").strip() for key in keys):
+                raise ValueError("market_yes_book_identity_missing")
+
+            mapped: dict[str, str] = {}
+            freshness_floor = decision_at - FRESHNESS_WINDOW_DEFAULT
+            for market_bin_id in keys:
+                source = manifest[market_bin_id]
+                if not isinstance(source, dict):
+                    raise ValueError("market_manifest_invalid")
+                interval = (
+                    _native_interval(source.get("lower_native")),
+                    _native_interval(source.get("upper_native")),
+                )
+                baseline_bin_id = expected_by_interval.get(interval)
+                if baseline_bin_id is None or baseline_bin_id in mapped.values():
+                    raise ValueError("market_native_topology_mismatch")
+                for field in (
+                    "executable_snapshot_id", "source_captured_at",
+                    "no_executable_snapshot_id", "no_raw_orderbook_hash",
+                    "no_source_captured_at",
+                ):
+                    if not str(source.get(field) or "").strip():
+                        raise ValueError("market_side_identity_missing")
+                if str(source["no_raw_orderbook_hash"]) != str(
+                    state_by_bin[market_bin_id].get("no_raw_orderbook_hash") or ""
+                ):
+                    raise ValueError("market_side_book_identity_mismatch")
+                for field in ("source_captured_at", "no_source_captured_at"):
+                    captured_at = aware(source[field])
+                    if not freshness_floor <= captured_at <= selected_at:
+                        raise ValueError("market_capture_not_fresh_for_case")
+                mapped[market_bin_id] = baseline_bin_id
+            if set(mapped.values()) != set(baseline.bin_ids):
+                raise ValueError("market_native_topology_mismatch")
+            model_values = tuple(model_q[market_id] for market_id, baseline_id in sorted(
+                mapped.items(), key=lambda item: baseline.bin_ids.index(item[1])
+            ))
+            market_values = tuple(market_q[market_id] for market_id, baseline_id in sorted(
+                mapped.items(), key=lambda item: baseline.bin_ids.index(item[1])
+            ))
+            if model_values != baseline.values:
+                raise ValueError("market_model_vector_not_baseline")
+            validate_probability_group(model_values)
+            validate_probability_group(market_values)
+            return MarketVector(
+                bin_ids=baseline.bin_ids,
+                values=market_values,
+                observed_at=selected_at,
+                quality_proven=True,
+            ), "market_covered"
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+    return None, "market_no_exact_complete_fresh_match"
+
+
+def extract_cases(
+    conn, *, cities, as_of, start_date, market_evidence_conn=None,
+    market_evidence_unavailable_reason=None,
+):
     bounded(conn)
     settlements = read_current_settlement_history(
         conn, cities_by_name=cities, as_of=as_of
@@ -350,6 +518,23 @@ def extract_cases(conn, *, cities, as_of, start_date):
             )
             if not candidates:
                 raise ValueError("no_qualified_source_combination")
+            market = None
+            market_reason = market_evidence_unavailable_reason or "market_evidence_not_requested"
+            if market_evidence_conn is not None:
+                market, market_reason = _market_vector_for_case(
+                    market_evidence_conn,
+                    city=truth.city,
+                    target_date=target,
+                    metric=truth.metric,
+                    unit=city.settlement_unit,
+                    decision_at=decision,
+                    baseline=baseline,
+                    bins=bins,
+                )
+                if market is None:
+                    excluded[market_reason] += 1
+            elif market_evidence_unavailable_reason is not None:
+                excluded[market_reason] += 1
             cases.append(
                 ProbabilityValidationCase(
                     city=truth.city,
@@ -361,6 +546,7 @@ def extract_cases(conn, *, cities, as_of, start_date):
                     winner_index=winner,
                     candidates=candidates,
                     baseline=baseline,
+                    market=market,
                 )
             )
             evidence.append(
@@ -372,6 +558,8 @@ def extract_cases(conn, *, cities, as_of, start_date):
                     posterior_id=row["posterior_id"],
                     source_row_ids=raw_ids,
                     label_known_at=known_at.isoformat(),
+                    market_coverage=market is not None,
+                    market_reason=market_reason,
                 )
             )
         except (KeyError, TypeError, ValueError) as exc:
@@ -379,19 +567,37 @@ def extract_cases(conn, *, cities, as_of, start_date):
     return cases, evidence, dict(excluded)
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--forecasts", type=Path, required=True)
     parser.add_argument("--as-of", required=True)
     parser.add_argument("--start-date", type=date.fromisoformat, required=True)
     parser.add_argument("--exclude-city", action="append", default=[])
-    args = parser.parse_args()
+    parser.add_argument("--market-evidence", type=Path)
+    args = parser.parse_args(argv)
     predeclared = declared_baskets()
     conn = _connect_read_only(
         args.forecasts, deadline_monotonic=clock.monotonic() + 3.0
     )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA query_only=1")
+    market_conn = None
+    market_evidence_unavailable_reason = None
+    if args.market_evidence is not None:
+        if not args.market_evidence.is_file():
+            market_evidence_unavailable_reason = "market_evidence_file_unavailable"
+        else:
+            try:
+                market_conn = _connect_read_only(
+                    args.market_evidence, deadline_monotonic=clock.monotonic() + 3.0
+                )
+                market_conn.row_factory = sqlite3.Row
+                market_conn.execute("PRAGMA query_only=1")
+            except (OSError, sqlite3.Error):
+                market_evidence_unavailable_reason = "market_evidence_unreadable"
+                if market_conn is not None:
+                    market_conn.close()
+                    market_conn = None
     try:
         cases, evidence, excluded = extract_cases(
             conn,
@@ -402,9 +608,13 @@ def main():
             },
             as_of=aware(args.as_of),
             start_date=args.start_date,
+            market_evidence_conn=market_conn,
+            market_evidence_unavailable_reason=market_evidence_unavailable_reason,
         )
     finally:
         conn.close()
+        if market_conn is not None:
+            market_conn.close()
     result = (
         validate_probability_candidates(
             cases,
@@ -422,7 +632,13 @@ def main():
                 cases=evidence,
                 candidate_policy="distinct provider-family pairs/triples/quartets; absence retains zero coverage; distinct families do not imply independent errors",
                 excluded=excluded,
-                market_comparison="UNAVAILABLE: requires matching complete contemporaneous family-book evidence",
+                market_comparison=(
+                    "UNAVAILABLE: --market-evidence not supplied"
+                    if args.market_evidence is None
+                    else f"UNAVAILABLE: {market_evidence_unavailable_reason}"
+                    if market_evidence_unavailable_reason is not None
+                    else "EXACT_COMPLETE_FRESH_MATCH_ONLY: no market superiority or latency claim"
+                ),
                 sampling="one fixed local-noon day-ahead case per city/metric/date; stored baseline versus current-law counterfactuals",
                 latency_advantage_proven=False,
             ),
