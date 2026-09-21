@@ -392,8 +392,8 @@ class TestBoundedOutbox:
             _BinProjection(
                 bin_id=bin_id,
                 executable=True,
-                lower_native=None,
-                upper_native=None,
+                lower_native=lower_native,
+                upper_native=upper_native,
                 condition_id=f"condition-{bin_id}",
                 yes_token_id=f"yes-{bin_id}",
                 no_token_id=f"no-{bin_id}",
@@ -406,8 +406,17 @@ class TestBoundedOutbox:
                 executable_snapshot_id=f"snapshot-{bin_id}",
                 raw_orderbook_hash=f"book-{bin_id}",
                 source_captured_at=_CAPTURED.isoformat(),
+                no_executable_snapshot_id=f"snapshot-no-{bin_id}",
+                no_raw_orderbook_hash=f"book-no-{bin_id}",
+                no_source_captured_at=(
+                    _CAPTURED + timedelta(seconds=7)
+                ).isoformat(),
             )
-            for bin_id in ("low", "high")
+            for bin_id, lower_native, upper_native in (
+                ("low", None, 68.0),
+                ("mid", 77.0, 77.0),
+                ("high", 86.0, None),
+            )
         )
         common = dict(
             family_id="day0-exact-family",
@@ -444,7 +453,7 @@ class TestBoundedOutbox:
             **common,
             decision_id="full-exact",
             receipt_hash="full-receipt",
-            model_q_by_bin_id={"low": 1.0, "high": 0.0},
+            model_q_by_bin_id={"low": 1.0, "mid": 0.0, "high": 0.0},
             decision_time=_CAPTURED + timedelta(minutes=1),
         )
 
@@ -456,15 +465,29 @@ class TestBoundedOutbox:
         conn = sqlite3.connect(str(evidence_path))
         try:
             rows = conn.execute(
-                "SELECT decision_id, complete_book, model_q_json "
+                "SELECT decision_id, complete_book, model_q_json, source_manifest_json "
                 "FROM family_book_observations ORDER BY decision_time"
             ).fetchall()
         finally:
             conn.close()
-        assert rows == [
+        assert [row[:3] for row in rows] == [
             ("partial-exact", 1, None),
-            ("full-exact", 1, '{"high":0.0,"low":1.0}'),
+            ("full-exact", 1, '{"high":0.0,"low":1.0,"mid":0.0}'),
         ]
+        persisted = json.loads(rows[0][3])
+        assert persisted["low"]["lower_native"] is None
+        assert persisted["low"]["upper_native"] == 68.0
+        assert persisted["mid"]["lower_native"] == persisted["mid"]["upper_native"] == 77.0
+        assert persisted["high"]["lower_native"] == 86.0
+        assert persisted["high"]["upper_native"] is None
+        assert persisted["mid"]["executable_snapshot_id"] == "snapshot-mid"
+        assert persisted["mid"]["raw_orderbook_hash"] == "book-mid"
+        assert persisted["mid"]["source_captured_at"] == _CAPTURED.isoformat()
+        assert persisted["mid"]["no_executable_snapshot_id"] == "snapshot-no-mid"
+        assert persisted["mid"]["no_raw_orderbook_hash"] == "book-no-mid"
+        assert persisted["mid"]["no_source_captured_at"] == (
+            _CAPTURED + timedelta(seconds=7)
+        ).isoformat()
 
     def test_ingest_deletes_the_acknowledged_batch_from_the_spool(self, tmp_path):
         spool_path = _start(tmp_path)

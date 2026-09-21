@@ -61,6 +61,9 @@ class _BinProjection:
     executable_snapshot_id: Optional[str]
     raw_orderbook_hash: Optional[str]
     source_captured_at: Optional[str]
+    no_executable_snapshot_id: Optional[str] = None
+    no_raw_orderbook_hash: Optional[str] = None
+    no_source_captured_at: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -382,6 +385,9 @@ def project_global_selection_observation_envelope(
                 executable_snapshot_id=str(yes_curve.snapshot_id),
                 raw_orderbook_hash=str(yes_curve.book_hash),
                 source_captured_at=yes_asset.captured_at_utc.isoformat(),
+                no_executable_snapshot_id=str(no_curve.snapshot_id),
+                no_raw_orderbook_hash=str(no_curve.book_hash),
+                no_source_captured_at=no_asset.captured_at_utc.isoformat(),
             )
         )
 
@@ -513,8 +519,14 @@ def build_source_manifest(envelope: ObservationEnvelope) -> str:
     return canonical_json(
         {
             b.bin_id: {
+                "lower_native": b.lower_native,
+                "upper_native": b.upper_native,
                 "executable_snapshot_id": b.executable_snapshot_id,
+                "raw_orderbook_hash": b.raw_orderbook_hash,
                 "source_captured_at": b.source_captured_at,
+                "no_executable_snapshot_id": b.no_executable_snapshot_id,
+                "no_raw_orderbook_hash": b.no_raw_orderbook_hash,
+                "no_source_captured_at": b.no_source_captured_at,
             }
             for b in sorted(envelope.bins, key=lambda b: b.bin_id)
         }

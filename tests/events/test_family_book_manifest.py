@@ -510,6 +510,9 @@ class TestGlobalSelectionObservationProjection:
 
     def test_fahrenheit_native_bounds_and_yes_no_books_are_preserved(self):
         family, _omega, witness, epoch = self._inputs()
+        for asset in epoch.assets:
+            if asset.side == "NO":
+                asset.captured_at_utc = _CAPTURED + timedelta(seconds=7)
         f_bins = tuple(
             SimpleNamespace(
                 bin_id=outcome.bin_id,
@@ -555,6 +558,21 @@ class TestGlobalSelectionObservationProjection:
         assert by_bin["b_low"].no_token_id == "no-b_low"
         assert envelope.model_q_by_bin_id is not None
         assert envelope.market_q_by_bin_id is not None
+        source_manifest = json.loads(build_source_manifest(envelope))
+        assert source_manifest["b_low"]["lower_native"] is None
+        assert source_manifest["b_low"]["upper_native"] == 68.0
+        assert source_manifest["b25"]["lower_native"] == 77.0
+        assert source_manifest["b25"]["upper_native"] == 77.0
+        assert source_manifest["b_high"]["lower_native"] == 86.0
+        assert source_manifest["b_high"]["upper_native"] is None
+        assert source_manifest["b25"]["executable_snapshot_id"] == "snapshot-yes-b25"
+        assert source_manifest["b25"]["raw_orderbook_hash"] == "book-yes-b25"
+        assert source_manifest["b25"]["source_captured_at"] == _CAPTURED.isoformat()
+        assert source_manifest["b25"]["no_executable_snapshot_id"] == "snapshot-no-b25"
+        assert source_manifest["b25"]["no_raw_orderbook_hash"] == "book-no-b25"
+        assert source_manifest["b25"]["no_source_captured_at"] == (
+            _CAPTURED + timedelta(seconds=7)
+        ).isoformat()
 
 
 # ---------------------------------------------------------------------------
