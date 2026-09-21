@@ -73,6 +73,8 @@ from src.state.schema.family_book_observations_schema import (
     insert_observation,
 )
 from src.state.schema.family_book_states_schema import (
+    HASH_VERSION,
+    PAYLOAD_SCHEMA_VERSION,
     ensure_table as _ensure_states_table,
     insert_state,
 )
@@ -695,11 +697,11 @@ def _build_outbox_row(envelope: ObservationEnvelope) -> Optional[dict]:
         "enqueued_at_utc": datetime.now(timezone.utc).isoformat(),
         "state_id": state_id,
         "content_hash": content_hash,
-        "hash_version": 1,
+        "hash_version": HASH_VERSION,
         "topology_hash": envelope.topology_hash,
         "complete_book": int(envelope.complete_book),
         "canonical_payload": canonical_payload,
-        "payload_schema_version": 1,
+        "payload_schema_version": PAYLOAD_SCHEMA_VERSION,
         "observation_id": sha256_text(f"{envelope.family_id}|{envelope.receipt_hash}|{decision_time_iso}"),
         "family_id": envelope.family_id,
         "city": envelope.city,

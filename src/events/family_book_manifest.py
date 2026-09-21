@@ -476,7 +476,7 @@ def project_global_selection_observation_envelope(
 # FIRST capture's provenance).
 _HASH_FIELDS = (
     "bin_id", "raw_orderbook_hash", "condition_id", "yes_token_id", "no_token_id",
-    "neg_risk", "min_tick_size", "min_order_size", "fee_rate",
+    "no_raw_orderbook_hash", "neg_risk", "min_tick_size", "min_order_size", "fee_rate",
 )
 
 

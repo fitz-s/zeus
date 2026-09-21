@@ -22,7 +22,7 @@ import os
 import sqlite3
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -456,24 +456,71 @@ class TestBoundedOutbox:
             model_q_by_bin_id={"low": 1.0, "mid": 0.0, "high": 0.0},
             decision_time=_CAPTURED + timedelta(minutes=1),
         )
+        no_only_base = replace(
+            full,
+            family_id="no-only-change-family",
+            receipt_hash="no-only-base",
+            pre_veto_selected=False,
+            decision_time=_CAPTURED + timedelta(minutes=3),
+        )
+        no_only_changed = replace(
+            no_only_base,
+            receipt_hash="no-only-changed",
+            decision_time=_CAPTURED + timedelta(minutes=3, seconds=1),
+            bins=tuple(
+                replace(bin_projection, no_raw_orderbook_hash="book-no-mid-changed")
+                if bin_projection.bin_id == "mid"
+                else bin_projection
+                for bin_projection in no_only_base.bins
+            ),
+        )
+        first_no_row = writer._build_outbox_row(no_only_base)
+        changed_no_row = writer._build_outbox_row(no_only_changed)
+        assert first_no_row is not None
+        assert changed_no_row is not None
+        assert changed_no_row["state_id"] != first_no_row["state_id"]
+        assert changed_no_row["sampling_reason"] == "STATE_CHANGE"
 
         writer.enqueue_observation_envelope(partial)
         writer.enqueue_observation_envelope(full)
         assert writer.drain(timeout=3.0)
+        legacy = replace(
+            full,
+            family_id="legacy-v1-family",
+            decision_id="legacy-v1",
+            receipt_hash="legacy-v1-receipt",
+            decision_time=_CAPTURED + timedelta(minutes=2),
+        )
+        legacy_row = writer._build_outbox_row(legacy)
+        assert legacy_row is not None
+        legacy_row["hash_version"] = 1
+        legacy_row["payload_schema_version"] = 1
+        spool_conn = sqlite3.connect(str(spool_path))
+        try:
+            writer.insert_outbox_row(spool_conn, legacy_row)
+            spool_conn.commit()
+        finally:
+            spool_conn.close()
         outcome = _ingest(evidence_path, spool_path)
-        assert outcome.ingested_observations == 2
+        assert outcome.ingested_observations == 3
         conn = sqlite3.connect(str(evidence_path))
         try:
             rows = conn.execute(
                 "SELECT decision_id, complete_book, model_q_json, source_manifest_json "
                 "FROM family_book_observations ORDER BY decision_time"
             ).fetchall()
+            state_versions = conn.execute(
+                "SELECT hash_version, payload_schema_version FROM family_book_states "
+                "ORDER BY family_id"
+            ).fetchall()
         finally:
             conn.close()
-        assert [row[:3] for row in rows] == [
+        assert [row[:3] for row in rows[:2]] == [
             ("partial-exact", 1, None),
             ("full-exact", 1, '{"high":0.0,"low":1.0,"mid":0.0}'),
         ]
+        assert rows[2][0] == "legacy-v1"
+        assert state_versions == [(2, 2), (1, 1)]
         persisted = json.loads(rows[0][3])
         assert persisted["low"]["lower_native"] is None
         assert persisted["low"]["upper_native"] == 68.0

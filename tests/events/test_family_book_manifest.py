@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
@@ -613,6 +613,22 @@ class TestComputeStateIdentity:
         id_a = compute_state_identity(env_a)
         id_b = compute_state_identity(env_b)
         assert id_a[1] != id_b[1]
+
+    def test_changed_no_raw_orderbook_hash_changes_content_hash(self):
+        case = _case()
+        space = _outcome_space(case)
+        book = _all_quoted_family_book(case, space)
+        envelope = _envelope(case, space, book)
+        changed = replace(
+            envelope,
+            bins=tuple(
+                replace(bin_projection, no_raw_orderbook_hash="no-book-changed")
+                if bin_projection.bin_id == "b25"
+                else bin_projection
+                for bin_projection in envelope.bins
+            ),
+        )
+        assert compute_state_identity(envelope)[1] != compute_state_identity(changed)[1]
 
     def test_changed_fee_or_tick_changes_content_hash(self):
         case = _case()
