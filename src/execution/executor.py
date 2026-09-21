@@ -7821,7 +7821,11 @@ def execute_exit_order(
         # -----------------------------------------------------------------------
         # submit phase — SDK call (INV-30: row already SUBMITTING)
         # -----------------------------------------------------------------------
-        if pre_venue_cancelled is not None:
+        def reject_final_pre_venue_cancellation() -> OrderResult | None:
+            """Terminalize this persisted command if final authority is absent."""
+
+            if pre_venue_cancelled is None:
+                return None
             try:
                 pre_venue_abort = bool(pre_venue_cancelled())
                 abort_reason = "global_final_authority_revoked_pre_venue"
@@ -7831,28 +7835,32 @@ def execute_exit_order(
                     "global_final_authority_unavailable_pre_venue:"
                     f"{type(exc).__name__}"
                 )
-            if pre_venue_abort:
-                abort_at = datetime.now(timezone.utc).isoformat()
-                append_event(
-                    conn,
-                    command_id=command_id,
-                    event_type="SUBMIT_REJECTED",
-                    occurred_at=abort_at,
-                    payload={"reason": abort_reason},
-                )
-                conn.commit()
-                return OrderResult(
-                    trade_id=intent.trade_id,
-                    status="rejected",
-                    reason=abort_reason,
-                    submitted_price=limit_price,
-                    shares=shares,
-                    order_role="exit",
-                    intent_id=intent.intent_id,
-                    idempotency_key=idem.value,
-                    command_id=command_id,
-                    command_state="REJECTED",
-                )
+            if not pre_venue_abort:
+                return None
+            append_event(
+                conn,
+                command_id=command_id,
+                event_type="SUBMIT_REJECTED",
+                occurred_at=datetime.now(timezone.utc).isoformat(),
+                payload={"reason": abort_reason},
+            )
+            conn.commit()
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=abort_reason,
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=idem.value,
+                command_id=command_id,
+                command_state="REJECTED",
+            )
+
+        pre_venue_rejected = reject_final_pre_venue_cancellation()
+        if pre_venue_rejected is not None:
+            return pre_venue_rejected
         try:
             client = prepared_client or PolymarketClient()
         except Exception as exc:
@@ -8010,6 +8018,12 @@ def execute_exit_order(
                     command_id=command_id,
                     command_state="REJECTED",
                 )
+        # The first final-authority check guards client/certificate work. Recheck at
+        # the actual venue boundary because those pre-submit operations can observe
+        # a generic completion deadline or newer fact after the first check.
+        pre_venue_rejected = reject_final_pre_venue_cancellation()
+        if pre_venue_rejected is not None:
+            return pre_venue_rejected
         # PR 6 (2026-05-19): capture zeus_submit_intent_time immediately before network call.
         _zeus_submit_intent_time = datetime.now(timezone.utc).isoformat()
         try:

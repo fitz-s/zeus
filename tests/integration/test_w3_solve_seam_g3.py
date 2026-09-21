@@ -30685,6 +30685,189 @@ def test_global_batch_reduce_only_prefilters_scan_prepare_and_book_scope(
     ]
 
 
+def test_generic_completion_restricts_action_family_but_retains_full_held_wealth(
+    monkeypatch,
+):
+    """A generic A completion may act on A while B remains in held economics."""
+    import src.data.replacement_input_hwm as replacement_hwm
+
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event_a = _global_scope_event(city="Alpha", source_run_id="run-a")
+    event_b = _global_scope_event(city="Beta", source_run_id="run-b")
+    full_scope = current_global_auction_scope_from_events(
+        (event_a, event_b),
+        captured_at_utc=decision_at,
+    )
+    family_a, family_b = full_scope.family_keys
+    wealth = _WealthNamespace(
+        spendable_cash_usd=Decimal("100"),
+        witness_identity="wealth-a-plus-b",
+        economic_identity="wealth-a-plus-b-economics",
+        ledger_snapshot_id="ledger-a-plus-b",
+        native_holdings_micro=(("yes-a", 5_000_000), ("yes-b", 7_000_000)),
+    )
+    positions = (
+        SimpleNamespace(
+            position_id="position-a",
+            trade_id="position-a",
+            direction="buy_yes",
+            token_id="yes-a",
+            no_token_id="",
+            temperature_metric="high",
+            city="Alpha",
+            target_date="2026-07-11",
+            bin_label="A-bin",
+            condition_id="condition-a",
+        ),
+        SimpleNamespace(
+            position_id="position-b",
+            trade_id="position-b",
+            direction="buy_yes",
+            token_id="yes-b",
+            no_token_id="",
+            temperature_metric="high",
+            city="Beta",
+            target_date="2026-07-11",
+            bin_label="B-bin",
+            condition_id="condition-b",
+        ),
+    )
+    selected_actions = []
+    stored = {}
+    prepared_events = []
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_current_held_weather_families",
+        lambda _conn: (
+            ("Alpha", "2026-07-11", "high"),
+            ("Beta", "2026-07-11", "high"),
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "scan_current_global_auction_scope",
+        lambda **_kwargs: full_scope,
+    )
+    monkeypatch.setattr(
+        replacement_hwm,
+        "prime_frozen_replacement_artifact_hwm",
+        lambda *_args, **_kwargs: lambda: None,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_args, **_kwargs: wealth,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_venue_auction_identity",
+        lambda *_args, **_kwargs: "venue-a-only",
+    )
+
+    def select(prepared, **kwargs):
+        selected_actions.append(
+            {
+                prepared_family.probability_witness.family_key
+                for prepared_family in prepared.values()
+            }
+        )
+        assert kwargs["current_scope"].family_keys == (family_a,)
+        assert kwargs["wealth_witness"] is wealth
+        return PreparedGlobalAuctionResult(
+            decision=GlobalSingleOrderDecision(
+                shares=Decimal("0"),
+                cost_usd=Decimal("0"),
+                robust_delta_log_wealth=0.0,
+                robust_ev_usd=0.0,
+                capital_efficiency=0.0,
+                candidate=None,
+                no_trade_reason="CASH_DOMINATES",
+                rejection_reasons={},
+                candidate_evaluations=(),
+            ),
+            winner_event_id=None,
+            actuation=None,
+            holding_coverage=(),
+        )
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "select_prepared_global_auction",
+        select,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_store_global_auction_receipt",
+        lambda *_args, **kwargs: stored.update(kwargs) or 1,
+    )
+
+    def prepare(event, _at):
+        prepared_events.append(event.event_id)
+        assert event.event_id == event_a.event_id
+        return EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            prepared_global_family=bridge.PreparedGlobalFamily(
+                decision_id="decision-a",
+                probability_witness=SimpleNamespace(
+                    family_key=family_a,
+                    captured_at_utc=decision_at,
+                    posterior_identity_hash="run-a",
+                    witness_identity="q-a",
+                    q_version="q-a",
+                    family_binding_identity="binding-a",
+                    sample_matrix_identity="samples-a",
+                    band_alpha=0.05,
+                    band_basis="lower-tail",
+                    bindings=(
+                        SimpleNamespace(
+                            bin_id="bin-a",
+                            condition_id="condition-a",
+                            yes_token_id="yes-a",
+                            no_token_id="",
+                        ),
+                    ),
+                ),
+                candidate_seeds=(),
+            ),
+        )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event_a, event_b),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=sqlite3.connect(":memory:"),
+        payload_reader=lambda event: json.loads(event.payload_json),
+        prepare_event=prepare,
+        actuate_winner=lambda *_: pytest.fail("cash-dominant cut must not actuate"),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: 0,
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+        portfolio_state_provider=lambda: SimpleNamespace(positions=positions),
+        current_book_epoch_provider=lambda probabilities, _at: (probabilities, None),
+        buy_candidates_enabled=False,
+        restrict_to_family_keys=frozenset({family_a}),
+    )
+
+    assert prepared_events == [event_a.event_id]
+    assert selected_actions == [{family_a}]
+    assert stored["wealth_witness"] is wealth
+    assert {
+        obligation.position_id for obligation in stored["expected_holding_obligations"]
+    } == {"position-a", "position-b"}
+    assert {
+        row.position_id for row in stored["selected"].holding_coverage
+    } == {"position-a", "position-b"}
+    assert set(stored["holding_probability_witnesses"]) == {family_a}
+    assert family_b not in stored["holding_probability_witnesses"]
+    assert result.winner_event_id is None
+    assert result.venue_submit_count == 0
+
+
 def test_global_batch_rejects_restricted_held_scope_mismatch(monkeypatch):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     carrier = _global_scope_event(city="Kuala Lumpur", source_run_id="run-kl")

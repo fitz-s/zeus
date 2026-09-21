@@ -6802,6 +6802,103 @@ def test_exit_prevenue_final_cancel_terminalizes_command_without_sdk_call(
         _clear_exit_submit_prereqs()
 
 
+@pytest.mark.parametrize(
+    ("second_check", "reason_prefix"),
+    (("revoked", "global_final_authority_revoked_pre_venue"),
+     ("raises", "global_final_authority_unavailable_pre_venue:RuntimeError")),
+)
+def test_exit_prevenue_final_cancellation_rechecks_after_certificate_before_sdk(
+    conn,
+    monkeypatch,
+    second_check,
+    reason_prefix,
+):
+    """Certificate work cannot carry a revoked generic cut across the SDK seam."""
+    from src.decision_kernel.ledger import DecisionCertificateLedger
+    from src.execution import executor
+    from src.execution.executor import create_exit_order_intent, execute_exit_order
+
+    _enable_exit_submit_prereqs(conn, monkeypatch)
+    snapshot_id = _ensure_snapshot(
+        conn,
+        snapshot_id=f"snap-exit-final-cancel-after-certificate-{second_check}",
+    )
+    conn.commit()
+    state = {"checks": 0, "persists": 0}
+    venue_calls = []
+
+    class FakeClient:
+        def _ensure_v2_adapter(self):
+            return self
+
+        def get_ctf_collateral_payload(self, *, token_ids):
+            assert token_ids == [YES_TOKEN]
+            return {
+                "authority_tier": "CHAIN",
+                "ctf_token_balances": {YES_TOKEN: 50},
+                "ctf_token_allowances": {YES_TOKEN: 50},
+            }
+
+        def place_limit_order(self, **_kwargs):  # pragma: no cover - tripwire
+            venue_calls.append(True)
+            raise AssertionError("post-certificate cancellation reached the SDK")
+
+    def persist_after_first_final_check(_self, _certificates):
+        state["persists"] += 1
+
+    def final_authority():
+        state["checks"] += 1
+        if state["checks"] == 1:
+            return False
+        if second_check == "raises":
+            raise RuntimeError("generic final authority unavailable")
+        return True
+
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClient)
+    monkeypatch.setattr(executor, "_trade_writer_lease_required", lambda _conn: True)
+    monkeypatch.setattr(
+        DecisionCertificateLedger,
+        "persist_all",
+        persist_after_first_final_check,
+    )
+    try:
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id=f"pos-exit-final-cancel-after-certificate-{second_check}",
+                token_id=YES_TOKEN,
+                shares=5.0,
+                current_price=0.50,
+                best_bid=0.49,
+                executable_snapshot_id=snapshot_id,
+            ),
+            conn=conn,
+            decision_id=f"exit-final-cancel-after-certificate-{second_check}",
+            pre_venue_cancelled=final_authority,
+        )
+
+        assert state == {"checks": 2, "persists": 1}
+        assert venue_calls == []
+        assert result.status == "rejected"
+        assert result.reason and result.reason.startswith(reason_prefix)
+        assert result.command_state == "REJECTED"
+        assert conn.execute(
+            "SELECT state FROM venue_commands WHERE command_id = ?",
+            (result.command_id,),
+        ).fetchone()[0] == "REJECTED"
+        assert conn.execute(
+            "SELECT event_type FROM venue_command_events WHERE command_id = ? "
+            "ORDER BY sequence_no",
+            (result.command_id,),
+        ).fetchall()[-1][0] == "SUBMIT_REJECTED"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM collateral_reservations "
+            "WHERE command_id = ? AND released_at IS NULL",
+            (result.command_id,),
+        ).fetchone()[0] == 0
+    finally:
+        _clear_exit_submit_prereqs()
+
+
 def test_exit_ctf_reservation_failure_rolls_back_snapshot_command_event_and_reservation(conn, monkeypatch):
     from src.execution import executor
     from src.execution.executor import create_exit_order_intent, execute_exit_order
