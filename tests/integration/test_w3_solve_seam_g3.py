@@ -11155,7 +11155,7 @@ def test_live_adapter_projects_only_exact_token_completion_rebind(monkeypatch, k
 
     def changed_witness(witness, **changes):
         names = identity_fields + (
-            ("yes_point_q", "yes_q_samples", "exact_payoff_witness")
+            ("yes_point_q", "yes_q_samples")
             if kind == "joint" else ("exact_yes_payoffs",)
         )
         params = {name: changes.get(name, getattr(witness, name)) for name in names}
