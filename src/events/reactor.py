@@ -13381,6 +13381,28 @@ def _edli_filter_beliefs_to_family_keys(
     return [belief for belief in beliefs if _edli_belief_family_key(belief) in family_keys]
 
 
+def _edli_unchanged_completed_screen_beliefs(
+    reloaded_beliefs: Iterable[Any],
+    completed_beliefs: Iterable[Any],
+) -> list:
+    """Keep a deferred entry chunk only when its complete belief input is unchanged.
+
+    A family key is a routing identity, not a probability identity.  After an
+    entry-phase timeout, the confirmation pass re-reads the latest belief; an
+    equal family key with a newer snapshot, calibrator, q vector, or validity
+    window cannot inherit the old cheap-screen result.
+    """
+
+    completed_by_key = {
+        _edli_belief_family_key(belief): belief for belief in completed_beliefs
+    }
+    return [
+        belief
+        for belief in reloaded_beliefs
+        if completed_by_key.get(_edli_belief_family_key(belief)) == belief
+    ]
+
+
 def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -> "list":
     """Build OpenRest entries for §4.5 rest management: every OPEN maker ENTRY rest joined to its
     decision belief via condition_id. Pure read on both DBs.
@@ -15292,6 +15314,7 @@ def run_edli_continuous_redecision_screen_cycle(
                         entry_trade_ro.close()
                     except Exception:  # noqa: BLE001
                         pass
+            completed_entry_beliefs = list(beliefs)
             _screen_check_deadline()
             _log.info(
                 "edli_redecision_screen receipt=%s",
@@ -15352,10 +15375,18 @@ def run_edli_continuous_redecision_screen_cycle(
         )
         all_families = set(family_keys) | rest_pull_families | held_reemit_families
         confirmed_entry_scope = set(family_keys) | entry_refresh_families
-        confirmed_rest_scope = set(rest_pull_families)
+        # Every submitted maker rest is a management obligation. A stale
+        # same-side bid can correctly produce no pull on this pass, but it must
+        # still request a bounded refresh so the next pass can re-screen it.
+        confirmed_rest_scope = set(open_rest_condition_scope)
         confirmed_held_scope = set(held_reemit_families)
         held_refresh_families = set(held_condition_scope)
-        confirm_families = set(all_families) | held_refresh_families | entry_refresh_families
+        confirm_families = (
+            set(all_families)
+            | set(open_rest_condition_scope)
+            | held_refresh_families
+            | entry_refresh_families
+        )
         fresh_entry_scope = _edli_families_with_fresh_scoped_executable_substrate(
             _edli_merge_condition_scopes(
                 entry_condition_scope,
@@ -15365,7 +15396,10 @@ def run_edli_continuous_redecision_screen_cycle(
             deadline_fence=screen_fence,
         )
         fresh_rest_scope = _edli_families_with_fresh_scoped_executable_substrate(
-            rest_condition_scope,
+            _edli_merge_condition_scopes(
+                open_rest_condition_scope,
+                rest_condition_scope,
+            ),
             now_utc=now,
             deadline_fence=screen_fence,
         )
@@ -15533,7 +15567,48 @@ def run_edli_continuous_redecision_screen_cycle(
                     # below is their emit authority.  Families needing a later
                     # confirmation refresh remain excluded rather than using a
                     # pre-refresh price/probability to authorize an event.
-                    pass
+                    reloaded_count = len(beliefs)
+                    beliefs = _edli_unchanged_completed_screen_beliefs(
+                        beliefs,
+                        completed_entry_beliefs,
+                    )
+                    carried_family_ids = {
+                        str(getattr(belief, "family_id", "") or "")
+                        for belief in beliefs
+                    }
+                    carried_family_keys = {
+                        _edli_family_key_from_belief(belief)
+                        for belief in beliefs
+                    }
+                    carried_family_keys.discard(None)
+                    redecisions = [
+                        redecision
+                        for redecision in redecisions
+                        if str(getattr(redecision, "family_id", "") or "")
+                        in carried_family_ids
+                    ]
+                    entry_redecisions = [
+                        redecision
+                        for redecision in entry_redecisions
+                        if str(getattr(redecision, "family_id", "") or "")
+                        in carried_family_ids
+                    ]
+                    raw_entry_family_keys &= carried_family_keys
+                    entry_refresh_condition_scope = {
+                        family: condition_ids
+                        for family, condition_ids in entry_refresh_condition_scope.items()
+                        if family in carried_family_keys
+                    }
+                    entry_condition_scope = _edli_redecision_condition_scope(
+                        entry_redecisions, beliefs
+                    )
+                    if len(beliefs) != reloaded_count:
+                        _log.info(
+                            "edli_redecision_screen: dropped deferred entry chunks with "
+                            "changed belief identity retained=%d reloaded=%d",
+                            len(beliefs),
+                            reloaded_count,
+                        )
                 else:
                     redecisions = screen_entry_redecisions(
                         world_ro,

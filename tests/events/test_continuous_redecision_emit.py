@@ -687,6 +687,171 @@ def test_repeated_rest_phase_timeouts_continue_fair_cursor(monkeypatch: pytest.M
     assert reactor._edli_redecision_screen_belief_cursor == 32
 
 
+def test_stale_open_rest_refreshes_then_rescreens_and_queues_cancel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An open rest without an initial pull still owns its exact refresh frontier."""
+
+    from src.events import continuous_redecision
+
+    _marker, seen = _install_rest_priority_cycle_fakes(
+        monkeypatch,
+        entry_screen=lambda *_args, **_kwargs: [],
+        complete_rest_flow=True,
+    )
+    refreshed = False
+    refresh_requests: list[tuple[set, list[str]]] = []
+    screen_calls = 0
+
+    def _fresh_scope(scope, **_kwargs):
+        return set(scope) if refreshed else set()
+
+    def _refresh(families, *, priority_condition_ids, **_kwargs):
+        nonlocal refreshed
+        refresh_requests.append((set(families), list(priority_condition_ids)))
+        refreshed = True
+        return {"status": "requested"}
+
+    def _stale_then_moved(*_args, **_kwargs):
+        nonlocal screen_calls
+        screen_calls += 1
+        if screen_calls == 1:
+            return []
+        return [
+            (
+                SimpleNamespace(
+                    command_id="command-1",
+                    venue_order_id="order-1",
+                    family_id="family-000",
+                    bin_label="31C",
+                    side="buy_yes",
+                    city="City-000",
+                    target_date="2026-09-21",
+                    metric="high",
+                    condition_id="condition-1",
+                ),
+                continuous_redecision.RepriceDecision(
+                    family_id="family-000",
+                    bin_label="31C",
+                    side="buy_yes",
+                    action="CANCEL_REPLACE",
+                    reason="BOOK_MOVED",
+                ),
+            )
+        ]
+
+    monkeypatch.setattr(reactor, "_edli_families_with_fresh_scoped_executable_substrate", _fresh_scope)
+    monkeypatch.setattr(reactor, "_edli_refresh_continuous_money_path_families", _refresh)
+    monkeypatch.setattr(continuous_redecision, "screen_resting_orders", _stale_then_moved)
+
+    reactor.run_edli_continuous_redecision_screen_cycle(screen_lock=threading.Lock())
+    assert refresh_requests == [
+        ({("City-000", "2026-09-21", "high")}, ["condition-1"])
+    ]
+    assert seen["cancellations"] == []
+    reactor.run_edli_continuous_redecision_screen_cycle(screen_lock=threading.Lock())
+
+    assert screen_calls == 3
+    assert len(seen["cancellations"]) == 1
+    assert seen["cancellations"][0][0][0].command_id == "command-1"
+
+
+def test_refreshed_rest_without_a_screen_pull_does_not_queue_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refresh request is not cancel authority when the second screen has no pull."""
+
+    from src.events import continuous_redecision
+
+    _marker, seen = _install_rest_priority_cycle_fakes(
+        monkeypatch,
+        entry_screen=lambda *_args, **_kwargs: [],
+        complete_rest_flow=True,
+    )
+    refreshed = False
+
+    def _fresh_scope(scope, **_kwargs):
+        return set(scope) if refreshed else set()
+
+    def _refresh(*_args, **_kwargs):
+        nonlocal refreshed
+        refreshed = True
+        return {"status": "requested"}
+
+    monkeypatch.setattr(reactor, "_edli_families_with_fresh_scoped_executable_substrate", _fresh_scope)
+    monkeypatch.setattr(reactor, "_edli_refresh_continuous_money_path_families", _refresh)
+    monkeypatch.setattr(continuous_redecision, "screen_resting_orders", lambda *_args, **_kwargs: [])
+
+    reactor.run_edli_continuous_redecision_screen_cycle(screen_lock=threading.Lock())
+    reactor.run_edli_continuous_redecision_screen_cycle(screen_lock=threading.Lock())
+
+    assert seen["cancellations"] == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("snapshot_id", "snapshot-s2"),
+        ("calibrator_model_hash", "calibrator-s2"),
+        ("p_posterior_vec", [0.2]),
+        ("q_lcb_yes_vec", [0.1]),
+        ("condition_ids", ["condition-s2"]),
+    ],
+)
+def test_deferred_entry_drops_changed_belief_identity_before_emit(
+    monkeypatch: pytest.MonkeyPatch, field: str, value: object
+) -> None:
+    """S1 cheap-screen output cannot create an entry wake after S2 replaces its belief."""
+
+    from src.events import continuous_redecision
+
+    beliefs_s1 = _screen_priority_beliefs()
+    beliefs_s2 = [
+        dataclasses.replace(beliefs_s1[0], **{field: value}),
+        *beliefs_s1[1:],
+    ]
+    reads = 0
+    calls = 0
+    generations = iter((501, 502))
+    original_expired = continuous_redecision.SqliteDeadlineFence.expired
+    monkeypatch.setattr(reactor, "_next_edli_redecision_screen_generation", lambda: next(generations))
+    monkeypatch.setattr(
+        continuous_redecision.SqliteDeadlineFence,
+        "expired",
+        lambda fence: fence.generation == 502 and calls >= 3 or original_expired(fence),
+    )
+
+    def _partial_entry(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls >= 3:
+            raise sqlite3.OperationalError("interrupted")
+        return [SimpleNamespace(family_id="family-000")]
+
+    _marker, seen = _install_rest_priority_cycle_fakes(
+        monkeypatch,
+        entry_screen=_partial_entry,
+        complete_rest_flow=True,
+        emit_completed_entry=True,
+    )
+    monkeypatch.setattr(
+        continuous_redecision,
+        "screen_resting_orders",
+        lambda *_args, **_kwargs: [],
+    )
+
+    def _beliefs_after_refresh(*_args, **_kwargs):
+        nonlocal reads
+        reads += 1
+        return beliefs_s1 if reads == 1 else beliefs_s2
+
+    monkeypatch.setattr(continuous_redecision, "_all_latest_beliefs", _beliefs_after_refresh)
+    reactor._edli_redecision_screen_belief_cursor = 0
+
+    reactor.run_edli_continuous_redecision_screen_cycle(screen_lock=threading.Lock())
+
+    assert reads == 3
+    assert seen["emitted"] == []
+
+
 @pytest.fixture(autouse=True)
 def _replacement_authority_disabled_by_default(monkeypatch):
     from src.events.triggers import forecast_snapshot_ready
