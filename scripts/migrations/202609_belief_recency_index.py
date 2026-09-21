@@ -2,7 +2,7 @@
 # Purpose: Install the world-DB covering index for the bounded EDLI belief
 #   recency scan without invoking general init_schema during live boot.
 # Authority: docs/operations/current/plans/hourly_capital_gains_improvement_loop.md
-#   §2026-09-21T04:03Z exact belief-recency index plan.
+#   exact belief-recency index plan section.
 # WRITER_LOCK: CREATE INDEX and ANALYZE run under db_writer_lock(BULK). The
 #   migration is index/statistics-only and does not rewrite probability rows.
 """Install the EDLI belief recency covering index on a world DB.
@@ -20,6 +20,11 @@ TARGET_DB = "world"
 
 _TABLE = "probability_trace_fact"
 _INDEX = "idx_probability_trace_belief_recency_cover"
+_EXPECTED_COLUMNS = (
+    ("recorded_at", 1, "BINARY"),
+    ("trace_id", 1, "BINARY"),
+    ("decision_id", 0, "BINARY"),
+)
 _CREATE_INDEX = (
     f"CREATE INDEX IF NOT EXISTS {_INDEX} "
     f"ON {_TABLE}(recorded_at DESC, trace_id DESC, decision_id)"
@@ -33,21 +38,65 @@ def _database_path(conn: sqlite3.Connection) -> Path | None:
     return Path(str(row[2])).resolve()
 
 
-def _table_exists(conn: sqlite3.Connection) -> bool:
-    return (
+def _assert_table_exists(conn: sqlite3.Connection) -> None:
+    if (
         conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
             (_TABLE,),
         ).fetchone()
-        is not None
-    )
+        is None
+    ):
+        raise RuntimeError(
+            f"{_TABLE} is missing; refusing to mark {_INDEX} migration applied"
+        )
+
+
+def _validate_existing_index(conn: sqlite3.Connection) -> bool:
+    """Return whether the exact intended index already exists; reject drift."""
+    row = conn.execute(
+        "SELECT tbl_name FROM sqlite_master WHERE type='index' AND name=?",
+        (_INDEX,),
+    ).fetchone()
+    if row is None:
+        return False
+    if str(row[0]) != _TABLE:
+        raise RuntimeError(
+            f"{_INDEX} exists on {row[0]!r}, expected {_TABLE!r}; refusing to drop/rebuild"
+        )
+
+    index_list = conn.execute(f"PRAGMA index_list({_TABLE})").fetchall()
+    metadata = next((entry for entry in index_list if str(entry[1]) == _INDEX), None)
+    if metadata is None:
+        raise RuntimeError(
+            f"{_INDEX} is not registered on {_TABLE}; refusing to drop/rebuild"
+        )
+    # PRAGMA index_list columns: seq, name, unique, origin, partial.
+    if int(metadata[2]) != 0 or int(metadata[4]) != 0:
+        raise RuntimeError(
+            f"{_INDEX} must be nonunique and nonpartial; refusing to drop/rebuild"
+        )
+
+    key_columns = [
+        (str(entry[2]), int(entry[3]), str(entry[4] or "BINARY"))
+        for entry in conn.execute(f"PRAGMA index_xinfo({_INDEX})").fetchall()
+        if int(entry[5]) == 1
+    ]
+    if key_columns != list(_EXPECTED_COLUMNS):
+        raise RuntimeError(
+            f"{_INDEX} has unexpected key columns {key_columns!r}; "
+            "refusing to drop/rebuild"
+        )
+    return True
 
 
 def _install(conn: sqlite3.Connection) -> None:
-    if not _table_exists(conn):
-        conn.commit()
-        return
-    conn.execute(_CREATE_INDEX)
+    _assert_table_exists(conn)
+    if not _validate_existing_index(conn):
+        conn.execute(_CREATE_INDEX)
+        if not _validate_existing_index(conn):
+            raise RuntimeError(
+                f"{_INDEX} was not materialized on {_TABLE} after CREATE INDEX"
+            )
     # The decision_id prefix range is broad on the live table.  ANALYZE lets
     # SQLite choose this order-preserving covering index instead of the unique
     # decision_id autoindex plus a temporary sort.

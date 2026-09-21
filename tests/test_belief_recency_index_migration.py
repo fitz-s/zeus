@@ -8,6 +8,8 @@ import importlib.util
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_PATH = ROOT / "scripts" / "migrations" / "202609_belief_recency_index.py"
@@ -200,5 +202,80 @@ def test_migration_runner_applies_world_target_and_records_ledger(tmp_path: Path
             "SELECT name FROM _migrations_applied WHERE name=?",
             ("202609_belief_recency_index",),
         ).fetchone() is not None
+    finally:
+        conn.close()
+
+
+def test_runner_refuses_missing_canonical_table_without_applied_entry(tmp_path: Path) -> None:
+    db_path = tmp_path / "world.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        from scripts.migrations import apply_migrations
+
+        with pytest.raises(RuntimeError, match="probability_trace_fact is missing"):
+            apply_migrations(
+                conn,
+                target="202609_belief_recency_index",
+                db_identity="world",
+            )
+        assert conn.execute(
+            "SELECT 1 FROM _migrations_applied WHERE name=?",
+            ("202609_belief_recency_index",),
+        ).fetchone() is None
+    finally:
+        conn.close()
+
+
+def test_runner_refuses_wrong_existing_index_shape_without_applied_entry(tmp_path: Path) -> None:
+    db_path = tmp_path / "world.db"
+    conn, _rows = _create_fixture(db_path)
+    try:
+        conn.execute(
+            "CREATE INDEX idx_probability_trace_belief_recency_cover "
+            "ON probability_trace_fact(decision_id)"
+        )
+        conn.commit()
+        from scripts.migrations import apply_migrations
+
+        with pytest.raises(RuntimeError, match="unexpected key columns"):
+            apply_migrations(
+                conn,
+                target="202609_belief_recency_index",
+                db_identity="world",
+            )
+        assert conn.execute(
+            "SELECT 1 FROM _migrations_applied WHERE name=?",
+            ("202609_belief_recency_index",),
+        ).fetchone() is None
+        key_columns = conn.execute(
+            "SELECT name FROM pragma_index_info(?) ORDER BY seqno",
+            ("idx_probability_trace_belief_recency_cover",),
+        ).fetchall()
+        assert [row[0] for row in key_columns] == ["decision_id"]
+    finally:
+        conn.close()
+
+
+def test_runner_accepts_exact_existing_index_idempotently(tmp_path: Path) -> None:
+    db_path = tmp_path / "world.db"
+    conn, _rows = _create_fixture(db_path)
+    try:
+        conn.execute(
+            "CREATE INDEX idx_probability_trace_belief_recency_cover "
+            "ON probability_trace_fact(recorded_at DESC, trace_id DESC, decision_id ASC)"
+        )
+        conn.commit()
+        from scripts.migrations import apply_migrations
+
+        applied = apply_migrations(
+            conn,
+            target="202609_belief_recency_index",
+            db_identity="world",
+        )
+        assert applied == ["202609_belief_recency_index"]
+        assert conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?",
+            (INDEX_NAME,),
+        ).fetchone()[0] == 1
     finally:
         conn.close()
