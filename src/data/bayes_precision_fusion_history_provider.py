@@ -355,7 +355,12 @@ class BayesPrecisionFusionHistoryProvider:
             date_text = str(row["target_date"])
             if endpoint == "single_runs":
                 target_start = _target_start_utc(city_config, date_text)
-                if target_start is None or available >= target_start or captured >= target_start:
+                if (
+                    target_start is None
+                    or source_cycle >= target_start
+                    or available >= target_start
+                    or captured >= target_start
+                ):
                     continue
             try:
                 settlement_c = _settlement_to_celsius(label.settlement_value, label.settlement_unit)

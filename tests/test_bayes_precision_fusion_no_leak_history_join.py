@@ -632,6 +632,25 @@ def test_history_rejects_partial_or_after_target_start_single_runs() -> None:
     ) == {}
 
 
+def test_history_rejects_post_target_cycle_with_forged_early_availability() -> None:
+    conn = _conn()
+    # Paris 2026-04-01 begins at 2026-03-31T22:00Z.  Availability/capture cannot
+    # make a run initialized inside the target local day causal fixed-lead history.
+    _insert_raw(
+        conn, model="gfs_global", city="Paris", target_date="2026-04-01",
+        metric="high", forecast_value_c=20.0, endpoint="single_runs",
+        source_cycle_time="2026-04-01T01:00:00+00:00",
+        source_available_at="2026-03-31T13:00:00+00:00",
+        captured_at="2026-03-31T14:00:00+00:00",
+    )
+    _insert_settlement(conn, city="Paris", target_date="2026-04-01", metric="high", settlement_value=19.0)
+
+    assert _provider(conn)(
+        city="Paris", metric="high", lead_days=1,
+        target_date=date(2026, 5, 1), models=["gfs_global"],
+    ) == {}
+
+
 def test_history_rejects_extra_request_physical_option_despite_matching_hash() -> None:
     conn = _conn()
     _insert_raw(
