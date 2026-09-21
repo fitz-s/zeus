@@ -388,6 +388,10 @@ def validate_probability_candidates(
         training_dates = tuple(sorted({case.target_date for case in training}))
         training_losses: dict[str, float] = {}
         if len(training_dates) >= MIN_TRAINING_TARGET_DATES:
+            training_losses["baseline"] = fmean(
+                _scores(case.baseline, case.winner_index).log_loss
+                for case in training
+            )
             for name in names:
                 if name not in outer.candidates or any(name not in case.candidates for case in training):
                     continue
@@ -395,7 +399,18 @@ def validate_probability_candidates(
                     _scores(case.candidates[name], case.winner_index).log_loss
                     for case in training
                 )
-        selected_name = min(training_losses, key=lambda name: (training_losses[name], name)) if training_losses else "baseline"
+        selected_name = (
+            min(
+                training_losses,
+                key=lambda name: (
+                    training_losses[name],
+                    0 if name == "baseline" else 1,
+                    name,
+                ),
+            )
+            if training_losses
+            else "baseline"
+        )
         selected_vector = outer.baseline if selected_name == "baseline" else outer.candidates[selected_name]
         evaluations.append(
             SelectionEvaluation(

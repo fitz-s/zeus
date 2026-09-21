@@ -117,7 +117,7 @@ def test_new_candidate_missing_earliest_training_vector_cannot_backselect():
     """A late candidate cannot discard an unfavorable missing training date."""
     cases = []
     for day in range(1, 6):
-        candidates = {"old": _vector((0.7, 0.2, 0.1), day=day)}
+        candidates = {"old": _vector((0.9, 0.1, 0.0), day=day)}
         if day > 1:
             candidates["new"] = _vector((0.99, 0.01, 0.0), day=day)
         cases.append(_case(day, candidates=candidates))
@@ -125,7 +125,7 @@ def test_new_candidate_missing_earliest_training_vector_cannot_backselect():
         _case(
             6,
             candidates={
-                "old": _vector((0.7, 0.2, 0.1), day=6),
+                "old": _vector((0.9, 0.1, 0.0), day=6),
                 "new": _vector((0.99, 0.01, 0.0), day=6),
             },
         )
@@ -136,11 +136,34 @@ def test_new_candidate_missing_earliest_training_vector_cannot_backselect():
     assert evaluation.selected_name == "old"
 
 
+def test_ready_selection_keeps_baseline_when_every_candidate_is_worse():
+    """Readiness permits comparison; it never compels a candidate switch."""
+    cases = [
+        _case(day, candidates={"candidate": _vector((0.1, 0.9, 0.0), day=day)})
+        for day in range(1, 6)
+    ]
+    cases.append(_case(6, candidates={"candidate": _vector((0.99, 0.01, 0.0), day=6)}))
+
+    evaluation = _evaluation(_result(cases), 6)
+    assert evaluation.training_target_date_count == 5
+    assert evaluation.selected_name == "baseline"
+
+
+def test_ready_selection_uses_candidate_only_when_it_beats_baseline():
+    cases = [
+        _case(day, candidates={"candidate": _vector((0.9, 0.1, 0.0), day=day)})
+        for day in range(1, 6)
+    ]
+    cases.append(_case(6, candidates={"candidate": _vector((0.9, 0.1, 0.0), day=6)}))
+
+    assert _evaluation(_result(cases), 6).selected_name == "candidate"
+
+
 def test_rolling_selection_uses_all_prior_same_city_metric_dates():
     """Five dates only open selection; they do not freeze its training window."""
     cases = []
     for day in range(1, 11):
-        a, b = ((0.9, 0.1, 0.0), (0.1, 0.9, 0.0)) if day <= 5 else (
+        a, b = ((0.7, 0.3, 0.0), (0.5, 0.5, 0.0)) if day <= 5 else (
             (0.01, 0.99, 0.0),
             (0.99, 0.01, 0.0),
         )
