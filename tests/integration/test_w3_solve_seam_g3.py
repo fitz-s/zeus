@@ -30182,6 +30182,152 @@ def test_current_portfolio_wealth_economic_identity_ignores_heartbeat_time_only(
     assert second.economic_identity == first.economic_identity
 
 
+@pytest.mark.parametrize("status", ("OPEN", "RESOLVED"))
+@pytest.mark.parametrize("timestamp_field", ("fill_confirmed_at", "chain_seen_at"))
+def test_current_portfolio_wealth_obligation_timestamp_only_changes_witness(
+    status, timestamp_field
+):
+    first_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    second_at = first_at + _dt.timedelta(seconds=1)
+    conn = _wealth_test_conn(captured_at=first_at, ctf={"token-1": 2_000_000})
+    conn.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?)",
+        ("cmd-1", "position-1", "token-1", "BUY", 2.0, 0.5, "ENTRY", "FILLED"),
+    )
+    conn.execute(
+        "INSERT INTO entry_exposure_obligations VALUES (?,?,?,?,?,?,?)",
+        ("cmd-1", status, "token-1", 2.0, 1.0, 0, first_at.isoformat()),
+    )
+    conn.execute(
+        "INSERT INTO venue_command_events "
+        "(command_id,event_type,occurred_at,payload_json) VALUES (?,?,?,?)",
+        ("cmd-1", "FILL_CONFIRMED", first_at.isoformat(), "{}"),
+    )
+    portfolio = PortfolioState(
+        positions=[
+            SimpleNamespace(
+                position_id="position-1",
+                trade_id="trade-1",
+                direction="buy_yes",
+                token_id="token-1",
+                no_token_id="no-token-1",
+                chain_state="synced",
+                chain_shares=2.0,
+                chain_cost_basis_usd=1.0,
+                chain_verified_at=first_at.isoformat(),
+                state="entered",
+            )
+        ],
+        authority="canonical_db",
+        authority_scope="runtime_exposure",
+    )
+    first = current_portfolio_wealth_witness(
+        conn,
+        decision_at_utc=first_at,
+        max_age=_dt.timedelta(seconds=60),
+        portfolio_state=portfolio,
+    )
+    if timestamp_field == "fill_confirmed_at":
+        conn.execute(
+            "INSERT INTO venue_command_events "
+            "(command_id,event_type,occurred_at,payload_json) VALUES (?,?,?,?)",
+            ("cmd-1", "FILL_CONFIRMED", second_at.isoformat(), "{}"),
+        )
+    else:
+        portfolio.positions[0].chain_verified_at = second_at.isoformat()
+    second = current_portfolio_wealth_witness(
+        conn,
+        decision_at_utc=second_at,
+        max_age=_dt.timedelta(seconds=60),
+        portfolio_state=portfolio,
+    )
+
+    assert second.witness_identity != first.witness_identity
+    assert second.ledger_snapshot_id != first.ledger_snapshot_id
+    assert second.position_set_hash == first.position_set_hash
+    assert second.economic_identity == first.economic_identity
+    assert second.wealth_floor_usd == first.wealth_floor_usd
+    assert second.wealth_ceiling_usd == first.wealth_ceiling_usd
+    assert second.spendable_cash_usd == first.spendable_cash_usd
+    assert second.reservations_usd == first.reservations_usd
+    assert second.collateral_authority == first.collateral_authority
+    assert second.native_holdings_micro == first.native_holdings_micro
+    assert second.pending_entry_endowments_micro == first.pending_entry_endowments_micro
+    assert second.native_commitments_micro == first.native_commitments_micro
+    assert (
+        second.strategy_capital_allocation.witness_identity
+        == first.strategy_capital_allocation.witness_identity
+    )
+
+
+def _obligation_identity_wealth_fixture():
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    conn = _wealth_test_conn(captured_at=decision_at, ctf={"token-1": 2_000_000})
+    conn.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?)",
+        ("cmd-1", "position-1", "token-1", "BUY", 2.0, 0.5, "ENTRY", "FILLED"),
+    )
+    conn.execute(
+        "INSERT INTO entry_exposure_obligations VALUES (?,?,?,?,?,?,?)",
+        ("cmd-1", "OPEN", "token-1", 2.0, 1.0, 0, decision_at.isoformat()),
+    )
+    portfolio = PortfolioState(
+        positions=[
+            SimpleNamespace(
+                position_id="position-1",
+                trade_id="trade-1",
+                direction="buy_yes",
+                token_id="token-1",
+                no_token_id="no-token-1",
+                chain_state="synced",
+                chain_shares=2.0,
+                chain_cost_basis_usd=1.0,
+                chain_verified_at=decision_at.isoformat(),
+                state="entered",
+            )
+        ],
+        authority="canonical_db",
+        authority_scope="runtime_exposure",
+    )
+    return conn, portfolio, decision_at
+
+
+@pytest.mark.parametrize("mutation", ("status", "command_state", "amount", "chain_state"))
+def test_current_portfolio_wealth_obligation_economic_fields_change_identity(mutation):
+    conn, portfolio, decision_at = _obligation_identity_wealth_fixture()
+    first = current_portfolio_wealth_witness(
+        conn,
+        decision_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=60),
+        portfolio_state=portfolio,
+    )
+    if mutation == "status":
+        conn.execute(
+            "UPDATE entry_exposure_obligations SET status = 'RESOLVED' "
+            "WHERE command_id = 'cmd-1'"
+        )
+    elif mutation == "command_state":
+        conn.execute(
+            "UPDATE venue_commands SET state = 'POST_ACKED' "
+            "WHERE command_id = 'cmd-1'"
+        )
+    elif mutation == "amount":
+        conn.execute(
+            "UPDATE entry_exposure_obligations "
+            "SET shares = 1.5, cost_basis_usd = 0.75 WHERE command_id = 'cmd-1'"
+        )
+    else:
+        portfolio.positions[0].chain_state = "unknown"
+    second = current_portfolio_wealth_witness(
+        conn,
+        decision_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=60),
+        portfolio_state=portfolio,
+    )
+
+    assert second.economic_identity != first.economic_identity
+
+
 def test_current_portfolio_wealth_economic_identity_changes_with_cash():
     first_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     second_at = first_at + _dt.timedelta(seconds=1)

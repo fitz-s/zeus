@@ -4046,6 +4046,9 @@ def current_portfolio_wealth_witness(
             allocation=active_capital_allocation,
         )
 
+        obligation_economic_identities = tuple(
+            sorted(identity[:7] + identity[9:] for identity in obligation_identities)
+        )
         ledger_snapshot_id = hashlib.sha256(
             repr(
                 (
@@ -4060,6 +4063,7 @@ def current_portfolio_wealth_witness(
                     inflight_identities,
                     tuple(sorted(pending_endowments)),
                     tuple(sorted(native_commitments_micro.items())),
+                    obligation_identities,
                 )
             ).encode("utf-8")
         ).hexdigest()
@@ -4069,7 +4073,7 @@ def current_portfolio_wealth_witness(
                     tuple(sorted(position_rows)),
                     tuple(sorted(held_balances.items())),
                     tuple(sorted(uncertain_micro.items())),
-                    obligation_identities,
+                    obligation_economic_identities,
                 )
             ).encode("utf-8")
         ).hexdigest()
