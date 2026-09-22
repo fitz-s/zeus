@@ -8276,10 +8276,9 @@ def event_bound_live_adapter_from_trade_conn(
         if family_keys is None:
             had_published_scope = _dependency_scope_family_keys is not None
             _dependency_scope_family_keys = None
-            # A recursive cut reuses this closure's revision box.  Rewind the
-            # cursor with the scope reset so the next probe reads queued wakes
-            # again even when the reactor revision number is unchanged.
             if had_published_scope:
+                # A recursive cut reuses this closure's revision box. Rewind
+                # the cursor so the replacement cut re-reads queued wakes.
                 _global_batch_urgent_wake_revision[0] = None
             return
         if not isinstance(family_keys, frozenset) or any(

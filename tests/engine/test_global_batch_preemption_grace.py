@@ -170,7 +170,7 @@ def harness(monkeypatch):
         def capacity_usd(self, **kwargs):
             return Decimal("17")
 
-    def make_adapter():
+    def make_adapter(**adapter_kwargs):
         return era.event_bound_live_adapter_from_trade_conn(
             trade,
             get_current_level=lambda: era.RiskLevel.GREEN,
@@ -179,13 +179,14 @@ def harness(monkeypatch):
             calibration_conn=world,
             portfolio_state_provider=lambda: None,
             auction_capital_authority=CapacityAuthority(),
+            **adapter_kwargs,
         )
 
-    def run_one_batch():
+    def run_one_batch(**adapter_kwargs):
         """Build a fresh adapter (fresh TYPE C generation) and return its
         captured epoch_superseded closure."""
         captured.clear()
-        adapter = make_adapter()
+        adapter = make_adapter(**adapter_kwargs)
         event = _forecast_event(city="Dallas", source_run_id="run-dallas")
         adapter.process_global_batch(
             (event,), _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc)
@@ -197,6 +198,7 @@ def harness(monkeypatch):
         urgent_reason=urgent_reason,
         wake_families=wake_families,
         run_one_batch=run_one_batch,
+        captured=captured,
     )
 
 
@@ -335,3 +337,36 @@ class TestDeterminismAndConstants:
             monkeypatch.delenv("ZEUS_GLOBAL_AUCTION_PREEMPTION_GRACE_MAX_SUPERSESSIONS", raising=False)
             monkeypatch.delenv("ZEUS_GLOBAL_AUCTION_PREEMPTION_GRACE_WINDOW_SECONDS", raising=False)
             importlib.reload(era)
+
+
+@pytest.mark.parametrize("reason", ("forecast_posterior_advanced", "day0_extreme_event_committed"))
+def test_generic_dependency_scope_reset_rechecks_unchanged_wake(harness, monkeypatch, reason):
+    from src.events.candidate_binding import weather_family_id
+
+    held = weather_family_id(city="Dallas", target_date="2026-07-11", metric="high")
+    outside = weather_family_id(city="Moscow", target_date="2026-07-11", metric="high")
+    monkeypatch.setattr(reactor_wake, "exact_held_sell_completion_wake_ids", lambda **_kwargs: ())
+    harness.urgent_reason["value"] = reason
+    harness.wake_families["value"] = (("Moscow", "2026-07-11", "high"),)
+    epoch = harness.run_one_batch(
+        family_scoped_held_completion=True,
+        selection_completion_reserved=True,
+        required_held_family_keys=frozenset({held}),
+    )
+    observe = harness.captured["dependency_scope_observer"]
+    # Initial reset preserves the captured revision; no new fact has arrived.
+    observe(None)
+    assert epoch() is False
+    observe(frozenset({held}))
+    _bump_revision(harness, 1)
+    assert epoch() is False
+    # A new cut must not reuse that ignored wake cursor or the old scope.
+    observe(None)
+    assert epoch() is True
+    observe(frozenset({held, outside}))
+    assert epoch() is True
+
+
+def test_ordinary_auction_has_no_dependency_scope_observer(harness):
+    harness.run_one_batch()
+    assert harness.captured["dependency_scope_observer"] is None

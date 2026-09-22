@@ -1100,11 +1100,13 @@ def test_generic_held_completion_wake_scope_ignores_only_valid_outside_families(
                 "forecast_families": (("Dallas", "2026-05-25"),),
             }
         ),
-        outside,
     ):
         assert _generic_held_completion_wakes_supersede(
-            (malformed,), valuation_family_keys=None
+            (malformed,), valuation_family_keys=scope
         )
+    assert _generic_held_completion_wakes_supersede(
+        (outside,), valuation_family_keys=None
+    )
 
 
 def test_global_dependency_scope_requires_complete_native_identity():
