@@ -28,6 +28,7 @@ from src.decision_kernel.canonicalization import stable_hash
 from src.decision_kernel.compiler import DecisionCompiler
 from src.contracts.execution_intent import DecisionSourceContext
 from src.state.snapshot_repo import init_snapshot_schema
+from src.state import db as state_db
 from src.engine.event_reactor_adapter import (
     build_event_bound_no_submit_receipt,
     edli_source_truth_gate,
@@ -2864,6 +2865,48 @@ def test_forecast_authority_resolver_prefers_attached_forecasts():
     conn.execute("CREATE TABLE forecasts.ensemble_snapshots (snapshot_id TEXT PRIMARY KEY)")
 
     assert _authority_table_ref(conn, "ensemble_snapshots") == "forecasts.ensemble_snapshots"
+
+
+def test_forecast_authority_resolver_prefers_canonical_main_and_rejects_ghost(tmp_path, monkeypatch):
+    from src.engine.event_reactor_adapter import _authority_table_ref
+
+    forecasts_path = tmp_path / "zeus-forecasts.db"
+    world_path = tmp_path / "zeus-world.db"
+    monkeypatch.setattr(state_db, "ZEUS_FORECASTS_DB_PATH", forecasts_path)
+    conn = sqlite3.connect(forecasts_path)
+    forecast_tables = ("source_run", "source_run_coverage", "readiness_state", "ensemble_snapshots")
+    for table in forecast_tables:
+        conn.execute(f"CREATE TABLE {table} (id TEXT PRIMARY KEY)")
+    conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+    for table in forecast_tables:
+        conn.execute(f"CREATE TABLE world.{table} (id TEXT PRIMARY KEY)")
+
+    for table in forecast_tables:
+        assert _authority_table_ref(conn, table) == table
+
+    conn.execute("DROP TABLE main.source_run")
+    assert _authority_table_ref(conn, "source_run") is None
+    conn.close()
+
+
+def test_forecast_authority_resolver_keeps_world_owner_on_world_main(tmp_path, monkeypatch):
+    from src.engine.event_reactor_adapter import _authority_table_ref
+
+    forecasts_path = tmp_path / "attached-forecasts.db"
+    world_path = tmp_path / "zeus-world.db"
+    trade_path = tmp_path / "zeus-trades.db"
+    monkeypatch.setattr(state_db, "ZEUS_FORECASTS_DB_PATH", tmp_path / "canonical-forecasts.db")
+    conn = sqlite3.connect(trade_path)
+    conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+    conn.execute("ATTACH DATABASE ? AS forecasts", (str(forecasts_path),))
+    conn.execute("CREATE TABLE world.selection_family_fact (family_id TEXT PRIMARY KEY)")
+    conn.execute("CREATE TABLE world.source_run (source_run_id TEXT PRIMARY KEY)")
+    conn.execute("CREATE TABLE forecasts.source_run (source_run_id TEXT PRIMARY KEY)")
+    conn.execute("CREATE TABLE forecasts.selection_family_fact (family_id TEXT PRIMARY KEY)")
+
+    assert _authority_table_ref(conn, "source_run") == "forecasts.source_run"
+    assert _authority_table_ref(conn, "selection_family_fact") == "world.selection_family_fact"
+    conn.close()
 
 
 def test_snapshot_lead_days_falls_back_to_source_available_and_local_day_start():

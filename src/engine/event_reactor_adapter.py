@@ -50131,8 +50131,41 @@ def _table_ref_columns(conn: sqlite3.Connection, table_ref: str) -> set[str]:
     return _table_columns(conn, table_ref)
 
 
+def _main_is_canonical_forecasts(conn: sqlite3.Connection) -> bool:
+    try:
+        from src.state.db import ZEUS_FORECASTS_DB_PATH, _main_database_path
+
+        main_path = _main_database_path(conn)
+        return main_path is not None and main_path == ZEUS_FORECASTS_DB_PATH.resolve()
+    except Exception:
+        return False
+
+
 def _authority_table_ref(conn: sqlite3.Connection, table_name: str) -> str | None:
     try:
+        from src.state.owner_routed_write import owner_db_filename
+
+        owner = owner_db_filename(table_name)
+        if owner == "zeus-forecasts.db":
+            if _main_is_canonical_forecasts(conn):
+                return table_name if _table_exists(conn, table_name) else None
+            attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+            if "forecasts" in attached:
+                exists = conn.execute(
+                    "SELECT 1 FROM forecasts.sqlite_master WHERE type='table' AND name=?",
+                    (table_name,),
+                ).fetchone()
+                return f"forecasts.{table_name}" if exists is not None else None
+        if owner == "zeus-world.db":
+            attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+            if "world" in attached:
+                exists = conn.execute(
+                    "SELECT 1 FROM world.sqlite_master WHERE type='table' AND name=?",
+                    (table_name,),
+                ).fetchone()
+                if exists is not None:
+                    return f"world.{table_name}"
+            return table_name if _table_exists(conn, table_name) else None
         attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
         if "forecasts" in attached:
             exists = conn.execute(

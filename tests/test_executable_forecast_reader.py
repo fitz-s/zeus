@@ -14,9 +14,11 @@ import sqlite3
 from datetime import date, datetime, timezone
 
 from src.contracts.ensemble_snapshot_provenance import ECMWF_OPENDATA_HIGH_DATA_VERSION
+from src.data import executable_forecast_reader
 from src.data.executable_forecast_reader import read_executable_forecast, read_executable_forecast_snapshot
 from src.data.forecast_target_contract import build_forecast_target_scope
 from src.data.producer_readiness import PRODUCER_READINESS_STRATEGY_KEY
+from src.state import db as state_db
 from src.state.db import init_schema, init_schema_trade_only, init_schema_forecasts
 from src.state.readiness_repo import write_readiness_state
 from src.state.schema.v2_schema import apply_canonical_schema
@@ -526,6 +528,32 @@ def test_full_reader_does_not_fallback_to_main_shadow_when_forecasts_attached(tm
 
     assert not result.ok
     assert result.reason_code == "PRODUCER_READINESS_MISSING"
+
+
+def test_full_reader_prefers_canonical_forecasts_main_over_world_ghost(tmp_path, monkeypatch) -> None:
+    forecasts_path = tmp_path / "zeus-forecasts.db"
+    world_path = tmp_path / "zeus-world.db"
+    monkeypatch.setattr(state_db, "ZEUS_FORECASTS_DB_PATH", forecasts_path)
+
+    conn = sqlite3.connect(forecasts_path)
+    conn.row_factory = sqlite3.Row
+    init_schema_forecasts(conn)
+    _insert_full_reader_fixture(conn)
+    conn.commit()
+    conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+    for table in ("source_run", "source_run_coverage", "readiness_state", "ensemble_snapshots"):
+        conn.execute(f"CREATE TABLE world.{table} AS SELECT * FROM main.{table} WHERE 0")
+
+    result = _read_full(conn, require_entry_readiness=False)
+
+    assert result.ok
+    assert result.bundle is not None
+    assert result.bundle.evidence.source_run_id == "source-run-1"
+
+    conn.execute("DROP TABLE main.source_run")
+    assert executable_forecast_reader._authority_table(conn, "source_run") is None
+    assert not _read_full(conn, require_entry_readiness=False).ok
+    conn.close()
 
 
 def test_full_reader_blocks_missing_entry_readiness() -> None:

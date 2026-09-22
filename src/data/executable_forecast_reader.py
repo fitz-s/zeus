@@ -336,6 +336,16 @@ def _schema_attached(conn: sqlite3.Connection, schema: str) -> bool:
     return schema == "main" or any(row[1] == schema for row in conn.execute("PRAGMA database_list"))
 
 
+def _main_is_canonical_forecasts(conn: sqlite3.Connection) -> bool:
+    try:
+        from src.state.db import ZEUS_FORECASTS_DB_PATH, _main_database_path
+
+        main_path = _main_database_path(conn)
+        return main_path is not None and main_path == ZEUS_FORECASTS_DB_PATH.resolve()
+    except Exception:
+        return False
+
+
 _TABLE_EXISTS_SQL = {
     "main": "SELECT 1 FROM main.sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
     WORLD_SCHEMA: "SELECT 1 FROM world.sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
@@ -364,6 +374,8 @@ def _authority_table(conn: sqlite3.Connection, table: str) -> str | None:
         raise ValueError("unsupported executable forecast authority table")
     forecasts_attached = _schema_attached(conn, FORECASTS_SCHEMA)
     world_attached = _schema_attached(conn, WORLD_SCHEMA)
+    if table in FORECASTS_OWNED_TABLES and _main_is_canonical_forecasts(conn):
+        return table if _table_exists(conn, schema="main", table=table) else None
     if forecasts_attached and table in FORECASTS_OWNED_TABLES:
         if not _table_exists(conn, schema=FORECASTS_SCHEMA, table=table):
             return None
