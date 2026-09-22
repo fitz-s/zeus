@@ -15,6 +15,7 @@ a cross-source blend. The freshness clock stays the freshest lane's; only the ex
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import replace
 
 import pytest
 
@@ -83,6 +84,43 @@ def test_a_stale_lanes_higher_high_survives(monkeypatch):
     assert fused is not None
     assert fused.high_so_far == pytest.approx(75.92)
     assert fused.low_so_far == pytest.approx(62.96)
+
+
+def test_canonical_raw_window_does_not_resurrect_retracted_projection(monkeypatch):
+    direct = replace(
+        _ctx(high=28.0, low=26.0, source="aviationweather_metar",
+             when="2026-09-22T05:00:00+00:00", unit="C"),
+        data_version="same_station_metar_canonical_window_v1",
+        provider_reported_time="typed_causal_availability",
+    )
+    stale = _ctx(high=29.0, low=25.0, source="ogimet_metar_rkpk",
+                 when="2026-09-22T04:00:00+00:00", unit="C")
+    fused = _fuse(monkeypatch, direct, stale, city_name="Busan")
+    assert fused is direct
+
+
+def test_conflicting_raw_revisions_cannot_fall_back_to_old_projection(monkeypatch):
+    import src.data.day0_fast_obs as fast_obs
+    import src.data.day0_observation_reader as reader
+    import src.engine.monitor_refresh as monitor
+    import src.state.db as db
+
+    def conflict(*args, **kwargs):
+        raise fast_obs.KmaObservationConflict("RKPK conflicting COR")
+
+    monkeypatch.setattr(fast_obs, "read_noaa_fast_obs_context_from_ledger", conflict)
+    monkeypatch.setattr(reader, "read_day0_observation_context_from_instants",
+                        lambda *args, **kwargs: _ctx(
+                            high=29.0, low=25.0, source="ogimet_metar_rkpk",
+                            when="2026-09-22T04:00:00+00:00", unit="C"))
+    class Connection:
+        def close(self):
+            pass
+    monkeypatch.setattr(db, "get_world_connection_read_only", Connection)
+    assert monitor._fetch_noaa_day0_observation(
+        _city("Busan"), dt.date(2026, 9, 22),
+        reference_time=dt.datetime(2026, 9, 22, 5, 1, tzinfo=dt.timezone.utc),
+    ) is None
 
 
 def test_the_freshness_clock_stays_the_freshest_lanes(monkeypatch):

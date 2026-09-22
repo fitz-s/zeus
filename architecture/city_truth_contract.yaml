@@ -39,6 +39,13 @@ source_roles:
   day0_live_monitor_source:
     description: "Provider/product used for live same-day observed-so-far monitoring."
     required_fields: [source_family, station_or_product, freshness_rule, evidence_refs]
+    optional_fields: [transport_identity, availability_clock_basis]
+    availability_clock_rule: >
+      An origin transport without a publisher timestamp may record local
+      first-seen after the complete response as a causal availability bound.
+      It must retain that clock basis and raw report identity in its durable
+      observation event; it must not write first-seen into a source-publication
+      ledger or gain settlement finality from earlier transport arrival.
   historical_hourly_source:
     description: "Provider/product used for hourly historical observation rows."
     required_fields: [source_family, station_or_product, extrema_rule, date_ranges, evidence_refs]

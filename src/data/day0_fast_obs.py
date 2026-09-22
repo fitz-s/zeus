@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import atexit
 import hashlib
+import html
 import json
 import logging
 import math
@@ -76,6 +77,14 @@ NOAA_METAR_CYCLE_ENDPOINT = (
 )
 NOAA_METAR_STATION_ENDPOINT = (
     "https://tgftp.nws.noaa.gov/data/observations/metar/stations/{station}.TXT"
+)
+KMA_AMO_METAR_ENDPOINT = "https://global.amo.go.kr/observation/PkObsMetarList.do"
+KMA_PRIORITY_STATIONS = frozenset({"RKPK", "RKSI"})
+KMA_METAR_MIN_FETCH_INTERVAL_S = 60.0
+KMA_METAR_TRANSPORT_ID = "kma_amo_raw_metar"
+AVAILABILITY_SOURCE_PUBLICATION = "SOURCE_PUBLICATION"
+AVAILABILITY_LOCAL_FIRST_SEEN_AFTER_COMPLETE_RESPONSE = (
+    "LOCAL_FIRST_SEEN_AFTER_COMPLETE_RESPONSE"
 )
 
 #: Canonical source id carried in event payload provenance.
@@ -315,6 +324,25 @@ def latest_fast_station_extreme_c(
         target_day, datetime.min.time(), tzinfo=tz
     ).astimezone(UTC)
     local_end = local_start + timedelta(days=1)
+    # KMA event windows are the canonical same-station raw carrier.  Do not
+    # let the legacy fast publication projection mask a correction or reintroduce
+    # an Ogimet row that the canonical window rejected.
+    if station in KMA_PRIORITY_STATIONS:
+        try:
+            state = _latest_kma_day0_event_state(
+                conn,
+                city=city_obj,
+                target_date=target_day.isoformat(),
+                decision_time=decision,
+                metric=normalized_metric,
+            )
+        except KmaObservationConflict:
+            raise
+        if state is not None:
+            value = state.high_native if normalized_metric == "high" else state.low_native
+            return float(value), state.observed_at.astimezone(UTC).isoformat(), len(state.reports), "C"
+        # A KMA event is optional.  Before the first KMA event, retain the
+        # existing publication-ledger fallback for NOAA/AWC observations.
     table = "world.observation_prints"
     try:
         conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
@@ -893,10 +921,53 @@ class MetarReport:
     temp_c: Optional[float]
     metar_type: str
     raw: str
+    first_seen_at: Optional[datetime] = None
+    availability_basis: str = AVAILABILITY_SOURCE_PUBLICATION
+    transport_id: str = "legacy"
+    raw_report_identity: str = ""
+
+    def __post_init__(self) -> None:
+        first_seen = self.first_seen_at
+        if first_seen is not None:
+            if first_seen.tzinfo is None or first_seen.utcoffset() is None:
+                raise ValueError("MetarReport.first_seen_at must be timezone-aware")
+            object.__setattr__(self, "first_seen_at", first_seen.astimezone(UTC))
+        basis = str(self.availability_basis or "").strip().upper()
+        if basis not in {
+            AVAILABILITY_SOURCE_PUBLICATION,
+            AVAILABILITY_LOCAL_FIRST_SEEN_AFTER_COMPLETE_RESPONSE,
+        }:
+            raise ValueError("MetarReport.availability_basis is invalid")
+        if (
+            basis == AVAILABILITY_LOCAL_FIRST_SEEN_AFTER_COMPLETE_RESPONSE
+            and self.first_seen_at is None
+        ):
+            raise ValueError("MetarReport local availability requires first_seen_at")
+        object.__setattr__(self, "availability_basis", basis)
+        object.__setattr__(
+            self,
+            "raw_report_identity",
+            self.raw_report_identity or _normalized_raw_report_identity(self.raw),
+        )
+
+    @property
+    def available_at(self) -> datetime:
+        if self.availability_basis == AVAILABILITY_LOCAL_FIRST_SEEN_AFTER_COMPLETE_RESPONSE:
+            if self.first_seen_at is None:
+                raise ValueError("MetarReport local availability requires first_seen_at")
+            return self.first_seen_at
+        if self.receipt_time is not None:
+            return self.receipt_time.astimezone(UTC)
+        return self.obs_time.astimezone(UTC)
 
     @property
     def has_t_group(self) -> bool:
         return bool(_T_GROUP_RE.search(self.raw or ""))
+
+
+def _normalized_raw_report_identity(raw: object) -> str:
+    normalized = " ".join(str(raw or "").split()).upper()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def parse_metar_api_payload(payload: object) -> list[MetarReport]:
@@ -991,6 +1062,321 @@ def parse_noaa_metar_cycle_payload(
         )
         reports[(station, observed, raw)] = report
     return list(reports.values())
+
+
+_KMA_METAR_STAMP_RE = re.compile(r"^(\d{2})(\d{2})(\d{2})Z$")
+_KMA_METAR_TEMP_RE = re.compile(r"^(M?\d{2})/(M?\d{2})$")
+_KMA_METAR_CELL_RE = re.compile(r"<td\b[^>]*>(.*?)</td>", re.IGNORECASE | re.DOTALL)
+_KMA_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _kma_cell_text(fragment: str) -> str:
+    return " ".join(
+        html.unescape(_KMA_HTML_TAG_RE.sub(" ", fragment)).split()
+    )
+
+
+def _kma_observation_time(stamp: str, *, as_of: datetime) -> datetime | None:
+    match = _KMA_METAR_STAMP_RE.fullmatch(stamp)
+    if match is None or as_of.tzinfo is None or as_of.utcoffset() is None:
+        return None
+    day, hour, minute = (int(value) for value in match.groups())
+    if hour > 23 or minute > 59 or day < 1 or day > 31:
+        return None
+    anchor = as_of.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    candidates: list[datetime] = []
+    for month_delta in (-1, 0, 1):
+        month_index = anchor.month - 1 + month_delta
+        year = anchor.year + month_index // 12
+        month = month_index % 12 + 1
+        try:
+            candidate = datetime(year, month, day, hour, minute, tzinfo=UTC)
+        except ValueError:
+            continue
+        candidates.append(candidate)
+    if not candidates:
+        return None
+    selected = min(candidates, key=lambda candidate: abs(candidate - as_of.astimezone(UTC)))
+    return selected if selected <= as_of.astimezone(UTC) else None
+
+
+def _kma_metar_report_from_raw(
+    raw: str,
+    *,
+    station_id: str,
+    as_of: datetime,
+    first_seen_at: datetime,
+) -> MetarReport | None:
+    tokens = raw.split()
+    if not tokens or tokens[0].upper() not in {"METAR", "SPECI"}:
+        return None
+    index = 1
+    is_correction = index < len(tokens) and tokens[index].upper() == "COR"
+    if is_correction:
+        index += 1
+    if index >= len(tokens) or tokens[index].upper() != station_id:
+        return None
+    index += 1
+    stamp_index = next(
+        (i for i, token in enumerate(tokens[index:], start=index)
+         if _KMA_METAR_STAMP_RE.fullmatch(token)),
+        None,
+    )
+    if stamp_index is None:
+        return None
+    observed = _kma_observation_time(tokens[stamp_index], as_of=as_of)
+    if observed is None:
+        return None
+    temp_c: float | None = None
+    for token in tokens[stamp_index + 1:]:
+        temperature = _KMA_METAR_TEMP_RE.fullmatch(token)
+        if temperature is None:
+            continue
+        value = temperature.group(1)
+        temp_c = float(-int(value[1:]) if value.startswith("M") else int(value))
+        break
+    if temp_c is None:
+        return None
+    return MetarReport(
+        station_id=station_id,
+        obs_time=observed,
+        receipt_time=None,
+        temp_c=temp_c,
+        metar_type="COR" if is_correction else "METAR",
+        raw=raw,
+        first_seen_at=first_seen_at,
+        availability_basis=AVAILABILITY_LOCAL_FIRST_SEEN_AFTER_COMPLETE_RESPONSE,
+        transport_id=KMA_METAR_TRANSPORT_ID,
+    )
+
+
+def parse_kma_metar_html(
+    payload: bytes | str,
+    *,
+    station_id: str,
+    as_of: datetime,
+    first_seen_at: datetime,
+) -> list[MetarReport]:
+    """Parse one complete KMA AMO HTML response for exactly one station.
+
+    KMA has no source publication clock for these rows.  Reports therefore use
+    the completion time of the fully-read response as their local availability
+    clock and can never masquerade as a publication-time observation.
+    """
+    station = str(station_id or "").strip().upper()
+    if station not in KMA_PRIORITY_STATIONS:
+        return []
+    if as_of.tzinfo is None or as_of.utcoffset() is None:
+        return []
+    if first_seen_at.tzinfo is None or first_seen_at.utcoffset() is None:
+        return []
+    text = payload.decode("euc-kr", "replace") if isinstance(payload, bytes) else str(payload)
+    candidates: list[MetarReport] = []
+    for fragment in _KMA_METAR_CELL_RE.findall(text):
+        raw = _kma_cell_text(fragment)
+        report = _kma_metar_report_from_raw(
+            raw,
+            station_id=station,
+            as_of=as_of,
+            first_seen_at=first_seen_at,
+        )
+        if report is not None:
+            candidates.append(report)
+    by_time: dict[datetime, list[MetarReport]] = {}
+    for report in candidates:
+        by_time.setdefault(report.obs_time, []).append(report)
+    selected: list[MetarReport] = []
+    for observed, reports in sorted(by_time.items()):
+        corrections = [report for report in reports if report.metar_type == "COR"]
+        values = {report.temp_c for report in corrections}
+        if len(values) > 1:
+            raise KmaObservationConflict(
+                f"conflicting COR observations: {(station, observed)}",
+                station_id=station,
+                obs_time=observed,
+                raw_reports=tuple(report.raw for report in corrections),
+                correction_rank="COR",
+                reports=tuple(corrections),
+            )
+        pool = corrections or reports
+        if len({report.temp_c for report in pool}) > 1:
+            raise KmaObservationConflict(
+                f"conflicting observations: {(station, observed)}",
+                station_id=station,
+                obs_time=observed,
+                raw_reports=tuple(report.raw for report in pool),
+                correction_rank="COR" if corrections else "METAR",
+                reports=tuple(pool),
+            )
+        # Prefer the Q rendering over the duplicate A rendering, then retain
+        # deterministic raw identity for the selected report.
+        selected.append(
+            max(
+                pool,
+                key=lambda report: (
+                    " Q" in f" {report.raw} ",
+                    " A" in f" {report.raw} ",
+                    report.raw,
+                ),
+            )
+        )
+    return selected
+
+
+_KmaFetchResult = tuple[str, list[MetarReport], bool, Any]
+
+
+@dataclass
+class KmaMetarCursor:
+    """Bounded, station-isolated polling of KMA's AMO METAR HTML endpoint."""
+
+    endpoint: str = KMA_AMO_METAR_ENDPOINT
+    max_workers: int = 2
+    min_fetch_interval_s: float = KMA_METAR_MIN_FETCH_INTERVAL_S
+    station_allowlist: frozenset[str] = KMA_PRIORITY_STATIONS
+    _in_flight: dict[str, Future[_KmaFetchResult]] = field(default_factory=dict, init=False)
+    _last_attempt_monotonic: dict[str, float] = field(default_factory=dict, init=False)
+    _last_successful_stations: frozenset[str] = field(
+        default_factory=frozenset,
+        init=False,
+        repr=False,
+    )
+    _executor: ThreadPoolExecutor | None = field(default=None, init=False, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _last_conflicts: dict[str, KmaObservationConflict] = field(default_factory=dict, init=False, repr=False)
+
+    def _fetch(
+        self,
+        *,
+        client: httpx.Client,
+        station: str,
+        as_of: datetime,
+        timeout: float,
+    ) -> _KmaFetchResult:
+        kst = as_of.astimezone(ZoneInfo("Asia/Seoul"))
+        form = {"stnCd": station, "tm": kst.strftime("%Y.%m.%d %H:%M")}
+        try:
+            response = client.post(
+                self.endpoint,
+                data=form,
+                timeout=timeout,
+                headers={"User-Agent": "zeus-day0-kma-fast-obs/1.0"},
+            )
+            if response.status_code != 200:
+                return station, [], False, None
+            body = response.content
+            first_seen_at = datetime.now(UTC)
+            reports = parse_kma_metar_html(
+                body,
+                station_id=station,
+                as_of=first_seen_at,
+                first_seen_at=first_seen_at,
+            )
+            return station, reports, bool(reports), None
+        except KmaObservationConflict as exc:
+            return station, [], False, exc
+        except (httpx.HTTPError, UnicodeError, ValueError, OSError) as exc:
+            logger.warning("KMA_METAR_FETCH_FAILED station=%s exc=%s: %s", station, type(exc).__name__, exc)
+            return station, [], False, None
+
+    def poll(
+        self,
+        *,
+        client: httpx.Client,
+        stations: Iterable[str],
+        as_of: datetime,
+        timeout: float = DEFAULT_METAR_FETCH_TIMEOUT_S,
+        budget_s: float = 0.75,
+    ) -> tuple[list[MetarReport], bool]:
+        selected = tuple(
+            dict.fromkeys(
+                station
+                for raw in stations
+                if (station := str(raw).strip().upper()) in self.station_allowlist
+            )
+        )
+        now = time.monotonic()
+        with self._lock:
+            ready = {
+                station: future
+                for station, future in self._in_flight.items()
+                if future.done()
+            }
+            for station in ready:
+                self._in_flight.pop(station, None)
+            if selected and self._executor is None:
+                self._executor = ThreadPoolExecutor(
+                    max_workers=max(1, int(self.max_workers)),
+                    thread_name_prefix="day0-kma",
+                )
+            for station in selected:
+                if station in self._in_flight:
+                    continue
+                if now - self._last_attempt_monotonic.get(station, float("-inf")) < self.min_fetch_interval_s:
+                    continue
+                assert self._executor is not None
+                self._last_attempt_monotonic[station] = now
+                self._in_flight[station] = self._executor.submit(
+                    self._fetch,
+                    client=client,
+                    station=station,
+                    as_of=as_of,
+                    timeout=timeout,
+                )
+            pending = {future: station for station, future in self._in_flight.items()}
+
+        reports: list[MetarReport] = []
+        source_ok = False
+        successful_stations: set[str] = set()
+        conflicts: dict[str, KmaObservationConflict] = {}
+        for station, future in ready.items():
+            try:
+                result_station, station_reports, station_ok, conflict = future.result()
+            except Exception as exc:  # noqa: BLE001 - isolate one station worker
+                logger.warning("KMA_METAR_WORKER_FAILED station=%s exc=%s: %s", station, type(exc).__name__, exc)
+                continue
+            reports.extend(station_reports)
+            source_ok = source_ok or station_ok
+            if station_ok:
+                successful_stations.add(result_station)
+            if conflict is not None:
+                conflicts[result_station] = conflict
+
+        deadline = time.monotonic() + max(0.0, float(budget_s))
+        while pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            done, _ = wait(pending, timeout=remaining, return_when=FIRST_COMPLETED)
+            if not done:
+                break
+            for future in done:
+                station = pending.pop(future)
+                with self._lock:
+                    if self._in_flight.get(station) is future:
+                        self._in_flight.pop(station, None)
+                try:
+                    _result_station, station_reports, station_ok, conflict = future.result()
+                except Exception as exc:  # noqa: BLE001 - isolate one station worker
+                    logger.warning("KMA_METAR_WORKER_FAILED station=%s exc=%s: %s", station, type(exc).__name__, exc)
+                    continue
+                reports.extend(station_reports)
+                source_ok = source_ok or station_ok
+                if station_ok:
+                    successful_stations.add(station)
+                if conflict is not None:
+                    conflicts[station] = conflict
+        with self._lock:
+            self._last_successful_stations = frozenset(successful_stations)
+            self._last_conflicts = conflicts
+        return reports, source_ok
+
+    def close(self) -> None:
+        with self._lock:
+            executor = self._executor
+            self._executor = None
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
 
 
 @dataclass
@@ -1368,6 +1754,42 @@ class FastObsExtremes:
     skipped_unit_law: int
     held_implausible: int = 0
     sample_times_utc: tuple[datetime, ...] = ()
+    last_available_at: Optional[datetime] = None
+    last_availability_basis: Optional[str] = None
+    last_transport_id: Optional[str] = None
+    last_raw_report: Optional[str] = None
+    last_raw_report_identity: Optional[str] = None
+    last_temp_c: Optional[float] = None
+    kma_report_window: tuple[MetarReport, ...] = ()
+
+
+class KmaObservationConflict(ValueError):
+    """A same-station observation instant has incompatible temperatures."""
+
+    def __init__(self, message: str, *, station_id: str = "", obs_time: datetime | None = None,
+                 raw_reports: tuple[str, ...] = (), correction_rank: str = "",
+                 reports: tuple[MetarReport, ...] = ()) -> None:
+        super().__init__(message)
+        self.station_id = station_id
+        self.obs_time = obs_time
+        self.raw_reports = tuple(raw_reports)
+        self.correction_rank = correction_rank
+        self.reports = tuple(reports)
+
+
+@dataclass(frozen=True)
+class KmaDay0EventState:
+    observed_at: datetime
+    available_at: datetime
+    current_temp_c: float
+    high_native: float
+    low_native: float
+    raw_report: str
+    raw_identity: str
+    corrected: bool
+    margin_units: float
+    event_id: str
+    reports: tuple[MetarReport, ...]
 
 
 @dataclass(frozen=True)
@@ -1491,9 +1913,18 @@ def running_extremes_for_local_day(
     station = str(getattr(city, "wu_station", "") or "").strip().upper()
     target = date.fromisoformat(str(target_date)[:10]) if not isinstance(target_date, date) else target_date
 
+    report_list = list(reports)
+    if any(report.transport_id == KMA_METAR_TRANSPORT_ID for report in report_list):
+        # A correction is an append-only replacement for the same physical
+        # instant. Reduce the mixed NOAA/KMA window before selecting the latest
+        # report metadata; otherwise input ordering could leave a superseded
+        # non-COR temperature as ``current_temp``.
+        report_list = list(_kma_canonicalize_reports(report_list))
     values: list[tuple[datetime, float, Optional[datetime]]] = []
+    report_by_value: dict[tuple[datetime, float, Optional[datetime]], MetarReport] = {}
+    kma_window_candidates: list[MetarReport] = []
     skipped = 0
-    for report in reports:
+    for report in report_list:
         if report.station_id != station:
             continue
         if as_of is not None and report.obs_time > as_of:
@@ -1501,13 +1932,20 @@ def running_extremes_for_local_day(
         if report.obs_time.astimezone(tz).date() != target:
             continue
         value = settlement_temp_for_report(report, unit)
+        if report.transport_id == KMA_METAR_TRANSPORT_ID and value is not None:
+            kma_window_candidates.append(report)
         if value is None:
             if report.temp_c is not None:
                 skipped += 1
             continue
         values.append((report.obs_time, value, report.receipt_time))
+        report_key = (report.obs_time, value, report.receipt_time)
+        previous_report = report_by_value.get(report_key)
+        if previous_report is None or report.available_at < previous_report.available_at:
+            report_by_value[report_key] = report
 
     values.sort(key=lambda item: item[0])
+    kma_window = _kma_canonicalize_reports(kma_window_candidates)
     city_name = str(getattr(city, "name", ""))
     values, held = filter_plausible_values(
         values, unit=unit, city_name=city_name, month=target.month
@@ -1530,19 +1968,46 @@ def running_extremes_for_local_day(
             first_obs_time=None, last_obs_time=None, last_receipt_time=None,
             sample_count=0, skipped_unit_law=skipped,
             held_implausible=held,
+            kma_report_window=kma_window,
         )
     temps = [v for _, v, _ in values]
     receipts = [r for _, _, r in values if r is not None]
+    last_value = values[-1]
+    last_report = report_by_value.get(last_value)
+    contributing_reports = [
+        report for report in report_list
+        if report.station_id == station
+        and (as_of is None or report.obs_time <= as_of)
+        and report.obs_time.astimezone(tz).date() == target
+        and settlement_temp_for_report(report, unit) is not None
+    ]
+    available_reports = [
+        report for report in contributing_reports
+        if report.receipt_time is not None
+        or report.availability_basis == AVAILABILITY_LOCAL_FIRST_SEEN_AFTER_COMPLETE_RESPONSE
+    ]
     return FastObsExtremes(
         city=city_name, station_id=station,
         target_date=target.isoformat(), unit=unit,
         high_so_far=max(temps) - margin_units, low_so_far=min(temps) + margin_units,
         current_temp=temps[-1],
-        first_obs_time=values[0][0], last_obs_time=values[-1][0],
+        first_obs_time=values[0][0],
+        last_obs_time=values[-1][0],
         last_receipt_time=max(receipts) if receipts else None,
         sample_count=len(values), skipped_unit_law=skipped,
         held_implausible=held,
         sample_times_utc=tuple(v[0].astimezone(UTC) for v in values),
+        last_available_at=(
+            max(report.available_at for report in available_reports)
+            if available_reports
+            else None
+        ),
+        last_availability_basis=(last_report.availability_basis if last_report is not None else None),
+        last_transport_id=(last_report.transport_id if last_report is not None else None),
+        last_raw_report=(last_report.raw if last_report is not None else None),
+        last_raw_report_identity=(last_report.raw_report_identity if last_report is not None else None),
+        last_temp_c=(last_report.temp_c if last_report is not None else None),
+        kma_report_window=kma_window,
     )
 
 
@@ -1647,6 +2112,8 @@ def fast_obs_to_day0_observation(
 
     if metric not in {"high", "low"}:
         raise ValueError(f"unsupported Day0 metric: {metric}")
+    if len(extremes.kma_report_window) > 512:
+        raise ValueError("KMA_REPORT_WINDOW_OVERFLOW")
     raw_value = extremes.high_so_far if metric == "high" else extremes.low_so_far
     if raw_value is None or extremes.last_obs_time is None:
         raise ValueError("fast-obs extremes carry no value for metric")
@@ -1661,10 +2128,15 @@ def fast_obs_to_day0_observation(
     # authority is DENIED below (publication_clock MISSING -> the reactor
     # hard-fact gate rejects live use; the value may still serve the monotone
     # kill memo).
-    publication_clock_present = extremes.last_receipt_time is not None
+    availability_basis = (
+        AVAILABILITY_LOCAL_FIRST_SEEN_AFTER_COMPLETE_RESPONSE
+        if extremes.kma_report_window
+        else (extremes.last_availability_basis or AVAILABILITY_SOURCE_PUBLICATION)
+    )
+    availability_clock_present = extremes.last_available_at is not None
     available_at = (
-        extremes.last_receipt_time.astimezone(UTC).isoformat()
-        if publication_clock_present
+        extremes.last_available_at.astimezone(UTC).isoformat()
+        if availability_clock_present
         else observation_time
     )
     expected_station = str(getattr(city, "wu_station", "") or "").strip().upper()
@@ -1706,7 +2178,7 @@ def fast_obs_to_day0_observation(
             source_authorized == "AUTHORIZED"
             and local_date_status == "MATCH"
             and dst_status == "UNAMBIGUOUS"
-            and publication_clock_present
+            and availability_clock_present
         )
         else "blocked"
     )
@@ -1718,6 +2190,28 @@ def fast_obs_to_day0_observation(
         "station_id": extremes.station_id,
         "observation_time": observation_time,
         "observation_available_at": available_at,
+        "observation_availability_basis": availability_basis,
+        "observation_transport": (
+            KMA_METAR_TRANSPORT_ID
+            if extremes.kma_report_window
+            else extremes.last_transport_id
+        ),
+        "raw_report_identity": extremes.last_raw_report_identity,
+        "current_observation_temp_c": extremes.last_temp_c,
+        "current_observation_raw_report": extremes.last_raw_report,
+        "kma_report_window": (
+            [
+                {
+                    "raw_report": report.raw,
+                    "raw_report_identity": report.raw_report_identity,
+                    "first_seen_at": report.first_seen_at.astimezone(UTC).isoformat(),
+                }
+                for report in extremes.kma_report_window
+                if report.first_seen_at is not None
+            ]
+            if extremes.kma_report_window
+            else None
+        ),
         "raw_value": float(raw_value),
         "high_so_far": extremes.high_so_far,
         "low_so_far": extremes.low_so_far,
@@ -1782,6 +2276,80 @@ def read_noaa_fast_obs_context_from_ledger(
     except (TypeError, ValueError):
         return None
     decision_utc = decision_time.astimezone(UTC)
+    if station in KMA_PRIORITY_STATIONS:
+        try:
+            state = _latest_kma_day0_event_state(
+                world_conn,
+                city=city,
+                target_date=target_day.isoformat(),
+                decision_time=decision_utc,
+                metric=None,
+            )
+        except KmaObservationConflict:
+            raise
+        if state is not None:
+            from src.data.observation_client import (
+                Day0ObservationContext,
+                _coverage_status_from_sample_times,
+            )
+
+            reports = tuple(state.reports)
+            unit = str(getattr(city, "settlement_unit", "C") or "C").upper()
+            valid_reports = tuple(
+                report for report in reports
+                if settlement_temp_for_report(report, unit) is not None
+            )
+            if not valid_reports:
+                return None
+            values = tuple(
+                settlement_temp_for_report(report, unit)
+                for report in valid_reports
+            )
+            assert all(value is not None for value in values)
+            first_obs = min(report.obs_time for report in valid_reports)
+            last_obs = state.observed_at.astimezone(UTC)
+            first_local = first_obs.astimezone(tz)
+            coverage_status, max_gap_minutes, gap_suspect_metrics, sample_times = (
+                _coverage_status_from_sample_times(
+                    first_local=first_local,
+                    n_samples=len(valid_reports),
+                    sample_times_utc=tuple(report.obs_time for report in valid_reports),
+                    target_day=target_day,
+                    timezone_name=timezone_name,
+                    reference_utc=decision_utc,
+                )
+            )
+            if unit == "F":
+                high = state.high_native * 9.0 / 5.0 + 32.0 - float(source.margin_units)
+                low = state.low_native * 9.0 / 5.0 + 32.0 + float(source.margin_units)
+                current = state.current_temp_c * 9.0 / 5.0 + 32.0
+            else:
+                high = state.high_native - float(source.margin_units)
+                low = state.low_native + float(source.margin_units)
+                current = state.current_temp_c
+            return Day0ObservationContext(
+                current_temp=float(current),
+                high_so_far=float(high),
+                low_so_far=float(low),
+                source=FAST_OBS_SOURCE_ID,
+                observation_time=last_obs.isoformat(),
+                unit=unit,
+                station_id=station,
+                sample_count=len(valid_reports),
+                first_sample_time=first_obs.isoformat(),
+                last_sample_time=last_obs.isoformat(),
+                coverage_status=coverage_status,
+                observation_available_at=state.available_at.astimezone(UTC).isoformat(),
+                provider_reported_time="typed_causal_availability",
+                source_role="runtime_monitoring",
+                source_authority=source.authority,
+                data_version="same_station_metar_canonical_window_v1",
+                training_allowed=False,
+                raw_payload_hash=state.raw_identity,
+                max_gap_minutes=max_gap_minutes,
+                gap_suspect_metrics=gap_suspect_metrics,
+                sample_times_utc=tuple(instant.isoformat() for instant in sample_times),
+            )
     day_start = datetime.combine(
         target_day,
         datetime.min.time(),
@@ -1964,10 +2532,14 @@ class FastObsPrefetch:
     # HTTP-phase authority is station-scoped: a fresh priority station may not
     # authorize an unrelated station retained in the global cache.
     station_statuses: tuple[tuple[str, str, Optional[float]], ...] = ()
+    # KMA has no publication-ledger row. These reports are a bounded event
+    # delta supplied directly to the emitter after complete response parsing.
+    event_reports: tuple[MetarReport, ...] = ()
+    kma_conflicts: tuple[tuple[str, KmaObservationConflict], ...] = ()
 
 
 def _report_publication_key(report: MetarReport) -> tuple[str, str, float] | None:
-    if report.temp_c is None:
+    if report.temp_c is None or report.transport_id == KMA_METAR_TRANSPORT_ID:
         return None
     publish_ts = report.receipt_time or report.obs_time
     return (
@@ -1992,15 +2564,18 @@ def _merge_report_windows(
     fetched: list[MetarReport],
 ) -> list[MetarReport]:
     """Merge reports, retaining the earliest publication of each observation."""
-    by_observation: dict[tuple[str, str, float | None], MetarReport] = {}
+    by_observation: dict[tuple[str, str, float | None, str], MetarReport] = {}
     for report in (*cached, *fetched):
-        key = _report_observation_key(report)
+        # Keep correction rank distinct until canonicalization.  Collapsing a
+        # same-temperature COR into an earlier non-COR here would erase the
+        # revision identity before _kma_canonicalize_reports can prefer COR.
+        key = (*_report_observation_key(report), str(report.metar_type or "").upper())
         previous = by_observation.get(key)
-        report_published = report.receipt_time or report.obs_time
+        report_published = report.available_at
         if previous is None:
             by_observation[key] = report
             continue
-        previous_published = previous.receipt_time or previous.obs_time
+        previous_published = previous.available_at
         if report_published < previous_published:
             by_observation[key] = report
     reports = list(by_observation.values())
@@ -2019,6 +2594,307 @@ def _merge_report_windows(
         )
     )
     return reports
+
+
+def _kma_canonicalize_reports(reports: Iterable[MetarReport]) -> tuple[MetarReport, ...]:
+    grouped: dict[tuple[str, datetime], list[MetarReport]] = {}
+    for report in reports:
+        grouped.setdefault((report.station_id, report.obs_time), []).append(report)
+    canonical: list[MetarReport] = []
+    for key, candidates in sorted(grouped.items()):
+        corrections = [report for report in candidates if report.metar_type == "COR"]
+        pool = corrections or candidates
+        if len({report.temp_c for report in corrections}) > 1:
+            raise KmaObservationConflict(
+                f"conflicting COR observations: {key}",
+                station_id=key[0], obs_time=key[1],
+                raw_reports=tuple(report.raw for report in corrections),
+                correction_rank="COR",
+                reports=tuple(corrections),
+            )
+        if len({report.temp_c for report in pool}) > 1:
+            raise KmaObservationConflict(
+                f"conflicting observations: {key}",
+                station_id=key[0], obs_time=key[1],
+                raw_reports=tuple(report.raw for report in pool),
+                correction_rank="COR" if corrections else "METAR",
+                reports=tuple(pool),
+            )
+        canonical.append(min(pool, key=lambda report: report.available_at))
+    return tuple(canonical)
+
+
+def _latest_kma_day0_event_state(
+    world_conn: Any,
+    *,
+    city: Any,
+    target_date: str,
+    decision_time: datetime,
+    metric: str | None = "high",
+) -> KmaDay0EventState | None:
+    """Rebuild one KMA event from its complete raw window and station ledger.
+
+    The event window is the KMA transport's causal frontier.  Same-station
+    NOAA/AWC and Ogimet publication rows are admitted only as raw corroborating
+    reports; they never replace the KMA window or turn local first-seen into a
+    source publication clock.
+    """
+    if metric not in {"high", "low", None} or decision_time.tzinfo is None:
+        return None
+    city_name = str(getattr(city, "name", "") or "").strip()
+    source = fast_obs_source_for_city(city, target_date=target_date)
+    station = str(getattr(source, "station_id", "") or "").strip().upper()
+    target = str(target_date)[:10]
+    if not city_name or station not in KMA_PRIORITY_STATIONS:
+        return None
+    try:
+        event_table = "main.opportunity_events"
+        try:
+            world_conn.execute("SELECT 1 FROM world.opportunity_events LIMIT 1").fetchone()
+            event_table = "world.opportunity_events"
+        except sqlite3.DatabaseError:
+            pass
+        metric_clause = (
+            "AND json_extract(payload_json, '$.metric') = ?"
+            if metric is not None
+            else "AND json_extract(payload_json, '$.metric') IN ('high', 'low')"
+        )
+        metric_params = (metric,) if metric is not None else ()
+        row = world_conn.execute(
+            f"""
+            SELECT event_id, observed_at, available_at, received_at, payload_json
+              FROM {event_table}
+             WHERE event_type = 'DAY0_EXTREME_UPDATED'
+               AND json_extract(payload_json, '$.city') = ?
+               AND json_extract(payload_json, '$.target_date') = ?
+               {metric_clause}
+               AND json_extract(payload_json, '$.observation_transport') = ?
+               AND datetime(available_at) <= datetime(?)
+               AND datetime(received_at) <= datetime(?)
+             ORDER BY datetime(available_at) DESC, datetime(received_at) DESC,
+                      event_id DESC
+             LIMIT 1
+            """,
+            (city_name, target, *metric_params, KMA_METAR_TRANSPORT_ID,
+             decision_time.astimezone(UTC).isoformat(),
+             decision_time.astimezone(UTC).isoformat()),
+        ).fetchone()
+    except Exception:
+        return None
+    if row is None:
+        return None
+    try:
+        payload = json.loads(str(row[4]))
+        observed_at = datetime.fromisoformat(str(row[1]).replace("Z", "+00:00"))
+        available_at = datetime.fromisoformat(str(row[2]).replace("Z", "+00:00"))
+        received_at = datetime.fromisoformat(str(row[3]).replace("Z", "+00:00"))
+        if any(value.tzinfo is None for value in (observed_at, available_at, received_at)):
+            return None
+        decision = decision_time.astimezone(UTC)
+        if available_at.astimezone(UTC) > decision or received_at.astimezone(UTC) > decision:
+            return None
+        payload_available_raw = payload.get("observation_available_at")
+        if payload_available_raw is None:
+            return None
+        payload_available = datetime.fromisoformat(
+            str(payload_available_raw).replace("Z", "+00:00")
+        )
+        if (
+            payload_available.tzinfo is None
+            or payload_available.astimezone(UTC) != available_at.astimezone(UTC)
+        ):
+            return None
+        payload_conflict = payload.get("observation_conflict")
+        if payload_conflict is None and (
+            payload.get("city") != city_name
+            or str(payload.get("target_date") or "")[:10] != target
+            or payload.get("station_id") != station
+            or payload.get("metric") not in {"high", "low"}
+            or (metric is not None and payload.get("metric") != metric)
+            or payload.get("observation_availability_basis")
+            != AVAILABILITY_LOCAL_FIRST_SEEN_AFTER_COMPLETE_RESPONSE
+            or payload.get("observation_transport") != KMA_METAR_TRANSPORT_ID
+            or payload.get("source_authorized_status") != "AUTHORIZED"
+            or payload.get("live_authority_status") != "live"
+            or payload.get("local_date_status") != "MATCH"
+            or payload.get("station_match_status") != "MATCH"
+            or payload.get("dst_status") != "UNAMBIGUOUS"
+        ):
+            return None
+        window = payload.get("kma_report_window")
+        if not isinstance(window, list) or not window or len(window) > 512:
+            raise ValueError("KMA_REPORT_WINDOW_INVALID")
+        kma_reports: list[MetarReport] = []
+        for item in window:
+            if not isinstance(item, dict) or set(item) != {
+                "raw_report", "raw_report_identity", "first_seen_at"
+            }:
+                raise ValueError("KMA_REPORT_WINDOW_ITEM_INVALID")
+            raw = str(item["raw_report"] or "")
+            identity = str(item["raw_report_identity"] or "")
+            if not raw or identity != _normalized_raw_report_identity(raw):
+                raise ValueError("KMA_REPORT_WINDOW_RAW_IDENTITY_INVALID")
+            first_seen = datetime.fromisoformat(
+                str(item["first_seen_at"]).replace("Z", "+00:00")
+            )
+            if first_seen.tzinfo is None or first_seen.astimezone(UTC) > decision:
+                raise ValueError("KMA_REPORT_WINDOW_FIRST_SEEN_INVALID")
+            if first_seen.astimezone(UTC) > available_at.astimezone(UTC):
+                raise ValueError("KMA_REPORT_WINDOW_FIRST_SEEN_AFTER_EVENT")
+            parsed = parse_kma_metar_html(
+                f"<td>{html.escape(raw)}</td>",
+                station_id=station,
+                as_of=decision,
+                first_seen_at=first_seen,
+            )
+            if len(parsed) != 1:
+                raise ValueError("KMA_REPORT_WINDOW_RAW_INVALID")
+            kma_reports.extend(parsed)
+        if isinstance(payload_conflict, dict):
+            raise KmaObservationConflict(
+                "durable KMA observation conflict",
+                station_id=str(payload_conflict.get("station_id") or station),
+                obs_time=observed_at.astimezone(UTC),
+                raw_reports=tuple(report.raw for report in kma_reports),
+                correction_rank=str(payload_conflict.get("correction_rank") or ""),
+                reports=tuple(kma_reports),
+            )
+        day = date.fromisoformat(target)
+        tz = ZoneInfo(str(getattr(city, "timezone", "UTC")))
+        day_start = datetime.combine(day, datetime.min.time(), tzinfo=tz).astimezone(UTC)
+        day_end = datetime.combine(day + timedelta(days=1), datetime.min.time(), tzinfo=tz).astimezone(UTC)
+        observation_table = "world.observation_prints"
+        try:
+            world_conn.execute(f"SELECT 1 FROM {observation_table} LIMIT 1").fetchone()
+        except sqlite3.DatabaseError:
+            observation_table = "observation_prints"
+        ledger_reports: list[MetarReport] = []
+        ogimet_channel = f"ogimet_metar_{station.lower()}"
+        # Keep the publication channel in the typed report so same-station
+        # Ogimet rows participate in COR precedence without entering the KMA
+        # publication path.
+        try:
+            channel_rows = world_conn.execute(
+                f"""
+                SELECT publish_ts_utc, value_native, unit, station_id,
+                       source_channel, raw_report, fetched_at_utc
+                  FROM {observation_table}
+                 WHERE city = ? AND station_id = ?
+                   AND source_channel IN (?, ?)
+                   AND publish_ts_utc >= ? AND publish_ts_utc < ?
+                   AND publish_ts_utc <= ?
+                   AND julianday(fetched_at_utc) <= julianday(?)
+                """,
+                (
+                    city_name, station, FAST_OBS_SOURCE_ID, ogimet_channel,
+                    day_start.isoformat(), day_end.isoformat(),
+                    decision.isoformat(), decision.isoformat(),
+                ),
+            ).fetchall()
+        except Exception:
+            channel_rows = ()
+        if channel_rows:
+            ledger_reports = []
+            for published_raw, value_raw, unit_raw, station_raw, channel, raw_report, fetched_raw in channel_rows:
+                if str(station_raw or "").strip().upper() != station:
+                    continue
+                try:
+                    published = datetime.fromisoformat(str(published_raw).replace("Z", "+00:00"))
+                    fetched = datetime.fromisoformat(str(fetched_raw).replace("Z", "+00:00"))
+                    if published.tzinfo is None or fetched.tzinfo is None:
+                        continue
+                    published = published.astimezone(UTC)
+                    fetched = fetched.astimezone(UTC)
+                    if published > decision or fetched > decision:
+                        continue
+                    raw_text = str(raw_report or "")
+                    observed = metar_observation_time_from_raw(raw_text, published_at=published)
+                    if observed is None or observed.astimezone(tz).date() != day:
+                        continue
+                    parsed_temp = metar_temperature_c(raw_text)
+                    if parsed_temp is None:
+                        value = float(value_raw)
+                        if str(unit_raw or "").strip().upper() == "F":
+                            value = (value - 32.0) * 5.0 / 9.0
+                    else:
+                        value = float(parsed_temp)
+                    ledger_reports.append(
+                        MetarReport(
+                            station_id=station,
+                            obs_time=observed.astimezone(UTC),
+                            receipt_time=published,
+                            temp_c=value,
+                            metar_type=(
+                                "COR" if re.search(r"\b(?:METAR|SPECI)\s+COR\b", raw_text, re.I)
+                                else "METAR"
+                            ),
+                            raw=raw_text,
+                            transport_id=str(channel or "").strip() or "noaa_ledger",
+                        )
+                    )
+                except (TypeError, ValueError, OSError, OverflowError):
+                    continue
+        canonical_kma = _kma_canonicalize_reports(
+            [report for report in kma_reports if report.obs_time.astimezone(tz).date() == day]
+        )
+        target_kma_reports = tuple(
+            report for report in kma_reports
+            if report.obs_time.astimezone(tz).date() == day
+        )
+        reports = _kma_canonicalize_reports((*ledger_reports, *target_kma_reports))
+        if not reports:
+            return None
+        extremes = running_extremes_for_local_day(
+            reports, city=city, target_date=target, as_of=decision, margin_units=0.0
+        )
+        if (
+            extremes.sample_count <= 0
+            or extremes.current_temp is None
+            or extremes.high_so_far is None
+            or extremes.low_so_far is None
+        ):
+            return None
+        if not canonical_kma:
+            return None
+        current_raw = str(payload.get("current_observation_raw_report") or "")
+        current_identity = str(payload.get("raw_report_identity") or "")
+        latest = max(
+            reports,
+            key=lambda report: (report.obs_time, -report.available_at.timestamp()),
+        )
+        if (
+            current_identity != latest.raw_report_identity
+            or current_raw != latest.raw
+            or float(payload.get("current_observation_temp_c")) != float(latest.temp_c)
+        ):
+            return None
+        margin = float(getattr(source, "margin_units", 0.0) or 0.0)
+        payload_margin = float(payload.get("metar_margin_units_applied") or 0.0)
+        if payload_margin != margin:
+            return None
+        high_native = float(extremes.high_so_far)
+        low_native = float(extremes.low_so_far)
+        if not math.isfinite(high_native) or not math.isfinite(low_native) or margin < 0.0:
+            return None
+        return KmaDay0EventState(
+            observed_at=latest.obs_time,
+            available_at=max(
+                [available_at.astimezone(UTC), *(report.available_at for report in reports)]
+            ),
+            current_temp_c=float(latest.temp_c),
+            high_native=high_native,
+            low_native=low_native,
+            raw_report=latest.raw,
+            raw_identity=latest.raw_report_identity,
+            corrected=latest.metar_type == "COR",
+            margin_units=margin,
+            event_id=str(row[0]),
+            reports=reports,
+        )
+    except KmaObservationConflict:
+        raise
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError, OSError):
+        return None
 
 
 def _append_metar_prints_to_ledger(
@@ -2152,6 +3028,8 @@ class Day0FastObsEmitter:
         init=False,
         repr=False,
     )
+    _kma_cursor: KmaMetarCursor = field(default_factory=KmaMetarCursor, init=False)
+    _kma_http_client: httpx.Client | None = field(default=None, init=False, repr=False)
     _global_fetch_executor: ThreadPoolExecutor | None = field(
         default=None,
         init=False,
@@ -2203,6 +3081,8 @@ class Day0FastObsEmitter:
         init=False,
     )
     _last_fetch_had_source_failure: bool = field(default=False, init=False)
+    _last_event_reports: tuple[MetarReport, ...] = field(default=(), init=False)
+    _last_kma_conflicts: dict[str, KmaObservationConflict] = field(default_factory=dict, init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
 
     def _station_statuses(
@@ -2267,14 +3147,20 @@ class Day0FastObsEmitter:
             self._global_fetch_future = None
             clients = tuple(
                 client
-                for client in (self._http_client, self._priority_http_client)
+                for client in (
+                    self._http_client,
+                    self._priority_http_client,
+                    self._kma_http_client,
+                )
                 if client is not None
             )
             self._http_client = None
             self._priority_http_client = None
+            self._kma_http_client = None
         if executor is not None:
             executor.shutdown(wait=True, cancel_futures=True)
         self._station_cursor.close()
+        self._kma_cursor.close()
         seen_client_ids: set[int] = set()
         for client in clients:
             if id(client) in seen_client_ids:
@@ -2907,6 +3793,7 @@ class Day0FastObsEmitter:
         with self._lock:
             cache_age = (now - self._cache_fetched_monotonic) if self._cached_reports else None
             if (now - self._last_attempt_monotonic) < self.min_fetch_interval_s:
+                self._last_event_reports = ()
                 self._last_fetch_fresh_stations = frozenset()
                 if self._cached_reports:
                     status = (
@@ -2929,6 +3816,7 @@ class Day0FastObsEmitter:
                 if (now - self._last_backfill_monotonic) >= METAR_BACKFILL_INTERVAL_S:
                     fetch_hours = max(fetch_hours, METAR_BACKFILL_FETCH_HOURS)
         reports: list[MetarReport] = []
+        kma_reports: list[MetarReport] = []
         source_ok = False
         history_loaded = False
         fresh_stations: set[str] = set()
@@ -2955,6 +3843,32 @@ class Day0FastObsEmitter:
                     if (station := str(raw).strip().upper())
                 )
             )
+            kma_station_ids = tuple(
+                station for station in priority_station_ids
+                if station in KMA_PRIORITY_STATIONS
+            )
+            kma_client = None
+            if kma_station_ids:
+                with self._lock:
+                    if self._kma_http_client is None:
+                        self._kma_http_client = httpx.Client(
+                            limits=httpx.Limits(
+                                max_keepalive_connections=2,
+                                max_connections=2,
+                                keepalive_expiry=60.0,
+                            )
+                        )
+                    kma_client = self._kma_http_client
+                # Launch the independent KMA worker before the bounded NOAA
+                # station request. A zero wait keeps KMA off the NOAA critical
+                # path; the second zero-wait poll below drains any response
+                # that completed during the NOAA phase.
+                self._kma_cursor.poll(
+                    client=kma_client,
+                    stations=kma_station_ids,
+                    as_of=datetime.now(UTC),
+                    budget_s=0.0,
+                )
             priority_reports, priority_ok = self._station_cursor.poll(
                 client=priority_client,
                 stations=priority_station_ids,
@@ -2969,6 +3883,24 @@ class Day0FastObsEmitter:
                     frozenset(priority_station_ids),
                 )
                 fresh_stations.update(exact_priority_success)
+            if kma_station_ids and kma_client is not None:
+                kma_reports, kma_ok = self._kma_cursor.poll(
+                    client=kma_client,
+                    stations=kma_station_ids,
+                    as_of=datetime.now(UTC),
+                    budget_s=0.0,
+                )
+                reports.extend(kma_reports)
+                source_ok = source_ok or kma_ok
+                if kma_ok:
+                    fresh_stations.update(
+                        set(getattr(self._kma_cursor, "_last_successful_stations", frozenset()))
+                        & set(kma_station_ids)
+                    )
+                with self._lock:
+                    self._last_kma_conflicts = dict(
+                        getattr(self._kma_cursor, "_last_conflicts", {})
+                    )
             if priority_station_ids:
                 global_result = self._poll_global_sources_in_background(
                     client=client,
@@ -3051,6 +3983,29 @@ class Day0FastObsEmitter:
                     if base and all(report in base_set for report in reports)
                     else _merge_report_windows(base, reports)
                 )
+                if kma_reports:
+                    grouped: dict[tuple[str, datetime], list[MetarReport]] = {}
+                    for report in merged:
+                        grouped.setdefault((report.station_id, report.obs_time), []).append(report)
+                    canonical: list[MetarReport] = []
+                    for group in grouped.values():
+                        if any(report.transport_id == KMA_METAR_TRANSPORT_ID for report in group):
+                            canonical.extend(_kma_canonicalize_reports(group))
+                        else:
+                            canonical.extend(group)
+                    merged = sorted(
+                        canonical,
+                        key=lambda report: (report.obs_time, report.station_id, report.available_at),
+                    )
+                event_delta: list[MetarReport] = []
+                for report in kma_reports:
+                    prior = [
+                        old for old in previous.values()
+                        if old.station_id == report.station_id and old.obs_time == report.obs_time
+                    ]
+                    if not prior or all(old != report for old in prior):
+                        event_delta.append(report)
+                self._last_event_reports = tuple(event_delta)
                 for report in merged:
                     old = previous.get(_report_observation_key(report))
                     if old == report:
@@ -3068,6 +4023,8 @@ class Day0FastObsEmitter:
             cache_age = (
                 (time.monotonic() - self._cache_fetched_monotonic) if self._cached_reports else None
             )
+            self._last_event_reports = ()
+            self._last_kma_conflicts = {}
             if self._cached_reports and source_ok:
                 return list(self._cached_reports), FETCH_CACHE_HIT, cache_age
             if self._cached_reports:
@@ -3545,6 +4502,8 @@ class Day0FastObsEmitter:
                 tuple(anomaly_actions),
                 ledger_reports,
                 station_statuses,
+                self._last_event_reports,
+                tuple(self._last_kma_conflicts.items()),
             )
         return FastObsPrefetch(
             tuple(eligible),
@@ -3555,6 +4514,8 @@ class Day0FastObsEmitter:
             (),
             ledger_reports,
             station_statuses,
+            self._last_event_reports,
+            tuple(self._last_kma_conflicts.items()),
         )
 
     def emit_prefetched(
@@ -3588,6 +4549,78 @@ class Day0FastObsEmitter:
         from src.signal.day0_obs_latency import staleness_budget_minutes
         from src.data.day0_oracle_anomaly import apply_day0_oracle_anomaly_action
 
+        def _emit_conflicts() -> int:
+            if not getattr(prefetch, "kma_conflicts", ()):
+                return 0
+            from src.events.opportunity_event import (
+                Day0ExtremeUpdatedPayload,
+                make_day0_extreme_updated_event,
+            )
+            writer = EventWriter(world_conn)
+            emitted_conflicts = 0
+            eligible_by_station = {
+                str(source.station_id).strip().upper(): (city, target_date)
+                for city, source, target_date in prefetch.eligible
+            }
+            for station, conflict in prefetch.kma_conflicts:
+                city_target = eligible_by_station.get(str(station).upper())
+                if city_target is None or conflict.obs_time is None:
+                    continue
+                city, target_date = city_target
+                reports = tuple(conflict.reports)
+                if not reports:
+                    continue
+                frontier = max(report.available_at for report in reports)
+                decision = prefetch.decision_time.astimezone(UTC)
+                if frontier > decision:
+                    continue
+                window = [
+                    {
+                        "raw_report": report.raw,
+                        "raw_report_identity": report.raw_report_identity,
+                        "first_seen_at": report.available_at.isoformat(),
+                    }
+                    for report in reports
+                ]
+                conflict_payload = {
+                    "station_id": str(station).upper(),
+                    "obs_time": conflict.obs_time.astimezone(UTC).isoformat(),
+                    "correction_rank": conflict.correction_rank,
+                    "raw_report_identities": [report.raw_report_identity for report in reports],
+                }
+                for metric in ("high", "low"):
+                    payload = Day0ExtremeUpdatedPayload(
+                        city=str(getattr(city, "name", "")),
+                        target_date=str(target_date), metric=metric,
+                        settlement_source=FAST_OBS_SOURCE_ID,
+                        station_id=str(station).upper(),
+                        observation_time=conflict.obs_time.astimezone(UTC).isoformat(),
+                        observation_available_at=frontier.isoformat(),
+                        raw_value=None, rounded_value=None, high_so_far=None, low_so_far=None,
+                        settlement_source_type=str(
+                            getattr(city, "settlement_source_type", "noaa") or "noaa"
+                        ),
+                        source_match_status="UNKNOWN", local_date_status="UNKNOWN",
+                        station_match_status="UNKNOWN", dst_status="UNKNOWN",
+                        metric_match_status="UNKNOWN", rounding_status="UNKNOWN",
+                        source_authorized_status="UNAUTHORIZED", live_authority_status="blocked",
+                        observation_availability_basis=AVAILABILITY_LOCAL_FIRST_SEEN_AFTER_COMPLETE_RESPONSE,
+                        observation_transport=KMA_METAR_TRANSPORT_ID,
+                        kma_report_window=window,
+                        observation_conflict=conflict_payload,
+                    )
+                    event = make_day0_extreme_updated_event(
+                        entity_key=f"{city.name}|{target_date}|{metric}|{station}|conflict|{conflict.obs_time.isoformat()}",
+                        source="day0_kma_conflict",
+                        observed_at=conflict.obs_time.astimezone(UTC).isoformat(),
+                        received_at=received_at,
+                        payload=payload,
+                    )
+                    result = writer.write(event)
+                    if result.inserted:
+                        emitted_conflicts += 1
+            return emitted_conflicts
+
         for action in getattr(prefetch, "anomaly_actions", ()) or ():
             try:
                 apply_day0_oracle_anomaly_action(action, conn=world_conn)
@@ -3596,6 +4629,11 @@ class Day0FastObsEmitter:
                     "DAY0_ORACLE_ANOMALY_EMIT_ACTION_FAILED action=%r exc=%s: %s",
                     action, type(exc).__name__, exc,
                 )
+        conflict_emitted = _emit_conflicts()
+        conflicted_stations = {
+            str(station).strip().upper()
+            for station, _conflict in getattr(prefetch, "kma_conflicts", ())
+        }
         if prefetch.eligible:
             # day0 defect-ledger (2026-07-16): cold-start restart-proofing —
             # runs even when this cycle's own fetch produced nothing
@@ -3603,7 +4641,7 @@ class Day0FastObsEmitter:
             # exists for. No-ops instantly once the cache is warm.
             self.hydrate_from_ledger(world_conn, prefetch.eligible)
         if not prefetch.eligible or not prefetch.reports:
-            return 0
+            return conflict_emitted
         if persist_ledger and not self.persist_prefetched_ledger(
             world_conn=world_conn,
             prefetch=prefetch,
@@ -3613,7 +4651,118 @@ class Day0FastObsEmitter:
             )
         reports = list(prefetch.reports)
         decision_time = prefetch.decision_time
-        emission_eligible = prefetch.eligible
+        fresh_station_statuses = {
+            str(station).strip().upper(): status
+            for station, status, _age in prefetch.station_statuses
+        }
+        fresh_kma_reports: dict[str, tuple[MetarReport, ...]] = {}
+        fresh_kma_event_deltas: dict[str, tuple[MetarReport, ...]] = {}
+        for city, source, target_date in prefetch.eligible:
+            station = str(source.station_id).strip().upper()
+            if station not in KMA_PRIORITY_STATIONS:
+                continue
+            try:
+                target_day = date.fromisoformat(str(target_date)[:10])
+                timezone_name = str(getattr(city, "timezone", "") or "")
+                local_timezone = ZoneInfo(timezone_name)
+            except (TypeError, ValueError, ZoneInfoNotFoundError):
+                continue
+            if fresh_station_statuses.get(station) != FETCH_FRESH:
+                continue
+            event_delta = tuple(
+                report
+                for report in prefetch.event_reports
+                if (
+                    report.transport_id == KMA_METAR_TRANSPORT_ID
+                    and report.station_id == station
+                    and report.obs_time.astimezone(local_timezone).date() == target_day
+                    and report.available_at <= decision_time.astimezone(UTC)
+                )
+            )
+            if not event_delta:
+                continue
+            fresh_kma_event_deltas[station] = event_delta
+            window = tuple(
+                report
+                for report in prefetch.reports
+                if (
+                    report.transport_id == KMA_METAR_TRANSPORT_ID
+                    and report.station_id == station
+                    and report.obs_time.astimezone(local_timezone).date() == target_day
+                    and report.available_at <= decision_time.astimezone(UTC)
+                )
+            )
+            if not window:
+                continue
+            # The fresh station status plus a current event delta prove this
+            # came from KMA's successful complete-response parser. Rebuild
+            # the full current raw window, not merely its changed delta.
+            try:
+                fresh_kma_reports[station] = _kma_canonicalize_reports(window)
+            except KmaObservationConflict as conflict:
+                continue
+        # A restarted emitter has no in-memory KMA window.  Hydrate the
+        # previously committed raw reports before reducing the new fetch so a
+        # same-observation correction retains its earliest first-seen clock
+        # and the complete canonical window remains reproducible.
+        historically_conflicted_stations: set[str] = set()
+        for city, source, target_date in prefetch.eligible:
+            station = str(source.station_id).strip().upper()
+            if station in conflicted_stations:
+                continue
+            if station not in KMA_PRIORITY_STATIONS:
+                continue
+            try:
+                state = _latest_kma_day0_event_state(
+                    world_conn,
+                    city=city,
+                    target_date=target_date,
+                    decision_time=decision_time,
+                    metric=None,
+                )
+            except KmaObservationConflict as conflict:
+                # A durable conflict remains blocking unless this very poll
+                # supplied a complete, successful raw KMA window for the same
+                # station. That new window can resolve a prior conflict (for
+                # example through COR), while an empty/partial/failed poll
+                # must never make historical conflict evidence disappear.
+                window = fresh_kma_reports.get(station)
+                if not window or conflict.obs_time is None:
+                    historically_conflicted_stations.add(station)
+                    continue
+                revisions = tuple(
+                    report for report in fresh_kma_event_deltas[station]
+                    if report.obs_time == conflict.obs_time
+                )
+                if not revisions:
+                    historically_conflicted_stations.add(station)
+                    continue
+                if (
+                    str(conflict.correction_rank).upper() == "COR"
+                    and not any(
+                        str(report.metar_type).upper() == "COR"
+                        for report in revisions
+                    )
+                ):
+                    historically_conflicted_stations.add(station)
+                    continue
+                reports = _merge_report_windows(window, reports)
+                continue
+            if state is None:
+                continue
+            reports = _merge_report_windows(
+                [
+                    report for report in state.reports
+                    if report.transport_id == KMA_METAR_TRANSPORT_ID
+                ],
+                reports,
+            )
+        blocked_kma_stations = conflicted_stations | historically_conflicted_stations
+        emission_eligible = tuple(
+            item for item in prefetch.eligible
+            if str(item[1].station_id).strip().upper()
+            not in blocked_kma_stations
+        )
         station_statuses = {
             station: (status, age)
             for station, status, age in prefetch.station_statuses
@@ -3634,6 +4783,10 @@ class Day0FastObsEmitter:
                 str(report.station_id).strip().upper()
                 for report in prefetch.ledger_reports
             }
+            changed_stations.update(
+                str(report.station_id).strip().upper()
+                for report in prefetch.event_reports
+            )
             with self._lock:
                 pending_live_families = {
                     (city, target_date)
@@ -3646,7 +4799,9 @@ class Day0FastObsEmitter:
             emission_eligible = tuple(
                 item
                 for item in prefetch.eligible
-                if (
+                if str(item[1].station_id).strip().upper()
+                not in blocked_kma_stations
+                and (
                     str(item[1].station_id).strip().upper() in changed_stations
                     or (str(getattr(item[0], "name", "")), item[2])
                     in pending_live_families
@@ -3664,6 +4819,12 @@ class Day0FastObsEmitter:
             family_admission=family_admission,
         )
         pending_memo_updates: dict[_MemoKey, _MemoUpdate] = {}
+        kma_revision_keys = {
+            (report.station_id, report.obs_time)
+            for report in prefetch.event_reports
+            if report.transport_id == KMA_METAR_TRANSPORT_ID
+            and report.metar_type == "COR"
+        }
 
         def _memo_values(key: _MemoKey) -> _MemoUpdate:
             with self._lock:
@@ -3697,7 +4858,7 @@ class Day0FastObsEmitter:
                 observation_time or pending_observation_time,
             )
 
-        emitted = 0
+        emitted = conflict_emitted
         attempted_stations: set[str] = set()
         failed_stations: set[str] = set()
         eligible_stations = {
@@ -3752,7 +4913,13 @@ class Day0FastObsEmitter:
                             live_observation_time,
                         )
                     )
-                    if not kill_moved and not live_moved and not observation_advanced:
+                    revision_changed = (station, extremes.last_obs_time) in kma_revision_keys
+                    if (
+                        not kill_moved
+                        and not live_moved
+                        and not observation_advanced
+                        and not revision_changed
+                    ):
                         continue
                     # KILL-MEMO SAFETY: only station/source/unit/local-date
                     # authorized values may advance the monotone kill memo
@@ -3780,7 +4947,7 @@ class Day0FastObsEmitter:
                                 observation["live_authority_status"],
                             )
                         continue
-                    if not live_moved and not observation_advanced:
+                    if not live_moved and not observation_advanced and not revision_changed:
                         _stage_memo(key, kill_value=kill_update)
                         continue
                     result = trigger.emit_from_observation(
@@ -3800,12 +4967,13 @@ class Day0FastObsEmitter:
                         # restarted daemon would re-attempt the same INSERT OR IGNORE
                         # every cycle until the next rounded movement. That is not a
                         # trading error, but it is not live-stable behavior either.
-                        _stage_memo(
-                            key,
-                            kill_value=kill_update,
-                            live_value=rounded,
-                            observation_time=observation_time,
-                        )
+                        if not revision_changed:
+                            _stage_memo(
+                                key,
+                                kill_value=kill_update,
+                                live_value=rounded,
+                                observation_time=observation_time,
+                            )
                     if result.inserted:
                         emitted += 1
                         if inserted_event_ids is not None:

@@ -1358,18 +1358,18 @@ external_truth_sources:
     endpoint_patterns: [data-api.polymarket.com, /positions]
     required_tests: [tests/test_polymarket_v2_adapter_balance_probe.py]
   metar_fast_obs:
-    # Day0 fast-lane intraday observations: the append-only NOAA/NWS global
-    # METAR cycle is the publication-first transport; aviationweather.gov is
-    # the bounded recovery/history surface. Both carry the same configured
-    # station reports. This is intraday running-extreme and oracle-anomaly
-    # evidence only; WU remains settlement authority.
+    # Day0 intraday METAR observations from NOAA/NWS cycles and the direct
+    # KMA AMO transport for RKSI/RKPK; aviationweather.gov supplies bounded
+    # recovery/history. All carry configured-station reports for intraday
+    # extrema and oracle-anomaly evidence; WU remains settlement authority.
     authority_tier: intraday_observation
     endpoint_patterns:
       - tgftp.nws.noaa.gov
       - /data/observations/metar/cycles
       - aviationweather.gov
       - /api/data/metar
-    required_tests: [tests/test_day0_fast_obs_lane.py, tests/test_day0_first_principles_antibodies.py]
+      - global.amo.go.kr/observation/PkObsMetarList.do
+    required_tests: [tests/test_day0_fast_obs_lane.py, tests/test_day0_first_principles_antibodies.py, tests/engine/test_noaa_day0_observation_union.py]
   nea_sg_observation:
     # Singapore NEA real-time air-temperature API. It is an intraday
     # observation covariate for Singapore/Changi monitoring, not a settlement

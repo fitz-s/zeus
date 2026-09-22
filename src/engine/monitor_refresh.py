@@ -3917,6 +3917,7 @@ def _fetch_noaa_day0_observation(
     conn = None
     try:
         from src.data.day0_fast_obs import (
+            KmaObservationConflict,
             read_noaa_fast_obs_context_from_ledger,
         )
         from src.data.day0_observation_reader import (
@@ -3932,8 +3933,18 @@ def _fetch_noaa_day0_observation(
                 target_date=target_d.isoformat(),
                 decision_time=reference_time,
             )
+        except KmaObservationConflict:
+            return None
         except Exception:
             direct = None
+        if (
+            direct is not None
+            and _day0_observation_field(direct, "data_version")
+            == "same_station_metar_canonical_window_v1"
+        ):
+            # This context already reconciles raw AWC/KMA/Ogimet revisions.
+            # Unioning an older projection would resurrect corrected readings.
+            return direct
         try:
             canonical = read_day0_observation_context_from_instants(
                 conn,

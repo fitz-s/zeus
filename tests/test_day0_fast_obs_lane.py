@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused/audited: 2026-09-13
-# Lifecycle: created=2026-06-10; last_reviewed=2026-09-13; last_reused=2026-09-13
+# Last reused/audited: 2026-09-22
+# Lifecycle: created=2026-06-10; last_reviewed=2026-09-22; last_reused=2026-09-22
 # Authority basis: operator green-light 2026-06-10 items A/C/E (free METAR fast
 #   lane, live-obs hook wiring, WU-vs-METAR oracle anomaly guard); day0
 #   first-principles review /tmp/day0_first_principles_review.md §6.2;
@@ -4954,3 +4954,656 @@ def test_fast_conditioning_deduplicates_same_metar_across_writer_prefixes(
         decision_time=datetime(2026, 7, 28, 19, 40, tzinfo=UTC),
     ) == (7.0, "2026-07-28T19:34:12+00:00", 1, "C")
     conn.close()
+
+
+def _kma_cell(raw: str) -> str:
+    return f"<table><tr><td>{raw}</td></tr></table>"
+
+
+def _kma_contract_symbols():
+    from src.data.day0_fast_obs import (
+        AVAILABILITY_LOCAL_FIRST_SEEN_AFTER_COMPLETE_RESPONSE,
+        KMA_METAR_TRANSPORT_ID,
+        KmaDay0EventState,
+        KmaMetarCursor,
+        parse_kma_metar_html,
+    )
+    return (
+        AVAILABILITY_LOCAL_FIRST_SEEN_AFTER_COMPLETE_RESPONSE,
+        KMA_METAR_TRANSPORT_ID,
+        KmaDay0EventState,
+        KmaMetarCursor,
+        parse_kma_metar_html,
+    )
+
+
+def test_kma_parser_reads_real_euckr_sample_and_deduplicates_a_q() -> None:
+    availability_basis, transport_id, _state_cls, _cursor_cls, parse = _kma_contract_symbols()
+    payload = "".join(
+        (
+            _kma_cell("METAR RKPK 220300Z 05016KT 9999 FEW050 27/14 A1016"),
+            _kma_cell("METAR RKPK 220400Z 05016KT 9999 FEW050 28/14 A1016"),
+            _kma_cell("METAR RKPK 220400Z 05016KT 9999 FEW050 28/14 Q1016"),
+        )
+    ).encode("euc-kr")
+    as_of = datetime(2026, 9, 22, 4, 30, tzinfo=UTC)
+    first_seen = datetime(2026, 9, 22, 4, 20, tzinfo=UTC)
+
+    reports = parse(
+        payload,
+        station_id="RKPK",
+        as_of=as_of,
+        first_seen_at=first_seen,
+    )
+
+    assert reports
+    latest = max(reports, key=lambda report: report.obs_time)
+    assert latest.station_id == "RKPK"
+    assert latest.obs_time == datetime(2026, 9, 22, 4, 0, tzinfo=UTC)
+    assert latest.temp_c == 28.0
+    assert " Q" in f" {latest.raw} "
+    assert latest.availability_basis == availability_basis
+    assert latest.available_at == first_seen
+    assert latest.transport_id == transport_id
+    assert latest.raw_report_identity
+    assert sum(report.obs_time == latest.obs_time for report in reports) == 1
+
+
+def test_kma_parser_rejects_wrong_station_malformed_and_future_reports() -> None:
+    _availability, _transport, _state_cls, _cursor_cls, parse = _kma_contract_symbols()
+    as_of = datetime(2026, 9, 22, 4, 30, tzinfo=UTC)
+    first_seen = datetime(2026, 9, 22, 4, 31, tzinfo=UTC)
+    payload = "".join(
+        (
+            _kma_cell("METAR RKSI 220400Z 05016KT 9999 FEW050 28/14 Q1016"),
+            _kma_cell("METAR RKPK 220400Z 05016KT 9999 FEW050 Q1016"),
+            _kma_cell("METAR RKPK 230400Z 05016KT 9999 FEW050 29/14 Q1016"),
+        )
+    )
+
+    assert parse(
+        payload, station_id="RKPK", as_of=as_of, first_seen_at=first_seen
+    ) == []
+
+
+def test_kma_parser_prefers_cor_and_rejects_conflicting_cor() -> None:
+    availability_basis, transport_id, _state_cls, _cursor_cls, parse = _kma_contract_symbols()
+    from src.data.day0_fast_obs import KmaObservationConflict
+    as_of = datetime(2026, 9, 22, 5, 0, tzinfo=UTC)
+    first_seen = datetime(2026, 9, 22, 5, 1, tzinfo=UTC)
+    selected = parse(
+        "".join(
+            (
+                _kma_cell("METAR RKPK 220400Z 05016KT 9999 FEW050 28/14 Q1016"),
+                _kma_cell("METAR COR RKPK 220400Z 05016KT 9999 FEW050 29/14 Q1016"),
+            )
+        ),
+        station_id="RKPK",
+        as_of=as_of,
+        first_seen_at=first_seen,
+    )
+    assert len(selected) == 1
+    assert selected[0].metar_type == "COR"
+    assert selected[0].temp_c == 29.0
+
+    with pytest.raises(KmaObservationConflict):
+        parse(
+            "".join(
+                (
+                    _kma_cell("METAR COR RKPK 220400Z 05016KT 9999 FEW050 29/14 Q1016"),
+                    _kma_cell("METAR COR RKPK 220400Z 05016KT 9999 FEW050 30/14 Q1016"),
+                )
+            ),
+            station_id="RKPK",
+            as_of=as_of,
+            first_seen_at=first_seen,
+        )
+
+
+def test_kma_parser_requires_t_group_for_f_settlement() -> None:
+    _availability, _transport, _state_cls, _cursor_cls, parse = _kma_contract_symbols()
+    report = parse(
+        _kma_cell("METAR RKPK 220400Z 05016KT 9999 FEW050 28/14 Q1016"),
+        station_id="RKPK",
+        as_of=datetime(2026, 9, 22, 5, 0, tzinfo=UTC),
+        first_seen_at=datetime(2026, 9, 22, 5, 1, tzinfo=UTC),
+    )[0]
+    assert settlement_temp_for_report(report, "F") is None
+
+
+def test_kma_cursor_throttles_per_station_and_records_complete_response_first_seen(
+    monkeypatch,
+) -> None:
+    _availability, _transport, _state_cls, cursor_cls, _parse = _kma_contract_symbols()
+    payload = _kma_cell("METAR RKPK 220400Z 05016KT 9999 FEW050 28/14 Q1016")
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    class _Response:
+        status_code = 200
+        content = payload.encode("euc-kr")
+
+    class _Client:
+        def post(self, endpoint, *, data, timeout, headers):
+            calls.append((endpoint, data))
+            return _Response()
+
+    now = [100.0]
+    monkeypatch.setattr("src.data.day0_fast_obs.time.monotonic", lambda: now[0])
+    cursor = cursor_cls(min_fetch_interval_s=60.0)
+    try:
+        before = datetime.now(UTC)
+        reports, ok = cursor.poll(
+            client=_Client(),
+            stations=("RKPK", "KORD"),
+            as_of=datetime(2026, 9, 22, 4, 30, tzinfo=UTC),
+            budget_s=0.5,
+        )
+        after = datetime.now(UTC)
+        assert ok is True
+        assert len(reports) == 1
+        assert before <= reports[0].first_seen_at <= after
+        assert calls == [
+            (
+                "https://global.amo.go.kr/observation/PkObsMetarList.do",
+                {"stnCd": "RKPK", "tm": "2026.09.22 13:30"},
+            )
+        ]
+        now[0] += 1.0
+        assert cursor.poll(
+            client=_Client(),
+            stations=("RKPK",),
+            as_of=datetime(2026, 9, 22, 4, 30, tzinfo=UTC),
+            budget_s=0.05,
+        ) == ([], False)
+        assert len(calls) == 1
+    finally:
+        cursor.close()
+
+
+def test_kma_cursor_slow_station_does_not_block_fast_station() -> None:
+    _availability, _transport, _state_cls, cursor_cls, _parse = _kma_contract_symbols()
+    payloads = {
+        "RKPK": _kma_cell("METAR RKPK 220400Z 05016KT 9999 FEW050 28/14 Q1016"),
+        "RKSI": _kma_cell("METAR RKSI 220400Z 05016KT 9999 FEW050 27/15 Q1016"),
+    }
+
+    class _Response:
+        status_code = 200
+
+        def __init__(self, body: str):
+            self.content = body.encode("euc-kr")
+
+    class _Client:
+        def post(self, _endpoint, *, data, timeout, headers):
+            if data["stnCd"] == "RKPK":
+                time.sleep(0.2)
+            return _Response(payloads[data["stnCd"]])
+
+    cursor = cursor_cls(min_fetch_interval_s=0.0, max_workers=2)
+    try:
+        reports, ok = cursor.poll(
+            client=_Client(),
+            stations=("RKPK", "RKSI"),
+            as_of=datetime(2026, 9, 22, 4, 30, tzinfo=UTC),
+            budget_s=0.05,
+        )
+        assert ok is True
+        assert {report.station_id for report in reports} == {"RKSI"}
+    finally:
+        cursor.close()
+
+
+def test_kma_and_noaa_duplicate_keeps_earliest_availability() -> None:
+    availability_basis, transport_id, _state_cls, _cursor_cls, _parse = _kma_contract_symbols()
+    observed = datetime(2026, 9, 22, 4, 0, tzinfo=UTC)
+    kma = MetarReport(
+        station_id="RKPK",
+        obs_time=observed,
+        receipt_time=None,
+        temp_c=28.0,
+        metar_type="METAR",
+        raw="METAR RKPK 220400Z 05016KT 9999 FEW050 28/14 Q1016",
+        first_seen_at=datetime(2026, 9, 22, 4, 1, tzinfo=UTC),
+        availability_basis=availability_basis,
+        transport_id=transport_id,
+    )
+    noaa = MetarReport(
+        station_id="RKPK",
+        obs_time=observed,
+        receipt_time=datetime(2026, 9, 22, 4, 5, tzinfo=UTC),
+        temp_c=28.0,
+        metar_type="METAR",
+        raw="RKPK 220400Z 05016KT 9999 FEW050 28/14 Q1016",
+        transport_id="noaa_cycle",
+    )
+    from src.data.day0_fast_obs import _merge_report_windows
+
+    assert _merge_report_windows([noaa], [kma]) == [kma]
+
+
+def test_kma_restart_hydrates_earliest_first_seen_before_canonical_emit(monkeypatch) -> None:
+    import src.data.day0_fast_obs as fast_obs
+    from dataclasses import replace
+    availability_basis, transport_id, state_cls, _cursor_cls, _parse = _kma_contract_symbols()
+
+    city = _seoul()
+    source = fast_obs.fast_obs_source_for_city(city, target_date="2026-09-22")
+    assert source is not None
+    observed = datetime(2026, 9, 22, 4, 0, tzinfo=UTC)
+    earliest = datetime(2026, 9, 22, 4, 1, tzinfo=UTC)
+    late = datetime(2026, 9, 22, 4, 3, tzinfo=UTC)
+    raw = "METAR RKSI 220400Z 05016KT 9999 FEW050 28/14 Q1016"
+    old = MetarReport(
+        station_id="RKSI", obs_time=observed, receipt_time=None, temp_c=28.0,
+        metar_type="METAR", raw=raw,
+        first_seen_at=earliest,
+        availability_basis=availability_basis,
+        transport_id=transport_id,
+    )
+    fetched_again = replace(old, first_seen_at=late, raw=raw.replace("05016", "05017"))
+    state = state_cls(
+        observed_at=observed,
+        available_at=earliest,
+        current_temp_c=28.0,
+        high_native=28.0,
+        low_native=28.0,
+        raw_report=old.raw,
+        raw_identity=old.raw_report_identity,
+        corrected=False,
+        margin_units=0.0,
+        event_id="prior-kma-event",
+        reports=(old,),
+    )
+    monkeypatch.setattr(fast_obs, "_latest_kma_day0_event_state", lambda *args, **kwargs: state)
+    prefetch = fast_obs.FastObsPrefetch(
+        eligible=((city, source, "2026-09-22"),),
+        reports=(fetched_again,),
+        freshness_status=fast_obs.FETCH_FRESH,
+        cache_age_s=0.0,
+        decision_time=datetime(2026, 9, 22, 4, 5, tzinfo=UTC),
+        ledger_reports=(),
+        station_statuses=(("RKSI", fast_obs.FETCH_FRESH, 0.0),),
+        event_reports=(fetched_again,),
+    )
+    conn = _world_conn()
+    try:
+        emitter = fast_obs.Day0FastObsEmitter()
+        assert emitter.emit_prefetched(
+            world_conn=conn,
+            prefetch=prefetch,
+            received_at="2026-09-22T04:05:00+00:00",
+            persist_ledger=False,
+        ) == 2
+        rows = conn.execute(
+            "SELECT payload_json FROM opportunity_events "
+            "WHERE event_type='DAY0_EXTREME_UPDATED' ORDER BY rowid DESC"
+        ).fetchall()
+        assert rows
+        import json
+
+        window = json.loads(rows[-1][0])["kma_report_window"]
+        assert window[0]["first_seen_at"] == earliest.isoformat()
+    finally:
+        conn.close()
+
+
+def test_kma_same_observation_correction_emits_canonical_revision(monkeypatch) -> None:
+    import src.data.day0_fast_obs as fast_obs
+    availability_basis, transport_id, state_cls, _cursor_cls, _parse = _kma_contract_symbols()
+
+    city = _seoul()
+    source = fast_obs.fast_obs_source_for_city(city, target_date="2026-09-22")
+    assert source is not None
+    observed = datetime(2026, 9, 22, 4, 0, tzinfo=UTC)
+    old = MetarReport(
+        station_id="RKSI", obs_time=observed, receipt_time=None, temp_c=28.0,
+        metar_type="METAR", raw="METAR RKSI 220400Z 05016KT 9999 FEW050 28/14 Q1016",
+        first_seen_at=datetime(2026, 9, 22, 4, 1, tzinfo=UTC),
+        availability_basis=availability_basis,
+        transport_id=transport_id,
+    )
+    corrected = MetarReport(
+        station_id="RKSI", obs_time=observed, receipt_time=None, temp_c=27.0,
+        metar_type="COR", raw="METAR COR RKSI 220400Z 05016KT 9999 FEW050 27/14 Q1016",
+        first_seen_at=datetime(2026, 9, 22, 4, 3, tzinfo=UTC),
+        availability_basis=availability_basis,
+        transport_id=transport_id,
+    )
+    state = state_cls(
+        observed_at=observed, available_at=old.available_at,
+        current_temp_c=old.temp_c, high_native=old.temp_c, low_native=old.temp_c,
+        raw_report=old.raw, raw_identity=old.raw_report_identity,
+        corrected=False, margin_units=0.0, event_id="prior-kma-event", reports=(old,),
+    )
+    monkeypatch.setattr(fast_obs, "_latest_kma_day0_event_state", lambda *args, **kwargs: state)
+    prefetch = fast_obs.FastObsPrefetch(
+        eligible=((city, source, "2026-09-22"),), reports=(corrected,),
+        freshness_status=fast_obs.FETCH_FRESH, cache_age_s=0.0,
+        decision_time=datetime(2026, 9, 22, 4, 5, tzinfo=UTC), ledger_reports=(),
+        station_statuses=(("RKSI", fast_obs.FETCH_FRESH, 0.0),),
+        event_reports=(corrected,),
+    )
+    conn = _world_conn()
+    emitter = fast_obs.Day0FastObsEmitter()
+    emitter._last_live_emitted_rounded.update({
+        ("Seoul", "2026-09-22", "high"): 29,
+        ("Seoul", "2026-09-22", "low"): 29,
+    })
+    emitter._last_live_emitted_observation_time.update({
+        ("Seoul", "2026-09-22", "high"): observed.isoformat(),
+        ("Seoul", "2026-09-22", "low"): observed.isoformat(),
+    })
+    try:
+        assert emitter.emit_prefetched(
+            world_conn=conn, prefetch=prefetch,
+            received_at="2026-09-22T04:05:00+00:00", persist_ledger=False,
+        ) >= 1
+        payload = json.loads(conn.execute(
+            "SELECT payload_json FROM opportunity_events "
+            "WHERE event_type='DAY0_EXTREME_UPDATED' ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()[0])
+        assert payload["current_observation_temp_c"] == 27.0
+        assert payload["kma_report_window"][0]["raw_report"].startswith("METAR COR RKSI")
+        assert emitter._last_live_emitted_rounded[("Seoul", "2026-09-22", "high")] == 29
+        assert emitter.emit_prefetched(
+            world_conn=conn, prefetch=prefetch,
+            received_at="2026-09-22T04:06:00+00:00", persist_ledger=False,
+        ) == 0
+    finally:
+        conn.close()
+
+
+def test_kma_helper_reads_attached_world_and_drains_conflict_to_valid(monkeypatch) -> None:
+    import dataclasses
+    import src.data.day0_fast_obs as fast_obs
+    from src.events.day0_authority import DAY0_LIVE_AUTHORITY_MATCHES
+    from src.events.opportunity_event import (
+        Day0ExtremeUpdatedPayload,
+        make_day0_extreme_updated_event,
+    )
+    from src.state.schema.opportunity_events_schema import CREATE_TABLE_SQL
+    availability_basis, transport_id, _state_cls, _cursor_cls, _parse = _kma_contract_symbols()
+
+    city = _seoul()
+    observed = datetime(2026, 9, 22, 4, 0, tzinfo=UTC)
+    first_seen = datetime(2026, 9, 22, 4, 1, tzinfo=UTC)
+    raw = "METAR RKSI 220400Z 05016KT 9999 FEW050 28/14 Q1016"
+    item = {
+        "raw_report": raw,
+        "raw_report_identity": fast_obs._normalized_raw_report_identity(raw),
+        "first_seen_at": first_seen.isoformat(),
+    }
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("ATTACH DATABASE ':memory:' AS world")
+    conn.execute(CREATE_TABLE_SQL.replace(
+        "CREATE TABLE IF NOT EXISTS opportunity_events",
+        "CREATE TABLE world.opportunity_events",
+    ))
+    conn.execute("CREATE TABLE world.observation_prints (city TEXT, station_id TEXT, source_channel TEXT, publish_ts_utc TEXT, value_native REAL, unit TEXT, raw_report TEXT, fetched_at_utc TEXT)")
+
+    def insert_event(*, conflict: dict[str, object] | None, received: str, metric: str = "high") -> None:
+        payload = Day0ExtremeUpdatedPayload(
+            city="Seoul", target_date="2026-09-22", metric=metric,
+            settlement_source=FAST_OBS_SOURCE_ID, station_id="RKSI",
+            observation_time=observed.isoformat(), observation_available_at=first_seen.isoformat(),
+            raw_value=None if conflict else 28.0, rounded_value=None if conflict else 28,
+            high_so_far=None if conflict else 28.0, low_so_far=None if conflict else 28.0,
+            settlement_source_type="noaa", kma_report_window=[item],
+            observation_availability_basis=availability_basis,
+            observation_transport=transport_id,
+            current_observation_temp_c=None if conflict else 28.0,
+            current_observation_raw_report=None if conflict else raw,
+            raw_report_identity=None if conflict else item["raw_report_identity"],
+            observation_conflict=conflict,
+            **({"source_authorized_status": "UNAUTHORIZED", "live_authority_status": "blocked"}
+               if conflict else DAY0_LIVE_AUTHORITY_MATCHES),
+        )
+        event = make_day0_extreme_updated_event(
+            entity_key=f"Seoul|2026-09-22|high|{'conflict' if conflict else 'valid'}|{received}",
+            source="test", observed_at=observed.isoformat(), received_at=received, payload=payload,
+        )
+        values = dataclasses.asdict(event)
+        cols = ",".join(values)
+        conn.execute(
+            f"INSERT INTO world.opportunity_events ({cols}) VALUES ({','.join('?' for _ in values)})",
+            tuple(values.values()),
+        )
+
+    conflict = {"station_id": "RKSI", "obs_time": observed.isoformat(), "correction_rank": "COR"}
+    insert_event(conflict=conflict, received="2026-09-22T04:02:00+00:00")
+    with pytest.raises(fast_obs.KmaObservationConflict):
+        fast_obs._latest_kma_day0_event_state(
+            conn, city=city, target_date="2026-09-22",
+            decision_time=datetime(2026, 9, 22, 4, 5, tzinfo=UTC), metric=None,
+        )
+    insert_event(conflict=None, received="2026-09-22T04:04:00+00:00", metric="high")
+    insert_event(conflict=None, received="2026-09-22T04:04:00+00:00", metric="low")
+    state = fast_obs._latest_kma_day0_event_state(
+        conn, city=city, target_date="2026-09-22",
+        decision_time=datetime(2026, 9, 22, 4, 5, tzinfo=UTC), metric=None,
+    )
+    assert state is not None
+    assert state.current_temp_c == 28.0
+    high = fast_obs._latest_kma_day0_event_state(
+        conn, city=city, target_date="2026-09-22",
+        decision_time=datetime(2026, 9, 22, 4, 5, tzinfo=UTC), metric="high",
+    )
+    low = fast_obs._latest_kma_day0_event_state(
+        conn, city=city, target_date="2026-09-22",
+        decision_time=datetime(2026, 9, 22, 4, 5, tzinfo=UTC), metric="low",
+    )
+    assert high is not None and low is not None
+    assert high.raw_identity == low.raw_identity == state.raw_identity
+    conn.close()
+
+
+def test_kma_mixed_window_uses_latest_contributing_noaa_clock() -> None:
+    _availability, transport_id, _state_cls, _cursor_cls, _parse = _kma_contract_symbols()
+    city = _seoul()
+    kma = MetarReport(
+        station_id="RKSI", obs_time=datetime(2026, 9, 22, 4, 0, tzinfo=UTC),
+        receipt_time=None, temp_c=28.0, metar_type="METAR",
+        raw="METAR RKSI 220400Z 05016KT 9999 FEW050 28/14 Q1016",
+        first_seen_at=datetime(2026, 9, 22, 4, 1, tzinfo=UTC),
+        availability_basis=_availability,
+        transport_id=transport_id,
+    )
+    noaa = MetarReport(
+        station_id="RKSI", obs_time=datetime(2026, 9, 22, 4, 30, tzinfo=UTC),
+        receipt_time=datetime(2026, 9, 22, 4, 35, tzinfo=UTC), temp_c=30.0,
+        metar_type="METAR", raw="METAR RKSI 220430Z 05016KT 9999 FEW050 30/14 Q1016",
+        transport_id="noaa_ledger",
+    )
+    extremes = running_extremes_for_local_day(
+        [kma, noaa], city=city, target_date="2026-09-22",
+        as_of=datetime(2026, 9, 22, 5, 0, tzinfo=UTC), margin_units=0.0,
+    )
+    assert extremes.high_so_far == 30.0
+    assert extremes.current_temp == 30.0
+    assert extremes.last_obs_time == noaa.obs_time
+    assert extremes.last_available_at == noaa.receipt_time
+
+
+def test_kma_conflict_station_does_not_block_other_station_emit() -> None:
+    import src.data.day0_fast_obs as fast_obs
+    _availability, transport_id, _state_cls, _cursor_cls, _parse = _kma_contract_symbols()
+    seoul = _seoul()
+    busan = SimpleNamespace(
+        name="Busan", timezone="Asia/Seoul", settlement_unit="C",
+        wu_station="RKPK", settlement_source_type="noaa",
+    )
+    source_seoul = fast_obs.fast_obs_source_for_city(seoul, target_date="2026-09-22")
+    source_busan = fast_obs.fast_obs_source_for_city(busan, target_date="2026-09-22")
+    assert source_seoul is not None and source_busan is not None
+    observed = datetime(2026, 9, 22, 4, 0, tzinfo=UTC)
+    first_seen = datetime(2026, 9, 22, 4, 1, tzinfo=UTC)
+    bad1 = MetarReport("RKSI", observed, None, 28.0, "COR", "METAR COR RKSI 220400Z 05016KT 9999 FEW050 28/14 Q1016", first_seen, _availability, transport_id)
+    bad2 = MetarReport("RKSI", observed, None, 29.0, "COR", "METAR COR RKSI 220400Z 05016KT 9999 FEW050 29/14 Q1016", first_seen, _availability, transport_id)
+    good = MetarReport("RKPK", observed, None, 28.0, "METAR", "METAR RKPK 220400Z 05016KT 9999 FEW050 28/14 Q1016", first_seen, _availability, transport_id)
+    conflict = fast_obs.KmaObservationConflict(
+        "conflict", station_id="RKSI", obs_time=observed,
+        raw_reports=(bad1.raw, bad2.raw), correction_rank="COR", reports=(bad1, bad2),
+    )
+    prefetch = fast_obs.FastObsPrefetch(
+        eligible=((seoul, source_seoul, "2026-09-22"), (busan, source_busan, "2026-09-22")),
+        reports=(good,), freshness_status=fast_obs.FETCH_FRESH, cache_age_s=0.0,
+        decision_time=datetime(2026, 9, 22, 4, 5, tzinfo=UTC), ledger_reports=(),
+        station_statuses=(("RKSI", fast_obs.FETCH_FRESH, 0.0), ("RKPK", fast_obs.FETCH_FRESH, 0.0)),
+        event_reports=(good,), kma_conflicts=(("RKSI", conflict),),
+    )
+    conn = _world_conn()
+    try:
+        assert fast_obs.Day0FastObsEmitter().emit_prefetched(
+            world_conn=conn, prefetch=prefetch,
+            received_at="2026-09-22T04:05:00+00:00", persist_ledger=False,
+        ) >= 2
+        rows = conn.execute("SELECT payload_json FROM opportunity_events").fetchall()
+        assert any('"observation_conflict"' in row[0] for row in rows)
+        assert any('"city":"Busan"' in row[0] for row in rows)
+    finally:
+        conn.close()
+
+
+def test_kma_complete_cor_response_recovers_prior_durable_conflict() -> None:
+    """Only a same-instant COR from this emitter's fresh response can recover."""
+    import json
+    import src.data.day0_fast_obs as fast_obs
+
+    availability_basis, transport_id, _state_cls, _cursor_cls, _parse = _kma_contract_symbols()
+    city = _seoul()
+    source = fast_obs.fast_obs_source_for_city(city)
+    assert source is not None
+    busan = SimpleNamespace(
+        name="Busan", timezone="Asia/Seoul", settlement_unit="C",
+        wu_station="RKPK", settlement_source_type="noaa",
+    )
+    busan_source = fast_obs.fast_obs_source_for_city(busan)
+    assert busan_source is not None
+    observed = datetime(2026, 9, 22, 4, 0, tzinfo=UTC)
+    first_seen = datetime(2026, 9, 22, 4, 1, tzinfo=UTC)
+    decision = datetime(2026, 9, 22, 4, 5, tzinfo=UTC)
+    bad_one = MetarReport(
+        "RKSI", observed, None, 28.0, "COR",
+        "METAR COR RKSI 220400Z 05016KT 9999 FEW050 28/14 Q1016",
+        first_seen, availability_basis, transport_id,
+    )
+    bad_two = MetarReport(
+        "RKSI", observed, None, 29.0, "COR",
+        "METAR COR RKSI 220400Z 05016KT 9999 FEW050 29/14 Q1016",
+        first_seen, availability_basis, transport_id,
+    )
+    conflict = fast_obs.KmaObservationConflict(
+        "conflicting COR", station_id="RKSI", obs_time=observed,
+        raw_reports=(bad_one.raw, bad_two.raw), correction_rank="COR",
+        reports=(bad_one, bad_two),
+    )
+    emitter = fast_obs.Day0FastObsEmitter()
+    conn = _world_conn()
+    try:
+        conflict_prefetch = fast_obs.FastObsPrefetch(
+            eligible=((city, source, "2026-09-22"),), reports=(),
+            freshness_status=fast_obs.FETCH_FRESH, cache_age_s=0.0,
+            decision_time=decision, ledger_reports=None,
+            station_statuses=(("RKSI", fast_obs.FETCH_FRESH, 0.0),),
+            kma_conflicts=(("RKSI", conflict),),
+        )
+        assert emitter.emit_prefetched(
+            world_conn=conn, prefetch=conflict_prefetch,
+            received_at="2026-09-22T04:02:00+00:00", persist_ledger=False,
+        ) == 2
+
+        corrected = MetarReport(
+            "RKSI", observed, None, 28.0, "COR",
+            "METAR COR RKSI 220400Z 05016KT 9999 FEW050 28/14 Q1016",
+            decision, availability_basis, transport_id,
+        )
+        normal = MetarReport(
+            "RKSI", observed, None, 28.0, "METAR",
+            "METAR RKSI 220400Z 05016KT 9999 FEW050 28/14 Q1016",
+            decision, availability_basis, transport_id,
+        )
+        busan_report = MetarReport(
+            "RKPK", observed, None, 27.0, "METAR",
+            "METAR RKPK 220400Z 05016KT 9999 FEW050 27/14 Q1016",
+            decision, availability_basis, transport_id,
+        )
+        normal_prefetch = fast_obs.FastObsPrefetch(
+            eligible=(
+                (city, source, "2026-09-22"),
+                (busan, busan_source, "2026-09-22"),
+            ),
+            reports=(normal, busan_report),
+            freshness_status=fast_obs.FETCH_FRESH, cache_age_s=0.0,
+            decision_time=decision, ledger_reports=(),
+            station_statuses=(
+                ("RKSI", fast_obs.FETCH_FRESH, 0.0),
+                ("RKPK", fast_obs.FETCH_FRESH, 0.0),
+            ),
+            event_reports=(normal, busan_report),
+        )
+        assert emitter.emit_prefetched(
+            world_conn=conn, prefetch=normal_prefetch,
+            received_at="2026-09-22T04:04:00+00:00", persist_ledger=False,
+        ) == 2
+        assert any(
+            '"city":"Busan"' in row[0]
+            for row in conn.execute("SELECT payload_json FROM opportunity_events")
+        )
+
+        later = MetarReport(
+            "RKSI", observed + timedelta(hours=1), None, 30.0, "METAR",
+            "METAR RKSI 220500Z 05016KT 9999 FEW050 30/14 Q1016",
+            observed + timedelta(hours=1, minutes=1), availability_basis, transport_id,
+        )
+        busan_later = MetarReport(
+            "RKPK", observed + timedelta(hours=1), None, 28.0, "METAR",
+            "METAR RKPK 220500Z 05016KT 9999 FEW050 28/14 Q1016",
+            observed + timedelta(hours=1, minutes=1), availability_basis, transport_id,
+        )
+        cached_cor_prefetch = fast_obs.FastObsPrefetch(
+            eligible=(
+                (city, source, "2026-09-22"),
+                (busan, busan_source, "2026-09-22"),
+            ),
+            reports=(corrected, later, busan_later),
+            freshness_status=fast_obs.FETCH_FRESH, cache_age_s=0.0,
+            decision_time=observed + timedelta(hours=1, minutes=2), ledger_reports=(),
+            station_statuses=(
+                ("RKSI", fast_obs.FETCH_FRESH, 0.0),
+                ("RKPK", fast_obs.FETCH_FRESH, 0.0),
+            ),
+            event_reports=(later, busan_later),
+        )
+        assert emitter.emit_prefetched(
+            world_conn=conn, prefetch=cached_cor_prefetch,
+            received_at="2026-09-22T05:03:00+00:00", persist_ledger=False,
+        ) == 2
+
+        corrected_prefetch = fast_obs.FastObsPrefetch(
+            eligible=((city, source, "2026-09-22"),), reports=(corrected,),
+            freshness_status=fast_obs.FETCH_FRESH, cache_age_s=0.0,
+            decision_time=decision, ledger_reports=(),
+            station_statuses=(("RKSI", fast_obs.FETCH_FRESH, 0.0),),
+            event_reports=(corrected,),
+        )
+        assert emitter.emit_prefetched(
+            world_conn=conn, prefetch=corrected_prefetch,
+            received_at="2026-09-22T04:05:00+00:00", persist_ledger=False,
+        ) == 2
+        payloads = [json.loads(row[0]) for row in conn.execute(
+            "SELECT payload_json FROM opportunity_events"
+        ).fetchall()]
+        recovered = [
+            payload for payload in payloads
+            if payload.get("city") == "Seoul"
+            and payload.get("observation_transport") == transport_id
+            and payload.get("observation_conflict") is None
+        ]
+        assert len(recovered) == 2
+        assert all(
+            payload["current_observation_raw_report"].startswith("METAR COR RKSI")
+            for payload in recovered
+        )
+    finally:
+        conn.close()

@@ -3776,6 +3776,29 @@ def read_day0_current_temperature_state(
         tz = ZoneInfo(timezone_name)
     except (TypeError, ValueError, ZoneInfoNotFoundError):
         return None
+    from src.data.day0_fast_obs import (
+        KMA_PRIORITY_STATIONS,
+        _latest_kma_day0_event_state,
+    )
+
+    kma = None
+    if station in KMA_PRIORITY_STATIONS:
+        kma = _latest_kma_day0_event_state(
+            conn, city=city, target_date=target_date, decision_time=decision_time,
+            metric=None,
+        )
+    kma_state = (
+        Day0CurrentTemperatureState(
+            value_native=(
+                kma.current_temp_c if unit == "C"
+                else kma.current_temp_c * 9.0 / 5.0 + 32.0
+            ),
+            observed_at=kma.observed_at,
+            source="aviationweather_metar",
+        ) if kma is not None else None
+    )
+    if kma_state is not None:
+        return kma_state
     attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
     schema = "world" if "world" in attached else "main"
     table = "world.observation_prints" if schema == "world" else "observation_prints"

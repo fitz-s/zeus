@@ -65,6 +65,170 @@ from src.types.market import Bin
 UTC = timezone.utc
 
 
+def _kma_consumer_fixture(*, damage=None, correction=False):
+    from src.events.day0_authority import DAY0_LIVE_AUTHORITY_MATCHES
+    from src.events.opportunity_event import (
+        Day0ExtremeUpdatedPayload, make_day0_extreme_updated_event,
+    )
+    from src.state.schema.observation_prints_schema import ensure_table, append_print
+    from src.state.schema.opportunity_events_schema import ensure_table as ensure_events
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    ensure_table(conn)
+    ensure_events(conn)
+    city = runtime_cities_by_name()["Busan"]
+    append_print(
+        conn, city="Busan", station_id="RKPK", source_channel="aviationweather_metar",
+        publish_ts_utc="2026-09-22T04:04:00+00:00", value_native=29.0, unit="C",
+        fetched_at_utc="2026-09-22T04:04:02+00:00",
+        raw_report="METAR RKPK 220400Z 05014KT 9999 FEW050 29/14 Q1016=",
+    )
+    raw = "METAR RKPK 220500Z 05014KT 9999 FEW050 28/14 Q1016="
+    available = "2026-09-22T05:00:34+00:00"
+    window = [{
+        "raw_report": raw, "raw_report_identity": hashlib.sha256(raw.encode()).hexdigest(),
+        "first_seen_at": available,
+    }]
+    if correction:
+        corrected = "METAR COR RKPK 220400Z 05014KT 9999 FEW050 27/14 Q1016="
+        window.append({
+            "raw_report": corrected,
+            "raw_report_identity": hashlib.sha256(corrected.encode()).hexdigest(),
+            "first_seen_at": available,
+        })
+    payload = Day0ExtremeUpdatedPayload(
+        city="Busan", target_date="2026-09-22", metric="high",
+        settlement_source="aviationweather_metar", station_id="RKPK",
+        observation_time="2026-09-22T05:00:00+00:00",
+        observation_available_at=available,
+        raw_value=28.0 if correction else 29.0,
+        rounded_value=28 if correction else 29,
+        high_so_far=28.0 if correction else 29.0,
+        low_so_far=27.0 if correction else 28.0,
+        settlement_source_type="noaa", metar_margin_units_applied=0.0,
+        observation_availability_basis="LOCAL_FIRST_SEEN_AFTER_COMPLETE_RESPONSE",
+        observation_transport="kma_amo_raw_metar",
+        raw_report_identity=hashlib.sha256(raw.encode()).hexdigest(),
+        current_observation_temp_c=28.0, current_observation_raw_report=raw,
+        kma_report_window=window, **DAY0_LIVE_AUTHORITY_MATCHES,
+    )
+    if damage:
+        payload = replace(payload, **damage)
+    event = make_day0_extreme_updated_event(
+        entity_key="Busan|2026-09-22|high|RKPK", source="day0_extreme_updated_trigger",
+        observed_at=payload.observation_time, received_at="2026-09-22T05:00:35+00:00",
+        payload=payload,
+    )
+    from dataclasses import asdict
+
+    values = asdict(event)
+    conn.execute(
+        f"INSERT INTO opportunity_events ({','.join(values)}) VALUES ({','.join('?' for _ in values)})",
+        tuple(values.values()),
+    )
+    return conn, city, datetime(2026, 9, 22, 5, 1, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("correction", [False, True])
+def test_kma_window_reaches_current_state_and_extreme_consumers(correction):
+    from src.data.day0_hourly_vectors import read_day0_current_temperature_state
+    from src.data.day0_fast_obs import latest_fast_station_extreme_c
+    from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
+
+    conn, city, cutoff = _kma_consumer_fixture(correction=correction)
+    try:
+        state = read_day0_current_temperature_state(
+            conn=conn, city=city, target_date="2026-09-22", decision_time=cutoff,
+        )
+        assert state is not None
+        assert state.value_native == 28.0
+        assert state.observed_at == cutoff.replace(minute=0)
+        fast = latest_fast_station_extreme_c(
+            conn, city="Busan", target_date="2026-09-22", metric="high", decision_time=cutoff,
+        )
+        assert fast is not None
+        assert fast[0] == (28.0 if correction else 29.0)
+        fact = _latest_authorized_day0_fact(
+            conn, city="Busan", target_date="2026-09-22", temperature_metric="high",
+            decision_time=cutoff,
+        )
+        assert fact is not None
+        assert fact["observed_extreme_native"] == (28.0 if correction else 29.0)
+        assert fact["observation_time"] == state.observed_at.isoformat()
+        assert _latest_authorized_day0_fact(
+            conn, city="Busan", target_date="2026-09-22", temperature_metric="high",
+            decision_time=cutoff, require_settlement_channel=True,
+        ) is None
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("damage", [
+    {"station_id": "RKSI"}, {"raw_report_identity": "0" * 64},
+    {"current_observation_temp_c": 39.0}, {"observation_transport": "unknown"},
+    {"observation_availability_basis": "SOURCE_PUBLICATION"},
+    {"observation_available_at": "2026-09-22T05:02:00+00:00"},
+])
+def test_kma_invalid_evidence_cannot_replace_current_temperature(damage):
+    from src.data.day0_hourly_vectors import read_day0_current_temperature_state
+
+    conn, city, cutoff = _kma_consumer_fixture(damage=damage)
+    try:
+        state = read_day0_current_temperature_state(
+            conn=conn, city=city, target_date="2026-09-22", decision_time=cutoff,
+        )
+        assert state is not None
+        assert state.value_native == 29.0
+        assert state.observed_at.hour == 4
+    finally:
+        conn.close()
+
+
+def test_kma_revision_changes_the_shared_probability_carrier():
+    from src.data.day0_hourly_vectors import read_day0_current_temperature_state
+    from src.data.day0_fast_obs import latest_fast_station_extreme_c
+
+    conn, city, cutoff = _kma_consumer_fixture(correction=True)
+    try:
+        state = read_day0_current_temperature_state(
+            conn=conn, city=city, target_date="2026-09-22", decision_time=cutoff,
+        )
+        boundary = latest_fast_station_extreme_c(
+            conn, city="Busan", target_date="2026-09-22", metric="high", decision_time=cutoff,
+        )
+        old = Day0CurrentTemperatureState(
+            value_native=29.0, observed_at=cutoff.replace(hour=4, minute=0),
+            source="aviationweather_metar",
+        )
+        vector = Day0HourlyVector(
+            model="ecmwf_ifs", city="Busan", target_date="2026-09-22",
+            timezone_name="Asia/Seoul", captured_at="2026-09-22T03:50:00+00:00",
+            times=tuple(f"2026-09-22T{hour:02d}:00" for hour in range(24)),
+            temps_c=tuple(29.0 if hour <= 14 else 25.0 for hour in range(24)),
+        )
+        def carrier(current, extreme):
+            future, _ = remaining_day_extremes_c_with_current_state(
+                [vector], target_date="2026-09-22", decision_time=cutoff,
+                metric="high", current_state=current, settlement_unit="C",
+                fallback_window_start=current.observed_at,
+            )
+            return build_day0_remaining_probability_carrier(
+                future_extremes_c=future, boundary_scenarios=((extreme, 1.0),),
+                metric="high", path_error_sigma_c=0.2, instrument_sigma_c=0.2,
+                bin_bounds_c=[(None, 27), (28, 28), (29, None)],
+                n_point=1000, n_samples=32,
+                identity_inputs={"city": "Busan", "unit": "C", "state": current.identity()},
+                settlement_semantics=SettlementSemantics.for_city(city),
+            )
+        previous = carrier(old, 29.0)
+        updated = carrier(state, boundary[0])
+        assert updated["content_identity"] != previous["content_identity"]
+        assert updated["q"][1] > previous["q"][1]
+    finally:
+        conn.close()
+
+
 def _settlement_semantics(city: str) -> SettlementSemantics:
     return SettlementSemantics.for_city(runtime_cities_by_name()[city])
 
