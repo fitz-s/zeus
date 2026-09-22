@@ -3364,10 +3364,9 @@ def _replacement_availability_poll_tick():
         return report
 
     try:
-        # Keep held common-cycle repair capital-prioritized, but reserve half of
-        # the existing current-target poll budget for the source-clock probe and
-        # ordinary residual-anchor drain below. A slow old-cycle recovery must
-        # never monopolize this single-instance scheduler job.
+        # Cap held common-cycle repair at ten seconds so the source-clock probe
+        # and ordinary residual-anchor drain below still run in this scheduler
+        # invocation. A slow old-cycle recovery must never monopolize it.
         common_cycle_recovery = _recover_held_common_cycle_anchors_if_needed(
             cfg,
             max_wall_clock_seconds=min(

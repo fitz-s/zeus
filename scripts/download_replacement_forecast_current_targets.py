@@ -21,7 +21,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Sequence
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from threading import Lock
@@ -75,7 +75,11 @@ _CURRENT_TARGET_ROTATION_LOCK = Lock()
 _CURRENT_TARGET_ROTATION_OFFSETS: dict[str, int] = {}
 _CURRENT_TARGET_ROTATION_STATE_VERSION = 1
 _RotationStateToken = tuple[str | None, int | None]
-_BUCKET_FALLBACK_RESERVE_SECONDS = 10.0
+_MAX_BUCKET_FALLBACK_RESERVE_SECONDS = 10.0
+_ANCHOR_WAVE_MAX_INFLIGHT = 8
+_ANCHOR_WAVE_LOCK = Lock()
+_ANCHOR_WAVE_EXECUTOR: ThreadPoolExecutor | None = None
+_ANCHOR_WAVE_INFLIGHT: dict[tuple[str, str, str], Future] = {}
 
 
 def _rotation_state_lock_path(state_path: Path) -> Path:
@@ -848,6 +852,7 @@ def _deadline_timeout_preserving_bucket_fallback(
     deadline_monotonic: float | None,
     *,
     default: float,
+    bucket_fallback_reserve_seconds: float = _MAX_BUCKET_FALLBACK_RESERVE_SECONDS,
 ) -> float:
     """Bound one provider rung without consuming the bucket fallback window.
 
@@ -858,9 +863,85 @@ def _deadline_timeout_preserving_bucket_fallback(
     if deadline_monotonic is None:
         return default
     remaining = deadline_monotonic - time.monotonic()
-    if remaining <= _BUCKET_FALLBACK_RESERVE_SECONDS:
+    if remaining <= bucket_fallback_reserve_seconds:
         raise TimeoutError("current-target deadline reserved for bucket fallback")
-    return max(0.001, min(default, remaining - _BUCKET_FALLBACK_RESERVE_SECONDS))
+    return max(0.001, min(default, remaining - bucket_fallback_reserve_seconds))
+
+
+def _bucket_fallback_reserve_seconds(
+    max_wall_clock_seconds: float | None,
+) -> float:
+    """Reserve a bounded final-third for the bucket rung of one download call."""
+    if max_wall_clock_seconds is None:
+        return _MAX_BUCKET_FALLBACK_RESERVE_SECONDS
+    return min(
+        _MAX_BUCKET_FALLBACK_RESERVE_SECONDS,
+        max(0.0, float(max_wall_clock_seconds)) / 3.0,
+    )
+
+
+def _anchor_wave_key(
+    key: tuple[str, str],
+    request: object,
+) -> tuple[str, str, str]:
+    return (key[0], key[1], request.run.isoformat())
+
+
+def _submit_anchor_wave_requests(
+    requests: dict[tuple[str, str], object],
+    *,
+    fetch_payload: Callable[[object], dict],
+) -> tuple[dict[Future, tuple[str, str]], dict[tuple[str, str], Exception]]:
+    """Submit only unowned anchor requests to the process-bounded worker pool.
+
+    Completed results are consumed only in the invocation that submitted them.
+    A future still running after that invocation's deadline remains registered;
+    later ticks defer its exact city/date/cycle instead of creating another
+    request. Its late result is discarded before any payload/DB write.
+    """
+    global _ANCHOR_WAVE_EXECUTOR
+
+    submitted: dict[Future, tuple[str, str]] = {}
+    deferred: dict[tuple[str, str], Exception] = {}
+    with _ANCHOR_WAVE_LOCK:
+        for key, future in tuple(_ANCHOR_WAVE_INFLIGHT.items()):
+            if future.done():
+                _ANCHOR_WAVE_INFLIGHT.pop(key, None)
+        available_slots = _ANCHOR_WAVE_MAX_INFLIGHT - len(_ANCHOR_WAVE_INFLIGHT)
+        for key, request in requests.items():
+            wave_key = _anchor_wave_key(key, request)
+            if wave_key in _ANCHOR_WAVE_INFLIGHT:
+                deferred[key] = RuntimeError(
+                    "meta-stamped anchor request still in flight for this city/date/cycle"
+                )
+                continue
+            if available_slots <= 0:
+                deferred[key] = RuntimeError(
+                    "meta-stamped anchor worker capacity is occupied by earlier requests"
+                )
+                continue
+            if _ANCHOR_WAVE_EXECUTOR is None:
+                _ANCHOR_WAVE_EXECUTOR = ThreadPoolExecutor(
+                    max_workers=_ANCHOR_WAVE_MAX_INFLIGHT,
+                    thread_name_prefix="openmeteo-anchor",
+                )
+            future = _ANCHOR_WAVE_EXECUTOR.submit(fetch_payload, request)
+            _ANCHOR_WAVE_INFLIGHT[wave_key] = future
+            submitted[future] = key
+            available_slots -= 1
+    return submitted, deferred
+
+
+def _discard_finished_anchor_wave_requests(
+    futures: dict[Future, tuple[str, str]],
+    requests: dict[tuple[str, str], object],
+) -> None:
+    """Drop only completed futures; running workers retain their no-duplicate lease."""
+    with _ANCHOR_WAVE_LOCK:
+        for future, key in futures.items():
+            wave_key = _anchor_wave_key(key, requests[key])
+            if future.done() and _ANCHOR_WAVE_INFLIGHT.get(wave_key) is future:
+                _ANCHOR_WAVE_INFLIGHT.pop(wave_key, None)
 
 
 def _try_bucket_rung_three(
@@ -1001,6 +1082,7 @@ def _resolve_anchor_payload(
     target_date: str,
     timezone_name: str,
     deadline_monotonic: float | None = None,
+    bucket_fallback_reserve_seconds: float = _MAX_BUCKET_FALLBACK_RESERVE_SECONDS,
     bucket_manifest_provider: Callable[[], dict] | None = None,
     bucket_read_point: Callable[[str, int], float] | None = None,
     bucket_read_workers: int = 1,
@@ -1056,7 +1138,9 @@ def _resolve_anchor_payload(
             if deadline_monotonic is not None:
                 kwargs.update(
                     timeout=_deadline_timeout_preserving_bucket_fallback(
-                        deadline_monotonic, default=30.0
+                        deadline_monotonic,
+                        default=30.0,
+                        bucket_fallback_reserve_seconds=bucket_fallback_reserve_seconds,
                     ),
                     max_retries=1,
                 )
@@ -1103,7 +1187,9 @@ def _resolve_anchor_payload(
             if deadline_monotonic is not None:
                 kwargs.update(
                     timeout=_deadline_timeout_preserving_bucket_fallback(
-                        deadline_monotonic, default=30.0
+                        deadline_monotonic,
+                        default=30.0,
+                        bucket_fallback_reserve_seconds=bucket_fallback_reserve_seconds,
                     ),
                     max_retries=1,
                 )
@@ -1164,6 +1250,7 @@ def _fetch_meta_stamped_anchor_wave(
     *,
     max_workers: int,
     deadline_monotonic: float | None,
+    bucket_fallback_reserve_seconds: float = _MAX_BUCKET_FALLBACK_RESERVE_SECONDS,
     client: httpx.Client,
     quota_critical: bool = False,
     quota_priority: bool = False,
@@ -1176,7 +1263,9 @@ def _fetch_meta_stamped_anchor_wave(
         return {}, {}
     request0 = next(iter(requests.values()))
     timeout = _deadline_timeout_preserving_bucket_fallback(
-        deadline_monotonic, default=30.0
+        deadline_monotonic,
+        default=30.0,
+        bucket_fallback_reserve_seconds=bucket_fallback_reserve_seconds,
     )
     quota_context = (
         quota_tracker.critical_lane()
@@ -1216,54 +1305,58 @@ def _fetch_meta_stamped_anchor_wave(
             return fetch_openmeteo_ecmwf_ifs9_anchor_payload_standard_unstamped(
                 request,
                 timeout=_deadline_timeout_preserving_bucket_fallback(
-                    deadline_monotonic, default=30.0
+                    deadline_monotonic,
+                    default=30.0,
+                    bucket_fallback_reserve_seconds=bucket_fallback_reserve_seconds,
                 ),
                 max_retries=1,
                 fast_fail_429=True,
                 client=client,
             )
 
-    executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="openmeteo-anchor")
+    future_keys, deferred = _submit_anchor_wave_requests(
+        wave_requests,
+        fetch_payload=_fetch_payload,
+    )
+    failures.update(deferred)
     try:
-        future_keys = {
-            executor.submit(_fetch_payload, request): key
-            for key, request in wave_requests.items()
-        }
-        try:
-            for future in as_completed(
-                future_keys,
-                timeout=(
-                    None
-                    if deadline_monotonic is None
-                    else _deadline_timeout_preserving_bucket_fallback(
-                        deadline_monotonic, default=30.0
+        for future in as_completed(
+            future_keys,
+            timeout=(
+                None
+                if deadline_monotonic is None
+                else _deadline_timeout_preserving_bucket_fallback(
+                    deadline_monotonic,
+                    default=30.0,
+                    bucket_fallback_reserve_seconds=bucket_fallback_reserve_seconds,
+                )
+            ),
+        ):
+            key = future_keys[future]
+            try:
+                payload = dict(future.result())
+                request = wave_requests[key]
+                if not _current_target_payload_materializable(
+                    payload,
+                    city_timezone=request.timezone_name,
+                    target_date=key[1],
+                    cycle=request.run,
+                ):
+                    raise ValueError(
+                        "meta-stamped payload has no finite target-day sample"
                     )
-                ),
-            ):
-                key = future_keys[future]
-                try:
-                    payload = dict(future.result())
-                    request = wave_requests[key]
-                    if not _current_target_payload_materializable(
-                        payload,
-                        city_timezone=request.timezone_name,
-                        target_date=key[1],
-                        cycle=request.run,
-                    ):
-                        raise ValueError(
-                            "meta-stamped payload has no finite target-day sample"
-                        )
-                    payloads[key] = (payload, datetime.now(tz=UTC))
-                except Exception as exc:  # each city retains its independent bucket fallback
-                    failures[key] = exc
-        except TimeoutError as exc:
-            for future, key in future_keys.items():
-                if not future.done():
-                    failures[key] = exc
+                payloads[key] = (payload, datetime.now(tz=UTC))
+            except Exception as exc:  # each city retains its independent bucket fallback
+                failures[key] = exc
+    except TimeoutError as exc:
+        for future, key in future_keys.items():
+            if not future.done():
+                failures[key] = exc
     finally:
-        # A non-cooperative worker must not hold this scheduler slice past its
-        # provider-rung budget. The target proceeds to bucket fallback below.
-        executor.shutdown(wait=False, cancel_futures=True)
+        # Running workers stay process-bounded and leased to their exact
+        # city/date/cycle. They cannot write late results, and future ticks
+        # defer instead of creating duplicate HTTP requests.
+        _discard_finished_anchor_wave_requests(future_keys, wave_requests)
 
     if not payloads:
         return {}, failures
@@ -1278,7 +1371,9 @@ def _fetch_meta_stamped_anchor_wave(
     with quota_context:
         meta_after = fetch_openmeteo_ifs9_model_meta(
             timeout=_deadline_timeout_preserving_bucket_fallback(
-                deadline_monotonic, default=20.0
+                deadline_monotonic,
+                default=20.0,
+                bucket_fallback_reserve_seconds=bucket_fallback_reserve_seconds,
             ),
             max_retries=1,
             fast_fail_429=True,
@@ -1304,6 +1399,7 @@ def _fetch_run_pinned_anchor_wave(
     requests: dict[tuple[str, str], object],
     *,
     deadline_monotonic: float | None,
+    bucket_fallback_reserve_seconds: float = _MAX_BUCKET_FALLBACK_RESERVE_SECONDS,
     client: httpx.Client,
     quota_critical: bool = False,
     quota_priority: bool = False,
@@ -1324,7 +1420,9 @@ def _fetch_run_pinned_anchor_wave(
         payloads = fetch_openmeteo_ecmwf_ifs9_anchor_payloads(
             tuple(request for _, request in items),
             timeout=_deadline_timeout_preserving_bucket_fallback(
-                deadline_monotonic, default=30.0
+                deadline_monotonic,
+                default=30.0,
+                bucket_fallback_reserve_seconds=bucket_fallback_reserve_seconds,
             ),
             max_retries=1,
             fast_fail_429=True,
@@ -1606,6 +1704,9 @@ def download_current_target_raw_inputs(
         if max_wall_clock_seconds is not None
         else None
     )
+    bucket_fallback_reserve_seconds = _bucket_fallback_reserve_seconds(
+        max_wall_clock_seconds
+    )
     resolved_payloads: dict[
         tuple[str, str], tuple[dict, dict[str, object], datetime]
     ] = _canonical_sibling_payload_reuse(
@@ -1708,6 +1809,7 @@ def download_current_target_raw_inputs(
             fetched_wave = _fetch_run_pinned_anchor_wave(
                 representative_requests,
                 deadline_monotonic=deadline_monotonic,
+                bucket_fallback_reserve_seconds=bucket_fallback_reserve_seconds,
                 client=openmeteo_client,
                 quota_critical=quota_critical,
                 quota_priority=quota_priority,
@@ -1745,6 +1847,7 @@ def download_current_target_raw_inputs(
                 representative_requests,
                 max_workers=fetch_workers,
                 deadline_monotonic=deadline_monotonic,
+                bucket_fallback_reserve_seconds=bucket_fallback_reserve_seconds,
                 client=openmeteo_client,
                 quota_critical=quota_critical,
                 quota_priority=quota_priority,
@@ -1854,6 +1957,7 @@ def download_current_target_raw_inputs(
                             target_date=target.target_date,
                             timezone_name=city_config.timezone,
                             deadline_monotonic=deadline_monotonic,
+                            bucket_fallback_reserve_seconds=bucket_fallback_reserve_seconds,
                             bucket_manifest_provider=current_bucket_manifests,
                             bucket_read_point=bucket_pool.read,
                             bucket_read_workers=min(max(1, int(fetch_workers)), 8),

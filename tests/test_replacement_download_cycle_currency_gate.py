@@ -1046,7 +1046,7 @@ def test_deadlined_meta_wave_never_queues_more_than_one_worker_width(monkeypatch
         requests,
         max_workers=2,
         deadline_monotonic=(
-            dl.time.monotonic() + dl._BUCKET_FALLBACK_RESERVE_SECONDS + 1.0
+            dl.time.monotonic() + dl._MAX_BUCKET_FALLBACK_RESERVE_SECONDS + 1.0
         ),
         client=object(),
     )
@@ -1087,42 +1087,27 @@ def test_deadlined_anchor_rungs_reserve_the_bucket_fallback_window(monkeypatch) 
         timezone_name="UTC",
     )
 
+    download_budget_seconds = 10.0
+    reserve_seconds = dl._bucket_fallback_reserve_seconds(download_budget_seconds)
     payload, provenance = dl._resolve_anchor_payload(
         request=request,
         city="City",
         target_date="2026-08-07",
         timezone_name="UTC",
-        deadline_monotonic=20.0,
+        deadline_monotonic=download_budget_seconds,
+        bucket_fallback_reserve_seconds=reserve_seconds,
     )
 
     assert payload == _anchor_payload("2026-08-07")
     assert provenance["run_authority"] == "bucket_test"
-    assert timeouts == [dl._BUCKET_FALLBACK_RESERVE_SECONDS]
+    assert 0.0 < reserve_seconds < download_budget_seconds
+    assert timeouts == [download_budget_seconds - reserve_seconds]
     assert len(bucket_calls) == 1
 
 
-def test_deadlined_meta_wave_never_waits_for_executor_shutdown(monkeypatch) -> None:
-    from concurrent.futures import Future
-
+def test_deadlined_meta_wave_bounds_blocked_worker_and_defers_duplicate_tick(monkeypatch) -> None:
     import scripts.download_replacement_forecast_current_targets as dl
     from src.data.openmeteo_ecmwf_ifs9_anchor import build_anchor_request
-
-    shutdown_calls: list[tuple[bool, bool]] = []
-
-    class _Executor:
-        def __init__(self, **_kwargs) -> None:
-            pass
-
-        def submit(self, fn, *args):
-            future = Future()
-            try:
-                future.set_result(fn(*args))
-            except BaseException as exc:
-                future.set_exception(exc)
-            return future
-
-        def shutdown(self, *, wait, cancel_futures) -> None:
-            shutdown_calls.append((wait, cancel_futures))
 
     meta = {
         "run_initialisation_utc": datetime(2026, 8, 7, 12, tzinfo=timezone.utc),
@@ -1135,24 +1120,78 @@ def test_deadlined_meta_wave_never_waits_for_executor_shutdown(monkeypatch) -> N
         run="2026-08-07T12:00:00+00:00",
         timezone_name="UTC",
     )
-    monkeypatch.setattr(dl, "ThreadPoolExecutor", _Executor)
+    release_worker = threading.Event()
+    fetch_calls: list[object] = []
+
+    class _Client:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    first_tick_client = _Client()
+    monkeypatch.setattr(dl, "_ANCHOR_WAVE_EXECUTOR", None)
+    monkeypatch.setattr(dl, "_ANCHOR_WAVE_INFLIGHT", {})
     monkeypatch.setattr(dl, "fetch_openmeteo_ifs9_model_meta", lambda **_kwargs: meta)
+
+    def _blocked_payload(*_args, **_kwargs):
+        fetch_calls.append(object())
+        assert release_worker.wait(timeout=1.0)
+        if _kwargs["client"].closed:
+            raise RuntimeError("caller closed the late worker client")
+        return _anchor_payload("2026-08-07")
+
     monkeypatch.setattr(
         dl,
         "fetch_openmeteo_ecmwf_ifs9_anchor_payload_standard_unstamped",
-        lambda *_args, **_kwargs: _anchor_payload("2026-08-07"),
+        _blocked_payload,
+    )
+    requests = {("City", "2026-08-07"): request}
+    reserve_seconds = 0.02
+    started = dl.time.monotonic()
+    first_resolved, first_failures = dl._fetch_meta_stamped_anchor_wave(
+        requests,
+        max_workers=1,
+        deadline_monotonic=started + 0.10,
+        bucket_fallback_reserve_seconds=reserve_seconds,
+        client=first_tick_client,
     )
 
-    resolved, failures = dl._fetch_meta_stamped_anchor_wave(
-        {("City", "2026-08-07"): request},
+    assert dl.time.monotonic() - started < 0.25
+    assert first_resolved == {}
+    assert tuple(first_failures) == (("City", "2026-08-07"),)
+    assert len(fetch_calls) == 1
+
+    second_resolved, second_failures = dl._fetch_meta_stamped_anchor_wave(
+        requests,
         max_workers=1,
-        deadline_monotonic=dl.time.monotonic() + 30.0,
+        deadline_monotonic=dl.time.monotonic() + 0.10,
+        bucket_fallback_reserve_seconds=reserve_seconds,
         client=object(),
     )
+    assert second_resolved == {}
+    assert tuple(second_failures) == (("City", "2026-08-07"),)
+    assert len(fetch_calls) == 1
 
-    assert tuple(resolved) == (("City", "2026-08-07"),)
-    assert failures == {}
-    assert shutdown_calls == [(False, True)]
+    running_future = next(iter(dl._ANCHOR_WAVE_INFLIGHT.values()))
+    first_tick_client.close()
+    release_worker.set()
+    with pytest.raises(RuntimeError, match="caller closed"):
+        running_future.result(timeout=1.0)
+    assert first_resolved == {}  # The late result was never published to the first tick.
+
+    third_resolved, third_failures = dl._fetch_meta_stamped_anchor_wave(
+        requests,
+        max_workers=1,
+        deadline_monotonic=dl.time.monotonic() + 0.50,
+        bucket_fallback_reserve_seconds=reserve_seconds,
+        client=_Client(),
+    )
+    assert tuple(third_resolved) == (("City", "2026-08-07"),)
+    assert third_failures == {}
+    assert len(fetch_calls) == 2
+    assert dl._ANCHOR_WAVE_EXECUTOR is not None
+    dl._ANCHOR_WAVE_EXECUTOR.shutdown(wait=True, cancel_futures=True)
 
 
 def test_meta_stamped_wave_discards_every_payload_when_provider_changes_run(
@@ -3411,6 +3450,7 @@ def test_direct_downloader_reuses_bucket_manifest_across_targets(
         "fetch_bucket_run_manifest",
         _fetch_bucket_run_manifest,
     )
+    monkeypatch.setattr(dl.quota_tracker, "can_call", lambda: False)
     monkeypatch.setattr(dl, "_resolve_anchor_payload", _resolve)
 
     report = dl.download_current_target_raw_inputs(
