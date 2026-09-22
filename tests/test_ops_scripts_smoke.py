@@ -8054,6 +8054,91 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
     assert "live restart preflight passed" in capsys.readouterr().out
 
 
+def test_deploy_live_warm_preflight_failure_releases_guard_without_stopping_main(
+    monkeypatch, capsys
+):
+    dl = _load("deploy_live_warm_preflight_refused_guard", "deploy_live.py")
+    calls = []
+    released = []
+
+    monkeypatch.setattr(dl, "_gate", lambda *_args, **_kwargs: (True, []))
+    monkeypatch.setattr(dl, "head_sha", lambda short=True: "e" * 40)
+    monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda _label: True)
+    monkeypatch.setattr(
+        dl,
+        "_loaded_live_restart_obligation_gate",
+        lambda *_args, **_kwargs: (True, "capital handoff admitted"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_pause_entries_for_live_restart_if_needed",
+        lambda labels, **_kwargs: (
+            calls.append(("pause", tuple(labels))) or (True, "pause armed")
+        ),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_current_prerequisite_code_identity_labels",
+        lambda labels, **_kwargs: set(labels),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_wait_for_prerequisite_code_identity",
+        lambda labels, **_kwargs: (
+            calls.append(("prerequisite", tuple(labels)))
+            or (True, "sidecar code identity verified")
+        ),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_restart_migration_targets_current",
+        lambda: (True, "migrations current"),
+    )
+
+    def _preflight(labels, **kwargs):
+        calls.append(
+            (
+                "preflight",
+                tuple(labels),
+                kwargs.get("expected_live_process_state"),
+                kwargs.get("defer_running_monitor_cadence"),
+            )
+        )
+        return False, "warm preflight timed out"
+
+    monkeypatch.setattr(dl, "_run_restart_preflight_if_needed", _preflight)
+    monkeypatch.setattr(
+        dl,
+        "_release_unused_live_restart_guard",
+        lambda labels, *, expected_sha: (
+            released.append((tuple(labels), expected_sha))
+            or "live restart guard release: released reason=restart_refused"
+        ),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_stop_label",
+        lambda label: (_ for _ in ()).throw(
+            AssertionError(f"warm refusal must not stop {label}")
+        ),
+    )
+    monkeypatch.setattr(dl, "_live_restart_exclusive_lock", contextlib.nullcontext)
+
+    assert dl.main(["restart", "live-trading"]) == 1
+
+    expanded_labels = [*dl.LIVE_TRADING_PREREQUISITE_LABELS, dl.LIVE_TRADING_LABEL]
+    assert released == [(tuple(expanded_labels), "e" * 40)]
+    assert calls[-1] == (
+        "preflight",
+        tuple(expanded_labels),
+        "running",
+        True,
+    )
+    output = capsys.readouterr().out
+    assert "warm restart preflight is not green" in output
+    assert "restart_refused" in output
+
+
 def test_deploy_live_current_migrations_keep_main_until_warm_preflight(monkeypatch):
     dl = _load("deploy_live_continuous_monitor_cutover", "deploy_live.py")
     calls = []

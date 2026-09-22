@@ -4392,6 +4392,17 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
                         "REFUSING to stop live-trading — warm restart preflight is not green:"
                     )
                     print(warm_detail)
+                    # The warm preflight refused before the old main was
+                    # stopped, so this invocation cannot ever serve
+                    # ``expected_live_sha`` and prove its guard green.  Clear
+                    # only this restart generation; the helper's CAS leaves
+                    # an operator pause or newer invocation untouched.
+                    print(
+                        _release_unused_live_restart_guard(
+                            labels,
+                            expected_sha=expected_live_sha,
+                        )
+                    )
                     return 1
                 print(warm_detail)
                 continuous_monitor_cutover = True
