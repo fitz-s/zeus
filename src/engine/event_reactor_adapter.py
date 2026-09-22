@@ -2614,10 +2614,27 @@ def _global_batch_wakes_supersede(
     return False
 
 
-def _generic_held_completion_wakes_supersede(wakes: Iterable[object]) -> bool:
+def _generic_held_completion_wakes_supersede(
+    wakes: Iterable[object],
+    *,
+    valuation_family_keys: frozenset[str] | None = None,
+) -> bool:
     """Whether a new wake invalidates a bounded generic held completion."""
 
     from src.runtime.reactor_wake import GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+
+    # A generic completion is only allowed to ignore a forecast/Day0 wake when
+    # the runtime has published the complete portfolio valuation scope.  Missing
+    # or malformed scope stays fail-closed, preserving the old global veto.
+    scope_keys: frozenset[str] | None = None
+    if isinstance(valuation_family_keys, frozenset) and valuation_family_keys:
+        if all(
+            isinstance(family_key, str) and family_key.strip()
+            for family_key in valuation_family_keys
+        ):
+            scope_keys = frozenset(
+                family_key.strip() for family_key in valuation_family_keys
+            )
 
     for wake in wakes:
         reason = str(getattr(wake, "reason", "") or "")
@@ -2626,10 +2643,43 @@ def _generic_held_completion_wakes_supersede(wakes: Iterable[object]) -> bool:
             "money_path_substrate_refreshed",
         }:
             continue
-        if reason == "forecast_posterior_advanced":
-            return True
-        if reason == "day0_extreme_event_committed":
-            return True
+        if reason in {
+            "forecast_posterior_advanced",
+            "day0_extreme_event_committed",
+        }:
+            if scope_keys is None:
+                return True
+            raw_families = getattr(wake, "forecast_families", None)
+            if not isinstance(raw_families, (tuple, list)) or not raw_families:
+                return True
+            wake_family_keys: set[str] = set()
+            for raw_family in raw_families:
+                if not isinstance(raw_family, (tuple, list)) or len(raw_family) != 3:
+                    return True
+                city, target_date, metric = (
+                    str(value or "").strip() for value in raw_family
+                )
+                metric = metric.lower()
+                if not city or not target_date or metric not in {"high", "low"}:
+                    return True
+                try:
+                    if date.fromisoformat(target_date).isoformat() != target_date:
+                        return True
+                except ValueError:
+                    return True
+                try:
+                    wake_family_keys.add(
+                        weather_family_id(
+                            city=city,
+                            target_date=target_date,
+                            metric=metric,
+                        )
+                    )
+                except (TypeError, ValueError):
+                    return True
+            if wake_family_keys & scope_keys:
+                return True
+            continue
         if (
             reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
             and not getattr(wake, "held_sell_reauction_requests", ())
@@ -8213,6 +8263,33 @@ def event_bound_live_adapter_from_trade_conn(
     _global_batch_grace_supersession_count = [0]
     _global_batch_grace_window_started_monotonic = [_time.monotonic()]
 
+    # Published by the runtime only after its current scope, wealth witness,
+    # and held obligations are coherent.  A strict generic completion may use
+    # this immutable family superset to ignore unrelated forecast/Day0 wakes;
+    # every new global-batch entry resets it to None in the runtime.
+    _dependency_scope_family_keys: frozenset[str] | None = None
+
+    def _observe_dependency_scope(
+        family_keys: frozenset[str] | None,
+    ) -> None:
+        nonlocal _dependency_scope_family_keys
+        if family_keys is None:
+            had_published_scope = _dependency_scope_family_keys is not None
+            _dependency_scope_family_keys = None
+            # A recursive cut reuses this closure's revision box.  Rewind the
+            # cursor with the scope reset so the next probe reads queued wakes
+            # again even when the reactor revision number is unchanged.
+            if had_published_scope:
+                _global_batch_urgent_wake_revision[0] = None
+            return
+        if not isinstance(family_keys, frozenset) or any(
+            not isinstance(family_key, str) or not family_key.strip()
+            for family_key in family_keys
+        ):
+            _dependency_scope_family_keys = None
+            return
+        _dependency_scope_family_keys = family_keys
+
     # INV-K7 reservation ledger: closure-held, fresh per reactor cycle. FIX B
     # (2026-06-05): rollback-aware so a candidate rejected downstream of Kelly is
     # rolled back by the reactor before the next sequential event reads it.
@@ -9209,16 +9286,19 @@ def event_bound_live_adapter_from_trade_conn(
                 exclude_wake_ids=_global_batch_owned_wake_ids,
             )
             if family_scoped_held_completion:
-                # This bounded generic completion owns only a named held family,
-                # but its full-portfolio wealth witness means every new forecast,
-                # any Day0 fact, or newly queued exact completion supersedes it.
-                # Book/substrate wakes remain JIT-rebound rather than restarting.
+                # This bounded generic completion owns a named held family and
+                # publishes a full valuation scope before preparation. Forecast
+                # or Day0 wakes inside that scope supersede; outside wakes stay
+                # queued while book/substrate wakes remain JIT-rebound.
                 try:
                     if exact_held_sell_completion_wake_ids(fail_on_error=True):
                         return True
                 except (OSError, ValueError):
                     return True
-                if _generic_held_completion_wakes_supersede(pending_wakes):
+                if _generic_held_completion_wakes_supersede(
+                    pending_wakes,
+                    valuation_family_keys=_dependency_scope_family_keys,
+                ):
                     return True
                 if not pending_wakes:
                     marker = reactor_urgent_wake_identity()
@@ -9330,17 +9410,33 @@ def event_bound_live_adapter_from_trade_conn(
         )
 
         def _day0_selection_cancelled() -> bool:
-            try:
-                hard_cancelled = _hard_day0_authority_cancelled()
-            except Exception:  # noqa: BLE001 - unavailable hard truth is a veto
-                logging.getLogger(__name__).exception(
-                    "global hard Day0 authority probe failed"
-                )
-                _stable_preflight_monitor_handoff[0] = False
-                return True
-            if hard_cancelled:
-                _stable_preflight_monitor_handoff[0] = False
-                return True
+            if family_scoped_held_completion:
+                # Strict generic completion must use the same epoch/scoped
+                # supersession path as _epoch_superseded.  The unscoped hard
+                # Day0 probe would otherwise cancel on an unrelated family
+                # before the published valuation scope can be consulted.
+                try:
+                    if _epoch_superseded():
+                        _stable_preflight_monitor_handoff[0] = False
+                        return True
+                except Exception:  # noqa: BLE001 - unavailable truth is a veto
+                    logging.getLogger(__name__).exception(
+                        "global strict-generic supersession probe failed"
+                    )
+                    _stable_preflight_monitor_handoff[0] = False
+                    return True
+            else:
+                try:
+                    hard_cancelled = _hard_day0_authority_cancelled()
+                except Exception:  # noqa: BLE001 - unavailable hard truth is a veto
+                    logging.getLogger(__name__).exception(
+                        "global hard Day0 authority probe failed"
+                    )
+                    _stable_preflight_monitor_handoff[0] = False
+                    return True
+                if hard_cancelled:
+                    _stable_preflight_monitor_handoff[0] = False
+                    return True
             if _generic_final_actuation_cancelled():
                 _stable_preflight_monitor_handoff[0] = False
                 return True
@@ -12331,6 +12427,11 @@ def event_bound_live_adapter_from_trade_conn(
                 epoch_superseded=_epoch_superseded,
                 selection_cancelled=_day0_selection_cancelled,
                 final_actuation_cancelled=final_actuation_cancelled,
+                dependency_scope_observer=(
+                    _observe_dependency_scope
+                    if family_scoped_held_completion
+                    else None
+                ),
                 held_sell_reauction_requests=held_sell_reauction_requests,
                 required_held_family_keys=required_held_family_keys,
                 selection_telemetry_observer=(
