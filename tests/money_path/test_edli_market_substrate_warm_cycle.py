@@ -56,7 +56,7 @@ import re
 import sqlite3
 import threading
 import time as time_module
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -2411,8 +2411,8 @@ def _patch_warm_cycle_runtime(monkeypatch, control_query):
     _enable_edli_cfg(monkeypatch, enabled=True)
 
 
-def test_market_substrate_warm_cycle_pause_suppression_resets_next_tick(monkeypatch):
-    """Trusted pause suppresses pending urgency promotion for only the current tick."""
+def test_market_substrate_warm_cycle_pause_state_only_changes_summary(monkeypatch):
+    """Pause state is observed, while normal warm always keeps fair rotation."""
 
     calls: list[dict] = []
     control_reads: list[str] = []
@@ -2440,24 +2440,29 @@ def test_market_substrate_warm_cycle_pause_suppression_resets_next_tick(monkeypa
 
     assert len(control_reads) == 2
     assert all(now.endswith("+00:00") for now in control_reads)
-    assert [call["promote_pending_urgency"] for call in calls] == [False, True]
+    assert [call["promote_pending_urgency"] for call in calls] == [False, False]
+    assert [call["capture_trigger_override"] for call in calls] == ["KEYFRAME", "KEYFRAME"]
     assert all(call["include_pending_families"] is True for call in calls)
     assert all(call["include_money_risk_families"] is False for call in calls)
     assert paused_result["pending_urgency_promotion_suppressed"] is True
-    assert paused_result["pending_urgency_promotion_suppression_reason"] == "entries_paused"
+    assert paused_result["pending_urgency_promotion_suppression_reason"] == (
+        "entries_paused_and_normal_background_fair_rotation"
+    )
     assert paused_result["control_authority_status"] == "ok"
     assert paused_result["control_authority_degraded"] is False
-    assert resumed_result["pending_urgency_promotion_suppressed"] is False
-    assert resumed_result["pending_urgency_promotion_suppression_reason"] is None
+    assert resumed_result["pending_urgency_promotion_suppressed"] is True
+    assert resumed_result["pending_urgency_promotion_suppression_reason"] == (
+        "normal_background_fair_rotation"
+    )
     assert resumed_result["control_authority_status"] == "ok"
     assert resumed_result["control_authority_degraded"] is False
 
 
 @pytest.mark.parametrize("control_mode", ["exception", "non_ok"])
-def test_market_substrate_warm_cycle_control_degraded_promotes_pending_urgency(
+def test_market_substrate_warm_cycle_control_degraded_keeps_fair_pending_rotation(
     monkeypatch, control_mode
 ):
-    """Unavailable control authority fails open for pending evidence priority."""
+    """Unavailable control authority cannot change the fair normal warm lane."""
 
     calls: list[dict] = []
 
@@ -2476,8 +2481,9 @@ def test_market_substrate_warm_cycle_control_degraded_promotes_pending_urgency(
 
     result = substrate_observer._edli_market_substrate_warm_cycle()
 
-    assert calls and calls[0]["promote_pending_urgency"] is True
-    assert result["pending_urgency_promotion_suppressed"] is False
+    assert calls and calls[0]["promote_pending_urgency"] is False
+    assert calls[0]["capture_trigger_override"] == "KEYFRAME"
+    assert result["pending_urgency_promotion_suppressed"] is True
     assert result["control_authority_degraded"] is True
     if control_mode == "exception":
         assert result["control_authority_status"] == "unavailable"
@@ -2508,7 +2514,7 @@ def test_market_substrate_warm_cycle_control_degraded_promotes_pending_urgency(
 def test_market_substrate_warm_cycle_malformed_control_fails_open_exactly(
     monkeypatch, control_state, expected_status, expected_reason
 ):
-    """Malformed or missing control authority cannot suppress evidence refresh."""
+    """Malformed or missing control authority cannot change fair evidence refresh."""
 
     calls: list[dict] = []
     monkeypatch.setattr(
@@ -2524,13 +2530,165 @@ def test_market_substrate_warm_cycle_malformed_control_fails_open_exactly(
 
     result = substrate_observer._edli_market_substrate_warm_cycle()
 
-    assert calls and calls[0]["promote_pending_urgency"] is True
-    assert result["promote_pending_urgency"] is True
-    assert result["pending_urgency_promotion_suppressed"] is False
-    assert result["pending_urgency_promotion_suppression_reason"] is None
+    assert calls and calls[0]["promote_pending_urgency"] is False
+    assert calls[0]["capture_trigger_override"] == "KEYFRAME"
+    assert result["promote_pending_urgency"] is False
+    assert result["pending_urgency_promotion_suppressed"] is True
+    assert result["pending_urgency_promotion_suppression_reason"] == (
+        "normal_background_fair_rotation"
+    )
     assert result["control_authority_degraded"] is True
     assert result["control_authority_status"] == expected_status
     assert result["control_authority_reason"] == expected_reason
+
+
+def test_normal_warm_rotates_urgent_backlog_to_future_families_and_keyframes(
+    monkeypatch,
+):
+    """A bounded normal warm lane must reach future pending families across ticks."""
+
+    urgent_families = [
+        ("Tokyo", (date(2026, 10, 1) + timedelta(days=index)).isoformat(), "high")
+        for index in range(88)
+    ]
+    future_families = [
+        ("Paris", "2026-09-23", "high"),
+        ("Paris", "2026-09-24", "high"),
+    ]
+    pending_rows = [(*family, 4) for family in urgent_families] + [
+        (*family, 2) for family in future_families
+    ]
+    topology_visits: list[tuple[str, str, str]] = []
+    captures: list[dict] = []
+    fake_now = [0.0]
+
+    class _NoCloseWorldConn:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, sql, params=()):
+            if "PRAGMA database_list" in str(sql):
+                return SimpleNamespace(
+                    fetchall=lambda: [(0, "main", ""), (2, "forecasts", "")],
+                    fetchone=lambda: (0, "main", ""),
+                )
+            return self._conn.execute(sql, params)
+
+        def close(self):
+            pass
+
+    raw_world = sqlite3.connect(":memory:")
+    world_conn = _NoCloseWorldConn(raw_world)
+    forecasts_conn = _FakeConn()
+    write_conn = _FakeConn()
+
+    def _topology_rows(_conn, payload):
+        family = (payload["city"], payload["target_date"], payload["metric"])
+        topology_visits.append(family)
+        fake_now[0] += 0.003
+        condition_id = "cond-" + "-".join(family)
+        return [
+            {
+                "market_slug": "-".join(family).lower(),
+                "city": family[0],
+                "target_date": family[1],
+                "temperature_metric": family[2],
+                "condition_id": condition_id,
+                "token_id": f"yes-{condition_id}",
+                "range_label": "test-bin",
+            }
+        ]
+
+    def _reconstruct(_conn, *, topology_rows, **_kwargs):
+        row = topology_rows[0]
+        condition_id = row["condition_id"]
+        return {
+            "slug": row["market_slug"],
+            "city": SimpleNamespace(name=row["city"]),
+            "target_date": row["target_date"],
+            "temperature_metric": row["temperature_metric"],
+            "outcomes": [
+                {
+                    "condition_id": condition_id,
+                    "market_id": condition_id,
+                    "token_id": row["token_id"],
+                    "no_token_id": f"no-{condition_id}",
+                    "question_id": f"q-{condition_id}",
+                }
+            ],
+        }
+
+    import src.data.market_topology_rows as topology_rows_module
+    import src.state.db as state_db
+
+    monkeypatch.setattr(
+        substrate_observer,
+        "_pending_family_rows_for_refresh",
+        lambda *_args, **_kwargs: list(pending_rows),
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_topology_lookup_deadline_for_snapshot_refresh",
+        lambda **_kwargs: fake_now[0] + 0.01,
+    )
+    monkeypatch.setattr(substrate_observer.time, "monotonic", lambda: fake_now[0])
+    monkeypatch.setattr(
+        topology_rows_module,
+        "_event_family_market_topology_rows",
+        _topology_rows,
+    )
+    monkeypatch.setattr(
+        market_scanner,
+        "reconstruct_weather_market_from_static_topology",
+        _reconstruct,
+    )
+    monkeypatch.setattr(substrate_observer, "_condition_buy_sides_fresh", lambda *_a: False)
+    monkeypatch.setattr(substrate_observer, "_substrate_clob_client", lambda *_a, **_k: object())
+    monkeypatch.setattr(state_db, "get_world_connection", lambda: world_conn)
+    monkeypatch.setattr(state_db, "get_forecasts_connection_read_only", lambda: forecasts_conn)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda **_k: _FakeConn())
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda **_k: write_conn)
+    monkeypatch.setattr(
+        state_db,
+        "query_control_override_state",
+        lambda _conn, *, now: {"status": "ok", "entries_paused": False},
+    )
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(
+        substrate_observer,
+        "_market_substrate_broad_turnstile",
+        lambda: contextlib.nullcontext(SimpleNamespace(acquired=True, status="acquired")),
+    )
+    monkeypatch.setattr(
+        "src.data.job_lock.acquire_lock",
+        lambda _name, **_kwargs: contextlib.nullcontext(True),
+    )
+    monkeypatch.setattr(substrate_observer, "_background_warm_refresh_budget_seconds", lambda: 5.0)
+    monkeypatch.setattr(substrate_observer, "_background_warm_snapshot_reserve_seconds", lambda _budget: 1.0)
+
+    def _capture(_conn, *, markets, **kwargs):
+        captures.append({"families": {
+            (m["city"].name, m["target_date"], m["temperature_metric"])
+            for m in markets
+        }, **kwargs})
+        return {
+            "attempted": len(markets),
+            "inserted": len(markets),
+            "executable_substrate_coverage_status": "FULL",
+        }
+
+    monkeypatch.setattr(market_scanner, "refresh_executable_market_substrate_snapshots", _capture)
+
+    for _ in range(30):
+        summary = substrate_observer._edli_market_substrate_warm_cycle()
+        assert summary["promote_pending_urgency"] is False
+
+    assert set(future_families).issubset(set(topology_visits))
+    assert captures
+    assert all(capture["capture_trigger_override"] == "KEYFRAME" for capture in captures)
+    assert all(capture["max_outcomes"] == 0 for capture in captures)
+    assert all(capture["background_fast_yield"] is True for capture in captures)
+    raw_world.close()
 
 
 def test_money_path_priority_cycle_suppresses_claim_families_when_entries_paused(monkeypatch):

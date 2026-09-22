@@ -3148,8 +3148,13 @@ def _edli_market_substrate_warm_cycle() -> None:
         control_authority_status = "unavailable"
         control_authority_degraded = False
         control_authority_reason: str | None = None
-        pending_urgency_promotion_suppressed = False
-        pending_urgency_promotion_suppression_reason: str | None = None
+        # The ordinary warm lane always rotates the complete pending-family
+        # backlog. Held/rest/exact money-risk families keep their independent
+        # priority lane; promoting pending urgency here would let a small
+        # Day0/redecision prefix monopolize the background budget and starve
+        # future families.
+        pending_urgency_promotion_suppressed = True
+        pending_urgency_promotion_suppression_reason = "normal_background_fair_rotation"
         control_now_iso = datetime.now(timezone.utc).isoformat()
         try:
             control_state = query_control_override_state(conn, now=control_now_iso)
@@ -3166,34 +3171,32 @@ def _edli_market_substrate_warm_cycle() -> None:
                 control_authority_degraded = True
                 control_authority_reason = "control_authority_malformed:entries_paused"
             elif entries_paused is True:
-                # SCOPE: only pending-event urgency -> priority-family promotion in this
-                # ordinary warm tick; discovery, explicit/held/rest/FC-03/money-risk and
-                # new-family exact priority remain unchanged.
-                # DRAIN: the next 20s tick still discovers durable pending families and
-                # captures them through ordinary DISCOVERY_SWEEP compact/keyframes, with
-                # no new claim-like full PRIORITY_MARKER expansion from pending urgency.
-                # RESET: the next tick whose trusted pause is false/expired restores
-                # urgency promotion; no cached or sticky state survives this call.
-                pending_urgency_promotion_suppressed = True
-                pending_urgency_promotion_suppression_reason = "entries_paused"
+                # Pause remains observable in the summary, but this lane does
+                # not grant trading authority and keeps the same fair
+                # pending-family rotation either way.
+                pending_urgency_promotion_suppression_reason = (
+                    "entries_paused_and_normal_background_fair_rotation"
+                )
         except Exception as exc:  # noqa: BLE001 — refresh evidence fails open
             control_authority_status = "unavailable"
             control_authority_degraded = True
             control_authority_reason = "control_authority_unavailable"
             logger.warning(
-                "EDLI market-substrate warm: control authority unavailable; retaining "
-                "pending urgency promotion: %s",
+                "EDLI market-substrate warm: control authority unavailable; normal "
+                "fair pending rotation remains active: %s",
                 exc,
             )
-        if pending_urgency_promotion_suppressed:
+        if control_authority_status == "ok" and pending_urgency_promotion_suppression_reason.startswith(
+            "entries_paused"
+        ):
             logger.info(
-                "EDLI market-substrate warm: pending urgency promotion suppressed while "
-                "entries are paused"
+                "EDLI market-substrate warm: entries paused; pending backlog remains on "
+                "the normal fair-rotation/keyframe lane"
             )
         elif control_authority_degraded:
             logger.warning(
-                "EDLI market-substrate warm: control authority degraded (%s); retaining "
-                "pending urgency promotion",
+                "EDLI market-substrate warm: control authority degraded (%s); normal "
+                "fair pending rotation remains active",
                 control_authority_reason,
             )
         summary = _refresh_pending_family_snapshots(
@@ -3205,7 +3208,8 @@ def _edli_market_substrate_warm_cycle() -> None:
             refresh_budget_seconds=background_budget_s,
             snapshot_reserve_seconds=background_snapshot_reserve_s,
             include_money_risk_families=False,
-            promote_pending_urgency=not pending_urgency_promotion_suppressed,
+            promote_pending_urgency=False,
+            capture_trigger_override="KEYFRAME",
         )
         summary = {
             **dict(summary or {}),
@@ -3214,7 +3218,7 @@ def _edli_market_substrate_warm_cycle() -> None:
             "held_position_priority_condition_ids": 0,
             "claim_order_priority_families": 0,
             "claim_order_priority_read_failed": False,
-            "promote_pending_urgency": not pending_urgency_promotion_suppressed,
+            "promote_pending_urgency": False,
             "pending_urgency_promotion_suppressed": pending_urgency_promotion_suppressed,
             "pending_urgency_promotion_suppression_reason": (
                 pending_urgency_promotion_suppression_reason
