@@ -2679,13 +2679,29 @@ def test_normal_warm_rotates_urgent_backlog_to_future_families_and_keyframes(
 
     monkeypatch.setattr(market_scanner, "refresh_executable_market_substrate_snapshots", _capture)
 
+    normal_captures = []
+    cursor_handoffs = []
     for _ in range(30):
+        before_capture = len(captures)
         summary = substrate_observer._edli_market_substrate_warm_cycle()
+        normal_captures.extend(captures[before_capture:])
+        ordinary_cursor = substrate_observer._SUBSTRATE_REFRESH_CURSOR
+        substrate_observer._refresh_pending_family_snapshots(
+            world_conn,
+            forecasts_conn,
+            extra_priority_families=[urgent_families[0]],
+            include_pending_families=False,
+            include_money_risk_families=False,
+            refresh_budget_seconds=5.0,
+            snapshot_reserve_seconds=1.0,
+        )
+        cursor_handoffs.append((ordinary_cursor, substrate_observer._SUBSTRATE_REFRESH_CURSOR))
 
     assert set(future_families).issubset(set(topology_visits))
     assert summary["promote_pending_urgency"] is False
-    assert captures
-    assert all(capture["capture_trigger_override"] == "KEYFRAME" for capture in captures)
+    assert all(before == after for before, after in cursor_handoffs)
+    assert normal_captures
+    assert all(capture["capture_trigger_override"] == "KEYFRAME" for capture in normal_captures)
     assert all(capture["max_outcomes"] == 0 for capture in captures)
     assert all(capture["background_fast_yield"] is True for capture in captures)
     raw_world.close()

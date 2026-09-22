@@ -2104,10 +2104,11 @@ def _refresh_pending_family_snapshots(
             else:
                 fresh_skipped += 1
 
-        _SUBSTRATE_REFRESH_CURSOR = (
-            start_offset
-            + max(1, max(0, families_processed_this_cycle - len(priority_families)))
-        ) % max(1, n_ordinary_families)
+        if n_ordinary_families:
+            _SUBSTRATE_REFRESH_CURSOR = (
+                start_offset
+                + max(1, max(0, families_processed_this_cycle - len(priority_families)))
+            ) % n_ordinary_families
         if n_priority_families:
             _SUBSTRATE_PRIORITY_REFRESH_CURSOR = (
                 priority_start_offset
