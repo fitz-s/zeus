@@ -19278,7 +19278,13 @@ def _current_global_actuation_prepared_family(
                 allow_partial_deterministic=isinstance(
                     selected, DeterministicBinPayoffWitness
                 ),
-                allow_unobserved_day0_replacement=True,
+                allow_unobserved_day0_replacement=(
+                    not _held_day0_has_canonical_observation(
+                        observation_conn,
+                        event=event,
+                        decision_time=revalidation_time,
+                    )
+                ),
                 allow_provisional_day0_replacement=True,
                 probability_use=_CurrentProbabilityUse.HELD_MONITOR,
             )

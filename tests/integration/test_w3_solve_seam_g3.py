@@ -5627,9 +5627,15 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(
     conn.close()
 
 
+@pytest.mark.parametrize(
+    ("probe_outcome", "allow_unobserved"),
+    (("fact", False), ("empty", True), ("error", True)),
+)
 def test_day0_buy_jit_requires_entry_and_held_probability_content_equality(
-    monkeypatch,
+    monkeypatch, probe_outcome, allow_unobserved
 ):
+    import src.data.replacement_forecast_current_target_plan as target_plan
+
     content = {
         field: f"current-{field}"
         for field in era._GLOBAL_PROBABILITY_CONTENT_FIELDS
@@ -5666,6 +5672,28 @@ def test_day0_buy_jit_requires_entry_and_held_probability_content_equality(
         "_prepare_current_global_probability_family",
         prepare_current,
     )
+    if probe_outcome == "error":
+        def _latest_fact(*_args, **_kwargs):
+            raise sqlite3.OperationalError("canonical observation probe failed")
+    else:
+        def _latest_fact(*_args, **_kwargs):
+            return {} if probe_outcome == "fact" else None
+
+    monkeypatch.setattr(
+        target_plan,
+        "_latest_authorized_day0_fact",
+        _latest_fact,
+    )
+    event = make_opportunity_event(
+        event_type="DAY0_EXTREME_UPDATED",
+        entity_key="Paris|2026-07-10|high|LFPB",
+        source="global-auction-day0-parity-test",
+        observed_at="2026-07-10T20:00:00+00:00",
+        available_at="2026-07-10T20:00:00+00:00",
+        received_at="2026-07-10T20:00:00+00:00",
+        causal_snapshot_id="day0-parity-test",
+        payload={"city": "Paris", "target_date": "2026-07-10", "metric": "high"},
+    )
     conn = sqlite3.connect(":memory:")
     candidate = _global_test_buy_candidate(
         family_key=str(selected.family_key),
@@ -5682,13 +5710,15 @@ def test_day0_buy_jit_requires_entry_and_held_probability_content_equality(
         decision=SimpleNamespace(candidate=candidate),
     )
 
-    rebound, payload = era._current_global_actuation_prepared_family(
-        SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+    args = dict(
         global_actuation=actuation,
         forecast_conn=conn,
         topology_conn=conn,
         observation_conn=conn,
         decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
+    )
+    rebound, payload = era._current_global_actuation_prepared_family(
+        event, **args
     )
 
     assert rebound.probability_witness is selected
@@ -5700,7 +5730,9 @@ def test_day0_buy_jit_requires_entry_and_held_probability_content_equality(
     assert calls[0]["allow_provisional_day0_replacement"] is True
     assert calls[1]["required_condition_id"] == "c0"
     assert calls[1]["allow_partial_deterministic"] is False
-    assert calls[1]["allow_unobserved_day0_replacement"] is True
+    assert calls[1]["allow_unobserved_day0_replacement"] is (
+        allow_unobserved
+    )
     assert calls[1]["allow_provisional_day0_replacement"] is True
     conn.close()
 
