@@ -7468,6 +7468,75 @@ def test_global_day0_prepared_witness_rejects_binding_domain_mismatch():
         )
 
 
+def test_global_day0_prepared_witness_maps_complete_reordered_candidates_without_permuting_q_columns():
+    family, prepared = _prepared_current_day0_entry_fixture()
+    family.candidates = tuple(reversed(family.candidates))
+
+    q_by_condition, lcb_by_condition, _p_values, _prefilter, evidence = (
+        era._day0_probability_and_fdr_from_prepared_witness(
+            prepared_global_family=prepared,
+            current_day0_payload={
+                "probability_authority": "day0_remaining_day_global_probability_v1"
+            },
+            payload={
+                "rounded_value": 19.0,
+                "metric": "high",
+                "_edli_q_source": "day0_remaining_day",
+            },
+            family=family,
+            native_costs={},
+            decision_time=_dt.datetime(2026, 7, 10, 20, tzinfo=_dt.timezone.utc),
+        )
+    )
+
+    assert q_by_condition == {"condition-0": 0.25, "condition-1": 0.75}
+    assert set(lcb_by_condition) == {
+        ("condition-0", "buy_yes"),
+        ("condition-0", "buy_no"),
+        ("condition-1", "buy_yes"),
+        ("condition-1", "buy_no"),
+    }
+    assert lcb_by_condition[("condition-0", "buy_yes")].q_lcb == pytest.approx(0.25)
+    assert lcb_by_condition[("condition-0", "buy_no")].q_lcb == pytest.approx(0.75)
+    assert lcb_by_condition[("condition-1", "buy_yes")].q_lcb == pytest.approx(0.75)
+    assert lcb_by_condition[("condition-1", "buy_no")].q_lcb == pytest.approx(0.25)
+    expected_family_order_hash = era._probability_vector_hash((0.75, 0.25))
+    assert evidence["p_cal_vector_hash"] == expected_family_order_hash
+    assert evidence["p_live_vector_hash"] == expected_family_order_hash
+
+
+@pytest.mark.parametrize("mutation", ("duplicate", "missing", "replacement_token"))
+def test_global_day0_prepared_witness_rejects_non_bijective_or_replaced_bindings(mutation):
+    family, prepared = _prepared_current_day0_entry_fixture()
+    first, second = family.candidates
+    if mutation == "duplicate":
+        family.candidates = (first, first)
+    elif mutation == "missing":
+        family.candidates = (first,)
+    else:
+        family.candidates = (
+            first,
+            SimpleNamespace(
+                condition_id=second.condition_id,
+                yes_token_id="replacement-token",
+                no_token_id=second.no_token_id,
+                bin=second.bin,
+            ),
+        )
+
+    with pytest.raises(ValueError, match="GLOBAL_DAY0_PREPARED_WITNESS_(DOMAIN|BINDING)_INVALID"):
+        era._day0_probability_and_fdr_from_prepared_witness(
+            prepared_global_family=prepared,
+            current_day0_payload={
+                "probability_authority": "day0_remaining_day_global_probability_v1"
+            },
+            payload={"rounded_value": 19.0, "metric": "high"},
+            family=family,
+            native_costs={},
+            decision_time=_dt.datetime(2026, 7, 10, 20, tzinfo=_dt.timezone.utc),
+        )
+
+
 def test_global_day0_statistical_witness_with_partial_exact_child_keeps_unresolved_bins():
     family, prepared = _prepared_current_day0_entry_fixture(
         with_partial_exact_child=True

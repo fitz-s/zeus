@@ -35855,11 +35855,20 @@ def _day0_probability_and_fdr_from_prepared_witness(
     bindings = tuple(getattr(witness, "bindings", ()) or ())
     if not candidates or len(bindings) != len(candidates):
         raise ValueError("GLOBAL_DAY0_PREPARED_WITNESS_DOMAIN_INVALID")
-    for candidate, binding in zip(candidates, bindings, strict=True):
+    binding_by_condition: dict[str, object] = {}
+    for binding in bindings:
+        condition_id = str(getattr(binding, "condition_id", "") or "")
+        if not condition_id.strip() or condition_id in binding_by_condition:
+            raise ValueError("GLOBAL_DAY0_PREPARED_WITNESS_BINDING_INVALID")
+        binding_by_condition[condition_id] = binding
+    candidate_condition_ids: set[str] = set()
+    for candidate in candidates:
+        condition_id = str(getattr(candidate, "condition_id", "") or "")
+        binding = binding_by_condition.get(condition_id)
         if (
-            str(getattr(candidate, "condition_id", "") or "") != str(
-                getattr(binding, "condition_id", "") or ""
-            )
+            not condition_id.strip()
+            or condition_id in candidate_condition_ids
+            or binding is None
             or _candidate_bin_id_from_topology(candidate)
             != str(getattr(binding, "bin_id", "") or "")
             or str(getattr(candidate, "yes_token_id", "") or "")
@@ -35868,6 +35877,9 @@ def _day0_probability_and_fdr_from_prepared_witness(
             != str(getattr(binding, "no_token_id", "") or "")
         ):
             raise ValueError("GLOBAL_DAY0_PREPARED_WITNESS_BINDING_INVALID")
+        candidate_condition_ids.add(condition_id)
+    if candidate_condition_ids != set(binding_by_condition):
+        raise ValueError("GLOBAL_DAY0_PREPARED_WITNESS_BINDING_INVALID")
 
     samples = np.asarray(getattr(witness, "yes_q_samples", ()), dtype=np.float64)
     point_q = np.asarray(getattr(witness, "yes_point_q", ()), dtype=np.float64)
@@ -35931,8 +35943,13 @@ def _day0_probability_and_fdr_from_prepared_witness(
     )
     if not probability_authority or not semantics_revision:
         raise ValueError("GLOBAL_DAY0_PREPARED_WITNESS_METADATA_MISSING")
+    # ``bindings`` own the witness matrix columns; do not permute either q vector
+    # or samples to match a separately materialized candidate family.  Both receipt
+    # vectors are expressed in the consumer family order, so they remain comparable
+    # when the same complete binding domain arrives in a different legal order.
     p_cal_vector_hash = _probability_vector_hash(
-        float(point_q[index]) for index in range(len(bindings))
+        q_by_condition[str(candidate.condition_id or "")]
+        for candidate in candidates
     )
     p_live_vector_hash = _probability_vector_hash(
         masked_q[str(candidate.condition_id or "")] for candidate in candidates
