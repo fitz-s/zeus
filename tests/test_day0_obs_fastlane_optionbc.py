@@ -1,5 +1,5 @@
 # Created: 2026-06-12
-# Last reused/audited: 2026-07-24
+# Last reused/audited: 2026-09-22
 # Lifecycle: created=2026-06-12; last_reviewed=2026-07-24; last_reused=2026-07-24
 # Purpose: Protect Day0 fast-observation source, coverage, and scheduler contracts.
 # Reuse: Run when WU, same-station fast-tail, or Day0 source-clock routing changes.
@@ -1319,13 +1319,28 @@ class TestDay0MetarSourceClockTick:
         assert forecasts.closed is True
         assert trades.closed is True
 
-    def test_commits_before_publishing_reactor_wake(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "ledger_count,event_count,conflict_count,ledger_evaluated",
+        [
+            (1, 0, 0, False),
+            (0, 1, 0, False),
+            (0, 0, 1, False),
+            (1, 1, 0, True),
+            (1, 0, 1, True),
+        ],
+        ids=["publication", "kma_only", "conflict_only", "kma_with_evaluated_ledger", "conflict_with_evaluated_ledger"],
+    )
+    def test_commits_before_publishing_reactor_wake(
+        self, monkeypatch, ledger_count, event_count, conflict_count, ledger_evaluated
+    ):
         import src.ingest_main as im
 
         self._enable(monkeypatch)
         order: list[str] = []
         prefetch = SimpleNamespace(
-            ledger_reports=(object(),),
+            ledger_reports=tuple(object() for _ in range(ledger_count)),
+            event_reports=tuple(object() for _ in range(event_count)),
+            kma_conflicts=tuple(object() for _ in range(conflict_count)),
             freshness_status="fresh_fetch",
             reports=(object(),),
             eligible=((_wu_icao_city(), object(), "2026-06-12"),),
@@ -1334,6 +1349,9 @@ class TestDay0MetarSourceClockTick:
         class _Emitter:
             def prefetch(self, **_kw):
                 return prefetch
+
+            def prefetched_events_evaluated(self, _prefetch):
+                return ledger_evaluated
 
             def hydrate_event_memos_from_events(
                 self,
@@ -1434,9 +1452,11 @@ class TestDay0MetarSourceClockTick:
 
         assert result == {
             "status": "COMMITTED",
-            "pending_reports": 1,
+            "pending_reports": ledger_count,
             "events_emitted": 2,
         }
+        assert len(prefetch.ledger_reports) == ledger_count
+        assert not im._DAY0_METAR_PENDING_COMMITS
         wake_entry = next(item for item in order if item.startswith("wake:"))
         acquire_entry = next(item for item in order if item.startswith("acquire:"))
         assert order.index("memo_hydrate") < order.index(acquire_entry)
@@ -1938,9 +1958,11 @@ class TestDay0MetarSourceClockTick:
         assert im._DAY0_METAR_RETRY_FAILURES == 0
         assert im._DAY0_METAR_RETRY_NOT_BEFORE_MONOTONIC == 0.0
 
+    @pytest.mark.parametrize("direct_event", [False, True], ids=["publication", "kma_only"])
     def test_commit_failure_does_not_advance_memo_before_retry(
         self,
         monkeypatch,
+        direct_event,
     ):
         import sqlite3
 
@@ -1948,7 +1970,8 @@ class TestDay0MetarSourceClockTick:
 
         self._enable(monkeypatch)
         prefetch = SimpleNamespace(
-            ledger_reports=(object(),),
+            ledger_reports=() if direct_event else (object(),),
+            event_reports=(object(),) if direct_event else (),
             eligible=((_wu_icao_city(), object(), "2026-06-12"),),
         )
         applied = []
@@ -2005,12 +2028,12 @@ class TestDay0MetarSourceClockTick:
         im._stage_day0_metar_commit(
             prefetch,
             received_at="2026-06-12T00:00:00+00:00",
-            day0_is_tradeable=True,
+            family_admission=lambda _observation: True,
         )
 
         first = im._commit_pending_day0_metar(origin="test")
 
-        assert first == {"status": "WRITE_CONTENDED", "pending_reports": 1}
+        assert first == {"status": "WRITE_CONTENDED", "pending_reports": int(not direct_event)}
         assert applied == []
         assert im._DAY0_METAR_PENDING_COMMITS[0][0] is prefetch
 
@@ -2018,7 +2041,7 @@ class TestDay0MetarSourceClockTick:
 
         assert second == {
             "status": "COMMITTED",
-            "pending_reports": 1,
+            "pending_reports": int(not direct_event),
             "events_emitted": 1,
         }
         assert applied == [
@@ -2064,7 +2087,7 @@ class TestDay0MetarSourceClockTick:
             im._stage_day0_metar_commit(
                 prefetch,
                 received_at=prefetch.name,
-                day0_is_tradeable=True,
+                family_admission=lambda _observation: True,
             )
 
         assert len(im._DAY0_METAR_PENDING_COMMITS) == 2

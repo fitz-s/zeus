@@ -645,7 +645,11 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
         prefetch, received_at, family_admission = staged
         emitter = _day0_metar_emitter()
         pending_reports = len(tuple(prefetch.ledger_reports or ()))
-        if pending_reports == 0:
+        pending_events = bool(
+            getattr(prefetch, "event_reports", ())
+            or getattr(prefetch, "kma_conflicts", ())
+        )
+        if pending_reports == 0 and not pending_events:
             del _DAY0_METAR_PENDING_COMMITS[0]
             return {"status": "SOURCE_CURRENT"}
 
@@ -1945,14 +1949,18 @@ def _day0_metar_source_clock_tick():
         anomaly_check=None,
     )
     pending_reports = tuple(prefetch.ledger_reports or ())
-    if not pending_reports:
+    pending_events = bool(
+        getattr(prefetch, "event_reports", ())
+        or getattr(prefetch, "kma_conflicts", ())
+    )
+    if not pending_reports and not pending_events:
         return {
             "status": "SOURCE_CURRENT",
             "freshness_status": prefetch.freshness_status,
             "reports": len(prefetch.reports),
         }
     events_evaluated = getattr(emitter, "prefetched_events_evaluated", None)
-    if callable(events_evaluated) and events_evaluated(prefetch):
+    if not pending_events and callable(events_evaluated) and events_evaluated(prefetch):
         persisted = _persist_day0_metar_ledger_after_wake(prefetch)
         return {
             "status": "LEDGER_FLUSHED" if persisted else "LEDGER_DEFERRED",
