@@ -2733,6 +2733,8 @@ def test_day0_reader_elects_older_contributor_when_newer_snapshot_is_blocked():
         condition_ids=["condition-1"],
         candidates=[],
     )
+    statements = []
+    conn.set_trace_callback(statements.append)
     row = _forecast_snapshot_row_for_event(
         conn,
         event=day0,
@@ -2743,6 +2745,49 @@ def test_day0_reader_elects_older_contributor_when_newer_snapshot_is_blocked():
 
     assert row is not None
     assert str(row["snapshot_id"]) == "1"
+    elected_reads = [
+        statement for statement in statements
+        if statement.startswith("SELECT * FROM ensemble_snapshots WHERE")
+        and "ORDER BY" not in statement
+    ]
+    assert elected_reads
+    for statement in set(elected_reads):
+        plan = conn.execute("EXPLAIN QUERY PLAN " + statement).fetchall()
+        assert any("SEARCH" in str(step[3]) for step in plan)
+        assert not any("SCAN" in str(step[3]) for step in plan)
+
+
+@pytest.mark.parametrize("elected_id", ["01", "+1", "1.0", " 1", "invalid", str(2**63)])
+def test_forecast_reader_rejects_noncanonical_elected_snapshot_id(monkeypatch, elected_id):
+    from src.engine import event_reactor_adapter as adapter
+
+    conn = _trade_conn_with_snapshot(attach_world_for_qkernel=False)
+    monkeypatch.setattr(
+        adapter, "_forecast_snapshot_reader_block_reason",
+        lambda *_args, **_kwargs: (None, elected_id),
+    )
+    family = SimpleNamespace(city="Chicago", target_date="2026-05-25", metric="high")
+    with pytest.raises(ValueError, match="FORECAST_READER_ELECTED_SNAPSHOT_ID_INVALID"):
+        adapter._forecast_snapshot_row_for_event(
+            conn, event=_day0_event(), family=family, allow_latest=True,
+            decision_time=datetime(2026, 5, 24, 14, 12, tzinfo=timezone.utc),
+        )
+
+
+def test_forecast_reader_missing_elected_snapshot_cannot_fall_back_to_seed(monkeypatch):
+    from src.engine import event_reactor_adapter as adapter
+
+    conn = _trade_conn_with_snapshot(attach_world_for_qkernel=False)
+    monkeypatch.setattr(
+        adapter, "_forecast_snapshot_reader_block_reason",
+        lambda *_args, **_kwargs: (None, "999"),
+    )
+    family = SimpleNamespace(city="Chicago", target_date="2026-05-25", metric="high")
+    with pytest.raises(ValueError, match="EXECUTABLE_FORECAST_SNAPSHOT_MISSING"):
+        adapter._forecast_snapshot_row_for_event(
+            conn, event=_day0_event(), family=family, allow_latest=True,
+            decision_time=datetime(2026, 5, 24, 14, 12, tzinfo=timezone.utc),
+        )
 
 
 def test_day0_sole_blocked_snapshot_remains_refused():

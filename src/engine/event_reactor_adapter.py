@@ -44900,19 +44900,34 @@ def _forecast_snapshot_row_for_event(
     # fully-captured FULL_CONTRIBUTOR (often an earlier cycle). Returning that row — instead of
     # asserting reader==causal — dissolves the permanent FORECAST_READER_SNAPSHOT_MISMATCH leak.
     # causal_snapshot_id stays as event provenance.
-    if elected_snapshot_id is not None and _nonnull(snapshot.get("snapshot_id")) != _nonnull(elected_snapshot_id):
+    if elected_snapshot_id is not None:
+        # SCOPE: this family's elected snapshot. DRAIN: the next source-event
+        # election. RESET: a canonical integer identity with its row present;
+        # a missing elected row never authorizes the unelected seed.
+        elected_identity = str(elected_snapshot_id)
+        try:
+            elected_key = int(elected_identity)
+            if str(elected_key) != elected_identity or not -(2**63) <= elected_key < 2**63:
+                raise ValueError("noncanonical SQLite integer identity")
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("FORECAST_READER_ELECTED_SNAPSHOT_ID_INVALID") from exc
+        if _nonnull(snapshot.get("snapshot_id")) == elected_identity:
+            return snapshot
         cur = conn.execute(
-            f"SELECT * FROM {table_ref} WHERE CAST(snapshot_id AS TEXT) = ?",
-            (str(elected_snapshot_id),),
+            f"SELECT * FROM {table_ref} WHERE snapshot_id = ?",
+            (elected_key,),
         )
         elected_row = cur.fetchone()
-        if elected_row is not None:
-            names = [description[0] for description in cur.description]
-            return (
-                {name: elected_row[name] for name in names}
-                if isinstance(elected_row, sqlite3.Row)
-                else dict(zip(names, elected_row))
+        if elected_row is None:
+            raise ValueError(
+                "FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:EXECUTABLE_FORECAST_SNAPSHOT_MISSING"
             )
+        names = [description[0] for description in cur.description]
+        return (
+            {name: elected_row[name] for name in names}
+            if isinstance(elected_row, sqlite3.Row)
+            else dict(zip(names, elected_row))
+        )
     return snapshot
 
 
