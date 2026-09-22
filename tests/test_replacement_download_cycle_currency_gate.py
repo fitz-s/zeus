@@ -1103,6 +1103,7 @@ def test_deadlined_anchor_rungs_reserve_the_bucket_fallback_window(monkeypatch) 
     assert 0.0 < reserve_seconds < download_budget_seconds
     assert timeouts == [download_budget_seconds - reserve_seconds]
     assert len(bucket_calls) == 1
+    assert bucket_calls[0]["deadline_monotonic"] == download_budget_seconds
 
 
 def test_deadlined_meta_wave_bounds_blocked_worker_and_defers_duplicate_tick(monkeypatch) -> None:
