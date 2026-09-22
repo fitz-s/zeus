@@ -3817,6 +3817,10 @@ class Day0FastObsEmitter:
                     fetch_hours = max(fetch_hours, METAR_BACKFILL_FETCH_HOURS)
         reports: list[MetarReport] = []
         kma_reports: list[MetarReport] = []
+        kma_ok = False
+        kma_successful_stations: set[str] = set()
+        kma_conflicts: dict[str, KmaObservationConflict] = {}
+        kma_conflicts_snapshot: dict[str, KmaObservationConflict] = {}
         source_ok = False
         history_loaded = False
         fresh_stations: set[str] = set()
@@ -3863,12 +3867,24 @@ class Day0FastObsEmitter:
                 # station request. A zero wait keeps KMA off the NOAA critical
                 # path; the second zero-wait poll below drains any response
                 # that completed during the NOAA phase.
-                self._kma_cursor.poll(
+                first_kma_reports, first_kma_ok = self._kma_cursor.poll(
                     client=kma_client,
                     stations=kma_station_ids,
                     as_of=datetime.now(UTC),
                     budget_s=0.0,
                 )
+                kma_reports.extend(first_kma_reports)
+                kma_ok = kma_ok or first_kma_ok
+                if first_kma_ok:
+                    kma_successful_stations.update(
+                        set(getattr(self._kma_cursor, "_last_successful_stations", frozenset()))
+                        & set(kma_station_ids)
+                    )
+                first_kma_conflicts = dict(
+                    getattr(self._kma_cursor, "_last_conflicts", {})
+                )
+                if first_kma_conflicts:
+                    kma_conflicts.update(first_kma_conflicts)
             priority_reports, priority_ok = self._station_cursor.poll(
                 client=priority_client,
                 stations=priority_station_ids,
@@ -3884,23 +3900,31 @@ class Day0FastObsEmitter:
                 )
                 fresh_stations.update(exact_priority_success)
             if kma_station_ids and kma_client is not None:
-                kma_reports, kma_ok = self._kma_cursor.poll(
+                second_kma_reports, second_kma_ok = self._kma_cursor.poll(
                     client=kma_client,
                     stations=kma_station_ids,
                     as_of=datetime.now(UTC),
                     budget_s=0.0,
                 )
-                reports.extend(kma_reports)
-                source_ok = source_ok or kma_ok
-                if kma_ok:
-                    fresh_stations.update(
+                kma_reports.extend(second_kma_reports)
+                kma_ok = kma_ok or second_kma_ok
+                if second_kma_ok:
+                    second_successful_stations = (
                         set(getattr(self._kma_cursor, "_last_successful_stations", frozenset()))
                         & set(kma_station_ids)
                     )
+                    kma_successful_stations.update(second_successful_stations)
+                second_kma_conflicts = dict(
+                    getattr(self._kma_cursor, "_last_conflicts", {})
+                )
+                if second_kma_conflicts:
+                    kma_conflicts.update(second_kma_conflicts)
+                fresh_stations.update(kma_successful_stations)
+                kma_conflicts_snapshot = dict(kma_conflicts)
                 with self._lock:
-                    self._last_kma_conflicts = dict(
-                        getattr(self._kma_cursor, "_last_conflicts", {})
-                    )
+                    self._last_kma_conflicts = dict(kma_conflicts_snapshot)
+                reports.extend(kma_reports)
+                source_ok = source_ok or kma_ok
             if priority_station_ids:
                 global_result = self._poll_global_sources_in_background(
                     client=client,
@@ -4024,7 +4048,7 @@ class Day0FastObsEmitter:
                 (time.monotonic() - self._cache_fetched_monotonic) if self._cached_reports else None
             )
             self._last_event_reports = ()
-            self._last_kma_conflicts = {}
+            self._last_kma_conflicts = dict(kma_conflicts_snapshot)
             if self._cached_reports and source_ok:
                 return list(self._cached_reports), FETCH_CACHE_HIT, cache_age
             if self._cached_reports:

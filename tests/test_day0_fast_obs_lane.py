@@ -5153,6 +5153,199 @@ def test_kma_cursor_slow_station_does_not_block_fast_station() -> None:
         cursor.close()
 
 
+def _reports_with_fake_kma_polls(monkeypatch, polls):
+    import src.data.day0_fast_obs as fast_obs
+
+    class _Cursor:
+        def __init__(self):
+            self._polls = iter(polls)
+            self._last_successful_stations = frozenset()
+            self._last_conflicts = {}
+
+        def poll(self, **_kwargs):
+            reports, ok, stations, conflicts = next(self._polls)
+            self._last_successful_stations = frozenset(stations)
+            self._last_conflicts = dict(conflicts)
+            return list(reports), ok
+
+    emitter = fast_obs.Day0FastObsEmitter(min_fetch_interval_s=0.0)
+    emitter._kma_cursor = _Cursor()
+    monkeypatch.setattr(emitter._station_cursor, "poll", lambda **_kwargs: ([], False))
+    monkeypatch.setattr(
+        emitter,
+        "_poll_global_sources_in_background",
+        lambda **_kwargs: ([], False, False),
+    )
+    return emitter._reports_with_status(
+        ["RKSI"],
+        priority_stations=("RKSI",),
+    ), emitter
+
+
+def test_kma_poll_keeps_second_only_result_and_deduplicates_both_polls(monkeypatch):
+    availability, transport, _state, _cursor, _parse = _kma_contract_symbols()
+    observed = datetime(2026, 9, 22, 4, 0, tzinfo=UTC)
+    report = MetarReport(
+        "RKSI", observed, None, 28.0, "METAR",
+        "METAR RKSI 220400Z 05016KT 9999 FEW050 28/14 Q1016",
+        observed + timedelta(minutes=1), availability, transport,
+    )
+    (second_only, _emitter) = _reports_with_fake_kma_polls(
+        monkeypatch,
+        [([], False, (), {}), ([report], True, ("RKSI",), {})],
+    )
+    reports, status, _age = second_only
+    assert status == "fresh_fetch"
+    assert reports == [report]
+
+    (duplicate, _emitter) = _reports_with_fake_kma_polls(
+        monkeypatch,
+        [([report], True, ("RKSI",), {}), ([report], True, ("RKSI",), {})],
+    )
+    reports, status, _age = duplicate
+    assert status == "fresh_fetch"
+    assert reports == [report]
+
+
+def test_kma_empty_second_poll_retains_first_conflict(monkeypatch):
+    import src.data.day0_fast_obs as fast_obs
+
+    availability, transport, _state, _cursor, _parse = _kma_contract_symbols()
+    observed = datetime(2026, 9, 22, 4, 0, tzinfo=UTC)
+    bad_one = MetarReport(
+        "RKSI", observed, None, 28.0, "COR",
+        "METAR COR RKSI 220400Z 05016KT 9999 FEW050 28/14 Q1016",
+        observed + timedelta(minutes=1), availability, transport,
+    )
+    bad_two = MetarReport(
+        "RKSI", observed, None, 29.0, "COR",
+        "METAR COR RKSI 220400Z 05016KT 9999 FEW050 29/14 Q1016",
+        observed + timedelta(minutes=1), availability, transport,
+    )
+    conflict = fast_obs.KmaObservationConflict(
+        "conflict", station_id="RKSI", obs_time=observed,
+        raw_reports=(bad_one.raw, bad_two.raw), correction_rank="COR",
+        reports=(bad_one, bad_two),
+    )
+    (result, emitter) = _reports_with_fake_kma_polls(
+        monkeypatch,
+        [([], False, (), {"RKSI": conflict}), ([], False, (), {})],
+    )
+    reports, status, _age = result
+    assert reports == []
+    assert status == "no_data"
+    assert emitter._last_kma_conflicts == {"RKSI": conflict}
+
+
+def test_kma_second_success_does_not_clear_first_poll_conflict(monkeypatch):
+    import src.data.day0_fast_obs as fast_obs
+
+    availability, transport, _state, _cursor, _parse = _kma_contract_symbols()
+    observed = datetime(2026, 9, 22, 4, 0, tzinfo=UTC)
+    bad_one = MetarReport(
+        "RKSI", observed, None, 28.0, "COR",
+        "METAR COR RKSI 220400Z 05016KT 9999 FEW050 28/14 Q1016",
+        observed + timedelta(minutes=1), availability, transport,
+    )
+    bad_two = MetarReport(
+        "RKSI", observed, None, 29.0, "COR",
+        "METAR COR RKSI 220400Z 05016KT 9999 FEW050 29/14 Q1016",
+        observed + timedelta(minutes=1), availability, transport,
+    )
+    good = MetarReport(
+        "RKSI", observed + timedelta(minutes=1), None, 30.0, "METAR",
+        "METAR RKSI 220501Z 05016KT 9999 FEW050 30/14 Q1016",
+        observed + timedelta(minutes=2), availability, transport,
+    )
+    conflict = fast_obs.KmaObservationConflict(
+        "conflict", station_id="RKSI", obs_time=observed,
+        raw_reports=(bad_one.raw, bad_two.raw), correction_rank="COR",
+        reports=(bad_one, bad_two),
+    )
+    (result, emitter) = _reports_with_fake_kma_polls(
+        monkeypatch,
+        [([], False, (), {"RKSI": conflict}), ([good], True, ("RKSI",), {})],
+    )
+    reports, status, _age = result
+    assert reports == [good]
+    assert status == "fresh_fetch"
+    assert emitter._last_kma_conflicts == {"RKSI": conflict}
+
+
+def test_kma_prefetch_first_poll_reaches_emit_without_publication_ledger(
+    monkeypatch,
+):
+    import src.data.day0_fast_obs as fast_obs
+
+    availability, transport, _state, _cursor, _parse = _kma_contract_symbols()
+    city = _seoul()
+    observed = datetime(2026, 9, 22, 4, 0, tzinfo=UTC)
+    decision = datetime(2026, 9, 22, 4, 5, tzinfo=UTC)
+    report = MetarReport(
+        "RKSI", observed, None, 28.0, "METAR",
+        "METAR RKSI 220400Z 05016KT 9999 FEW050 28/14 Q1016",
+        observed + timedelta(minutes=1), availability, transport,
+    )
+    emitter = fast_obs.Day0FastObsEmitter(min_fetch_interval_s=0.0)
+
+    class _Cursor:
+        _last_successful_stations = frozenset()
+        _last_conflicts = {}
+
+        def __init__(self):
+            self.calls = 0
+
+        def poll(self, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                self._last_successful_stations = frozenset({"RKSI"})
+                return [report], True
+            self._last_successful_stations = frozenset()
+            self._last_conflicts = {}
+            return [], False
+
+    emitter._kma_cursor = _Cursor()
+    monkeypatch.setattr(emitter._station_cursor, "poll", lambda **_kwargs: ([], False))
+    monkeypatch.setattr(
+        emitter,
+        "_poll_global_sources_in_background",
+        lambda **_kwargs: ([], False, False),
+    )
+    monkeypatch.setattr(
+        fast_obs,
+        "_append_metar_prints_to_ledger",
+        lambda *_args, **_kwargs: pytest.fail("KMA report entered NOAA publication ledger"),
+    )
+
+    prefetch = emitter.prefetch(
+        cities=[city],
+        decision_time=decision,
+        priority_scopes=[("Seoul", "2026-09-22")],
+    )
+    assert prefetch.reports == (report,)
+    assert prefetch.event_reports == (report,)
+    assert prefetch.ledger_reports == ()
+
+    conn = _world_conn()
+    try:
+        assert emitter.emit_prefetched(
+            world_conn=conn,
+            prefetch=prefetch,
+            received_at=decision.isoformat(),
+            persist_ledger=True,
+        ) == 2
+        payload = json.loads(
+            conn.execute(
+                "SELECT payload_json FROM opportunity_events "
+                "WHERE event_type='DAY0_EXTREME_UPDATED' ORDER BY rowid LIMIT 1"
+            ).fetchone()[0]
+        )
+        assert payload["observation_transport"] == transport
+        assert payload["kma_report_window"][0]["raw_report"] == report.raw
+    finally:
+        conn.close()
+
+
 def test_kma_and_noaa_duplicate_keeps_earliest_availability() -> None:
     availability_basis, transport_id, _state_cls, _cursor_cls, _parse = _kma_contract_symbols()
     observed = datetime(2026, 9, 22, 4, 0, tzinfo=UTC)
