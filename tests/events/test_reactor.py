@@ -5401,6 +5401,62 @@ def test_family_completion_baton_does_not_arm_for_failed_or_unknown_monitor():
         main._edli_initialize_reactor_wake_cursor()
 
 
+@pytest.mark.parametrize(
+    ("monitor_required", "monitor_result", "expect_cycle"),
+    ((True, True, True), (True, False, False), (False, True, True)),
+)
+def test_family_completion_baton_negative_poll_paths(
+    tmp_path, monkeypatch, monitor_required, monitor_result, expect_cycle
+):
+    """No strict durable debt means no immediate family baton handoff."""
+
+    import src.config as config
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    monkeypatch.setattr(config, "state_path", lambda _name: path)
+    family = ("Chicago", "2026-09-22", "high")
+    reactor_wake.publish_reactor_wake(
+        source="day0",
+        reason="day0_extreme_event_committed",
+        path=path,
+        wake_id="day0-only",
+        published_at=datetime(2026, 9, 22, 13, 0, tzinfo=timezone.utc),
+        forecast_families=(family,),
+    )
+    calls = {"cycle": 0}
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
+    monkeypatch.setattr(
+        main, "_collateral_authority_wake_backoff_ids", lambda: frozenset()
+    )
+    monkeypatch.setattr(main, "_paused_forecast_carrier_priority_allowed", lambda **_k: False)
+    monkeypatch.setattr(
+        main, "_day0_wake_requires_exit_monitor", lambda _families: monitor_required
+    )
+    monkeypatch.setattr(
+        main,
+        "_day0_exit_monitor_attempt_state",
+        lambda _wake_id: (True, monitor_result),
+    )
+    monkeypatch.setattr(main, "_pending_held_day0_wake_families", lambda: frozenset())
+    monkeypatch.setattr(main, "_record_day0_no_monitor_completion", lambda _wake_id: True)
+    monkeypatch.setattr(
+        main,
+        "_edli_event_reactor_cycle",
+        lambda **_kwargs: calls.__setitem__("cycle", calls["cycle"] + 1) or True,
+    )
+    monkeypatch.setattr(main, "_acknowledge_edli_reactor_wake_batch", lambda *_a, **_k: True)
+    main._edli_initialize_reactor_wake_cursor()
+    try:
+        assert main._edli_reactor_wake_poll_once() is expect_cycle
+        assert calls["cycle"] == int(expect_cycle)
+        assert main._edli_family_completion_post_monitor_yield.wake_ids == frozenset()
+    finally:
+        main._edli_initialize_reactor_wake_cursor()
+
+
 def test_paused_forecast_carrier_priority_preserves_fill_and_exact_held_priority(tmp_path):
     """The paused carrier preference cannot outrank capital-at-risk wakes."""
 
