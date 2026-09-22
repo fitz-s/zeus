@@ -39916,6 +39916,7 @@ def test_full_priming_isolates_priority_unknown_from_historical_orders(
         "idempotency_keys": {"idem-priority"},
         "condition_ids": set(),
         "full_priority_inflight_command_id": "unknown-priority",
+        "full_priority_inflight_state": "SUBMIT_UNKNOWN_SIDE_EFFECT",
         "full_priority_inflight_quantum_remaining": True,
     }
     kwargs = command_recovery._scheduled_venue_snapshot_kwargs(
@@ -39926,6 +39927,307 @@ def test_full_priming_isolates_priority_unknown_from_historical_orders(
     assert kwargs["order_ids"] == {"order-priority"}
     assert kwargs["derive_orders_from_account_truth"] is True
     assert kwargs["account_truth_deadline_seconds"] == 30.0
+
+
+def test_full_priming_cancel_pending_requires_exact_created_at_window(monkeypatch):
+    """A cancel priority quantum is admitted only with a bounded trade window."""
+    from src.execution import command_recovery
+
+    cancel = {
+        "command_id": "cancel-priority",
+        "state": "CANCEL_PENDING",
+        "venue_order_id": "order-cancel-priority",
+        "created_at": "2026-09-20T12:00:00Z",
+    }
+    monkeypatch.setattr(
+        command_recovery,
+        "_full_quantum_candidates",
+        lambda _conn: [cancel],
+    )
+    priming = command_recovery._collect_recovery_priming_keys(
+        object(),
+        scope="full",
+    )
+
+    assert priming["full_priority_inflight_command_id"] == "cancel-priority"
+    assert priming["full_priority_inflight_state"] == "CANCEL_PENDING"
+    assert priming["full_priority_trades_after_epoch_seconds"] == int(
+        datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc).timestamp()
+    )
+    kwargs = command_recovery._scheduled_venue_snapshot_kwargs(
+        "full",
+        priming,
+        deadline_monotonic=123.0,
+    )
+    assert kwargs["trades_after_epoch_seconds"] == priming[
+        "full_priority_trades_after_epoch_seconds"
+    ]
+
+    cancel["created_at"] = ""
+    unbounded = command_recovery._collect_recovery_priming_keys(
+        object(),
+        scope="full",
+    )
+    assert "full_priority_inflight_command_id" not in unbounded
+
+
+@pytest.mark.parametrize(
+    ("point_status", "followthrough_error", "state_race"),
+    [
+        ("CANCELED", False, False),
+        ("CANCELED", True, False),
+        ("LIVE", False, False),
+        ("CANCELED", False, True),
+    ],
+)
+def test_full_priority_cancel_pending_partial_drains_exact_remainder(
+    tmp_path,
+    monkeypatch,
+    point_status,
+    followthrough_error,
+    state_race,
+):
+    """Full recovery uses one exact point read before terminalizing a partial cancel."""
+    from src.execution import command_recovery, venue_sync_contract
+    from src.state.collateral_ledger import init_collateral_schema
+    from src.state.db import init_schema, init_schema_trade_only, log_execution_fact
+    from src.state.venue_command_repo import append_event
+
+    db_path = tmp_path / "full-priority-cancel-partial.db"
+    seed = sqlite3.connect(db_path)
+    seed.row_factory = sqlite3.Row
+    init_schema(seed)
+    init_schema_trade_only(seed)
+    init_collateral_schema(seed)
+    command_id = "cmd-full-priority-cancel"
+    position_id = "pos-full-priority-cancel"
+    order_id = "ord-full-priority-cancel"
+    created_at = "2026-09-20T12:00:00Z"
+    _insert(
+        seed,
+        command_id=command_id,
+        position_id=position_id,
+        size=10.09,
+        price=0.07,
+        created_at=created_at,
+    )
+    _open_test_entry_obligation(seed, command_id)
+    _advance_to_acked(seed, command_id=command_id, venue_order_id=order_id)
+    _seed_pending_entry_projection(
+        seed,
+        position_id=position_id,
+        command_id=command_id,
+        order_id=order_id,
+    )
+    _append_test_filled_entry_projection(
+        seed,
+        position_id=position_id,
+        command_id=command_id,
+        order_id=order_id,
+        shares=4.87,
+        cost_basis_usd=0.3409,
+        size_usd=0.3409,
+        entry_price=0.07,
+    )
+    seed.execute(
+        """
+        UPDATE position_current
+           SET phase = 'day0_window', shares = 4.87, chain_shares = 4.87,
+               chain_state = 'synced', cost_basis_usd = 0.3409,
+               chain_cost_basis_usd = 0.3409, size_usd = 0.3409,
+               entry_price = 0.07, order_status = 'partial'
+         WHERE position_id = ?
+        """,
+        (position_id,),
+    )
+    _append_confirmed_trade_fact(
+        seed,
+        command_id=command_id,
+        order_id=order_id,
+        trade_id="trade-full-priority-cancel",
+        filled_size="4.87",
+        fill_price="0.07",
+    )
+    log_execution_fact(
+        seed,
+        intent_id=f"{position_id}:entry",
+        position_id=position_id,
+        decision_id=f"decision:{command_id}",
+        command_id=command_id,
+        order_role="entry",
+        posted_at=created_at,
+        filled_at="2026-09-20T12:00:01Z",
+        submitted_price=0.07,
+        fill_price=0.07,
+        shares=4.87,
+        venue_status="PARTIAL",
+        terminal_exec_status="partial",
+    )
+    _append_order_fact(
+        seed,
+        command_id=command_id,
+        order_id=order_id,
+        state="CANCEL_CONFIRMED",
+        matched_size="4.87",
+        remaining_size="5.22",
+        source="REST",
+        raw_payload_json={
+            "id": order_id,
+            "status": "CANCELED",
+            "type": "CANCELLATION",
+            "size_matched": "4.87",
+        },
+    )
+    append_event(
+        seed,
+        command_id=command_id,
+        event_type="CANCEL_REQUESTED",
+        occurred_at="2026-09-20T12:01:00Z",
+        payload={"venue_order_id": order_id},
+    )
+    seed.commit()
+    seed.close()
+
+    def factory(**_kwargs):
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    factory.supports_nonblocking_flocks = True
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+    monkeypatch.setattr(command_recovery, "_full_background_recovery_quantum_slot", lambda: 0)
+    captured = {}
+    point_order = {
+        "orderID": order_id,
+        "status": point_status,
+        "original_size": "10.09",
+        "size_matched": "4.87",
+    }
+
+    def capture(_client, **kwargs):
+        captured.update(kwargs)
+        if state_race:
+            raced = sqlite3.connect(db_path)
+            raced.execute(
+                "UPDATE venue_commands SET state = 'ACKED' WHERE command_id = ?",
+                (command_id,),
+            )
+            raced.commit()
+            raced.close()
+        return SimpleNamespace(
+            get_order=lambda requested_order_id: (
+                point_order if requested_order_id == order_id else None
+            )
+        )
+
+    monkeypatch.setattr(venue_sync_contract, "capture_venue_read_snapshot", capture)
+    client = MagicMock(
+        spec_set=["get_order", "cancel_order", "place_limit_order", "redeem"]
+    )
+    for method in (client.cancel_order, client.place_limit_order, client.redeem):
+        method.side_effect = AssertionError("full recovery must not write to venue")
+
+    if followthrough_error:
+        original_followthrough = (
+            command_recovery._reconcile_cancel_terminal_follow_through
+        )
+
+        def fail_after_followthrough(conn, current_command_id):
+            original_followthrough(conn, current_command_id)
+            raise RuntimeError("test follow-through failure")
+
+        monkeypatch.setattr(
+            command_recovery,
+            "_reconcile_cancel_terminal_follow_through",
+            fail_after_followthrough,
+        )
+        with pytest.raises(RuntimeError, match="test follow-through failure"):
+            command_recovery.reconcile_unresolved_commands(
+                client=client,
+                scope="full",
+            )
+    else:
+        summary = command_recovery.reconcile_unresolved_commands(
+            client=client,
+            scope="full",
+        )
+
+    if not followthrough_error:
+        assert summary["full_priority_inflight_only"] is True
+        assert captured["order_ids"] == {order_id}
+        assert captured["trades_after_epoch_seconds"] == int(
+            datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc).timestamp()
+        )
+        if state_race:
+            assert summary["scanned"] == 0
+        elif point_status == "CANCELED":
+            assert summary["cancel_ack_terminal_partial_facts_fast"]["advanced"] == 1
+            assert summary["terminal_entry_exposure_obligations_fast"]["advanced"] == 1
+        else:
+            assert summary["stayed"] == 1
+    verified = factory()
+    try:
+        command = verified.execute(
+            "SELECT state FROM venue_commands WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+        assert command["state"] == (
+            "ACKED"
+            if state_race
+            else (
+                "CANCELLED"
+                if point_status == "CANCELED" and not followthrough_error
+                else "CANCEL_PENDING"
+            )
+        )
+        terminal = verified.execute(
+            """
+            SELECT state, matched_size, remaining_size
+              FROM venue_order_facts
+             WHERE command_id = ?
+             ORDER BY fact_id DESC
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        if state_race or point_status == "LIVE" or followthrough_error:
+            assert dict(terminal) == {
+                "state": "CANCEL_CONFIRMED",
+                "matched_size": "4.87",
+                "remaining_size": "5.22",
+            }
+        else:
+            assert dict(terminal) == {
+                "state": "PARTIALLY_MATCHED",
+                "matched_size": "4.87",
+                "remaining_size": "0",
+            }
+        obligation = verified.execute(
+            "SELECT status FROM entry_exposure_obligations WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+        assert obligation["status"] == (
+            "RESOLVED"
+            if (
+                point_status == "CANCELED"
+                and not followthrough_error
+                and not state_race
+            )
+            else "OPEN"
+        )
+        position = verified.execute(
+            "SELECT phase, shares, chain_shares, cost_basis_usd "
+            "FROM position_current WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+        assert dict(position) == {
+            "phase": "day0_window",
+            "shares": 4.87,
+            "chain_shares": 4.87,
+            "cost_basis_usd": 0.3409,
+        }
+    finally:
+        verified.close()
 
 
 def test_unrelated_submit_error_skips_deterministic_rejection_fact_scans(

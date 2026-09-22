@@ -241,6 +241,10 @@ def _scheduled_venue_snapshot_kwargs(
     trades_after_epoch_seconds: int | None = None,
 ) -> dict[str, object]:
     kwargs = _account_truth_snapshot_kwargs(scope)
+    if trades_after_epoch_seconds is None:
+        priority_window = priming.get("full_priority_trades_after_epoch_seconds")
+        if priority_window is not None:
+            trades_after_epoch_seconds = int(priority_window)
     if trades_after_epoch_seconds is not None:
         kwargs["trades_after_epoch_seconds"] = trades_after_epoch_seconds
     kwargs.update(
@@ -256,8 +260,8 @@ def _scheduled_venue_snapshot_kwargs(
         kwargs["deadline_monotonic"] = deadline_monotonic
         kwargs["derive_orders_from_account_truth"] = True
     if scope == "full" and priming.get("full_priority_inflight_command_id"):
-        # SCOPE: one highest-priority UNKNOWN/SUBMIT_UNKNOWN_SIDE_EFFECT
-        # command. DRAIN: complete account truth plus its exact point read
+        # SCOPE: one highest-priority UNKNOWN/SUBMIT_UNKNOWN_SIDE_EFFECT or
+        # CANCEL_PENDING command. DRAIN: complete account truth plus its exact point read
         # before any historical order maintenance. RESET: the command advances
         # or remains the next bounded full-sweep continuation.
         kwargs["account_truth_deadline_seconds"] = (
@@ -32066,24 +32070,39 @@ def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "fu
         priority = full_priority_rows[0]
         priority_state = str(priority.get("state") or "")
         priority_order_id = str(priority.get("venue_order_id") or "").strip()
-        if priority_order_id and priority_state in {
+        priority_window = (
+            _obligation_window_epoch_seconds([priority])
+            if priority_state == CommandState.CANCEL_PENDING.value
+            else None
+        )
+        priority_eligible = priority_state in {
             CommandState.UNKNOWN.value,
             CommandState.SUBMIT_UNKNOWN_SIDE_EFFECT.value,
-        }:
+        } or (
+            priority_state == CommandState.CANCEL_PENDING.value
+            and priority_window is not None
+        )
+        if priority_order_id and priority_eligible:
             # One exact unresolved side effect outranks every historical point
             # read. Returning here prevents unrelated active/partial debt from
             # consuming the shared account+order deadline first.
-            return {
+            priority_priming = {
                 "order_ids": order_ids,
                 "idempotency_keys": idem_keys,
                 "condition_ids": condition_ids,
                 "full_priority_inflight_command_id": str(
                     priority.get("command_id") or ""
                 ),
+                "full_priority_inflight_state": priority_state,
                 "full_priority_inflight_quantum_remaining": (
                     len(full_priority_rows) > 1
                 ),
             }
+            if priority_window is not None:
+                priority_priming[
+                    "full_priority_trades_after_epoch_seconds"
+                ] = priority_window
+            return priority_priming
     if scope in {"live_tick", "boot_fast"}:
         try:
             _harvest(
@@ -32485,6 +32504,69 @@ def _full_quantum_candidates(
     return ordered
 
 
+def _reconcile_cancel_terminal_follow_through(
+    conn: sqlite3.Connection,
+    command_id: str,
+) -> dict[str, dict]:
+    """Run exact terminal reducers after an authenticated cancel transition."""
+
+    current_state = conn.execute(
+        """
+        SELECT state,
+               intent_kind,
+               (
+                   SELECT event_type
+                     FROM venue_command_events event
+                    WHERE event.command_id = venue_commands.command_id
+                    ORDER BY event.sequence_no DESC
+                    LIMIT 1
+               ) AS latest_event_type
+          FROM venue_commands
+         WHERE command_id = ?
+        """,
+        (command_id,),
+    ).fetchone()
+    if current_state is None:
+        return {}
+    state_name = str(current_state["state"] or "").upper()
+    intent_name = str(current_state["intent_kind"] or "").upper()
+    latest_event_type = str(current_state["latest_event_type"] or "").upper()
+    review_cleared_terminal = (
+        state_name == CommandState.EXPIRED.value
+        and latest_event_type
+        == CommandEventType.REVIEW_CLEARED_NO_VENUE_EXPOSURE.value
+    )
+    if intent_name != IntentKind.ENTRY.value or not (
+        state_name == CommandState.CANCELLED.value or review_cleared_terminal
+    ):
+        return {}
+
+    follow_bundle: dict[str, dict] = {}
+    if state_name == CommandState.CANCELLED.value:
+        scoped_ids = frozenset({command_id})
+        follow_bundle = {
+            "cancel_ack_terminal_no_fill_facts_fast": (
+                reconcile_cancel_ack_terminal_no_fill_facts(
+                    conn,
+                    command_ids=scoped_ids,
+                )
+            ),
+            "cancel_ack_terminal_partial_facts_fast": (
+                reconcile_cancel_ack_terminal_partial_facts(
+                    conn,
+                    command_ids=scoped_ids,
+                )
+            ),
+        }
+    follow_bundle["terminal_entry_exposure_obligations_fast"] = (
+        reconcile_terminal_entry_exposure_obligations(
+            conn,
+            command_id=command_id,
+        )
+    )
+    return follow_bundle
+
+
 def _reconcile_passes_short_conn(
     client,
     summary: dict,
@@ -32710,7 +32792,7 @@ def _reconcile_passes_short_conn(
         )
 
     def _full_priority_inflight_fast_pass() -> bool:
-        """Resolve one unknown submit before unrelated full-sweep work."""
+        """Resolve one priority side-effect command before full-sweep work."""
 
         if scope != "full":
             return False
@@ -32722,6 +32804,10 @@ def _reconcile_passes_short_conn(
         command_id = str(priming.get("full_priority_inflight_command_id") or "")
         if not command_id:
             return False
+        expected_state = str(
+            priming.get("full_priority_inflight_state")
+            or CommandState.UNKNOWN.value
+        )
 
         assert_no_open_connection("recovery.full_priority_inflight_fast")
         snapshot = capture_venue_read_snapshot(
@@ -32752,17 +32838,17 @@ def _reconcile_passes_short_conn(
                 """
                 SELECT * FROM venue_commands
                  WHERE command_id = ?
-                   AND state IN (?, ?)
+                   AND state = ?
                 """,
                 (
                     command_id,
-                    CommandState.UNKNOWN.value,
-                    CommandState.SUBMIT_UNKNOWN_SIDE_EFFECT.value,
+                    expected_state,
                 ),
             ).fetchone()
             rows = [_dict_row(current)] if current is not None else []
             result = {"scanned": len(rows), "advanced": 0, "stayed": 0, "errors": 0}
             for row in rows:
+                initial_state = str(row.get("state") or "")
                 try:
                     outcome = _reconcile_row(
                         conn,
@@ -32779,6 +32865,13 @@ def _reconcile_passes_short_conn(
                     continue
                 if outcome in {"advanced", "stayed"}:
                     result[outcome] += 1
+                    if outcome == "advanced" and initial_state == CommandState.CANCEL_PENDING.value:
+                        follow_bundle = _reconcile_cancel_terminal_follow_through(
+                            conn,
+                            command_id,
+                        )
+                        if follow_bundle:
+                            result["terminal_follow_through"] = follow_bundle
                 else:
                     result["errors"] += 1
             summary["scanned"] = result["scanned"]
@@ -32787,7 +32880,7 @@ def _reconcile_passes_short_conn(
             summary["errors"] += result["errors"]
             return result
 
-        _run_recovery_pass_with_lock_policy(
+        priority_result = _run_recovery_pass_with_lock_policy(
             "full_priority_inflight_apply",
             lambda: run_three_phase(
                 lambda conn: None,
@@ -32802,6 +32895,12 @@ def _reconcile_passes_short_conn(
             deadline_monotonic=priority_apply_deadline,
             bounded_lock_retry_delays=_CAPITAL_RECOVERY_LOCK_RETRY_DELAYS,
         )
+        if priority_result is not None:
+            terminal_follow_through = priority_result.pop(
+                "terminal_follow_through", {}
+            )
+            for follow_key, follow_summary in terminal_follow_through.items():
+                _accumulate(summary, follow_key, follow_summary)
         summary["full_priority_inflight_only"] = True
         summary["inflight_quantum"] = command_id
         summary["inflight_quantum_remaining"] = bool(
@@ -33597,82 +33696,12 @@ def _reconcile_passes_short_conn(
                     continue
                 if outcome == "advanced":
                     ps["advanced"] += 1
-                    current_state = conn.execute(
-                        """
-                        SELECT state,
-                               intent_kind,
-                               (
-                                   SELECT event_type
-                                     FROM venue_command_events event
-                                    WHERE event.command_id = venue_commands.command_id
-                                    ORDER BY event.sequence_no DESC
-                                    LIMIT 1
-                               ) AS latest_event_type
-                          FROM venue_commands
-                         WHERE command_id = ?
-                        """,
-                        (command_id,),
-                    ).fetchone()
-                    state_name = (
-                        str(current_state["state"] or "").upper()
-                        if current_state is not None
-                        else ""
+                    follow_bundle = _reconcile_cancel_terminal_follow_through(
+                        conn,
+                        command_id,
                     )
-                    latest_event_type = (
-                        str(current_state["latest_event_type"] or "").upper()
-                        if current_state is not None
-                        else ""
-                    )
-                    # The existing already-canceled REVIEW_REQUIRED owner can
-                    # atomically clear an ENTRY to EXPIRED after an authenticated
-                    # zero-exposure point read.  Its REVIEW_CLEARED event is the
-                    # same terminal no-fill proof consumed by the scoped reducers;
-                    # keep this exception exact instead of reopening broad scans.
-                    review_cleared_terminal = (
-                        state_name == CommandState.EXPIRED.value
-                        and latest_event_type
-                        == CommandEventType.REVIEW_CLEARED_NO_VENUE_EXPOSURE.value
-                    )
-                    if (
-                        current_state is not None
-                        and (
-                            state_name == CommandState.CANCELLED.value
-                            or review_cleared_terminal
-                        )
-                        and str(current_state["intent_kind"] or "").upper()
-                        == IntentKind.ENTRY.value
-                    ):
-                        # Keep the authenticated cancel transition and its
-                        # command-scoped terminal projection/release atomic.
-                        # Positive fills remain position truth; zero-fill and
-                        # partial reducers are mutually exclusive selectors.
-                        follow_bundle: dict[str, dict] = {}
-                        if state_name == CommandState.CANCELLED.value:
-                            scoped_ids = frozenset({command_id})
-                            follow_bundle.update(
-                                {
-                                    "cancel_ack_terminal_no_fill_facts_fast": (
-                                        reconcile_cancel_ack_terminal_no_fill_facts(
-                                            conn,
-                                            command_ids=scoped_ids,
-                                        )
-                                    ),
-                                    "cancel_ack_terminal_partial_facts_fast": (
-                                        reconcile_cancel_ack_terminal_partial_facts(
-                                            conn,
-                                            command_ids=scoped_ids,
-                                        )
-                                    ),
-                                }
-                            )
-                        follow_bundle[
-                            "terminal_entry_exposure_obligations_fast"
-                        ] = reconcile_terminal_entry_exposure_obligations(
-                            conn,
-                            command_id=command_id,
-                        )
-                        if follow_bundle:
-                            terminal_follow_through.append(follow_bundle)
+                    if follow_bundle:
+                        terminal_follow_through.append(follow_bundle)
                 elif outcome == "stayed":
                     ps["stayed"] += 1
                 else:
@@ -34569,17 +34598,20 @@ def _reconcile_passes_short_conn(
                 """
                 SELECT * FROM venue_commands
                  WHERE command_id = ?
-                   AND state IN (?, ?)
+                   AND state = ?
                 """,
                 (
                     priority_command_id,
-                    CommandState.UNKNOWN.value,
-                    CommandState.SUBMIT_UNKNOWN_SIDE_EFFECT.value,
+                    str(
+                        priming.get("full_priority_inflight_state")
+                        or CommandState.UNKNOWN.value
+                    ),
                 ),
             ).fetchone()
             rows = [_dict_row(current)] if current is not None else []
             result = {"scanned": len(rows), "advanced": 0, "stayed": 0, "errors": 0}
             for row in rows:
+                initial_state = str(row.get("state") or "")
                 try:
                     outcome = _reconcile_row(
                         conn,
@@ -34596,6 +34628,13 @@ def _reconcile_passes_short_conn(
                     continue
                 if outcome in {"advanced", "stayed"}:
                     result[outcome] += 1
+                    if outcome == "advanced" and initial_state == CommandState.CANCEL_PENDING.value:
+                        follow_bundle = _reconcile_cancel_terminal_follow_through(
+                            conn,
+                            priority_command_id,
+                        )
+                        if follow_bundle:
+                            result["terminal_follow_through"] = follow_bundle
                 else:
                     result["errors"] += 1
             summary["scanned"] = result["scanned"]
@@ -34625,7 +34664,7 @@ def _reconcile_passes_short_conn(
             # short atomic capital release and must finish before yielding.
             monitor_preemptible=False,
         )
-        _run_pass_with_lock_retry(
+        priority_result = _run_pass_with_lock_retry(
             "full_priority_inflight_apply",
             lambda: run_three_phase(
                 lambda conn: None,
@@ -34636,6 +34675,12 @@ def _reconcile_passes_short_conn(
                 label="recovery.full_priority_inflight_apply",
             ),
         )
+        if priority_result is not None:
+            terminal_follow_through = priority_result.pop(
+                "terminal_follow_through", {}
+            )
+            for follow_key, follow_summary in terminal_follow_through.items():
+                _accumulate(summary, follow_key, follow_summary)
         summary["full_priority_inflight_only"] = True
         summary["inflight_quantum_remaining"] = bool(
             priming.get("full_priority_inflight_quantum_remaining")
