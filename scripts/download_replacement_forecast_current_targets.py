@@ -75,6 +75,7 @@ _CURRENT_TARGET_ROTATION_LOCK = Lock()
 _CURRENT_TARGET_ROTATION_OFFSETS: dict[str, int] = {}
 _CURRENT_TARGET_ROTATION_STATE_VERSION = 1
 _RotationStateToken = tuple[str | None, int | None]
+_BUCKET_FALLBACK_RESERVE_SECONDS = 10.0
 
 
 def _rotation_state_lock_path(state_path: Path) -> Path:
@@ -843,6 +844,25 @@ def _deadline_timeout(
     return max(0.001, min(default, remaining))
 
 
+def _deadline_timeout_preserving_bucket_fallback(
+    deadline_monotonic: float | None,
+    *,
+    default: float,
+) -> float:
+    """Bound one provider rung without consuming the bucket fallback window.
+
+    The run-pinned and metadata-stamped APIs must not starve the independently
+    admitted exact-run bucket transport. A deadline-expired provider rung is a
+    retryable transport failure; callers continue at the bucket rung.
+    """
+    if deadline_monotonic is None:
+        return default
+    remaining = deadline_monotonic - time.monotonic()
+    if remaining <= _BUCKET_FALLBACK_RESERVE_SECONDS:
+        raise TimeoutError("current-target deadline reserved for bucket fallback")
+    return max(0.001, min(default, remaining - _BUCKET_FALLBACK_RESERVE_SECONDS))
+
+
 def _try_bucket_rung_three(
     *,
     request,
@@ -1035,7 +1055,9 @@ def _resolve_anchor_payload(
                 kwargs["client"] = client
             if deadline_monotonic is not None:
                 kwargs.update(
-                    timeout=_deadline_timeout(deadline_monotonic, default=30.0),
+                    timeout=_deadline_timeout_preserving_bucket_fallback(
+                        deadline_monotonic, default=30.0
+                    ),
                     max_retries=1,
                 )
             payload = fetch_openmeteo_ecmwf_ifs9_anchor_payload(request, **kwargs)
@@ -1060,8 +1082,11 @@ def _resolve_anchor_payload(
                 single_runs_run_refusals.add(request.run.isoformat())
             # `except ... as` unbinds the name at block exit; persist it for rungs 2/3.
             single_runs_exc = exc
-        except RuntimeError as exc:
-            if not _is_transient_provider_failure(exc):
+        except (RuntimeError, TimeoutError, httpx.TransportError) as exc:
+            if (
+                not isinstance(exc, (TimeoutError, httpx.TransportError))
+                and not _is_transient_provider_failure(exc)
+            ):
                 raise
             single_runs_exc = exc
     else:
@@ -1077,7 +1102,9 @@ def _resolve_anchor_payload(
                 kwargs["client"] = client
             if deadline_monotonic is not None:
                 kwargs.update(
-                    timeout=_deadline_timeout(deadline_monotonic, default=30.0),
+                    timeout=_deadline_timeout_preserving_bucket_fallback(
+                        deadline_monotonic, default=30.0
+                    ),
                     max_retries=1,
                 )
             payload, meta_provenance = fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped(
@@ -1105,7 +1132,7 @@ def _resolve_anchor_payload(
             if not _is_transient_provider_failure(meta_runtime_exc):
                 raise
             rung2_reason = meta_runtime_exc
-        except (ValueError, httpx.TransportError) as meta_exc:
+        except (TimeoutError, ValueError, httpx.TransportError) as meta_exc:
             # ValueError = meta REFUSAL (older run; never weakened); TransportError = provider
             # unreachable. Both degrade to rung 3 (the bucket is independent infrastructure).
             rung2_reason = meta_exc
@@ -1148,7 +1175,9 @@ def _fetch_meta_stamped_anchor_wave(
     if not requests:
         return {}, {}
     request0 = next(iter(requests.values()))
-    timeout = _deadline_timeout(deadline_monotonic, default=30.0)
+    timeout = _deadline_timeout_preserving_bucket_fallback(
+        deadline_monotonic, default=30.0
+    )
     quota_context = (
         quota_tracker.critical_lane()
         if quota_critical
@@ -1171,10 +1200,9 @@ def _fetch_meta_stamped_anchor_wave(
     workers = min(max(1, int(max_workers)), 8, len(requests))
     wave_requests = requests
     if deadline_monotonic is not None:
-        # A ThreadPoolExecutor context waits for every submitted future at shutdown.
-        # Submit one worker-width wave so this bounded live slice cannot multiply its
-        # wall-clock budget by the number of queued city/date targets. Unattempted
-        # targets remain absent and are reconsidered by the next maintenance cycle.
+        # Submit one worker-width wave so this bounded live slice cannot multiply
+        # its wall-clock budget by the number of queued city/date targets.
+        # Unattempted targets remain absent and are reconsidered next slice.
         wave_requests = dict(list(requests.items())[:workers])
     def _fetch_payload(request):
         quota_context = (
@@ -1187,34 +1215,58 @@ def _fetch_meta_stamped_anchor_wave(
         with quota_context:
             return fetch_openmeteo_ecmwf_ifs9_anchor_payload_standard_unstamped(
                 request,
-                timeout=_deadline_timeout(deadline_monotonic, default=30.0),
+                timeout=_deadline_timeout_preserving_bucket_fallback(
+                    deadline_monotonic, default=30.0
+                ),
                 max_retries=1,
                 fast_fail_429=True,
                 client=client,
             )
 
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="openmeteo-anchor") as executor:
+    executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="openmeteo-anchor")
+    try:
         future_keys = {
             executor.submit(_fetch_payload, request): key
             for key, request in wave_requests.items()
         }
-        for future in as_completed(future_keys):
-            key = future_keys[future]
-            try:
-                payload = dict(future.result())
-                request = wave_requests[key]
-                if not _current_target_payload_materializable(
-                    payload,
-                    city_timezone=request.timezone_name,
-                    target_date=key[1],
-                    cycle=request.run,
-                ):
-                    raise ValueError(
-                        "meta-stamped payload has no finite target-day sample"
+        try:
+            for future in as_completed(
+                future_keys,
+                timeout=(
+                    None
+                    if deadline_monotonic is None
+                    else _deadline_timeout_preserving_bucket_fallback(
+                        deadline_monotonic, default=30.0
                     )
-                payloads[key] = (payload, datetime.now(tz=UTC))
-            except Exception as exc:  # each city retains its independent bucket fallback
-                failures[key] = exc
+                ),
+            ):
+                key = future_keys[future]
+                try:
+                    payload = dict(future.result())
+                    request = wave_requests[key]
+                    if not _current_target_payload_materializable(
+                        payload,
+                        city_timezone=request.timezone_name,
+                        target_date=key[1],
+                        cycle=request.run,
+                    ):
+                        raise ValueError(
+                            "meta-stamped payload has no finite target-day sample"
+                        )
+                    payloads[key] = (payload, datetime.now(tz=UTC))
+                except Exception as exc:  # each city retains its independent bucket fallback
+                    failures[key] = exc
+        except TimeoutError as exc:
+            for future, key in future_keys.items():
+                if not future.done():
+                    failures[key] = exc
+    finally:
+        # A non-cooperative worker must not hold this scheduler slice past its
+        # provider-rung budget. The target proceeds to bucket fallback below.
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    if not payloads:
+        return {}, failures
 
     quota_context = (
         quota_tracker.critical_lane()
@@ -1225,7 +1277,9 @@ def _fetch_meta_stamped_anchor_wave(
     )
     with quota_context:
         meta_after = fetch_openmeteo_ifs9_model_meta(
-            timeout=_deadline_timeout(deadline_monotonic, default=20.0),
+            timeout=_deadline_timeout_preserving_bucket_fallback(
+                deadline_monotonic, default=20.0
+            ),
             max_retries=1,
             fast_fail_429=True,
             client=client,
@@ -1269,7 +1323,9 @@ def _fetch_run_pinned_anchor_wave(
     with quota_context:
         payloads = fetch_openmeteo_ecmwf_ifs9_anchor_payloads(
             tuple(request for _, request in items),
-            timeout=_deadline_timeout(deadline_monotonic, default=30.0),
+            timeout=_deadline_timeout_preserving_bucket_fallback(
+                deadline_monotonic, default=30.0
+            ),
             max_retries=1,
             fast_fail_429=True,
             client=client,
@@ -1661,8 +1717,8 @@ def download_current_target_raw_inputs(
             if status_code != 400 and status_code != 429 and status_code < 500:
                 raise
             single_runs_wave_failure = exc
-        except RuntimeError as exc:
-            if not _is_transient_provider_failure(exc):
+        except (RuntimeError, TimeoutError) as exc:
+            if not isinstance(exc, TimeoutError) and not _is_transient_provider_failure(exc):
                 raise
             single_runs_wave_failure = exc
         else:

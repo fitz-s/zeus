@@ -3475,8 +3475,14 @@ def _recover_held_common_cycle_anchors_if_needed(
     cfg: Mapping[str, object],
     *,
     decision_time: datetime | None = None,
+    max_wall_clock_seconds: float | None = None,
 ) -> dict[str, object] | None:
-    """Capture exact missing anchor legs for held scopes' common input cycle."""
+    """Capture exact missing anchor legs for held scopes' common input cycle.
+
+    A source-clock caller may bound this recovery. The deadline covers every
+    held common-cycle batch so one stale held family cannot suppress the
+    independent current-cycle residual-anchor drain.
+    """
 
     forecast_db = cfg.get("forecast_db")
     output_dir = cfg.get("download_output_dir") or cfg.get("raw_manifest_dir")
@@ -3487,6 +3493,11 @@ def _recover_held_common_cycle_anchors_if_needed(
     )
 
     now = (decision_time or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    deadline_monotonic = (
+        time.monotonic() + max(0.0, float(max_wall_clock_seconds))
+        if max_wall_clock_seconds is not None
+        else None
+    )
     forecast_db_path = Path(str(forecast_db))
     batches = _held_common_cycle_recovery_targets(
         forecast_db_path,
@@ -3515,7 +3526,22 @@ def _recover_held_common_cycle_anchors_if_needed(
     )
     rolled_past = 0
     committed_families: list[tuple[str, str, str]] = []
-    for cycle, scopes in batches:
+    for batch_index, (cycle, scopes) in enumerate(batches):
+        remaining = (
+            max(0.0, deadline_monotonic - time.monotonic())
+            if deadline_monotonic is not None
+            else None
+        )
+        if remaining is not None and remaining <= 0.0:
+            report["status"] = "HELD_COMMON_CYCLE_RECOVERY_TIMEBOXED_INCOMPLETE"
+            report["timeboxed_incomplete"] = True
+            report["max_wall_clock_seconds"] = max_wall_clock_seconds
+            report["unattempted_cycle_count"] = len(batches) - batch_index
+            report["unattempted_scope_count"] = sum(
+                len(unattempted_scopes)
+                for _unattempted_cycle, unattempted_scopes in batches[batch_index:]
+            )
+            break
         missing_before = _critical_scopes_missing_current_anchor(
             forecast_db_path,
             scopes,
@@ -3552,6 +3578,9 @@ def _recover_held_common_cycle_anchors_if_needed(
         try:
             recovered: tuple[tuple[str, str, str], ...] = ready_before
             if missing_before:
+                download_kwargs: dict[str, object] = {}
+                if remaining is not None:
+                    download_kwargs["max_wall_clock_seconds"] = remaining
                 result = download_current_target_openmeteo_inputs(
                     forecast_db=forecast_db_path,
                     output_dir=Path(str(output_dir)),
@@ -3573,7 +3602,12 @@ def _recover_held_common_cycle_anchors_if_needed(
                     # provider cooldown, terminal HTTP outcome, single-flight,
                     # and bounded-request contracts.
                     quota_critical=True,
+                    **download_kwargs,
                 )
+                if bool(result.get("timeboxed_incomplete")):
+                    report["status"] = "HELD_COMMON_CYCLE_RECOVERY_TIMEBOXED_INCOMPLETE"
+                    report["timeboxed_incomplete"] = True
+                    report["max_wall_clock_seconds"] = max_wall_clock_seconds
                 # SCOPE: only exact held families requested in this recovery batch.
                 # DRAIN: re-read canonical exact-cycle coverage after the downloader
                 # commits; a count or sibling manifest is never family evidence.
@@ -3650,7 +3684,11 @@ def _recover_held_common_cycle_anchors_if_needed(
                     ],
                 }
             )
-    if rolled_past == len(batches) and batches:
+    if (
+        report["status"] == "HELD_COMMON_CYCLE_GAPS_FOUND"
+        and rolled_past == len(batches)
+        and batches
+    ):
         report["status"] = "HELD_COMMON_CYCLE_GAPS_ROLLED_PAST"
     report["committed_families"] = tuple(dict.fromkeys(committed_families))
     return report

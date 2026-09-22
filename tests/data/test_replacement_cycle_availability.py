@@ -602,6 +602,61 @@ def test_held_common_cycle_recovery_reseeds_only_reproven_families(
     assert report["recoveries"][0]["seeds_enqueued"] == 1
 
 
+def test_held_common_cycle_recovery_shares_its_deadline_across_batches(
+    monkeypatch, tmp_path
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as downloader
+    import src.data.replacement_forecast_production as prod
+
+    first_cycle = _dt("2026-06-10T06:00:00")
+    second_cycle = _dt("2026-06-10T12:00:00")
+    first_scope = ("Moscow", "2026-06-11", "high")
+    second_scope = ("Tel Aviv", "2026-06-11", "low")
+    clock = [100.0]
+    calls: list[float] = []
+    monkeypatch.setattr(prod.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        prod,
+        "_held_common_cycle_recovery_targets",
+        lambda *args, **kwargs: (
+            (first_cycle, (first_scope,)),
+            (second_cycle, (second_scope,)),
+        ),
+    )
+    monkeypatch.setattr(prod, "_per_leg_downloaded_cycle", lambda *args, **kwargs: first_cycle)
+    monkeypatch.setattr(
+        prod,
+        "_critical_scopes_missing_current_anchor",
+        lambda _db, scopes, _cycle: tuple(scopes),
+    )
+
+    def _download(**kwargs):
+        calls.append(kwargs["max_wall_clock_seconds"])
+        clock[0] += kwargs["max_wall_clock_seconds"]
+        return {
+            "status": "CURRENT_TARGET_RAW_INPUTS_TIMEBOXED_INCOMPLETE",
+            "timeboxed_incomplete": True,
+        }
+
+    monkeypatch.setattr(downloader, "download_current_target_openmeteo_inputs", _download)
+
+    report = prod._recover_held_common_cycle_anchors_if_needed(
+        {
+            "forecast_db": tmp_path / "forecasts.db",
+            "download_output_dir": tmp_path / "raw",
+        },
+        decision_time=_dt("2026-06-10T22:30:00"),
+        max_wall_clock_seconds=5.0,
+    )
+
+    assert calls == [5.0]
+    assert report is not None
+    assert report["status"] == "HELD_COMMON_CYCLE_RECOVERY_TIMEBOXED_INCOMPLETE"
+    assert report["timeboxed_incomplete"] is True
+    assert report["unattempted_cycle_count"] == 1
+    assert report["unattempted_scope_count"] == 1
+
+
 def test_held_common_cycle_recovery_reseeds_preexisting_exact_anchor(
     monkeypatch, tmp_path
 ) -> None:
@@ -802,7 +857,7 @@ def test_common_cycle_recovery_reseeds_exact_scope_and_isolates_trigger_failure(
     monkeypatch.setattr(
         prod,
         "_recover_held_common_cycle_anchors_if_needed",
-        lambda _cfg: recovery,
+        lambda _cfg, **_kwargs: recovery,
     )
     monkeypatch.setattr(prod, "_ingest_station_forecasts_if_due", lambda _cfg: None)
     calls: list[tuple[str, dict[str, object]]] = []
@@ -860,9 +915,10 @@ def test_ingest_poll_calls_held_common_cycle_recovery() -> None:
     import src.ingest_main as ingest_main
 
     source = inspect.getsource(ingest_main._replacement_availability_poll_tick)
-    assert "_recover_held_common_cycle_anchors_if_needed(cfg)" in source
-    assert source.index("_recover_held_common_cycle_anchors_if_needed(cfg)") < (
-        source.index("_ingest_station_forecasts_if_due(cfg)")
+    assert "_recover_held_common_cycle_anchors_if_needed(" in source
+    assert "max_wall_clock_seconds=min(" in source
+    assert source.index("_recover_held_common_cycle_anchors_if_needed(") < (
+        source.index("probe_openmeteo_source_clock_updates(advance_cursor=False)")
     )
 
     def test_flag_off_is_inert(self, tmp_path):

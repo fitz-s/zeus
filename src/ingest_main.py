@@ -3364,7 +3364,19 @@ def _replacement_availability_poll_tick():
         return report
 
     try:
-        common_cycle_recovery = _recover_held_common_cycle_anchors_if_needed(cfg)
+        # Keep held common-cycle repair capital-prioritized, but reserve half of
+        # the existing current-target poll budget for the source-clock probe and
+        # ordinary residual-anchor drain below. A slow old-cycle recovery must
+        # never monopolize this single-instance scheduler job.
+        common_cycle_recovery = _recover_held_common_cycle_anchors_if_needed(
+            cfg,
+            max_wall_clock_seconds=min(
+                10.0,
+                _replacement_current_target_poll_timeout_seconds(
+                    _replacement_availability_poll_seconds()
+                ),
+            ),
+        )
         if common_cycle_recovery:
             committed_families = tuple(
                 dict.fromkeys(

@@ -1045,13 +1045,114 @@ def test_deadlined_meta_wave_never_queues_more_than_one_worker_width(monkeypatch
     resolved, failures = dl._fetch_meta_stamped_anchor_wave(
         requests,
         max_workers=2,
-        deadline_monotonic=dl.time.monotonic() + 1.0,
+        deadline_monotonic=(
+            dl.time.monotonic() + dl._BUCKET_FALLBACK_RESERVE_SECONDS + 1.0
+        ),
         client=object(),
     )
 
     assert failures == {}
     assert list(resolved) == list(requests)[:2]
     assert len(attempted) == 2
+
+
+def test_deadlined_anchor_rungs_reserve_the_bucket_fallback_window(monkeypatch) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+    from src.data.openmeteo_ecmwf_ifs9_anchor import build_anchor_request
+
+    clock = [0.0]
+    timeouts: list[float] = []
+    bucket_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(dl.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(dl, "_single_runs_public_for_request", lambda _request: True)
+
+    def _single_runs(_request, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        clock[0] += kwargs["timeout"]
+        raise dl.httpx.ReadTimeout("provider timeout")
+
+    monkeypatch.setattr(dl, "fetch_openmeteo_ecmwf_ifs9_anchor_payload", _single_runs)
+    monkeypatch.setattr(
+        dl,
+        "_try_bucket_rung_three",
+        lambda **kwargs: (
+            bucket_calls.append(kwargs)
+            or (_anchor_payload("2026-08-07"), {"run_authority": "bucket_test"})
+        ),
+    )
+    request = build_anchor_request(
+        latitude=30.0,
+        longitude=10.0,
+        run="2026-08-07T12:00:00+00:00",
+        timezone_name="UTC",
+    )
+
+    payload, provenance = dl._resolve_anchor_payload(
+        request=request,
+        city="City",
+        target_date="2026-08-07",
+        timezone_name="UTC",
+        deadline_monotonic=20.0,
+    )
+
+    assert payload == _anchor_payload("2026-08-07")
+    assert provenance["run_authority"] == "bucket_test"
+    assert timeouts == [dl._BUCKET_FALLBACK_RESERVE_SECONDS]
+    assert len(bucket_calls) == 1
+
+
+def test_deadlined_meta_wave_never_waits_for_executor_shutdown(monkeypatch) -> None:
+    from concurrent.futures import Future
+
+    import scripts.download_replacement_forecast_current_targets as dl
+    from src.data.openmeteo_ecmwf_ifs9_anchor import build_anchor_request
+
+    shutdown_calls: list[tuple[bool, bool]] = []
+
+    class _Executor:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def submit(self, fn, *args):
+            future = Future()
+            try:
+                future.set_result(fn(*args))
+            except BaseException as exc:
+                future.set_exception(exc)
+            return future
+
+        def shutdown(self, *, wait, cancel_futures) -> None:
+            shutdown_calls.append((wait, cancel_futures))
+
+    meta = {
+        "run_initialisation_utc": datetime(2026, 8, 7, 12, tzinfo=timezone.utc),
+        "run_availability_utc": datetime(2026, 8, 7, 13, tzinfo=timezone.utc),
+        "run_modification_utc": datetime(2026, 8, 7, 13, tzinfo=timezone.utc),
+    }
+    request = build_anchor_request(
+        latitude=30.0,
+        longitude=10.0,
+        run="2026-08-07T12:00:00+00:00",
+        timezone_name="UTC",
+    )
+    monkeypatch.setattr(dl, "ThreadPoolExecutor", _Executor)
+    monkeypatch.setattr(dl, "fetch_openmeteo_ifs9_model_meta", lambda **_kwargs: meta)
+    monkeypatch.setattr(
+        dl,
+        "fetch_openmeteo_ecmwf_ifs9_anchor_payload_standard_unstamped",
+        lambda *_args, **_kwargs: _anchor_payload("2026-08-07"),
+    )
+
+    resolved, failures = dl._fetch_meta_stamped_anchor_wave(
+        {("City", "2026-08-07"): request},
+        max_workers=1,
+        deadline_monotonic=dl.time.monotonic() + 30.0,
+        client=object(),
+    )
+
+    assert tuple(resolved) == (("City", "2026-08-07"),)
+    assert failures == {}
+    assert shutdown_calls == [(False, True)]
 
 
 def test_meta_stamped_wave_discards_every_payload_when_provider_changes_run(
@@ -3301,7 +3402,7 @@ def test_direct_downloader_reuses_bucket_manifest_across_targets(
         providers.append(provider)
         provider()
         return (
-            {"hourly": {"time": [], "temperature_2m": []}},
+            _anchor_payload("2026-06-10"),
             {"openmeteo_endpoint": "bucket", "run_authority": "bucket_partial_run_test"},
         )
 
