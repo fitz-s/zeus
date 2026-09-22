@@ -242,6 +242,33 @@ class ReactorWake:
     held_sell_reauction_requests: tuple[HeldSellReauctionRequest, ...] = ()
 
 
+def is_strict_generic_held_family_completion_wake(wake: object) -> bool:
+    """Return whether ``wake`` is an unmixed monitor-family completion marker."""
+
+    return (
+        str(getattr(wake, "source", "") or "") == "held_position_monitor"
+        and str(getattr(wake, "reason", "") or "")
+        == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+        and not tuple(getattr(wake, "event_ids", ()) or ())
+        and bool(tuple(getattr(wake, "forecast_families", ()) or ()))
+        and not tuple(
+            getattr(wake, "held_sell_reauction_requests", ()) or ()
+        )
+    )
+
+
+def strict_generic_held_family_completion_wakes(
+    *, path: Path | None = None, fail_on_error: bool = False
+) -> tuple[ReactorWake, ...]:
+    """Return the current durable strict generic completion markers."""
+
+    return tuple(
+        wake
+        for _queue_file, wake in _queued_wakes(path, fail_on_error=fail_on_error)
+        if is_strict_generic_held_family_completion_wake(wake)
+    )
+
+
 def _wake_path(path: Path | None) -> Path:
     if path is not None:
         target = Path(path)
@@ -1154,6 +1181,7 @@ def read_reactor_wake(
     prefer_forecast_carrier_progress: bool = False,
     prefer_material_progress: bool = False,
     prefer_price_progress: bool = False,
+    prefer_family_scoped_held_completion: bool = False,
     fail_on_error: bool = False,
 ) -> ReactorWake | None:
     """Read the queued fact with the shortest alpha clock first.
@@ -1201,12 +1229,21 @@ def read_reactor_wake(
             # deadline. The auction still rebinds current q/book; this priority
             # never authorizes replay of the request's historical quote.
             return wake
-    if prefer_exact_held_sell:
+    if prefer_exact_held_sell or prefer_family_scoped_held_completion:
         for _queue_file, wake in queued:
             if (
                 wake.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
                 and wake.held_sell_reauction_requests
             ):
+                return wake
+    if prefer_family_scoped_held_completion:
+        # A successful held-position monitor earns one bounded family cut turn.
+        # Confirmed fills remain ahead because they change capital already at risk.
+        for _queue_file, wake in queued:
+            if wake.reason == "position_fill_projected":
+                return wake
+        for _queue_file, wake in queued:
+            if is_strict_generic_held_family_completion_wake(wake):
                 return wake
     if prefer_price_progress:
         # SCOPE: one fill/price capital turn after a Day0 monitor attempt did
@@ -1471,6 +1508,17 @@ def coalescible_reactor_wakes(
             for wake in queued
             if wake.wake_id != selected.wake_id and wake.reason == selected.reason
         ]
+    elif is_strict_generic_held_family_completion_wake(selected):
+        candidates = [
+            wake
+            for wake in queued
+            if wake.wake_id != selected.wake_id
+            and is_strict_generic_held_family_completion_wake(wake)
+        ]
+        max_wakes = min(
+            max(1, int(max_wakes)),
+            GLOBAL_AUCTION_COMPLETION_COALESCE_LIMIT,
+        )
     elif selected.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON:
         candidates = [
             wake

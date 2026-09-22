@@ -5174,6 +5174,233 @@ def test_family_scoped_completion_cannot_starve_behind_continuous_material(tmp_p
     assert reactor_wake.read_reactor_wake(path=path) == fill
 
 
+def test_family_completion_baton_prefers_strict_queue_and_is_one_turn(
+    tmp_path, monkeypatch
+):
+    """A successful Day0 monitor grants one real strict-family queue turn."""
+
+    import src.config as config
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    monkeypatch.setattr(config, "state_path", lambda _name: path)
+    family = ("Chicago", "2026-09-22", "high")
+    base = datetime(2026, 9, 22, 13, 0, tzinfo=timezone.utc)
+
+    def publish(wake_id, offset, reason, *, source, families=()):
+        return reactor_wake.publish_reactor_wake(
+            source=source,
+            reason=reason,
+            path=path,
+            wake_id=wake_id,
+            published_at=base + timedelta(seconds=offset),
+            forecast_families=families,
+        )
+
+    generic_first = publish(
+        "generic-first",
+        0,
+        reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        source="held_position_monitor",
+        families=(family,),
+    )
+    generic_second = publish(
+        "generic-second",
+        1,
+        reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        source="held_position_monitor",
+        families=(family,),
+    )
+    publish(
+        "empty-fairness",
+        2,
+        reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        source="held_position_monitor",
+    )
+    publish(
+        "day0-old",
+        3,
+        "day0_extreme_event_committed",
+        source="day0",
+        families=(family,),
+    )
+    day0_new = publish(
+        "day0-new",
+        4,
+        "day0_extreme_event_committed",
+        source="day0",
+        families=(family,),
+    )
+    publish(
+        "price-new",
+        5,
+        "market_price_advanced",
+        source="price",
+        families=(family,),
+    )
+
+    assert reactor_wake.read_reactor_wake(path=path) == day0_new
+    assert reactor_wake.read_reactor_wake(
+        path=path,
+        prefer_family_scoped_held_completion=True,
+    ) == generic_first
+    assert [
+        wake.wake_id
+        for wake in reactor_wake.coalescible_reactor_wakes(
+            generic_first, path=path
+        )
+    ] == [generic_first.wake_id, generic_second.wake_id]
+
+    cycle_kwargs: dict[str, object] = {}
+    acknowledged: list[tuple[str, ...]] = []
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
+    monkeypatch.setattr(
+        main, "_collateral_authority_wake_backoff_ids", lambda: frozenset()
+    )
+    monkeypatch.setattr(main, "_paused_forecast_carrier_priority_allowed", lambda **_k: False)
+    monkeypatch.setattr(main, "_day0_wake_requires_exit_monitor", lambda _families: True)
+    monkeypatch.setattr(main, "_day0_exit_monitor_attempt_state", lambda _wake_id: (True, True))
+    monkeypatch.setattr(main, "_edli_event_reactor_cycle", lambda **kwargs: cycle_kwargs.update(kwargs) or True)
+    monkeypatch.setattr(
+        main,
+        "_acknowledge_edli_reactor_wake_batch",
+        lambda _wake, wakes, **_kwargs: acknowledged.append(
+            tuple(queued.wake_id for queued in wakes)
+        )
+        or True,
+    )
+    main._edli_initialize_reactor_wake_cursor()
+    try:
+        assert main._edli_reactor_wake_poll_once() is False
+        assert cycle_kwargs == {}
+        assert acknowledged == []
+        assert main._edli_family_completion_post_monitor_yield.wake_ids == {
+            day0_new.wake_id
+        }
+        assert main._edli_reactor_wake_poll_once() is True
+        assert cycle_kwargs["producer_wake_ids"] == (
+            generic_first.wake_id,
+            generic_second.wake_id,
+        )
+        assert cycle_kwargs["producer_family_scoped_held_completion"] is True
+        assert acknowledged == [(generic_first.wake_id, generic_second.wake_id)]
+        assert main._edli_family_completion_post_monitor_yield.wake_ids == frozenset()
+        assert reactor_wake.read_reactor_wake(path=path) == day0_new
+    finally:
+        main._edli_initialize_reactor_wake_cursor()
+
+
+def test_strict_family_completion_requires_success_baton_and_preserves_cap(tmp_path):
+    from src.main import _is_strict_generic_held_family_completion_wake_batch
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    family = ("Chicago", "2026-09-22", "high")
+    for index in range(reactor_wake.GLOBAL_AUCTION_COMPLETION_COALESCE_LIMIT + 3):
+        reactor_wake.publish_reactor_wake(
+            source="held_position_monitor",
+            reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+            path=path,
+            wake_id=f"strict-{index}",
+            published_at=datetime(2026, 9, 22, 13, 0, index, tzinfo=timezone.utc),
+            forecast_families=(family,),
+        )
+    selected = reactor_wake.read_reactor_wake(
+        path=path, prefer_family_scoped_held_completion=True
+    )
+    assert selected is not None
+    batch = reactor_wake.coalescible_reactor_wakes(selected, path=path)
+    assert len(batch) == reactor_wake.GLOBAL_AUCTION_COMPLETION_COALESCE_LIMIT
+    assert _is_strict_generic_held_family_completion_wake_batch(
+        batch, exact_held_sell_wake_ids=frozenset()
+    )
+
+
+def test_family_completion_baton_keeps_exact_and_fill_ahead(tmp_path):
+    from src.runtime import reactor_wake
+
+    family = ("Chicago", "2026-09-22", "high")
+    request = reactor_wake.make_held_sell_reauction_request(
+        position_id="held-position",
+        family=family,
+        probability_content_identity="q-current",
+        held_token_id="held-token",
+        held_best_bid=0.11,
+        bid_observed_at="2026-09-22T13:00:00+00:00",
+    )
+    exact_path = tmp_path / "exact.json"
+    reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=exact_path,
+        wake_id="strict-generic",
+        published_at=datetime(2026, 9, 22, 13, 0, tzinfo=timezone.utc),
+        forecast_families=(family,),
+    )
+    exact = reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=exact_path,
+        wake_id="exact-held",
+        published_at=datetime(2026, 9, 22, 13, 1, tzinfo=timezone.utc),
+        forecast_families=(family,),
+        held_sell_reauction_requests=(request,),
+    )
+    assert reactor_wake.read_reactor_wake(
+        path=exact_path,
+        prefer_family_scoped_held_completion=True,
+    ) == exact
+
+    fill_path = tmp_path / "fill.json"
+    reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=fill_path,
+        wake_id="strict-generic",
+        published_at=datetime(2026, 9, 22, 13, 0, tzinfo=timezone.utc),
+        forecast_families=(family,),
+    )
+    fill = reactor_wake.publish_reactor_wake(
+        source="fill",
+        reason="position_fill_projected",
+        path=fill_path,
+        wake_id="fill-first",
+        published_at=datetime(2026, 9, 22, 13, 1, tzinfo=timezone.utc),
+        event_ids=("fill-event",),
+    )
+    assert reactor_wake.read_reactor_wake(
+        path=fill_path,
+        prefer_family_scoped_held_completion=True,
+    ) == fill
+
+
+def test_family_completion_baton_does_not_arm_for_failed_or_unknown_monitor():
+    import src.main as main
+    from src.runtime.reactor_wake import ReactorWake
+
+    wake = ReactorWake(
+        "day0",
+        "2026-09-22T13:00:00+00:00",
+        "day0",
+        "day0_extreme_event_committed",
+        forecast_families=(("Chicago", "2026-09-22", "high"),),
+    )
+    main._edli_initialize_reactor_wake_cursor()
+    try:
+        main._yield_incomplete_day0_after_monitor_once(
+            wake, monitor_succeeded=False
+        )
+        assert main._edli_family_completion_post_monitor_yield.wake_ids == frozenset()
+        main._yield_incomplete_day0_after_monitor_once(
+            wake, monitor_succeeded=True
+        )
+        assert main._edli_family_completion_post_monitor_yield.wake_ids == frozenset()
+    finally:
+        main._edli_initialize_reactor_wake_cursor()
+
+
 def test_paused_forecast_carrier_priority_preserves_fill_and_exact_held_priority(tmp_path):
     """The paused carrier preference cannot outrank capital-at-risk wakes."""
 

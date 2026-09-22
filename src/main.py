@@ -161,6 +161,7 @@ class _OneTurnWakeExclusion:
 
 _edli_global_completion_yield = _OneTurnWakeExclusion()
 _edli_day0_post_monitor_yield = _OneTurnWakeExclusion()
+_edli_family_completion_post_monitor_yield = _OneTurnWakeExclusion()
 _edli_paused_forecast_post_monitor_yield = _OneTurnWakeExclusion()
 _edli_terminal_day0_cleanup_yield = threading.Event()
 _edli_failed_day0_price_yield = threading.Event()
@@ -5049,6 +5050,7 @@ def _edli_initialize_reactor_wake_cursor() -> None:
     _edli_last_reactor_wake_id = None
     _edli_global_completion_yield.reset()
     _edli_day0_post_monitor_yield.reset()
+    _edli_family_completion_post_monitor_yield.reset()
     _edli_paused_forecast_post_monitor_yield.reset()
     _edli_terminal_day0_cleanup_yield.clear()
     _edli_failed_day0_price_yield.clear()
@@ -6795,17 +6797,12 @@ def _is_strict_generic_held_family_completion_wake_batch(
 ) -> bool:
     """Whether a coalesced wake batch may receive the bounded generic turn."""
 
-    from src.runtime.reactor_wake import GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+    from src.runtime.reactor_wake import (
+        is_strict_generic_held_family_completion_wake,
+    )
 
     return bool(wakes) and not exact_held_sell_wake_ids and all(
-        str(getattr(queued, "source", "") or "") == "held_position_monitor"
-        and str(getattr(queued, "reason", "") or "")
-        == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
-        and not tuple(getattr(queued, "event_ids", ()) or ())
-        and bool(tuple(getattr(queued, "forecast_families", ()) or ()))
-        and not tuple(
-            getattr(queued, "held_sell_reauction_requests", ()) or ()
-        )
+        is_strict_generic_held_family_completion_wake(queued)
         for queued in wakes
     )
 
@@ -6824,6 +6821,7 @@ def _edli_reactor_wake_poll_once() -> bool:
         held_sell_reauction_requests_completed,
         persist_held_sell_reauction_receipts,
         read_reactor_wake,
+        strict_generic_held_family_completion_wakes,
     )
 
     def _unowned_day0_monitor_wake_pending() -> bool:
@@ -6882,6 +6880,9 @@ def _edli_reactor_wake_poll_once() -> bool:
         _edli_global_completion_yield.consume() - exact_held_sell_wake_ids
     )
     day0_post_monitor_yield_ids = _edli_day0_post_monitor_yield.consume()
+    family_completion_post_monitor_yield_ids = (
+        _edli_family_completion_post_monitor_yield.consume()
+    )
     paused_forecast_post_monitor_yield_ids = (
         _edli_paused_forecast_post_monitor_yield.consume()
     )
@@ -6894,6 +6895,14 @@ def _edli_reactor_wake_poll_once() -> bool:
     )
     price_progress_kwargs = (
         {"prefer_price_progress": True} if prefer_price_progress else {}
+    )
+    family_completion_kwargs = (
+        {"prefer_family_scoped_held_completion": True}
+        if family_completion_post_monitor_yield_ids
+        else {}
+    )
+    excluded_wake_ids = frozenset(
+        excluded_wake_ids | family_completion_post_monitor_yield_ids
     )
     paused_forecast_carrier_priority_allowed = (
         _paused_forecast_carrier_priority_allowed(
@@ -6917,6 +6926,7 @@ def _edli_reactor_wake_poll_once() -> bool:
                 prefer_exact_held_sell=True,
                 prefer_forecast_carrier_progress=prefer_forecast_carrier_progress,
                 **price_progress_kwargs,
+                **family_completion_kwargs,
                 fail_on_error=True,
             )
         else:
@@ -6931,6 +6941,7 @@ def _edli_reactor_wake_poll_once() -> bool:
                     ),
                     prefer_forecast_carrier_progress=prefer_forecast_carrier_progress,
                     **price_progress_kwargs,
+                    **family_completion_kwargs,
                     fail_on_error=(
                         prefer_forecast_carrier_progress
                         or prefer_exact_held_sell
@@ -6945,6 +6956,7 @@ def _edli_reactor_wake_poll_once() -> bool:
                     ),
                     prefer_forecast_carrier_progress=prefer_forecast_carrier_progress,
                     **price_progress_kwargs,
+                    **family_completion_kwargs,
                     fail_on_error=(
                         prefer_forecast_carrier_progress
                         or prefer_exact_held_sell
@@ -6962,6 +6974,7 @@ def _edli_reactor_wake_poll_once() -> bool:
                 ),
                 prefer_forecast_carrier_progress=prefer_forecast_carrier_progress,
                 **price_progress_kwargs,
+                **family_completion_kwargs,
                 fail_on_error=(
                     prefer_forecast_carrier_progress
                     or prefer_exact_held_sell
@@ -6977,6 +6990,7 @@ def _edli_reactor_wake_poll_once() -> bool:
             wake = read_reactor_wake(
                 exclude_wake_ids=excluded_wake_ids,
                 prefer_material_progress=True,
+                **family_completion_kwargs,
                 fail_on_error=True,
             )
         if (
@@ -7277,6 +7291,17 @@ def _edli_reactor_wake_poll_once() -> bool:
             _started, result = _day0_exit_monitor_attempt_state(wake.wake_id)
             day0_monitor_succeeded = result is True
             if not day0_monitor_succeeded:
+                return False
+            if strict_generic_held_family_completion_wakes(fail_on_error=True):
+                # SCOPE: only a completed held-position monitor with current
+                # strict generic family debt. DRAIN: the next listener poll
+                # consumes this baton once and dispatches that debt. RESET:
+                # an empty strict queue leaves the ordinary Day0 flow intact.
+                _yield_incomplete_day0_after_monitor_once(
+                    wake,
+                    monitor_succeeded=True,
+                )
+                _edli_family_completion_post_monitor_yield.arm(wake.wake_id)
                 return False
     monitor_wake_families = wake_families
     if price_wake and not monitor_wake_families:
