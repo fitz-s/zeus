@@ -62,6 +62,79 @@ def _carrier_semantics(city_name: str) -> SettlementSemantics:
 
     return SettlementSemantics.for_city(runtime_cities_by_name()[city_name])
 
+
+def test_kma_window_reaches_extrema_and_day0_fact_without_settlement_authority():
+    """A KMA window is live Day0 evidence, never a settlement-channel fact."""
+    from dataclasses import asdict
+
+    from src.config import runtime_cities_by_name
+    from src.data.day0_fast_obs import latest_fast_station_extreme_c
+    from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
+    from src.events.day0_authority import DAY0_LIVE_AUTHORITY_MATCHES
+    from src.events.opportunity_event import Day0ExtremeUpdatedPayload, make_day0_extreme_updated_event
+    from src.state.schema.observation_prints_schema import append_print, ensure_table
+    from src.state.schema.opportunity_events_schema import ensure_table as ensure_events
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    ensure_table(conn)
+    ensure_events(conn)
+    city = runtime_cities_by_name()["Busan"]
+    append_print(
+        conn, city="Busan", station_id="RKPK", source_channel="aviationweather_metar",
+        publish_ts_utc="2026-09-22T04:04:00+00:00", value_native=29.0, unit="C",
+        fetched_at_utc="2026-09-22T04:04:02+00:00",
+        raw_report="METAR RKPK 220400Z 05014KT 9999 FEW050 29/14 Q1016=",
+    )
+    raw = "METAR RKPK 220500Z 05014KT 9999 FEW050 28/14 Q1016="
+    available = "2026-09-22T05:00:34+00:00"
+    payload = Day0ExtremeUpdatedPayload(
+        city="Busan", target_date="2026-09-22", metric="high",
+        settlement_source="aviationweather_metar", station_id="RKPK",
+        observation_time="2026-09-22T05:00:00+00:00",
+        observation_available_at=available, raw_value=29.0, rounded_value=29,
+        high_so_far=29.0, low_so_far=28.0, settlement_source_type="noaa",
+        metar_margin_units_applied=0.0,
+        observation_availability_basis="LOCAL_FIRST_SEEN_AFTER_COMPLETE_RESPONSE",
+        observation_transport="kma_amo_raw_metar",
+        raw_report_identity=hashlib.sha256(raw.encode()).hexdigest(),
+        current_observation_temp_c=28.0, current_observation_raw_report=raw,
+        kma_report_window=[{
+            "raw_report": raw,
+            "raw_report_identity": hashlib.sha256(raw.encode()).hexdigest(),
+            "first_seen_at": available,
+        }],
+        **DAY0_LIVE_AUTHORITY_MATCHES,
+    )
+    event = make_day0_extreme_updated_event(
+        entity_key="Busan|2026-09-22|high|RKPK", source="day0_extreme_updated_trigger",
+        observed_at=payload.observation_time, received_at="2026-09-22T05:00:35+00:00",
+        payload=payload,
+    )
+    values = asdict(event)
+    conn.execute(
+        f"INSERT INTO opportunity_events ({','.join(values)}) VALUES ({','.join('?' for _ in values)})",
+        tuple(values.values()),
+    )
+    cutoff = datetime(2026, 9, 22, 5, 1, tzinfo=UTC)
+    try:
+        assert latest_fast_station_extreme_c(
+            conn, city="Busan", target_date="2026-09-22", metric="high",
+            decision_time=cutoff,
+        )[0] == 29.0
+        fact = _latest_authorized_day0_fact(
+            conn, city="Busan", target_date="2026-09-22", temperature_metric="high",
+            decision_time=cutoff,
+        )
+        assert fact is not None
+        assert fact["observed_extreme_native"] == 29.0
+        assert _latest_authorized_day0_fact(
+            conn, city="Busan", target_date="2026-09-22", temperature_metric="high",
+            decision_time=cutoff, require_settlement_channel=True,
+        ) is None
+    finally:
+        conn.close()
+
 # Pin the retention-prune clock so this suite is HERMETIC. The persisted-vector
 # fixtures use fixed captured_at timestamps on the 2026-06-10 target day; the
 # prune cutoff is `now - retention_days`. Without a pinned `now`, the prune uses

@@ -1037,6 +1037,13 @@ def _latest_authorized_day0_fact(
                 payload = json.loads(str(event_row["payload_json"] or "{}"))
                 if not isinstance(payload, Mapping):
                     continue
+                if (
+                    payload.get("observation_transport") == "kma_amo_raw_metar"
+                    or payload.get("kma_report_window") is not None
+                ):
+                    # Transport windows are validated and merged with raw
+                    # ledger reports below, before computing the extreme.
+                    continue
                 assert_live_day0_payload_authority(payload)
                 if expected_station and not _station_matches(
                     str(payload.get("station_id") or "").strip().upper(),
@@ -1498,6 +1505,46 @@ def _latest_authorized_day0_fact(
                             }
                         ]
                     facts.extend(ledger_facts)
+
+    if not require_settlement_channel and city_obj is not None:
+        from src.data.day0_fast_obs import (
+            KMA_PRIORITY_STATIONS,
+            _latest_kma_day0_event_state,
+        )
+
+        if expected_station in KMA_PRIORITY_STATIONS:
+            kma = _latest_kma_day0_event_state(
+                conn, city=city_obj, target_date=target_date,
+                decision_time=decision_utc, metric=metric,
+            )
+            if kma is not None:
+                facts = [
+                    fact for fact in facts
+                    if str(fact.get("observation_source") or "").strip().lower()
+                    not in {FAST_OBS_SOURCE_ID, f"ogimet_metar_{expected_station.lower()}"}
+                ]
+                extreme = (
+                    kma.low_native + kma.margin_units if metric == "low"
+                    else kma.high_native - kma.margin_units
+                )
+                raw_identity = json.dumps(
+                    [
+                        [report.raw_report_identity, report.available_at.isoformat()]
+                        for report in kma.reports
+                    ],
+                    separators=(",", ":"),
+                )
+                facts.append({
+                    "observed_extreme_native": extreme,
+                    "observation_time": kma.observed_at.isoformat(),
+                    "sample_count": len(kma.reports),
+                    "source": f"durable_day0_event:{FAST_OBS_SOURCE_ID}",
+                    "observation_source": FAST_OBS_SOURCE_ID,
+                    "station_id": expected_station,
+                    "unit": expected_unit,
+                    "observation_available_at": kma.available_at.isoformat(),
+                    "raw_payload_sha256": _raw_payload_sha256(raw_identity),
+                })
 
     def fact_time(fact: Mapping[str, object]) -> datetime:
         parsed = datetime.fromisoformat(

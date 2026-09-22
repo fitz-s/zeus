@@ -91,6 +91,12 @@ def build_day0_extreme_updated_event(
         ),
         evidence_finality=day0_evidence_finality(observation),
         metar_margin_units_applied=observation.get("metar_margin_units_applied"),
+        observation_availability_basis=observation.get("observation_availability_basis"),
+        observation_transport=observation.get("observation_transport"),
+        raw_report_identity=observation.get("raw_report_identity"),
+        current_observation_temp_c=observation.get("current_observation_temp_c"),
+        current_observation_raw_report=observation.get("current_observation_raw_report"),
+        kma_report_window=observation.get("kma_report_window"),
     )
     entity_key = "|".join((payload.city, payload.target_date, payload.metric, payload.station_id))
     return make_day0_extreme_updated_event(
