@@ -4,7 +4,7 @@
 # Reuse: asserts the FAIL-SOFT contract (a locked/empty/missing DB degrades one
 #   section to ERR, the rest still render) and that each script runs read-only
 #   against temp DBs. No live DB is touched.
-# Last reused/audited: 2026-09-10
+# Last reused/audited: 2026-09-22
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做")
 """Smoke tests for scripts/zeus_status.py, deploy_live.py, generate_schema_cheatsheet.py."""
 from __future__ import annotations
@@ -6601,6 +6601,74 @@ def test_deploy_live_stuck_monitor_quote_only_partition_requires_stale_parseable
         assert "STUCK_MONITOR_RECOVERY_ADMITTED" in detail
     else:
         assert detail == f"STUCK_MONITOR_RECOVERY_REFUSED:{expected_reason}"
+
+
+@pytest.mark.parametrize(
+    ("book_current", "sidecar_current", "classified", "expected_ok", "reason"),
+    (
+        (True, True, True, True, ""),
+        (False, True, True, False, "exact_held_book_not_current"),
+        (True, False, True, False, "held_quote_sidecar_not_current"),
+        (True, True, False, False, "stale_partition_invalid"),
+    ),
+)
+def test_deploy_live_quote_only_stale_partition_requires_complete_restart_admission(
+    monkeypatch,
+    tmp_path,
+    book_current,
+    sidecar_current,
+    classified,
+    expected_ok,
+    reason,
+):
+    """Quote-only stale rows need timestamp, classification, book and sidecar proof."""
+    dl = _load(
+        f"deploy_live_restart_quote_only_partition_{book_current}_{sidecar_current}_{classified}",
+        "deploy_live.py",
+    )
+    position_ids = ("pos-quote",)
+    handoff = _fresh_failed_monitor_handoff(
+        position_ids,
+        monitored_position_ids=position_ids,
+        fresh_position_count=0,
+        quote_only_stale_position_count=1,
+        quote_only_stale_position_ids=position_ids,
+        fresh_failed_monitor_no_action_position_count=0,
+        fresh_failed_monitor_no_action_position_ids=(),
+        fresh_failed_monitor_other_classified_position_ids=position_ids,
+        restart_blocking_position_count=0,
+        restart_blocking_position_ids=(),
+        fresh_failed_monitor_timestamp_stale_position_ids=position_ids,
+        stale_classified_position_ids=position_ids if classified else (),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_current_quote_only_repair_snapshot_ids",
+        lambda *_args, **_kwargs: position_ids if book_current else (),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_held_quote_sidecar_current_evidence",
+        lambda: {"current": sidecar_current, "age_seconds": 1.0},
+    )
+
+    ok, detail = dl._quote_only_monitor_repair_handoff_admission(
+        trade_db=tmp_path / "zeus_trades.db",
+        obligations={
+            "open_position_count": 1,
+            "nonterminal_command_count": 0,
+            "all_open_position_ids": position_ids,
+        },
+        pause_state={"entries_paused": True},
+        handoff=handoff,
+        repair_pending={"pending": True},
+    )
+
+    assert ok is expected_ok
+    if expected_ok:
+        assert "QUOTE_ONLY_MONITOR_REPAIR_HANDOFF_ADMITTED" in detail
+    else:
+        assert detail.endswith(reason)
 
 
 @pytest.mark.parametrize(

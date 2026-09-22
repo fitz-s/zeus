@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-12; last_reviewed=2026-09-10; last_reused=2026-09-10
+# Lifecycle: created=2026-06-12; last_reviewed=2026-09-22; last_reused=2026-09-22
 # Purpose: make live daemon restarts SAFE — refuse `launchctl kickstart` while the LIVE
 #   checkout's runtime surface is uncommitted/unpushed, and require live restart preflight
 #   before booting the trading daemon.
 # Reuse: read-mostly (git status/rev-parse + launchctl list + preflight checks); the only
 #   state change is kickstart after the gates pass.
-# Last reused/audited: 2026-08-31
+# Last reused/audited: 2026-09-22
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做") +
 #   incident: a `launchctl kickstart` booted a concurrent agent's mid-edit working tree
 #   into live money.
@@ -2238,6 +2238,7 @@ def _quote_only_monitor_repair_handoff_admission(
     # exists before stop.
     stale_failed_set = restart_ids & stale_timestamp_set
     fresh_failed_set = restart_ids - stale_timestamp_set
+    stale_quote_set = quote_set & stale_timestamp_set
     stale_settlement_set = settlement_set & stale_timestamp_set
     if (
         len(settlement_ids)
@@ -2245,7 +2246,8 @@ def _quote_only_monitor_repair_handoff_admission(
         or len(settlement_set) != len(settlement_ids)
         or not settlement_set.issubset(no_action_set)
         or stale_timestamp_set != stale_classified_set
-        or stale_timestamp_set != stale_failed_set | stale_settlement_set
+        or stale_timestamp_set
+        != stale_quote_set | stale_failed_set | stale_settlement_set
     ):
         return False, "QUOTE_ONLY_MONITOR_REPAIR_HANDOFF_REFUSED:stale_partition_invalid"
     if no_action_set != restart_ids | settlement_set:
