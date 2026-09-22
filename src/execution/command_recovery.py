@@ -33384,7 +33384,11 @@ def _reconcile_passes_short_conn(
                     terminal_late_fill_result,
                 )
         preexisting_obligation_result = None
-        if terminal_obligation_open:
+        # A CANCEL_PENDING command needs its bounded authenticated order read
+        # before any account-wide obligation selector can spend the live-tick
+        # writer budget.  The exact cancel APPLY below performs its own scoped
+        # terminal-fact/obligation follow-through in the same transaction.
+        if terminal_obligation_open and not cancel_candidates:
             obligation_deadline = _capital_deadline()
             obligation_conn_factory = _capital_apply_conn_factory(
                 obligation_deadline,
@@ -33567,6 +33571,7 @@ def _reconcile_passes_short_conn(
 
         def _apply_cancel(conn, snap_client):
             ps = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+            terminal_follow_through: list[dict[str, dict]] = []
             current = {
                 str(row.get("command_id") or ""): row
                 for row in _capital_blocking_cancel_commands(conn)
@@ -33592,10 +33597,88 @@ def _reconcile_passes_short_conn(
                     continue
                 if outcome == "advanced":
                     ps["advanced"] += 1
+                    current_state = conn.execute(
+                        """
+                        SELECT state,
+                               intent_kind,
+                               (
+                                   SELECT event_type
+                                     FROM venue_command_events event
+                                    WHERE event.command_id = venue_commands.command_id
+                                    ORDER BY event.sequence_no DESC
+                                    LIMIT 1
+                               ) AS latest_event_type
+                          FROM venue_commands
+                         WHERE command_id = ?
+                        """,
+                        (command_id,),
+                    ).fetchone()
+                    state_name = (
+                        str(current_state["state"] or "").upper()
+                        if current_state is not None
+                        else ""
+                    )
+                    latest_event_type = (
+                        str(current_state["latest_event_type"] or "").upper()
+                        if current_state is not None
+                        else ""
+                    )
+                    # The existing already-canceled REVIEW_REQUIRED owner can
+                    # atomically clear an ENTRY to EXPIRED after an authenticated
+                    # zero-exposure point read.  Its REVIEW_CLEARED event is the
+                    # same terminal no-fill proof consumed by the scoped reducers;
+                    # keep this exception exact instead of reopening broad scans.
+                    review_cleared_terminal = (
+                        state_name == CommandState.EXPIRED.value
+                        and latest_event_type
+                        == CommandEventType.REVIEW_CLEARED_NO_VENUE_EXPOSURE.value
+                    )
+                    if (
+                        current_state is not None
+                        and (
+                            state_name == CommandState.CANCELLED.value
+                            or review_cleared_terminal
+                        )
+                        and str(current_state["intent_kind"] or "").upper()
+                        == IntentKind.ENTRY.value
+                    ):
+                        # Keep the authenticated cancel transition and its
+                        # command-scoped terminal projection/release atomic.
+                        # Positive fills remain position truth; zero-fill and
+                        # partial reducers are mutually exclusive selectors.
+                        follow_bundle: dict[str, dict] = {}
+                        if state_name == CommandState.CANCELLED.value:
+                            scoped_ids = frozenset({command_id})
+                            follow_bundle.update(
+                                {
+                                    "cancel_ack_terminal_no_fill_facts_fast": (
+                                        reconcile_cancel_ack_terminal_no_fill_facts(
+                                            conn,
+                                            command_ids=scoped_ids,
+                                        )
+                                    ),
+                                    "cancel_ack_terminal_partial_facts_fast": (
+                                        reconcile_cancel_ack_terminal_partial_facts(
+                                            conn,
+                                            command_ids=scoped_ids,
+                                        )
+                                    ),
+                                }
+                            )
+                        follow_bundle[
+                            "terminal_entry_exposure_obligations_fast"
+                        ] = reconcile_terminal_entry_exposure_obligations(
+                            conn,
+                            command_id=command_id,
+                        )
+                        if follow_bundle:
+                            terminal_follow_through.append(follow_bundle)
                 elif outcome == "stayed":
                     ps["stayed"] += 1
                 else:
                     ps["errors"] += 1
+            if terminal_follow_through:
+                ps["terminal_follow_through"] = terminal_follow_through
             return ps
 
         cancel_result = None
@@ -33613,7 +33696,13 @@ def _reconcile_passes_short_conn(
                 deadline_monotonic=fast_deadline,
             )
             if cancel_result is not None:
+                terminal_follow_through = cancel_result.pop(
+                    "terminal_follow_through", []
+                )
                 _accumulate(summary, "cancel_recovery_fast", cancel_result)
+                for follow_bundle in terminal_follow_through:
+                    for follow_key, follow_summary in follow_bundle.items():
+                        _accumulate(summary, follow_key, follow_summary)
 
         partial_result = None
         if partial_candidates:
@@ -33641,21 +33730,23 @@ def _reconcile_passes_short_conn(
                     partial_result,
                 )
 
-        obligation_result = _run_capital_pass(
-            "terminal_entry_exposure_obligations_fast",
-            lambda: run_db_only_pass(
-                reconcile_terminal_entry_exposure_obligations,
-                conn_factory=fast_conn_factory,
-                label="recovery.terminal_entry_exposure_obligations_fast",
-            ),
-            deadline_monotonic=fast_deadline,
-        )
-        if obligation_result is not None:
-            _accumulate(
-                summary,
+        obligation_result = None
+        if not cancel_candidates:
+            obligation_result = _run_capital_pass(
                 "terminal_entry_exposure_obligations_fast",
-                obligation_result,
+                lambda: run_db_only_pass(
+                    reconcile_terminal_entry_exposure_obligations,
+                    conn_factory=fast_conn_factory,
+                    label="recovery.terminal_entry_exposure_obligations_fast",
+                ),
+                deadline_monotonic=fast_deadline,
             )
+            if obligation_result is not None:
+                _accumulate(
+                    summary,
+                    "terminal_entry_exposure_obligations_fast",
+                    obligation_result,
+                )
 
         terminal_result = None
         if terminal_candidates:

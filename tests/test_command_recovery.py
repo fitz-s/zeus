@@ -38267,6 +38267,236 @@ def test_cancelled_increment_releases_obligation_inside_capital_fast_lane(
         verified.close()
 
 
+def test_cancel_first_partial_entry_releases_only_unmatched_remainder(
+    tmp_path,
+    monkeypatch,
+):
+    """A partial CANCEL_PENDING ENTRY outruns a deferred broad obligation pass."""
+    from src.execution import command_recovery, venue_sync_contract
+    from src.state.db import init_schema, init_schema_trade_only, log_execution_fact
+    from src.state.venue_command_repo import append_event
+
+    db_path = tmp_path / "cancel-first-partial-entry.db"
+    seed = sqlite3.connect(db_path)
+    seed.row_factory = sqlite3.Row
+    init_schema(seed)
+    init_schema_trade_only(seed)
+    command_id = "cmd-cancel-first-partial"
+    position_id = "pos-cancel-first-partial"
+    order_id = "ord-cancel-first-partial"
+    _insert(
+        seed,
+        command_id=command_id,
+        position_id=position_id,
+        size=10.09,
+        price=0.07,
+    )
+    _open_test_entry_obligation(seed, command_id)
+    _advance_to_acked(seed, command_id=command_id, venue_order_id=order_id)
+    _seed_pending_entry_projection(
+        seed,
+        position_id=position_id,
+        command_id=command_id,
+        order_id=order_id,
+    )
+    _append_test_filled_entry_projection(
+        seed,
+        position_id=position_id,
+        command_id=command_id,
+        order_id=order_id,
+        shares=4.87,
+        cost_basis_usd=0.3409,
+        size_usd=0.3409,
+        entry_price=0.07,
+    )
+    seed.execute(
+        """
+        UPDATE position_current
+           SET phase = 'day0_window', shares = 4.87, chain_shares = 4.87,
+               chain_state = 'synced', cost_basis_usd = 0.3409,
+               chain_cost_basis_usd = 0.3409, size_usd = 0.3409,
+               entry_price = 0.07, order_status = 'partial'
+         WHERE position_id = ?
+        """,
+        (position_id,),
+    )
+    _append_confirmed_trade_fact(
+        seed,
+        command_id=command_id,
+        order_id=order_id,
+        trade_id="trade-cancel-first-partial",
+        filled_size="4.87",
+        fill_price="0.07",
+    )
+    log_execution_fact(
+        seed,
+        intent_id=f"{position_id}:entry",
+        position_id=position_id,
+        decision_id=f"decision:{command_id}",
+        command_id=command_id,
+        order_role="entry",
+        posted_at="2026-08-28T12:00:00Z",
+        filled_at="2026-08-28T12:00:01Z",
+        submitted_price=0.07,
+        fill_price=0.07,
+        shares=4.87,
+        venue_status="PARTIAL",
+        terminal_exec_status="partial",
+    )
+    _append_order_fact(
+        seed,
+        command_id=command_id,
+        order_id=order_id,
+        state="CANCEL_CONFIRMED",
+        matched_size="4.87",
+        remaining_size="5.22",
+        source="REST",
+        raw_payload_json={
+            "id": order_id,
+            "status": "CANCELED",
+            "type": "CANCELLATION",
+            "size_matched": "4.87",
+        },
+    )
+    append_event(
+        seed,
+        command_id=command_id,
+        event_type="CANCEL_REQUESTED",
+        occurred_at="2026-08-28T12:01:00Z",
+        payload={"venue_order_id": order_id},
+    )
+
+    # An unrelated PARTIAL obligation forces the old broad pass to hit its
+    # budget gate before cancel APPLY; the new path must defer that pass.
+    _insert(
+        seed,
+        command_id="cmd-unrelated-partial-obligation",
+        position_id="pos-unrelated-partial-obligation",
+        size=8.0,
+        price=0.08,
+    )
+    _open_test_entry_obligation(seed, "cmd-unrelated-partial-obligation")
+    seed.execute(
+        "UPDATE venue_commands SET state = 'PARTIAL' WHERE command_id = ?",
+        ("cmd-unrelated-partial-obligation",),
+    )
+    seed.commit()
+    seed.close()
+
+    def factory(**_kwargs):
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    factory.supports_nonblocking_flocks = True
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+    monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "1")
+    monkeypatch.setenv("ZEUS_CAPITAL_RECOVERY_DB_BUDGET_SECONDS", "1")
+    point_client = MagicMock()
+    point_client.get_order.return_value = {
+        "orderID": order_id,
+        "status": "CANCELED",
+        "original_size": "10.09",
+        "size_matched": "4.87",
+    }
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "capture_venue_read_snapshot",
+        lambda *_args, **_kwargs: point_client,
+    )
+    broad_labels = []
+    original_run = command_recovery._run_recovery_pass_with_lock_policy
+
+    def run(label, fn, **kwargs):
+        if label == "terminal_entry_exposure_obligations_fast":
+            broad_labels.append(label)
+            summary = kwargs["summary"]
+            summary["db_budget_deferred"] = True
+            summary["db_budget_deferred_at"] = label
+            return None
+        return original_run(label, fn, **kwargs)
+
+    monkeypatch.setattr(
+        command_recovery,
+        "_run_recovery_pass_with_lock_policy",
+        run,
+    )
+    summary = command_recovery.reconcile_unresolved_commands(
+        client=MagicMock(),
+        scope="live_tick",
+    )
+
+    assert broad_labels == []
+    assert summary["cancel_recovery_fast"]["advanced"] == 1
+    assert summary["cancel_ack_terminal_partial_facts_fast"] == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    assert summary["terminal_entry_exposure_obligations_fast"] == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+        "terminal_late_fill_corrections": {
+            "scanned": 1,
+            "advanced": 0,
+            "stayed": 1,
+            "errors": 0,
+        },
+    }
+    verified = factory()
+    try:
+        command = verified.execute(
+            "SELECT state FROM venue_commands WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+        assert command["state"] == "CANCELLED"
+        event_types = [
+            row["event_type"]
+            for row in verified.execute(
+                "SELECT event_type FROM venue_command_events WHERE command_id = ? "
+                "ORDER BY sequence_no",
+                (command_id,),
+            )
+        ]
+        assert "CANCEL_ACKED" in event_types
+        terminal = verified.execute(
+            """
+            SELECT state, matched_size, remaining_size
+              FROM venue_order_facts
+             WHERE command_id = ?
+             ORDER BY fact_id DESC
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        assert dict(terminal) == {
+            "state": "PARTIALLY_MATCHED",
+            "matched_size": "4.87",
+            "remaining_size": "0",
+        }
+        obligation = verified.execute(
+            "SELECT status FROM entry_exposure_obligations WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+        assert obligation["status"] == "RESOLVED"
+        position = verified.execute(
+            "SELECT phase, shares, chain_shares, cost_basis_usd "
+            "FROM position_current WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+        assert dict(position) == {
+            "phase": "day0_window",
+            "shares": 4.87,
+            "chain_shares": 4.87,
+            "cost_basis_usd": 0.3409,
+        }
+    finally:
+        verified.close()
+
+
 def test_screen_cancel_ack_runs_scoped_terminal_follow_through(
     tmp_path, monkeypatch,
 ):
