@@ -71,8 +71,8 @@ class Day0ExtremeUpdatedPayload:
     station_id: str
     observation_time: str
     observation_available_at: str
-    raw_value: float
-    rounded_value: int
+    raw_value: float | None
+    rounded_value: int | None
     high_so_far: float | None = None
     low_so_far: float | None = None
     settlement_source_type: str = ""
@@ -91,6 +91,13 @@ class Day0ExtremeUpdatedPayload:
     #: day0_oracle_anomaly.metar_margin_units_for_city. None for every other
     #: source (WU, HKO, etc); 0.0 for a settlement-faithful METAR station.
     metar_margin_units_applied: float | None = None
+    observation_availability_basis: str | None = None
+    observation_transport: str | None = None
+    raw_report_identity: str | None = None
+    current_observation_temp_c: float | None = None
+    current_observation_raw_report: str | None = None
+    kma_report_window: list[dict[str, str]] | None = None
+    observation_conflict: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -200,6 +207,17 @@ def make_opportunity_event(
         _parse_utc(expires_at, "expires_at")
 
     payload_obj = dataclasses.asdict(payload) if dataclasses.is_dataclass(payload) else payload
+    if isinstance(payload, Day0ExtremeUpdatedPayload):
+        # Absent transport evidence must preserve existing event identities.
+        for name in (
+            "observation_availability_basis", "observation_transport",
+            "raw_report_identity", "current_observation_temp_c",
+            "current_observation_raw_report",
+            "kma_report_window",
+            "observation_conflict",
+        ):
+            if payload_obj[name] is None:
+                del payload_obj[name]
     payload_json = canonical_json(payload_obj)
     digest = payload_hash(payload_obj)
     identity_parts = (event_type, entity_key, source, available_at, digest)

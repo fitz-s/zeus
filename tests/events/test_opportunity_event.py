@@ -3,6 +3,9 @@
 # Authority basis: EDLI v1 implementation prompt §6 event model acceptance A03-A07.
 from __future__ import annotations
 
+import dataclasses
+import json
+
 import pytest
 
 from src.events.opportunity_event import (
@@ -178,3 +181,51 @@ def test_day0_available_at_uses_observation_available_at_not_observation_time():
     )
     assert event.observed_at == payload.observation_time
     assert event.available_at == payload.observation_available_at
+
+
+def test_day0_transport_evidence_preserves_clocks_and_legacy_identity():
+    legacy_payload = dict(
+        city="Busan", target_date="2026-09-22", metric="high",
+        settlement_source="aviationweather_metar", station_id="RKPK",
+        observation_time="2026-09-22T05:00:00+00:00",
+        observation_available_at="2026-09-22T05:00:34+00:00",
+        raw_value=29.0, rounded_value=29,
+    )
+    payload = Day0ExtremeUpdatedPayload(**legacy_payload)
+    optional = {
+        "observation_availability_basis", "observation_transport",
+        "raw_report_identity", "current_observation_temp_c",
+        "current_observation_raw_report",
+        "kma_report_window",
+        "observation_conflict",
+    }
+    old_shape = {k: v for k, v in dataclasses.asdict(payload).items() if k not in optional}
+    kwargs = dict(
+        event_type="DAY0_EXTREME_UPDATED", entity_key="Busan|2026-09-22|high|RKPK",
+        source="day0_extreme_updated_trigger", observed_at=payload.observation_time,
+        available_at=payload.observation_available_at,
+        received_at="2026-09-22T05:00:35+00:00",
+    )
+    legacy = make_opportunity_event(**kwargs, payload=old_shape)
+    unchanged = make_opportunity_event(**kwargs, payload=payload)
+    assert unchanged.event_id == legacy.event_id
+    raw = "METAR RKPK 220500Z 05014KT 9999 FEW050 28/14 A3002="
+    import hashlib
+
+    enriched = dataclasses.replace(
+        payload, observation_availability_basis="LOCAL_FIRST_SEEN_AFTER_COMPLETE_RESPONSE",
+        observation_transport="kma_amo_raw_metar",
+        raw_report_identity=hashlib.sha256(raw.encode()).hexdigest(),
+        current_observation_temp_c=28.0, current_observation_raw_report=raw,
+    )
+    event = make_opportunity_event(**kwargs, payload=enriched)
+    evidence = json.loads(event.payload_json)
+    assert event.observed_at == payload.observation_time
+    assert event.available_at == payload.observation_available_at
+    assert evidence["current_observation_temp_c"] == 28.0
+    assert evidence["raw_value"] == 29.0
+    assert evidence["observation_availability_basis"] == "LOCAL_FIRST_SEEN_AFTER_COMPLETE_RESPONSE"
+    assert evidence["current_observation_raw_report"] == raw
+    assert event.event_id != legacy.event_id
+    with pytest.raises(OpportunityEventValidationError, match="available_at"):
+        assert_available_for_decision(event, "2026-09-22T05:00:33+00:00")
