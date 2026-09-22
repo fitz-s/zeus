@@ -19933,7 +19933,7 @@ def test_persist_tier0_candidate_set_skips_candidates_without_city_date_context(
             "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
             "LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"
             "remaining_day q_lcb is degenerate with q_live",
-            "BLOCKED",
+            "CANDIDATE_BLOCKED",
         ),
         (
             "GLOBAL_ACTUATION_PREPARE_FAILED:"
@@ -36731,11 +36731,6 @@ def test_global_batch_rebuilds_full_cut_after_stale_sell_authority(
             "LIVE_INFERENCE_INPUTS_MISSING:"
             "DAY0_ORACLE_ANOMALY_PAUSED:Dallas:2026-07-22"
         ),
-        (
-            "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
-            "LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"
-            "remaining_day q_lcb is degenerate with q_live"
-        ),
     ),
 )
 @pytest.mark.parametrize("buy_enabled", [True, False])
@@ -36931,6 +36926,20 @@ def test_global_batch_falls_through_family_local_preflight_block(
             "GLOBAL_PREFLIGHT_CANDIDATE_DAY0_ADMISSION_BLOCKED:DAY0_DIURNAL_NOWCAST_VETO",
             "BUY",
             "BUY",
+        ),
+        (
+            "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+            "LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"
+            "remaining_day q_lcb is degenerate with q_live",
+            "BUY",
+            "BUY",
+        ),
+        (
+            "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+            "LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"
+            "remaining_day q_lcb is degenerate with q_live",
+            "BUY",
+            "SELL",
         ),
         (
             "GLOBAL_ACTUATION_PREPARE_FAILED:"

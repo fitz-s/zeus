@@ -15914,6 +15914,15 @@ def _global_preflight_block_status(reason: str) -> str:
         # qualified BUY or reduce-only SELL.
         return "CANDIDATE_BLOCKED"
     if reason == (
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+        "LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"
+        "remaining_day q_lcb is degenerate with q_live"
+    ):
+        # The remaining-day transform is a selected BUY certificate defect.
+        # Exclude that candidate and let the same cut compare other bins and
+        # held reduce-only SELLs. The next cut rebuilds a fresh certificate.
+        return "CANDIDATE_BLOCKED"
+    if reason == (
         "LIVE_INFERENCE_INPUTS_MISSING:"
         "GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE"
     ):
@@ -16005,11 +16014,6 @@ def _global_preflight_block_status(reason: str) -> str:
                 "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
                 "LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"
                 "selected q_lcb does not match remaining-day transform:"
-            ),
-            (
-                "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
-                "LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"
-                "remaining_day q_lcb is degenerate with q_live"
             ),
         )
     ):
