@@ -14537,7 +14537,11 @@ def test_winner_target_carrier_terminalizes_on_unregistered_reason(caplog):
     assert unregistered_reason in regret_row[1]
 
 
-def test_winner_target_carrier_requeues_with_sentinel_on_registered_transient_reason():
+@pytest.mark.parametrize("reason", (
+    "EXECUTABLE_SNAPSHOT_BLOCKED",
+    "LIVE_INFERENCE_INPUTS_MISSING:FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA",
+))
+def test_winner_target_carrier_requeues_with_sentinel_on_registered_transient_reason(reason):
     """Regression guard: a winner-target carrier with an EXPLICITLY registered
     transient reason must still requeue with its GLOBAL_WINNER_TARGETED_CLAIM
     sentinel restored, exactly as before this fix — only UNREGISTERED reasons
@@ -14558,7 +14562,7 @@ def test_winner_target_carrier_requeues_with_sentinel_on_registered_transient_re
             (event.event_id,),
         ).fetchone()
 
-    reactor._transient_requeue_reasons[event.event_id] = "EXECUTABLE_SNAPSHOT_BLOCKED"
+    reactor._transient_requeue_reasons[event.event_id] = reason
     res = ReactorResult()
     reactor._finalize_disposition(
         event,
@@ -14610,11 +14614,13 @@ def test_non_winner_target_carrier_unaffected_by_unregistered_reason_gate():
     assert last_error == unregistered_reason
 
 
-def test_source_captured_after_decision_time_is_retryable_not_consumed():
-    """The forecast-source re-ingestion race (SOURCE_CAPTURED_AFTER_DECISION_TIME) is TRANSIENT:
-    the event is requeued and retried next cycle (decision_time advances past the source's
-    available time) rather than consumed at the money-path stage. Mirrors the snapshot retry.
-    """
+@pytest.mark.parametrize("reader_reason", (
+    "SOURCE_CAPTURED_AFTER_DECISION_TIME",
+    "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA",
+    "PRODUCER_READINESS_MISSING",
+))
+def test_unavailable_forecast_source_receipt_is_retryable_not_consumed(reader_reason):
+    """Source recovery must reach a fresh decision rather than consume its event."""
     payload = json.loads(_forecast_event(target_date="2026-05-25").payload_json)
 
     def _submit(event, _decision_time):
@@ -14627,7 +14633,10 @@ def test_source_captured_after_decision_time_is_retryable_not_consumed():
             target_date=payload.get("target_date"),
             metric=payload.get("metric"),
             trade_score_positive=False,
-            reason="LIVE_INFERENCE_INPUTS_MISSING:FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:SOURCE_CAPTURED_AFTER_DECISION_TIME",
+            reason=(
+                "LIVE_INFERENCE_INPUTS_MISSING:FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:"
+                + reader_reason
+            ),
         )
 
     conn, store = _store()
