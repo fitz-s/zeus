@@ -2206,8 +2206,17 @@ def _position_strategy_key(conn: sqlite3.Connection, position_id: str) -> str | 
     return str(row["strategy_key"] or "") if row and row["strategy_key"] else None
 
 
-def _latest_terminal_order_fact_candidates(conn: sqlite3.Connection) -> list[dict]:
+def _latest_terminal_order_fact_candidates(
+    conn: sqlite3.Connection,
+    *,
+    command_ids: set[str] | frozenset[str] | None = None,
+) -> list[dict]:
     if not _table_exists(conn, "venue_order_facts"):
+        return []
+    scoped_ids = tuple(sorted(str(value) for value in (command_ids or ()) if str(value)))
+    # ``None`` means the historical all-command selector.  An explicit empty
+    # scope means there is no work; it must never widen back to that selector.
+    if command_ids is not None and not scoped_ids:
         return []
     states = tuple(sorted(_TERMINAL_NO_FILL_ORDER_FACT_STATES))
     command_states = tuple(
@@ -2224,6 +2233,13 @@ def _latest_terminal_order_fact_candidates(conn: sqlite3.Connection) -> list[dic
     sources = tuple(sorted(_LIVE_TERMINAL_ORDER_FACT_SOURCES))
     command_state_placeholders = ",".join("?" for _ in command_states)
     command_scope_cte = "terminal_order_fact_candidate_commands"
+    command_id_scope_clause = (
+        " AND cmd.command_id IN ("
+        + ",".join("?" for _ in scoped_ids)
+        + ")"
+        if scoped_ids
+        else ""
+    )
     sql = f"""
         WITH {command_scope_cte} AS (
             SELECT cmd.command_id
@@ -2242,6 +2258,7 @@ def _latest_terminal_order_fact_candidates(conn: sqlite3.Connection) -> list[dic
                         AND CAST(COALESCE(pc.cost_basis_usd, '0') AS REAL) = 0
                     )
                )
+               {command_id_scope_clause}
         ),
     """ + _canonical_order_truth_cte(
         command_scope_cte=command_scope_cte,
@@ -2306,7 +2323,7 @@ def _latest_terminal_order_fact_candidates(conn: sqlite3.Connection) -> list[dic
         """
     rows = conn.execute(
         sql,
-        (*command_states, *states, *sources),
+        (*command_states, *scoped_ids, *states, *sources),
     ).fetchall()
     return [_dict_row(row) for row in rows]
 
@@ -2325,6 +2342,8 @@ def _cancel_ack_terminal_no_fill_fact_candidates(
     sources = tuple(sorted(_LIVE_TERMINAL_ORDER_FACT_SOURCES))
     source_placeholders = ",".join("?" for _ in sources)
     scoped_ids = tuple(sorted(str(value) for value in (command_ids or ()) if str(value)))
+    if command_ids is not None and not scoped_ids:
+        return []
     scope_clause = (
         " AND cmd.command_id IN (" + ",".join("?" for _ in scoped_ids) + ")"
         if scoped_ids else ""
@@ -2452,6 +2471,8 @@ def _cancel_ack_terminal_partial_fact_candidates(
     if not all(_table_exists(conn, table) for table in required):
         return []
     scoped_ids = tuple(sorted(str(value) for value in (command_ids or ()) if str(value)))
+    if command_ids is not None and not scoped_ids:
+        return []
     scope_clause = (
         " AND cmd.command_id IN (" + ",".join("?" for _ in scoped_ids) + ")"
         if scoped_ids else ""
@@ -12287,10 +12308,13 @@ def reconcile_terminal_order_facts(
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
     continuations: list[dict] = []
     immediate_redecision_events = 0
-    for row in _latest_terminal_order_fact_candidates(conn):
+    terminal_candidates = (
+        _latest_terminal_order_fact_candidates(conn)
+        if command_ids is None
+        else _latest_terminal_order_fact_candidates(conn, command_ids=command_ids)
+    )
+    for row in terminal_candidates:
         command_id = str(row.get("command_id") or "")
-        if command_ids is not None and command_id not in command_ids:
-            continue
         summary["scanned"] += 1
         command_order_id = str(row.get("venue_order_id") or "")
         order_id = str(row.get("order_fact_venue_order_id") or "")
@@ -14081,13 +14105,84 @@ def terminal_entry_no_fill_projection_pending(conn: sqlite3.Connection) -> bool:
     return bool(_terminal_entry_no_fill_priority_command_ids(conn))
 
 
+def _terminal_entry_no_fill_unmaterialized_command_ids(
+    conn: sqlite3.Connection,
+) -> set[str]:
+    """Find bounded-shape cancels whose terminal no-fill fact is missing.
+
+    This is only a cheap read hint.  The cancel-ack reducer below rechecks the
+    canonical order fact, source, and positive-fill exclusions before writing.
+    Keeping the projection and one-command ownership predicates here prevents
+    unrelated terminal debt from entering the capital-priority lane.
+    """
+
+    required = {
+        "venue_commands",
+        "venue_command_events",
+        "venue_order_facts",
+        "venue_trade_facts",
+        "position_current",
+    }
+    if not all(_table_exists(conn, table) for table in required):
+        return set()
+    sources = tuple(sorted(_LIVE_TERMINAL_ORDER_FACT_SOURCES))
+    source_placeholders = ",".join("?" for _ in sources)
+    sql = (
+        "SELECT cmd.command_id, pc.shares, pc.cost_basis_usd, "
+        "       pc.chain_shares, pc.chain_cost_basis_usd "
+        "   FROM venue_commands cmd "
+        "   JOIN position_current pc ON pc.position_id = cmd.position_id "
+        "  WHERE cmd.intent_kind = 'ENTRY' "
+        "    AND UPPER(COALESCE(cmd.side, '')) = 'BUY' "
+        "    AND cmd.state IN ('CANCELLED', 'EXPIRED') "
+        "    AND TRIM(COALESCE(cmd.venue_order_id, '')) != '' "
+        "    AND pc.phase = 'pending_entry' "
+        "    AND LOWER(COALESCE(pc.chain_state, '')) = 'local_only' "
+        "    AND CAST(COALESCE(pc.shares, '0') AS REAL) = 0 "
+        "    AND CAST(COALESCE(pc.cost_basis_usd, '0') AS REAL) = 0 "
+        "    AND (pc.chain_shares IS NULL OR "
+        "         CAST(COALESCE(pc.chain_shares, '0') AS REAL) = 0) "
+        "    AND (pc.chain_cost_basis_usd IS NULL OR "
+        "         CAST(COALESCE(pc.chain_cost_basis_usd, '0') AS REAL) = 0) "
+        "    AND (SELECT COUNT(*) FROM venue_commands owner "
+        "           WHERE owner.position_id = cmd.position_id) = 1 "
+        "    AND EXISTS (SELECT 1 FROM venue_command_events event "
+        "                 WHERE event.command_id = cmd.command_id "
+        "                   AND event.event_type IN ('CANCEL_ACKED', 'EXPIRED')) "
+        "    AND EXISTS (SELECT 1 FROM venue_order_facts fact "
+        "                 WHERE fact.command_id = cmd.command_id "
+        "                   AND fact.venue_order_id = cmd.venue_order_id "
+        f"                  AND fact.source IN ({source_placeholders}) "
+        "                   AND CAST(COALESCE(fact.matched_size, '0') AS REAL) = 0) "
+        "    AND NOT EXISTS (SELECT 1 FROM venue_trade_facts trade "
+        "                      WHERE trade.command_id = cmd.command_id "
+        "                        AND CAST(COALESCE(trade.filled_size, '0') AS REAL) > 0)"
+    )
+    rows = conn.execute(sql, sources).fetchall()
+    command_ids: set[str] = set()
+    for row in rows:
+        if not (
+            _decimal_is_zero(row[1])
+            and _decimal_is_zero(row[2])
+            and all(
+                value is None or _decimal_is_zero(value)
+                for value in (row[3], row[4])
+            )
+        ):
+            continue
+        command_id = str(row[0] or "").strip()
+        if command_id:
+            command_ids.add(command_id)
+    return command_ids
+
+
 def _terminal_entry_no_fill_priority_command_ids(
     conn: sqlite3.Connection,
     *,
     limit: int = _LIVE_TICK_IDENTITY_BOUND_MAX_CANDIDATES,
 ) -> frozenset[str]:
     """Select only exact terminal zero-exposure entries on this connection."""
-    command_ids = set()
+    command_ids = _terminal_entry_no_fill_unmaterialized_command_ids(conn)
     for candidate in _latest_terminal_order_fact_candidates(conn):
         if (
             candidate.get("intent_kind") != "ENTRY"
@@ -14138,13 +14233,28 @@ def _terminal_entry_no_fill_priority_command_ids(
 
 def _reconcile_terminal_entry_no_fill_priority_pass(conn: sqlite3.Connection) -> dict:
     """Recheck the entire read hint inside the canonical writer transaction."""
-    return reconcile_terminal_order_facts(
+    command_ids = _terminal_entry_no_fill_priority_command_ids(conn, limit=1)
+    if not command_ids:
+        return {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    # A CANCEL_ACKED/EXPIRED event can be durable before its terminal order
+    # fact.  Materialize that exact fact first, then reuse the canonical
+    # terminal reducer for the projection/event mutation.  The scoped IDs are
+    # deliberately non-empty; an empty scope must never become an account-wide
+    # obligation scan.
+    no_fill_facts = reconcile_cancel_ack_terminal_no_fill_facts(
         conn,
-        command_ids=_terminal_entry_no_fill_priority_command_ids(conn, limit=1),
+        command_ids=command_ids,
+    )
+    terminal_summary = reconcile_terminal_order_facts(
+        conn,
+        command_ids=command_ids,
         collect_continuations=True,
         emit_immediate_redecision=False,
         propagate_bounded_interrupt=True,
     )
+    terminal_summary["terminal_no_fill_facts"] = no_fill_facts
+    terminal_summary["errors"] += int(no_fill_facts.get("errors", 0) or 0)
+    return terminal_summary
 
 
 def reconcile_terminal_entry_no_fill_projections_priority(

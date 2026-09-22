@@ -41992,6 +41992,214 @@ def test_terminal_entry_no_fill_priority_projects_void_once(conn):
     ).fetchone()[0] == 1
 
 
+def test_terminal_entry_no_fill_priority_materializes_missing_cancel_fact(conn):
+    """The priority writer closes a CANCEL_ACKED row whose terminal fact is absent."""
+    from src.execution import command_recovery as recovery
+    from src.state.venue_command_repo import append_event
+
+    _insert(conn)
+    _advance_to_cancel_pending(conn, venue_order_id="ord-001")
+    _seed_pending_entry_projection(conn)
+    _append_order_fact(
+        conn,
+        state="LIVE",
+        matched_size="0",
+        remaining_size="10.35",
+        source="REST",
+    )
+    append_event(
+        conn,
+        command_id="cmd-001",
+        event_type="CANCEL_ACKED",
+        occurred_at="2026-04-26T00:04:00Z",
+    )
+    conn.execute(
+        "UPDATE venue_commands SET state='CANCELLED' WHERE command_id='cmd-001'"
+    )
+    conn.commit()
+
+    assert recovery.terminal_entry_no_fill_projection_pending(conn) is True
+    summary = recovery._reconcile_terminal_entry_no_fill_priority_pass(conn)
+
+    assert summary["advanced"] == 1
+    assert summary["terminal_no_fill_facts"]["advanced"] == 1
+    assert conn.execute(
+        "SELECT phase FROM position_current WHERE position_id='pos-001'"
+    ).fetchone()[0] == "voided"
+    terminal = conn.execute(
+        "SELECT state, matched_size FROM venue_order_facts "
+        "WHERE command_id='cmd-001' ORDER BY local_sequence DESC LIMIT 1"
+    ).fetchone()
+    assert dict(terminal) == {"state": "CANCEL_CONFIRMED", "matched_size": "0"}
+    assert recovery._reconcile_terminal_entry_no_fill_priority_pass(conn)["scanned"] == 0
+
+
+def test_terminal_entry_no_fill_priority_rolls_back_materialized_fact_on_interrupt(
+    conn, monkeypatch
+):
+    """Fact materialization and projection stay one writer transaction."""
+    from src.execution import command_recovery as recovery
+    from src.state.venue_command_repo import append_event
+
+    _insert(conn)
+    _advance_to_cancel_pending(conn, venue_order_id="ord-001")
+    _seed_pending_entry_projection(conn)
+    _append_order_fact(
+        conn,
+        state="LIVE",
+        matched_size="0",
+        remaining_size="10.35",
+        source="REST",
+    )
+    append_event(
+        conn,
+        command_id="cmd-001",
+        event_type="CANCEL_ACKED",
+        occurred_at="2026-04-26T00:04:00Z",
+    )
+    conn.execute(
+        "UPDATE venue_commands SET state='CANCELLED' WHERE command_id='cmd-001'"
+    )
+    conn.commit()
+    conn.execute("BEGIN")
+
+    def interrupt_after_fact(db_conn, **_kwargs):
+        assert db_conn.execute(
+            "SELECT COUNT(*) FROM venue_order_facts "
+            "WHERE command_id='cmd-001' AND state='CANCEL_CONFIRMED'"
+        ).fetchone()[0] == 1
+        raise sqlite3.OperationalError("interrupted")
+
+    monkeypatch.setattr(recovery, "reconcile_terminal_order_facts", interrupt_after_fact)
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        recovery._reconcile_terminal_entry_no_fill_priority_pass(conn)
+    conn.rollback()
+
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_order_facts "
+        "WHERE command_id='cmd-001' AND state='CANCEL_CONFIRMED'"
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT phase FROM position_current WHERE position_id='pos-001'"
+    ).fetchone()[0] == "pending_entry"
+
+    monkeypatch.undo()
+    assert recovery._reconcile_terminal_entry_no_fill_priority_pass(conn)["advanced"] == 1
+
+
+def test_terminal_entry_no_fill_priority_surfaces_materializer_error(conn, monkeypatch):
+    from src.execution import command_recovery as recovery
+    from src.state.venue_command_repo import append_event
+
+    _insert(conn)
+    _advance_to_cancel_pending(conn, venue_order_id="ord-001")
+    _seed_pending_entry_projection(conn)
+    _append_order_fact(
+        conn,
+        state="LIVE",
+        matched_size="0",
+        remaining_size="10.35",
+        source="REST",
+    )
+    append_event(
+        conn,
+        command_id="cmd-001",
+        event_type="CANCEL_ACKED",
+        occurred_at="2026-04-26T00:04:00Z",
+    )
+    conn.execute(
+        "UPDATE venue_commands SET state='CANCELLED' WHERE command_id='cmd-001'"
+    )
+    conn.commit()
+
+    monkeypatch.setattr(
+        recovery,
+        "reconcile_cancel_ack_terminal_no_fill_facts",
+        lambda *_args, **_kwargs: {
+            "scanned": 1,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 1,
+        },
+    )
+    summary = recovery._reconcile_terminal_entry_no_fill_priority_pass(conn)
+
+    assert summary["errors"] == 1
+    assert conn.execute(
+        "SELECT phase FROM position_current WHERE position_id='pos-001'"
+    ).fetchone()[0] == "pending_entry"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events "
+        "WHERE position_id='pos-001' AND event_type='ENTRY_ORDER_VOIDED'"
+    ).fetchone()[0] == 0
+
+
+def test_terminal_entry_no_fill_priority_respects_positive_cancel_witness(
+    conn,
+):
+    from src.execution import command_recovery as recovery
+    from src.state.venue_command_repo import append_event
+
+    _insert(conn)
+    _advance_to_cancel_pending(conn, venue_order_id="ord-001")
+    _seed_pending_entry_projection(conn)
+    _append_order_fact(
+        conn,
+        state="LIVE",
+        matched_size="0",
+        remaining_size="10.35",
+        source="REST",
+    )
+    append_event(
+        conn,
+        command_id="cmd-001",
+        event_type="CANCEL_ACKED",
+        occurred_at="2026-04-26T00:04:00Z",
+        payload={
+            "venue_order_id": "ord-001",
+            "fresh_point_order_witness": {
+                "status": "FILLED",
+                "matched_size": "10.35",
+                "source": "authenticated_point_order",
+            },
+        },
+    )
+    conn.execute(
+        "UPDATE venue_commands SET state='CANCELLED' WHERE command_id='cmd-001'"
+    )
+    conn.commit()
+
+    summary = recovery._reconcile_terminal_entry_no_fill_priority_pass(conn)
+
+    assert summary["advanced"] == 0
+    assert conn.execute(
+        "SELECT phase FROM position_current WHERE position_id='pos-001'"
+    ).fetchone()[0] == "pending_entry"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_order_facts "
+        "WHERE command_id='cmd-001' AND state='CANCEL_CONFIRMED'"
+    ).fetchone()[0] == 0
+
+
+def test_terminal_entry_no_fill_scoped_empty_selectors_never_full_scan(conn):
+    from src.execution import command_recovery as recovery
+
+    _insert(conn)
+    _advance_to_cancel_pending(conn, venue_order_id="ord-001")
+    _seed_pending_entry_projection(conn)
+    _append_order_fact(conn, state="CANCEL_CONFIRMED", matched_size="0", remaining_size="0")
+
+    assert recovery._latest_terminal_order_fact_candidates(
+        conn, command_ids=frozenset()
+    ) == []
+    assert recovery._cancel_ack_terminal_no_fill_fact_candidates(
+        conn, command_ids=frozenset()
+    ) == []
+    assert recovery._cancel_ack_terminal_partial_fact_candidates(
+        conn, command_ids=frozenset()
+    ) == []
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -42186,7 +42394,7 @@ def test_terminal_entry_priority_rethrows_sqlite_interrupt_and_rolls_back(conn, 
     monkeypatch.setattr(
         recovery,
         "_latest_terminal_order_fact_candidates",
-        lambda _conn: candidates,
+        lambda _conn, **_kwargs: candidates,
     )
     original_resolve = recovery._resolve_m5_local_orphan_findings
 
