@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import hashlib
 import sqlite3
+from math import erf, hypot, sqrt
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -5935,6 +5936,188 @@ def test_shenzhen_wu_31c_revision_risk_cannot_mint_exact_30c_no(monkeypatch):
     assert 1.0 - yes_q[1] < 0.02
 
 
+@pytest.mark.parametrize("metric", ["high", "low"])
+@pytest.mark.parametrize("unit", ["C", "F"])
+def test_exact_remaining_helper_matches_independent_native_cdf_oracle(metric, unit):
+    """The extracted helper matches a direct CDF calculation in native units."""
+    from src.data.day0_hourly_vectors import day0_exact_remaining_probability_vector
+
+    sem = SettlementSemantics(
+        resolution_source="TEST",
+        measurement_unit=unit,
+        precision=1.0,
+        rounding_rule="wmo_half_up",
+        finalization_time="12:00:00Z",
+    )
+    future = (-4.25, -1.75)
+    boundary = -2.5
+    scenarios = ((boundary, 1.0),)
+    survival = 0.8
+    bounds = ((None, -3), (-2, -2), (-1, None))
+    path_sigma = 0.3
+    instrument_sigma = 0.4
+    sigma = hypot(path_sigma, instrument_sigma)
+
+    def cdf(value):
+        if value == -np.inf:
+            return 0.0
+        if value == np.inf:
+            return 1.0
+        return 0.5 * (1.0 + erf(value / sqrt(2.0)))
+
+    expected = np.zeros(len(bounds), dtype=float)
+    for mean in future:
+        member = np.zeros(len(bounds), dtype=float)
+        for scenario_boundary, weight in scenarios:
+            for index, (low, high) in enumerate(bounds):
+                lower = -np.inf if low is None else low - 0.5
+                upper = np.inf if high is None else high + 0.5
+                rounded = float(sem.round_values([scenario_boundary])[0])
+                atom_in_bin = (
+                    (low is None or rounded >= low)
+                    and (high is None or rounded <= high)
+                )
+                if metric == "high":
+                    censored_lower = max(lower, scenario_boundary)
+                    censored = (
+                        0.0
+                        if censored_lower >= upper
+                        else cdf((upper - mean) / sigma)
+                        - cdf((censored_lower - mean) / sigma)
+                    )
+                    if atom_in_bin:
+                        censored += cdf((scenario_boundary - mean) / sigma)
+                else:
+                    censored_upper = min(upper, scenario_boundary)
+                    censored = (
+                        0.0
+                        if lower >= censored_upper
+                        else cdf((censored_upper - mean) / sigma)
+                        - cdf((lower - mean) / sigma)
+                    )
+                    if atom_in_bin:
+                        censored += 1.0 - cdf((scenario_boundary - mean) / sigma)
+                uncensored = cdf((upper - mean) / sigma) - cdf(
+                    (lower - mean) / sigma
+                )
+                member[index] += weight * (survival * censored + (1.0 - survival) * uncensored)
+        expected += member
+    expected /= len(future)
+    expected /= expected.sum()
+
+    actual = day0_exact_remaining_probability_vector(
+        future_extremes=future,
+        boundary_scenarios=scenarios,
+        metric=metric,
+        path_error_sigma=path_sigma,
+        instrument_sigma=instrument_sigma,
+        bin_bounds=bounds,
+        settlement_semantics=sem,
+        boundary_survival_probability=survival,
+    )
+    assert actual == pytest.approx(expected, abs=2e-14)
+
+
+def test_exact_remaining_helper_hko_boundary_atom_and_negative_rounding():
+    """HKO truncate semantics keep the low boundary atom on its integer bin."""
+    from src.data.day0_hourly_vectors import day0_exact_remaining_probability_vector
+
+    actual = day0_exact_remaining_probability_vector(
+        future_extremes=(25.9,),
+        boundary_scenarios=((25.9, 1.0),),
+        metric="low",
+        path_error_sigma=0.0,
+        instrument_sigma=0.0,
+        bin_bounds=((None, 24), (25, 25), (26, None)),
+        settlement_semantics=_settlement_semantics("Hong Kong"),
+    )
+    assert actual == pytest.approx([0.0, 1.0, 0.0])
+
+
+def test_nonshared_exact_point_is_n_mc_invariant_and_keeps_tiny_tail(monkeypatch):
+    """Nonshared q is analytic even where a one-draw MC estimate is zero."""
+    import src.engine.event_reactor_adapter as era
+
+    city = _paris()
+    sem = _settlement_semantics("Paris")
+    bins = [
+        Bin(None, 7, "C", "7C or below"),
+        Bin(8, 8, "C", "8C"),
+        Bin(9, None, "C", "9C or above"),
+    ]
+    payload = {
+        "metric": "high",
+        "rounded_value": 0.0,
+        "settlement_source": "hko_daily_api",
+    }
+    monkeypatch.setattr(
+        "src.signal.ensemble_signal.sigma_instrument_for_city",
+        lambda _city: SimpleNamespace(value=1.0),
+    )
+    monkeypatch.setattr("src.config.ensemble_n_mc", lambda: 1)
+    small = era._day0_remaining_p_raw_vector(
+        np.asarray([0.0]), city=city, settlement_semantics=sem,
+        bins=bins, payload=payload, extra_member_sigma=0.0,
+    )
+    monkeypatch.setattr("src.config.ensemble_n_mc", lambda: 10000)
+    large = era._day0_remaining_p_raw_vector(
+        np.asarray([0.0]), city=city, settlement_semantics=sem,
+        bins=bins, payload=payload, extra_member_sigma=0.0,
+    )
+    assert np.array_equal(small, large)
+    assert 0.0 < small[1] < 1e-10
+    assert payload["_edli_day0_probability_operator"] == (
+        "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v1"
+    )
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+@pytest.mark.parametrize("unit", ["C", "F"])
+def test_nonshared_partial_projection_is_global_and_overlaps_fail_closed(monkeypatch, metric, unit):
+    import src.engine.event_reactor_adapter as era
+
+    city = _paris()
+    city.settlement_unit = unit
+    sem = (SettlementSemantics.default_wu_celsius("TEST") if unit == "C"
+           else SettlementSemantics.default_wu_fahrenheit("TEST"))
+    monkeypatch.setattr(
+        "src.signal.ensemble_signal.sigma_instrument_for_city",
+        lambda _city: SimpleNamespace(value=0.0),
+    )
+    boundary = 0.0 if metric == "high" else 70.0
+    upper = 36 if unit == "F" else 35
+    bounds = [(35, upper), (upper + 1, None)] if metric == "high" else [(None, 34), (35, upper)]
+    payload = {"metric": metric, "rounded_value": boundary, "settlement_source": "hko_daily_api"}
+    q = era._day0_remaining_p_raw_vector(
+        np.asarray([34.0, 35.0, upper + 1.0]), city=city, settlement_semantics=sem,
+        bins=[Bin(lo, hi, unit, str((lo, hi))) for lo, hi in bounds],
+        payload=payload, extra_member_sigma=0.0,
+    )
+    assert q == pytest.approx([0.5, 0.5])
+    with pytest.raises(ValueError, match="DAY0_REMAINING_ANALYTIC_BIN_GAP_OR_OVERLAP"):
+        era._day0_remaining_p_raw_vector(
+            np.asarray([35.0]), city=city, settlement_semantics=sem,
+            bins=[Bin(35, upper, unit, "35"), Bin(35, upper, unit, "duplicate")],
+            payload=payload, extra_member_sigma=0.0,
+        )
+    with pytest.raises(ValueError, match="DAY0_REMAINING_ANALYTIC_BIN_BOUNDS_INVALID"):
+        era._day0_remaining_p_raw_vector(
+            np.asarray([35.0]), city=city, settlement_semantics=sem,
+            bins=[], payload=payload, extra_member_sigma=0.0,
+        )
+
+
+def test_point_with_zero_confidence_samples_is_not_clipped_before_side_lcb():
+    import src.engine.event_reactor_adapter as era
+
+    q_point = 2.5e-12
+    q_lcb_yes, q_lcb_no = era._side_q_lcb_from_yes_samples(
+        np.zeros(500, dtype=float), q_yes_point=q_point
+    )
+    assert q_lcb_yes == 0.0
+    assert q_lcb_no <= 1.0 - q_point
+
+
 def test_target_day_hour_grid_reuses_immutable_calendar_geometry():
     import src.data.day0_hourly_vectors as vectors
 
@@ -8725,7 +8908,7 @@ class TestRemainingDayMembers:
 
         assert q[winning_index] == pytest.approx(1.0)
         assert payload["_edli_day0_probability_operator"] == (
-            "extreme_observed_then_noisy_future_v1"
+            "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v1"
         )
 
     def test_probability_operator_preserves_real_future_excursion(self, monkeypatch):
@@ -8926,7 +9109,7 @@ class TestRemainingDayMembers:
         assert point_with_telemetry.sum() == pytest.approx(1.0)
         assert "_edli_day0_peak_set_mixture_basis" not in payload
         assert payload["_edli_day0_probability_operator"] == (
-            "extreme_observed_then_noisy_future_v1"
+            "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v1"
         )
 
     def test_fast_residual_frontier_moves_peak_atom_before_slow_wu_catches_up(self):

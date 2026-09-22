@@ -1067,6 +1067,176 @@ def _day0_truncated_normal_interval_probability(
     return float(min(1.0, max(0.0, probability)))
 
 
+DAY0_REMAINING_ANALYTIC_OPERATOR = (
+    "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v1"
+)
+
+
+def day0_exact_remaining_probability_vector(
+    *,
+    future_extremes: Iterable[float],
+    boundary_scenarios: Iterable[tuple[float | None, float]],
+    metric: str,
+    path_error_sigma: float,
+    instrument_sigma: float,
+    bin_bounds: Iterable[tuple[float | None, float | None]],
+    settlement_semantics: SettlementSemantics,
+    boundary_survival_probability: float = 1.0,
+) -> np.ndarray:
+    """Return exact settlement-bin probabilities for the Day0 path mixture.
+
+    Each future provider member is ``N(mean, hypot(path_error_sigma,
+    instrument_sigma))``.  A non-null boundary applies ``max``/``min`` before
+    settlement rounding, and ``boundary_survival_probability`` mixes that
+    censored component with the uncensored member.  All values are already in
+    the settlement-native unit; settlement preimages therefore come directly
+    from ``SettlementSemantics``.
+    """
+    values = np.sort(np.asarray(tuple(float(value) for value in future_extremes), dtype=float))
+    scenarios = tuple(
+        (None if boundary is None else float(boundary), float(weight))
+        for boundary, weight in boundary_scenarios
+    )
+    bounds = tuple(
+        (
+            None if low is None else float(low),
+            None if high is None else float(high),
+        )
+        for low, high in bin_bounds
+    )
+    if (
+        metric not in {"high", "low"}
+        or not values.size
+        or not np.isfinite(values).all()
+        or not scenarios
+        or not bounds
+        or not math.isfinite(path_error_sigma)
+        or path_error_sigma < 0.0
+        or not math.isfinite(instrument_sigma)
+        or instrument_sigma < 0.0
+        or not math.isfinite(boundary_survival_probability)
+        or not 0.0 < boundary_survival_probability <= 1.0
+        or any(
+            (boundary is not None and not math.isfinite(boundary))
+            or not math.isfinite(weight)
+            or weight < 0.0
+            for boundary, weight in scenarios
+        )
+        or not math.isclose(sum(weight for _, weight in scenarios), 1.0, abs_tol=1e-9)
+    ):
+        raise ValueError("DAY0_REMAINING_ANALYTIC_INPUT_INVALID")
+    if any(
+        (low is None and high is None)
+        or (low is not None and not math.isclose(low, round(low), abs_tol=1e-9))
+        or (high is not None and not math.isclose(high, round(high), abs_tol=1e-9))
+        or (low is not None and high is not None and low > high)
+        for low, high in bounds
+    ):
+        raise ValueError("DAY0_REMAINING_ANALYTIC_BIN_BOUNDS_INVALID")
+    bounds = tuple(
+        (
+            None if low is None else float(round(low)),
+            None if high is None else float(round(high)),
+        )
+        for low, high in bounds
+    )
+    ordered = sorted(bounds, key=lambda item: float("-inf") if item[0] is None else item[0])
+    if (ordered and ordered[0][0] is not None) or (ordered and ordered[-1][1] is not None):
+        raise ValueError("DAY0_REMAINING_ANALYTIC_SHOULDER_TOPOLOGY_INVALID")
+    for previous, current in zip(ordered, ordered[1:]):
+        if previous[1] is None or current[0] is None or current[0] != previous[1] + 1.0:
+            raise ValueError("DAY0_REMAINING_ANALYTIC_BIN_GAP_OR_OVERLAP")
+
+    sigma = math.hypot(path_error_sigma, instrument_sigma)
+    low_offset, high_offset = settlement_preimage_offsets(
+        settlement_semantics.rounding_rule,
+        half_step=settlement_semantics.precision / 2.0,
+    )
+
+    def stable_normal_interval_probability(mu: float, lower: float, upper: float) -> float:
+        """Return P(lower <= N(mu, sigma) <= upper) without tail cancellation."""
+        if lower >= upper:
+            return 0.0
+        if sigma == 0.0:
+            return 1.0 if lower <= mu < upper else 0.0
+        z_low = -math.inf if lower == -math.inf else (lower - mu) / sigma
+        z_high = math.inf if upper == math.inf else (upper - mu) / sigma
+        if z_low >= 0.0:
+            log_low = float(log_ndtr(-z_low))
+            log_high = float(log_ndtr(-z_high))
+            if math.isinf(log_high) and log_high < 0.0:
+                return float(math.exp(log_low))
+            return float(math.exp(log_low) * (-math.expm1(log_high - log_low)))
+        if z_high <= 0.0:
+            log_high = float(log_ndtr(z_high))
+            log_low = float(log_ndtr(z_low))
+            if math.isinf(log_low) and log_low < 0.0:
+                return float(math.exp(log_high))
+            return float(math.exp(log_high) * (-math.expm1(log_low - log_high)))
+        from scipy.special import ndtr
+
+        return float(ndtr(z_high) - ndtr(z_low))
+
+    def exact_member_probability(mu: float, boundary: float | None) -> np.ndarray:
+        out = np.zeros(len(bounds), dtype=float)
+        if sigma == 0.0:
+            final = mu
+            if boundary is not None:
+                final = max(mu, boundary) if metric == "high" else min(mu, boundary)
+            settled = float(settlement_semantics.round_values([final])[0])
+            for index, (low, high) in enumerate(bounds):
+                if (low is None or settled >= low) and (high is None or settled <= high):
+                    out[index] = 1.0
+                    return out
+            raise ValueError("DAY0_REMAINING_ANALYTIC_BIN_TOPOLOGY_INVALID")
+
+        for index, (low, high) in enumerate(bounds):
+            lower = -math.inf if low is None else low + low_offset
+            upper = math.inf if high is None else high + high_offset
+            if boundary is None:
+                out[index] = stable_normal_interval_probability(mu, lower, upper)
+                continue
+            rounded_boundary = float(settlement_semantics.round_values([boundary])[0])
+            atom_in_bin = (
+                (low is None or rounded_boundary >= low)
+                and (high is None or rounded_boundary <= high)
+            )
+            if metric == "high":
+                out[index] = stable_normal_interval_probability(mu, max(lower, boundary), upper)
+                if atom_in_bin:
+                    out[index] += stable_normal_interval_probability(mu, -math.inf, boundary)
+            else:
+                out[index] = stable_normal_interval_probability(mu, lower, min(upper, boundary))
+                if atom_in_bin:
+                    out[index] += stable_normal_interval_probability(mu, boundary, math.inf)
+        total = float(out.sum())
+        if total <= 0.0 or not np.isfinite(total):
+            raise ValueError("DAY0_REMAINING_ANALYTIC_BIN_TOPOLOGY_INVALID")
+        return out / total
+
+    point = np.zeros(len(bounds), dtype=float)
+    for member in values:
+        member_probability = np.zeros(len(bounds), dtype=float)
+        for boundary, weight in scenarios:
+            if boundary is None or boundary_survival_probability == 1.0:
+                member_probability += float(weight) * exact_member_probability(
+                    float(member), boundary
+                )
+            else:
+                member_probability += float(weight) * (
+                    boundary_survival_probability
+                    * exact_member_probability(float(member), boundary)
+                    + (1.0 - boundary_survival_probability)
+                    * exact_member_probability(float(member), None)
+                )
+        point += member_probability
+    point /= float(values.size)
+    point_total = float(point.sum())
+    if point_total <= 0.0 or not np.isfinite(point_total):
+        raise ValueError("DAY0_REMAINING_ANALYTIC_BIN_TOPOLOGY_INVALID")
+    return point / point_total
+
+
 def _day0_sample_truncated_normal(
     rng: np.random.Generator, *, mu: np.ndarray, sigma: float,
     boundary: np.ndarray, metric: str,
@@ -1532,114 +1702,15 @@ def build_day0_remaining_probability_carrier(
     # carrier arrives with F centers, F boundaries, F sigma, and F preimage
     # offsets; converting only the analytic path would diverge from the V1
     # confidence sampler and from the materializer's native payload.
-    sigma_physical = sigma
-
-    def stable_normal_interval_probability(
-        mu: float, lower: float, upper: float,
-    ) -> float:
-        """Return P(lower <= N(mu, sigma) <= upper) without tail cancellation."""
-
-        if lower >= upper:
-            return 0.0
-        from scipy.special import log_ndtr, ndtr
-
-        z_low = -math.inf if lower == -math.inf else (lower - mu) / sigma_physical
-        z_high = math.inf if upper == math.inf else (upper - mu) / sigma_physical
-        if z_low >= 0.0:
-            # P = SF(z_low) - SF(z_high), evaluated in log space for far tails.
-            log_low = float(log_ndtr(-z_low))
-            log_high = float(log_ndtr(-z_high))
-            if math.isinf(log_high) and log_high < 0.0:
-                return float(math.exp(log_low))
-            log_ratio = log_high - log_low
-            return float(math.exp(log_low) * (-math.expm1(log_ratio)))
-        if z_high <= 0.0:
-            # P = CDF(z_high) - CDF(z_low), likewise in log space.
-            log_high = float(log_ndtr(z_high))
-            log_low = float(log_ndtr(z_low))
-            if math.isinf(log_low) and log_low < 0.0:
-                return float(math.exp(log_high))
-            log_ratio = log_low - log_high
-            return float(math.exp(log_high) * (-math.expm1(log_ratio)))
-        return float(ndtr(z_high) - ndtr(z_low))
-
-    def exact_member_probability(mu: float, boundary: float | None) -> np.ndarray:
-        """Exact settlement-bin probabilities for one member/scenario."""
-
-        out = np.zeros(len(bounds), dtype=float)
-        if sigma == 0.0:
-            final = mu
-            if boundary is not None:
-                final = max(mu, boundary) if metric == "high" else min(mu, boundary)
-            settled = float(settlement_semantics.round_values([final])[0])
-            for index, (low, high) in enumerate(bounds):
-                if (low is None or settled >= low) and (high is None or settled <= high):
-                    out[index] = 1.0
-                    return out
-            raise ValueError("DAY0_REMAINING_CARRIER_BIN_TOPOLOGY_INVALID")
-
-        low_offset, high_offset = settlement_preimage_offsets(
-            settlement_semantics.rounding_rule,
-            half_step=settlement_semantics.precision / 2.0,
-        )
-        mu_physical = mu
-        boundary_physical = boundary
-        for index, (low, high) in enumerate(bounds):
-            lower = (
-                -math.inf if low is None
-                else low + low_offset
-            )
-            upper = (
-                math.inf if high is None
-                else high + high_offset
-            )
-            if boundary is None:
-                out[index] = stable_normal_interval_probability(
-                    mu_physical, lower, upper
-                )
-                continue
-
-            rounded_boundary = float(settlement_semantics.round_values([boundary])[0])
-            atom_in_bin = (
-                (low is None or rounded_boundary >= low)
-                and (high is None or rounded_boundary <= high)
-            )
-            if metric == "high":
-                # max(X,b): X <= b becomes an atom at b; X > b retains X.
-                out[index] = stable_normal_interval_probability(
-                    mu_physical, max(lower, boundary_physical), upper
-                )
-                if atom_in_bin:
-                    out[index] += stable_normal_interval_probability(
-                        mu_physical, -math.inf, boundary_physical
-                    )
-            else:
-                # min(X,b): X >= b becomes an atom at b; X < b retains X.
-                out[index] = stable_normal_interval_probability(
-                    mu_physical, lower, min(upper, boundary_physical)
-                )
-                if atom_in_bin:
-                    out[index] += stable_normal_interval_probability(
-                        mu_physical, boundary_physical, math.inf
-                    )
-        total = float(out.sum())
-        if total <= 0.0 or not np.isfinite(total):
-            raise ValueError("DAY0_REMAINING_CARRIER_BIN_TOPOLOGY_INVALID")
-        return out / total
-
-    point = np.zeros(len(bounds), dtype=float)
-    for member in values:
-        member_probability = np.zeros(len(bounds), dtype=float)
-        for boundary, weight in scenarios:
-            member_probability += float(weight) * exact_member_probability(
-                float(member), boundary
-            )
-        point += member_probability
-    point /= float(values.size)
-    point_total = float(point.sum())
-    if point_total <= 0.0 or not np.isfinite(point_total):
-        raise ValueError("DAY0_REMAINING_CARRIER_BIN_TOPOLOGY_INVALID")
-    point /= point_total
+    point = day0_exact_remaining_probability_vector(
+        future_extremes=values,
+        boundary_scenarios=scenarios,
+        metric=metric,
+        path_error_sigma=path_error_sigma_c,
+        instrument_sigma=instrument_sigma_c,
+        bin_bounds=bounds,
+        settlement_semantics=settlement_semantics,
+    )
 
     # V2's identity is a v4 envelope over the legacy confidence identity.  The
     # nested legacy identity deliberately retains n_point because the old

@@ -42729,6 +42729,9 @@ def _prepare_current_global_probability_family(
             "remaining_content_identity": payload.get(
                 "_edli_day0_remaining_content_identity"
             ),
+            "probability_operator": payload.get(
+                "_edli_day0_probability_operator"
+            ),
             "remaining_vector_witness": payload.get(
                 "_edli_day0_remaining_vector_witness"
             ),
@@ -46732,6 +46735,88 @@ def _day0_remaining_p_raw_vector(
         payload=payload,
         metric=metric,
     )
+    if peak_set_probability is None:
+        from src.data.day0_hourly_vectors import (
+            DAY0_REMAINING_ANALYTIC_OPERATOR,
+            day0_exact_remaining_probability_vector,
+        )
+
+        # NOAA preliminary scenarios may already carry the explicit
+        # ``(boundary, survival), (None, 1-survival)`` mixture.  Do not apply
+        # that survival a second time; ordinary provisional boundaries still
+        # receive the same mixture through the pure analytic helper.
+        helper_survival = (
+            1.0
+            if boundary_survival_probability < 1.0
+            and any(boundary is None for boundary, _weight in boundary_scenarios)
+            else boundary_survival_probability
+        )
+        # A market family may expose only a partial projection of the integer
+        # settlement line (for example ``35`` and ``36+``).  The carrier helper
+        # intentionally requires a strict full partition, so add virtual
+        # complement bins for integration, then project back and globally
+        # renormalize over the caller's bins.  Virtual bins never enter payload,
+        # identity, or topology witnesses.
+        actual_bounds = []
+        for index, candidate in enumerate(bins):
+            low = None if candidate.low is None else float(candidate.low)
+            high = None if candidate.high is None else float(candidate.high)
+            if (
+                (low is not None and (not math.isfinite(low) or not math.isclose(low, round(low), abs_tol=1e-9)))
+                or (high is not None and (not math.isfinite(high) or not math.isclose(high, round(high), abs_tol=1e-9)))
+                or (low is not None and high is not None and low > high)
+                or (low is None and high is None)
+            ):
+                raise ValueError("DAY0_REMAINING_ANALYTIC_BIN_BOUNDS_INVALID")
+            actual_bounds.append((None if low is None else float(round(low)), None if high is None else float(round(high)), index))
+        if not actual_bounds:
+            raise ValueError("DAY0_REMAINING_ANALYTIC_BIN_BOUNDS_INVALID")
+        ordered_actual = sorted(actual_bounds, key=lambda item: float("-inf") if item[0] is None else item[0])
+        full_bounds: list[tuple[float | None, float | None]] = []
+        actual_full_indices: dict[int, int] = {}
+        first_low = ordered_actual[0][0]
+        if first_low is not None:
+            full_bounds.append((None, first_low - 1.0))
+        previous_high: float | None = None
+        processed_count = 0
+        for low, high, original_index in ordered_actual:
+            if processed_count and previous_high is None:
+                raise ValueError("DAY0_REMAINING_ANALYTIC_BIN_GAP_OR_OVERLAP")
+            if previous_high is not None and low is None:
+                raise ValueError("DAY0_REMAINING_ANALYTIC_BIN_GAP_OR_OVERLAP")
+            if previous_high is not None and low is not None:
+                if low <= previous_high:
+                    raise ValueError("DAY0_REMAINING_ANALYTIC_BIN_GAP_OR_OVERLAP")
+                if low > previous_high + 1.0:
+                    full_bounds.append((previous_high + 1.0, low - 1.0))
+            actual_full_indices[original_index] = len(full_bounds)
+            full_bounds.append((low, high))
+            previous_high = high
+            processed_count += 1
+        if previous_high is not None:
+            full_bounds.append((previous_high + 1.0, None))
+        probabilities_full = day0_exact_remaining_probability_vector(
+            future_extremes=members,
+            boundary_scenarios=boundary_scenarios,
+            metric=metric,
+            path_error_sigma=float(extra_member_sigma),
+            instrument_sigma=float(sigma_instrument_for_city(city).value),
+            bin_bounds=full_bounds,
+            settlement_semantics=settlement_semantics,
+            boundary_survival_probability=helper_survival,
+        )
+        probabilities = np.asarray(
+            [probabilities_full[actual_full_indices[index]] for index in range(len(bins))],
+            dtype=float,
+        )
+        projected_total = float(probabilities.sum())
+        if projected_total <= 0.0 or not np.isfinite(projected_total):
+            raise ValueError("DAY0_REMAINING_ANALYTIC_BIN_TOPOLOGY_INVALID")
+        probabilities /= projected_total
+        payload["_edli_day0_probability_operator"] = (
+            DAY0_REMAINING_ANALYTIC_OPERATOR
+        )
+        return probabilities
     seed_payload: dict[str, object] = {
         "operator": "day0_extreme_observed_then_noisy_future_v1",
         "city": str(getattr(city, "name", "") or ""),

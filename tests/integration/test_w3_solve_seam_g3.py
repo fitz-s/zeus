@@ -10018,6 +10018,31 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
     )
     assert revision_prior_permissions == [*physical_revision_permissions, False]
 
+    def same_distribution_new_operator(*args, **kwargs):
+        components = remaining_day_components(*args, **kwargs)
+        kwargs["payload"]["_edli_day0_probability_operator"] = "exact-point-test-operator"
+        return components
+
+    monkeypatch.setattr(
+        era, "_day0_remaining_global_probability_components",
+        same_distribution_new_operator,
+    )
+    changed_operator = era._prepare_current_global_probability_family(
+        _global_day0_scope_event(city="Dallas", source_run_id="run-dallas"),
+        forecast_conn=forecast, topology_conn=forecast, observation_conn=observations,
+        decision_time=_dt.datetime(2026, 7, 11, 18, 0, tzinfo=_dt.timezone.utc),
+        max_age=_dt.timedelta(seconds=30),
+    ).probability_witness
+    prior_operator = recaptured.probability_witness
+    assert np.array_equal(prior_operator.yes_point_q, changed_operator.yes_point_q)
+    assert np.array_equal(prior_operator.yes_q_samples, changed_operator.yes_q_samples)
+    assert prior_operator.source_truth_identity != changed_operator.source_truth_identity
+    assert prior_operator.posterior_identity_hash != changed_operator.posterior_identity_hash
+    assert prior_operator.q_version != changed_operator.q_version
+    monkeypatch.setattr(
+        era, "_day0_remaining_global_probability_components", remaining_day_components,
+    )
+
     missing_observations = sqlite3.connect(":memory:")
     with pytest.raises(ValueError, match="GLOBAL_DAY0_OBSERVATION_HWM_UNAVAILABLE"):
         era._prepare_current_global_probability_family(
@@ -46341,3 +46366,63 @@ def test_book_projection_prefilters_depth_without_changing_exact_freshness(monke
     assert channels["expired"][1] == checked
     assert fetched.pop() == len(cases)
     conn.close()
+
+
+def test_day0_exact_point_revision_rejects_old_mc_even_when_points_match():
+    from types import SimpleNamespace
+    from src.engine import global_batch_runtime as runtime
+    from src.events.day0_authority import bind_day0_probability_semantics
+
+    old_q_version = "day0-semrev:day0_hourly_ens_source_clock_carrier_v18:same-input"
+    common = {
+        field: f"same-{field}"
+        for field in runtime._PROBABILITY_ACTION_CONTENT_FIELDS
+    }
+    common.update(bindings=(), yes_point_q=np.array([0.25, 0.75]))
+    historical = SimpleNamespace(q_version=old_q_version, **common)
+    current = SimpleNamespace(
+        q_version=bind_day0_probability_semantics("same-input"), **common
+    )
+    assert bind_day0_probability_semantics(old_q_version) == old_q_version
+    assert runtime._probability_action_content_mismatches(current, historical) == (
+        "q_version",
+    )
+
+
+@pytest.mark.parametrize("tail", [1e-5, 1e-12])
+def test_day0_exact_tail_survives_zero_hit_bootstrap_global_caps(tail):
+    decision_at = _dt.datetime(2026, 7, 19, 23, 39, tzinfo=_dt.timezone.utc)
+    family = SimpleNamespace(
+        family_id="Hong Kong|2026-07-20|low", city="Hong Kong",
+        target_date="2026-07-20", metric="low",
+        candidates=tuple(
+            SimpleNamespace(condition_id=f"c{i}", bin=Bin(v, v, "C", f"{v}C"))
+            for i, v in enumerate((27, 28))
+        ),
+    )
+    bindings = tuple(
+        OutcomeTokenBinding(
+            bin_id=f"b{i}", condition_id=f"c{i}",
+            yes_token_id=f"y{i}", no_token_id=f"n{i}",
+        ) for i in range(2)
+    )
+    point = np.array([tail, 1.0 - tail])
+    samples = np.tile(np.array([0.0, 1.0]), (500, 1))
+    payload = {
+        "metric": "low", "rounded_value": 28.0,
+        "observation_time": decision_at.isoformat(),
+        "_edli_q_source": "day0_remaining_day",
+        "_edli_day0_exit_authority_status": "immature",
+        "_edli_day0_exit_authority_reason": "hours_remaining=16.7",
+    }
+    rows = era._day0_global_candidate_payoff_q_lcb_caps(
+        payload=payload, family=family, bindings=bindings, samples=samples,
+        point_q=point, band_alpha=0.05, decision_time=decision_at,
+    )
+    caps = {(row[1], row[3]): row[4] for row in rows}
+    assert caps[("c0", "YES")] == 0.0
+    assert 0.0 <= caps[("c0", "NO")] <= 1.0 - tail
+    assert 0.0 <= caps[("c1", "YES")] <= 1.0 - tail
+    assert caps[("c1", "NO")] == 0.0
+    assert np.array_equal(point, np.array([tail, 1.0 - tail]))
+    assert np.array_equal(samples, np.tile(np.array([0.0, 1.0]), (500, 1)))

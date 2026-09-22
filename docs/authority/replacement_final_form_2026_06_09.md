@@ -199,6 +199,15 @@ retain the V1 seed and samples for identical inputs; the V2 content identity bin
 the operator and that legacy confidence-draw identity. The legacy `n_point`
 parameter affects the confidence seed, but not the analytic point expectation.
 
+Non-shared Day0 remaining-path point probabilities use that same exact mixture
+integral. Provisional-report survival is a weighted mixture of the censored
+and uncensored future distributions, not an additional observation fact.
+Native-unit settlement rounding and the HIGH/LOW boundary atom are preserved.
+The numerical operator is recorded in the decision probability provenance;
+confidence sampling retains its existing law. Monte Carlo sample count must
+not change this point expectation or erase representable Gaussian tail mass
+merely because no sample reached it. Full-day forecast distributions are unchanged.
+
 The shared-carrier V1 is retained only for explicit, immutable historical replay. Current ENTRY and
 held-position belief require a complete V2 or typed V3 carrier declaration; ordinary
 non-carrier forecasts are unaffected. Old, partial or unknown carrier versions
