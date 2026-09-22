@@ -12547,6 +12547,10 @@ def _is_sqlite_lock_error(exc: sqlite3.OperationalError) -> bool:
 
 
 def _is_global_probability_family_unavailable(exc: Exception) -> bool:
+    from src.data.day0_fast_obs import KmaObservationConflict
+
+    if isinstance(exc, KmaObservationConflict):
+        return True
     if not isinstance(exc, ValueError):
         return False
     reason = str(exc)

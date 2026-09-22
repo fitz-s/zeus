@@ -763,6 +763,31 @@ def test_current_probability_failure_is_family_local(reason: str) -> None:
     ) is True
 
 
+def test_kma_observation_conflict_is_family_local_and_not_cacheable() -> None:
+    from src.data.day0_fast_obs import KmaObservationConflict
+    from src.events.reactor import EventSubmissionReceipt
+
+    conflict = KmaObservationConflict(
+        "conflicting observations: ('RKSI', '2026-09-22T20:00:00+00:00')",
+        station_id="RKSI",
+        raw_reports=("RKSI 222000Z 20010KT 9999 20/18", "RKSI 222000Z 20010KT 9999 19/18"),
+        correction_rank="METAR",
+    )
+
+    assert adapter._is_global_probability_family_unavailable(conflict) is True
+    receipt = EventSubmissionReceipt(
+        False,
+        "event-kma-conflict",
+        reason=(
+            "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+            f"FamilyAuthorityUnavailable:{conflict}"
+        ),
+        proof_accepted=False,
+    )
+    assert str(conflict) in receipt.reason
+    assert adapter._cacheable_global_probability_ineligible(receipt) is False
+
+
 @pytest.mark.parametrize(
     ("metric", "physical", "settlement", "expected"),
     (

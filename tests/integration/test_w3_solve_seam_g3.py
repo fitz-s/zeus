@@ -35089,6 +35089,15 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
             (
                 "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
                 "FamilyAuthorityUnavailable:"
+                "conflicting observations: "
+                "('RKSI', '2026-09-22T20:00:00+00:00')"
+            ),
+            True,
+        ),
+        (
+            (
+                "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+                "FamilyAuthorityUnavailable:"
                 "GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE"
             ),
             True,
@@ -35272,6 +35281,14 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
                     )
                 if "CONDITIONING_OBSERVATION_MISMATCH" in ineligible_reason:
                     raise ValueError("GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH")
+                if "conflicting observations" in ineligible_reason:
+                    from src.data.day0_fast_obs import KmaObservationConflict
+
+                    raise KmaObservationConflict(
+                        "conflicting observations: "
+                        "('RKSI', '2026-09-22T20:00:00+00:00')",
+                        station_id="RKSI",
+                    )
                 if "PROVISIONAL_REVISION_LIKELIHOOD" in ineligible_reason:
                     raise ValueError(
                         "GLOBAL_DAY0_PROVISIONAL_REVISION_"
@@ -35475,6 +35492,97 @@ def test_global_batch_preserves_single_family_current_q_failure(monkeypatch):
 
     assert result.receipts[event.event_id].reason == (
         f"GLOBAL_FAMILY_INELIGIBLE:{reason}"
+    )
+
+
+def test_global_batch_required_held_kma_conflict_stays_fail_closed(monkeypatch):
+    import src.data.replacement_input_hwm as replacement_hwm
+
+    decision_at = _dt.datetime(2026, 9, 22, 21, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    scope = current_global_auction_scope_from_events(
+        (event,), captured_at_utc=decision_at
+    )
+    family_key = scope.family_keys[0]
+    conflict_reason = (
+        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+        "FamilyAuthorityUnavailable:conflicting observations: "
+        "('RKSI', '2026-09-22T20:00:00+00:00')"
+    )
+    obligation = global_batch_runtime._CurrentHeldObligation(
+        position_id="held-rksi",
+        family_key=family_key,
+        bin_label="21C",
+        condition_id="held-condition",
+        side="YES",
+        token_id="held-yes",
+        held_shares=Decimal("10"),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_current_held_weather_families",
+        lambda _conn: (("Alpha", "2026-07-11", "high"),),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_current_held_obligations",
+        lambda *_: (obligation,),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "scan_current_global_auction_scope",
+        lambda **_: scope,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: _WealthNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth-witness",
+            economic_identity="wealth-economic",
+            ledger_snapshot_id="ledger",
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_venue_auction_identity",
+        lambda *_, **__: "venue",
+    )
+    monkeypatch.setattr(
+        replacement_hwm,
+        "prime_frozen_replacement_artifact_hwm",
+        lambda *_args, **_kwargs: lambda: None,
+    )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda item: json.loads(item.payload_json),
+        prepare_event=lambda item, _at: EventSubmissionReceipt(
+            False,
+            item.event_id,
+            item.causal_snapshot_id,
+            reason=conflict_reason,
+        ),
+        actuate_winner=lambda *_: pytest.fail(
+            "required held conflict must not actuate"
+        ),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: 0,
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+        required_held_family_keys=frozenset({family_key}),
+        portfolio_state_provider=lambda: object(),
+    )
+
+    assert result.winner_event_id is None
+    assert result.venue_submit_count == 0
+    assert result.receipts[event.event_id].reason == (
+        "GLOBAL_AUCTION_REQUIRED_HELD_FAMILY_PREPARATION_INCOMPLETE:"
+        f"{family_key}"
     )
 
 
