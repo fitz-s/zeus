@@ -5154,6 +5154,13 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     "REPLACEMENT_0_1_LIVE_INPUT_LAG",
     "REPLACEMENT_LIVE_INPUT_LAG",
     "FORECAST_AUTHORITY_MISSING",
+    # SCOPE: the exact city/date/metric family whose executable forecast reader
+    # could not elect a current contributor (including an all-blocked cycle set).
+    # DRAIN: the source writer re-serves a complete contributor cycle, then the
+    # next event wake performs a fresh reader election and full redecision.
+    # RESET: the canonical reader returns a live-eligible bundle for that family;
+    # preserve the typed suffix so the underlying block reason remains visible.
+    "FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED",
     # SCOPE: the exact city/date/metric family whose persisted conditioning
     # predates a later authoritative observation value or coverage clock.
     # DRAIN: the settlement-print catch-up event seeds immediate family materialization.

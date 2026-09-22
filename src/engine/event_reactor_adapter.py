@@ -44879,8 +44879,6 @@ def _forecast_snapshot_row_for_event(
         return None
     names = [description[0] for description in cur.description]
     snapshot = {name: row[name] for name in names} if isinstance(row, sqlite3.Row) else dict(zip(names, row))
-    if event.event_type == "DAY0_EXTREME_UPDATED":
-        return snapshot
     reason, elected_snapshot_id = _forecast_snapshot_reader_block_reason(
         conn,
         snapshot=snapshot,

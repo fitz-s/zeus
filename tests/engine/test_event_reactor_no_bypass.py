@@ -2583,11 +2583,12 @@ def test_p_cal_json_available_after_event_is_ignored_when_calibrator_authority_e
 
 
 def test_day0_latest_snapshot_seed_does_not_consume_entry_reader_readiness(monkeypatch):
-    """Day0 hard facts use the latest safe snapshot as a seed, not entry-reader TTL.
+    """Day0 hard facts use the reader-elected safe snapshot, not entry-reader TTL.
 
     A realized DAY0_EXTREME_UPDATED payload has already passed live source/station/date
-    authority. The executable forecast reader's runtime readiness expiry licenses the
-    forecast-entry lane, not this observation-aware Day0 mask.
+    authority. The executable forecast reader still elects the canonical contributor row,
+    while its runtime readiness expiry licenses the forecast-entry lane, not this
+    observation-aware Day0 mask.
     """
     from types import SimpleNamespace
 
@@ -2609,11 +2610,15 @@ def test_day0_latest_snapshot_seed_does_not_consume_entry_reader_readiness(monke
     )
     calls = []
 
-    def _expired_reader(*_args, **_kwargs):
-        calls.append("reader")
-        return SimpleNamespace(ok=False, bundle=None, reason_code="READINESS_EXPIRED")
+    def _day0_reader(*_args, **kwargs):
+        calls.append(kwargs.get("require_entry_readiness"))
+        return SimpleNamespace(
+            ok=True,
+            bundle=SimpleNamespace(snapshot=SimpleNamespace(snapshot_id="1")),
+            reason_code="OK",
+        )
 
-    monkeypatch.setattr(executable_forecast_reader, "read_executable_forecast", _expired_reader)
+    monkeypatch.setattr(executable_forecast_reader, "read_executable_forecast", _day0_reader)
     decision_time = datetime(2026, 5, 24, 14, 12, tzinfo=timezone.utc)
 
     row = _forecast_snapshot_row_for_event(
@@ -2632,11 +2637,166 @@ def test_day0_latest_snapshot_seed_does_not_consume_entry_reader_readiness(monke
     )
 
     assert row is not None
-    assert calls == []
+    assert calls == [False, False]
     assert payload["reader_authority"] == "day0_latest_forecast_snapshot_seed"
     assert payload["reader_status"] == "VERIFIED"
     assert payload["coverage_readiness_status"] == "LIVE_ELIGIBLE"
     assert payload["day0_entry_readiness_expiry_not_applied"] is True
+
+
+def test_day0_reader_elects_older_contributor_when_newer_snapshot_is_blocked():
+    """Day0 binds the canonical contributor election instead of the newest row."""
+    from src.engine.event_reactor_adapter import _forecast_snapshot_row_for_event
+
+    conn = _trade_conn_with_snapshot(attach_world_for_qkernel=False)
+    source_run = dict(conn.execute("SELECT * FROM source_run WHERE source_run_id = 'run-1'").fetchone())
+    source_run.update(
+        {
+            "source_run_id": "run-2",
+            "source_cycle_time": "2026-05-24T12:00:00+00:00",
+            "source_issue_time": "2026-05-24T12:00:00+00:00",
+            "source_release_time": "2026-05-24T13:00:00+00:00",
+            "source_available_at": "2026-05-24T13:00:00+00:00",
+            "fetch_started_at": "2026-05-24T13:01:00+00:00",
+            "fetch_finished_at": "2026-05-24T13:05:00+00:00",
+            "captured_at": "2026-05-24T13:10:00+00:00",
+            "imported_at": "2026-05-24T13:10:00+00:00",
+            "completeness_status": "PARTIAL",
+            "partial_run": 1,
+            "status": "PARTIAL",
+        }
+    )
+    run_columns = [str(row[1]) for row in conn.execute("PRAGMA table_info(source_run)").fetchall()]
+    conn.execute(
+        f"INSERT INTO source_run ({','.join(run_columns)}) VALUES ({','.join('?' for _ in run_columns)})",
+        [source_run[column] for column in run_columns],
+    )
+
+    coverage = dict(conn.execute("SELECT * FROM source_run_coverage WHERE coverage_id = 'coverage-1'").fetchone())
+    coverage.update(
+        {
+            "coverage_id": "coverage-2",
+            "source_run_id": "run-2",
+            "snapshot_ids_json": "[2]",
+            "completeness_status": "PARTIAL",
+            "readiness_status": "BLOCKED",
+            "reason_code": "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA",
+            "computed_at": "2026-05-24T13:10:00+00:00",
+        }
+    )
+    coverage_columns = [str(row[1]) for row in conn.execute("PRAGMA table_info(source_run_coverage)").fetchall()]
+    conn.execute(
+        f"INSERT INTO source_run_coverage ({','.join(coverage_columns)}) VALUES ({','.join('?' for _ in coverage_columns)})",
+        [coverage[column] for column in coverage_columns],
+    )
+    # The fixture's replacement posterior setup rewrites the current data_version after the
+    # producer-readiness row is inserted; align that row so the real reader can enumerate both
+    # cycles through its canonical scope query.
+    conn.execute(
+        """
+        UPDATE readiness_state
+        SET data_version = (SELECT data_version FROM source_run_coverage WHERE coverage_id = 'coverage-1')
+        WHERE readiness_id = 'producer-readiness-1'
+        """
+    )
+
+    snapshot = dict(conn.execute("SELECT * FROM ensemble_snapshots WHERE snapshot_id = '1'").fetchone())
+    snapshot.update(
+        {
+            "snapshot_id": "2",
+            "source_run_id": "run-2",
+            "source_cycle_time": "2026-05-24T12:00:00+00:00",
+            "source_release_time": "2026-05-24T13:00:00+00:00",
+            "source_available_at": "2026-05-24T13:00:00+00:00",
+            "issue_time": "2026-05-24T12:00:00+00:00",
+            "fetch_time": "2026-05-24T13:05:00+00:00",
+            "available_at": "2026-05-24T13:00:00+00:00",
+            "first_member_observed_time": "2026-05-24T13:01:00+00:00",
+            "run_complete_time": "2026-05-24T13:10:00+00:00",
+            "contributes_to_target_extrema": 0,
+            "forecast_window_attribution_status": "NON_CONTRIBUTING",
+        }
+    )
+    snapshot_columns = [str(row[1]) for row in conn.execute("PRAGMA table_info(ensemble_snapshots)").fetchall()]
+    conn.execute(
+        f"INSERT INTO ensemble_snapshots ({','.join(snapshot_columns)}) VALUES ({','.join('?' for _ in snapshot_columns)})",
+        [snapshot[column] for column in snapshot_columns],
+    )
+
+    day0 = _day0_event()
+    family = SimpleNamespace(
+        city="Chicago",
+        target_date="2026-05-25",
+        metric="high",
+        family_id="run-1",
+        condition_ids=["condition-1"],
+        candidates=[],
+    )
+    row = _forecast_snapshot_row_for_event(
+        conn,
+        event=day0,
+        family=family,
+        allow_latest=True,
+        decision_time=datetime(2026, 5, 24, 14, 12, tzinfo=timezone.utc),
+    )
+
+    assert row is not None
+    assert str(row["snapshot_id"]) == "1"
+
+
+def test_day0_sole_blocked_snapshot_remains_refused():
+    from src.engine.event_reactor_adapter import _forecast_snapshot_row_for_event
+
+    conn = _trade_conn_with_snapshot()
+    conn.execute(
+        """
+        UPDATE ensemble_snapshots
+        SET contributes_to_target_extrema = 0,
+            forecast_window_attribution_status = 'NON_CONTRIBUTING'
+        WHERE snapshot_id = '1'
+        """
+    )
+    family = SimpleNamespace(
+        city="Chicago",
+        target_date="2026-05-25",
+        metric="high",
+        family_id="run-1",
+        condition_ids=["condition-1"],
+        candidates=[],
+    )
+
+    with pytest.raises(ValueError, match="FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED"):
+        _forecast_snapshot_row_for_event(
+            conn,
+            event=_day0_event(),
+            family=family,
+            allow_latest=True,
+            decision_time=datetime(2026, 5, 24, 14, 12, tzinfo=timezone.utc),
+        )
+
+
+def test_day0_missing_reader_coverage_remains_refused():
+    from src.engine.event_reactor_adapter import _forecast_snapshot_row_for_event
+
+    conn = _trade_conn_with_snapshot(attach_world_for_qkernel=False)
+    conn.execute("DROP TABLE source_run_coverage")
+    family = SimpleNamespace(
+        city="Chicago",
+        target_date="2026-05-25",
+        metric="high",
+        family_id="run-1",
+        condition_ids=["condition-1"],
+        candidates=[],
+    )
+
+    with pytest.raises(ValueError, match="FORECAST_READER_SCOPE_CONSTRUCTION_MISSING"):
+        _forecast_snapshot_row_for_event(
+            conn,
+            event=_day0_event(),
+            family=family,
+            allow_latest=True,
+            decision_time=datetime(2026, 5, 24, 14, 12, tzinfo=timezone.utc),
+        )
 
 
 def test_adapter_computes_on_reader_elected_snapshot_not_causal_pin(monkeypatch):
