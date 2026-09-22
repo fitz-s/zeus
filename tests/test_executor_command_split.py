@@ -6510,3 +6510,24 @@ def test_expired_snapshot_after_identity_commit_is_terminal_without_post(
     assert not any(e["event_type"] in {"SUBMIT_TIMEOUT_UNKNOWN", "SUBMIT_ACKED"} for e in events)
     if path == "entry":
         assert released == [command["command_id"]]
+
+
+@pytest.mark.parametrize("metric", ["high", "low", None])
+def test_submit_strategy_policy_uses_certificate_metric(mem_conn, monkeypatch, metric):
+    from src.execution.executor import _entry_strategy_policy_submit_component
+    import src.riskguard.policy as policy_module
+
+    seen = []
+
+    def resolve(_conn, _strategy, _now, **kwargs):
+        seen.append(kwargs)
+        return SimpleNamespace(gated=False, exit_only=False, sources=())
+
+    monkeypatch.setattr(policy_module, "resolve_strategy_policy", resolve)
+    intent = _make_entry_intent(mem_conn)
+    payload = {"strategy_key": "center_buy", "probability_semantics_revision": "current"}
+    if metric is not None:
+        payload["metric"] = metric
+    result = _entry_strategy_policy_submit_component(mem_conn, intent, payload)
+    assert result["allowed"] is True
+    assert seen == [{"temperature_metric": metric, "probability_semantics_revision": "current"}]

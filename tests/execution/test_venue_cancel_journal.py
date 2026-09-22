@@ -282,6 +282,7 @@ def test_screen_dispatch_cancel_success_and_unknown_are_attempt_fenced():
     )
     clob = _PointOrderClob(matched_size="0")
     factory_deadlines = []
+    collected = []
 
     def deadline_conn_factory(*, deadline_monotonic):
         factory_deadlines.append(deadline_monotonic)
@@ -295,12 +296,139 @@ def test_screen_dispatch_cancel_success_and_unknown_are_attempt_fenced():
         deadline_monotonic=deadline,
         owner="boot-a:11",
         close_connections=False,
+        collect_cancelled=collected,
     )
     assert stats["cancelled"] == 1
     assert clob.cancelled == ["order-1"]
     assert factory_deadlines and all(value == deadline for value in factory_deadlines)
     assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 321
     assert conn.execute("SELECT state FROM venue_commands WHERE command_id='dispatch-1'").fetchone()[0] == "CANCELLED"
+    assert [entry["command_id"] for entry in collected] == ["dispatch-1"]
+    conn.close()
+
+
+def test_screen_cancel_zero_fill_classifier_rejects_positive_or_filled_witness():
+    from src.execution.venue_cancel_journal import (
+        _screen_cancel_terminal_witness_is_zero_fill,
+    )
+
+    assert not _screen_cancel_terminal_witness_is_zero_fill(
+        {"status": "FILLED", "matched_size": "0"}
+    )
+    assert not _screen_cancel_terminal_witness_is_zero_fill(
+        {"status": "ABSENT", "matched_size": "2"}
+    )
+    assert _screen_cancel_terminal_witness_is_zero_fill({"status": "ABSENT"})
+
+
+def test_screen_dispatch_cancel_failure_does_not_collect_follow_through():
+    import time
+
+    conn = _db()
+    _add_order(conn, command_id="dispatch-fail-1", venue_order_id="order-fail-1")
+    persist_screen_redecision_cancel_obligations(
+        [_entry("dispatch-fail-1", "order-fail-1")],
+        conn_factory=lambda: conn,
+        deadline_monotonic=time.monotonic() + 1,
+        close_connections=False,
+    )
+    collected = []
+    stats = dispatch_screen_redecision_cancel_obligations(
+        find_screen_redecision_cancel_obligations(conn),
+        _FakeClob(fail_on={"order-fail-1"}),
+        conn_factory=lambda *, deadline_monotonic: conn,
+        deadline_monotonic=time.monotonic() + 1,
+        owner="boot-a:11",
+        close_connections=False,
+        collect_cancelled=collected,
+    )
+    assert stats["cancelled"] == 0
+    assert stats["deferred"] == 1
+    assert collected == []
+    assert conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id='dispatch-fail-1'"
+    ).fetchone()[0] == "CANCEL_PENDING"
+    conn.close()
+
+
+def test_screen_dispatch_terminal_witness_collects_without_cancel_call():
+    import time
+
+    conn = _db()
+    _add_order(conn, command_id="dispatch-terminal-1", venue_order_id="order-terminal-1")
+    persist_screen_redecision_cancel_obligations(
+        [_entry("dispatch-terminal-1", "order-terminal-1")],
+        conn_factory=lambda: conn,
+        deadline_monotonic=time.monotonic() + 1,
+        close_connections=False,
+    )
+    collected = []
+
+    class TerminalClob:
+        def get_order(self, order_id: str, *, deadline_monotonic=None):
+            return {
+                "orderID": order_id,
+                "status": "CANCELED",
+                "original_size": "26.5",
+                "size_matched": "0",
+            }
+
+        def cancel_order(self, *_args, **_kwargs):
+            raise AssertionError("terminal witness must not issue a cancel")
+
+    stats = dispatch_screen_redecision_cancel_obligations(
+        find_screen_redecision_cancel_obligations(conn),
+        TerminalClob(),
+        conn_factory=lambda *, deadline_monotonic: conn,
+        deadline_monotonic=time.monotonic() + 1,
+        owner="boot-a:11",
+        close_connections=False,
+        collect_cancelled=collected,
+    )
+    assert stats["cancelled"] == 1
+    assert [entry["command_id"] for entry in collected] == ["dispatch-terminal-1"]
+    assert conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id='dispatch-terminal-1'"
+    ).fetchone()[0] == "CANCELLED"
+    conn.close()
+
+
+def test_screen_dispatch_positive_cancel_witness_does_not_collect_follow_through():
+    import time
+
+    conn = _db()
+    _add_order(conn, command_id="dispatch-positive-cancel-1", venue_order_id="order-positive-cancel-1")
+    persist_screen_redecision_cancel_obligations(
+        [_entry("dispatch-positive-cancel-1", "order-positive-cancel-1")],
+        conn_factory=lambda: conn,
+        deadline_monotonic=time.monotonic() + 1,
+        close_connections=False,
+    )
+    collected = []
+
+    class PositiveTerminalClob:
+        def get_order(self, order_id: str, *, deadline_monotonic=None):
+            return {
+                "orderID": order_id,
+                "status": "CANCELED",
+                "original_size": "26.5",
+                "size_matched": "2",
+            }
+
+        def cancel_order(self, *_args, **_kwargs):
+            raise AssertionError("positive terminal witness must not issue a cancel")
+
+    stats = dispatch_screen_redecision_cancel_obligations(
+        find_screen_redecision_cancel_obligations(conn),
+        PositiveTerminalClob(),
+        conn_factory=lambda *, deadline_monotonic: conn,
+        deadline_monotonic=time.monotonic() + 1,
+        owner="boot-a:11",
+        close_connections=False,
+        collect_cancelled=collected,
+    )
+    assert stats["cancelled"] == 1
+    assert collected == []
     conn.close()
 
 
@@ -1170,6 +1298,37 @@ class _PointOrderClob(_FakeClob):
             "original_size": "26.5",
             "size_matched": self.matched_size,
         }
+
+
+def test_terminal_follow_through_strict_mode_propagates_reducer_errors(monkeypatch):
+    import pytest
+
+    from src.execution import command_recovery, venue_cancel_journal
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE position_current (position_id TEXT);
+        CREATE TABLE venue_commands (command_id TEXT, venue_order_id TEXT);
+        CREATE TABLE venue_command_events (command_id TEXT);
+        CREATE TABLE venue_order_facts (command_id TEXT);
+        """
+    )
+    failed = {"scanned": 1, "advanced": 0, "stayed": 0, "errors": 1}
+    monkeypatch.setattr(command_recovery, "reconcile_cancel_ack_terminal_no_fill_facts", lambda *_a, **_k: failed)
+    monkeypatch.setattr(command_recovery, "reconcile_cancel_ack_terminal_partial_facts", lambda *_a, **_k: {"errors": 0})
+    monkeypatch.setattr(command_recovery, "reconcile_terminal_order_facts", lambda *_a, **_k: {"errors": 0})
+    monkeypatch.setattr(command_recovery, "reconcile_terminal_entry_exposure_obligations", lambda *_a, **_k: {"errors": 0})
+
+    with pytest.raises(RuntimeError, match="reducers reported errors"):
+        venue_cancel_journal._reconcile_terminal_no_fill_after_cancel_ack(
+            lambda: conn,
+            command_id="strict-command",
+            order_id="strict-order",
+            close_connections=False,
+            raise_on_error=True,
+        )
+    conn.close()
 
 
 class TestPersistedRestCancel:

@@ -2311,7 +2311,11 @@ def _latest_terminal_order_fact_candidates(conn: sqlite3.Connection) -> list[dic
     return [_dict_row(row) for row in rows]
 
 
-def _cancel_ack_terminal_no_fill_fact_candidates(conn: sqlite3.Connection) -> list[dict]:
+def _cancel_ack_terminal_no_fill_fact_candidates(
+    conn: sqlite3.Connection,
+    *,
+    command_ids: set[str] | frozenset[str] | None = None,
+) -> list[dict]:
     if not (
         _table_exists(conn, "venue_order_facts")
         and _table_exists(conn, "venue_command_events")
@@ -2320,8 +2324,13 @@ def _cancel_ack_terminal_no_fill_fact_candidates(conn: sqlite3.Connection) -> li
         return []
     sources = tuple(sorted(_LIVE_TERMINAL_ORDER_FACT_SOURCES))
     source_placeholders = ",".join("?" for _ in sources)
+    scoped_ids = tuple(sorted(str(value) for value in (command_ids or ()) if str(value)))
+    scope_clause = (
+        " AND cmd.command_id IN (" + ",".join("?" for _ in scoped_ids) + ")"
+        if scoped_ids else ""
+    )
     sql = (
-        """
+        f"""
         WITH candidate_commands AS (
             SELECT
                 cmd.command_id AS command_id,
@@ -2352,6 +2361,28 @@ def _cancel_ack_terminal_no_fill_fact_candidates(conn: sqlite3.Connection) -> li
                      WHERE event.command_id = cmd.command_id
                        AND event.event_type IN ('CANCEL_ACKED', 'EXPIRED')
                )
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM venue_command_events positive_event
+                     WHERE positive_event.command_id = cmd.command_id
+                       AND positive_event.event_type = 'CANCEL_ACKED'
+                       AND json_valid(positive_event.payload_json)
+                       AND (
+                            CAST(COALESCE(
+                                json_extract(
+                                    positive_event.payload_json,
+                                    '$.fresh_point_order_witness.matched_size'
+                                ), '0'
+                            ) AS REAL) > 0
+                            OR UPPER(COALESCE(
+                                json_extract(
+                                    positive_event.payload_json,
+                                    '$.fresh_point_order_witness.status'
+                                ), ''
+                            )) IN ('FILLED', 'MATCHED', 'PARTIALLY_MATCHED', 'PARTIAL')
+                       )
+               )
+               {scope_clause}
         ),
         """
         + _canonical_order_truth_cte(command_scope_cte="candidate_commands")
@@ -2395,12 +2426,14 @@ def _cancel_ack_terminal_no_fill_fact_candidates(conn: sqlite3.Connection) -> li
          ORDER BY cmd.terminal_event_occurred_at, cmd.command_id
         """
     )
-    rows = conn.execute(sql, sources).fetchall()
+    rows = conn.execute(sql, (*scoped_ids, *sources)).fetchall()
     return [_dict_row(row) for row in rows]
 
 
 def _cancel_ack_terminal_partial_fact_candidates(
     conn: sqlite3.Connection,
+    *,
+    command_ids: set[str] | frozenset[str] | None = None,
 ) -> list[dict]:
     """Return cancel-acked ENTRY commands whose positive fill lacks terminality.
 
@@ -2418,9 +2451,14 @@ def _cancel_ack_terminal_partial_fact_candidates(
     }
     if not all(_table_exists(conn, table) for table in required):
         return []
+    scoped_ids = tuple(sorted(str(value) for value in (command_ids or ()) if str(value)))
+    scope_clause = (
+        " AND cmd.command_id IN (" + ",".join("?" for _ in scoped_ids) + ")"
+        if scoped_ids else ""
+    )
     sql = (
-        "WITH candidate_commands AS ("
-        """
+        f"WITH candidate_commands AS ("
+        f"""
             SELECT cmd.*,
                    (
                        SELECT MAX(event.occurred_at)
@@ -2439,6 +2477,7 @@ def _cancel_ack_terminal_partial_fact_candidates(
                      WHERE event.command_id = cmd.command_id
                        AND event.event_type = 'CANCEL_ACKED'
                )
+               {scope_clause}
         ),
         """
         + _canonical_trade_fact_cte(
@@ -2525,7 +2564,7 @@ def _cancel_ack_terminal_partial_fact_candidates(
          ORDER BY cmd.cancel_acked_at, cmd.command_id
         """
     )
-    return [_dict_row(row) for row in conn.execute(sql).fetchall()]
+    return [_dict_row(row) for row in conn.execute(sql, scoped_ids).fetchall()]
 
 
 def _local_orphan_no_fill_candidates(conn: sqlite3.Connection) -> list[dict]:
@@ -17318,7 +17357,11 @@ def _append_point_order_terminal_no_fill_fact(
     return fact_id, payload
 
 
-def reconcile_cancel_ack_terminal_no_fill_facts(conn: sqlite3.Connection) -> dict:
+def reconcile_cancel_ack_terminal_no_fill_facts(
+    conn: sqlite3.Connection,
+    *,
+    command_ids: set[str] | frozenset[str] | None = None,
+) -> dict:
     """Materialize terminal no-fill order facts from already-acked cancels.
 
     A CANCEL_ACKED command event is venue-side evidence that the entry order left
@@ -17328,7 +17371,9 @@ def reconcile_cancel_ack_terminal_no_fill_facts(conn: sqlite3.Connection) -> dic
     """
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
-    for row in _cancel_ack_terminal_no_fill_fact_candidates(conn):
+    for row in _cancel_ack_terminal_no_fill_fact_candidates(
+        conn, command_ids=command_ids
+    ):
         summary["scanned"] += 1
         command_id = str(row.get("command_id") or "")
         venue_order_id = str(row.get("venue_order_id") or "")
@@ -17418,7 +17463,11 @@ def reconcile_cancel_ack_terminal_no_fill_facts(conn: sqlite3.Connection) -> dic
     return summary
 
 
-def reconcile_cancel_ack_terminal_partial_facts(conn: sqlite3.Connection) -> dict:
+def reconcile_cancel_ack_terminal_partial_facts(
+    conn: sqlite3.Connection,
+    *,
+    command_ids: set[str] | frozenset[str] | None = None,
+) -> dict:
     """Close only the unfilled remainder of an acknowledged cancelled ENTRY.
 
     SCOPE: the exact cancelled command/order backed by authenticated economic
@@ -17429,7 +17478,9 @@ def reconcile_cancel_ack_terminal_partial_facts(conn: sqlite3.Connection) -> dic
     """
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
-    for candidate in _cancel_ack_terminal_partial_fact_candidates(conn):
+    for candidate in _cancel_ack_terminal_partial_fact_candidates(
+        conn, command_ids=command_ids
+    ):
         summary["scanned"] += 1
         command_id = str(candidate.get("command_id") or "")
         safe_command_id = "".join(
@@ -29846,6 +29897,7 @@ def drain_screen_redecision_cancel_obligations(
     from src.execution.venue_cancel_journal import (
         dispatch_screen_redecision_cancel_obligations,
         find_screen_redecision_cancel_obligations,
+        _reconcile_terminal_no_fill_after_cancel_ack,
     )
     from src.state.db import get_trade_connection, get_trade_connection_read_only
 
@@ -29899,6 +29951,7 @@ def drain_screen_redecision_cancel_obligations(
                 deadline_monotonic=deadline,
             )
 
+    cancelled_entries: list[dict] = []
     stats = dispatch_screen_redecision_cancel_obligations(
         entries,
         _DeadlineClient(client),
@@ -29908,9 +29961,37 @@ def drain_screen_redecision_cancel_obligations(
         ),
         deadline_monotonic=obligation_deadline,
         owner=_SCREEN_CANCEL_DISPATCH_BOOT_ID,
+        collect_cancelled=cancelled_entries,
     )
+    followthrough_errors = 0
+    for entry in cancelled_entries:
+        command_id = str(entry.get("command_id") or "")
+        order_id = str(entry.get("venue_order_id") or "")
+        if not command_id or not order_id:
+            continue
+        try:
+            _reconcile_terminal_no_fill_after_cancel_ack(
+                lambda: get_trade_connection(
+                    write_class="live",
+                    deadline_monotonic=obligation_deadline,
+                ),
+                command_id=command_id,
+                order_id=order_id,
+                close_connections=True,
+                raise_on_error=True,
+            )
+        except Exception:
+            followthrough_errors += 1
+            logger.exception(
+                "recovery: screen cancel terminal follow-through failed command=%s",
+                command_id,
+            )
     summary["cancelled"] = int(stats.get("cancelled", 0) or 0)
-    summary["errors"] = int(stats.get("errors", 0) or 0) + int(stats.get("journal_failed", 0) or 0)
+    summary["errors"] = (
+        int(stats.get("errors", 0) or 0)
+        + int(stats.get("journal_failed", 0) or 0)
+        + followthrough_errors
+    )
     summary["deferred"] = int(stats.get("deferred", 0) or 0)
     return summary
 

@@ -6718,8 +6718,9 @@ def _global_current_entry_feasibility_rejection_reason(
     *,
     strategy_key: str | None = None,
     probability_semantics_revision: str | None = None,
+    temperature_metric: str | None = None,
     strategy_policy_conn: sqlite3.Connection | None = None,
-    strategy_policy_cache: dict[tuple[str, str], str | None] | None = None,
+    strategy_policy_cache: dict[tuple[str, str, str], str | None] | None = None,
     observe_through_automated_risk_gate: bool = False,
 ) -> str | None:
     """Reject BUY execution proposals that current policy cannot execute.
@@ -6794,12 +6795,14 @@ def _global_current_entry_feasibility_rejection_reason(
                 str(probability_semantics_revision or "").strip()
                 or "__GLOBAL_CANDIDATE_SCOPE_UNRESOLVED__"
             )
-            policy_cache_key = (normalized_strategy, candidate_revision)
+            candidate_metric = str(temperature_metric or "").strip().lower()
+            policy_cache_key = (normalized_strategy, candidate_revision, candidate_metric)
             if strategy_policy_cache is None:
                 strategy_block = _entry_strategy_policy_blocks_live_submit(
                     strategy_policy_conn,
                     normalized_strategy,
                     probability_semantics_revision=candidate_revision,
+                    **({"temperature_metric": candidate_metric} if candidate_metric else {}),
                 )
             else:
                 if policy_cache_key not in strategy_policy_cache:
@@ -6808,6 +6811,7 @@ def _global_current_entry_feasibility_rejection_reason(
                             strategy_policy_conn,
                             normalized_strategy,
                             probability_semantics_revision=candidate_revision,
+                            **({"temperature_metric": candidate_metric} if candidate_metric else {}),
                         )
                     )
                 strategy_block = strategy_policy_cache[policy_cache_key]
@@ -7806,6 +7810,7 @@ def _entry_strategy_policy_blocks_live_submit(
     strategy_key: str | None,
     *,
     probability_semantics_revision: str | None = None,
+    temperature_metric: str | None = None,
 ) -> str | None:
     """Re-read per-strategy authority at the final EDLI submit boundary."""
 
@@ -7825,6 +7830,7 @@ def _entry_strategy_policy_blocks_live_submit(
             conn,
             strategy,
             datetime.now(timezone.utc),
+            **({"temperature_metric": temperature_metric} if temperature_metric else {}),
             **(
                 {
                     "probability_semantics_revision": (
@@ -8604,6 +8610,7 @@ def event_bound_live_adapter_from_trade_conn(
                     probability_semantics_revision=(
                         no_submit_receipt.probability_semantics_revision
                     ),
+                    temperature_metric=no_submit_receipt.metric,
                 )
                 if strategy_policy_reason is not None:
                     _abort_family_rebalance_entry_payloads_after_no_submit(
@@ -12074,7 +12081,7 @@ def event_bound_live_adapter_from_trade_conn(
                 return Decimal("0")
             return min(allocator_limit, flat_cost_usd)
 
-        strategy_policy_cache: dict[tuple[str, str], str | None] = {}
+        strategy_policy_cache: dict[tuple[str, str, str], str | None] = {}
         day0_ask_repricing_cache: dict[tuple[str, datetime], int | None] = {}
 
         def _current_entry_calibration_scope(candidate, prepared):
@@ -12241,6 +12248,7 @@ def event_bound_live_adapter_from_trade_conn(
                 ),
                 strategy_policy_conn=trade_conn,
                 strategy_policy_cache=strategy_policy_cache,
+                temperature_metric=metric,
                 observe_through_automated_risk_gate=proof_only,
             )
 
@@ -31444,7 +31452,7 @@ def _strategy_policy_selection_rejection_reason(
         policy_now = decision_time
         if policy_now is None:
             policy_now = datetime.now(timezone.utc)
-            logger.warning(
+            logging.getLogger(__name__).warning(
                 "DECISION_TIME_FABRICATED_AT_EDLI_STRATEGY_POLICY: strategy_key=%s policy_now=%s",
                 strategy_key,
                 policy_now,
@@ -31456,6 +31464,10 @@ def _strategy_policy_selection_rejection_reason(
             strategy_policy_conn,
             strategy_key,
             policy_now,
+            temperature_metric=(
+                getattr(proof.candidate, "metric", None)
+                or getattr(proof.candidate, "temperature_metric", None)
+            ),
             **(
                 {"probability_semantics_revision": probability_revision}
                 if probability_revision

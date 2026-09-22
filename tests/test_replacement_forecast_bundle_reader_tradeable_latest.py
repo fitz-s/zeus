@@ -134,7 +134,7 @@ def _provenance(
             }
         }
         likelihood = {
-            "semantics": "same_station_preliminary_report_survival_likelihood_v1",
+            "semantics": "same_station_preliminary_report_survival_likelihood_v2",
             "cutoff": shape["source_cycle_time"],
             "successes": [],
             "failures": [],
@@ -446,6 +446,40 @@ def test_held_provenance_binds_configured_station_and_source_pair() -> None:
         metric="high",
         decision_time=_dt(6, 12),
     ) == "REPLACEMENT_PINNED_DAY0_LIKELIHOOD_SOURCE_PAIR_MISMATCH"
+
+
+def test_held_provenance_rejects_pre_unit_normalization_likelihood_revision() -> None:
+    from src.data import replacement_forecast_bundle_reader as reader
+    from src.data.day0_hourly_vectors import DAY0_REMAINING_CARRIER_OPERATOR_V2
+
+    provenance = _provenance(
+        q_mode=_FUSED_FULL,
+        strict_day0=True,
+        shape_source_cycle_time=_dt(6, 0),
+    )
+    provenance["day0_remaining_carrier_operator"] = DAY0_REMAINING_CARRIER_OPERATOR_V2
+    assert reader._held_pinned_provenance_reason(
+        provenance,
+        city="Tel Aviv",
+        target_date="2026-06-07",
+        metric="high",
+        decision_time=_dt(6, 12),
+    ) is None
+
+    likelihood = provenance["day0_preliminary_report_survival_likelihood"]
+    assert isinstance(likelihood, dict)
+    likelihood["semantics"] = "same_station_preliminary_report_survival_likelihood_v1"
+    likelihood.pop("identity_hash")
+    likelihood["identity_hash"] = hashlib.sha256(
+        json.dumps(likelihood, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert reader._held_pinned_provenance_reason(
+        provenance,
+        city="Tel Aviv",
+        target_date="2026-06-07",
+        metric="high",
+        decision_time=_dt(6, 12),
+    ) == "REPLACEMENT_PINNED_DAY0_LIKELIHOOD_SEMANTICS_MISMATCH"
 
 
 def test_held_pinned_reader_accepts_carrier_samples_derived_from_bootstrap_bins() -> None:

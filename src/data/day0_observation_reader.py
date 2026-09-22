@@ -64,6 +64,8 @@ from math import isfinite
 from typing import Optional, Sequence
 from zoneinfo import ZoneInfo
 
+from src.types.temperature import Fahrenheit, f_to_c
+
 # ---------------------------------------------------------------------------
 # Default source priority (tier-descending canonical preference).
 # HK callers should override with ('hko_hourly_accumulator',).
@@ -871,15 +873,25 @@ def same_station_preliminary_report_survival_likelihood(
     awc: dict[datetime, tuple[int, float, datetime, str]] = {}
     ogimet: dict[datetime, list[tuple[int, float, datetime, str]]] = {}
     for row_id, channel, published_raw, value_raw, unit, fetched_raw, raw in rows:
-        if str(unit or "").upper() != "C":
+        channel_name = str(channel or "").strip().lower()
+        unit_name = str(unit or "").upper()
+        if channel_name == awc_channel:
+            if unit_name != "C":
+                continue
+        elif channel_name == ogimet_channel:
+            if unit_name not in {"C", "F"}:
+                continue
+        else:
             continue
         try:
             published = datetime.fromisoformat(str(published_raw).replace("Z", "+00:00"))
             fetched = datetime.fromisoformat(str(fetched_raw).replace("Z", "+00:00"))
             value = float(value_raw)
+            if channel_name == ogimet_channel and unit_name == "F":
+                value = float(f_to_c(Fahrenheit(value)))
         except (TypeError, ValueError):
             continue
-        if str(channel).strip().lower() == ogimet_channel:
+        if channel_name == ogimet_channel:
             # The canonical OGIMET ledger stores the mirror's publication clock
             # as its native hourly observation instant; its raw_report is often
             # intentionally NULL.  AWC retains the report-issued METAR clock.
@@ -896,7 +908,7 @@ def same_station_preliminary_report_survival_likelihood(
         ):
             continue
         digest = hashlib.sha256(str(raw or "").encode()).hexdigest()
-        if str(channel).strip().lower() == awc_channel:
+        if channel_name == awc_channel:
             awc[observed.astimezone(timezone.utc)] = (int(row_id), value, fetched.astimezone(timezone.utc), digest)
         else:
             ogimet.setdefault(observed.astimezone(timezone.utc), []).append((int(row_id), value, fetched.astimezone(timezone.utc), digest))
@@ -929,7 +941,7 @@ def same_station_preliminary_report_survival_likelihood(
         identity = {
             "semantics": (
                 "same_station_preliminary_report_survival_likelihood_"
-                "jeffreys_prior_only_v1"
+                "jeffreys_prior_only_v2"
             ),
             "cutoff": cutoff.isoformat(),
             "successes": confirmations,
@@ -950,7 +962,7 @@ def same_station_preliminary_report_survival_likelihood(
         }
     alpha, beta = successes + 0.5, failed + 0.5
     identity = {
-        "semantics": "same_station_preliminary_report_survival_likelihood_v1",
+        "semantics": "same_station_preliminary_report_survival_likelihood_v2",
         "cutoff": cutoff.isoformat(),
         "successes": confirmations,
         "failures": failures,

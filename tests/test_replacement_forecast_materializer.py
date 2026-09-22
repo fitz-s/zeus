@@ -2519,7 +2519,7 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
         for model, value_c in zip(("ecmwf_ifs", "icon_global"), member_values_c)
     ]
     likelihood_identity = {
-        "semantics": "same_station_preliminary_report_survival_likelihood_jeffreys_prior_only_v1",
+        "semantics": "same_station_preliminary_report_survival_likelihood_jeffreys_prior_only_v2",
         "cutoff": computed_at.isoformat(),
         "successes": [],
         "failures": [],

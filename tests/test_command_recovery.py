@@ -14866,6 +14866,64 @@ class TestRecoveryResolutionTable:
             (finding.finding_id,),
         ).fetchone()["resolution"] == "command_recovery_terminal_no_fill"
 
+    def test_cancel_ack_positive_point_witness_blocks_zero_fill_classifier(self, conn):
+        from src.execution.command_recovery import reconcile_cancel_ack_terminal_no_fill_facts
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=10.35, price=0.60)
+        _advance_to_acked(conn, venue_order_id="ord-positive-witness")
+        _seed_pending_entry_projection(conn, order_id="ord-positive-witness")
+        _append_order_fact(
+            conn,
+            order_id="ord-positive-witness",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="10.35",
+            source="REST",
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:04:00Z",
+            payload={"venue_order_id": "ord-positive-witness"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_ACKED",
+            occurred_at="2026-04-26T00:05:00Z",
+            payload={
+                "venue_order_id": "ord-positive-witness",
+                "venue_status": "FILLED",
+                "fresh_point_order_witness": {
+                    "status": "FILLED",
+                    "matched_size": "10.35",
+                    "source": "authenticated_point_order",
+                },
+            },
+        )
+
+        assert reconcile_cancel_ack_terminal_no_fill_facts(conn) == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+        latest = conn.execute(
+            "SELECT state, matched_size, remaining_size FROM venue_order_facts "
+            "WHERE command_id='cmd-001' ORDER BY local_sequence DESC LIMIT 1"
+        ).fetchone()
+        assert dict(latest) == {
+            "state": "LIVE",
+            "matched_size": "0",
+            "remaining_size": "10.35",
+        }
+        assert conn.execute(
+            "SELECT phase FROM position_current WHERE position_id='pos-001'"
+        ).fetchone()[0] == "pending_entry"
+
+
     def test_cancel_acked_no_fill_fake_venue_fact_cannot_materialize_terminal_authority(
         self, conn
     ):
@@ -38205,6 +38263,251 @@ def test_cancelled_increment_releases_obligation_inside_capital_fast_lane(
             "shares": 6.0,
             "cost_basis_usd": 3.18,
         }
+    finally:
+        verified.close()
+
+
+def test_screen_cancel_ack_runs_scoped_terminal_follow_through(
+    tmp_path, monkeypatch,
+):
+    """A screen CANCEL_ACKED immediately materializes only its own no-fill truth."""
+    from src.execution import command_recovery, venue_cancel_journal
+    from src.state.db import init_schema, init_schema_trade_only
+    from src.state.collateral_ledger import init_collateral_schema
+
+    db_path = tmp_path / "screen-cancel-follow-through.db"
+    seed = sqlite3.connect(db_path)
+    seed.row_factory = sqlite3.Row
+    init_schema(seed)
+    init_schema_trade_only(seed)
+    init_collateral_schema(seed)
+    _insert(
+        seed,
+        command_id="cmd-screen-cancel",
+        position_id="pos-screen-cancel",
+        size=10.0,
+        price=0.52,
+    )
+    _advance_to_acked(
+        seed,
+        command_id="cmd-screen-cancel",
+        venue_order_id="ord-screen-cancel",
+    )
+    _seed_pending_entry_projection(
+        seed,
+        position_id="pos-screen-cancel",
+        command_id="cmd-screen-cancel",
+        order_id="ord-screen-cancel",
+    )
+    _open_test_entry_obligation(seed, "cmd-screen-cancel")
+    _append_order_fact(
+        seed,
+        command_id="cmd-screen-cancel",
+        order_id="ord-screen-cancel",
+        state="LIVE",
+        matched_size="0",
+        remaining_size="10",
+        source="REST",
+    )
+    _insert(
+        seed,
+        command_id="cmd-unrelated-cancel",
+        position_id="pos-unrelated-cancel",
+        token_id="tok-unrelated-cancel",
+        size=8.0,
+        price=0.51,
+    )
+    _advance_to_acked(
+        seed,
+        command_id="cmd-unrelated-cancel",
+        venue_order_id="ord-unrelated-cancel",
+    )
+    _seed_pending_entry_projection(
+        seed,
+        position_id="pos-unrelated-cancel",
+        command_id="cmd-unrelated-cancel",
+        order_id="ord-unrelated-cancel",
+        token_id="tok-unrelated-cancel",
+    )
+    _append_order_fact(
+        seed,
+        command_id="cmd-unrelated-cancel",
+        order_id="ord-unrelated-cancel",
+        state="LIVE",
+        matched_size="0",
+        remaining_size="8",
+        source="REST",
+    )
+    from src.state.venue_command_repo import append_event
+
+    append_event(
+        seed,
+        command_id="cmd-unrelated-cancel",
+        event_type="CANCEL_REQUESTED",
+        occurred_at="2026-09-21T22:00:01+00:00",
+        payload={"venue_order_id": "ord-unrelated-cancel"},
+    )
+    append_event(
+        seed,
+        command_id="cmd-unrelated-cancel",
+        event_type="CANCEL_ACKED",
+        occurred_at="2026-09-21T22:00:02+00:00",
+        payload={"venue_order_id": "ord-unrelated-cancel", "venue_status": "CANCELED"},
+    )
+    _insert(
+        seed,
+        command_id="cmd-screen-terminal",
+        position_id="pos-screen-terminal",
+        token_id="tok-screen-terminal",
+        size=7.0,
+        price=0.53,
+    )
+    _advance_to_acked(
+        seed,
+        command_id="cmd-screen-terminal",
+        venue_order_id="ord-screen-terminal",
+    )
+    _seed_pending_entry_projection(
+        seed,
+        position_id="pos-screen-terminal",
+        command_id="cmd-screen-terminal",
+        order_id="ord-screen-terminal",
+        token_id="tok-screen-terminal",
+    )
+    _open_test_entry_obligation(seed, "cmd-screen-terminal")
+    _append_order_fact(
+        seed,
+        command_id="cmd-screen-terminal",
+        order_id="ord-screen-terminal",
+        state="LIVE",
+        matched_size="0",
+        remaining_size="7",
+        source="REST",
+    )
+    terminal_queued = {
+        "command_id": "cmd-screen-terminal",
+        "venue_order_id": "ord-screen-terminal",
+        "created_at": "2026-09-21T22:00:03+00:00",
+        "fact_state": "LIVE",
+        "matched_size": "0",
+        "cancel_reason": "screen_redecision",
+        "cancel_action": "CANCEL_REPLACE",
+        "cancel_detail": {"trigger": "test-terminal"},
+    }
+    queued = {
+        "command_id": "cmd-screen-cancel",
+        "venue_order_id": "ord-screen-cancel",
+        "created_at": "2026-09-21T22:00:00+00:00",
+        "fact_state": "LIVE",
+        "matched_size": "0",
+        "cancel_reason": "screen_redecision",
+        "cancel_action": "CANCEL_REPLACE",
+        "cancel_detail": {"trigger": "test"},
+    }
+    assert venue_cancel_journal.persist_screen_redecision_cancel_obligations(
+        [queued, terminal_queued],
+        conn_factory=lambda: seed,
+        deadline_monotonic=command_recovery.time.monotonic() + 1.0,
+        close_connections=False,
+    )["queued"] == 2
+    seed.commit()
+    seed.close()
+
+    def factory(**_kwargs):
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    class Client:
+        def get_order(self, order_id, *, deadline_monotonic=None):
+            return {
+                "orderID": order_id,
+                "status": "FILLED" if order_id == "ord-screen-terminal" else "LIVE",
+                "original_size": "10",
+                "size_matched": "10" if order_id == "ord-screen-terminal" else "0",
+            }
+
+        def cancel_order(self, order_id, *, deadline_monotonic=None):
+            if order_id == "ord-screen-terminal":
+                raise AssertionError("positive terminal witness must not issue a cancel")
+            return {"canceled": [order_id]}
+
+    monkeypatch.setattr(
+        "src.state.db.get_trade_connection_read_only",
+        lambda **_kwargs: factory(),
+    )
+    monkeypatch.setattr(
+        "src.state.db.get_trade_connection",
+        lambda **_kwargs: factory(),
+    )
+    summary = command_recovery.drain_screen_redecision_cancel_obligations(
+        Client(),
+        deadline_monotonic=command_recovery.time.monotonic() + 5.0,
+    )
+    assert summary["cancelled"] == 2
+    assert summary["errors"] == 0
+
+    verified = factory()
+    try:
+        assert _get_state(verified, "cmd-screen-cancel") == "CANCELLED"
+        terminal = verified.execute(
+            """
+            SELECT state, matched_size, remaining_size
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-screen-cancel'
+             ORDER BY fact_id DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(terminal) == {
+            "state": "CANCEL_CONFIRMED",
+            "matched_size": "0",
+            "remaining_size": "10",
+        }
+        assert verified.execute(
+            "SELECT phase FROM position_current WHERE position_id = 'pos-screen-cancel'"
+        ).fetchone()[0] == "voided"
+        assert verified.execute(
+            "SELECT status FROM entry_exposure_obligations WHERE command_id = 'cmd-screen-cancel'"
+        ).fetchone()[0] == "RESOLVED"
+        assert _get_state(verified, "cmd-screen-terminal") == "CANCELLED"
+        terminal_witness = verified.execute(
+            """
+            SELECT state, matched_size, remaining_size
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-screen-terminal'
+             ORDER BY fact_id DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(terminal_witness) == {
+            "state": "LIVE",
+            "matched_size": "0",
+            "remaining_size": "7",
+        }
+        assert verified.execute(
+            "SELECT phase FROM position_current WHERE position_id = 'pos-screen-terminal'"
+        ).fetchone()[0] == "pending_entry"
+        assert verified.execute(
+            "SELECT status FROM entry_exposure_obligations WHERE command_id = 'cmd-screen-terminal'"
+        ).fetchone()[0] == "OPEN"
+        unrelated = verified.execute(
+            """
+            SELECT state, matched_size, remaining_size
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-unrelated-cancel'
+             ORDER BY fact_id DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(unrelated) == {
+            "state": "LIVE",
+            "matched_size": "0",
+            "remaining_size": "8",
+        }
+        assert verified.execute(
+            "SELECT phase FROM position_current WHERE position_id = 'pos-unrelated-cancel'"
+        ).fetchone()[0] == "pending_entry"
     finally:
         verified.close()
 

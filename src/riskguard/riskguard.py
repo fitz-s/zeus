@@ -2889,6 +2889,7 @@ def _live_realized_capital_curve(
     strategy_key: str,
     window_days: float,
     as_of: datetime | None = None,
+    temperature_metric: str | None = None,
 ) -> dict[str, object]:
     """Build walk-forward realized-capital attribution for observability only.
 
@@ -2907,6 +2908,11 @@ def _live_realized_capital_curve(
 
     if strategy_key not in {"day0_nowcast_entry", "forecast_qkernel_entry"}:
         raise ValueError("live capital strategy is not canonical")
+    metric = None
+    if temperature_metric is not None:
+        metric = str(temperature_metric).strip().lower()
+        if metric not in {"high", "low"}:
+            raise ValueError("temperature_metric must be high or low")
 
     from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 
@@ -2917,6 +2923,7 @@ def _live_realized_capital_curve(
     status: dict[str, object] = {
         "status": "awaiting_current_law_fills",
         "strategy_key": strategy_key,
+        "temperature_metric": metric,
         "decision_law_id": "predicted_bin_ev_v1",
         "probability_semantics_revision": (
             DAY0_PROBABILITY_SEMANTICS_REVISION
@@ -3001,7 +3008,7 @@ def _live_realized_capital_curve(
         "ef.intent_id" if execution_fact_has_intent_id else "NULL"
     )
 
-    entry_rows = conn.execute(
+    entry_sql = (
         "SELECT pc.position_id,pc.phase,pc.city,pc.target_date,"
         "pc.temperature_metric,pc.cost_basis_usd,pc.realized_pnl_usd,"
         f"vc.command_id,{execution_intent_select},vc.q_version,"
@@ -3019,7 +3026,8 @@ def _live_realized_capital_curve(
         "JOIN execution_fact AS ef ON ef.command_id=vc.command_id "
         "JOIN venue_submission_envelopes AS vse ON vse.envelope_id=vc.envelope_id "
         "WHERE pc.strategy_key=? "
-        "AND pc.decision_law_id='predicted_bin_ev_v1' "
+        + ("AND pc.temperature_metric=? " if metric is not None else "")
+        + "AND pc.decision_law_id='predicted_bin_ev_v1' "
         "AND vc.intent_kind='ENTRY' AND ef.order_role='entry' "
         "AND ef.filled_at IS NOT NULL "
         "AND lower(COALESCE(ef.terminal_exec_status,'')) "
@@ -3029,9 +3037,14 @@ def _live_realized_capital_curve(
         "WHERE order_role='entry' AND filled_at>=? "
         "AND lower(COALESCE(terminal_exec_status,'')) "
         "IN ('filled','confirmed','partial')) "
-        "ORDER BY pc.position_id,ef.filled_at,vc.command_id",
-        (strategy_key, cutoff.isoformat()),
-    ).fetchall()
+        "ORDER BY pc.position_id,ef.filled_at,vc.command_id"
+    )
+    entry_params: tuple[object, ...] = (
+        (strategy_key, metric, cutoff.isoformat())
+        if metric is not None
+        else (strategy_key, cutoff.isoformat())
+    )
+    entry_rows = conn.execute(entry_sql, entry_params).fetchall()
     if not entry_rows:
         return status
 
@@ -3541,12 +3554,14 @@ def _day0_live_realized_capital_curve(
     *,
     window_days: float,
     as_of: datetime | None = None,
+    temperature_metric: str | None = None,
 ) -> dict[str, object]:
     return _live_realized_capital_curve(
         conn,
         strategy_key="day0_nowcast_entry",
         window_days=window_days,
         as_of=as_of,
+        temperature_metric=temperature_metric,
     )
 
 
@@ -3555,12 +3570,14 @@ def _qkernel_live_realized_capital_curve(
     *,
     window_days: float,
     as_of: datetime | None = None,
+    temperature_metric: str | None = None,
 ) -> dict[str, object]:
     return _live_realized_capital_curve(
         conn,
         strategy_key="forecast_qkernel_entry",
         window_days=window_days,
         as_of=as_of,
+        temperature_metric=temperature_metric,
     )
 
 
@@ -4223,8 +4240,19 @@ def _market_relative_alpha_evidence(
         evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)
     not_before = evaluated_at - timedelta(days=window_days)
 
+    def _row_temperature_metric(row: Mapping[str, object]) -> str:
+        metric = str(row.get("temperature_metric") or "").strip().lower()
+        if metric in {"high", "low"}:
+            return metric
+        family = tuple(row.get("entry_market_benchmark_family") or ())
+        if len(family) == 3:
+            metric = str(family[2]).strip().lower()
+            if metric in {"high", "low"}:
+                return metric
+        return ""
+
     cohorts: dict[
-        tuple[str, str, tuple[str, ...]],
+        tuple[str, str, tuple[str, ...], str | None],
         dict[tuple[str, str], dict],
     ] = {}
     missing_benchmark_count = 0
@@ -4276,6 +4304,7 @@ def _market_relative_alpha_evidence(
                 if str(revision).strip()
             )
         )
+        temperature_metric = _row_temperature_metric(row)
         global_selection_revision = str(
             row.get("global_selection_revision") or ""
         ).strip()
@@ -4283,6 +4312,7 @@ def _market_relative_alpha_evidence(
             decision_law_id,
             global_selection_revision,
             revisions,
+            temperature_metric,
         )
         # Sibling bins and HIGH/LOW from one city-date share weather,
         # observation, and market-information shocks.  Different cities are
@@ -4328,6 +4358,7 @@ def _market_relative_alpha_evidence(
         decision_law_id,
         global_selection_revision,
         revisions,
+        temperature_metric,
     ), cluster_rows in sorted(cohorts.items()):
         log_model_over_market = 0.0
         for row in cluster_rows.values():
@@ -4373,6 +4404,7 @@ def _market_relative_alpha_evidence(
             {
                 "decision_law_id": decision_law_id,
                 "global_selection_revision": global_selection_revision,
+                "temperature_metric": temperature_metric or None,
                 "probability_semantics_revisions": list(revisions),
                 "independent_cluster_count": len(cluster_rows),
                 "candidate_count": sum(
@@ -4383,6 +4415,7 @@ def _market_relative_alpha_evidence(
                     == decision_law_id
                     and str(row.get("global_selection_revision") or "").strip()
                     == global_selection_revision
+                    and _row_temperature_metric(row) == temperature_metric
                     and tuple(sorted(row.get("probability_semantics_revisions") or ()))
                     == revisions
                     and row.get("entry_market_benchmark_ready", False)
@@ -4614,6 +4647,9 @@ def _market_relative_alpha_gate_reason(
 def _market_relative_alpha_unproven_revisions(
     semantics_binding: Mapping[str, object],
     causal_alpha_evidence: Mapping[str, object],
+    *,
+    temperature_metric: str | None = None,
+    require_metric_identity: bool = False,
 ) -> tuple[str, ...]:
     """Return only licensed probability revisions still lacking capital proof."""
 
@@ -4635,6 +4671,11 @@ def _market_relative_alpha_unproven_revisions(
             )
         )
     )
+    metric = None
+    if temperature_metric is not None:
+        metric = str(temperature_metric).strip().lower()
+        if metric not in {"high", "low"}:
+            raise ValueError("temperature_metric must be high or low")
     validated = {
         str(revision).strip()
         for cohort in (causal_alpha_evidence.get("cohorts") or [])
@@ -4644,6 +4685,20 @@ def _market_relative_alpha_unproven_revisions(
         and cohort.get("global_selection_revision")
         == CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
         and cohort.get("validated") is True
+        and (
+            (
+                metric is None
+                and (
+                    not require_metric_identity
+                    or "temperature_metric" not in cohort
+                )
+            )
+            or (
+                metric is not None
+                and str(cohort.get("temperature_metric") or "").strip().lower()
+                == metric
+            )
+        )
         for revision in cohort.get("probability_semantics_revisions", [])
         if str(revision).strip()
     }
@@ -4714,6 +4769,7 @@ def _revision_probation_gate_reason(
     capital_curve: Mapping[str, object],
     *,
     reason_prefix: str,
+    temperature_metric: str | None = None,
 ) -> tuple[str | None, tuple[str, ...]]:
     """Bound an unproven probability revision by realized capital truth.
 
@@ -4746,10 +4802,25 @@ def _revision_probation_gate_reason(
     unproven_revisions = _market_relative_alpha_unproven_revisions(
         semantics_binding,
         causal_alpha_evidence,
+        temperature_metric=temperature_metric,
+        require_metric_identity=True,
     )
     if not curve_revision or curve_revision not in unproven_revisions:
         return None, ()
     revision = curve_revision
+
+    metric = None
+    if temperature_metric is not None:
+        metric = str(temperature_metric).strip().lower()
+        if metric not in {"high", "low"}:
+            raise ValueError("temperature_metric must be high or low")
+        curve_metric = str(capital_curve.get("temperature_metric") or "").strip().lower()
+        if curve_metric != metric:
+            return (
+                f"{reason_prefix}_revision_probation_metric_identity_missing("
+                f"revision={revision},metric={metric})",
+                (revision,),
+            )
 
     # A probability revision can span several materially different selection
     # laws.  Old selector losses and an unbound open-position accounting dispute
@@ -4790,7 +4861,9 @@ def _revision_probation_gate_reason(
         reason = (
             f"{reason_prefix}_revision_probation_truth_degraded("
             f"status={status or 'missing'},blocked={blocked_positions},"
-            f"revision={revision})"
+            f"revision={revision}"
+            + (f",metric={metric}" if metric is not None else "")
+            + ")"
         )
         return reason, (revision,)
     # open_positions intentionally does NOT gate: concurrency is owned by the
@@ -4803,7 +4876,9 @@ def _revision_probation_gate_reason(
         reason = (
             f"{reason_prefix}_revision_probation_nonpositive("
             f"realized={realized_positions},net_pnl_usd={net_pnl:.6f},"
-            f"revision={revision})"
+            f"revision={revision}"
+            + (f",metric={metric}" if metric is not None else "")
+            + ")"
         )
         return reason, (revision,)
     return None, ()
@@ -4813,12 +4888,15 @@ def _day0_revision_probation_gate_reason(
     semantics_binding: Mapping[str, object],
     causal_alpha_evidence: Mapping[str, object],
     capital_curve: Mapping[str, object],
+    *,
+    temperature_metric: str | None = None,
 ) -> tuple[str | None, tuple[str, ...]]:
     return _revision_probation_gate_reason(
         semantics_binding,
         causal_alpha_evidence,
         capital_curve,
         reason_prefix="day0",
+        temperature_metric=temperature_metric,
     )
 
 
@@ -4826,12 +4904,15 @@ def _qkernel_revision_probation_gate_reason(
     semantics_binding: Mapping[str, object],
     causal_alpha_evidence: Mapping[str, object],
     capital_curve: Mapping[str, object],
+    *,
+    temperature_metric: str | None = None,
 ) -> tuple[str | None, tuple[str, ...]]:
     return _revision_probation_gate_reason(
         semantics_binding,
         causal_alpha_evidence,
         capital_curve,
         reason_prefix="qkernel",
+        temperature_metric=temperature_metric,
     )
 
 
@@ -5091,6 +5172,10 @@ def _strategy_brier_breakdown(rows: list[dict], thresholds: dict) -> dict[str, o
                     )
                 }
             )
+            unscoped_probability_semantics_present = any(
+                not tuple(payload.get("probability_semantics_revisions") or ())
+                for payload in degraded_cohorts
+            )
             degraded_payload: dict[str, object] = {
                 "sample_size": len(degraded_p),
                 "independent_target_date_count": len(
@@ -5104,6 +5189,9 @@ def _strategy_brier_breakdown(rows: list[dict], thresholds: dict) -> dict[str, o
                 "brier": round(float(brier_score(degraded_p, degraded_o)), 6),
                 "level": degraded_level.value,
                 "cohorts": [str(payload["cohort"]) for payload in degraded_cohorts],
+                "unscoped_probability_semantics_present": (
+                    unscoped_probability_semantics_present
+                ),
             }
             if len(degraded_cohorts) == 1:
                 degraded_payload["cohort"] = degraded_cohorts[0]["cohort"]
@@ -5302,6 +5390,11 @@ def _sync_riskguard_strategy_gate_actions(
     recommended_strategy_gate_reasons: dict[str, list[str]],
     *,
     probability_semantics_scopes: Mapping[str, set[str]] | None = None,
+    probability_semantics_metric_scopes: Mapping[
+        str, set[tuple[str, str]]
+    ] | None = None,
+    probability_semantics_broad_revisions: Mapping[str, set[str]] | None = None,
+    probability_semantics_unscoped: Mapping[str, bool] | None = None,
     issued_at: str,
 ) -> dict[str, int | str]:
     if not _table_exists(conn, "risk_actions"):
@@ -5312,9 +5405,18 @@ def _sync_riskguard_strategy_gate_actions(
             "expired_count": 0,
         }
 
-    def _scope_covers_reason(reason: str, revisions: set[str]) -> bool:
+    def _scope_covers_reason(
+        reason: str,
+        revisions: set[str],
+        metric_pairs: set[tuple[str, str]],
+        broad_revisions: set[str],
+    ) -> bool:
         if reason.startswith("brier_degraded("):
-            return True
+            # A Brier verdict without an exact revision identity is a
+            # strategy-wide fail-closed gate.  Once metric scopes are present,
+            # only an explicitly supplied broad revision union may narrow it;
+            # a LOW probation pair must never make HIGH appear eligible.
+            return not metric_pairs or bool(broad_revisions)
         if reason.startswith(
             (
                 "market_relative_alpha_unproven(",
@@ -5325,41 +5427,83 @@ def _sync_riskguard_strategy_gate_actions(
             marker = ",revision="
             if marker not in reason or not reason.endswith(")"):
                 return False
+            revision_text = reason.rsplit(marker, 1)[1][:-1]
+            if ",metric=" in revision_text:
+                revision_text = revision_text.split(",metric=", 1)[0]
             reason_revisions = {
                 revision.strip()
-                for revision in reason.rsplit(marker, 1)[1][:-1].split(",")
+                for revision in revision_text.split(",")
                 if revision.strip()
             }
-            return bool(reason_revisions) and reason_revisions.issubset(revisions)
+            metric_marker = ",metric="
+            reason_metric = None
+            if metric_marker in reason:
+                reason_metric = reason.rsplit(metric_marker, 1)[1][:-1].strip()
+                if "," in reason_metric:
+                    reason_metric = reason_metric.split(",", 1)[0].strip()
+            if reason_metric:
+                return bool(reason_revisions) and all(
+                    (revision, reason_metric) in metric_pairs
+                    or revision in broad_revisions
+                    for revision in reason_revisions
+                )
+            scope_revisions = broad_revisions if metric_pairs else (
+                revisions or broad_revisions
+            )
+            return bool(reason_revisions) and reason_revisions.issubset(
+                scope_revisions
+            )
         return False
 
-    recommended = {
-        strategy: (
-            "|".join(sorted(reasons)),
-            json.dumps(
-                {
-                    "gate": True,
-                    "probability_semantics_revisions": sorted(
-                        (probability_semantics_scopes or {}).get(strategy, set())
-                    ),
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            if (probability_semantics_scopes or {}).get(strategy)
-            and all(
-                _scope_covers_reason(
-                    reason,
-                    (probability_semantics_scopes or {}).get(
-                        strategy, set()
-                    ),
-                )
-                for reason in reasons
-            )
-            else "true",
+    recommended: dict[str, tuple[str, str]] = {}
+    for strategy, reasons in sorted(recommended_strategy_gate_reasons.items()):
+        revisions = set((probability_semantics_scopes or {}).get(strategy, set()))
+        metric_pairs = set(
+            (probability_semantics_metric_scopes or {}).get(strategy, set())
         )
-        for strategy, reasons in sorted(recommended_strategy_gate_reasons.items())
-    }
+        broad_revisions = set(
+            (probability_semantics_broad_revisions or {}).get(strategy, set())
+        )
+        all_revisions = revisions | broad_revisions | {
+            revision for revision, _metric in metric_pairs
+        }
+        scoped = bool(metric_pairs)
+        has_brier_reason = any(
+            reason.startswith("brier_degraded(") for reason in reasons
+        )
+        brier_unscoped = (
+            bool((probability_semantics_unscoped or {}).get(strategy, False))
+            if probability_semantics_unscoped is not None
+            else bool(has_brier_reason and metric_pairs)
+        )
+        scope_complete = bool(all_revisions) and all(
+            _scope_covers_reason(
+                reason, revisions, metric_pairs, broad_revisions
+            )
+            for reason in reasons
+        )
+        if brier_unscoped:
+            scope_complete = False
+        if scope_complete:
+            payload: dict[str, object] = {
+                "gate": True,
+                "probability_semantics_revisions": sorted(all_revisions),
+            }
+            if scoped:
+                payload["probability_semantics_metric_scopes"] = [
+                    {
+                        "probability_semantics_revision": revision,
+                        "temperature_metric": metric,
+                    }
+                    for revision, metric in sorted(metric_pairs)
+                ]
+                payload["probability_semantics_broad_revisions"] = sorted(
+                    broad_revisions
+                )
+            value = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        else:
+            value = "true"
+        recommended[strategy] = ("|".join(sorted(reasons)), value)
 
     existing_rows = conn.execute(
         """
@@ -5511,6 +5655,11 @@ def _refresh_riskguard_auxiliary_bookkeeping(
     *,
     recommended_strategy_gate_reasons: dict[str, list[str]],
     recommended_strategy_gate_scopes: Mapping[str, set[str]] | None = None,
+    recommended_strategy_gate_metric_scopes: Mapping[
+        str, set[tuple[str, str]]
+    ] | None = None,
+    recommended_strategy_gate_broad_revisions: Mapping[str, set[str]] | None = None,
+    recommended_strategy_gate_unscoped: Mapping[str, bool] | None = None,
     now: str,
     position_view: dict | None = None,
 ) -> tuple[dict, dict, dict]:
@@ -5558,6 +5707,13 @@ def _refresh_riskguard_auxiliary_bookkeeping(
             capture,
             recommended_strategy_gate_reasons,
             probability_semantics_scopes=recommended_strategy_gate_scopes,
+            probability_semantics_metric_scopes=(
+                recommended_strategy_gate_metric_scopes
+            ),
+            probability_semantics_broad_revisions=(
+                recommended_strategy_gate_broad_revisions
+            ),
+            probability_semantics_unscoped=recommended_strategy_gate_unscoped,
             issued_at=now,
         )
         strategy_health_refresh = refresh_strategy_health(
@@ -6147,6 +6303,18 @@ def _tick_once() -> RiskLevel:
                 ),
             )
         )
+        qkernel_live_realized_capital_curves_by_metric = {
+            metric: _bind_live_curve_to_selection_revision(
+                zeus_conn,
+                _qkernel_live_realized_capital_curve(
+                    zeus_conn,
+                    window_days=market_relative_alpha_window_days,
+                    as_of=market_relative_alpha_as_of,
+                    temperature_metric=metric,
+                ),
+            )
+            for metric in ("high", "low")
+        }
         (
             qkernel_actual_global_capital_rows,
             qkernel_actual_global_capital_binding,
@@ -6194,16 +6362,25 @@ def _tick_once() -> RiskLevel:
                 qkernel_market_relative_alpha_gate_evidence,
             )
         )
-        (
-            qkernel_revision_probation_gate_reason,
-            qkernel_revision_probation_gate_revisions,
-        ) = _qkernel_revision_probation_gate_reason(
-            probability_semantics_binding,
-            qkernel_market_relative_alpha_gate_evidence,
-            qkernel_live_realized_capital_curve,
+        qkernel_revision_probation_gate_reasons_by_metric: dict[str, str] = {}
+        qkernel_revision_probation_gate_revisions_by_metric: dict[
+            str, tuple[str, ...]
+        ] = {}
+        for metric, metric_curve in qkernel_live_realized_capital_curves_by_metric.items():
+            metric_reason, metric_revisions = _qkernel_revision_probation_gate_reason(
+                probability_semantics_binding,
+                qkernel_market_relative_alpha_gate_evidence,
+                metric_curve,
+                temperature_metric=metric,
+            )
+            if metric_reason is not None:
+                qkernel_revision_probation_gate_reasons_by_metric[metric] = metric_reason
+                qkernel_revision_probation_gate_revisions_by_metric[metric] = metric_revisions
+        qkernel_revision_probation_gate_reason = next(
+            iter(qkernel_revision_probation_gate_reasons_by_metric.values()), None
         )
-        qkernel_revision_probation_gate_required = (
-            qkernel_revision_probation_gate_reason is not None
+        qkernel_revision_probation_gate_required = bool(
+            qkernel_revision_probation_gate_reasons_by_metric
         )
         (
             day0_market_relative_alpha_shadow_rows,
@@ -6223,6 +6400,18 @@ def _tick_once() -> RiskLevel:
                 ),
             )
         )
+        day0_live_realized_capital_curves_by_metric = {
+            metric: _bind_live_curve_to_selection_revision(
+                zeus_conn,
+                _day0_live_realized_capital_curve(
+                    zeus_conn,
+                    window_days=market_relative_alpha_window_days,
+                    as_of=market_relative_alpha_as_of,
+                    temperature_metric=metric,
+                ),
+            )
+            for metric in ("high", "low")
+        }
         (
             day0_actual_global_capital_rows,
             day0_actual_global_capital_binding,
@@ -6258,16 +6447,25 @@ def _tick_once() -> RiskLevel:
         day0_market_relative_alpha_gate_required = (
             day0_market_relative_alpha_gate_reason is not None
         )
-        (
-            day0_revision_probation_gate_reason,
-            day0_revision_probation_gate_revisions,
-        ) = _day0_revision_probation_gate_reason(
-            day0_probability_semantics_binding,
-            day0_market_relative_alpha_evidence,
-            day0_live_realized_capital_curve,
+        day0_revision_probation_gate_reasons_by_metric: dict[str, str] = {}
+        day0_revision_probation_gate_revisions_by_metric: dict[
+            str, tuple[str, ...]
+        ] = {}
+        for metric, metric_curve in day0_live_realized_capital_curves_by_metric.items():
+            metric_reason, metric_revisions = _day0_revision_probation_gate_reason(
+                day0_probability_semantics_binding,
+                day0_market_relative_alpha_evidence,
+                metric_curve,
+                temperature_metric=metric,
+            )
+            if metric_reason is not None:
+                day0_revision_probation_gate_reasons_by_metric[metric] = metric_reason
+                day0_revision_probation_gate_revisions_by_metric[metric] = metric_revisions
+        day0_revision_probation_gate_reason = next(
+            iter(day0_revision_probation_gate_reasons_by_metric.values()), None
         )
-        day0_revision_probation_gate_required = (
-            day0_revision_probation_gate_reason is not None
+        day0_revision_probation_gate_required = bool(
+            day0_revision_probation_gate_reasons_by_metric
         )
         probability_identity_ready_count = sum(
             bool(row.get("probability_identity_ready", False))
@@ -6417,6 +6615,11 @@ def _tick_once() -> RiskLevel:
         recommended_control_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_scopes: dict[str, set[str]] = {}
+        recommended_strategy_gate_metric_scopes: dict[
+            str, set[tuple[str, str]]
+        ] = {}
+        recommended_strategy_gate_broad_revisions: dict[str, set[str]] = {}
+        recommended_strategy_gate_unscoped: dict[str, bool] = {}
         # Each strategy bootstraps one exact current q/book/wealth probe per
         # revision. While that probe is unresolved, or after its realized
         # capital is nonpositive, the same revision is gated until exact-selector
@@ -6461,24 +6664,39 @@ def _tick_once() -> RiskLevel:
                 recommended_strategy_gate_scopes.setdefault(
                     strategy, set()
                 ).update(revisions)
-        if qkernel_revision_probation_gate_reason is not None:
+                recommended_strategy_gate_broad_revisions.setdefault(
+                    strategy, set()
+                ).update(revisions)
+        for metric, reason in qkernel_revision_probation_gate_reasons_by_metric.items():
             _append_reason(
                 recommended_strategy_gate_reasons,
                 "forecast_qkernel_entry",
-                qkernel_revision_probation_gate_reason,
+                reason,
+            )
+            revisions = qkernel_revision_probation_gate_revisions_by_metric.get(
+                metric, ()
             )
             recommended_strategy_gate_scopes.setdefault(
                 "forecast_qkernel_entry", set()
-            ).update(qkernel_revision_probation_gate_revisions)
-        if day0_revision_probation_gate_reason is not None:
+            ).update(revisions)
+            recommended_strategy_gate_metric_scopes.setdefault(
+                "forecast_qkernel_entry", set()
+            ).update((revision, metric) for revision in revisions)
+        for metric, reason in day0_revision_probation_gate_reasons_by_metric.items():
             _append_reason(
                 recommended_strategy_gate_reasons,
                 "day0_nowcast_entry",
-                day0_revision_probation_gate_reason,
+                reason,
+            )
+            revisions = day0_revision_probation_gate_revisions_by_metric.get(
+                metric, ()
             )
             recommended_strategy_gate_scopes.setdefault(
                 "day0_nowcast_entry", set()
-            ).update(day0_revision_probation_gate_revisions)
+            ).update(revisions)
+            recommended_strategy_gate_metric_scopes.setdefault(
+                "day0_nowcast_entry", set()
+            ).update((revision, metric) for revision in revisions)
         degraded_brier_strategies = brier_verdict_breakdown.get(
             "degraded_strategies", {}
         )
@@ -6503,10 +6721,17 @@ def _tick_once() -> RiskLevel:
                     )
                     if str(revision).strip()
                 }
+                if payload.get("unscoped_probability_semantics_present") is True:
+                    recommended_strategy_gate_unscoped[str(strategy)] = True
                 if revisions:
                     recommended_strategy_gate_scopes.setdefault(
                         str(strategy), set()
                     ).update(revisions)
+                    recommended_strategy_gate_broad_revisions.setdefault(
+                        str(strategy), set()
+                    ).update(revisions)
+                else:
+                    recommended_strategy_gate_unscoped[str(strategy)] = True
                 cohort = payload.get("cohort") if revisions else None
                 cohort_suffix = f",cohort={cohort}" if cohort else ""
                 _append_reason(
@@ -6626,6 +6851,15 @@ def _tick_once() -> RiskLevel:
             zeus_conn,
             recommended_strategy_gate_reasons=recommended_strategy_gate_reasons,
             recommended_strategy_gate_scopes=recommended_strategy_gate_scopes,
+            recommended_strategy_gate_metric_scopes=(
+                recommended_strategy_gate_metric_scopes
+            ),
+            recommended_strategy_gate_broad_revisions=(
+                recommended_strategy_gate_broad_revisions
+            ),
+            recommended_strategy_gate_unscoped=(
+                recommended_strategy_gate_unscoped
+            ),
             now=now,
             position_view=portfolio_truth.get("_strategy_health_position_view"),
         )
@@ -6962,6 +7196,9 @@ def _tick_once() -> RiskLevel:
                 "qkernel_revision_probation_gate_reason": (
                     qkernel_revision_probation_gate_reason
                 ),
+                "qkernel_revision_probation_gate_reasons_by_metric": (
+                    qkernel_revision_probation_gate_reasons_by_metric
+                ),
                 "market_relative_alpha_admission_role": (
                     "revision_scoped_rejection_gate"
                 ),
@@ -6976,6 +7213,9 @@ def _tick_once() -> RiskLevel:
                 ),
                 "qkernel_live_realized_capital_curve": (
                     qkernel_live_realized_capital_curve
+                ),
+                "qkernel_live_realized_capital_curves_by_metric": (
+                    qkernel_live_realized_capital_curves_by_metric
                 ),
                 "day0_market_relative_alpha_evidence": (
                     day0_market_relative_alpha_evidence
@@ -6992,6 +7232,9 @@ def _tick_once() -> RiskLevel:
                 "day0_revision_probation_gate_reason": (
                     day0_revision_probation_gate_reason
                 ),
+                "day0_revision_probation_gate_reasons_by_metric": (
+                    day0_revision_probation_gate_reasons_by_metric
+                ),
                 "day0_market_relative_alpha_observation": (
                     day0_market_relative_alpha_observation
                 ),
@@ -7003,6 +7246,9 @@ def _tick_once() -> RiskLevel:
                 ),
                 "day0_live_realized_capital_curve": (
                     day0_live_realized_capital_curve
+                ),
+                "day0_live_realized_capital_curves_by_metric": (
+                    day0_live_realized_capital_curves_by_metric
                 ),
                 "day0_market_relative_alpha_gate_required": (
                     day0_market_relative_alpha_gate_required

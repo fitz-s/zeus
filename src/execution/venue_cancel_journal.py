@@ -313,6 +313,21 @@ def _screen_cancel_restore_deadline(
         logger.debug("screen cancel deadline state restore failed", exc_info=True)
 
 
+def _screen_cancel_terminal_witness_is_zero_fill(
+    witness: Mapping[str, Any] | None,
+) -> bool:
+    if not isinstance(witness, Mapping):
+        return False
+    status = str(witness.get("status") or "").upper()
+    matched = _finite_nonnegative(witness.get("matched_size"))
+    if status == "ABSENT":
+        return matched in (None, 0)
+    zero_fill_terminal_statuses = frozenset(
+        {"CANCELED", "CANCELLED", "EXPIRED", "REJECTED"}
+    )
+    return status in zero_fill_terminal_statuses and matched == 0
+
+
 def _screen_cancel_witness_is_fresh(
     witness: Mapping[str, Any],
     *,
@@ -839,7 +854,12 @@ def claim_screen_redecision_cancel_obligation(
             conn.rollback()
             return finish(action="deadline_deferred")
         conn.commit()
-        return finish(claimed=True, action="finalized", event_id=event_id)
+        return finish(
+            claimed=True,
+            action="finalized",
+            event_id=event_id,
+            fresh_point_order_witness=dict(fresh_witness),
+        )
     except BaseException:
         conn.rollback()
         raise
@@ -959,6 +979,7 @@ def dispatch_screen_redecision_cancel_obligations(
     owner: str,
     lease_seconds: float = 5.0,
     close_connections: bool = True,
+    collect_cancelled: list[dict[str, Any]] | None = None,
 ) -> dict[str, int]:
     """Drain claimed screen obligations without crossing DB and HTTP I/O."""
 
@@ -1036,6 +1057,10 @@ def dispatch_screen_redecision_cancel_obligations(
             continue
         if claim_result.get("action") == "finalized":
             stats["cancelled"] += 1
+            if collect_cancelled is not None and _screen_cancel_terminal_witness_is_zero_fill(
+                claim_result.get("fresh_point_order_witness")
+            ):
+                collect_cancelled.append(dict(entry))
             continue
         if claim_result.get("action") != "dispatch":
             stats["deferred"] += 1
@@ -1134,6 +1159,8 @@ def dispatch_screen_redecision_cancel_obligations(
             continue
         if stats_key == "cancelled":
             stats["cancelled"] += 1
+            if collect_cancelled is not None:
+                collect_cancelled.append(dict(entry))
         else:
             stats["deferred"] += 1
     return stats
@@ -1399,6 +1426,7 @@ def _reconcile_terminal_no_fill_after_cancel_ack(
     command_id: str,
     order_id: str,
     close_connections: bool,
+    raise_on_error: bool = False,
 ) -> None:
     """Immediately consume zero-fill cancel truth after a confirmed cancel.
 
@@ -1430,8 +1458,13 @@ def _reconcile_terminal_no_fill_after_cancel_ack(
             reconcile_terminal_order_facts,
         )
 
-        cancel_summary = reconcile_cancel_ack_terminal_no_fill_facts(conn)
-        partial_summary = reconcile_cancel_ack_terminal_partial_facts(conn)
+        scoped_command_ids = frozenset({command_id})
+        cancel_summary = reconcile_cancel_ack_terminal_no_fill_facts(
+            conn, command_ids=scoped_command_ids
+        )
+        partial_summary = reconcile_cancel_ack_terminal_partial_facts(
+            conn, command_ids=scoped_command_ids
+        )
         conn.commit()
         terminal_summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
         for attempt in range(1, 4):
@@ -1445,8 +1478,24 @@ def _reconcile_terminal_no_fill_after_cancel_ack(
             conn.rollback()
             if attempt < 3:
                 time.sleep(0.25 * attempt)
-        obligation_summary = reconcile_terminal_entry_exposure_obligations(conn)
+        obligation_summary = reconcile_terminal_entry_exposure_obligations(
+            conn, command_id=command_id
+        )
         conn.commit()
+        reducer_errors = sum(
+            int(summary.get("errors", 0) or 0)
+            for summary in (
+                cancel_summary,
+                partial_summary,
+                terminal_summary,
+                obligation_summary,
+            )
+        )
+        if raise_on_error and reducer_errors:
+            raise RuntimeError(
+                "terminal no-fill follow-through reducers reported errors: "
+                f"command_id={command_id} errors={reducer_errors}"
+            )
         advanced = int(cancel_summary.get("advanced", 0) or 0) + int(
             partial_summary.get("advanced", 0) or 0
         ) + int(
@@ -1473,5 +1522,7 @@ def _reconcile_terminal_no_fill_after_cancel_ack(
             order_id,
             exc,
         )
+        if raise_on_error:
+            raise
     finally:
         _close_conn_if_needed(conn, close=close_connections)

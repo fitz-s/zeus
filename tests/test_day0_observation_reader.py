@@ -1518,3 +1518,141 @@ def test_noaa_preliminary_survival_uses_only_prior_later_same_report_confirmatio
     assert result["unconfirmed_awc_ids"] == []
     assert result["boundary_survival_probability"] == pytest.approx(1.5 / 3.0)
     assert result["identity_hash"]
+
+
+def _same_station_survival(
+    rows: tuple[tuple[object, ...], ...], *, allow_prior_only: bool = False
+) -> dict[str, object]:
+    conn = sqlite3.connect(":memory:")
+    conn.execute("""CREATE TABLE observation_prints (
+        id INTEGER PRIMARY KEY, city TEXT, station_id TEXT, source_channel TEXT,
+        publish_ts_utc TEXT, value_native REAL, unit TEXT, fetched_at_utc TEXT,
+        raw_report TEXT)""")
+    conn.executemany(
+        "INSERT INTO observation_prints VALUES (?, 'Tel Aviv', 'LLBG', ?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+    return same_station_preliminary_report_survival_likelihood(
+        conn,
+        city="Tel Aviv",
+        station_id="LLBG",
+        timezone_name="Asia/Jerusalem",
+        target_date="2026-08-24",
+        temperature_metric="high",
+        decision_time=datetime(2026, 8, 24, 9, 30, tzinfo=timezone.utc),
+        allow_prior_only=allow_prior_only,
+    )
+
+
+_AWC_PRELIMINARY = (
+    1,
+    "aviationweather_metar",
+    "2026-08-20T09:20:00+00:00",
+    33.4,
+    "C",
+    "2026-08-20T09:21:00+00:00",
+    "METAR LLBG 200920Z 00000KT 9999 SKC 33/20 Q1010 RMK T03340100",
+)
+
+
+@pytest.mark.parametrize(
+    ("ogimet_value", "ogimet_unit"),
+    ((33.4, "C"), (92.12, "F")),
+)
+def test_noaa_preliminary_survival_accepts_exact_same_report_c_or_f_ogimet(
+    ogimet_value: float,
+    ogimet_unit: str,
+) -> None:
+    result = _same_station_survival(
+        (
+            _AWC_PRELIMINARY,
+            (
+                2,
+                "ogimet_metar_llbg",
+                "2026-08-20T09:20:00+00:00",
+                ogimet_value,
+                ogimet_unit,
+                "2026-08-20T09:25:00+00:00",
+                None,
+            ),
+        )
+    )
+
+    assert result["semantics"] == "same_station_preliminary_report_survival_likelihood_v2"
+    assert len(result["successes"]) == 1
+    assert result["failures"] == []
+    assert result["unconfirmed_awc_ids"] == []
+
+
+def test_noaa_preliminary_survival_counts_real_fahrenheit_difference_as_failure() -> None:
+    result = _same_station_survival(
+        (
+            _AWC_PRELIMINARY,
+            (
+                2,
+                "ogimet_metar_llbg",
+                "2026-08-20T09:20:00+00:00",
+                91.94,
+                "F",
+                "2026-08-20T09:25:00+00:00",
+                None,
+            ),
+        )
+    )
+
+    assert result["successes"] == []
+    assert len(result["failures"]) == 1
+    assert result["unconfirmed_awc_ids"] == []
+
+
+def test_noaa_preliminary_survival_does_not_pair_adjacent_report_minutes() -> None:
+    result = _same_station_survival(
+        (
+            _AWC_PRELIMINARY,
+            (
+                2,
+                "ogimet_metar_llbg",
+                "2026-08-20T09:21:00+00:00",
+                92.12,
+                "F",
+                "2026-08-20T09:25:00+00:00",
+                None,
+            ),
+        ),
+        allow_prior_only=True,
+    )
+
+    assert result["successes"] == []
+    assert result["failures"] == []
+    assert result["unconfirmed_awc_ids"] == [1]
+
+
+@pytest.mark.parametrize(
+    ("awc_unit", "ogimet_unit", "expected_unconfirmed"),
+    (("C", "K", [1]), ("F", "F", [])),
+)
+def test_noaa_preliminary_survival_skips_unknown_or_wrong_source_units(
+    awc_unit: str,
+    ogimet_unit: str,
+    expected_unconfirmed: list[int],
+) -> None:
+    awc = (*_AWC_PRELIMINARY[:4], awc_unit, *_AWC_PRELIMINARY[5:])
+    result = _same_station_survival(
+        (
+            awc,
+            (
+                2,
+                "ogimet_metar_llbg",
+                "2026-08-20T09:20:00+00:00",
+                92.12,
+                ogimet_unit,
+                "2026-08-20T09:25:00+00:00",
+                None,
+            ),
+        ),
+        allow_prior_only=True,
+    )
+
+    assert result["successes"] == []
+    assert result["failures"] == []
+    assert result["unconfirmed_awc_ids"] == expected_unconfirmed

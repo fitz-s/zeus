@@ -5466,7 +5466,10 @@ def evaluate_candidate(
                 policy_now,
             )
         policy = (
-            resolve_strategy_policy(conn, strategy_key, policy_now)
+            resolve_strategy_policy(
+                conn, strategy_key, policy_now,
+                temperature_metric=temperature_metric.temperature_metric,
+            )
             if conn is not None
             else _default_strategy_policy(strategy_key)
         )

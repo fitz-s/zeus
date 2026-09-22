@@ -4355,6 +4355,77 @@ class TestStrategyBrierMinSample:
         assert "opening_inertia" not in out["degraded_strategies"]
         assert out["by_strategy"]["opening_inertia"]["thin_sample_no_verdict"] is True
 
+    def test_mixed_stamped_and_unstamped_degraded_cohorts_remain_unscoped(self):
+        revision = riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
+        rows = [
+            {
+                "strategy": "forecast_qkernel_entry",
+                "target_date": f"2026-09-{day:02d}",
+                "p_posterior": 0.80,
+                "outcome": 0,
+                **({} if day <= 10 else {
+                    "probability_semantics_revisions": (revision,)
+                }),
+            }
+            for day in range(1, 21)
+        ]
+        out = riskguard_module._strategy_brier_breakdown(
+            rows,
+            {"brier_yellow": 0.25, "brier_orange": 0.30, "brier_red": 0.35},
+        )
+        degraded = out["degraded_strategies"]["forecast_qkernel_entry"]
+        assert degraded["probability_semantics_revisions"] == [revision]
+        assert degraded["unscoped_probability_semantics_present"] is True
+
+        conn = _policy_conn()
+        riskguard_module._sync_riskguard_strategy_gate_actions(
+            conn,
+            {
+                "forecast_qkernel_entry": [
+                    "brier_degraded(level=YELLOW,brier=0.64,sample=20)",
+                    (
+                        "market_relative_alpha_unproven(status=rejected,"
+                        "model_evalue=0.0,required=10.0,clusters=2,"
+                        "law=executable_min_order_capital_gain_v2,"
+                        f"revision={revision})"
+                    ),
+                    (
+                        "qkernel_revision_probation_nonpositive(realized=3,"
+                        f"net_pnl_usd=-1.0,revision={revision},metric=low)"
+                    ),
+                ]
+            },
+            probability_semantics_scopes={
+                "forecast_qkernel_entry": {revision}
+            },
+            probability_semantics_metric_scopes={
+                "forecast_qkernel_entry": {(revision, "low")}
+            },
+            probability_semantics_broad_revisions={
+                "forecast_qkernel_entry": {revision}
+            },
+            probability_semantics_unscoped={
+                "forecast_qkernel_entry": bool(
+                    degraded["unscoped_probability_semantics_present"]
+                )
+            },
+            issued_at="2026-09-06T06:00:00+00:00",
+        )
+        value = conn.execute(
+            "SELECT value FROM risk_actions WHERE action_id = ?",
+            ("riskguard:gate:forecast_qkernel_entry",),
+        ).fetchone()["value"]
+        assert value == "true"
+        for metric in ("high", "low"):
+            assert policy_module.resolve_strategy_policy(
+                conn,
+                "forecast_qkernel_entry",
+                datetime(2026, 9, 6, 6, tzinfo=timezone.utc),
+                probability_semantics_revision=revision,
+                temperature_metric=metric,
+            ).gated is True
+        conn.close()
+
 
 class TestStrategyBrierMinSampleContinued:
     def test_one_strategy_cannot_pool_across_probability_semantics(self):
@@ -5949,6 +6020,50 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert curve["net_realized_pnl_usd"] == pytest.approx(-0.602523)
         conn.close()
 
+    def test_live_capital_curve_filters_exact_temperature_metric(self):
+        conn = self._live_capital_conn(
+            phase="economically_closed",
+            gross_pnl=-0.50,
+            exit_price=0.17,
+        )
+        high_curve = riskguard_module._day0_live_realized_capital_curve(
+            conn,
+            window_days=7.0,
+            as_of=datetime(2026, 8, 11, 17, tzinfo=timezone.utc),
+            temperature_metric="high",
+        )
+        low_curve = riskguard_module._day0_live_realized_capital_curve(
+            conn,
+            window_days=7.0,
+            as_of=datetime(2026, 8, 11, 17, tzinfo=timezone.utc),
+            temperature_metric="low",
+        )
+
+        assert high_curve["temperature_metric"] == "high"
+        assert high_curve["realized_position_count"] == 1
+        assert low_curve["temperature_metric"] == "low"
+        assert low_curve["filled_position_count"] == 0
+        assert low_curve["realized_position_count"] == 0
+        conn.close()
+
+        low_conn = self._live_capital_conn(
+            phase="economically_closed",
+            gross_pnl=-0.50,
+            exit_price=0.17,
+        )
+        low_conn.execute(
+            "UPDATE position_current SET temperature_metric='low'"
+        )
+        low_conn.commit()
+        low_only_curve = riskguard_module._day0_live_realized_capital_curve(
+            low_conn,
+            window_days=7.0,
+            as_of=datetime(2026, 8, 11, 17, tzinfo=timezone.utc),
+            temperature_metric="low",
+        )
+        assert low_only_curve["realized_position_count"] == 1
+        low_conn.close()
+
     def test_current_revision_capital_proof_is_wired_to_entry_gate(self):
         import inspect
 
@@ -5973,7 +6088,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
             riskguard_module._market_relative_alpha_gate_reason
         ).parameters
 
-    def test_same_target_date_high_and_low_count_as_one_evidence_cluster(self):
+    def test_same_target_date_high_and_low_use_independent_evidence_cohorts(self):
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 
         rows = []
@@ -6010,10 +6125,19 @@ class TestQkernelMarketRelativeAlphaEvidence:
             as_of=datetime(2026, 8, 11, tzinfo=timezone.utc),
         )
 
-        cohort = evidence["cohorts"][0]
-        assert cohort["candidate_count"] == 2
-        assert cohort["independent_cluster_count"] == 1
-        assert cohort["model_over_market_evalue"] == pytest.approx(4.75)
+        assert len(evidence["cohorts"]) == 2
+        assert {
+            cohort["temperature_metric"] for cohort in evidence["cohorts"]
+        } == {"high", "low"}
+        assert {
+            cohort["candidate_count"] for cohort in evidence["cohorts"]
+        } == {1}
+        assert {
+            cohort["independent_cluster_count"] for cohort in evidence["cohorts"]
+        } == {1}
+        assert sorted(
+            cohort["model_over_market_evalue"] for cohort in evidence["cohorts"]
+        ) == pytest.approx([4.5, 4.75])
         assert evidence["validated"] is False
         conn.close()
 
@@ -6384,6 +6508,59 @@ class TestQkernelMarketRelativeAlphaEvidence:
             f"realized=15,net_pnl_usd=-31.278889,revision={revision})"
         )
         assert revisions == (revision,)
+
+    def test_qkernel_probation_validation_is_exact_temperature_metric(self):
+        revision = riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
+        binding = {"status": "ok", "current_revision": revision}
+        base_curve = {
+            "status": "nonpositive",
+            "probability_semantics_revision": revision,
+            "global_selection_revision": (
+                riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+            ),
+            "selection_revision_bound": True,
+            "open_position_count": 0,
+            "realized_position_count": 3,
+            "blocked_position_count": 0,
+            "net_realized_pnl_usd": -1.0,
+        }
+        validated_high = {
+            "cohorts": [
+                {
+                    "decision_law_id": "executable_min_order_capital_gain_v2",
+                    "global_selection_revision": (
+                        riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+                    ),
+                    "probability_semantics_revisions": [revision],
+                    "temperature_metric": "high",
+                    "validated": True,
+                }
+            ]
+        }
+        low_reason, _ = riskguard_module._qkernel_revision_probation_gate_reason(
+            binding,
+            validated_high,
+            {**base_curve, "temperature_metric": "low"},
+            temperature_metric="low",
+        )
+        high_reason, _ = riskguard_module._qkernel_revision_probation_gate_reason(
+            binding,
+            validated_high,
+            {**base_curve, "temperature_metric": "high"},
+            temperature_metric="high",
+        )
+        missing_metric_reason, _ = (
+            riskguard_module._qkernel_revision_probation_gate_reason(
+                binding,
+                validated_high,
+                base_curve,
+            )
+        )
+
+        assert low_reason is not None
+        assert ",metric=low)" in low_reason
+        assert high_reason is None
+        assert missing_metric_reason is not None
 
     def test_unproven_day0_revision_allows_one_probe_then_positive_sequential_probe(self):
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
@@ -8647,6 +8824,31 @@ class TestStrategyPolicyResolver:
             decision_time=now,
         )
         assert allowed == {}
+        trade_conn.execute(
+            "UPDATE risk_actions SET value = ? WHERE action_id = ?",
+            (json.dumps({
+                "gate": True,
+                "probability_semantics_revisions": [current_revision],
+                "probability_semantics_metric_scopes": [{
+                    "probability_semantics_revision": current_revision,
+                    "temperature_metric": "low",
+                }],
+                "probability_semantics_broad_revisions": [],
+            }), "gate-stale-q-revision"),
+        )
+        for metric, expected_blocked in (("high", False), ("low", True), (None, True)):
+            trade_conn.execute(
+                "UPDATE world.decision_certificates SET payload_json = ? WHERE certificate_hash = ?",
+                (json.dumps({
+                    "strategy_key": "forecast_qkernel_entry",
+                    "probability_semantics_revision": current_revision,
+                    "metric": metric,
+                }), "cert-1"),
+            )
+            result = _edli_policy_blocked_open_rest_commands(
+                trade_conn, [rest], decision_time=now,
+            )
+            assert result == ({"rest-1": "STRATEGY_POLICY_GATED"} if expected_blocked else {})
         trade_conn.close()
 
     def test_resolve_strategy_policy_shrinks_only_one_strategy_allocation(self, monkeypatch):
@@ -9525,6 +9727,255 @@ class TestStrategyPolicyResolver:
 
         assert policy.threshold_multiplier in (pytest.approx(1.5), pytest.approx(1.8))
         assert "risk_action:threshold_multiplier" in policy.sources
+        conn.close()
+
+    def test_metric_scoped_probability_gate_matches_only_exact_pair(self, monkeypatch):
+        _neutralize_hard_safety(monkeypatch)
+        conn = _policy_conn()
+        now = datetime(2026, 9, 6, 6, 0, tzinfo=timezone.utc)
+        revision = riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
+        payload = json.dumps(
+            {
+                "gate": True,
+                "probability_semantics_revisions": [revision],
+                "probability_semantics_metric_scopes": [
+                    {
+                        "probability_semantics_revision": revision,
+                        "temperature_metric": "low",
+                    }
+                ],
+                "probability_semantics_broad_revisions": [],
+            },
+            separators=(",", ":"),
+        )
+        _insert_risk_action(
+            conn,
+            action_id="riskguard:gate:forecast_qkernel_entry",
+            strategy_key="forecast_qkernel_entry",
+            action_type="gate",
+            value=payload,
+            issued_at=now.isoformat(),
+            effective_until=None,
+            precedence=50,
+        )
+
+        low = policy_module.resolve_strategy_policy(
+            conn,
+            "forecast_qkernel_entry",
+            now,
+            probability_semantics_revision=revision,
+            temperature_metric="low",
+        )
+        high = policy_module.resolve_strategy_policy(
+            conn,
+            "forecast_qkernel_entry",
+            now,
+            probability_semantics_revision=revision,
+            temperature_metric="high",
+        )
+        missing_identity = policy_module.resolve_strategy_policy(
+            conn,
+            "forecast_qkernel_entry",
+            now,
+            probability_semantics_revision=revision,
+        )
+        wrong_revision = policy_module.resolve_strategy_policy(
+            conn,
+            "forecast_qkernel_entry",
+            now,
+            probability_semantics_revision="future-revision",
+            temperature_metric="low",
+        )
+
+        assert low.gated is True
+        assert high.gated is False
+        assert missing_identity.gated is True
+        assert wrong_revision.gated is False
+        assert policy_module.active_probability_revision_capital_gate_action_ids(
+            conn,
+            "forecast_qkernel_entry",
+            now,
+            probability_semantics_revision=revision,
+            temperature_metric="low",
+        ) == ("riskguard:gate:forecast_qkernel_entry",)
+        assert policy_module.active_probability_revision_capital_gate_action_ids(
+            conn,
+            "forecast_qkernel_entry",
+            now,
+            probability_semantics_revision=revision,
+            temperature_metric="high",
+        ) == ()
+        conn.close()
+
+    def test_metric_scoped_payload_keeps_broad_revision_union(self, monkeypatch):
+        _neutralize_hard_safety(monkeypatch)
+        conn = _policy_conn()
+        revision = riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
+        stale = riskguard_module.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
+        reason_pair = (
+            "qkernel_revision_probation_nonpositive(realized=3,"
+            f"net_pnl_usd=-1.0,revision={revision},metric=low)"
+        )
+        reason_broad = (
+            "market_relative_alpha_unproven(status=rejected,model_evalue=0.0,"
+            "required=10.0,clusters=0,law=executable_min_order_capital_gain_v2,"
+            f"revision={stale})"
+        )
+        riskguard_module._sync_riskguard_strategy_gate_actions(
+            conn,
+            {"forecast_qkernel_entry": [reason_pair, reason_broad]},
+            probability_semantics_scopes={
+                "forecast_qkernel_entry": {revision, stale}
+            },
+            probability_semantics_metric_scopes={
+                "forecast_qkernel_entry": {(revision, "low")}
+            },
+            probability_semantics_broad_revisions={
+                "forecast_qkernel_entry": {stale}
+            },
+            issued_at="2026-09-06T06:00:00+00:00",
+        )
+        row = conn.execute(
+            "SELECT value FROM risk_actions WHERE action_id = ?",
+            ("riskguard:gate:forecast_qkernel_entry",),
+        ).fetchone()
+        assert json.loads(row["value"]) == {
+            "gate": True,
+            "probability_semantics_revisions": sorted((revision, stale)),
+            "probability_semantics_metric_scopes": [
+                {
+                    "probability_semantics_revision": revision,
+                    "temperature_metric": "low",
+                }
+            ],
+            "probability_semantics_broad_revisions": [stale],
+        }
+        assert policy_module.resolve_strategy_policy(
+            conn,
+            "forecast_qkernel_entry",
+            datetime(2026, 9, 6, 6, tzinfo=timezone.utc),
+            probability_semantics_revision=stale,
+            temperature_metric="high",
+        ).gated is True
+        assert policy_module.resolve_strategy_policy(
+            conn,
+            "forecast_qkernel_entry",
+            datetime(2026, 9, 6, 6, tzinfo=timezone.utc),
+            probability_semantics_revision=revision,
+            temperature_metric="high",
+        ).gated is False
+        conn.close()
+
+    def test_unscoped_brier_cannot_shrink_mixed_metric_probation_gate(
+        self, monkeypatch,
+    ):
+        _neutralize_hard_safety(monkeypatch)
+        conn = _policy_conn()
+        revision = riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
+        riskguard_module._sync_riskguard_strategy_gate_actions(
+            conn,
+            {
+                "forecast_qkernel_entry": [
+                    "brier_degraded(level=YELLOW,brier=0.31,sample=12)",
+                    (
+                        "qkernel_revision_probation_nonpositive(realized=3,"
+                        f"net_pnl_usd=-1.0,revision={revision},metric=low)"
+                    ),
+                ]
+            },
+            probability_semantics_scopes={
+                "forecast_qkernel_entry": {revision}
+            },
+            probability_semantics_metric_scopes={
+                "forecast_qkernel_entry": {(revision, "low")}
+            },
+            issued_at="2026-09-06T06:00:00+00:00",
+        )
+        row = conn.execute(
+            "SELECT value FROM risk_actions WHERE action_id = ?",
+            ("riskguard:gate:forecast_qkernel_entry",),
+        ).fetchone()
+        assert row["value"] == "true"
+        for metric in ("high", "low"):
+            assert policy_module.resolve_strategy_policy(
+                conn,
+                "forecast_qkernel_entry",
+                datetime(2026, 9, 6, 6, tzinfo=timezone.utc),
+                probability_semantics_revision=revision,
+                temperature_metric=metric,
+            ).gated is True
+
+        riskguard_module._sync_riskguard_strategy_gate_actions(
+            conn,
+            {
+                "forecast_qkernel_entry": [
+                    "brier_degraded(level=YELLOW,brier=0.31,sample=12)",
+                    (
+                        "qkernel_revision_probation_nonpositive(realized=3,"
+                        f"net_pnl_usd=-1.0,revision={revision},metric=low)"
+                    ),
+                ]
+            },
+            probability_semantics_scopes={
+                "forecast_qkernel_entry": {revision}
+            },
+            probability_semantics_metric_scopes={
+                "forecast_qkernel_entry": {(revision, "low")}
+            },
+            probability_semantics_broad_revisions={
+                "forecast_qkernel_entry": {revision}
+            },
+            probability_semantics_unscoped={
+                "forecast_qkernel_entry": False
+            },
+            issued_at="2026-09-06T06:01:00+00:00",
+        )
+        row = conn.execute(
+            "SELECT value FROM risk_actions WHERE action_id = ?",
+            ("riskguard:gate:forecast_qkernel_entry",),
+        ).fetchone()
+        payload = json.loads(row["value"])
+        assert payload["probability_semantics_broad_revisions"] == [revision]
+        assert payload["probability_semantics_metric_scopes"] == [
+            {
+                "probability_semantics_revision": revision,
+                "temperature_metric": "low",
+            }
+        ]
+
+        riskguard_module._sync_riskguard_strategy_gate_actions(
+            conn,
+            {
+                "forecast_qkernel_entry": [
+                    "brier_degraded(level=YELLOW,brier=0.31,sample=12)",
+                    (
+                        "market_relative_alpha_unproven(status=rejected,"
+                        "model_evalue=0.0,required=10.0,clusters=0,"
+                        "law=executable_min_order_capital_gain_v2,"
+                        f"revision={revision})"
+                    ),
+                    (
+                        "qkernel_revision_probation_nonpositive(realized=3,"
+                        f"net_pnl_usd=-1.0,revision={revision},metric=low)"
+                    ),
+                ]
+            },
+            probability_semantics_scopes={
+                "forecast_qkernel_entry": {revision}
+            },
+            probability_semantics_metric_scopes={
+                "forecast_qkernel_entry": {(revision, "low")}
+            },
+            probability_semantics_broad_revisions={
+                "forecast_qkernel_entry": {revision}
+            },
+            issued_at="2026-09-06T06:02:00+00:00",
+        )
+        row = conn.execute(
+            "SELECT value FROM risk_actions WHERE action_id = ?",
+            ("riskguard:gate:forecast_qkernel_entry",),
+        ).fetchone()
+        assert row["value"] == "true"
         conn.close()
 
 

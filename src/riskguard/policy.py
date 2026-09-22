@@ -43,6 +43,7 @@ def resolve_strategy_policy(
     now: datetime,
     *,
     probability_semantics_revision: str | None = None,
+    temperature_metric: str | None = None,
 ) -> StrategyPolicy:
     if not strategy_key:
         raise ValueError("strategy_key is required")
@@ -115,15 +116,13 @@ def resolve_strategy_policy(
         try:
             action_type = str(row["action_type"])
             if action_type == "gate":
-                scoped_revisions = _risk_action_gate_probability_revisions(
-                    row["value"]
+                applies = _risk_action_gate_applies(
+                    row["value"],
+                    probability_semantics_revision=probability_semantics_revision,
+                    temperature_metric=temperature_metric,
                 )
-                if scoped_revisions:
-                    current_revision = str(
-                        probability_semantics_revision or ""
-                    ).strip()
-                    if current_revision and current_revision not in scoped_revisions:
-                        continue
+                if not applies:
+                    continue
                 if "gated" in locked_fields:
                     logger.info("policy: risk_action gate skipped — field locked by higher-priority source")
                     continue
@@ -154,6 +153,11 @@ def resolve_strategy_policy(
             # B050: sqlite3.Row has no .get() — use keys() membership.
             row_id = row["action_id"] if "action_id" in row.keys() else "?"
             logger.error("policy: bad_row for risk_action %s: %s", row_id, e)
+            if str(row["action_type"] or "") == "gate":
+                # A malformed scoped identity is a safety failure.  Preserve
+                # the gate instead of opening the strategy on parser error.
+                gated = True
+                locked_fields.add("gated")
             continue
 
     return StrategyPolicy(
@@ -172,6 +176,7 @@ def active_probability_revision_capital_gate_action_ids(
     now: datetime,
     *,
     probability_semantics_revision: str | None,
+    temperature_metric: str | None = None,
 ) -> tuple[str, ...]:
     """Return exact automated proof gates applying to one probability revision.
 
@@ -185,7 +190,6 @@ def active_probability_revision_capital_gate_action_ids(
     strategy = str(strategy_key or "").strip()
     if not strategy:
         raise ValueError("strategy_key is required")
-    revision = str(probability_semantics_revision or "").strip()
     action_ids: list[str] = []
     for row in _select_rows(_load_risk_actions(conn, strategy, _normalize_datetime(now))):
         if str(row["action_type"] or "") != "gate":
@@ -199,17 +203,11 @@ def active_probability_revision_capital_gate_action_ids(
             raise ValueError("malformed probability revision capital gate") from exc
         if not isinstance(payload, dict) or payload.get("gate") is not True:
             continue
-        revisions = payload.get("probability_semantics_revisions")
-        if revisions is None:
-            continue
-        if not isinstance(revisions, list):
-            raise ValueError("probability revision capital gate scope is invalid")
-        scoped = frozenset(
-            str(value).strip() for value in revisions if str(value).strip()
-        )
-        if not scoped:
-            raise ValueError("probability revision capital gate scope is empty")
-        if revision and revision not in scoped:
+        if not _risk_action_gate_applies(
+            raw,
+            probability_semantics_revision=probability_semantics_revision,
+            temperature_metric=temperature_metric,
+        ):
             continue
         action_id = str(row["action_id"] or "").strip()
         if not action_id:
@@ -383,6 +381,104 @@ def _risk_action_gate_probability_revisions(raw: Any) -> frozenset[str]:
         str(value).strip() for value in revisions if str(value).strip()
     )
     return cleaned
+
+
+def _risk_action_gate_scope(raw: Any) -> tuple[
+    frozenset[str], frozenset[tuple[str, str]], frozenset[str], bool
+]:
+    """Decode an automated gate's revision/binary metric identity.
+
+    The top-level revision list is retained for legacy readers and is never
+    treated as broad when an explicit metric scope is present.  In that shape,
+    ``probability_semantics_broad_revisions`` is the only revision-wide scope;
+    the pair list is exact ``(revision, temperature_metric)`` identity.
+    """
+
+    if not isinstance(raw, str) or not raw.lstrip().startswith("{"):
+        return frozenset(), frozenset(), frozenset(), False
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return frozenset(), frozenset(), frozenset(), False
+    if not isinstance(payload, dict) or payload.get("gate") is not True:
+        return frozenset(), frozenset(), frozenset(), False
+
+    revisions_raw = payload.get("probability_semantics_revisions")
+    if revisions_raw is None:
+        revisions: frozenset[str] = frozenset()
+    elif isinstance(revisions_raw, list):
+        revisions = frozenset(
+            str(value).strip() for value in revisions_raw if str(value).strip()
+        )
+        if not revisions:
+            raise ValueError("probability revision capital gate scope is empty")
+    else:
+        raise ValueError("probability revision capital gate scope is invalid")
+
+    pair_key = "probability_semantics_metric_scopes"
+    if pair_key not in payload:
+        return revisions, frozenset(), revisions, False
+    raw_pairs = payload.get(pair_key)
+    if not isinstance(raw_pairs, list):
+        raise ValueError("probability metric gate scope is invalid")
+    pairs: set[tuple[str, str]] = set()
+    for raw_pair in raw_pairs:
+        if not isinstance(raw_pair, dict):
+            raise ValueError("probability metric gate pair is invalid")
+        pair_revision = str(
+            raw_pair.get("probability_semantics_revision") or ""
+        ).strip()
+        metric = str(raw_pair.get("temperature_metric") or "").strip().lower()
+        if not pair_revision or metric not in {"high", "low"}:
+            raise ValueError("probability metric gate pair identity is incomplete")
+        pairs.add((pair_revision, metric))
+    if not pairs:
+        raise ValueError("probability metric gate scope is empty")
+
+    broad_raw = payload.get("probability_semantics_broad_revisions", [])
+    if not isinstance(broad_raw, list):
+        raise ValueError("probability broad revision gate scope is invalid")
+    broad = frozenset(str(value).strip() for value in broad_raw if str(value).strip())
+    return revisions, frozenset(pairs), broad, True
+
+
+def _risk_action_gate_applies(
+    raw: Any,
+    *,
+    probability_semantics_revision: str | None,
+    temperature_metric: str | None,
+) -> bool:
+    """Return whether one gate applies to an action's exact identity.
+
+    Scoped gates fail closed when the caller cannot prove both revision and
+    metric.  A different exact metric is outside the pair cohort; broad
+    revision evidence remains revision-wide by design.
+    """
+
+    if not isinstance(raw, str) or not raw.lstrip().startswith("{"):
+        return True
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        # Preserve the historical plain/invalid boolean behavior: the policy
+        # parser will still apply a gate rather than silently opening it.
+        return True
+    if not isinstance(payload, dict) or payload.get("gate") is not True:
+        return True
+    revisions, pairs, broad, has_metric_scope = _risk_action_gate_scope(raw)
+    if not revisions and not has_metric_scope:
+        return True
+    revision = str(probability_semantics_revision or "").strip()
+    metric = str(temperature_metric or "").strip().lower()
+    if has_metric_scope:
+        if not revision or metric not in {"high", "low"}:
+            return True
+        if revision in broad:
+            return True
+        return (revision, metric) in pairs
+    if not revision:
+        return True
+    return revision in revisions
 
 
 def _query_rows(

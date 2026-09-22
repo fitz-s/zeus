@@ -413,8 +413,8 @@ def _held_pinned_provenance_reason(
         ):
             return "REPLACEMENT_PINNED_DAY0_SOURCE_STATION_MISMATCH"
         if str(likelihood.get("semantics") or "").strip() not in {
-            "same_station_preliminary_report_survival_likelihood_v1",
-            "same_station_preliminary_report_survival_likelihood_jeffreys_prior_only_v1",
+            "same_station_preliminary_report_survival_likelihood_v2",
+            "same_station_preliminary_report_survival_likelihood_jeffreys_prior_only_v2",
         }:
             return "REPLACEMENT_PINNED_DAY0_LIKELIHOOD_SEMANTICS_MISMATCH"
         if str(likelihood.get("station_id") or "").strip().upper() != expected_station:

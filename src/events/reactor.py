@@ -13834,6 +13834,7 @@ def _edli_policy_blocked_open_rest_commands(
                 strategy_key,
                 decision_time,
                 probability_semantics_revision=revision,
+                temperature_metric=payload.get("metric"),
             )
         except Exception:  # noqa: BLE001 - authority loss pulls unfilled BUY risk
             blocked[command_id] = "ENTRY_POLICY_AUTHORITY_UNAVAILABLE"

@@ -2060,6 +2060,10 @@ def _entry_strategy_policy_submit_component(
             conn,
             strategy_key,
             checked_at or datetime.now(timezone.utc),
+            temperature_metric=(
+                actionable_payload.get("metric")
+                if isinstance(actionable_payload, Mapping) else None
+            ),
             **(
                 {"probability_semantics_revision": probability_revision}
                 if probability_revision

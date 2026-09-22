@@ -7890,3 +7890,69 @@ def test_identity_sell_accepts_improved_proceeds_without_price_calibration(bid, 
     assert (reason is None) is allowed
     if not allowed:
         assert "net_proceeds" in reason
+
+
+@pytest.mark.parametrize("first_metric", ["high", "low"])
+def test_global_entry_policy_cache_separates_temperature_metrics(monkeypatch, first_metric):
+    candidate = SimpleNamespace(
+        action="BUY", side="NO",
+        executable_cost_curve=SimpleNamespace(levels=(SimpleNamespace(price=Decimal("0.30")),)),
+        native_bid_levels=(SimpleNamespace(price=Decimal("0.29")),),
+    )
+    calls = []
+
+    def scoped_policy(_conn, _strategy, **kwargs):
+        metric = kwargs["temperature_metric"]
+        calls.append(metric)
+        return "STRATEGY_POLICY_GATED:test:sources=risk_action:gate" if metric == "low" else None
+
+    monkeypatch.setattr(era, "_entry_strategy_policy_blocks_live_submit", scoped_policy)
+    cache = {}
+    conn = object()
+    for metric in (first_metric, "low" if first_metric == "high" else "high", first_metric):
+        result = era._global_current_entry_feasibility_rejection_reason(
+            candidate, strategy_key="settlement_capture",
+            probability_semantics_revision="same-revision", temperature_metric=metric,
+            strategy_policy_conn=conn, strategy_policy_cache=cache,
+        )
+        assert (result is not None) == (metric == "low")
+    assert len(calls) == 2
+    assert set(calls) == {"high", "low"}
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+def test_final_entry_policy_forwards_exact_metric(monkeypatch, metric):
+    import src.riskguard.policy as policy_module
+    seen = []
+
+    def resolve(_conn, _strategy, _now, **kwargs):
+        seen.append(kwargs)
+        return SimpleNamespace(gated=False, exit_only=False, sources=())
+
+    monkeypatch.setattr(policy_module, "resolve_strategy_policy", resolve)
+    assert era._entry_strategy_policy_blocks_live_submit(
+        object(), "forecast_qkernel_entry", probability_semantics_revision="current",
+        temperature_metric=metric,
+    ) is None
+    assert seen == [{"probability_semantics_revision": "current", "temperature_metric": metric}]
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+@pytest.mark.parametrize("decision_time", [None, datetime(2026, 9, 21, tzinfo=timezone.utc)])
+def test_selection_policy_forwards_candidate_metric(monkeypatch, metric, decision_time):
+    import src.riskguard.policy as policy_module
+    seen = []
+
+    def resolve(_conn, _strategy, _now, **kwargs):
+        seen.append(kwargs)
+        return SimpleNamespace(gated=False, exit_only=False, sources=())
+
+    monkeypatch.setattr(policy_module, "resolve_strategy_policy", resolve)
+    monkeypatch.setattr(era, "_event_bound_strategy_key", lambda **kwargs: "forecast_qkernel_entry")
+    proof = SimpleNamespace(candidate=SimpleNamespace(metric=metric), direction="buy_yes",
+                            probability_semantics_revision="current")
+    assert era._strategy_policy_selection_rejection_reason(
+        proof, strategy_policy_conn=object(), strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
+        decision_time=decision_time,
+    ) is None
+    assert seen == [{"temperature_metric": metric, "probability_semantics_revision": "current"}]
