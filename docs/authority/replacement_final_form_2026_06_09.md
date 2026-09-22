@@ -190,7 +190,7 @@ log-wealth objective, never on a side-specific probability recipe.
 
 #### Day0 conditional remaining-path operator
 
-The current shared-carrier numerical operator is
+The shared-carrier operator for remaining-hourly paths is
 `extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2`. Its point q
 integrates the existing Gaussian mixture through the physical max/min and the
 canonical settlement preimages, including the observed-boundary atom. It changes
@@ -200,10 +200,10 @@ the operator and that legacy confidence-draw identity. The legacy `n_point`
 parameter affects the confidence seed, but not the analytic point expectation.
 
 The shared-carrier V1 is retained only for explicit, immutable historical replay. Current ENTRY and
-held-position belief require a complete V2 carrier declaration; ordinary
+held-position belief require a complete V2 or typed V3 carrier declaration; ordinary
 non-carrier forecasts are unaffected. Old, partial or unknown carrier versions
 are uncovered in the existing family coverage/seed loop and are rebuilt from
-causal inputs. Valid V2 materialization clears this family-scoped condition.
+causal inputs. Valid current materialization clears this family-scoped condition.
 Unavailable inputs preserve DATA_DEGRADED/read-only monitoring; version migration
 does not authorize liquidation or rewriting historical receipts. Posterior
 identity binds both carrier operator and content, even when numerical q coincides.
@@ -222,6 +222,27 @@ path_error²     = max(unresolved², instrument_latency_floor²)
 future_s        = provider_path_s + Normal(0, path_error)
 final_s         = extreme(observed_running_boundary, future_s)
 ```
+
+A station product predicting the **final daily extreme** is not a remaining
+hourly path. Its center remains separately typed in
+`day0_remaining_carrier_final_extremes_c`. When such a component is present,
+the shared operator is `typed_remaining_and_final_extreme_gaussian_v3`.
+Within each surviving observed-boundary scenario, a final-HIGH Gaussian is
+conditioned on being at least that boundary; a final-LOW Gaussian is conditioned
+on being at most it. Integrate the truncated, normalized Gaussian over the same
+settlement preimages. Do not clamp the center or censor its below/above-boundary
+mass into an atom. A no-boundary scenario retains its unconditioned Gaussian.
+A zero-variance component contradicting the surviving boundary is unavailable,
+not a fabricated point mass at the boundary.
+
+V3 retains the source-current error width, provider-component weights and
+boundary-survival mixture. Remaining-hourly components still use the max/min
+operator above. Both point probabilities and confidence draws use these same
+typed distributions, and carrier identity binds the two center sets separately.
+Without final-daily components, V1 historical replay and V2 results remain
+unchanged. Materialization, ENTRY, held redecision and submit-time reproduction
+share this builder; a new Day0 semantics revision prevents mixing old and new
+decision certificates or settlement attribution.
 
 The provider-path distribution carries current provider disagreement and the
 explicit remaining diurnal shape. It does not carry the error shared by all

@@ -275,7 +275,9 @@ def tradeable_grade_coverage_sql(
     the table alias with a trailing dot already applied by the caller's existing
     convention (for example, ``"p."``).
     """
-    from src.data.day0_hourly_vectors import DAY0_REMAINING_CARRIER_OPERATOR_V2
+    from src.data.day0_hourly_vectors import (
+        DAY0_REMAINING_CARRIER_OPERATOR_V2, DAY0_REMAINING_CARRIER_OPERATOR_V3,
+    )
 
     cols = set(posterior_columns)
     fragments: list[str] = []
@@ -330,6 +332,12 @@ def tradeable_grade_coverage_sql(
     carrier_operator_value = (
         f"json_extract({provenance_expr}, '$.day0_remaining_carrier_operator')"
     )
+    carrier_shape_type = f"json_type({provenance_expr}, '$.q_shape')"
+    carrier_shape_value = f"json_extract({provenance_expr}, '$.q_shape')"
+    provider_type = f"json_type({provenance_expr}, '$.day0_remaining_carrier_station_extreme_providers')"
+    provider_value = f"json_extract({provenance_expr}, '$.day0_remaining_carrier_station_extreme_providers')"
+    final_centers_type = f"json_type({provenance_expr}, '$.day0_remaining_carrier_final_extremes_c')"
+    final_centers_value = f"json_extract({provenance_expr}, '$.day0_remaining_carrier_final_extremes_c')"
     ens_cycle_value = (
         f"json_extract({provenance_expr}, '{shape_path}.source_cycle_time')"
     )
@@ -368,13 +376,34 @@ def tradeable_grade_coverage_sql(
         "AND (("
         f"{carrier_identity_type} IS NULL AND {carrier_operator_type} IS NULL AND "
         f"COALESCE(json_extract({provenance_expr}, '$.q_shape'), '') "
-        "NOT IN ('day0_remaining_shared_carrier_v1', 'day0_remaining_shared_carrier_v2')"
+        "NOT IN ('day0_remaining_shared_carrier_v1', 'day0_remaining_shared_carrier_v2', 'day0_remaining_shared_carrier_v3')"
         ") OR ("
         f"{carrier_identity_type} = 'text' AND "
         f"length(trim(COALESCE({carrier_identity_value}, ''))) > 0 AND "
         f"{carrier_operator_type} = 'text' AND "
-        f"{carrier_operator_value} = '{DAY0_REMAINING_CARRIER_OPERATOR_V2}'"
-        "))"
+        f"(({carrier_operator_value} = '{DAY0_REMAINING_CARRIER_OPERATOR_V2}' AND "
+        f"({carrier_shape_type} IS NULL OR {carrier_shape_type} = 'null' OR {carrier_shape_value} NOT IN ('day0_remaining_shared_carrier_v1', 'day0_remaining_shared_carrier_v2', 'day0_remaining_shared_carrier_v3') OR {carrier_shape_value} = 'day0_remaining_shared_carrier_v2') AND "
+        f"({provider_type} IS NULL OR {provider_type} = 'null' OR ({provider_type} = 'array' AND "
+        "json_array_length(" + provenance_expr + ", '$.day0_remaining_carrier_station_extreme_providers') = 0)) AND "
+        f"({final_centers_type} IS NULL OR {final_centers_type} = 'null' OR ({final_centers_type} = 'array' AND "
+        "json_array_length(" + provenance_expr + ", '$.day0_remaining_carrier_final_extremes_c') = 0))) OR ("
+        f"{carrier_operator_value} = '{DAY0_REMAINING_CARRIER_OPERATOR_V3}' AND "
+        f"({carrier_shape_type} IS NULL OR {carrier_shape_type} = 'null' OR {carrier_shape_value} NOT IN ('day0_remaining_shared_carrier_v1', 'day0_remaining_shared_carrier_v2', 'day0_remaining_shared_carrier_v3') OR {carrier_shape_value} = 'day0_remaining_shared_carrier_v3') AND "
+        f"{provider_type} = 'array' AND json_array_length(" + provenance_expr + ", '$.day0_remaining_carrier_station_extreme_providers') > 0 AND "
+        f"{final_centers_type} = 'array' AND "
+        "json_array_length(" + provenance_expr + ", '$.day0_remaining_carrier_final_extremes_c') = "
+        "json_array_length(" + provenance_expr + ", '$.day0_remaining_carrier_station_extreme_providers') AND "
+        f"NOT EXISTS (SELECT 1 FROM json_each(CASE WHEN {provider_type} = 'array' THEN {provider_value} ELSE '[]' END) AS provider "
+        f"LEFT JOIN json_each(CASE WHEN {final_centers_type} = 'array' THEN {final_centers_value} ELSE '[]' END) AS final_center "
+        "ON final_center.key = provider.key "
+        "WHERE provider.type <> 'object' "
+        "OR COALESCE(CASE WHEN provider.type = 'object' THEN json_type(provider.value, '$.forecast_value_c') ELSE '' END, '') NOT IN ('integer', 'real') "
+        "OR ABS(CAST(CASE WHEN provider.type = 'object' THEN json_extract(provider.value, '$.forecast_value_c') ELSE 0 END AS REAL)) > 1.7976931348623157e308 "
+        "OR COALESCE(final_center.type, '') NOT IN ('integer', 'real') "
+        "OR ABS(CAST(final_center.value AS REAL)) > 1.7976931348623157e308 "
+        "OR CAST(CASE WHEN provider.type = 'object' THEN json_extract(provider.value, '$.forecast_value_c') ELSE 0 END AS REAL) "
+        "!= CAST(final_center.value AS REAL)))"
+        ")))"
     )
     return "\n              ".join(fragments)
 

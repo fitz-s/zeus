@@ -1,8 +1,8 @@
 # Purpose: Verify forecast-cycle eligibility, coverage and current-carrier reseeding.
 # Reuse: Run when changing posterior cycle authority or seed coverage and drain rules.
 # Created: 2026-06-10
-# Last reused or audited: 2026-08-19
-# Lifecycle: created=2026-06-10; last_reviewed=2026-08-19; last_reused=2026-08-19
+# Last reused or audited: 2026-09-22
+# Lifecycle: created=2026-06-10; last_reviewed=2026-09-22; last_reused=2026-09-22
 # Authority basis: operator staleness/cycle-physics directive 2026-06-10 (bounded re-materialization
 #   staleness gate at materialization, fail-closed; cycle-phase provenance treats all standard
 #   00Z/06Z/12Z/18Z cycles as live-eligible synoptic); 2026-08-19 causal
@@ -438,7 +438,46 @@ def test_day0_carrier_coverage_requires_complete_current_v2_pair() -> None:
         ({}, True),
         ({"q_shape": "day0_remaining_shared_carrier_v1"}, False),
         ({"q_shape": "day0_remaining_shared_carrier_v2"}, False),
+        ({"q_shape": "day0_remaining_shared_carrier_v3"}, False),
+        ({"day0_remaining_carrier_content_identity": "old-censored-station",
+          "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+          "day0_remaining_carrier_station_extreme_providers": [{"model": "hko_fnd"}]}, False),
+        *(
+            ({"day0_remaining_carrier_content_identity": "typed-content",
+              "day0_remaining_carrier_operator": "typed_remaining_and_final_extreme_gaussian_v3",
+              "day0_remaining_carrier_final_extremes_c": centers,
+              "day0_remaining_carrier_station_extreme_providers": [
+                  {"forecast_value_c": value} for value in centers
+              ] if isinstance(centers, (list, tuple)) else []}, accepted)
+            for centers, accepted in (([32.0], True), ([], False),
+                                      ([True], False), (["32"], False),
+                                      ("invalid", False), ([None], False))
+        ),
+        ({"day0_remaining_carrier_content_identity": "typed-content",
+          "day0_remaining_carrier_operator": "typed_remaining_and_final_extreme_gaussian_v3",
+          "day0_remaining_carrier_final_extremes_c": [32.0],
+          "day0_remaining_carrier_station_extreme_providers": [{"forecast_value_c": 31.0}]}, False),
+        ({"day0_remaining_carrier_content_identity": "typed-content",
+          "day0_remaining_carrier_operator": "typed_remaining_and_final_extreme_gaussian_v3",
+          "day0_remaining_carrier_final_extremes_c": [32.0],
+          "day0_remaining_carrier_station_extreme_providers": [None]}, False),
+        ({"q_shape": "day0_remaining_shared_carrier_v2",
+          "day0_remaining_carrier_content_identity": "typed-content",
+          "day0_remaining_carrier_operator": "typed_remaining_and_final_extreme_gaussian_v3",
+          "day0_remaining_carrier_final_extremes_c": [32.0],
+          "day0_remaining_carrier_station_extreme_providers": [{"forecast_value_c": 32.0}]}, False),
+
         ({"q_shape": "fused_day0_fast_residual_likelihood"}, True),
+        ({"q_shape": "fused_day0_fast_residual_likelihood",
+          "day0_remaining_carrier_content_identity": "content-v2",
+          "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+          "day0_remaining_carrier_station_extreme_providers": [],
+          "day0_remaining_carrier_final_extremes_c": []}, True),
+        ({"q_shape": "fused_day0_fast_residual_likelihood",
+          "day0_remaining_carrier_content_identity": "typed-content",
+          "day0_remaining_carrier_operator": "typed_remaining_and_final_extreme_gaussian_v3",
+          "day0_remaining_carrier_final_extremes_c": [32.0],
+          "day0_remaining_carrier_station_extreme_providers": [{"forecast_value_c": 32.0}]}, True),
         (
             {
                 "day0_remaining_carrier_content_identity": "content-v1",
@@ -533,6 +572,89 @@ def test_day0_carrier_coverage_requires_complete_current_v2_pair() -> None:
             f"SELECT count(*) FROM posterior WHERE 1=1 {clause}"
         ).fetchone()[0]
         assert bool(count) is expected, carrier
+
+
+def test_day0_v3_coverage_rejects_malformed_provider_and_infinite_value() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE posterior (q_lcb_json TEXT, q_ucb_json TEXT, provenance_json TEXT)"
+    )
+    base = {
+        "q_lcb_basis": "fused_center_bootstrap_p05",
+        "bayes_precision_fusion": {
+            "current_evidence_shape": {
+                "shape_lag_hours": 0,
+                "translation_applied": False,
+                "stale_shape_reused": False,
+                "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                "source_cycle_time": "2026-09-20T00:00:00Z",
+            }
+        },
+    }
+    clause = tradeable_grade_coverage_sql(
+        posterior_columns={"q_lcb_json", "q_ucb_json", "provenance_json"},
+        decision_time=datetime(2026, 9, 20, 1, tzinfo=UTC),
+    )
+    cases = [
+        *(
+            {
+                **base,
+                "day0_remaining_carrier_content_identity": "typed-content",
+                "day0_remaining_carrier_operator": "typed_remaining_and_final_extreme_gaussian_v3",
+                "day0_remaining_carrier_final_extremes_c": [32.0],
+                "day0_remaining_carrier_station_extreme_providers": [{"forecast_value_c": 32.0}],
+                field: "invalid",
+            }
+            for field in (
+                "day0_remaining_carrier_final_extremes_c",
+                "day0_remaining_carrier_station_extreme_providers",
+            )
+        ),
+        {
+            **base,
+            "day0_remaining_carrier_content_identity": "typed-content",
+            "day0_remaining_carrier_operator": "typed_remaining_and_final_extreme_gaussian_v3",
+            "day0_remaining_carrier_final_extremes_c": [32.0],
+            "day0_remaining_carrier_station_extreme_providers": ["invalid"],
+        },
+        {
+            **base,
+            "day0_remaining_carrier_content_identity": "typed-content",
+            "day0_remaining_carrier_operator": "typed_remaining_and_final_extreme_gaussian_v3",
+            "day0_remaining_carrier_final_extremes_c": [32.0],
+            "day0_remaining_carrier_station_extreme_providers": "invalid",
+        },
+        {
+            **base,
+            "day0_remaining_carrier_content_identity": "typed-content",
+            "day0_remaining_carrier_operator": "typed_remaining_and_final_extreme_gaussian_v3",
+            "day0_remaining_carrier_final_extremes_c": "invalid",
+            "day0_remaining_carrier_station_extreme_providers": [
+                {"forecast_value_c": 32.0}
+            ],
+        },
+        json.dumps(
+            {
+                **base,
+                "day0_remaining_carrier_content_identity": "typed-content",
+                "day0_remaining_carrier_operator": "typed_remaining_and_final_extreme_gaussian_v3",
+                "day0_remaining_carrier_final_extremes_c": [999.0],
+                "day0_remaining_carrier_station_extreme_providers": [
+                    {"forecast_value_c": 999.0}
+                ],
+            }
+        ).replace("999.0", "1e999"),
+    ]
+    for provenance in cases:
+        raw = provenance if isinstance(provenance, str) else json.dumps(provenance)
+        conn.execute("DELETE FROM posterior")
+        conn.execute(
+            "INSERT INTO posterior VALUES (?, ?, ?)",
+            ('{"bin":0.1}', '{"bin":0.2}', raw),
+        )
+        assert conn.execute(
+            f"SELECT count(*) FROM posterior WHERE 1=1 {clause}"
+        ).fetchone()[0] == 0
 
 
 @pytest.mark.parametrize("legacy_shape_only", (None, "day0_remaining_shared_carrier_v1", "day0_remaining_shared_carrier_v2"))
@@ -674,6 +796,7 @@ def test_day0_v1_coverage_drains_seed_and_v2_coverage_stops_reenqueue(tmp_path, 
 
     v2_provenance = {
         **provenance,
+        "q_shape": "day0_remaining_shared_carrier_v2",
         "day0_remaining_carrier_content_identity": "content-v2",
         "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
     }

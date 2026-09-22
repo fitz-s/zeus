@@ -1309,6 +1309,7 @@ def _day0_noaa_preliminary_carrier(
     future_members_c: Sequence[float] | None,
     bins: Sequence[object],
     path_error_sigma_c: float,
+    final_extreme_centers_c: Sequence[float] = (),
 ) -> tuple[dict[str, object], dict[str, object]]:
     """Build a source-specific provisional shared remaining-day carrier.
 
@@ -1331,7 +1332,6 @@ def _day0_noaa_preliminary_carrier(
     from src.config import runtime_cities_by_name
     from src.contracts.settlement_semantics import SettlementSemantics
     from src.data.day0_hourly_vectors import (
-        DAY0_REMAINING_CARRIER_OPERATOR_V2,
         build_day0_remaining_probability_carrier,
         day0_remaining_carrier_identity_inputs,
         read_day0_current_temperature_state,
@@ -1482,6 +1482,10 @@ def _day0_noaa_preliminary_carrier(
     identity_inputs["current_path_state"] = current_state.identity()
     carrier = build_day0_remaining_probability_carrier(
         future_extremes_c=future_members_native,
+        final_extreme_centers_c=tuple(
+            float(value) * native_scale + native_offset
+            for value in final_extreme_centers_c
+        ),
         boundary_scenarios=native_boundary_scenarios,
         metric=metric,
         path_error_sigma_c=float(path_error_sigma_c) * native_scale,
@@ -1491,7 +1495,6 @@ def _day0_noaa_preliminary_carrier(
         n_samples=500,
         identity_inputs=identity_inputs,
         settlement_semantics=SettlementSemantics.for_city(city),
-        operator=DAY0_REMAINING_CARRIER_OPERATOR_V2,
     )
     return carrier, likelihood
 
@@ -1707,7 +1710,7 @@ def _day0_noaa_carrier_future_members(
         )
     combined = tuple((*future, *station_values))
     return (
-        combined,
+        future,
         unresolved_path_sigma(combined),
         cutoff,
         tuple(evidence),
@@ -6361,6 +6364,10 @@ def _compute_posterior_payload(
                         future_members_c=_carrier_future,
                         bins=request.bins,
                         path_error_sigma_c=_carrier_path_sigma,
+                        final_extreme_centers_c=tuple(
+                            float(evidence["forecast_value_c"])
+                            for evidence in _day0_shared_carrier_station_extremes
+                        ),
                     )
                 )
                 if not str(
@@ -6596,7 +6603,11 @@ def _compute_posterior_payload(
                     for index, item in enumerate(request.bins)
                 }
                 q = q_global
-                q_shape = "day0_remaining_shared_carrier_v2"
+                q_shape = (
+                    "day0_remaining_shared_carrier_v3"
+                    if _day0_shared_carrier_station_extremes
+                    else "day0_remaining_shared_carrier_v2"
+                )
                 # 2026-09-13: the shared Day0 carrier derives its width from instrument sigma +
                 # path error (_day0_noaa_carrier_future_members / _day0_noaa_preliminary_carrier),
                 # never from the settlement-residual floor artifact — the lookup above ran
@@ -6807,7 +6818,11 @@ def _compute_posterior_payload(
                 except Exception:
                     pass
             if _day0_shared_carrier is not None:
-                q_shape = "day0_remaining_shared_carrier_v2"
+                q_shape = (
+                    "day0_remaining_shared_carrier_v3"
+                    if _day0_shared_carrier_station_extremes
+                    else "day0_remaining_shared_carrier_v2"
+                )
                 carrier_q = {
                     str(item.bin_id): float(_day0_shared_carrier["q"][index])
                     for index, item in enumerate(request.bins)
@@ -7219,6 +7234,10 @@ def _compute_posterior_payload(
                 ),
                 "day0_remaining_carrier_future_extremes_c": [
                     float(value) for value in _carrier_future
+                ],
+                "day0_remaining_carrier_final_extremes_c": [
+                    float(evidence["forecast_value_c"])
+                    for evidence in _day0_shared_carrier_station_extremes
                 ],
                 "day0_remaining_carrier_station_extreme_providers": [
                     dict(value)

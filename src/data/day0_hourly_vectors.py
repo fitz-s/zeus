@@ -57,6 +57,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import numpy as np
+from scipy.special import log_ndtr, ndtri_exp
 
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.contracts.settlement_semantics import settlement_preimage_offsets
@@ -70,6 +71,9 @@ UTC = timezone.utc
 DAY0_REMAINING_CARRIER_OPERATOR_V1 = "extreme_observed_then_noisy_future_v1"
 DAY0_REMAINING_CARRIER_OPERATOR_V2 = (
     "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2"
+)
+DAY0_REMAINING_CARRIER_OPERATOR_V3 = (
+    "typed_remaining_and_final_extreme_gaussian_v3"
 )
 DAY0_REMAINING_CARRIER_OPERATOR = DAY0_REMAINING_CARRIER_OPERATOR_V2
 
@@ -1008,13 +1012,332 @@ def day0_remaining_carrier_identity_inputs(
     }
 
 
+def _day0_log_normal_interval_probability(
+    mu: float, sigma: float, lower: float, upper: float,
+) -> float:
+    """Log probability for a normal interval, stable in 40-sigma tails."""
+
+    if lower >= upper:
+        return -math.inf
+    z_lower = -math.inf if lower == -math.inf else (lower - mu) / sigma
+    z_upper = math.inf if upper == math.inf else (upper - mu) / sigma
+    if z_lower == -math.inf and z_upper == math.inf:
+        return 0.0
+
+    def log_difference(log_high: float, log_low: float) -> float:
+        if math.isinf(log_low) and log_low < 0.0:
+            return log_high
+        if log_high <= log_low:
+            return -math.inf
+        return log_high + math.log(-math.expm1(log_low - log_high))
+
+    if z_upper <= 0.0:
+        return log_difference(float(log_ndtr(z_upper)), float(log_ndtr(z_lower)))
+    if z_lower >= 0.0:
+        return log_difference(float(log_ndtr(-z_lower)), float(log_ndtr(-z_upper)))
+    # An interval crossing the mean has no severe cancellation.  Keep this
+    # branch in ordinary space so the result is exact around zero as well.
+    from scipy.special import ndtr
+
+    probability = float(ndtr(z_upper) - ndtr(z_lower))
+    return math.log(probability) if probability > 0.0 else -math.inf
+
+
+def _day0_truncated_normal_interval_probability(
+    *, mu: float, sigma: float, lower: float, upper: float,
+    support_lower: float = -math.inf, support_upper: float = math.inf,
+) -> float:
+    """Return a normal interval mass conditioned on a one-sided support."""
+
+    clipped_lower = max(lower, support_lower)
+    clipped_upper = min(upper, support_upper)
+    if clipped_lower >= clipped_upper:
+        return 0.0
+    log_numerator = _day0_log_normal_interval_probability(
+        mu, sigma, clipped_lower, clipped_upper
+    )
+    log_denominator = _day0_log_normal_interval_probability(
+        mu, sigma, support_lower, support_upper
+    )
+    if math.isinf(log_numerator) and log_numerator < 0.0:
+        return 0.0
+    if math.isinf(log_denominator) or not math.isfinite(log_denominator):
+        raise ValueError("DAY0_REMAINING_CARRIER_TRUNCATION_INVALID")
+    probability = math.exp(log_numerator - log_denominator)
+    return float(min(1.0, max(0.0, probability)))
+
+
+def _day0_sample_truncated_normal(
+    rng: np.random.Generator, *, mu: np.ndarray, sigma: float,
+    boundary: np.ndarray, metric: str,
+) -> np.ndarray:
+    """Draw one-sided conditional normals using log-CDF inverse tails."""
+
+    uniforms = np.clip(
+        rng.random(mu.shape), np.nextafter(0.0, 1.0),
+        np.nextafter(1.0, 0.0),
+    )
+    z_boundary = (boundary - mu) / sigma
+    if metric == "high":
+        log_tail = log_ndtr(-z_boundary)
+        # P(X >= b) is the survival tail.  Multiplication in log space keeps
+        # a 40-sigma lower tail finite instead of producing 0/0.
+        log_survival = log_tail + np.log1p(-uniforms)
+        z = -ndtri_exp(log_survival)
+    else:
+        log_cdf = log_ndtr(z_boundary)
+        log_probability = log_cdf + np.log(uniforms)
+        z = ndtri_exp(log_probability)
+    if not np.isfinite(z).all():
+        raise ValueError(
+            "DAY0_REMAINING_CARRIER_TRUNCATED_SAMPLE_INVALID"
+        )
+    return mu + sigma * z
+
+
+def _build_day0_remaining_probability_carrier_v3(
+    *, values: np.ndarray, final_centers: np.ndarray,
+    scenarios: tuple[tuple[float | None, float], ...], metric: str,
+    sigma: float, path_error_sigma: float, instrument_sigma: float,
+    bounds: tuple[tuple[float | None, float | None], ...],
+    n_point: int, n_samples: int, legacy_identity: str,
+    economic_identity_inputs: Mapping[str, object],
+    settlement_semantics: SettlementSemantics,
+) -> dict[str, object]:
+    """Build V3 from typed future and final-extreme components.
+
+    Future components retain the censoring operator used by V2.  Final-extreme
+    components are separate continuous centers, conditioned on the same
+    report-survival boundary scenario.  Keeping the two loops separate is the
+    shape-level guard against accidentally turning a final center into a
+    boundary atom.
+    """
+    if sigma == 0.0:
+        for boundary, weight in scenarios:
+            if boundary is None or weight <= 0.0:
+                continue
+            if metric == "high" and np.any(final_centers < boundary):
+                raise ValueError(
+                    "DAY0_REMAINING_CARRIER_FINAL_CENTER_CONTRADICTS_BOUNDARY"
+                )
+            if metric == "low" and np.any(final_centers > boundary):
+                raise ValueError(
+                    "DAY0_REMAINING_CARRIER_FINAL_CENTER_CONTRADICTS_BOUNDARY"
+                )
+
+    low_offset, high_offset = settlement_preimage_offsets(
+        settlement_semantics.rounding_rule,
+        half_step=settlement_semantics.precision / 2.0,
+    )
+
+    def bin_probability_vector(mu: float, boundary: float | None) -> np.ndarray:
+        out = np.zeros(len(bounds), dtype=float)
+        if sigma == 0.0:
+            final = mu
+            if boundary is not None:
+                final = max(mu, boundary) if metric == "high" else min(mu, boundary)
+            settled = float(settlement_semantics.round_values([final])[0])
+            for index, (low, high) in enumerate(bounds):
+                if (low is None or settled >= low) and (high is None or settled <= high):
+                    out[index] = 1.0
+                    break
+            if not out.any():
+                raise ValueError("DAY0_REMAINING_CARRIER_BIN_TOPOLOGY_INVALID")
+            return out
+
+        for index, (low, high) in enumerate(bounds):
+            lower = -math.inf if low is None else low + low_offset
+            upper = math.inf if high is None else high + high_offset
+            if boundary is None:
+                out[index] = math.exp(
+                    _day0_log_normal_interval_probability(mu, sigma, lower, upper)
+                )
+                continue
+
+            rounded_boundary = float(settlement_semantics.round_values([boundary])[0])
+            atom_in_bin = (
+                (low is None or rounded_boundary >= low)
+                and (high is None or rounded_boundary <= high)
+            )
+            if metric == "high":
+                out[index] = math.exp(
+                    _day0_log_normal_interval_probability(
+                        mu, sigma, max(lower, boundary), upper
+                    )
+                )
+                if atom_in_bin:
+                    out[index] += math.exp(
+                        _day0_log_normal_interval_probability(
+                            mu, sigma, -math.inf, boundary
+                        )
+                    )
+            else:
+                out[index] = math.exp(
+                    _day0_log_normal_interval_probability(
+                        mu, sigma, lower, min(upper, boundary)
+                    )
+                )
+                if atom_in_bin:
+                    out[index] += math.exp(
+                        _day0_log_normal_interval_probability(
+                            mu, sigma, boundary, math.inf
+                        )
+                    )
+        total = float(out.sum())
+        if total <= 0.0 or not np.isfinite(total):
+            raise ValueError("DAY0_REMAINING_CARRIER_BIN_TOPOLOGY_INVALID")
+        return out / total
+
+    def final_center_probability_vector(
+        mu: float, boundary: float | None,
+    ) -> np.ndarray:
+        if sigma == 0.0:
+            return bin_probability_vector(mu, boundary)
+        out = np.zeros(len(bounds), dtype=float)
+        for index, (low, high) in enumerate(bounds):
+            lower = -math.inf if low is None else low + low_offset
+            upper = math.inf if high is None else high + high_offset
+            if boundary is None:
+                log_mass = _day0_log_normal_interval_probability(
+                    mu, sigma, lower, upper
+                )
+                out[index] = math.exp(log_mass)
+            elif metric == "high":
+                out[index] = _day0_truncated_normal_interval_probability(
+                    mu=mu, sigma=sigma, lower=lower, upper=upper,
+                    support_lower=boundary,
+                )
+            else:
+                out[index] = _day0_truncated_normal_interval_probability(
+                    mu=mu, sigma=sigma, lower=lower, upper=upper,
+                    support_upper=boundary,
+                )
+        total = float(out.sum())
+        if total <= 0.0 or not np.isfinite(total):
+            raise ValueError("DAY0_REMAINING_CARRIER_BIN_TOPOLOGY_INVALID")
+        return out / total
+
+    point = np.zeros(len(bounds), dtype=float)
+    component_count = values.size + final_centers.size
+    for boundary, weight in scenarios:
+        if weight <= 0.0:
+            continue
+        component = np.zeros(len(bounds), dtype=float)
+        for member in values:
+            component += bin_probability_vector(float(member), boundary)
+        for center in final_centers:
+            component += final_center_probability_vector(float(center), boundary)
+        point += float(weight) * component
+    point /= float(component_count)
+    point_total = float(point.sum())
+    if point_total <= 0.0 or not np.isfinite(point_total):
+        raise ValueError("DAY0_REMAINING_CARRIER_BIN_TOPOLOGY_INVALID")
+    point /= point_total
+
+    v3_content = {
+        "v": 5,
+        "operator": DAY0_REMAINING_CARRIER_OPERATOR_V3,
+        "component_types": {
+            "remaining_future_extremes": [float(x) for x in values],
+            "final_extreme_centers": [float(x) for x in final_centers],
+        },
+        "boundary_scenarios": scenarios,
+        "n_point": n_point,
+        "n_samples": n_samples,
+        "inputs": economic_identity_inputs,
+        "sigma_source": {
+            "path_error_sigma": path_error_sigma,
+            "instrument_sigma": instrument_sigma,
+            "combined_sigma": sigma,
+            "confidence_draw_identity": legacy_identity,
+        },
+        "bins": bounds,
+        "settlement_semantics": {
+            "resolution_source": settlement_semantics.resolution_source,
+            "measurement_unit": settlement_semantics.measurement_unit,
+            "precision": settlement_semantics.precision,
+            "rounding_rule": settlement_semantics.rounding_rule,
+        },
+    }
+    identity = hashlib.sha256(
+        json.dumps(v3_content, sort_keys=True, separators=(",", ":"), default=str).encode()
+    ).hexdigest()
+
+    def draw_v3(rows: int, seed: int) -> np.ndarray:
+        rng = np.random.default_rng(seed)
+        future = values + rng.normal(0.0, sigma, (rows, values.size))
+        scenario_i = rng.choice(len(scenarios), size=rows, p=[w for _, w in scenarios])
+        boundary_values = np.asarray(
+            [0.0 if scenarios[i][0] is None else scenarios[i][0] for i in scenario_i],
+            dtype=float,
+        )
+        has_boundary = np.asarray(
+            [scenarios[i][0] is not None for i in scenario_i], dtype=bool
+        )
+        bounded = (
+            np.maximum(future, boundary_values[:, None])
+            if metric == "high"
+            else np.minimum(future, boundary_values[:, None])
+        )
+        future_final = np.where(has_boundary[:, None], bounded, future)
+        if final_centers.size:
+            center_means = np.broadcast_to(final_centers, (rows, final_centers.size))
+            center_final = np.empty_like(center_means, dtype=float)
+            if sigma == 0.0:
+                center_final = center_means.copy()
+            else:
+                unbounded = ~has_boundary
+                if np.any(unbounded):
+                    center_final[unbounded] = center_means[unbounded] + rng.normal(
+                        0.0, sigma, (int(unbounded.sum()), final_centers.size)
+                    )
+                if np.any(has_boundary):
+                    conditional = _day0_sample_truncated_normal(
+                        rng,
+                        mu=center_means[has_boundary],
+                        sigma=sigma,
+                        boundary=np.broadcast_to(
+                            boundary_values[has_boundary, None],
+                            (int(has_boundary.sum()), final_centers.size),
+                        ),
+                        metric=metric,
+                    )
+                    center_final[has_boundary] = conditional
+            all_final = np.concatenate((future_final, center_final), axis=1)
+        else:
+            all_final = future_final
+        settled = settlement_semantics.round_values(all_final)
+        out = np.empty((rows, len(bounds)), dtype=float)
+        for index, (low, high) in enumerate(bounds):
+            mask = np.ones(settled.shape, dtype=bool)
+            if low is not None:
+                mask &= settled >= low
+            if high is not None:
+                mask &= settled <= high
+            out[:, index] = np.mean(mask, axis=1)
+        totals = out.sum(axis=1, keepdims=True)
+        if np.any(totals <= 0.0) or not np.isfinite(totals).all():
+            raise ValueError("DAY0_REMAINING_CARRIER_BIN_TOPOLOGY_INVALID")
+        return out / totals
+
+    samples = draw_v3(n_samples, int(identity[:16], 16) ^ 0x9E3779B97F4A7C15)
+    return {
+        "q": [float(x) for x in point],
+        "samples": [[float(x) for x in row] for row in samples],
+        "content_identity": identity,
+        "operator": DAY0_REMAINING_CARRIER_OPERATOR_V3,
+        "sample_count": n_samples,
+    }
+
+
 def build_day0_remaining_probability_carrier(
     *, future_extremes_c: Iterable[float], boundary_scenarios: Iterable[tuple[float | None, float]],
+    final_extreme_centers_c: Iterable[float] = (),
     metric: str, path_error_sigma_c: float, instrument_sigma_c: float,
     bin_bounds_c: Iterable[tuple[float | None, float | None]], n_point: int,
     n_samples: int, identity_inputs: Mapping[str, object],
     settlement_semantics: SettlementSemantics,
-    operator: str = DAY0_REMAINING_CARRIER_OPERATOR,
+    operator: str | None = None,
 ) -> dict[str, object]:
     """Pure ``extreme(boundary, noisy future)`` carrier for both Day0 readers.
 
@@ -1027,10 +1350,15 @@ def build_day0_remaining_probability_carrier(
     V1 is the historical Monte Carlo operator and is intentionally byte-stable.
     V2 keeps its confidence draw matrix from that same legacy stream while
     replacing only the point estimate with the exact expectation of the same
-    physical Gaussian-mixture distribution.
+    physical Gaussian-mixture distribution.  V3 keeps the remaining future
+    components censored, while typed final-extreme centers are conditioned on
+    the same boundary scenario as continuous one-sided truncated normals.
     """
     values = np.sort(
         np.asarray(tuple(float(v) for v in future_extremes_c), dtype=float)
+    )
+    final_centers = np.sort(
+        np.asarray(tuple(float(v) for v in final_extreme_centers_c), dtype=float)
     )
     scenarios = tuple(
         (None if b is None else float(b), float(w))
@@ -1078,6 +1406,7 @@ def build_day0_remaining_probability_carrier(
         if previous[1] is None or current[0] is None or current[0] != previous[1] + 1.0:
             raise ValueError("DAY0_REMAINING_CARRIER_BIN_GAP_OR_OVERLAP")
     if (metric not in {"high", "low"} or not values.size or not np.isfinite(values).all()
+            or not np.isfinite(final_centers).all()
             or not scenarios or not bounds or n_point < 1 or n_samples < 1
             or path_error_sigma_c < 0 or instrument_sigma_c < 0
             or not math.isclose(sum(w for _, w in scenarios), 1.0, abs_tol=1e-9)
@@ -1086,6 +1415,28 @@ def build_day0_remaining_probability_carrier(
                 for b, w in scenarios
             )):
         raise ValueError("DAY0_REMAINING_CARRIER_INPUT_INVALID")
+    selected_operator = (
+        DAY0_REMAINING_CARRIER_OPERATOR_V3
+        if operator is None and final_centers.size
+        else DAY0_REMAINING_CARRIER_OPERATOR
+        if operator is None
+        else operator
+    )
+    if selected_operator in {
+        DAY0_REMAINING_CARRIER_OPERATOR_V1,
+        DAY0_REMAINING_CARRIER_OPERATOR_V2,
+    } and final_centers.size:
+        raise ValueError(
+            "DAY0_REMAINING_CARRIER_LEGACY_OPERATOR_FINAL_CENTERS_INVALID"
+        )
+    if selected_operator == DAY0_REMAINING_CARRIER_OPERATOR_V3 and not final_centers.size:
+        raise ValueError("DAY0_REMAINING_CARRIER_V3_FINAL_CENTERS_REQUIRED")
+    if selected_operator not in {
+        DAY0_REMAINING_CARRIER_OPERATOR_V1,
+        DAY0_REMAINING_CARRIER_OPERATOR_V2,
+        DAY0_REMAINING_CARRIER_OPERATOR_V3,
+    }:
+        raise ValueError("unsupported Day0 remaining carrier operator")
     # Decision/cutoff clocks prove causality and freshness, but they do not
     # change the probability distribution when the selected future path and
     # physical observation inputs are unchanged. Including them in the content
@@ -1111,12 +1462,6 @@ def build_day0_remaining_probability_carrier(
                       "inputs": economic_identity_inputs}
     legacy_identity = hashlib.sha256(json.dumps(legacy_content, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
     sigma = math.hypot(path_error_sigma_c, instrument_sigma_c)
-
-    if operator not in {
-        DAY0_REMAINING_CARRIER_OPERATOR_V1,
-        DAY0_REMAINING_CARRIER_OPERATOR_V2,
-    }:
-        raise ValueError("unsupported Day0 remaining carrier operator")
 
     def draw(rows: int, seed: int) -> np.ndarray:
         rng = np.random.default_rng(seed)
@@ -1153,9 +1498,10 @@ def build_day0_remaining_probability_carrier(
     # analytic point-estimate migration from creating a one-time uncertainty
     # shock in downstream LCB/monitor consumers.
     legacy_seed = int(legacy_identity[:16], 16)
-    samples = draw(n_samples, legacy_seed ^ 0x9E3779B97F4A7C15)
+    if selected_operator != DAY0_REMAINING_CARRIER_OPERATOR_V3:
+        samples = draw(n_samples, legacy_seed ^ 0x9E3779B97F4A7C15)
 
-    if operator == DAY0_REMAINING_CARRIER_OPERATOR_V1:
+    if selected_operator == DAY0_REMAINING_CARRIER_OPERATOR_V1:
         point = draw(n_point, legacy_seed).mean(axis=0)
         return {
             "q": [float(x) for x in point],
@@ -1164,6 +1510,23 @@ def build_day0_remaining_probability_carrier(
             "operator": DAY0_REMAINING_CARRIER_OPERATOR_V1,
             "sample_count": n_samples,
         }
+
+    if selected_operator == DAY0_REMAINING_CARRIER_OPERATOR_V3:
+        return _build_day0_remaining_probability_carrier_v3(
+            values=values,
+            final_centers=final_centers,
+            scenarios=scenarios,
+            metric=metric,
+            sigma=sigma,
+            path_error_sigma=path_error_sigma_c,
+            instrument_sigma=instrument_sigma_c,
+            bounds=bounds,
+            n_point=n_point,
+            n_samples=n_samples,
+            legacy_identity=legacy_identity,
+            economic_identity_inputs=economic_identity_inputs,
+            settlement_semantics=settlement_semantics,
+        )
 
     # All inputs are already in settlement-native units.  In particular, an F
     # carrier arrives with F centers, F boundaries, F sigma, and F preimage

@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-08-23
-# Lifecycle: created=2026-06-06; last_reviewed=2026-08-23; last_reused=2026-08-23
+# Last reused/audited: 2026-09-22
+# Lifecycle: created=2026-06-06; last_reviewed=2026-09-22; last_reused=2026-09-22
 # Purpose: Protect replacement posterior bundle reader no-bypass semantics.
 # Reuse: Run before wiring replacement posterior into executable forecast reader or event reactor.
 # Authority basis: Operator-directed live replacement forecast bundle reader semantics.
@@ -1206,7 +1206,47 @@ def _live_provenance() -> dict[str, object]:
         ({}, True),
         ({"q_shape": "day0_remaining_shared_carrier_v1"}, False),
         ({"q_shape": "day0_remaining_shared_carrier_v2"}, False),
+        ({"q_shape": "day0_remaining_shared_carrier_v3"}, False),
+        ({"day0_remaining_carrier_content_identity": "old-censored-station",
+          "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+          "day0_remaining_carrier_station_extreme_providers": [{"model": "hko_fnd"}]}, False),
+        *(
+            ({"day0_remaining_carrier_content_identity": "typed-content",
+              "day0_remaining_carrier_operator": "typed_remaining_and_final_extreme_gaussian_v3",
+              "day0_remaining_carrier_final_extremes_c": centers,
+              "day0_remaining_carrier_station_extreme_providers": [
+                  {"forecast_value_c": value} for value in centers
+              ] if isinstance(centers, (list, tuple)) else []}, accepted)
+            for centers, accepted in (([32.0], True), ([], False),
+                                      ([True], False), (["32"], False),
+                                      ([float("inf")], False),
+                                      ("invalid", False), ([None], False))
+        ),
+        ({"day0_remaining_carrier_content_identity": "typed-content",
+          "day0_remaining_carrier_operator": "typed_remaining_and_final_extreme_gaussian_v3",
+          "day0_remaining_carrier_final_extremes_c": [32.0],
+          "day0_remaining_carrier_station_extreme_providers": [{"forecast_value_c": 31.0}]}, False),
+        ({"day0_remaining_carrier_content_identity": "typed-content",
+          "day0_remaining_carrier_operator": "typed_remaining_and_final_extreme_gaussian_v3",
+          "day0_remaining_carrier_final_extremes_c": [32.0],
+          "day0_remaining_carrier_station_extreme_providers": [None]}, False),
+        ({"q_shape": "day0_remaining_shared_carrier_v2",
+          "day0_remaining_carrier_content_identity": "typed-content",
+          "day0_remaining_carrier_operator": "typed_remaining_and_final_extreme_gaussian_v3",
+          "day0_remaining_carrier_final_extremes_c": [32.0],
+          "day0_remaining_carrier_station_extreme_providers": [{"forecast_value_c": 32.0}]}, False),
+
         ({"q_shape": "fused_day0_fast_residual_likelihood"}, True),
+        ({"q_shape": "fused_day0_fast_residual_likelihood",
+          "day0_remaining_carrier_content_identity": "content-v2",
+          "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+          "day0_remaining_carrier_station_extreme_providers": [],
+          "day0_remaining_carrier_final_extremes_c": []}, True),
+        ({"q_shape": "fused_day0_fast_residual_likelihood",
+          "day0_remaining_carrier_content_identity": "typed-content",
+          "day0_remaining_carrier_operator": "typed_remaining_and_final_extreme_gaussian_v3",
+          "day0_remaining_carrier_final_extremes_c": [32.0],
+          "day0_remaining_carrier_station_extreme_providers": [{"forecast_value_c": 32.0}]}, True),
         (
             {
                 "day0_remaining_carrier_content_identity": "content-v1",

@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-09-15
-# Lifecycle: created=2026-06-10; last_reviewed=2026-09-15; last_reused=2026-09-15
+# Last reused or audited: 2026-09-22
+# Lifecycle: created=2026-06-10; last_reviewed=2026-09-22; last_reused=2026-09-22
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -1921,6 +1921,257 @@ def test_shared_remaining_carrier_accepts_valid_market_order_and_preserves_align
     )
 
 
+@pytest.mark.parametrize(
+    ("metric", "future", "center", "boundary", "bounds", "expected"),
+    (
+        (
+            "high", [0.0], [0.0], 1.0,
+            [(None, 0), (1, 1), (2, None)],
+            [0.0, 0.7560543605317344, 0.24394563946826564],
+        ),
+        (
+            "low", [0.0], [0.0], -1.0,
+            [(None, -2), (-1, -1), (0, None)],
+            [0.24394563946826553, 0.7560543605317345, 0.0],
+        ),
+    ),
+)
+def test_v3_conditions_final_center_without_boundary_atom(
+    metric, future, center, boundary, bounds, expected
+):
+    from src.data.day0_hourly_vectors import DAY0_REMAINING_CARRIER_OPERATOR_V3
+
+    carrier = build_day0_remaining_probability_carrier(
+        future_extremes_c=future,
+        final_extreme_centers_c=center,
+        boundary_scenarios=((boundary, 1.0),),
+        metric=metric,
+        path_error_sigma_c=1.0,
+        instrument_sigma_c=0.0,
+        bin_bounds_c=bounds,
+        n_point=10,
+        n_samples=2000,
+        identity_inputs={"city": "Tel Aviv", "unit": "C"},
+        settlement_semantics=_settlement_semantics("Tel Aviv"),
+    )
+    assert carrier["operator"] == DAY0_REMAINING_CARRIER_OPERATOR_V3
+    assert carrier["q"] == pytest.approx(expected, abs=2e-12)
+    # The final center is a continuous truncated normal; it does not create a
+    # second boundary atom in the confidence rows.
+    sample_mean = np.mean(np.asarray(carrier["samples"]), axis=0)
+    assert sample_mean == pytest.approx(expected, abs=0.03)
+
+
+def test_v3_none_boundary_keeps_final_center_untruncated_and_is_deterministic():
+    kwargs = dict(
+        future_extremes_c=[0.0],
+        final_extreme_centers_c=[0.0],
+        boundary_scenarios=((None, 1.0),),
+        metric="high",
+        path_error_sigma_c=1.0,
+        instrument_sigma_c=0.0,
+        bin_bounds_c=[(None, 0), (1, 1), (2, None)],
+        n_point=10,
+        n_samples=500,
+        identity_inputs={"city": "Tel Aviv", "unit": "C", "source": "v3"},
+        settlement_semantics=_settlement_semantics("Tel Aviv"),
+    )
+    first = build_day0_remaining_probability_carrier(**kwargs)
+    second = build_day0_remaining_probability_carrier(**kwargs)
+    assert first == second
+    assert first["q"] == pytest.approx(
+        [0.6914624612740131, 0.24173033745712877, 0.06680720126885807],
+        abs=2e-12,
+    )
+
+
+def test_v3_zero_sigma_rejects_contradictory_final_center_but_allows_boundary():
+    common = dict(
+        future_extremes_c=[0.0],
+        final_extreme_centers_c=[1.0],
+        boundary_scenarios=((2.0, 1.0),),
+        metric="high",
+        path_error_sigma_c=0.0,
+        instrument_sigma_c=0.0,
+        bin_bounds_c=[(None, 1), (2, 2), (3, None)],
+        n_point=1,
+        n_samples=5,
+        identity_inputs={"city": "Tel Aviv", "unit": "C"},
+        settlement_semantics=_settlement_semantics("Tel Aviv"),
+    )
+    with pytest.raises(
+        ValueError, match="DAY0_REMAINING_CARRIER_FINAL_CENTER_CONTRADICTS_BOUNDARY"
+    ):
+        build_day0_remaining_probability_carrier(**common)
+    allowed = build_day0_remaining_probability_carrier(
+        **{**common, "final_extreme_centers_c": [2.0]}
+    )
+    assert allowed["q"] == pytest.approx([0.0, 1.0, 0.0])
+
+
+def test_v3_far_tail_truncation_is_finite_and_normalized():
+    carrier = build_day0_remaining_probability_carrier(
+        future_extremes_c=[0.0],
+        final_extreme_centers_c=[0.0],
+        boundary_scenarios=((40.0, 1.0),),
+        metric="high",
+        path_error_sigma_c=1.0,
+        instrument_sigma_c=0.0,
+        bin_bounds_c=[(None, 39), (40, 40), (41, None)],
+        n_point=1,
+        n_samples=200,
+        identity_inputs={"city": "Tel Aviv", "unit": "C"},
+        settlement_semantics=_settlement_semantics("Tel Aviv"),
+    )
+    assert all(np.isfinite(carrier["q"]))
+    assert sum(carrier["q"]) == pytest.approx(1.0)
+    assert all(np.isfinite(np.asarray(carrier["samples"])).ravel())
+
+
+def test_v3_final_center_uses_hko_truncate_preimage():
+    common = dict(
+        future_extremes_c=[0.0],
+        final_extreme_centers_c=[1.9],
+        boundary_scenarios=((1.9, 1.0),),
+        metric="high",
+        path_error_sigma_c=0.2,
+        instrument_sigma_c=0.0,
+        bin_bounds_c=[(None, 0), (1, 1), (2, None)],
+        n_point=1,
+        n_samples=500,
+        identity_inputs={"city": "Hong Kong", "unit": "C"},
+    )
+    hko = build_day0_remaining_probability_carrier(
+        **common,
+        settlement_semantics=_settlement_semantics("Hong Kong"),
+    )
+    wmo_kwargs = {**common, "identity_inputs": {"city": "Tel Aviv", "unit": "C"}}
+    wmo = build_day0_remaining_probability_carrier(
+        **wmo_kwargs,
+        settlement_semantics=_settlement_semantics("Tel Aviv"),
+    )
+    assert hko["q"][1] > 0.4
+    assert wmo["q"][1] == pytest.approx(0.0, abs=1e-12)
+    assert hko["content_identity"] != wmo["content_identity"]
+
+
+def test_v3_log_interval_near_equal_tail_is_finite():
+    from src.data.day0_hourly_vectors import _day0_log_normal_interval_probability
+
+    log_mass = _day0_log_normal_interval_probability(
+        0.0, 1.0, 10.0, 10.00000000000001
+    )
+    assert np.isfinite(log_mass)
+    assert log_mass < 0.0
+
+
+def test_v3_zero_weight_contradictory_boundary_is_ignored():
+    carrier = build_day0_remaining_probability_carrier(
+        future_extremes_c=[0.0],
+        final_extreme_centers_c=[1.0],
+        boundary_scenarios=((2.0, 0.0), (None, 1.0)),
+        metric="high",
+        path_error_sigma_c=0.0,
+        instrument_sigma_c=0.0,
+        bin_bounds_c=[(None, 0), (1, 1), (2, None)],
+        n_point=1,
+        n_samples=5,
+        identity_inputs={"city": "Tel Aviv", "unit": "C"},
+        settlement_semantics=_settlement_semantics("Tel Aviv"),
+    )
+    assert carrier["q"] == pytest.approx([0.5, 0.5, 0.0])
+
+
+def test_v3_fahrenheit_native_units_normalize_and_mirror_high_low():
+    sem = SettlementSemantics(
+        resolution_source="TEST_F",
+        measurement_unit="F",
+        precision=1.0,
+        rounding_rule="wmo_half_up",
+        finalization_time="12:00:00Z",
+    )
+    common = dict(
+        path_error_sigma_c=0.9,
+        instrument_sigma_c=0.4,
+        n_point=31,
+        n_samples=500,
+        identity_inputs={"city": "Fahrenheit acceptance", "unit": "F"},
+        settlement_semantics=sem,
+    )
+    high = build_day0_remaining_probability_carrier(
+        future_extremes_c=(-4.0, -2.0, 0.0),
+        final_extreme_centers_c=(-1.0,),
+        boundary_scenarios=((1.0, 0.7), (None, 0.3)),
+        metric="high",
+        bin_bounds_c=[(None, -2), (-1, 0), (1, None)],
+        **common,
+    )
+    low = build_day0_remaining_probability_carrier(
+        future_extremes_c=(4.0, 2.0, 0.0),
+        final_extreme_centers_c=(1.0,),
+        boundary_scenarios=((-1.0, 0.7), (None, 0.3)),
+        metric="low",
+        bin_bounds_c=[(None, -1), (0, 1), (2, None)],
+        **common,
+    )
+    for carrier in (high, low):
+        assert carrier["operator"] == "typed_remaining_and_final_extreme_gaussian_v3"
+        assert sum(carrier["q"]) == pytest.approx(1.0)
+        rows = np.asarray(carrier["samples"], dtype=float)
+        assert rows.shape == (500, 3)
+        assert np.isfinite(rows).all()
+        assert rows.sum(axis=1) == pytest.approx(np.ones(500))
+    assert low["q"] == pytest.approx(list(reversed(high["q"])), abs=2e-12)
+
+
+@pytest.mark.parametrize(
+    "operator",
+    [
+        "extreme_observed_then_noisy_future_v1",
+        "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+    ],
+)
+def test_v1_v2_reject_typed_final_centers(operator):
+    with pytest.raises(
+        ValueError, match="DAY0_REMAINING_CARRIER_LEGACY_OPERATOR_FINAL_CENTERS_INVALID"
+    ):
+        build_day0_remaining_probability_carrier(
+            future_extremes_c=[0.0],
+            final_extreme_centers_c=[0.0],
+            boundary_scenarios=((None, 1.0),),
+            metric="high",
+            path_error_sigma_c=0.5,
+            instrument_sigma_c=0.5,
+            bin_bounds_c=[(None, 0), (1, None)],
+            n_point=10,
+            n_samples=5,
+            identity_inputs={"city": "Tel Aviv", "unit": "C"},
+            settlement_semantics=_settlement_semantics("Tel Aviv"),
+            operator=operator,
+        )
+
+
+def test_explicit_v3_rejects_empty_final_centers():
+    from src.data.day0_hourly_vectors import DAY0_REMAINING_CARRIER_OPERATOR_V3
+
+    with pytest.raises(
+        ValueError, match="DAY0_REMAINING_CARRIER_V3_FINAL_CENTERS_REQUIRED"
+    ):
+        build_day0_remaining_probability_carrier(
+            future_extremes_c=[0.0],
+            boundary_scenarios=((None, 1.0),),
+            metric="high",
+            path_error_sigma_c=0.5,
+            instrument_sigma_c=0.5,
+            bin_bounds_c=[(None, 0), (1, None)],
+            n_point=10,
+            n_samples=5,
+            identity_inputs={"city": "Tel Aviv", "unit": "C"},
+            settlement_semantics=_settlement_semantics("Tel Aviv"),
+            operator=DAY0_REMAINING_CARRIER_OPERATOR_V3,
+        )
+
+
 def test_shared_remaining_carrier_normalizes_fahrenheit_round_trip_grid():
     """Celsius storage residue must not invalidate adjacent Fahrenheit bins."""
 
@@ -2383,12 +2634,15 @@ def test_hko_adapter_replays_materialized_carrier_identity_and_q(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """HKO held redecision must use the exact materialized provisional q."""
+    from src.data.day0_hourly_vectors import DAY0_REMAINING_CARRIER_OPERATOR_V3
+
     import src.engine.event_reactor_adapter as era
     from src.config import ensemble_n_mc
     from src.types.temperature import TemperatureDelta
 
     city = runtime_cities_by_name()["Hong Kong"]
     future = (25.4, 25.8, 28.4, 26.0)
+    final_centers = (24.0,)
     cutoff = "2026-09-03T04:58:45+00:00"
     decision_time = datetime(2026, 9, 3, 4, 58, 45, tzinfo=UTC)
     likelihood = {
@@ -2424,6 +2678,7 @@ def test_hko_adapter_replays_materialized_carrier_identity_and_q(
     path_sigma = float(np.std(np.asarray(future), ddof=0))
     expected = build_day0_remaining_probability_carrier(
         future_extremes_c=future,
+        final_extreme_centers_c=final_centers,
         boundary_scenarios=((25.9, 0.97), (None, 1.0 - 0.97)),
         metric="low",
         path_error_sigma_c=path_sigma,
@@ -2455,6 +2710,7 @@ def test_hko_adapter_replays_materialized_carrier_identity_and_q(
         "_edli_day0_remaining_probability_sample_count": 500,
         "_edli_day0_remaining_probability_samples": expected["samples"],
         "_edli_day0_remaining_carrier_future_extremes_c": list(future),
+        "_edli_day0_remaining_carrier_final_extremes_c": list(final_centers),
         "_edli_day0_remaining_carrier_path_error_sigma_c": path_sigma,
         "_edli_day0_remaining_carrier_probability_cutoff_utc": cutoff,
         "_edli_day0_remaining_carrier_q": expected["q"],
@@ -2473,7 +2729,7 @@ def test_hko_adapter_replays_materialized_carrier_identity_and_q(
     }
 
     replay = era._day0_remaining_p_raw_vector(
-        np.asarray(future),
+        np.sort(np.asarray((*future, *final_centers))),
         city=city,
         settlement_semantics=SettlementSemantics.for_city(city),
         bins=[
@@ -2488,6 +2744,9 @@ def test_hko_adapter_replays_materialized_carrier_identity_and_q(
     )
 
     assert replay.tolist() == pytest.approx(expected["q"])
+    assert payload["_edli_day0_remaining_probability_samples"] == expected["samples"]
+    assert payload["_edli_day0_remaining_content_identity"] == expected["content_identity"]
+    assert payload["_edli_day0_probability_operator"] == DAY0_REMAINING_CARRIER_OPERATOR_V3
     missing_identity_field = dict(payload)
     missing_identity_field["_edli_day0_provisional_revision_likelihood"] = {
         "identity_hash": hashlib.sha256(
@@ -2504,7 +2763,7 @@ def test_hko_adapter_replays_materialized_carrier_identity_and_q(
         match="DAY0_NOAA_PRELIMINARY_CARRIER_SOURCE_IDENTITY_INVALID",
     ):
         era._day0_remaining_p_raw_vector(
-            np.asarray(future),
+            np.sort(np.asarray((*future, *final_centers))),
             city=city,
             settlement_semantics=SettlementSemantics.for_city(city),
             bins=[
@@ -2539,7 +2798,7 @@ def test_hko_adapter_replays_materialized_carrier_identity_and_q(
         match="DAY0_NOAA_PRELIMINARY_CARRIER_SOURCE_IDENTITY_INVALID",
     ):
         era._day0_remaining_p_raw_vector(
-            np.asarray(future),
+            np.sort(np.asarray((*future, *final_centers))),
             city=city,
             settlement_semantics=SettlementSemantics.for_city(city),
             bins=[
@@ -2580,11 +2839,12 @@ def test_hko_adapter_replays_materialized_carrier_identity_and_q(
         unit="C",
         decision_time=next_decision_time,
         future_extremes_c=changed_future,
+        final_extreme_centers_c=final_centers,
         authority_kind="held_current_remaining_path",
         entry_authority=False,
     )
     rebuilt = era._day0_remaining_p_raw_vector(
-        np.asarray(changed_future),
+        np.sort(np.asarray((*changed_future, *final_centers))),
         city=city,
         settlement_semantics=SettlementSemantics.for_city(city),
         bins=[candidate.bin for candidate in family.candidates],
@@ -2607,7 +2867,7 @@ def test_hko_adapter_replays_materialized_carrier_identity_and_q(
         match="DAY0_NOAA_PRELIMINARY_CARRIER_Q_MISMATCH",
     ):
         era._day0_remaining_p_raw_vector(
-            np.asarray(changed_future),
+            np.sort(np.asarray((*changed_future, *final_centers))),
             city=city,
             settlement_semantics=SettlementSemantics.for_city(city),
             bins=[
@@ -2824,11 +3084,12 @@ def test_materialized_day0_carrier_keeps_exact_station_extreme_provider(
         )
     )
 
-    assert future == (31.0, 32.0, 33.0)
+    assert future == (31.0, 32.0)
+    assert tuple(item["forecast_value_c"] for item in evidence) == (33.0,)
     from src.config import runtime_cities_by_name
     from src.signal.ensemble_signal import sigma_instrument_for_city
 
-    center_sigma = float(np.std(np.asarray(future), ddof=0))
+    center_sigma = float(np.std(np.asarray((*future, 33.0)), ddof=0))
     instrument_sigma = float(
         sigma_instrument_for_city(runtime_cities_by_name()["Taipei"])
         .to("C")
@@ -3379,8 +3640,12 @@ def test_day0_redecision_scope_keeps_reduce_only_symmetric_with_monitor():
     ) is None
 
 
-def test_entry_current_state_rebuilds_effective_carrier_without_widening_held_authority():
+def test_entry_current_state_rebuilds_effective_carrier_without_widening_held_authority(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """ENTRY rebuilds from A(now), while the source-clock carrier stays provenance."""
+    from src.data.day0_hourly_vectors import DAY0_REMAINING_CARRIER_OPERATOR_V3
+
     import src.engine.event_reactor_adapter as era
     from src.config import runtime_cities_by_name
     from src.contracts.settlement_semantics import SettlementSemantics
@@ -3397,6 +3662,7 @@ def test_entry_current_state_rebuilds_effective_carrier_without_widening_held_au
     decision_time = datetime(2026, 8, 24, 12, 30, tzinfo=UTC)
     source_clock_vector = [27.0, 27.5, 28.0, 28.5]
     current_vector = (28.5, 29.0, 30.5, 31.25)
+    final_centers = (32.0,)
     likelihood = {
         "semantics": "same_station_preliminary_report_survival_likelihood_v1",
         "cutoff": decision_time.isoformat(),
@@ -3447,6 +3713,7 @@ def test_entry_current_state_rebuilds_effective_carrier_without_widening_held_au
         "_edli_day0_remaining_probability_samples": [[1.0]],
         "_edli_day0_remaining_probability_sample_count": 1,
         "_edli_day0_remaining_carrier_future_extremes_c": source_clock_vector,
+        "_edli_day0_remaining_carrier_final_extremes_c": list(final_centers),
         "_edli_day0_remaining_carrier_path_error_sigma_c": 0.25,
         "_edli_day0_remaining_carrier_probability_cutoff_utc": decision_time.isoformat(),
         "_edli_day0_remaining_vector_witness": {
@@ -3468,11 +3735,14 @@ def test_entry_current_state_rebuilds_effective_carrier_without_widening_held_au
         unit="C",
         decision_time=decision_time,
         future_extremes_c=current_vector,
+        final_extreme_centers_c=final_centers,
         authority_kind="entry_current_remaining_path",
         entry_authority=True,
     )
 
     assert payload["_edli_day0_remaining_carrier_future_extremes_c"] == list(current_vector)
+    assert payload["_edli_day0_remaining_carrier_final_extremes_c"] == list(final_centers)
+    assert payload["_edli_day0_probability_operator"] == DAY0_REMAINING_CARRIER_OPERATOR_V3
     assert payload["_edli_day0_source_clock_carrier_provenance"][
         "remaining_carrier_future_extremes_c"
     ] == source_clock_vector
@@ -3481,7 +3751,7 @@ def test_entry_current_state_rebuilds_effective_carrier_without_widening_held_au
     )
     city = runtime_cities_by_name()["Tel Aviv"]
     replay = era._day0_remaining_p_raw_vector(
-        np.asarray(current_vector),
+        np.sort(np.asarray((*current_vector, *final_centers))),
         city=city,
         settlement_semantics=SettlementSemantics.for_city(city),
         bins=[candidate.bin for candidate in family.candidates],

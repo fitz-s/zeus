@@ -23770,36 +23770,16 @@ def _day0_nowcast_gap_native(
     for source in (actionable_payload, event_payload):
         if not isinstance(source, Mapping):
             continue
-        authority = source.get("day0_probability_authority")
-        blocks: tuple[object, ...] = (source,)
-        if isinstance(authority, Mapping):
-            blocks = (
-                authority,
-                authority.get("global_current_observation_payload"),
-                source,
-            )
-        for block in blocks:
-            if not isinstance(block, Mapping):
-                continue
-            members = block.get(
-                "remaining_carrier_future_extremes_c"
-            ) or block.get("_edli_day0_remaining_carrier_future_extremes_c")
-            if not isinstance(members, (list, tuple)) or not members:
-                continue
-            values = [
-                value
-                for value in (_optional_float(member) for member in members)
-                if value is not None and math.isfinite(value)
-            ]
-            if not values:
-                continue
-            center_c = float(np.median(np.asarray(values, dtype=float)))
-            center = center_c * 9.0 / 5.0 + 32.0 if unit == "F" else center_c
-            return (
-                center - running_extreme
-                if metric == "high"
-                else running_extreme - center
-            )
+        values = _day0_nowcast_carrier_future_extremes(source)
+        if not values:
+            continue
+        center_c = float(np.median(np.asarray(values, dtype=float)))
+        center = center_c * 9.0 / 5.0 + 32.0 if unit == "F" else center_c
+        return (
+            center - running_extreme
+            if metric == "high"
+            else running_extreme - center
+        )
     return None
 
 
@@ -37372,6 +37352,7 @@ def _day0_replacement_conditioning(
                 "day0_remaining_carrier_q",
                 "day0_remaining_carrier_sample_count",
                 "day0_remaining_carrier_future_extremes_c",
+                "day0_remaining_carrier_final_extremes_c",
                 "day0_remaining_carrier_path_error_sigma_c",
                 "day0_remaining_carrier_probability_cutoff_utc",
                 "day0_remaining_vector_witness",
@@ -38702,6 +38683,7 @@ def _global_day0_execution_payload(
             "day0_remaining_carrier_probability_samples": "_edli_day0_remaining_probability_samples",
             "day0_remaining_carrier_sample_count": "_edli_day0_remaining_probability_sample_count",
             "day0_remaining_carrier_future_extremes_c": "_edli_day0_remaining_carrier_future_extremes_c",
+            "day0_remaining_carrier_final_extremes_c": "_edli_day0_remaining_carrier_final_extremes_c",
             "day0_remaining_carrier_path_error_sigma_c": "_edli_day0_remaining_carrier_path_error_sigma_c",
             "day0_remaining_carrier_probability_cutoff_utc": "_edli_day0_remaining_carrier_probability_cutoff_utc",
             "day0_remaining_carrier_likelihood": "_edli_day0_provisional_revision_likelihood",
@@ -38868,6 +38850,10 @@ def _global_day0_probability_authority_payload(
             (
                 "remaining_carrier_future_extremes_c",
                 "_edli_day0_remaining_carrier_future_extremes_c",
+            ),
+            (
+                "remaining_carrier_final_extremes_c",
+                "_edli_day0_remaining_carrier_final_extremes_c",
             ),
             (
                 "remaining_carrier_path_error_sigma_c",
@@ -40094,7 +40080,11 @@ def _bind_day0_saturated_statistical_sides(
 def _day0_nowcast_carrier_future_extremes(
     payload: Mapping[str, object],
 ) -> tuple[float, ...]:
-    """Freeze the first valid carrier vector used by the submit-time nowcast."""
+    """Freeze all carrier centers for the nowcast's descriptive median.
+
+    The legacy context field also holds final-daily centers; this aggregate
+    never feeds the remaining-future probability operator.
+    """
 
     authority = payload.get("day0_probability_authority")
     blocks: tuple[object, ...] = (payload,)
@@ -40112,9 +40102,14 @@ def _day0_nowcast_carrier_future_extremes(
         )
         if not isinstance(members, (list, tuple)) or not members:
             continue
+        final = block.get("remaining_carrier_final_extremes_c") or block.get(
+            "_edli_day0_remaining_carrier_final_extremes_c", ()
+        )
+        if not isinstance(final, (list, tuple)):
+            continue
         values = tuple(
             value
-            for value in (_optional_float(member) for member in members)
+            for value in (_optional_float(member) for member in (*members, *final))
             if value is not None and math.isfinite(value)
         )
         if values:
@@ -42642,6 +42637,7 @@ def _prepare_current_global_probability_family(
             "_edli_day0_remaining_probability_samples",
             "_edli_day0_remaining_probability_sample_count",
             "_edli_day0_remaining_carrier_future_extremes_c",
+            "_edli_day0_remaining_carrier_final_extremes_c",
             "_edli_day0_remaining_carrier_path_error_sigma_c",
             "_edli_day0_remaining_carrier_probability_cutoff_utc",
             "_edli_day0_remaining_vector_witness",
@@ -46574,9 +46570,15 @@ def _day0_remaining_p_raw_vector(
             raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_INVALID") from exc
         if not np.isfinite(np.asarray(future_c, dtype=float)).all():
             raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_INVALID")
+        final_raw = payload.get("_edli_day0_remaining_carrier_final_extremes_c", ())
+        if not isinstance(final_raw, (list, tuple)):
+            raise ValueError("DAY0_FINAL_EXTREME_CENTER_INVALID")
+        final_c = tuple(float(value) for value in final_raw)
+        if not np.isfinite(np.asarray(final_c, dtype=float)).all():
+            raise ValueError("DAY0_FINAL_EXTREME_CENTER_INVALID")
         current_native = np.asarray(members, dtype=float)
         carrier_unit = str(getattr(city, "settlement_unit", "") or "").strip().upper()
-        persisted_c = np.sort(np.asarray(future_c, dtype=float))
+        persisted_c = np.sort(np.asarray((*future_c, *final_c), dtype=float))
         if carrier_unit == "F":
             persisted_native = persisted_c * (9.0 / 5.0) + 32.0
             # Compare in the consuming unit. C->F->C plus decimal rounding
@@ -46688,6 +46690,9 @@ def _day0_remaining_p_raw_vector(
             }
         carrier = build_day0_remaining_probability_carrier(
             future_extremes_c=future_native,
+            final_extreme_centers_c=tuple(
+                value * native_scale + native_offset for value in final_c
+            ),
             boundary_scenarios=boundary_scenarios,
             metric=metric,
             path_error_sigma_c=path_sigma_c * native_scale,
@@ -47904,6 +47909,7 @@ def _snapshot_day0_source_clock_carrier_provenance(
         "_edli_day0_remaining_probability_samples",
         "_edli_day0_remaining_probability_sample_count",
         "_edli_day0_remaining_carrier_future_extremes_c",
+        "_edli_day0_remaining_carrier_final_extremes_c",
         "_edli_day0_remaining_carrier_path_error_sigma_c",
         "_edli_day0_remaining_carrier_probability_cutoff_utc",
         "_edli_day0_remaining_vector_witness",
@@ -47930,6 +47936,7 @@ def _rebuild_decision_time_day0_carrier(
     unit: str,
     decision_time: datetime,
     future_extremes_c: object,
+    final_extreme_centers_c: object = (),
     authority_kind: str,
     entry_authority: bool,
     held_shared_current_remaining_path: bool = False,
@@ -47975,6 +47982,7 @@ def _rebuild_decision_time_day0_carrier(
     _snapshot_day0_source_clock_carrier_provenance(payload)
     from src.data.day0_hourly_vectors import (
         DAY0_REMAINING_CARRIER_OPERATOR_V2,
+        DAY0_REMAINING_CARRIER_OPERATOR_V3,
         build_day0_remaining_probability_carrier,
         day0_remaining_carrier_identity_inputs,
     )
@@ -48027,12 +48035,18 @@ def _rebuild_decision_time_day0_carrier(
     native_scale = 1.0 if carrier_unit == "C" else 9.0 / 5.0
     native_offset = 0.0 if carrier_unit == "C" else 32.0
     values_native = tuple(value * native_scale + native_offset for value in values_c)
+    final_values_c = tuple(float(value) for value in final_extreme_centers_c)
+    if not np.isfinite(np.asarray(final_values_c, dtype=float)).all():
+        raise ValueError("DAY0_FINAL_EXTREME_CENTER_INVALID")
+    final_values_native = tuple(
+        value * native_scale + native_offset for value in final_values_c
+    )
     extra_sigma_native = _day0_extra_member_sigma_native(
         payload=payload,
         family=family,
         unit=carrier_unit,
         decision_time=decision_time,
-        members_native=values_native,
+        members_native=(*values_native, *final_values_native),
     )
     if not math.isfinite(extra_sigma_native) or extra_sigma_native < 0.0:
         raise ValueError("DAY0_HELD_SHARED_CARRIER_SIGMA_INVALID")
@@ -48090,6 +48104,7 @@ def _rebuild_decision_time_day0_carrier(
         }
     carrier = build_day0_remaining_probability_carrier(
         future_extremes_c=values_native,
+        final_extreme_centers_c=final_values_native,
         boundary_scenarios=boundary_scenarios,
         metric=str(family.metric).strip().lower(),
         # The builder's historical "_c" argument is applied directly to the
@@ -48102,7 +48117,11 @@ def _rebuild_decision_time_day0_carrier(
         n_samples=500,
         identity_inputs=identity_inputs,
         settlement_semantics=SettlementSemantics.for_city(city),
-        operator=DAY0_REMAINING_CARRIER_OPERATOR_V2,
+        operator=(
+            DAY0_REMAINING_CARRIER_OPERATOR_V3
+            if final_values_native
+            else DAY0_REMAINING_CARRIER_OPERATOR_V2
+        ),
     )
     payload.update(
         {
@@ -48112,11 +48131,12 @@ def _rebuild_decision_time_day0_carrier(
             "_edli_day0_remaining_probability_samples": list(carrier["samples"]),
             "_edli_day0_remaining_probability_sample_count": 500,
             "_edli_day0_remaining_carrier_future_extremes_c": list(values_c),
+            "_edli_day0_remaining_carrier_final_extremes_c": list(final_values_c),
             "_edli_day0_remaining_carrier_path_error_sigma_c": path_error_sigma_c,
             "_edli_day0_remaining_carrier_probability_cutoff_utc": cutoff,
             "_edli_day0_decision_carrier_rebuild_basis": rebuild_basis,
             "_edli_day0_remaining_path_center_sigma_native": float(
-                np.std(np.asarray(values_native, dtype=float), ddof=0)
+                np.std(np.asarray((*values_native, *final_values_native), dtype=float), ddof=0)
             ),
         }
     )
@@ -48133,6 +48153,7 @@ def _rebuild_held_day0_shared_carrier(
     unit: str,
     decision_time: datetime,
     future_extremes_c: object,
+    final_extreme_centers_c: object = (),
 ) -> None:
     """Compatibility wrapper retaining the narrowed held A' authority gate."""
     if payload.get("_edli_day0_redecision_authority_scope") != (
@@ -48145,6 +48166,7 @@ def _rebuild_held_day0_shared_carrier(
         unit=unit,
         decision_time=decision_time,
         future_extremes_c=future_extremes_c,
+        final_extreme_centers_c=final_extreme_centers_c,
         authority_kind="held_a_prime",
         entry_authority=False,
     )
@@ -49428,57 +49450,17 @@ def _day0_remaining_day_members(
             decision_time=decision_time,
             represented_models=provider_models,
         )
+        hourly_member_count = len(extremes_c)
+        final_extremes_c = tuple(
+            float(evidence["forecast_value_c"]) for evidence in station_extremes
+        )
         if station_extremes:
-            # A pinned station provider is already a forecast of the FINAL
-            # daily extreme.  Only a separately typed statistical physical
-            # boundary may constrain that forecast center here.  Falling back
-            # to ``rounded_value`` would apply a provisional settlement-view
-            # boundary before the carrier's survival mixture, erasing the
-            # no-survival branch (HKO LOW 26C -> 25C) and making held q diverge
-            # from the materialized source-clock carrier.
-            explicit_boundary_native = _optional_float(
-                payload.get("_edli_day0_probability_boundary_native")
-            )
-            resolved_boundary_native = (
-                _day0_probability_boundary_native(payload, metric)
-                if explicit_boundary_native is not None
-                else None
-            )
-            boundary_native = (
-                resolved_boundary_native
-                if (
-                    explicit_boundary_native is not None
-                    and resolved_boundary_native is not None
-                    and math.isclose(
-                        resolved_boundary_native,
-                        explicit_boundary_native,
-                        rel_tol=0.0,
-                        abs_tol=1e-9,
-                    )
-                )
-                else None
-            )
-            boundary_c = (
-                boundary_native
-                if boundary_native is None or str(unit).upper() == "C"
-                else (boundary_native - 32.0) * 5.0 / 9.0
-            )
-            for evidence in station_extremes:
-                station_value = float(evidence["forecast_value_c"])
-                if boundary_c is not None:
-                    station_value = (
-                        max(station_value, boundary_c)
-                        if metric == "high"
-                        else min(station_value, boundary_c)
-                    )
-                extremes_c.append(station_value)
-                provider_models.append(str(evidence["model"]))
+            extremes_c.extend(final_extremes_c)
+            provider_models.extend(str(evidence["model"]) for evidence in station_extremes)
             payload["_edli_day0_station_extreme_providers"] = [
                 dict(evidence) for evidence in station_extremes
             ]
-            payload["_edli_day0_provider_representative_models"] = list(
-                provider_models
-            )
+            payload["_edli_day0_provider_representative_models"] = list(provider_models)
         if direct_entry_authority:
             entry_carrier = payload.get(
                 "_edli_day0_direct_entry_source_clock_carrier"
@@ -49614,7 +49596,8 @@ def _day0_remaining_day_members(
                 family=family,
                 unit=unit,
                 decision_time=decision_time,
-                future_extremes_c=extremes_c,
+                future_extremes_c=extremes_c[:hourly_member_count],
+                final_extreme_centers_c=final_extremes_c,
                 authority_kind="entry_current_remaining_path",
                 entry_authority=True,
             )
@@ -49629,7 +49612,8 @@ def _day0_remaining_day_members(
                 family=family,
                 unit=unit,
                 decision_time=decision_time,
-                future_extremes_c=extremes_c,
+                future_extremes_c=extremes_c[:hourly_member_count],
+                final_extreme_centers_c=final_extremes_c,
                 authority_kind="held_current_remaining_path",
                 entry_authority=False,
             )
@@ -49645,7 +49629,8 @@ def _day0_remaining_day_members(
                 family=family,
                 unit=unit,
                 decision_time=decision_time,
-                future_extremes_c=extremes_c,
+                future_extremes_c=extremes_c[:hourly_member_count],
+                final_extreme_centers_c=final_extremes_c,
                 authority_kind="held_shared_current_remaining_path",
                 entry_authority=False,
                 held_shared_current_remaining_path=True,
@@ -49661,7 +49646,8 @@ def _day0_remaining_day_members(
                 family=family,
                 unit=unit,
                 decision_time=decision_time,
-                future_extremes_c=extremes_c,
+                future_extremes_c=extremes_c[:hourly_member_count],
+                final_extreme_centers_c=final_extremes_c,
             )
         maturity_values = np.asarray(values, dtype=float).copy()
         probability_clock = (

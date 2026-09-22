@@ -21,6 +21,7 @@ from src.contracts.ensemble_snapshot_provenance import (
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.data.day0_hourly_vectors import (
     DAY0_REMAINING_CARRIER_OPERATOR_V2,
+    DAY0_REMAINING_CARRIER_OPERATOR_V3,
     day0_remaining_carrier_samples_row_major,
 )
 from src.data.forecast_target_contract import compute_target_local_day_window_utc
@@ -108,6 +109,7 @@ def _day0_carrier_identity_reason(provenance: Mapping[str, Any]) -> str | None:
         and provenance.get("q_shape") not in (
             "day0_remaining_shared_carrier_v1",
             "day0_remaining_shared_carrier_v2",
+            "day0_remaining_shared_carrier_v3",
         )
     ):
         return None
@@ -117,8 +119,42 @@ def _day0_carrier_identity_reason(provenance: Mapping[str, Any]) -> str | None:
         return "REPLACEMENT_DAY0_CARRIER_IDENTITY_PAIR_INCOMPLETE"
     if not isinstance(operator, str) or not operator:
         return "REPLACEMENT_DAY0_CARRIER_IDENTITY_PAIR_INCOMPLETE"
-    if operator != DAY0_REMAINING_CARRIER_OPERATOR_V2:
+    shared_shape_operators = {
+        "day0_remaining_shared_carrier_v1": "extreme_observed_then_noisy_future_v1",
+        "day0_remaining_shared_carrier_v2": DAY0_REMAINING_CARRIER_OPERATOR_V2,
+        "day0_remaining_shared_carrier_v3": DAY0_REMAINING_CARRIER_OPERATOR_V3,
+    }
+    q_shape = provenance.get("q_shape")
+    expected_operator = shared_shape_operators.get(q_shape)
+    if expected_operator is not None and operator != expected_operator:
+        return "REPLACEMENT_DAY0_CARRIER_SHAPE_OPERATOR_MISMATCH"
+    if operator not in {DAY0_REMAINING_CARRIER_OPERATOR_V2, DAY0_REMAINING_CARRIER_OPERATOR_V3}:
         return "REPLACEMENT_DAY0_CARRIER_OPERATOR_NOT_CURRENT"
+    providers = provenance.get("day0_remaining_carrier_station_extreme_providers", ())
+    final = provenance.get("day0_remaining_carrier_final_extremes_c", ())
+    if operator == DAY0_REMAINING_CARRIER_OPERATOR_V2:
+        if providers not in (None, (), []) or final not in (None, (), []):
+            return "REPLACEMENT_DAY0_FINAL_EXTREME_OPERATOR_MISMATCH"
+        return None
+    if operator == DAY0_REMAINING_CARRIER_OPERATOR_V3:
+        if not isinstance(providers, (list, tuple)) or not providers:
+            return "REPLACEMENT_DAY0_FINAL_EXTREME_PROVIDERS_INVALID"
+        if not isinstance(final, (list, tuple)) or not final or len(providers) != len(final):
+            return "REPLACEMENT_DAY0_FINAL_EXTREME_CENTERS_INVALID"
+        for provider, center in zip(providers, final, strict=True):
+            if not isinstance(provider, Mapping):
+                return "REPLACEMENT_DAY0_FINAL_EXTREME_PROVIDERS_INVALID"
+            forecast_value = provider.get("forecast_value_c")
+            if (
+                isinstance(forecast_value, bool)
+                or not isinstance(forecast_value, (int, float))
+                or not math.isfinite(float(forecast_value))
+                or isinstance(center, bool)
+                or not isinstance(center, (int, float))
+                or not math.isfinite(float(center))
+                or float(forecast_value) != float(center)
+            ):
+                return "REPLACEMENT_DAY0_FINAL_EXTREME_VALUE_MISMATCH"
     return None
 
 
@@ -454,7 +490,7 @@ def _held_pinned_provenance_reason(
         return "REPLACEMENT_PINNED_DAY0_CARRIER_FIELDS_MISSING"
     if (
         str(provenance.get("day0_remaining_carrier_operator"))
-        != DAY0_REMAINING_CARRIER_OPERATOR_V2
+        not in {DAY0_REMAINING_CARRIER_OPERATOR_V2, DAY0_REMAINING_CARRIER_OPERATOR_V3}
         or int(provenance.get("day0_remaining_carrier_sample_count") or 0) != 500
     ):
         return "REPLACEMENT_PINNED_DAY0_CARRIER_SHAPE_INVALID"

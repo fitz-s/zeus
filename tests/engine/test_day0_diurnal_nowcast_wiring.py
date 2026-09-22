@@ -1,5 +1,5 @@
 # Created: 2026-09-04
-# Last reused or audited: 2026-09-19
+# Last reused or audited: 2026-09-22
 # Authority basis: diurnal-residual study 2026-09-04 (REPORT.md §5) — the veto is only
 #   real if the reactor actually assembles the nowcast context at the live submit seam
 #   and stamps the verdict where an audit can find it.
@@ -394,8 +394,9 @@ def test_non_day0_candidate_is_never_stamped(installed_nowcast) -> None:
     assert DAY0_NOWCAST_Q_HELD_KEY not in payload
 
 
+@pytest.mark.parametrize("typed_final", [False, True])
 def test_gap_conditioning_uses_the_payload_carrier_members_without_a_db_read(
-    monkeypatch,
+    monkeypatch, typed_final,
 ) -> None:
     """The NWP gap comes from the remaining-vector carrier already on the payload."""
 
@@ -421,6 +422,15 @@ def test_gap_conditioning_uses_the_payload_carrier_members_without_a_db_read(
     payload["day0_probability_authority"] = {
         "remaining_carrier_future_extremes_c": [33.5, 34.0, 34.5],
     }
+    if typed_final:
+        payload["day0_probability_authority"] = {
+            "remaining_carrier_future_extremes_c": [33.5],
+            "remaining_carrier_final_extremes_c": [34.0, 34.5],
+        }
+    assert era._day0_nowcast_gap_native(
+        actionable_payload=payload, event_payload={}, metric="high",
+        running_extreme=32.0, unit="C",
+    ) == 2.0
 
     stamp_day0_diurnal_nowcast(
         payload, event_payload=_event().payload, decision_time=DECISION_TIME
@@ -588,6 +598,8 @@ def test_global_nowcast_context_binds_real_topology_candidates_to_witness_bins(m
             "probability_authority": "day0_remaining_day_global_probability_v1",
             "_edli_q_source": "day0_remaining_day",
             "_edli_day0_probability_boundary_native": boundary,
+            "_edli_day0_remaining_carrier_future_extremes_c": [31.0, 32.0],
+            "_edli_day0_remaining_carrier_final_extremes_c": [34.0],
         }
     )
     bound = era._bind_day0_diurnal_nowcast_context(
@@ -600,6 +612,7 @@ def test_global_nowcast_context_binds_real_topology_candidates_to_witness_bins(m
     context = bound.day0_diurnal_nowcast_context
     assert context.probability_witness_identity == "nowcast-witness"
     assert context.running_extreme == boundary
+    assert context.carrier_future_extremes_c == (31.0, 32.0, 34.0)
     assert {(row.bin_id, row.side, row.token_id) for row in context.candidate_bindings} == {
         ("witness-bin", "YES", "yes-token"),
         ("witness-bin", "NO", "no-token"),
