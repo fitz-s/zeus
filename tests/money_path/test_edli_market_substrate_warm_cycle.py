@@ -2681,9 +2681,9 @@ def test_normal_warm_rotates_urgent_backlog_to_future_families_and_keyframes(
 
     for _ in range(30):
         summary = substrate_observer._edli_market_substrate_warm_cycle()
-        assert summary["promote_pending_urgency"] is False
 
     assert set(future_families).issubset(set(topology_visits))
+    assert summary["promote_pending_urgency"] is False
     assert captures
     assert all(capture["capture_trigger_override"] == "KEYFRAME" for capture in captures)
     assert all(capture["max_outcomes"] == 0 for capture in captures)

@@ -696,6 +696,78 @@ def test_discovery_capture_staleness_does_not_override_keyframe_interval(
     )
 
 
+def test_pending_warm_refreshes_expired_yes_no_full_evidence_on_first_visit(conn, monkeypatch):
+    import contextlib
+    import threading
+    from unittest.mock import MagicMock
+
+    from src.data import job_lock, substrate_observer
+    from src.state import db
+
+    monkeypatch.setattr(market_scanner_module, "_discovery_captures_since_keyframe", {})
+    monkeypatch.setenv("ZEUS_SUBSTRATE_CAPTURE_KEYFRAME_INTERVAL_CYCLES", "20")
+    market = _market_for_capture()
+    captures = []
+
+    def capture_pair(at, trigger):
+        for direction, token in (("buy_yes", "yes-token"), ("buy_no", "no-token")):
+            clob = FakeClobFacts()
+            clob.orderbook["asset_id"] = token
+            captures.append(capture_executable_market_snapshot(
+                conn,
+                market=market,
+                decision=_decision_for_capture(direction),
+                clob=clob,
+                captured_at=at,
+                scan_authority="VERIFIED",
+                capture_trigger=trigger,
+            ))
+        conn.commit()
+
+    capture_pair(NOW, "KEYFRAME")
+    refreshed_at = NOW + timedelta(minutes=10)
+    assert all(
+        datetime.fromisoformat(row[0]) < refreshed_at
+        for row in conn.execute("SELECT freshness_deadline FROM executable_market_snapshot_latest")
+    )
+    # Ordinary discovery must retain its lightweight policy; pending decision
+    # demand must explicitly request full evidence through the real warm call.
+    capture_pair(refreshed_at, "DISCOVERY_SWEEP")
+    assert [row["snapshot_persistence_tier"] for row in captures[-2:]] == ["compact"] * 2
+    assert {row[0] for row in conn.execute(
+        "SELECT captured_at FROM executable_market_snapshot_latest"
+    )} == {NOW.isoformat()}
+
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(substrate_observer, "_market_substrate_refresh_lock", threading.Lock())
+    monkeypatch.setattr(substrate_observer, "_market_substrate_broad_turnstile", lambda: (
+        contextlib.nullcontext(SimpleNamespace(acquired=True))
+    ))
+    monkeypatch.setattr(job_lock, "acquire_lock", lambda *_args: contextlib.nullcontext(True))
+    monkeypatch.setattr(db, "get_world_connection", lambda: MagicMock())
+    monkeypatch.setattr(db, "get_forecasts_connection_read_only", lambda: MagicMock())
+    monkeypatch.setattr(db, "query_control_override_state", lambda *_a, **_k: {
+        "status": "ok", "entries_paused": False,
+    })
+
+    def refresh_selected_family(_world, _forecasts, **kwargs):
+        capture_pair(refreshed_at, kwargs.get("capture_trigger_override") or "DISCOVERY_SWEEP")
+        return {"status": "refreshed", "executable_snapshots_inserted": 2}
+
+    monkeypatch.setattr(substrate_observer, "_refresh_pending_family_snapshots", refresh_selected_family)
+    summary = substrate_observer._edli_market_substrate_warm_cycle()
+    assert summary["status"] == "refreshed"
+    assert [row["snapshot_persistence_tier"] for row in captures[-2:]] == ["full"] * 2
+    rows = conn.execute("""
+        SELECT l.selected_outcome_token_id, l.captured_at, s.capture_trigger
+        FROM executable_market_snapshot_latest l
+        JOIN executable_market_snapshots s ON s.snapshot_id = l.snapshot_id
+    """).fetchall()
+    assert {tuple(row) for row in rows} == {
+        (token, refreshed_at.isoformat(), "KEYFRAME") for token in ("yes-token", "no-token")
+    }
+
+
 def test_discovery_capture_replaces_invalidated_keyframe(conn, monkeypatch):
     market_scanner_module._discovery_captures_since_keyframe.clear()
     monkeypatch.setenv("ZEUS_SUBSTRATE_CAPTURE_KEYFRAME_INTERVAL_CYCLES", "20")
