@@ -618,6 +618,33 @@ def test_execution_feasibility_latest_attached_schema_never_regresses_event_time
     )
 
 
+def test_inline_feasibility_retention_rethrows_sqlite_interrupt():
+    from src.events.triggers import market_channel_ingestor as module
+
+    class _InterruptedConnection:
+        def execute(self, *_args, **_kwargs):
+            raise sqlite3.OperationalError("interrupted")
+
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        module._inline_expire_execution_feasibility_evidence(
+            _InterruptedConnection(),
+            "execution_feasibility_evidence",
+        )
+
+
+def test_inline_feasibility_retention_keeps_ordinary_errors_nonblocking():
+    from src.events.triggers import market_channel_ingestor as module
+
+    class _BrokenConnection:
+        def execute(self, *_args, **_kwargs):
+            raise sqlite3.OperationalError("malformed retention index")
+
+    module._inline_expire_execution_feasibility_evidence(
+        _BrokenConnection(),
+        "execution_feasibility_evidence",
+    )
+
+
 def test_quote_cache_seeded_from_rest_on_connect():
     conn, writer = _conn_writer()
     cache = QuoteCache()

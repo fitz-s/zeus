@@ -1337,6 +1337,7 @@ class _PriceChannelWriteGate:
         from src.events.triggers.market_channel_ingestor import _world_write_mutex
         from src.state.write_coordinator import (
             DBIdentity,
+            WritePriority,
             bounded_sqlite_write,
             default_runtime_write_coordinator,
         )
@@ -1390,6 +1391,30 @@ class _PriceChannelWriteGate:
             )
             self.lease = lease
             if self._conn is not None:
+                # ``bounded_sqlite_write`` only fences a raw writer's busy wait;
+                # it cannot interrupt a statement that has already entered
+                # SQLite.  The persistent market quote producer is the one
+                # background TRADE lane allowed to use this cooperative SQL
+                # deadline.  Keep the deadline layer outside the bounded-write
+                # layer so the latter still installs busy_timeout=0 and both
+                # contexts restore the connection's prior state on exit.
+                if (
+                    self._scope == "trade"
+                    and self._priority in {
+                        WritePriority.BACKGROUND_RECOVERY,
+                        WritePriority.BACKGROUND_RECOVERY.value,
+                    }
+                    and self._owner == "price_channel_market_quote"
+                ):
+                    deadline = lease.acquired_at + self._max_hold_ms / 1000.0
+                    if self._deadline_monotonic is not None:
+                        deadline = min(deadline, self._deadline_monotonic)
+                    stack.enter_context(
+                        _held_quote_sqlite_deadline(
+                            self._conn,
+                            deadline_monotonic=deadline,
+                        )
+                    )
                 stack.enter_context(
                     bounded_sqlite_write(
                         self._conn, lease, max_hold_ms=self._max_hold_ms

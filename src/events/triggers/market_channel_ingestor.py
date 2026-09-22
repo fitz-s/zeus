@@ -4036,9 +4036,11 @@ def _inline_expire_execution_feasibility_evidence(
     just inserted by the caller in this same batch -- excluded so a
     legitimately old-timestamped write (a backfill/catch-up insert, or a row
     whose own quote_seen_at happens to already be outside the window) is
-    never deleted by the very insert that created it. Never raises -- a bug
-    here must not block a legitimate quote-evidence write; failures are
-    logged and swallowed so the caller's insert/commit proceeds unaffected.
+    never deleted by the very insert that created it. Ordinary retention
+    failures never block a legitimate quote-evidence write; they are logged
+    and swallowed so the caller's insert/commit proceeds unaffected. A
+    SQLite interrupt is propagated so the caller must roll back the enclosing
+    quote transaction.
 
     ``table`` is the already owner-routed table name (e.g. "execution_feasibility_evidence"
     or "trades.execution_feasibility_evidence") resolved by the caller -- never
@@ -4082,7 +4084,19 @@ def _inline_expire_execution_feasibility_evidence(
         # documented but not yet run) converts the DB to auto_vacuum=
         # INCREMENTAL.
         conn.execute("PRAGMA incremental_vacuum(1000)")
-    except Exception:  # noqa: BLE001 - inline expiry must never block a real write
+    except Exception as exc:  # noqa: BLE001 - ordinary retention errors stay opportunistic
+        # A cooperative deadline interrupt means the enclosing quote
+        # transaction is no longer safe to finalize.  Propagate it so the
+        # caller rolls back and requeues the complete batch; only unrelated
+        # retention failures remain best-effort and non-blocking.
+        code = getattr(exc, "sqlite_errorcode", None)
+        name = str(getattr(exc, "sqlite_errorname", "") or "").upper()
+        detail = str(exc).lower()
+        if (
+            isinstance(code, int)
+            and (code & 0xFF) == sqlite3.SQLITE_INTERRUPT
+        ) or name == "SQLITE_INTERRUPT" or "interrupted" in detail:
+            raise
         _logger.exception(
             "_inline_expire_execution_feasibility_evidence failed for table=%s (write unaffected)",
             table,

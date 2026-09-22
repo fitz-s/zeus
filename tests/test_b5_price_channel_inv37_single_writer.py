@@ -1001,6 +1001,83 @@ def test_price_channel_writer_roles_reach_coordinator_priority(monkeypatch):
     }
 
 
+def test_background_market_quote_gate_interrupts_long_sql_and_next_monitor_write_survives(
+    monkeypatch,
+):
+    """The quote gate aborts a long SQLite unit and leaves the connection reusable."""
+    from src.ingest import price_channel_ingest as lane
+    from src.state import write_coordinator
+
+    class _FakeLease:
+        def __init__(self) -> None:
+            self.acquired_at = time.monotonic()
+            self._metrics = SimpleNamespace(
+                stage=None,
+                sqlite_errorcode=None,
+                sqlite_errorname=None,
+            )
+
+        def record_stage(self, stage) -> None:
+            self._metrics.stage = stage
+
+        def record_sqlite_error(self, exc, *, stage) -> None:
+            self._metrics.stage = stage
+            self._metrics.sqlite_errorcode = getattr(exc, "sqlite_errorcode", None)
+            self._metrics.sqlite_errorname = getattr(exc, "sqlite_errorname", None)
+
+    class _Coordinator:
+        @contextlib.contextmanager
+        def lease(self, _dbs, **_kwargs):
+            yield _FakeLease()
+
+    monkeypatch.setattr(
+        write_coordinator,
+        "default_runtime_write_coordinator",
+        lambda: _Coordinator(),
+    )
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE quotes (value INTEGER)")
+    conn.execute("PRAGMA busy_timeout = 321")
+    conn.commit()
+    try:
+        with pytest.raises(TimeoutError, match="deadline elapsed during SQLite execution"):
+            with lane._PriceChannelWriteGate(
+                owner="price_channel_market_quote",
+                scope="trade",
+                priority="background_recovery",
+                deadline_ms=1000,
+                max_hold_ms=20,
+                conn=conn,
+            ):
+                assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 0
+                conn.execute("INSERT INTO quotes VALUES (1)")
+                conn.execute(
+                    """
+                    WITH RECURSIVE counter(value) AS (
+                        SELECT 0
+                        UNION ALL
+                        SELECT value + 1 FROM counter WHERE value < 100000000
+                    )
+                    SELECT sum(value) FROM counter
+                    """
+                ).fetchone()
+    finally:
+        conn.rollback()
+
+    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 321
+    assert conn.execute("SELECT COUNT(*) FROM quotes").fetchone()[0] == 0
+    with lane._edli_price_channel_trade_write_gate(
+        owner="price_channel_monitor_after_quote_timeout",
+        priority="monitor",
+        conn=conn,
+    ):
+        conn.execute("INSERT INTO quotes VALUES (2)")
+        conn.commit()
+    assert conn.execute("SELECT value FROM quotes").fetchall() == [(2,)]
+    conn.close()
+
+
 def test_submit_ack_retry_persists_after_a_180ms_legacy_sqlite_lock(tmp_path):
     """Post-venue ACK persistence retries the local fact write, never the venue call."""
     from src.execution.executor import _retry_persist_on_db_lock
