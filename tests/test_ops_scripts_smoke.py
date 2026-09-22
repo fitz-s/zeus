@@ -8060,6 +8060,7 @@ def test_deploy_live_warm_preflight_failure_releases_guard_without_stopping_main
     dl = _load("deploy_live_warm_preflight_refused_guard", "deploy_live.py")
     calls = []
     released = []
+    armed_issued_at = []
 
     monkeypatch.setattr(dl, "_gate", lambda *_args, **_kwargs: (True, []))
     monkeypatch.setattr(dl, "head_sha", lambda short=True: "e" * 40)
@@ -8072,8 +8073,10 @@ def test_deploy_live_warm_preflight_failure_releases_guard_without_stopping_main
     monkeypatch.setattr(
         dl,
         "_pause_entries_for_live_restart_if_needed",
-        lambda labels, **_kwargs: (
-            calls.append(("pause", tuple(labels))) or (True, "pause armed")
+        lambda labels, **kwargs: (
+            armed_issued_at.append(kwargs["issued_at"])
+            or calls.append(("pause", tuple(labels)))
+            or (True, "pause armed")
         ),
     )
     monkeypatch.setattr(
@@ -8110,8 +8113,8 @@ def test_deploy_live_warm_preflight_failure_releases_guard_without_stopping_main
     monkeypatch.setattr(
         dl,
         "_release_unused_live_restart_guard",
-        lambda labels, *, expected_sha: (
-            released.append((tuple(labels), expected_sha))
+        lambda labels, *, expected_sha, issued_at: (
+            released.append((tuple(labels), expected_sha, issued_at))
             or "live restart guard release: released reason=restart_refused"
         ),
     )
@@ -8127,7 +8130,8 @@ def test_deploy_live_warm_preflight_failure_releases_guard_without_stopping_main
     assert dl.main(["restart", "live-trading"]) == 1
 
     expanded_labels = [*dl.LIVE_TRADING_PREREQUISITE_LABELS, dl.LIVE_TRADING_LABEL]
-    assert released == [(tuple(expanded_labels), "e" * 40)]
+    assert len(armed_issued_at) == 1 and armed_issued_at[0]
+    assert released == [(tuple(expanded_labels), "e" * 40, armed_issued_at[0])]
     assert calls[-1] == (
         "preflight",
         tuple(expanded_labels),

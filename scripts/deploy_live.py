@@ -3898,6 +3898,7 @@ def _pause_entries_for_live_restart_if_needed(
     labels: list[str],
     *,
     expected_sha: str | None = None,
+    issued_at: str | None = None,
 ) -> tuple[bool, str]:
     """Durably pause entries before a live-trading restart can boot new code.
 
@@ -3915,13 +3916,17 @@ def _pause_entries_for_live_restart_if_needed(
     if not os.path.exists(py):
         py = sys.executable
     expected_literal = json.dumps(str(expected_sha or head_sha(short=False)))
+    issued_literal = json.dumps(str(issued_at).strip()) if issued_at else "None"
     code = textwrap.dedent(
         f"""
         from src.control.control_plane import arm_deploy_live_restart_guard
 
         # Existing operator/risk/source pauses remain selected and untouched.
         # The guard is indefinite (effective_until=None), never a TTL.
-        result = arm_deploy_live_restart_guard(expected_sha={expected_literal})
+        result = arm_deploy_live_restart_guard(
+            expected_sha={expected_literal},
+            issued_at={issued_literal},
+        )
         if result.get('status') == 'preserved':
             print(
                 'entries pause guard preserved: '
@@ -3961,6 +3966,7 @@ def _release_unused_live_restart_guard(
     labels: list[str],
     *,
     expected_sha: str,
+    issued_at: str,
 ) -> str:
     """Release the guard this invocation armed when the restart will not run.
 
@@ -3972,8 +3978,9 @@ def _release_unused_live_restart_guard(
     indefinite and ownerless, and entries stay stopped for a transition that
     never began.
 
-    Releases exactly the generation matching ``expected_sha``; an operator pause
-    or a newer guard is left untouched by the control-plane CAS.
+    Releases exactly the generation matching ``expected_sha`` and ``issued_at``;
+    an operator pause or a newer guard is left untouched by the control-plane
+    CAS.
     """
 
     if LIVE_TRADING_LABEL not in labels:
@@ -3983,6 +3990,7 @@ def _release_unused_live_restart_guard(
     if not os.path.exists(py):
         py = sys.executable
     expected_literal = json.dumps(str(expected_sha))
+    expected_issued_at_literal = json.dumps(str(issued_at))
     code = textwrap.dedent(
         f"""
         from src.control.control_plane import (
@@ -3993,8 +4001,12 @@ def _release_unused_live_restart_guard(
         witness = get_active_deploy_live_restart_guard()
         if witness is None:
             print('live restart guard release: no guard selected')
-        elif witness.expected_sha != {expected_literal}:
-            # A newer invocation owns the pause now; leave it selected.
+        elif (
+            witness.expected_sha != {expected_literal}
+            or witness.issued_at != {expected_issued_at_literal}
+        ):
+            # A newer invocation (including one with the same SHA) owns the
+            # pause now; leave it selected.
             print(
                 'live restart guard release: skipped, a different guard is '
                 f'selected (expected_sha={{witness.expected_sha[:9]}})'
@@ -4029,6 +4041,7 @@ def _pause_entries_with_stuck_live_recovery(
     *,
     live_was_loaded: bool,
     expected_sha: str | None = None,
+    issued_at: str | None = None,
 ) -> tuple[bool, str]:
     """Arm the restart guard after stopping requested daemons that hold the writer.
 
@@ -4039,13 +4052,15 @@ def _pause_entries_with_stuck_live_recovery(
     Other pause failures remain fail-closed, with every stopped label left down.
     """
 
-    if expected_sha is None:
-        ok, detail = _pause_entries_for_live_restart_if_needed(labels)
-    else:
-        ok, detail = _pause_entries_for_live_restart_if_needed(
-            labels,
-            expected_sha=expected_sha,
-        )
+    pause_kwargs = {}
+    if expected_sha is not None:
+        pause_kwargs["expected_sha"] = expected_sha
+    if issued_at is not None:
+        pause_kwargs["issued_at"] = issued_at
+    ok, detail = _pause_entries_for_live_restart_if_needed(
+        labels,
+        **pause_kwargs,
+    )
     writer_stuck = "timed out after" in detail or "database is locked" in detail
     if ok or not writer_stuck:
         return ok, detail
@@ -4059,13 +4074,10 @@ def _pause_entries_with_stuck_live_recovery(
         if not _wait_for_launchctl_unloaded(label):
             stop_details.append(f"FAILED unload wait {label}")
             return False, f"{detail}\n" + "; ".join(stop_details)
-    if expected_sha is None:
-        retry_ok, retry_detail = _pause_entries_for_live_restart_if_needed(labels)
-    else:
-        retry_ok, retry_detail = _pause_entries_for_live_restart_if_needed(
-            labels,
-            expected_sha=expected_sha,
-        )
+    retry_ok, retry_detail = _pause_entries_for_live_restart_if_needed(
+        labels,
+        **pause_kwargs,
+    )
     prior_state = "loaded" if live_was_loaded else "already absent"
     return (
         retry_ok,
@@ -4289,6 +4301,9 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
         else False
     )
     expected_live_sha = head_sha(short=False) if includes_live_trading else ""
+    restart_guard_issued_at = (
+        datetime.now(timezone.utc).isoformat() if includes_live_trading else ""
+    )
 
     # Arm the durable entry guard while the loaded main still monitors held
     # capital.  The obligation gate below requires this witness, so checking it
@@ -4298,6 +4313,7 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
     pause_ok, pause_detail = _pause_entries_for_live_restart_if_needed(
         labels,
         expected_sha=expected_live_sha,
+        issued_at=restart_guard_issued_at,
     )
     if not pause_ok:
         print("REFUSING to restart — live entry pause guard is not armed:")
@@ -4319,6 +4335,7 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
             _release_unused_live_restart_guard(
                 labels,
                 expected_sha=expected_live_sha,
+                issued_at=restart_guard_issued_at,
             )
         )
         return 1
@@ -4401,6 +4418,7 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
                         _release_unused_live_restart_guard(
                             labels,
                             expected_sha=expected_live_sha,
+                            issued_at=restart_guard_issued_at,
                         )
                     )
                     return 1

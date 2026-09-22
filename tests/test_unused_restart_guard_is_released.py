@@ -64,7 +64,7 @@ class TestReleaseUnusedGuard:
 
     def test_a_newer_guard_generation_is_left_selected(self):
         stale = _arm("a" * 40)
-        newer = control_plane.arm_deploy_live_restart_guard("b" * 40)
+        newer = control_plane.arm_deploy_live_restart_guard("a" * 40)
         assert newer["status"] == "armed"
 
         result = control_plane.release_unused_deploy_live_restart_guard(stale)
