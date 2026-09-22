@@ -5059,6 +5059,141 @@ def _single_order_metrics(
     return float(robust_du), float(robust_ev), float(efficiency), cost
 
 
+def _family_joint_plan_candidate_key(
+    candidate: GlobalSingleOrderCandidate,
+) -> tuple[object, ...] | None:
+    """Freeze the candidate and economic-curve fields the planner reads."""
+    try:
+        curve = candidate.economic_cost_curve
+        levels = tuple(
+            (Decimal(level.price), Decimal(level.size))
+            for level in curve.levels
+        )
+        curve_values = (
+            Decimal(curve.fee_model.fee_rate),
+            Decimal(curve.min_tick),
+            Decimal(curve.min_order_size),
+        )
+        candidate_values = (
+            candidate.candidate_id,
+            candidate.family_key,
+            candidate.bin_id,
+            candidate.ledger_snapshot_id,
+            candidate.token_id,
+            candidate.side,
+            candidate.execution_mode,
+        )
+        if not levels or any(not p.is_finite() or not s.is_finite() for p, s in levels):
+            return None
+        return (*candidate_values, levels, *curve_values)
+    except (AttributeError, TypeError, ValueError, ArithmeticError):
+        return None
+
+
+def _family_joint_plan_cache_key(
+    candidates: Sequence[GlobalSingleOrderCandidate],
+    *,
+    probability_witness: JointOutcomeProbabilityWitness,
+    endowment: FamilyPortfolioEndowment,
+    capital_limit_by_candidate: Mapping[str, Decimal],
+    fractional_kelly_multiplier: Decimal,
+) -> tuple[object, ...] | None:
+    """Return a hashable key, or ``None`` for the original uncached path."""
+    try:
+        ordered_candidates = tuple(candidates)
+        if not ordered_candidates:
+            return None
+        candidate_keys = tuple(
+            _family_joint_plan_candidate_key(candidate)
+            for candidate in ordered_candidates
+        )
+        if any(key is None for key in candidate_keys):
+            return None
+        family_key = probability_witness.family_key
+        bin_ids = tuple(probability_witness.bin_ids)
+        point = np.asarray(probability_witness.yes_point_q, dtype="<f8")
+        band_alpha = float(probability_witness.band_alpha)
+        if (
+            not isinstance(family_key, str)
+            or not family_key
+            or not bin_ids
+            or len(set(bin_ids)) != len(bin_ids)
+            or any(not isinstance(bin_id, str) or not bin_id for bin_id in bin_ids)
+            or point.ndim != 1
+            or point.shape != (len(bin_ids),)
+            or not np.isfinite(point).all()
+            or not math.isfinite(band_alpha)
+        ):
+            return None
+        effective_caps = tuple(
+            Decimal(
+                capital_limit_by_candidate.get(
+                    candidate.candidate_id,
+                    Decimal("0"),
+                )
+            )
+            for candidate in ordered_candidates
+        )
+        multiplier = Decimal(fractional_kelly_multiplier)
+        if not multiplier.is_finite():
+            return None
+        key = (
+            candidate_keys,
+            (
+                family_key,
+                bin_ids,
+                point.shape,
+                point.tobytes(order="C"),
+                band_alpha,
+            ),
+            endowment,
+            effective_caps,
+            multiplier,
+        )
+        hash(key)
+        return key
+    except (AttributeError, KeyError, TypeError, ValueError, ArithmeticError):
+        return None
+
+
+def _plan_family_joint_buy_targets_cached(
+    candidates: Sequence[GlobalSingleOrderCandidate],
+    *,
+    probability_witness: JointOutcomeProbabilityWitness,
+    endowment: FamilyPortfolioEndowment,
+    capital_limit_by_candidate: Mapping[str, Decimal],
+    fractional_kelly_multiplier: Decimal,
+    cache: dict[object, FamilyJointBuyPlan] | None,
+) -> FamilyJointBuyPlan:
+    """Run or reuse one pure family planner result inside a selection cut."""
+
+    key = (
+        _family_joint_plan_cache_key(
+            candidates,
+            probability_witness=probability_witness,
+            endowment=endowment,
+            capital_limit_by_candidate=capital_limit_by_candidate,
+            fractional_kelly_multiplier=fractional_kelly_multiplier,
+        )
+        if cache is not None
+        else None
+    )
+    if key is not None and key in cache:
+        return cache[key]
+    # Do not cache exceptions: callers retain the existing typed family
+    # no-trade handling around this pure planner call.
+    plan = plan_family_joint_buy_targets(
+        candidates,
+        probability_witness=probability_witness,
+        endowment=endowment,
+        capital_limit_by_candidate=capital_limit_by_candidate,
+        fractional_kelly_multiplier=fractional_kelly_multiplier,
+    )
+    if key is not None:
+        cache[key] = plan
+    return plan
+
+
 def plan_family_joint_buy_targets(
     candidates: Sequence[GlobalSingleOrderCandidate],
     *,
@@ -7220,6 +7355,7 @@ def select_global_single_order(
         [str], FamilyPortfolioEndowment
     ]
     | None = None,
+    family_joint_plan_cache: dict[object, FamilyJointBuyPlan] | None = None,
     candidate_policy_rejection_resolver: Callable[
         [GlobalSingleOrderAnyCandidate], str | None
     ]
@@ -8247,12 +8383,13 @@ def select_global_single_order(
                 continue
             try:
                 family_endowment = family_portfolio_endowment_resolver(family_key)
-                joint_plan = plan_family_joint_buy_targets(
+                joint_plan = _plan_family_joint_buy_targets_cached(
                     positive_family_candidates,
                     probability_witness=witness,
                     endowment=family_endowment,
                     capital_limit_by_candidate=joint_buy_cost_limits,
                     fractional_kelly_multiplier=multiplier,
+                    cache=family_joint_plan_cache,
                 )
             except Exception:  # noqa: BLE001 - missing joint authority blocks this family
                 joint_plan = FamilyJointBuyPlan(

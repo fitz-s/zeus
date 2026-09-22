@@ -30,6 +30,7 @@ from src.solve.solver import (
     CurrentMakerFillWitness,
     DeterministicBinPayoffWitness,
     FamilyPortfolioEndowment,
+    FamilyJointBuyPlan,
     GlobalSingleOrderAnyCandidate,
     GlobalSingleOrderCandidate,
     GlobalSingleOrderDecision,
@@ -815,6 +816,7 @@ def select_prepared_global_auction(
     fractional_kelly_multiplier: Decimal = Decimal("1"),
     decision_at_utc: datetime,
     book_epoch: CurrentGlobalBookEpoch | None = None,
+    family_joint_plan_cache: dict[object, FamilyJointBuyPlan] | None = None,
     current_capital_limit_resolver: Callable[
         [GlobalSingleOrderAnyCandidate, str, str, str], Decimal
     ]
@@ -1604,6 +1606,7 @@ def select_prepared_global_auction(
         family_portfolio_endowment_resolver=(
             _family_endowment if book_epoch is not None else None
         ),
+        family_joint_plan_cache=family_joint_plan_cache,
         candidate_policy_rejection_resolver=_candidate_policy_rejection,
         payoff_q_correction_resolver=payoff_q_correction_resolver,
         buy_probability_rejection_resolver=_buy_probability_rejection,

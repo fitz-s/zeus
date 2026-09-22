@@ -1,6 +1,6 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-09-16
-# Lifecycle: created=2026-07-03; last_reviewed=2026-09-16; last_reused=2026-09-16
+# Last reused/audited: 2026-09-22
+# Lifecycle: created=2026-07-03; last_reviewed=2026-09-22; last_reused=2026-09-22
 # Authority basis: current global auction, executable Kelly, and wealth contracts
 """Current global-auction solver properties over executable portfolio wealth."""
 
@@ -1590,6 +1590,7 @@ def _global_select(
     fractional_kelly_multiplier="1",
     resolution_hours_by_family=None,
     cancelled=None,
+    family_joint_plan_cache=None,
 ):
     candidates = tuple(candidates)
     if probability_witnesses is None:
@@ -1653,6 +1654,7 @@ def _global_select(
             candidate_portfolio_endowment_resolver
         ),
         family_portfolio_endowment_resolver=family_portfolio_endowment_resolver,
+        family_joint_plan_cache=family_joint_plan_cache,
         candidate_policy_rejection_resolver=candidate_policy_rejection_resolver,
         payoff_q_correction_resolver=payoff_q_correction_resolver,
         cancelled=cancelled,
@@ -7328,6 +7330,221 @@ def _shared_two_bin_family_candidates():
         )
     _GLOBAL_PROBABILITY_WITNESSES[witness.witness_identity] = witness
     return tuple(candidates), witness
+
+
+def test_family_joint_plan_cache_is_cut_local_and_read_set_complete(monkeypatch):
+    candidates, witness = _shared_two_bin_family_candidates()
+    endowment = _family_endowment(
+        candidates[0], spendable_cash="100", portfolio_capital="100"
+    )
+    caps = {candidate.candidate_id: Decimal("100") for candidate in candidates}
+    cache = {}
+    original = S._ru_cvar_optimum
+    calls = 0
+
+    def counted_optimizer(**kwargs):
+        nonlocal calls
+        calls += 1
+        return original(**kwargs)
+
+    monkeypatch.setattr(S, "_ru_cvar_optimum", counted_optimizer)
+
+    def run(
+        selected_candidates=candidates,
+        *,
+        selected_witness=witness,
+        selected_endowment=endowment,
+        selected_caps=caps,
+        multiplier=Decimal("0.25"),
+    ):
+        return S._plan_family_joint_buy_targets_cached(
+            tuple(selected_candidates),
+            probability_witness=selected_witness,
+            endowment=selected_endowment,
+            capital_limit_by_candidate=selected_caps,
+            fractional_kelly_multiplier=multiplier,
+            cache=cache,
+        )
+
+    first = run()
+    assert run() == first
+    assert calls == 1
+
+    # A JSON-origin curve may carry an unhashable fee_details mapping.  The
+    # planner does not read that metadata, so the immutable read-set key still
+    # reuses the plan.
+    metadata_curve = replace(
+        candidates[0].executable_cost_curve,
+        fee_details={"source": ["json"]},
+    )
+    metadata_candidate = replace(
+        candidates[0],
+        executable_cost_curve=metadata_curve,
+        execution_curve_identity=S.executable_curve_identity(metadata_curve),
+    )
+    metadata_candidates = (metadata_candidate, candidates[1])
+    metadata_first = run(selected_candidates=metadata_candidates)
+    assert run(selected_candidates=metadata_candidates) == metadata_first
+    assert calls == 1
+
+    # Every planner input dimension is part of the key.
+    changed_point = np.array([0.60, 0.40], dtype=np.float64)
+    changed_identity = S.joint_probability_witness_identity(
+        family_key=witness.family_key,
+        bindings=witness.bindings,
+        q_version=witness.q_version,
+        resolution_identity=witness.resolution_identity,
+        topology_identity=witness.topology_identity,
+        posterior_identity_hash=witness.posterior_identity_hash,
+        source_truth_identity=witness.source_truth_identity,
+        authority_certificate_hash=witness.authority_certificate_hash,
+        band_alpha=witness.band_alpha,
+        band_basis=witness.band_basis,
+        yes_point_q=changed_point,
+        yes_q_samples=witness.yes_q_samples,
+        captured_at_utc=witness.captured_at_utc,
+    )
+    changed_witness = replace(
+        witness,
+        yes_point_q=changed_point,
+        witness_identity=changed_identity,
+    )
+    run(selected_witness=changed_witness)
+    changed_curve = replace(
+        candidates[0].executable_cost_curve,
+        levels=(BookLevel(price=Decimal("0.41"), size=Decimal("1000")),),
+    )
+    changed_candidate = replace(
+        candidates[0],
+        executable_cost_curve=changed_curve,
+        execution_curve_identity=S.executable_curve_identity(changed_curve),
+    )
+    run(selected_candidates=(changed_candidate, candidates[1]))
+    for curve_variant in (
+        replace(
+            candidates[0].executable_cost_curve,
+            fee_model=FeeModel(fee_rate=Decimal("0.01")),
+        ),
+        replace(candidates[0].executable_cost_curve, min_tick=Decimal("0.002")),
+        replace(
+            candidates[0].executable_cost_curve,
+            min_order_size=Decimal("0.02"),
+        ),
+    ):
+        variant = replace(
+            candidates[0],
+            executable_cost_curve=curve_variant,
+            execution_curve_identity=S.executable_curve_identity(curve_variant),
+        )
+        run(selected_candidates=(variant, candidates[1]))
+    changed_endowment = replace(
+        endowment,
+        current_token_shares=((candidates[0].token_id, Decimal("1")),),
+        committed_capital_usd=Decimal("1"),
+    )
+    run(selected_endowment=changed_endowment)
+    run(selected_caps={**caps, candidates[0].candidate_id: Decimal("99")})
+    run(multiplier=Decimal("0.20"))
+    run(selected_candidates=candidates[:1])
+    run(selected_candidates=tuple(reversed(candidates)))
+    alpha_identity = S.joint_probability_witness_identity(
+        family_key=witness.family_key,
+        bindings=witness.bindings,
+        q_version=witness.q_version,
+        resolution_identity=witness.resolution_identity,
+        topology_identity=witness.topology_identity,
+        posterior_identity_hash=witness.posterior_identity_hash,
+        source_truth_identity=witness.source_truth_identity,
+        authority_certificate_hash=witness.authority_certificate_hash,
+        band_alpha=0.10,
+        band_basis=witness.band_basis,
+        yes_point_q=witness.yes_point_q,
+        yes_q_samples=witness.yes_q_samples,
+        captured_at_utc=witness.captured_at_utc,
+    )
+    run(
+        selected_witness=replace(
+            witness,
+            band_alpha=0.10,
+            witness_identity=alpha_identity,
+        )
+    )
+    assert calls == 12
+
+    class MalformedCaps(dict):
+        def get(self, _key, _default=None):
+            return []
+
+    assert (
+        S._family_joint_plan_cache_key(
+            candidates,
+            probability_witness=witness,
+            endowment=endowment,
+            capital_limit_by_candidate=MalformedCaps(),
+            fractional_kelly_multiplier=Decimal("0.25"),
+        )
+        is None
+    )
+
+
+def test_global_selector_reuses_only_supplied_family_plan_cache(monkeypatch):
+    candidates, _witness = _shared_two_bin_family_candidates()
+    endowment = _family_endowment(candidates[0])
+    cache = {}
+    original = S._ru_cvar_optimum
+    calls = 0
+
+    def counted_optimizer(**kwargs):
+        nonlocal calls
+        calls += 1
+        return original(**kwargs)
+
+    monkeypatch.setattr(S, "_ru_cvar_optimum", counted_optimizer)
+    first = _global_select(
+        candidates,
+        cap="100",
+        fractional_kelly_multiplier="0.25",
+        family_portfolio_endowment_resolver=lambda _: endowment,
+        family_joint_plan_cache=cache,
+    )
+    second = _global_select(
+        candidates,
+        cap="100",
+        fractional_kelly_multiplier="0.25",
+        family_portfolio_endowment_resolver=lambda _: endowment,
+        family_joint_plan_cache=cache,
+    )
+    assert calls == 1
+    assert first.candidate is second.candidate
+    assert first.shares == second.shares
+    assert first.cost_usd == second.cost_usd
+
+
+def test_family_joint_plan_cache_does_not_store_planner_exceptions(monkeypatch):
+    candidates, witness = _shared_two_bin_family_candidates()
+    endowment = _family_endowment(candidates[0])
+    caps = {candidate.candidate_id: Decimal("100") for candidate in candidates}
+    cache = {}
+    calls = 0
+
+    def failing_plan(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("fixture planner failure")
+
+    monkeypatch.setattr(S, "plan_family_joint_buy_targets", failing_plan)
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="fixture planner failure"):
+            S._plan_family_joint_buy_targets_cached(
+                candidates,
+                probability_witness=witness,
+                endowment=endowment,
+                capital_limit_by_candidate=caps,
+                fractional_kelly_multiplier=Decimal("0.25"),
+                cache=cache,
+            )
+    assert calls == 2
+    assert not cache
 
 
 @pytest.mark.parametrize(

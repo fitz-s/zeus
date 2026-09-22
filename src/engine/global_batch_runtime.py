@@ -9109,6 +9109,10 @@ def process_current_global_batch(
             wealth_reauction_audit: _WealthReauctionAudit | None = None,
         ):
             nonlocal last_selection_receipt_row_id
+            # One ephemeral cache is shared by the actual and side-effect-free
+            # proof selections in this cut.  A retry invokes ``select_once``
+            # again and therefore receives a fresh cache.
+            family_joint_plan_cache = {}
             selection_at = current_time()
             prepared_for_selection = attempt_prepared
             if attempt_book_epoch is not None and selection_state is not None:
@@ -9333,6 +9337,7 @@ def process_current_global_batch(
                 fractional_kelly_multiplier=fractional_kelly_multiplier,
                 decision_at_utc=selection_at,
                 book_epoch=attempt_book_epoch,
+                family_joint_plan_cache=family_joint_plan_cache,
                 current_capital_limit_resolver=current_capital_limit_resolver,
                 candidate_policy_rejection_resolver=candidate_policy,
                 preflight_excluded_by_family=preflight_excluded_by_family,
@@ -9374,6 +9379,7 @@ def process_current_global_batch(
                     fractional_kelly_multiplier=fractional_kelly_multiplier,
                     decision_at_utc=selection_at,
                     book_epoch=attempt_book_epoch,
+                    family_joint_plan_cache=family_joint_plan_cache,
                     current_capital_limit_resolver=current_capital_limit_resolver,
                     candidate_policy_rejection_resolver=(
                         proof_candidate_policy

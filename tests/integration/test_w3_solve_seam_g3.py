@@ -34426,6 +34426,147 @@ def test_global_batch_distinguishes_unrelated_wake_from_final_authority_revocati
     trade.close()
 
 
+def test_global_batch_actual_and_proof_share_cut_local_plan_cache(
+    monkeypatch,
+):
+    """The runtime seam shares one cache for actual/proof and resets per cut."""
+
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-cache")
+    scope = current_global_auction_scope_from_events(
+        (event,), captured_at_utc=decision_at
+    )
+    family_key = scope.family_keys[0]
+    witness = SimpleNamespace(
+        family_key=family_key,
+        captured_at_utc=decision_at,
+        posterior_identity_hash="run-cache",
+        witness_identity="q-run-cache",
+    )
+    prepared = bridge.PreparedGlobalFamily(
+        decision_id="decision-cache",
+        probability_witness=witness,
+        candidate_seeds=(),
+    )
+    selected = SimpleNamespace(
+        decision=SimpleNamespace(
+            candidate=None,
+            candidate_evaluations=(),
+            rejection_reasons={},
+            no_trade_reason="TEST_NO_TRADE",
+        ),
+        winner_event_id=None,
+        holding_coverage=(),
+        materialization_excluded_by_family={},
+        actuation=None,
+    )
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "scan_current_global_auction_scope",
+        lambda **_: scope,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_bind_selection_holdings",
+        lambda prepared_by_event, **_kwargs: dict(prepared_by_event),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: _WealthNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth-cache",
+            economic_identity="wealth-economics-cache",
+            ledger_snapshot_id="ledger-cache",
+            native_holdings_micro=(),
+            pending_entry_endowments_micro=(),
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_venue_auction_identity",
+        lambda *_, **__: "venue-cache",
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_store_global_auction_receipt",
+        lambda *_, **__: 1,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_bind_stored_global_auction_receipt",
+        lambda _conn, *, selected, decision_log_id: selected,
+    )
+
+    def run(*, force_uncached: bool):
+        cache_objects = []
+
+        def select(*_args, **kwargs):
+            cache_objects.append(kwargs.get("family_joint_plan_cache"))
+            if force_uncached:
+                kwargs["family_joint_plan_cache"] = None
+            return selected
+
+        monkeypatch.setattr(global_batch_runtime, "select_prepared_global_auction", select)
+        trade = sqlite3.connect(":memory:")
+        try:
+            result = global_batch_runtime.process_current_global_batch(
+                (event,),
+                decision_time=decision_at,
+                world_conn=object(),
+                forecast_conn=object(),
+                trade_conn=trade,
+                payload_reader=lambda current: json.loads(current.payload_json),
+                prepare_event=lambda current, _at: EventSubmissionReceipt(
+                    False,
+                    current.event_id,
+                    current.causal_snapshot_id,
+                    prepared_global_family=prepared,
+                ),
+                actuate_winner=lambda *_: pytest.fail("no-trade fixture must not actuate"),
+                stamp_receipt=lambda receipt: receipt,
+                venue_submit_count=lambda: 0,
+                current_execution=lambda *_: object(),
+                current_time_provider=lambda: decision_at,
+                current_book_epoch_provider=lambda probabilities, _at: (
+                    probabilities,
+                    None,
+                ),
+                proof_candidate_policy_rejection_resolver=lambda _candidate: "proof",
+            )
+        finally:
+            trade.close()
+        return result, cache_objects
+
+    cached_result, cached_caches = run(force_uncached=False)
+    assert len(cached_caches) == 2
+    assert cached_caches[0] is cached_caches[1]
+    assert cached_caches[0] is not None
+
+    uncached_result, uncached_caches = run(force_uncached=True)
+    assert len(uncached_caches) == 2
+    assert uncached_caches[0] is uncached_caches[1]
+    assert all(cache is not None for cache in uncached_caches)
+    assert cached_caches[0] is not uncached_caches[0]
+    assert cached_result.receipts.keys() == uncached_result.receipts.keys()
+    assert {
+        event_id: (
+            receipt.reason,
+            receipt.submitted,
+            receipt.proof_accepted,
+        )
+        for event_id, receipt in cached_result.receipts.items()
+    } == {
+        event_id: (
+            receipt.reason,
+            receipt.submitted,
+            receipt.proof_accepted,
+        )
+        for event_id, receipt in uncached_result.receipts.items()
+    }
+
+
 def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
     monkeypatch,
     caplog,
@@ -46096,6 +46237,78 @@ def test_day0_saturated_no_is_removed_before_joint_kelly_and_yes_wins():
     blocked = [row for row in selected.decision.candidate_evaluations if row.side == "NO"]
     assert blocked and all(row.rejection_reason == "DAY0_STATISTICAL_CERTAINTY_UNSUPPORTED" for row in blocked)
     assert selected.decision.expected_growth.expected_ev_usd > 0
+
+
+def test_day0_joint_plan_cache_reuses_rebuilt_candidates_with_equal_decision(
+    monkeypatch,
+):
+    event_id, prepared, payload, kwargs = _saturated_day0_auction_inputs()
+    bound = era._bind_day0_saturated_statistical_sides(prepared, payload)
+    import src.solve.solver as solver
+
+    original_optimizer = solver._ru_cvar_optimum
+    calls = []
+
+    def counted_optimizer(**optimizer_kwargs):
+        calls.append(True)
+        return original_optimizer(**optimizer_kwargs)
+
+    monkeypatch.setattr(solver, "_ru_cvar_optimum", counted_optimizer)
+
+    def select(cache):
+        return select_prepared_global_auction(
+            {event_id: bound},
+            family_joint_plan_cache=cache,
+            **kwargs,
+        )
+
+    shared_cache = {}
+    cached_first = select(shared_cache)
+    cached_second = select(shared_cache)
+    assert len(calls) == 1
+    assert cached_first.decision == cached_second.decision
+    assert cached_first.winner_event_id == cached_second.winner_event_id
+
+    calls.clear()
+    uncached_first = select(None)
+    uncached_second = select(None)
+    assert len(calls) == 2
+    assert uncached_first.decision == cached_first.decision
+    assert uncached_second.decision == cached_first.decision
+
+    proof_kwargs = dict(
+        selection_epoch_identity=kwargs["selection_epoch_identity"],
+        selection_cut_at_utc=kwargs["selection_cut_at_utc"],
+        decision_at_utc=kwargs["decision_at_utc"],
+        probability_manifest=((
+            bound.probability_witness.family_key,
+            bound.probability_witness.witness_identity,
+        ),),
+        full_scope_identity=kwargs["current_scope"].scope_identity,
+        book_epoch_identity=kwargs["book_epoch"].witness_identity,
+        wealth_witness=kwargs["wealth_witness"],
+        family_context_by_key={
+            bound.probability_witness.family_key: {
+                "city": "Chicago",
+                "target_date": "2026-06-13",
+                "metric": "high",
+            }
+        },
+        probability_semantics_by_family={
+            bound.probability_witness.family_key: "day0_remaining_day",
+        },
+        probability_witnesses={
+            bound.probability_witness.family_key: bound.probability_witness,
+        },
+        payoff_q_lcb_by_candidate=None,
+        venue_submit_count_before=0,
+        venue_submit_count_after=0,
+    )
+    assert global_batch_runtime._capital_proof_counterfactual_receipt(
+        cached_second, **proof_kwargs
+    ) == global_batch_runtime._capital_proof_counterfactual_receipt(
+        uncached_first, **proof_kwargs
+    )
 
 
 def test_day0_nowcast_rejects_the_current_overpriced_proposal_and_falls_through(monkeypatch):
