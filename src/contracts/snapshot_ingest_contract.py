@@ -20,6 +20,7 @@ import os
 from typing import Literal
 
 from src.contracts.ensemble_snapshot_provenance import (
+    ECMWF_OPENDATA_HIGH_DATA_VERSION,
     ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
     TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
     _ECMWF_OPENDATA_HIGH_DATA_VERSION_LEGACY,
@@ -68,6 +69,12 @@ _LOW_LOCALDAY_MIN_OPENDATA_3H = MetricIdentity(
 )
 
 _ALLOWED_DATA_VERSIONS: dict[str, MetricIdentity] = {
+    ECMWF_OPENDATA_HIGH_DATA_VERSION: MetricIdentity(
+        temperature_metric="high",
+        physical_quantity="mx2t3_local_calendar_day_max",
+        observation_field="high_temp",
+        data_version=ECMWF_OPENDATA_HIGH_DATA_VERSION,
+    ),
     HIGH_LOCALDAY_MAX.data_version: HIGH_LOCALDAY_MAX,
     LOW_LOCALDAY_MIN.data_version: LOW_LOCALDAY_MIN,
     # 2026-05-12 antibody (B/C — schema drift completion): the Open Data

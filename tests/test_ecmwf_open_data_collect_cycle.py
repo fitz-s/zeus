@@ -681,47 +681,35 @@ def test_runtime_coordinate_manifest_preserves_prior_snapshots(tmp_path, monkeyp
         ecmwf_open_data._write_runtime_coordinate_manifest(tmp_path)
 
 
-def test_extract_assets_fall_back_without_moving_raw_storage(tmp_path):
-    """A migration fallback may supply code assets without changing raw_root."""
+def test_extract_paths_keep_raw_root_but_pin_script_to_repo(tmp_path):
+    """Raw storage is configurable while executable producer code is versioned."""
     from src.data import ecmwf_open_data
 
     source_root = tmp_path / "new-repo" / "51 source data"
-    legacy_root = tmp_path / "external" / "51 source data"
-    (legacy_root / "scripts").mkdir(parents=True)
-    (legacy_root / "docs").mkdir(parents=True)
-    (legacy_root / "scripts" / "extract_open_ens_localday.py").write_text("# extractor\n")
-    (legacy_root / "docs" / "tigge_city_coordinate_manifest_full_latest.json").write_text("{}")
-
     resolved = ecmwf_open_data._resolve_opendata_paths(
         source_root=source_root,
         environ={},
-        legacy_external_root=legacy_root,
-    )
-
-    assert resolved.raw_root == source_root.resolve()
-    assert resolved.asset_root == legacy_root.resolve()
-    assert resolved.origin == "home_repo_migration_split"
-
-
-def test_explicit_source_root_never_silently_falls_back(tmp_path):
-    """An explicit operator root fails closed when its extractor assets are absent."""
-    from src.data import ecmwf_open_data
-
-    source_root = tmp_path / "configured" / "51 source data"
-    legacy_root = tmp_path / "external" / "51 source data"
-    (legacy_root / "scripts").mkdir(parents=True)
-    (legacy_root / "docs").mkdir(parents=True)
-    (legacy_root / "scripts" / "extract_open_ens_localday.py").write_text("# extractor\n")
-    (legacy_root / "docs" / "tigge_city_coordinate_manifest_full_latest.json").write_text("{}")
-
-    resolved = ecmwf_open_data._resolve_opendata_paths(
-        environ={"ZEUS_51_SOURCE_ROOT": str(source_root)},
-        legacy_external_root=legacy_root,
     )
 
     assert resolved.raw_root == source_root.resolve()
     assert resolved.asset_root == source_root.resolve()
-    assert resolved.origin == "env_complete_root"
+    assert resolved.extract_script == ecmwf_open_data.PROJECT_ROOT / "scripts" / "extract_open_ens_localday.py"
+    assert resolved.origin == "repo_script_fixed"
+
+
+def test_explicit_source_root_keeps_repo_script(tmp_path):
+    """An explicit raw root never selects executable code from a legacy checkout."""
+    from src.data import ecmwf_open_data
+
+    source_root = tmp_path / "configured" / "51 source data"
+    resolved = ecmwf_open_data._resolve_opendata_paths(
+        environ={"ZEUS_51_SOURCE_ROOT": str(source_root)},
+    )
+
+    assert resolved.raw_root == source_root.resolve()
+    assert resolved.asset_root == source_root.resolve()
+    assert resolved.extract_script == ecmwf_open_data.PROJECT_ROOT / "scripts" / "extract_open_ens_localday.py"
+    assert resolved.origin == "env_raw_root_repo_script"
 
 
 def test_missing_extract_assets_fail_before_download_or_subprocess(tmp_path, monkeypatch):
@@ -771,12 +759,159 @@ def test_missing_extract_assets_fail_before_download_or_subprocess(tmp_path, mon
 
 
 def test_extract_asset_paths_share_one_cycle_bundle():
-    """Script and manifest must come from the same selected asset package."""
+    """The script is always the checked-in producer; runtime manifest is explicit."""
     from src.data import ecmwf_open_data
 
     paths = ecmwf_open_data._resolve_opendata_paths()
 
-    assert paths.extract_script == paths.asset_root / "scripts" / "extract_open_ens_localday.py"
+    assert paths.extract_script == ecmwf_open_data.PROJECT_ROOT / "scripts" / "extract_open_ens_localday.py"
     assert paths.manifest_path == (
         paths.asset_root / "docs" / "tigge_city_coordinate_manifest_full_latest.json"
     )
+
+
+def test_versioned_extractor_preserves_high_native_inner_and_boundary_candidates(tmp_path, monkeypatch):
+    """HIGH keeps both native planes; only the inner candidate is emitted as value."""
+    from scripts import extract_open_ens_localday as extractor
+
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps({"cities": [{
+            "city": "New York",
+            "lat": 40.7,
+            "lon": -74.0,
+            "timezone": "America/New_York",
+            "unit": "C",
+        }]}),
+        encoding="utf-8",
+    )
+    grib = tmp_path / "cycle.grib2"
+    grib.write_bytes(b"fixture")
+
+    entries = {}
+    for member in range(51):
+        entries[(member, 6)] = {
+            "member": member,
+            "step_hours": 6,
+            "start_step": 3,
+            "end_step": 6,
+            "step_range": "3-6",
+            "city_values_k": {"New York": {
+                "value_k": 300.15 + member,
+                "nearest_grid_lat": 40.75,
+                "nearest_grid_lon": -74.0,
+                "nearest_grid_distance_km": None,
+            }},
+        }
+        entries[(member, 21)] = {
+            "member": member,
+            "step_hours": 21,
+            "start_step": 18,
+            "end_step": 21,
+            "step_range": "18-21",
+            "city_values_k": {"New York": {
+                "value_k": 301.15 + member,
+                "nearest_grid_lat": 40.75,
+                "nearest_grid_lon": -74.0,
+                "nearest_grid_distance_km": None,
+            }},
+        }
+    monkeypatch.setattr(
+        extractor,
+        "_scan_grib_with_city_values",
+        lambda _path, _track, _cities: {
+            "issue_dt": datetime(2026, 6, 6, 0, tzinfo=timezone.utc),
+            "entries": entries,
+        },
+    )
+
+    output_root = tmp_path / "raw"
+    result = extractor.extract_open_ens_localday(
+        grib_path=grib,
+        track_name="mx2t6_high",
+        manifest_path=manifest,
+        output_root=output_root,
+    )
+    assert result["status"] == "ok"
+    payload_path = next(output_root.rglob("*_target_2026-06-06_lead_0.json"))
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    assert payload["boundary_ambiguous"] is False
+    assert payload["selected_step_ranges_inner"] == ["18-21"]
+    assert payload["selected_step_ranges_boundary"] == ["3-6"]
+    member = payload["members"][0]
+    assert member["inner_step_ranges"] == ["18-21"]
+    assert member["boundary_step_ranges"] == ["3-6"]
+    assert member["native_windows"] == [
+        {
+            "start_step_hours": 3,
+            "end_step_hours": 6,
+            "value_native_unit": pytest.approx(27.0),
+        },
+        {
+            "start_step_hours": 18,
+            "end_step_hours": 21,
+            "value_native_unit": pytest.approx(28.0),
+        },
+    ]
+    assert member["inner_max_native_unit"] == pytest.approx(28.0)
+    assert member["boundary_max_native_unit"] == pytest.approx(27.0)
+    assert member["value_native_unit"] == pytest.approx(member["inner_max_native_unit"])
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ({"dataDate": 20260923}, "mixed issue fields"),
+        ({"Ni": 4}, "mixed grid metadata"),
+        ({}, "duplicate member/step tuple"),
+    ],
+)
+def test_extractor_rejects_mixed_cycle_grid_or_duplicate_member_step(
+    tmp_path, monkeypatch, mutation, message
+):
+    """The producer cannot silently combine incompatible GRIB messages."""
+    from scripts import extract_open_ens_localday as extractor
+
+    base = {
+        "shortName": "mx2t3",
+        "dataDate": 20260922,
+        "dataTime": 0,
+        "dataType": "fc",
+        "units": "K",
+        "typeOfLevel": "heightAboveGround",
+        "level": 2,
+        "stepUnits": 1,
+        "stepType": "max",
+        "startStep": 27,
+        "endStep": 30,
+        "stepRange": "27-30",
+        "lengthOfTimeRange": 3,
+        "indicatorOfUnitForTimeRange": 1,
+        "gridType": "regular_ll",
+        "Ni": 2,
+        "Nj": 2,
+        "latitudeOfFirstGridPointInDegrees": 1.0,
+        "longitudeOfFirstGridPointInDegrees": 0.0,
+        "iDirectionIncrementInDegrees": 1.0,
+        "jDirectionIncrementInDegrees": 1.0,
+        "scanningMode": 0,
+    }
+    first = dict(base)
+    second = dict(base)
+    second.update(mutation)
+    handles = [first, second]
+    monkeypatch.setattr(extractor, "codes_grib_new_from_file", lambda _fh: handles.pop(0) if handles else None)
+    monkeypatch.setattr(extractor, "codes_get", lambda handle, key: handle[key])
+    monkeypatch.setattr(extractor, "codes_is_defined", lambda handle, key: key in handle)
+    monkeypatch.setattr(extractor, "codes_get_values", lambda _handle: [300.0, 300.0, 300.0, 300.0])
+    monkeypatch.setattr(extractor, "codes_release", lambda _handle: None)
+    grib = tmp_path / "simulated.grib2"
+    grib.write_bytes(b"fixture")
+    cities = [{"city": "X", "lat": 0.0, "lon": 0.0}]
+
+    with pytest.raises(ValueError, match=message):
+        extractor._scan_grib_with_city_values(
+            grib,
+            extractor.TRACKS["mx2t6_high"],
+            cities,
+        )

@@ -1105,6 +1105,9 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
     in `conn` so it matches _current_market_bin_topology_hash exactly.
     Authority: replacement live row authority requires flags plus a live-grade posterior."""
     import json as _json
+    from src.data.replacement_forecast_source_run_identity import (
+        expected_replacement_dependency_identity_by_role,
+    )
 
     from src.data.replacement_forecast_bundle_reader import (
         _current_market_bin_topology_payload,
@@ -1173,6 +1176,7 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
             "decorrelated_providers_expected": 3,
             "current_evidence_shape": {
                 "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                "source_cycle_time": "2026-05-24T00:00:00+00:00",
             },
         },
     }
@@ -1263,9 +1267,26 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
         {
             "baseline_b0": "run-1",
             "openmeteo_ifs9_anchor": "run-1",
+            "current_ensemble_snapshot": 1,
         },
         separators=(",", ":"),
     )
+    current_baseline_dataset = expected_replacement_dependency_identity_by_role("high")[
+        "baseline_b0"
+    ].data_version
+    conn.execute(
+        "UPDATE ensemble_snapshots SET dataset_id = ? WHERE snapshot_id = '1'",
+        (current_baseline_dataset or "fixture-current-dataset",),
+    )
+    if current_baseline_dataset:
+        conn.execute(
+            "UPDATE source_run SET dataset_id = ? WHERE source_run_id = 'run-1'",
+            (current_baseline_dataset,),
+        )
+        conn.execute(
+            "UPDATE source_run_coverage SET data_version = ? WHERE source_run_id = 'run-1'",
+            (current_baseline_dataset,),
+        )
     conn.execute(
         """
         INSERT INTO forecast_posteriors (
@@ -1941,6 +1962,56 @@ def test_replacement_posterior_forecast_authority_payload_satisfies_pre_submit_s
     assert "missing_authority_tier" not in errors
     assert "missing_first_member_observed_time" not in errors
     assert "missing_run_complete_time" not in errors
+
+
+def test_replacement_posterior_rejects_old_intrinsic_ensemble_carrier_even_when_ready():
+    event = _replacement_forecast_event()
+    conn = _trade_conn_with_snapshot()
+    _insert_replacement_forecast_fixture(conn)
+    conn.execute(
+        "UPDATE ensemble_snapshots SET dataset_id = ? WHERE snapshot_id = '1'",
+        ("ecmwf_opendata_mx2t3_local_calendar_day_max",),
+    )
+    conn.commit()
+    family = SimpleNamespace(city="Chicago", target_date="2026-05-25", metric="high")
+    reason: dict[str, str] = {}
+
+    result = _forecast_authority_payload_from_posterior(
+        conn,
+        event=event,
+        family=family,
+        payload={"source_id": REPLACEMENT_SOURCE_ID, "source_run_id": "run-1"},
+        decision_time=DECISION_TIME,
+        reason_out=reason,
+    )
+
+    assert result is None
+    assert reason["reason"] == "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_MISMATCH"
+
+
+def test_replacement_posterior_rejects_malformed_intrinsic_dependency():
+    event = _replacement_forecast_event()
+    conn = _trade_conn_with_snapshot()
+    _insert_replacement_forecast_fixture(conn)
+    conn.execute(
+        "UPDATE forecast_posteriors SET dependency_source_run_ids_json = ?",
+        ("{malformed",),
+    )
+    conn.commit()
+    family = SimpleNamespace(city="Chicago", target_date="2026-05-25", metric="high")
+    reason: dict[str, str] = {}
+
+    result = _forecast_authority_payload_from_posterior(
+        conn,
+        event=event,
+        family=family,
+        payload={"source_id": REPLACEMENT_SOURCE_ID, "source_run_id": "run-1"},
+        decision_time=DECISION_TIME,
+        reason_out=reason,
+    )
+
+    assert result is None
+    assert reason["reason"] == "current_ensemble_dependency_unparseable"
 
 
 def test_replacement_posterior_refuses_old_current_evidence_semantics():

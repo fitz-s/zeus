@@ -48,7 +48,7 @@ import pytest
 
 from src.contracts.ensemble_snapshot_provenance import (
     CANONICAL_ENSEMBLE_DATA_VERSIONS,
-    ECMWF_OPENDATA_HIGH_DATA_VERSION,
+    ECMWF_OPENDATA_HIGH_DATA_VERSION_UNCERTIFIED as ECMWF_OPENDATA_HIGH_DATA_VERSION,
     ECMWF_OPENDATA_LOW_DATA_VERSION,
     assert_data_version_allowed,
     normalize_opendata_data_version,

@@ -28656,7 +28656,8 @@ def _forecast_authority_payload_from_posterior(
             f"""
             SELECT source_id, source_cycle_time, source_available_at, computed_at,
                    posterior_identity_hash, data_version, posterior_id, family_id,
-                   bin_topology_hash, q_json, q_lcb_json, q_ucb_json, provenance_json
+                   bin_topology_hash, q_json, q_lcb_json, q_ucb_json, provenance_json,
+                   dependency_source_run_ids_json
              FROM {posterior_table}
              WHERE product_id = ?
                AND runtime_layer = 'live'
@@ -28690,9 +28691,35 @@ def _forecast_authority_payload_from_posterior(
         p_q_lcb_json,
         p_q_ucb_json,
         p_provenance_json,
+        p_dependency_source_run_ids_json,
     ) = prow
     if not p_identity_hash or not p_source_cycle_time:
         _fail("identity_hash_or_cycle_missing")
+        return None
+    try:
+        p_dependency = json.loads(str(p_dependency_source_run_ids_json or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        _fail("current_ensemble_dependency_unparseable")
+        return None
+    if not isinstance(p_dependency, Mapping):
+        _fail("current_ensemble_dependency_unparseable")
+        return None
+    try:
+        from src.data.replacement_forecast_bundle_reader import (
+            _current_ensemble_snapshot_identity_reason,
+        )
+
+        current_snapshot_reason = _current_ensemble_snapshot_identity_reason(
+            conn,
+            dependency_json=p_dependency,
+            city=family.city,
+            target_date=family.target_date,
+            metric=family.metric,
+        )
+    except Exception:  # noqa: BLE001 — identity authority is fail-closed
+        current_snapshot_reason = "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_FAULT"
+    if current_snapshot_reason is not None:
+        _fail(current_snapshot_reason)
         return None
     raw_lag_reason = _replacement_live_input_lag_reason(
         conn,

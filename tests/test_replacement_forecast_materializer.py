@@ -6083,7 +6083,7 @@ def _insert_coordinate_bound_frontier_row(
 @pytest.mark.parametrize(
     ("metric", "base"),
     (
-        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max"),
+        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max_boundary_v2"),
         ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min"),
     ),
 )
@@ -6129,6 +6129,15 @@ def test_current_evidence_uses_only_the_request_coordinate_dataset(
         conn, snapshot_id=103, dataset_id=base,
         metric=metric, available_at=_dt(3, 58),
     )
+    if metric == "high":
+        uncertified = coordinate_bound_data_version(
+            "ecmwf_opendata_mx2t3_local_calendar_day_max",
+            sha256(current_manifest.encode("utf-8")).hexdigest(),
+        )
+        _insert_coordinate_bound_frontier_row(
+            conn, snapshot_id=104, dataset_id=uncertified,
+            metric=metric, available_at=_dt(3, 59),
+        )
     request = replace(
         _request(), temperature_metric=metric,
         baseline_data_version=current_data_version,
@@ -6147,6 +6156,10 @@ def test_current_evidence_uses_only_the_request_coordinate_dataset(
         replace(request, baseline_data_version=old_data_version),
         metric=metric,
     ) is None
+    if metric == "high":
+        assert materializer_mod.read_current_evidence_snapshot_id(
+            conn, replace(request, baseline_data_version=uncertified), metric=metric,
+        ) is None
 
 
 def test_current_evidence_requires_current_profile_and_point_in_time_row(

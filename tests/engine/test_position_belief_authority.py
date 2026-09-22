@@ -369,6 +369,7 @@ def _install_live_readiness_binding(
     posterior_id: int,
     computed_at: datetime,
     expires_at: datetime,
+    metric: str = "high",
 ) -> None:
     conn = sqlite3.connect(db_path)
     for ddl in (
@@ -376,16 +377,48 @@ def _install_live_readiness_binding(
         "ALTER TABLE forecast_posteriors ADD COLUMN data_version TEXT",
         "ALTER TABLE forecast_posteriors ADD COLUMN training_allowed INTEGER",
         "ALTER TABLE forecast_posteriors ADD COLUMN source_available_at TEXT",
+        "ALTER TABLE forecast_posteriors ADD COLUMN dependency_source_run_ids_json TEXT",
     ):
         conn.execute(ddl)
     conn.execute(
-        """
+        f"""
         UPDATE forecast_posteriors
            SET product_id = 'openmeteo_ecmwf_ifs9_bayes_fusion_v1',
-               data_version = 'openmeteo_ecmwf_ifs9_bayes_fusion_high_v1',
+               data_version = 'openmeteo_ecmwf_ifs9_bayes_fusion_{metric}_v1',
                training_allowed = 0,
                source_available_at = computed_at
         """
+    )
+    from src.data.replacement_forecast_source_run_identity import (
+        expected_replacement_dependency_identity_by_role,
+    )
+
+    expected_dataset = expected_replacement_dependency_identity_by_role(metric)[
+        "baseline_b0"
+    ].data_version
+    conn.execute(
+        """
+        CREATE TABLE ensemble_snapshots (
+            snapshot_id INTEGER PRIMARY KEY,
+            dataset_id TEXT,
+            source_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots (
+            snapshot_id, dataset_id, source_id, city, target_date, temperature_metric
+        ) VALUES (1, ?, 'ecmwf_open_data', ?, ?, ?)
+        """,
+        (expected_dataset or "fixture-current-dataset", city, target_date, metric),
+    )
+    conn.execute(
+        "UPDATE forecast_posteriors SET dependency_source_run_ids_json = ?",
+        (json.dumps({"current_ensemble_snapshot": 1}),),
     )
     conn.execute(
         """
@@ -423,10 +456,10 @@ def _install_live_readiness_binding(
             "strategy",
             "openmeteo_ecmwf_ifs9_bayes_fusion",
             LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID,
-            "openmeteo_ecmwf_ifs9_bayes_fusion_high_v1",
+            f"openmeteo_ecmwf_ifs9_bayes_fusion_{metric}_v1",
             city,
             target_date,
-            "high",
+            metric,
             "READY",
             computed_at.isoformat(),
             expires_at.isoformat(),
@@ -437,7 +470,7 @@ def _install_live_readiness_binding(
                             "role": "soft_anchor_posterior",
                             "source_id": LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID,
                             "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
-                            "data_version": "openmeteo_ecmwf_ifs9_bayes_fusion_high_v1",
+                            "data_version": f"openmeteo_ecmwf_ifs9_bayes_fusion_{metric}_v1",
                             "status": "READY",
                             "source_available_at": computed_at.isoformat(),
                             "posterior_id": posterior_id,
@@ -791,6 +824,82 @@ class TestLoadReplacementBelief:
 
         assert belief is not None
         assert belief.posterior_id == "101"
+        assert belief.q_yes_bin == pytest.approx(0.20)
+
+    def test_ready_posterior_with_old_intrinsic_high_carrier_has_no_held_authority(
+        self, forecasts_db
+    ):
+        future_target = "2026-06-13"
+        _insert(
+            forecasts_db,
+            posterior_id=301,
+            computed_at=(NOW - timedelta(hours=1)).isoformat(),
+            q={BIN: 0.20},
+            target_date=future_target,
+        )
+        _install_live_readiness_binding(
+            forecasts_db,
+            city="Karachi",
+            target_date=future_target,
+            posterior_id=301,
+            computed_at=NOW - timedelta(minutes=30),
+            expires_at=NOW + timedelta(hours=1),
+        )
+        conn = sqlite3.connect(forecasts_db)
+        conn.execute(
+            "UPDATE ensemble_snapshots SET dataset_id = ? WHERE snapshot_id = 1",
+            ("ecmwf_opendata_mx2t3_local_calendar_day_max",),
+        )
+        conn.commit()
+        conn.close()
+
+        belief = load_replacement_belief(
+            city="Karachi",
+            target_date=future_target,
+            temperature_metric="high",
+            bin_label=BIN,
+            direction="buy_yes",
+            now=NOW,
+            db_path=forecasts_db,
+        )
+
+        assert belief is None
+
+    def test_ready_posterior_current_carrier_is_metric_scoped_for_low(
+        self, forecasts_db
+    ):
+        future_target = "2026-06-13"
+        low_bin = "Will the lowest temperature in Karachi be 37°C on June 13?"
+        _insert(
+            forecasts_db,
+            posterior_id=302,
+            computed_at=(NOW - timedelta(hours=1)).isoformat(),
+            q={low_bin: 0.20},
+            target_date=future_target,
+            metric="low",
+        )
+        _install_live_readiness_binding(
+            forecasts_db,
+            city="Karachi",
+            target_date=future_target,
+            posterior_id=302,
+            computed_at=NOW - timedelta(minutes=30),
+            expires_at=NOW + timedelta(hours=1),
+            metric="low",
+        )
+
+        belief = load_replacement_belief(
+            city="Karachi",
+            target_date=future_target,
+            temperature_metric="low",
+            bin_label=low_bin,
+            direction="buy_yes",
+            now=NOW,
+            db_path=forecasts_db,
+        )
+
+        assert belief is not None
+        assert belief.posterior_id == "302"
         assert belief.q_yes_bin == pytest.approx(0.20)
 
     def test_expired_live_readiness_cannot_authorize_held_probability(

@@ -349,6 +349,140 @@ def _low_local_day_min_interval_evidence(
     }
 
 
+def _high_local_day_max_boundary_certificate(payload: dict) -> dict[str, Any] | None:
+    """Prove all 51 native daily maxima without assigning cross-midnight maxima."""
+    from src.contracts.ensemble_snapshot_provenance import (
+        ECMWF_OPENDATA_HIGH_DATA_VERSION,
+        split_coordinate_bound_data_version,
+    )
+
+    version = str(payload.get("data_version") or "")
+    bound = split_coordinate_bound_data_version(version)
+    if (bound[0] if bound else version) != ECMWF_OPENDATA_HIGH_DATA_VERSION:
+        return None
+    reasons: list[str] = []
+    records: list[dict[str, Any]] = []
+    try:
+        city = runtime_cities_by_name().get(str(payload.get("city") or ""))
+        if (city is None or str(city.timezone) != payload.get("timezone")
+                or city.settlement_unit != payload.get("unit")):
+            raise ValueError("city_timezone_or_unit")
+        zone = ZoneInfo(str(payload["timezone"]))
+        start = datetime.fromisoformat(str(payload["target_date_local"])).replace(tzinfo=zone)
+        end = (start + timedelta(days=1)).astimezone(timezone.utc)
+        start = start.astimezone(timezone.utc)
+        issue = _parse_iso_datetime(payload.get("issue_time_utc"))
+        if issue is None or issue.tzinfo is None:
+            raise ValueError("missing_issue")
+        if (_parse_iso_datetime(payload.get("local_day_start_utc")) != start
+                or _parse_iso_datetime(payload.get("local_day_end_utc")) != end):
+            raise ValueError("local_day_bounds")
+        if payload.get("unit") not in {"C", "F"}:
+            raise ValueError("native_unit")
+        members = payload.get("members")
+        if (not isinstance(members, list) or len(members) != 51
+                or any(not isinstance(m, dict) or type(m.get("member")) is not int for m in members)
+                or {m["member"] for m in members} != set(range(51))):
+            raise ValueError("member_axis")
+        for member in members:
+            errors: list[str] = []
+            intervals = []
+            canonical_ranges: dict[str, list[list[int]]] = {}
+            for key in ("inner_step_ranges", "boundary_step_ranges"):
+                raw_ranges = member.get(key)
+                parsed = [
+                    _parse_step_range(r)
+                    if isinstance(r, str) or (
+                        isinstance(r, (list, tuple)) and len(r) == 2
+                        and all(type(h) is int for h in r)
+                    ) else None
+                    for r in raw_ranges
+                ] if isinstance(raw_ranges, list) else [None]
+                valid = []
+                for interval in parsed:
+                    if interval is None or interval[1] - interval[0] != 3 or interval[0] < 0:
+                        errors.append("invalid_native_interval")
+                        continue
+                    left, right = (issue + timedelta(hours=h) for h in interval)
+                    inner = start <= left and right <= end
+                    overlaps = left < end and right > start
+                    if not overlaps or inner != (key == "inner_step_ranges"):
+                        errors.append("interval_attribution")
+                        continue
+                    valid.append(list(interval))
+                    intervals.append((max(start, left), min(end, right)))
+                canonical_ranges[key] = sorted(valid)
+            frontier = start
+            for left, right in sorted(intervals):
+                if left > frontier:
+                    errors.append("native_interval_gap")
+                frontier = max(frontier, right)
+            if frontier != end:
+                errors.append("native_interval_gap")
+            native: dict[tuple[int, int], float] = {}
+            try:
+                windows = member["native_windows"]
+                if not isinstance(windows, list):
+                    raise ValueError("windows")
+                for window in windows:
+                    a, b = window["start_step_hours"], window["end_step_hours"]
+                    value = float(window["value_native_unit"])
+                    if (type(a) is not int or type(b) is not int or b-a != 3
+                            or (a, b) in native or not math.isfinite(value)):
+                        raise ValueError("window")
+                    native[a, b] = value
+                expected_ranges = {
+                    tuple(r) for ranges in canonical_ranges.values() for r in ranges
+                }
+                if set(native) != expected_ranges:
+                    raise ValueError("range_value_bijection")
+            except (KeyError, TypeError, ValueError, OverflowError):
+                errors.append("invalid_native_window_values")
+            try:
+                inner = float(member["inner_max_native_unit"])
+                value = float(member["value_native_unit"])
+                if not math.isfinite(inner) or value != inner or not canonical_ranges["inner_step_ranges"]:
+                    raise ValueError("inner")
+                if inner != max(native[tuple(r)] for r in canonical_ranges["inner_step_ranges"]):
+                    raise ValueError("inner_aggregate")
+                boundary_raw = member.get("boundary_max_native_unit")
+                if canonical_ranges["boundary_step_ranges"]:
+                    boundary = float(boundary_raw)
+                    if not math.isfinite(boundary):
+                        raise ValueError("boundary")
+                    if boundary != max(native[tuple(r)] for r in canonical_ranges["boundary_step_ranges"]):
+                        raise ValueError("boundary_aggregate")
+                    if boundary > inner:
+                        errors.append("boundary_can_exceed_inner")
+                elif boundary_raw is not None:
+                    errors.append("unexpected_boundary_value")
+            except (KeyError, TypeError, ValueError, OverflowError):
+                errors.append("invalid_native_extrema")
+            records.append({
+                "member": member["member"], **canonical_ranges,
+                "inner_max_native_unit": _raw_endpoint_for_provenance(member.get("inner_max_native_unit")),
+                "boundary_max_native_unit": _raw_endpoint_for_provenance(member.get("boundary_max_native_unit")),
+                "native_windows": [[a, b, v] for (a, b), v in sorted(native.items())],
+                "exact": not errors, "reasons": sorted(set(errors)),
+            })
+            reasons.extend(errors)
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        reasons.append(f"invalid_certificate:{exc}")
+    certificate = {
+        "revision": "high_native_boundary_v2",
+        "data_version": version,
+        "status": "EXACT" if len(records) == 51 and not reasons else "UNKNOWN",
+        "unit": payload.get("unit"), "issue_time_utc": payload.get("issue_time_utc"),
+        "local_day_start_utc": payload.get("local_day_start_utc"),
+        "local_day_end_utc": payload.get("local_day_end_utc"),
+        "manifest_sha256": payload.get("manifest_sha256"),
+        "members": records, "exact_member_count": sum(r["exact"] for r in records),
+        "reasons": sorted(set(reasons)),
+    }
+    certificate["identity_sha256"] = _canonical_json_sha256(certificate)
+    return certificate
+
+
 def _provenance_json(
     payload: dict,
     metric: MetricIdentity,
@@ -421,6 +555,9 @@ def _provenance_json(
     if interval_evidence is not None:
         prov["low_local_day_min_interval_evidence_sha256"] = interval_evidence["identity_sha256"]
         prov["low_local_day_min_interval_member_count"] = interval_evidence["member_count"]
+    high_certificate = _high_local_day_max_boundary_certificate(payload)
+    if high_certificate is not None:
+        prov["high_local_day_max_boundary_certificate"] = high_certificate
     return json.dumps(prov, ensure_ascii=False)
 
 
@@ -797,6 +934,25 @@ def _contract_evidence_fields(
     target_date = str(payload.get("target_date_local") or payload.get("target_date") or "")
     window_fields = _forecast_window_from_payload(payload, city_timezone=city_timezone)
     block_reasons = list(window_fields.pop("block_reasons", []))
+    high_certificate = _high_local_day_max_boundary_certificate(payload)
+    if high_certificate is not None:
+        if high_certificate["status"] == "EXACT":
+            # The clipped native-window union and member-wise dominance prove
+            # this derived quantity over the entire local day, including its edges.
+            start = _parse_iso_datetime(payload["local_day_start_utc"])
+            end = _parse_iso_datetime(payload["local_day_end_utc"])
+            zone = ZoneInfo(city_timezone)
+            window_fields = {
+                "forecast_window_start_utc": start.isoformat(),
+                "forecast_window_end_utc": end.isoformat(),
+                "forecast_window_start_local": start.astimezone(zone).isoformat(),
+                "forecast_window_end_local": end.astimezone(zone).isoformat(),
+            }
+            block_reasons = []
+        else:
+            # SCOPE: this city/date/cycle HIGH row. DRAIN: next native extraction
+            # retains every boundary window; RESET: a complete exact certificate.
+            block_reasons.append("high_boundary_certificate_not_exact")
 
     base = {
         "city_timezone": city_timezone,
@@ -928,7 +1084,10 @@ def ingest_json_file(
         data_version = normalized_dv
         payload["data_version"] = data_version
     if source_run_context is not None and source_run_context.dataset_id is not None:
-        from src.contracts.ensemble_snapshot_provenance import split_coordinate_bound_data_version
+        from src.contracts.ensemble_snapshot_provenance import (
+            opendata_source_run_revision_suffix,
+            split_coordinate_bound_data_version,
+        )
 
         identity = split_coordinate_bound_data_version(source_run_context.dataset_id)
         if (
@@ -942,6 +1101,7 @@ def ingest_json_file(
                 + ("mx2t6_high" if metric.temperature_metric == "high" else "mn2t6_low")
                 + source_run_context.source_cycle_time.astimezone(timezone.utc).strftime(":%Y-%m-%dT%HZ")
                 + ":coordsha:" + identity[1]
+                + opendata_source_run_revision_suffix(source_run_context.dataset_id)
             )
         ):
             return "contract_rejected: COORDINATE_MANIFEST_IDENTITY_MISMATCH"
@@ -1046,6 +1206,9 @@ def ingest_json_file(
         metric,
         source_id=source_run_context.source_id if source_run_context else None,
     )
+    high_certificate = _high_local_day_max_boundary_certificate(payload)
+    if high_certificate is not None and high_certificate["status"] != "EXACT":
+        training_allowed = 0
     prov_json = _provenance_json(payload, metric, contract_evidence=contract_evidence)
     lead_hours = _lead_hours(payload)
     now = _now_utc_iso()

@@ -411,17 +411,45 @@ def _seed_posterior(
     source_cycle_time: str,
     provenance_json: str = "{}",
 ) -> None:
+    from src.data.replacement_forecast_source_run_identity import (
+        expected_replacement_dependency_identity_by_role,
+    )
+
     city, target_date, metric = family
+    expected_dataset = expected_replacement_dependency_identity_by_role(metric)[
+        "baseline_b0"
+    ].data_version
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO ensemble_snapshots (
+            snapshot_id, city, target_date, temperature_metric, physical_quantity,
+            observation_field, available_at, fetch_time, lead_hours, members_json,
+            model_version, dataset_id, source_id, authority, causality_status,
+            boundary_ambiguous
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, 1, '[]', 'fixture', ?,
+                  'ecmwf_open_data', 'VERIFIED', 'OK', 0)
+        """,
+        (
+            city,
+            target_date,
+            metric,
+            "mx2t3_local_calendar_day_max" if metric == "high" else "mn2t3_local_calendar_day_min",
+            "high_temp" if metric == "high" else "low_temp",
+            source_cycle_time,
+            source_cycle_time,
+            expected_dataset or "fixture-current-dataset",
+        ),
+    )
     conn.execute(
         """
         INSERT INTO forecast_posteriors (
             source_id, product_id, data_version, city, target_date, temperature_metric,
             source_cycle_time, source_available_at, computed_at, q_json, posterior_method,
-            posterior_identity_hash, provenance_json
-        ) VALUES ('openmeteo', 'openmeteo_ecmwf_ifs9_bayes_fusion_v1', 'v1', ?, ?, ?, ?, ?, ?, '{}', 'bayes', ?, ?)
+            posterior_identity_hash, provenance_json, dependency_source_run_ids_json
+        ) VALUES ('openmeteo', 'openmeteo_ecmwf_ifs9_bayes_fusion_v1', 'v1', ?, ?, ?, ?, ?, ?, '{}', 'bayes', ?, ?, ?)
         """,
         (city, target_date, metric, source_cycle_time, source_cycle_time, source_cycle_time,
-         posterior_identity_hash, provenance_json),
+         posterior_identity_hash, provenance_json, json.dumps({"current_ensemble_snapshot": 1})),
     )
     conn.commit()
 
@@ -793,6 +821,45 @@ class TestReadCurrentFamilyQVersions:
 
         assert result[FAMILY].startswith("__Q_AUTHORITY_BLOCKED__:q-old:")
         assert "latest_raw_cycle=2026-07-03T06:00:00+00:00" in result[FAMILY]
+
+    def test_old_intrinsic_ensemble_carrier_returns_blocked_q_sentinel(self):
+        conn = _forecasts_db()
+        _seed_posterior(
+            conn,
+            family=FAMILY,
+            posterior_identity_hash="q-old",
+            source_cycle_time="2026-07-03T00:00:00+00:00",
+        )
+        conn.execute(
+            "UPDATE ensemble_snapshots SET dataset_id = ? WHERE snapshot_id = 1",
+            ("ecmwf_opendata_mx2t3_local_calendar_day_max",),
+        )
+        conn.commit()
+
+        result = read_current_family_q_versions(conn, [FAMILY])
+
+        assert result[FAMILY].startswith("__Q_AUTHORITY_BLOCKED__:q-old:")
+        assert "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_MISMATCH" in result[FAMILY]
+
+    def test_malformed_intrinsic_dependency_returns_blocked_q_sentinel(self):
+        conn = _forecasts_db()
+        _seed_posterior(
+            conn,
+            family=FAMILY,
+            posterior_identity_hash="q-old",
+            source_cycle_time="2026-07-03T00:00:00+00:00",
+        )
+        conn.execute(
+            "UPDATE forecast_posteriors SET dependency_source_run_ids_json = ?",
+            ("{malformed",),
+        )
+        conn.commit()
+
+        result = read_current_family_q_versions(conn, [FAMILY])
+
+        assert result[FAMILY] == (
+            "__Q_AUTHORITY_BLOCKED__:q-old:current_ensemble_dependency_unparseable"
+        )
 
 
 # ---------------------------------------------------------------------------

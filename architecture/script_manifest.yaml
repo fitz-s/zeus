@@ -924,6 +924,25 @@ scripts:
   etl_tigge_ens.py: {class: stale_deprecated, status: deprecated, lifecycle: deprecated_fail_closed, canonical_command: DO_NOT_RUN, reason: partial single-step TIGGE path is unaudited and superseded by canonical rebuild pipeline}
   extract_tigge_mn2t6_localday_min.py: {class: etl_writer, dangerous_if_run: false, external_inputs: [TIGGE_GRIB_CACHE], write_targets: ["data/local_calendar_day_snapshots/"]}
   extract_tigge_mx2t6_localday_max.py: {class: etl_writer, dangerous_if_run: false, external_inputs: [TIGGE_GRIB_CACHE], write_targets: ["data/local_calendar_day_snapshots/"]}
+  extract_open_ens_localday.py:
+    class: etl_writer
+    lifecycle: long_lived
+    status: active
+    dangerous_if_run: false
+    authority_scope: forecast_json_extraction
+    read_targets: [ECMWF_OPEN_DATA_GRIB, runtime_coordinate_manifest]
+    write_targets: ["raw/coordinate_manifests/<manifest_sha>/open_ens_*_localday_*/"]
+    target_db: null
+    dry_run_default: false
+    apply_flag: implicit
+    external_inputs: [ECMWF_OPEN_DATA_GRIB]
+    reuse_when: "Extract a checked-in ECMWF Open Data ENS GRIB into local-calendar-day JSON payloads for the canonical ingester."
+    do_not_use_when: "Do not use for settlement observations, direct DB writes, or a GRIB whose native startStep/endStep/stepRange/lengthOfTimeRange provenance cannot be verified."
+    canonical_command: "python3 scripts/extract_open_ens_localday.py --grib-path PATH --track mx2t6_high|mn2t6_low --manifest-path PATH --output-root PATH"
+    delete_policy: retain_until_superseded
+    promotion_barrier: "JSON output is consumed by the canonical ingest path; it does not by itself authorize live forecasts or trading."
+    required_helpers: []
+    required_tests: [tests/test_ecmwf_open_data_collect_cycle.py]
   force_lifecycle.py: {class: repair, apply_flag: implicit, target_db: state/zeus_trades.db, unguarded_write_rationale: "Direct lifecycle forcing is unsafe and currently unguarded; do not run outside a dedicated repair packet."}
   watch_full_loss_investigation.py:
     class: runtime_support

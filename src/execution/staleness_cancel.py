@@ -495,6 +495,7 @@ def read_current_family_q_versions(
             row = forecasts_conn.execute(
                 """
                 SELECT posterior_identity_hash, source_cycle_time, computed_at
+                       , dependency_source_run_ids_json
                   FROM forecast_posteriors
                  WHERE product_id = ?
                    AND city = ? AND target_date = ? AND temperature_metric = ?
@@ -509,6 +510,31 @@ def read_current_family_q_versions(
             out[family] = None
             continue
         q_version = str(row[0])
+        try:
+            dependency_json = json.loads(str(row[3] or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            out[family] = f"{_Q_AUTHORITY_BLOCKED_PREFIX}{q_version}:current_ensemble_dependency_unparseable"
+            continue
+        if not isinstance(dependency_json, dict):
+            out[family] = f"{_Q_AUTHORITY_BLOCKED_PREFIX}{q_version}:current_ensemble_dependency_unparseable"
+            continue
+        try:
+            from src.data.replacement_forecast_bundle_reader import (
+                _current_ensemble_snapshot_identity_reason,
+            )
+
+            current_snapshot_reason = _current_ensemble_snapshot_identity_reason(
+                forecasts_conn,
+                dependency_json=dependency_json,
+                city=city,
+                target_date=target_date,
+                metric=metric,
+            )
+        except Exception:  # noqa: BLE001 — q authority must stay blocked on identity faults
+            current_snapshot_reason = "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_FAULT"
+        if current_snapshot_reason is not None:
+            out[family] = f"{_Q_AUTHORITY_BLOCKED_PREFIX}{q_version}:{current_snapshot_reason}"
+            continue
         try:
             lag_reason = _replacement_input_hwm.replacement_live_input_lag_reason(
                 forecasts_conn,

@@ -139,7 +139,7 @@ class MetricIdentity:
 # writes ensemble_snapshots.dataset_id with the matching string.
 _HIGH_DATA_VERSION_BY_SOURCE_FAMILY: dict[str, str] = {
     "tigge": "tigge_mx2t6_local_calendar_day_max",
-    "ecmwf_opendata": "ecmwf_opendata_mx2t3_local_calendar_day_max",
+    "ecmwf_opendata": "ecmwf_opendata_mx2t3_local_calendar_day_max_boundary_v2",
 }
 _LOW_DATA_VERSION_BY_SOURCE_FAMILY: dict[str, str] = {
     "tigge": "tigge_mn2t6_local_calendar_day_min",

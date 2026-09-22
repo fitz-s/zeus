@@ -227,6 +227,7 @@ def _certified_replacement_posterior_row(
         "posterior_id",
         "product_id",
         "data_version",
+        "dependency_source_run_ids_json",
         "training_allowed",
         "source_available_at",
     }
@@ -309,14 +310,15 @@ def _certified_replacement_posterior_row(
     ):
         return None
 
-    return conn.execute(
+    row = conn.execute(
         f"""
         SELECT posterior_id, computed_at, q_json, q_lcb_json, q_ucb_json,
                {('source_cycle_time' if 'source_cycle_time' in posterior_columns else 'NULL AS source_cycle_time')},
                runtime_layer,
                {('source_id' if 'source_id' in posterior_columns else 'NULL AS source_id')},
                {('posterior_method' if 'posterior_method' in posterior_columns else 'NULL AS posterior_method')},
-               {('provenance_json' if 'provenance_json' in posterior_columns else 'NULL AS provenance_json')}
+               {('provenance_json' if 'provenance_json' in posterior_columns else 'NULL AS provenance_json')},
+               dependency_source_run_ids_json
           FROM forecast_posteriors
          WHERE posterior_id = ?
            AND city = ?
@@ -344,6 +346,31 @@ def _certified_replacement_posterior_row(
             decision_iso,
         ),
     ).fetchone()
+    if row is None:
+        return None
+    try:
+        dependency_json = json.loads(str(row["dependency_source_run_ids_json"] or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(dependency_json, Mapping):
+        return None
+    from src.data.replacement_forecast_bundle_reader import (
+        _current_ensemble_snapshot_identity_reason,
+    )
+
+    try:
+        current_snapshot_reason = _current_ensemble_snapshot_identity_reason(
+            conn,
+            dependency_json=dependency_json,
+            city=city,
+            target_date=target_date,
+            metric=metric,
+        )
+    except Exception:  # noqa: BLE001 — held belief is fail-closed on identity faults
+        current_snapshot_reason = "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_FAULT"
+    if current_snapshot_reason is not None:
+        return None
+    return row
 
 
 def _parse_computed_at(raw: object) -> datetime | None:

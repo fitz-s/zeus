@@ -106,7 +106,7 @@ def _seal_current_coordinates(conn):
             "UPDATE ensemble_snapshots SET dataset_id=?, manifest_hash=?, provenance_json=?, source_run_id=? WHERE temperature_metric=?",
             (data_version_for_track(track, manifest), hashlib.sha256((metric + manifest).encode()).hexdigest(),
              json.dumps({"manifest_sha256": digest}),
-             f"ecmwf_open_data:{track}:2026-05-19T00Z:coordsha:{digest}", metric),
+             f"ecmwf_open_data:{track}:2026-05-19T00Z:coordsha:{digest}" + (":high_boundary_v2" if metric == "high" else ""), metric),
         )
 
 

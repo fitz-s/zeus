@@ -341,7 +341,10 @@ def _parse_ingest_bundle(
         "n_members": int(members_hourly.shape[0]),
     }
     if bundle.source_id == "ecmwf_open_data":
-        from src.contracts.ensemble_snapshot_provenance import split_coordinate_bound_data_version
+        from src.contracts.ensemble_snapshot_provenance import (
+            opendata_source_run_revision_suffix,
+            split_coordinate_bound_data_version,
+        )
         if not isinstance(raw, Mapping):
             raise ValueError("OpenData bundle is missing coordinate provenance")
         versions = raw.get("data_version_by_metric")
@@ -361,6 +364,7 @@ def _parse_ingest_bundle(
             for row in rows.values():
                 issue = _parse_timestamp_as_utc(str(row["issue_time"]))
                 expected_run = f"ecmwf_open_data:{track}:" + issue.strftime("%Y-%m-%dT%HZ:coordsha:") + identity[1]
+                expected_run += opendata_source_run_revision_suffix(data_version)
                 if (row["dataset_id"] != data_version or row["coordinate_manifest_sha"] != identity[1]
                     or row["source_run_id"] != expected_run):
                     raise ValueError("OpenData bundle source snapshot identity mismatch")

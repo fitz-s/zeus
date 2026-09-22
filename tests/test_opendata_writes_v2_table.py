@@ -42,6 +42,75 @@ def test_canonical_allowlist_includes_opendata():
     assert "tigge_mn2t6_local_calendar_day_min" in CANONICAL_ENSEMBLE_DATA_VERSIONS
 
 
+def _boundary_high_payload(target="2026-09-23", zone="America/New_York"):
+    from zoneinfo import ZoneInfo
+    start = datetime.fromisoformat(target).replace(tzinfo=ZoneInfo(zone))
+    end = start + timedelta(days=1)
+    issue = start.astimezone(timezone.utc).replace(hour=0)
+    inner, boundary = [], []
+    for step in range(3, 51, 3):
+        left, right = issue + timedelta(hours=step-3), issue + timedelta(hours=step)
+        if left >= end or right <= start:
+            continue
+        (inner if left >= start and right <= end else boundary).append(f"{step-3}-{step}")
+    return {
+        "data_version": "ecmwf_opendata_mx2t3_local_calendar_day_max_boundary_v2",
+        "city": "NYC", "timezone": zone, "target_date_local": target,
+        "unit": "F", "issue_time_utc": issue.isoformat(),
+        "local_day_start_utc": start.astimezone(timezone.utc).isoformat(),
+        "local_day_end_utc": end.astimezone(timezone.utc).isoformat(),
+        "members": [{"member": i, "value_native_unit": 70.0,
+            "inner_max_native_unit": 70.0, "boundary_max_native_unit": 69.0 if boundary else None,
+            "inner_step_ranges": inner.copy(), "boundary_step_ranges": boundary.copy(),
+            "native_windows": [{"start_step_hours": int(r.split("-")[0]),
+                "end_step_hours": int(r.split("-")[1]),
+                "value_native_unit": 70.0 if r in inner else 69.0} for r in inner + boundary]}
+            for i in range(51)],
+    }
+
+
+@pytest.mark.parametrize("target", ["2026-09-23", "2026-03-08", "2026-11-01"])
+def test_high_boundary_certificate_preserves_exact_native_local_day(target):
+    from scripts.ingest_grib_to_snapshots import _high_local_day_max_boundary_certificate
+    p = _boundary_high_payload(target)
+    cert = _high_local_day_max_boundary_certificate(p)
+    assert cert["status"] == "EXACT"
+    assert cert["exact_member_count"] == 51
+    p["members"][0]["boundary_max_native_unit"] = 70.0
+    for w in p["members"][0]["native_windows"]:
+        if w["value_native_unit"] == 69.0:
+            w["value_native_unit"] = 70.0
+    assert _high_local_day_max_boundary_certificate(p)["status"] == "EXACT"
+
+
+@pytest.mark.parametrize("defect", ["higher", "gap", "missing_boundary", "duplicate", "nonfinite", "mismatch", "inner_window", "boundary_window", "fractional_range"])
+def test_high_boundary_certificate_does_not_invent_missing_physics(defect):
+    from scripts.ingest_grib_to_snapshots import _high_local_day_max_boundary_certificate
+    p = _boundary_high_payload()
+    member = p["members"][0]
+    if defect == "higher":
+        member["boundary_max_native_unit"] = 71.0
+    elif defect == "gap":
+        member["inner_step_ranges"].pop(1)
+    elif defect == "missing_boundary":
+        member["boundary_step_ranges"] = []
+    elif defect == "duplicate":
+        member["member"] = 1
+    elif defect == "nonfinite":
+        member["inner_max_native_unit"] = float("nan")
+    elif defect == "inner_window":
+        member["native_windows"][0]["value_native_unit"] = 100.0
+    elif defect == "boundary_window":
+        member["native_windows"][-1]["value_native_unit"] = 100.0
+    elif defect == "fractional_range":
+        member["native_windows"][0]["start_step_hours"] += 0.1
+    else:
+        member["value_native_unit"] = 71.0
+    cert = _high_local_day_max_boundary_certificate(p)
+    assert cert["status"] == "UNKNOWN"
+    assert cert["reasons"]
+
+
 def _coordinate_sha():
     from src.config import runtime_coordinate_manifest_json
     return hashlib.sha256(runtime_coordinate_manifest_json().encode()).hexdigest()
@@ -129,6 +198,24 @@ def _make_opendata_high_payload(
                 "forecast_window_end_local": forecast_window_end_iso,
             }
         )
+    issue_dt = datetime.fromisoformat(issue_iso)
+    start_dt, end_dt = map(datetime.fromisoformat, (local_day_start_iso, local_day_end_iso))
+    inner, boundary = [], []
+    for step in range(3, 243, 3):
+        left, right = issue_dt + timedelta(hours=step - 3), issue_dt + timedelta(hours=step)
+        if left >= end_dt or right <= start_dt:
+            continue
+        (inner if left >= start_dt and right <= end_dt else boundary).append(f"{step-3}-{step}")
+    payload["selected_step_ranges_inner"] = inner
+    payload["selected_step_ranges_boundary"] = boundary
+    for member in payload["members"]:
+        member.update(inner_max_native_unit=member["value_native_unit"],
+                      boundary_max_native_unit=17.0 if boundary else None,
+                      inner_step_ranges=inner.copy(), boundary_step_ranges=boundary.copy())
+        member["native_windows"] = [{"start_step_hours": int(r.split("-")[0]),
+            "end_step_hours": int(r.split("-")[1]),
+            "value_native_unit": member["value_native_unit"] if r in inner else 17.0}
+            for r in inner + boundary]
     return payload
 
 
@@ -151,6 +238,33 @@ def test_member_axis_provenance_requires_canonical_explicit_member_ids():
     unverified = _member_axis_provenance(payload)
     assert unverified["status"] == "UNVERIFIED"
     assert unverified["reason"] == "MEMBER_AXIS_NOT_CANONICAL"
+
+
+@pytest.mark.parametrize("boundary,contributes", [(17.0, 1), (100.0, 0)])
+def test_high_boundary_certificate_controls_persisted_authority(tmp_path, boundary, contributes):
+    from scripts.ingest_grib_to_snapshots import ingest_json_file
+    from src.types.metric_identity import HIGH_LOCALDAY_MAX
+
+    p = _make_opendata_high_payload(
+        "2026-05-02", "2026-05-01T00:00:00+00:00",
+        local_day_start_iso="2026-05-01T23:00:00+00:00",
+        local_day_end_iso="2026-05-02T23:00:00+00:00",
+    )
+    p["members"][0]["boundary_max_native_unit"] = boundary
+    path = tmp_path / "native.json"
+    path.write_text(json.dumps(p))
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema_forecasts(conn)
+    assert ingest_json_file(conn, path, metric=HIGH_LOCALDAY_MAX,
+                            model_version="ecmwf_ens", overwrite=False) == "written"
+    row = conn.execute("SELECT * FROM ensemble_snapshots").fetchone()
+    assert row["contributes_to_target_extrema"] == contributes
+    assert row["training_allowed"] == contributes
+    certificate = json.loads(row["provenance_json"])["high_local_day_max_boundary_certificate"]
+    assert certificate["status"] == ("EXACT" if contributes else "UNKNOWN")
+    assert len(certificate["members"]) == 51
+    assert len(json.loads(row["members_json"])) == 51
 
 
 def test_opendata_high_payload_lands_in_v2(tmp_path: Path, monkeypatch):
@@ -673,7 +787,7 @@ def test_collect_open_ens_cycle_clears_prior_same_source_run_rows(tmp_path: Path
     fifty_one_root = tmp_path / "51 source data"
     monkeypatch.setattr(ecmwf_open_data, "FIFTY_ONE_ROOT", fifty_one_root)
     extract_subdir = "open_ens_mx2t6_localday_max"
-    source_run_id = "ecmwf_open_data:mx2t6_high:2026-05-01T00Z:coordsha:" + _coordinate_sha()
+    source_run_id = "ecmwf_open_data:mx2t6_high:2026-05-01T00Z:coordsha:" + _coordinate_sha() + ":high_boundary_v2"
     forecasts_conn.execute(
         """
         INSERT INTO ensemble_snapshots (
@@ -818,7 +932,7 @@ def test_collect_open_ens_cycle_overwrites_existing_snapshot_in_place(tmp_path: 
     fifty_one_root = tmp_path / "51 source data"
     monkeypatch.setattr(ecmwf_open_data, "FIFTY_ONE_ROOT", fifty_one_root)
     extract_subdir = "open_ens_mx2t6_localday_max"
-    source_run_id = "ecmwf_open_data:mx2t6_high:2026-05-01T00Z:coordsha:" + _coordinate_sha()
+    source_run_id = "ecmwf_open_data:mx2t6_high:2026-05-01T00Z:coordsha:" + _coordinate_sha() + ":high_boundary_v2"
     issue_iso = "2026-05-01T00:00:00+00:00"
     forecasts_conn.execute(
         """
@@ -975,7 +1089,7 @@ def test_coordinate_revision_appends_without_rebinding_prior_evidence(tmp_path, 
             now_utc=datetime(2026, 5, 1, 9 + index, tzinfo=timezone.utc),
         )
         assert result["status"] == "ok"
-        assert result["source_run_id"].endswith(":coordsha:" + digest)
+        assert result["source_run_id"].endswith(":coordsha:" + digest + (":high_boundary_v2" if track == "mx2t6_high" else ""))
         assert result["data_version"].endswith("__coordsha_" + digest)
         if first_run is None:
             first_run = result["source_run_id"]

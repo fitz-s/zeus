@@ -84,7 +84,7 @@ def _seal_current_coordinates(conn):
             "UPDATE ensemble_snapshots SET dataset_id=?, manifest_hash=?, provenance_json=?, source_run_id=? WHERE temperature_metric=?",
             (data_version_for_track(track, manifest), hashlib.sha256((metric + manifest).encode()).hexdigest(),
              json.dumps({"manifest_sha256": digest}),
-             f"ecmwf_open_data:{track}:2026-05-19T00Z:coordsha:{digest}", metric),
+             f"ecmwf_open_data:{track}:2026-05-19T00Z:coordsha:{digest}" + (":high_boundary_v2" if metric == "high" else ""), metric),
         )
 
 
@@ -347,7 +347,7 @@ def test_day0_fetch_selects_current_coordinates_and_invalidates_prior_profile_ca
             (fake_city.name, _TARGET_DATE, metric, _ISSUE_TIME, _AVAILABLE_AT,
              _DB_FETCH_TIME, _RECORDED_AT, json.dumps(_make_members(base_value + 30)),
              data_version_for_track(track, manifest_b), digest_b,
-             f"ecmwf_open_data:{track}:2026-05-19T00Z:coordsha:{digest_b}",
+             f"ecmwf_open_data:{track}:2026-05-19T00Z:coordsha:{digest_b}" + (":high_boundary_v2" if metric == "high" else ""),
              json.dumps({"manifest_sha256": digest_b})),
         )
     first = client.fetch_ensemble(fake_city, forecast_days=1, model="ecmwf_ifs025",
@@ -356,7 +356,7 @@ def test_day0_fetch_selects_current_coordinates_and_invalidates_prior_profile_ca
     assert first["data_version"] == data_version_for_track(track, manifest_a)
     identity = first["snapshot_identity_by_metric_target_date"][metric][_TARGET_DATE]
     assert identity["dataset_id"] == first["data_version"]
-    assert identity["source_run_id"].endswith(":coordsha:" + first["coordinate_manifest_sha"])
+    assert identity["source_run_id"].endswith(":coordsha:" + first["coordinate_manifest_sha"] + (":high_boundary_v2" if metric == "high" else ""))
     assert all(datetime.fromisoformat(t).astimezone(ZoneInfo(fake_city.timezone)).date().isoformat() == _TARGET_DATE
                for t in first["times"])
     current["manifest"] = manifest_b

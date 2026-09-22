@@ -641,6 +641,7 @@ def _retry_identity_for_failed_prior_run(
 
 
 def _job_run_id(identity: dict[str, object]) -> str:
+    from src.contracts.ensemble_snapshot_provenance import opendata_source_run_revision_suffix
     scheduled_for = identity["scheduled_for"]
     if isinstance(scheduled_for, datetime):
         scheduled = scheduled_for.isoformat()
@@ -650,6 +651,7 @@ def _job_run_id(identity: dict[str, object]) -> str:
         f"{identity['job_name']}:{identity['source_id']}:{identity['track']}:"
         f"{scheduled}:{identity['release_calendar_key']}:"
         f"coordsha:{_coordinate_manifest_sha(identity)}"
+        f"{opendata_source_run_revision_suffix(str(identity.get('data_version', '')))}"
     )
 
 
@@ -796,6 +798,7 @@ def _probe_newest_opendata_cycle_availability(
 
 
 def _expected_source_run_id(identity: dict[str, object]) -> str:
+    from src.contracts.ensemble_snapshot_provenance import opendata_source_run_revision_suffix
     scheduled_for = identity.get("scheduled_for")
     if not isinstance(scheduled_for, datetime):
         raise TypeError("forecast-live identity scheduled_for must be datetime")
@@ -804,6 +807,7 @@ def _expected_source_run_id(identity: dict[str, object]) -> str:
         f"{identity['source_id']}:{identity['track']}:"
         f"{selected_cycle.date().isoformat()}T{selected_cycle.hour:02d}Z:"
         f"coordsha:{_coordinate_manifest_sha(identity)}"
+        f"{opendata_source_run_revision_suffix(str(identity['data_version']))}"
     )
 
 

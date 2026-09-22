@@ -70,6 +70,7 @@ import requests
 from src.config import PROJECT_ROOT, runtime_cities_by_name, runtime_coordinate_manifest_json
 from src.contracts.availability_time import proof_of_possession_available_at
 from src.contracts.ensemble_snapshot_provenance import (
+    opendata_source_run_revision_suffix,
     ECMWF_OPENDATA_HIGH_DATA_VERSION,
     ECMWF_OPENDATA_LOW_DATA_VERSION,
     ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
@@ -132,52 +133,32 @@ def _write_runtime_coordinate_manifest(raw_root: Path, *, manifest_json: str | N
     return path
 
 
-def _has_extract_assets(root: Path) -> bool:
-    return (
-        (root / "scripts" / "extract_open_ens_localday.py").is_file()
-        and (root / "docs" / "tigge_city_coordinate_manifest_full_latest.json").is_file()
-    )
-
-
 def _resolve_opendata_paths(
     *,
     source_root: Path | None = None,
     environ: Mapping[str, str] | None = None,
     legacy_external_root: Path | None = None,
 ) -> OpenDataPaths:
-    """Bind raw storage and extractor assets once for one collection cycle.
+    """Bind raw storage and the versioned in-repo producer for one cycle.
 
-    The home-repo migration left the active OpenData cache under the new repo
-    while the extractor package remained in the external source-data checkout.
-    An explicit ZEUS_51_SOURCE_ROOT is a complete-root assertion and is never
-    silently bypassed. The unset-env migration bridge keeps current raw bytes
-    in place while selecting the external asset package only when both required
-    assets exist. The returned immutable bundle prevents per-stage path drift.
+    Raw bytes remain under the configured ``ZEUS_51_SOURCE_ROOT`` (or the
+    existing default).  The extractor is always the checked-in script under
+    ``PROJECT_ROOT/scripts``; no unversioned external checkout may provide
+    executable code.  The coordinate manifest is generated from the current
+    runtime city config and passed explicitly by ``collect_open_ens_cycle``.
     """
     env = os.environ if environ is None else environ
     configured = str(env.get("ZEUS_51_SOURCE_ROOT", "")).strip()
     raw_root = Path(
         configured or source_root or FIFTY_ONE_ROOT
     ).expanduser().resolve()
-    if configured or _has_extract_assets(raw_root):
-        asset_root = raw_root
-        origin = "env_complete_root" if configured else "source_root_complete"
-    else:
-        fallback = (
-            legacy_external_root
-            if legacy_external_root is not None
-            else Path.home() / ".openclaw" / "workspace-venus" / "51 source data"
-        ).expanduser().resolve()
-        if _has_extract_assets(fallback):
-            asset_root = fallback
-            origin = "home_repo_migration_split"
-        else:
-            asset_root = raw_root
-            origin = "source_root_missing_assets"
+    asset_root = raw_root
+    origin = "repo_script_fixed" if not configured else "env_raw_root_repo_script"
+    extract_script = PROJECT_ROOT / "scripts" / "extract_open_ens_localday.py"
     return OpenDataPaths(
         raw_root=raw_root,
         asset_root=asset_root,
-        extract_script=asset_root / "scripts" / "extract_open_ens_localday.py",
+        extract_script=extract_script,
         manifest_path=asset_root / "docs" / "tigge_city_coordinate_manifest_full_latest.json",
         origin=origin,
     )
@@ -2745,6 +2726,10 @@ def collect_open_ens_cycle(
     source_run_id = (
         f"{SOURCE_ID}:{track}:{cycle_date.isoformat()}T{cycle_hour:02d}Z"
         f":coordsha:{manifest_sha}"
+        # HIGH now carries native inner/boundary evidence.  Keep its source-run
+        # identity disjoint from the pre-boundary producer so a new run cannot
+        # clear or overwrite rows that were materialized under the old law.
+        f"{opendata_source_run_revision_suffix(cfg['data_version'])}"
     )
     release_calendar_key = f"{SOURCE_ID}:{track}:{horizon_profile}"
 
@@ -2759,9 +2744,13 @@ def collect_open_ens_cycle(
     stages: list[dict] = []
 
     if not skip_extract:
+        # The producer is versioned in this repository.  The coordinate
+        # manifest is generated from the live runtime city config immediately
+        # below and supplied as an explicit subprocess argument, so a stale
+        # external manifest is not a required asset.
         missing_extract_assets = [
-            str(path)
-            for path in (paths.extract_script, paths.manifest_path)
+            str(paths.extract_script)
+            for path in (paths.extract_script,)
             if not path.is_file()
         ]
         if missing_extract_assets:

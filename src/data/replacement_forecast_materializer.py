@@ -3606,6 +3606,8 @@ def _read_current_evidence_shape(
             for value in json.loads(snapshot.members_json)
             if value is not None
         )
+        if metric == "high" and (len(values) != 51 or not all(math.isfinite(v) for v in values)):
+            return None
         members_unit = str(snapshot.members_unit or "").strip().lower()
         if members_unit in {"degf", "f", "°f"}:
             values = tuple((value - 32.0) * 5.0 / 9.0 for value in values)

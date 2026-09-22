@@ -75,7 +75,8 @@ from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 # aggregations). The stream now serves mx2t3/mn2t3 (3h native). Constants
 # renamed to reflect the new physical quantity. Old mx2t6 versions kept in
 # the allow-list so the 1568 historical rows remain readable.
-ECMWF_OPENDATA_HIGH_DATA_VERSION = "ecmwf_opendata_mx2t3_local_calendar_day_max"
+ECMWF_OPENDATA_HIGH_DATA_VERSION_UNCERTIFIED = "ecmwf_opendata_mx2t3_local_calendar_day_max"
+ECMWF_OPENDATA_HIGH_DATA_VERSION = "ecmwf_opendata_mx2t3_local_calendar_day_max_boundary_v2"
 ECMWF_OPENDATA_LOW_DATA_VERSION = "ecmwf_opendata_mn2t3_local_calendar_day_min"
 
 # Coordinate-bound Open Data identities preserve the immutable snapshot's
@@ -84,6 +85,7 @@ ECMWF_OPENDATA_LOW_DATA_VERSION = "ecmwf_opendata_mn2t3_local_calendar_day_min"
 # the 3-hour metric identity without an explicit contract update.
 _COORDINATE_BOUND_BASE_DATA_VERSIONS: frozenset[str] = frozenset({
     ECMWF_OPENDATA_HIGH_DATA_VERSION,
+    ECMWF_OPENDATA_HIGH_DATA_VERSION_UNCERTIFIED,
     ECMWF_OPENDATA_LOW_DATA_VERSION,
 })
 _COORDINATE_BOUND_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -117,6 +119,13 @@ def split_coordinate_bound_data_version(
             return None
     return None
 
+def opendata_source_run_revision_suffix(data_version: str) -> str:
+    """Keep certified HIGH runs distinct from immutable pre-certificate runs."""
+    identity = split_coordinate_bound_data_version(data_version)
+    base = identity[0] if identity is not None else data_version
+    return ":high_boundary_v2" if base == ECMWF_OPENDATA_HIGH_DATA_VERSION else ""
+
+
 # Legacy versions (mx2t6 era, written before 2026-05-07). Kept in the
 # allow-list so historical rows in ensemble_snapshots remain readable.
 _ECMWF_OPENDATA_HIGH_DATA_VERSION_LEGACY = "ecmwf_opendata_mx2t6_local_calendar_day_max"
@@ -144,6 +153,7 @@ CANONICAL_ENSEMBLE_DATA_VERSIONS: frozenset[str] = frozenset({
     HIGH_LOCALDAY_MAX.data_version,
     LOW_LOCALDAY_MIN.data_version,
     ECMWF_OPENDATA_HIGH_DATA_VERSION,
+    ECMWF_OPENDATA_HIGH_DATA_VERSION_UNCERTIFIED,
     ECMWF_OPENDATA_LOW_DATA_VERSION,
     TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
     ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,

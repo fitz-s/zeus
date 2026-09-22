@@ -598,8 +598,14 @@ def test_coordinate_manifest_seals_source_run_and_dataset_identity(track: str) -
     expected_b = daemon._expected_source_run_id(identity_b)
     assert expected_a != expected_b
     assert ":coordsha:" in expected_a
-    assert identity_a["data_version"].endswith(expected_a.split(":coordsha:", 1)[1])
-    assert identity_b["data_version"].endswith(expected_b.split(":coordsha:", 1)[1])
+    assert identity_a["data_version"].endswith(expected_a.split(":coordsha:", 1)[1].split(":", 1)[0])
+    assert identity_b["data_version"].endswith(expected_b.split(":coordsha:", 1)[1].split(":", 1)[0])
+    assert expected_a.endswith(":high_boundary_v2") == (track == "mx2t6_high")
+    assert daemon._job_run_id(identity_a).endswith(":high_boundary_v2") == (track == "mx2t6_high")
+    if track == "mx2t6_high":
+        legacy = dict(identity_a, data_version=str(identity_a["data_version"]).replace("_boundary_v2", ""))
+        assert daemon._job_run_id(legacy) != daemon._job_run_id(identity_a)
+        assert daemon._expected_source_run_id(legacy) != expected_a
     assert identity_a["data_version"] != identity_b["data_version"]
 
     result_a = {

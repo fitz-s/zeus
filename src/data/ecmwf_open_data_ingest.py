@@ -43,6 +43,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 
 from src.config import runtime_coordinate_manifest_json
+from src.contracts.ensemble_snapshot_provenance import opendata_source_run_revision_suffix
 from src.data.forecast_fetch_plan import data_version_for_track
 from src.data.forecast_extrema_authority import POSITIVE_ATTRIBUTION_STATUS_SQL_IN_LIST
 from src.data.forecast_ingest_protocol import (
@@ -424,6 +425,7 @@ def _query_metric(
     track = "mx2t6_high" if temperature_metric == "high" else "mn2t6_low"
     data_version = data_version_for_track(track, manifest_json)
     manifest_sha = hashlib.sha256(manifest_json.encode()).hexdigest()
+    manifest_run_suffix = manifest_sha + opendata_source_run_revision_suffix(data_version)
     source_run_prefix = f"{SOURCE_ID}:{track}:"
     conn = get_forecasts_connection()
     try:
@@ -485,11 +487,11 @@ def _query_metric(
                 city_name,
                 temperature_metric,
                 SOURCE_ID,
-                data_version, manifest_sha, source_run_prefix, manifest_sha,
+                data_version, manifest_sha, source_run_prefix, manifest_run_suffix,
                 decision_time, decision_time, decision_time, decision_time,
                 cutoff,
                 SOURCE_ID,
-                data_version, manifest_sha, source_run_prefix, manifest_sha,
+                data_version, manifest_sha, source_run_prefix, manifest_run_suffix,
                 decision_time, decision_time, decision_time, decision_time,
                 cutoff,
             ),
