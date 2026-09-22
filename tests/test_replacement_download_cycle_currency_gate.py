@@ -3329,7 +3329,7 @@ def test_timebox_commits_ready_wave_payloads_before_deferring_unresolved(
     assert any("Paris" in path for path in report["written_manifests"])
 
 
-def test_anchor_location_batch_failure_falls_back_as_one_meta_wave(
+def test_anchor_location_batch_read_timeout_falls_back_as_one_meta_wave_with_run_identity(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -3347,18 +3347,20 @@ def test_anchor_location_batch_failure_falls_back_as_one_meta_wave(
     )
     plan = _PlanStub(ready=False, rows=rows)
     meta_calls: list[tuple[tuple[str, str], ...]] = []
+    meta_runs: list[tuple[datetime, ...]] = []
 
     monkeypatch.setattr(dl, "_single_runs_public_for_request", lambda _request: True)
     monkeypatch.setattr(
         dl,
         "_fetch_run_pinned_anchor_wave",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            RuntimeError("429 Too Many Requests")
+            dl.httpx.ReadTimeout("single-runs location batch timed out")
         ),
     )
 
     def _meta_wave(requests, **_kwargs):
         meta_calls.append(tuple(requests))
+        meta_runs.append(tuple(request.run for request in requests.values()))
         captured_at = datetime.now(timezone.utc)
         return (
             {
@@ -3400,9 +3402,18 @@ def test_anchor_location_batch_failure_falls_back_as_one_meta_wave(
     assert meta_calls == [
         (("London", "2026-06-10"), ("Paris", "2026-06-10"))
     ]
+    assert meta_runs == [(AVAILABLE_CYCLE, AVAILABLE_CYCLE)]
     assert report["manifest_count"] == 2
     assert report["downloaded"]["openmeteo_model_meta_fetch_count"] == 2
     assert report["downloaded"]["openmeteo_single_runs_location_batch_count"] == 1
+    manifests = [json.loads(Path(path).read_text()) for path in report["written_manifests"]]
+    assert {manifest["source_cycle_time"] for manifest in manifests} == {
+        AVAILABLE_CYCLE.isoformat()
+    }
+    assert all(
+        "ReadTimeout" in manifest["product_metadata"]["single_runs_fallback_reason"]
+        for manifest in manifests
+    )
 
 
 def test_direct_downloader_reuses_bucket_manifest_across_targets(

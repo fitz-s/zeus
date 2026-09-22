@@ -1819,8 +1819,8 @@ def download_current_target_raw_inputs(
             if status_code != 400 and status_code != 429 and status_code < 500:
                 raise
             single_runs_wave_failure = exc
-        except (RuntimeError, TimeoutError) as exc:
-            if not isinstance(exc, TimeoutError) and not _is_transient_provider_failure(exc):
+        except (RuntimeError, TimeoutError, httpx.TransportError) as exc:
+            if not isinstance(exc, (TimeoutError, httpx.TransportError)) and not _is_transient_provider_failure(exc):
                 raise
             single_runs_wave_failure = exc
         else:
