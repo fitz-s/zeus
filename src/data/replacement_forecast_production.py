@@ -748,6 +748,45 @@ def _critical_scopes_missing_current_anchor(
         return None
 
 
+def _committed_current_target_anchor_scopes(
+    written_manifests: Sequence[object],
+    *,
+    cycle: datetime,
+) -> tuple[tuple[str, str, str], ...]:
+    """Recover exact scopes from the manifest receipts committed by one download call.
+
+    The downloader commits each raw artifact before returning its manifest path.
+    Only those receipts may publish cold-start materialization work: a planned
+    or merely attempted target is not a committed source event.
+    """
+    from src.data.raw_forecast_artifact_manifest import read_manifest  # noqa: PLC0415
+
+    committed: set[tuple[str, str, str]] = set()
+    for value in written_manifests:
+        try:
+            manifest = read_manifest(Path(str(value)))
+            metadata = manifest.product_metadata
+            if (
+                manifest.source_id != "openmeteo_ecmwf_ifs_9km"
+                or manifest.product_id != "openmeteo_ecmwf_ifs9_deterministic_anchor_v1"
+                or manifest.source_cycle_time.astimezone(timezone.utc)
+                != cycle.astimezone(timezone.utc)
+            ):
+                continue
+            scope = tuple(
+                str(metadata[field]).strip()
+                for field in ("city", "target_date", "metric")
+            )
+            if all(scope):
+                committed.add(scope)
+        except (OSError, ValueError, KeyError, TypeError):
+            # The manifest receipt is the publication proof. An unreadable
+            # receipt must not synthesize a seed; the normal missing-input
+            # drain will retry it on a later source event.
+            continue
+    return tuple(sorted(committed))
+
+
 @_single_current_target_download
 def _download_replacement_forecast_current_targets_if_needed(
     cfg: dict[str, object],
@@ -1033,6 +1072,10 @@ def _download_replacement_forecast_current_targets_if_needed(
     result.setdefault(
         "downloaded_cycle",
         None if downloaded_cycle is None else downloaded_cycle.isoformat(),
+    )
+    result["committed_families"] = _committed_current_target_anchor_scopes(
+        result.get("written_manifests") or (),
+        cycle=cycle,
     )
     if structurally_unservable_critical_scopes:
         result["structurally_unservable_scope_count"] = len(

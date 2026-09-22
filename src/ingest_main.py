@@ -1082,6 +1082,9 @@ def _compact_replacement_current_target_report(download_report):
         "cycle_advance_seeds_enqueued": download_report.get(
             "cycle_advance_seeds_enqueued"
         ),
+        "committed_family_count": len(
+            tuple(download_report.get("committed_families") or ())
+        ),
     }
     coverage = download_report.get("coverage")
     if isinstance(coverage, dict):
@@ -3007,6 +3010,11 @@ def _replacement_maintenance_tick():
                 for scope in (
                     *held_reseed_scopes,
                     *(
+                        download_report.get("committed_families") or ()
+                        if isinstance(download_report, dict)
+                        else ()
+                    ),
+                    *(
                         extras_report.get("committed_families") or ()
                         if isinstance(extras_report, dict)
                         else ()
@@ -3259,6 +3267,18 @@ def _replacement_availability_poll_tick():
     )
 
     cfg = _replacement_forecast_live_materialization_queue_config()
+
+    def _committed_anchor_scopes(
+        report: dict[str, object],
+    ) -> tuple[tuple[str, str, str], ...]:
+        return tuple(
+            dict.fromkeys(
+                tuple(str(part) for part in scope)
+                for scope in (report.get("committed_families") or ())
+                if isinstance(scope, (tuple, list)) and len(scope) == 3
+            )
+        )
+
     def _attach_reseed_reports(
         report: dict[str, object],
         *,
@@ -3267,6 +3287,8 @@ def _replacement_availability_poll_tick():
         include_cycle_advance: bool = True,
         prepared_manifest_snapshot: dict[str, object] | None = None,
     ) -> dict[str, object]:
+        if scopes is None:
+            scopes = _committed_anchor_scopes(report) or None
         manifest_snapshot = prepared_manifest_snapshot
         reseed_errors = list(report.get("reseed_errors") or ())
         try:
@@ -3515,14 +3537,21 @@ def _replacement_availability_poll_tick():
                 report["anchor_missing_scope_count"] = residual_gap_count
                 if residual_gap_count is None or residual_gap_count > 0:
                     residual_report = _download_current_targets(quota_priority=True)
-                    if (
-                        isinstance(residual_report, dict)
-                        and int(residual_report.get("written_manifest_count") or 0) > 0
-                    ):
+                    committed_scopes = (
+                        _committed_anchor_scopes(residual_report)
+                        if isinstance(residual_report, dict)
+                        else ()
+                    )
+                    if committed_scopes:
                         _attach_reseed_reports(
                             residual_report,
+                            scopes=committed_scopes,
                             changed_sources=("ecmwf_ifs",),
                         )
+                    elif isinstance(residual_report, dict) and int(
+                        residual_report.get("written_manifest_count") or 0
+                    ) > 0:
+                        residual_report["anchor_receipt_unusable_for_seed"] = True
                     compact = _compact_replacement_current_target_report(
                         residual_report
                     )
@@ -3600,14 +3629,24 @@ def _replacement_availability_poll_tick():
             ),
             quota_priority=True,
         )
-        if (
-            isinstance(source_clock_anchor_report, dict)
-            and int(source_clock_anchor_report.get("written_manifest_count") or 0) > 0
-        ):
-            _attach_reseed_reports(source_clock_anchor_report)
+        committed_scopes = (
+            _committed_anchor_scopes(source_clock_anchor_report)
+            if isinstance(source_clock_anchor_report, dict)
+            else ()
+        )
+        if committed_scopes:
+            _attach_reseed_reports(
+                source_clock_anchor_report,
+                scopes=committed_scopes,
+                changed_sources=("ecmwf_ifs",),
+            )
             anchor_reseed_published = not bool(
                 source_clock_anchor_report.get("reseed_errors")
             )
+        elif isinstance(source_clock_anchor_report, dict) and int(
+            source_clock_anchor_report.get("written_manifest_count") or 0
+        ) > 0:
+            source_clock_anchor_report["anchor_receipt_unusable_for_seed"] = True
     notified_source_scopes: set[tuple[str, str, str, str]] = set()
     anchor_scopes_attempted: set[tuple[str, str, str]] = set()
     fallback_reseed_published = False

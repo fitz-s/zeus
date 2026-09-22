@@ -909,6 +909,87 @@ def test_common_cycle_recovery_reseeds_exact_scope_and_isolates_trigger_failure(
     )
 
 
+def test_residual_anchor_commit_publishes_scoped_cold_start_seed_transport(
+    monkeypatch,
+) -> None:
+    """A new anchor for a family with no posterior reaches the existing seed transport."""
+    import src.data.replacement_forecast_production as prod
+    import src.data.source_clock_update_probe as source_clock_probe
+    import src.ingest_main as ingest_main
+
+    scope = ("Los Angeles", "2026-09-24", "high")
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {"forecast_db": "forecast.db", "download_current_targets_enabled": True},
+    )
+    monkeypatch.setattr(prod, "_recover_held_common_cycle_anchors_if_needed", lambda *_a, **_k: None)
+    monkeypatch.setattr(prod, "_ingest_station_forecasts_if_due", lambda _cfg: None)
+    monkeypatch.setattr(prod, "_current_target_anchor_gap_count", lambda *_a, **_k: 1)
+    reports = iter(
+        (
+            {
+                "status": "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED",
+                "written_manifest_count": 1,
+                "committed_families": (scope,),
+            },
+            {
+                "status": "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED",
+                "written_manifest_count": 1,
+                "committed_families": (),
+            },
+        )
+    )
+    monkeypatch.setattr(
+        prod,
+        "_download_replacement_forecast_current_targets_if_needed",
+        lambda *_a, **_k: next(reports),
+    )
+
+    class _NoChange:
+        updated_sources = ()
+
+        def as_dict(self):
+            return {
+                "status": "SOURCE_CLOCK_NO_PUBLICLY_USABLE_CHANGE",
+                "updated_sources": [],
+                "affected_cities": [],
+                "source_runs": {"ecmwf_ifs": {"initialisation_time": "2026-09-22T06:00:00Z"}},
+            }
+
+    monkeypatch.setattr(
+        source_clock_probe,
+        "probe_openmeteo_source_clock_updates",
+        lambda **_kwargs: _NoChange(),
+    )
+    calls: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_fusion_upgrade_reseeds_if_needed",
+        lambda _cfg, **kwargs: calls.append(("fusion", kwargs))
+        or {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 0},
+    )
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda _cfg, **kwargs: calls.append(("cycle", kwargs))
+        or {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 1},
+    )
+
+    result = ingest_main._replacement_availability_poll_tick.__wrapped__()
+
+    assert result["source_clock_anchor_residual_download"]["committed_family_count"] == 1
+    assert calls == [
+        ("fusion", {"scopes": (scope,), "changed_sources": ("ecmwf_ifs",)}),
+        ("cycle", {"scopes": (scope,)}),
+    ]
+
+    calls.clear()
+    second = ingest_main._replacement_availability_poll_tick.__wrapped__()
+    assert calls == []
+    assert second["source_clock_anchor_residual_download"]["committed_family_count"] == 0
+
+
 def test_ingest_poll_calls_held_common_cycle_recovery() -> None:
     import inspect
 

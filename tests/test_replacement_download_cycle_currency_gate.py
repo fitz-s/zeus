@@ -3528,6 +3528,55 @@ def test_existing_corrupt_openmeteo_payload_is_not_reused(tmp_path: Path) -> Non
     assert dl._json_file_valid(payload) is True
 
 
+def test_current_target_manifest_commit_reports_exact_cold_start_scope(
+    tmp_path: Path,
+) -> None:
+    """Only a new manifest receipt publishes one scoped cold-start seed event."""
+    import scripts.download_replacement_forecast_current_targets as dl
+    import src.data.replacement_forecast_production as prod
+    from src.data.raw_forecast_artifact_manifest import write_manifest
+
+    scope = ("Los Angeles", "2026-09-24", "high")
+    payload = tmp_path / "openmeteo_Los_Angeles_2026-09-24_high.json"
+    payload.write_text(json.dumps(_anchor_payload(scope[1])) + "\n", encoding="utf-8")
+
+    def _manifest_for(cycle: datetime, suffix: str) -> Path:
+        manifest = dl.RawForecastArtifactManifest.from_file(
+            payload,
+            source_id=dl.OPENMETEO_SOURCE_ID,
+            product_id=dl.OPENMETEO_PRODUCT_ID,
+            data_version=dl.OPENMETEO_HIGH_DATA_VERSION,
+            source_cycle_time=cycle,
+            source_available_at=cycle.isoformat(),
+            captured_at=cycle.isoformat(),
+            request_url="https://example.test/openmeteo",
+            request_params={"run": cycle.isoformat()},
+            product_metadata={"city": scope[0], "target_date": scope[1], "metric": scope[2]},
+        )
+        path = tmp_path / f"{suffix}.manifest.json"
+        write_manifest(manifest, path)
+        return path
+
+    cycle_one = AVAILABLE_CYCLE
+    first = _manifest_for(cycle_one, "first")
+    assert prod._committed_current_target_anchor_scopes(
+        (str(first),), cycle=cycle_one
+    ) == (scope,)
+    assert prod._committed_current_target_anchor_scopes((), cycle=cycle_one) == ()
+    assert prod._committed_current_target_anchor_scopes(
+        (str(tmp_path / "unreadable-receipt.manifest.json"),), cycle=cycle_one
+    ) == ()
+
+    cycle_two = AVAILABLE_CYCLE.replace(hour=6)
+    second = _manifest_for(cycle_two, "second")
+    assert prod._committed_current_target_anchor_scopes(
+        (str(second),), cycle=cycle_one
+    ) == ()
+    assert prod._committed_current_target_anchor_scopes(
+        (str(second),), cycle=cycle_two
+    ) == (scope,)
+
+
 def test_concurrent_payload_publishers_use_distinct_temp_files(
     tmp_path: Path, monkeypatch
 ) -> None:
