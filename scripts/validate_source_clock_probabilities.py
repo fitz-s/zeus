@@ -83,6 +83,52 @@ def bounded(conn: sqlite3.Connection) -> None:
     conn.set_progress_handler(lambda: clock.monotonic() > deadline, 10000)
 
 
+def _market_evidence_schema_error(exc: sqlite3.Error) -> bool:
+    """Recognize missing schema objects without hiding other read failures."""
+    detail = str(exc).strip().lower()
+    return detail.startswith("no such table:") or detail.startswith("no such column:")
+
+
+def _market_evidence_timeout_error(exc: sqlite3.Error) -> bool:
+    """Recognize SQLite's bounded-read interrupt/busy outcomes."""
+    transient_codes = {
+        code
+        for code in (
+            getattr(sqlite3, "SQLITE_BUSY", None),
+            getattr(sqlite3, "SQLITE_LOCKED", None),
+            getattr(sqlite3, "SQLITE_INTERRUPT", None),
+        )
+        if isinstance(code, int)
+    }
+    error_code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(error_code, int) and (error_code & 0xFF) in transient_codes:
+        return True
+    if getattr(exc, "sqlite_errorname", None) in {
+        "SQLITE_BUSY",
+        "SQLITE_LOCKED",
+        "SQLITE_INTERRUPT",
+    }:
+        return True
+    detail = str(exc).strip().lower()
+    if detail in {
+        "interrupted",
+        "database is busy",
+        "database is locked",
+        "database table is locked",
+        "database schema is locked",
+        "sqlite_read_deadline_exceeded",
+        "sqlite_read_cancelled",
+        "sqlite_read_canceled",
+        "timeout",
+        "timed out",
+    }:
+        return True
+    return any(
+        detail.startswith(prefix)
+        for prefix in ("database table is locked:", "database schema is locked:")
+    )
+
+
 def native_value(value_c: float, unit: str) -> float:
     return value_c * 1.8 + 32.0 if unit == "F" else value_c
 
@@ -329,8 +375,12 @@ def _market_vector_for_case(
                 selection_floor.isoformat(), decision_at.isoformat(),
             ),
         ).fetchall()
-    except sqlite3.Error:
-        return None, "market_evidence_schema_unavailable"
+    except sqlite3.Error as exc:
+        if _market_evidence_timeout_error(exc):
+            return None, "market_evidence_query_timeout"
+        if _market_evidence_schema_error(exc):
+            return None, "market_evidence_schema_unavailable"
+        return None, "market_evidence_query_error"
 
     expected_by_interval: dict[tuple[int | None, int | None], str] = {}
     try:

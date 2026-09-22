@@ -103,6 +103,14 @@ CREATE INDEX IF NOT EXISTS idx_family_book_observations_state
     ON family_book_observations(state_id)
 """
 
+CREATE_MARKET_CASE_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_family_book_observations_market_case
+    ON family_book_observations(
+        city, target_date, temperature_metric, measurement_unit, decision_time
+    )
+    WHERE complete_book = 1
+"""
+
 CREATE_NO_UPDATE_TRIGGER_SQL = """
 CREATE TRIGGER IF NOT EXISTS trg_family_book_observations_no_update
 BEFORE UPDATE ON family_book_observations
@@ -125,6 +133,7 @@ def ensure_table(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_UNIQUE_INDEX_SQL)
     conn.execute(CREATE_FAMILY_TIME_INDEX_SQL)
     conn.execute(CREATE_STATE_INDEX_SQL)
+    conn.execute(CREATE_MARKET_CASE_INDEX_SQL)
     conn.execute(CREATE_NO_UPDATE_TRIGGER_SQL)
     conn.execute(CREATE_NO_DELETE_TRIGGER_SQL)
 

@@ -19,6 +19,9 @@ from src.events.family_book_manifest import (
     build_source_manifest,
     compute_state_identity,
 )
+from src.state.schema.family_book_observations_schema import (
+    ensure_table as ensure_observations_table,
+)
 
 
 def test_declared_universe_preserves_never_observed_combinations(monkeypatch):
@@ -406,6 +409,90 @@ def test_market_evidence_missing_schema_has_zero_coverage():
 
     assert vector is None
     assert reason == "market_evidence_schema_unavailable"
+
+
+def test_market_evidence_schema_upgrade_adds_partial_index_and_keeps_triggers():
+    conn = sqlite3.connect(":memory:")
+    ensure_observations_table(conn)
+    conn.execute("DROP INDEX idx_family_book_observations_market_case")
+    ensure_observations_table(conn)
+
+    index_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' "
+        "AND name='idx_family_book_observations_market_case'"
+    ).fetchone()[0]
+    assert "WHERE complete_book = 1" in index_sql
+    trigger_names = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' "
+            "AND name IN ('trg_family_book_observations_no_update', "
+            "'trg_family_book_observations_no_delete')"
+        )
+    }
+    assert trigger_names == {
+        "trg_family_book_observations_no_update",
+        "trg_family_book_observations_no_delete",
+    }
+
+    plan = conn.execute(
+        "EXPLAIN QUERY PLAN "
+        "SELECT observation_id FROM family_book_observations "
+        "WHERE city=? AND target_date=? AND temperature_metric=? "
+        "AND measurement_unit=? AND complete_book=1 "
+        "AND julianday(decision_time)>=julianday(?) "
+        "AND julianday(decision_time)<=julianday(?) "
+        "ORDER BY decision_time DESC, observation_id DESC LIMIT 256",
+        ("Chicago", "2026-09-19", "high", "F", "2026-09-18T11:00:00Z", "2026-09-18T12:00:00Z"),
+    ).fetchall()
+    assert any("idx_family_book_observations_market_case" in row[-1] for row in plan)
+    conn.close()
+
+
+def test_market_evidence_sqlite_interrupt_is_reported_as_timeout(monkeypatch):
+    conn, baseline = _market_evidence_db()
+    monkeypatch.setattr(
+        validation,
+        "bounded",
+        lambda connection: connection.set_progress_handler(lambda: 1, 1),
+    )
+    vector, reason = validation._market_vector_for_case(
+        conn,
+        city="Chicago",
+        target_date=date(2026, 9, 19),
+        metric="high",
+        unit="F",
+        decision_at=datetime(2026, 9, 18, 12, tzinfo=timezone.utc),
+        baseline=baseline,
+        bins=bins(),
+    )
+    assert vector is None
+    assert reason == "market_evidence_query_timeout"
+
+
+def test_market_evidence_other_sqlite_error_is_not_no_data():
+    class _BrokenConnection(sqlite3.Connection):
+        def execute(self, *args, **kwargs):
+            raise sqlite3.OperationalError("disk I/O error")
+
+    conn = sqlite3.connect(":memory:", factory=_BrokenConnection)
+    baseline = validation.ProbabilityVector(
+        bin_ids=tuple(str(i) for i in range(5)),
+        values=(0.10, 0.15, 0.20, 0.25, 0.30),
+        available_at=datetime(2026, 9, 18, 11, 58, tzinfo=timezone.utc),
+    )
+    vector, reason = validation._market_vector_for_case(
+        conn,
+        city="Chicago",
+        target_date=date(2026, 9, 19),
+        metric="high",
+        unit="F",
+        decision_at=datetime(2026, 9, 18, 12, tzinfo=timezone.utc),
+        baseline=baseline,
+        bins=bins(),
+    )
+    assert vector is None
+    assert reason == "market_evidence_query_error"
 
 
 def test_missing_market_evidence_file_reports_zero_coverage_without_creating_it(
