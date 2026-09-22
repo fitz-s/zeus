@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-09-20
-# Lifecycle: created=2026-04-27; last_reviewed=2026-09-20; last_reused=2026-09-20
+# Last reused/audited: 2026-09-22
+# Lifecycle: created=2026-04-27; last_reviewed=2026-09-22; last_reused=2026-09-22
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
@@ -10649,6 +10649,7 @@ def test_backoff_exhausted_legacy_favorable_bid_reenters_global_auction(conn):
     if conn.in_transaction:
         conn.commit()
     requested = []
+    _bind_complete_reauction_monitor_for_test(conn, position)
     assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
         position,
         conn=conn,
@@ -14279,6 +14280,7 @@ def test_global_sell_post_only_cross_rejection_reauctions_without_backoff(
         )
         return True
 
+    _bind_complete_reauction_monitor_for_test(conn, position)
     assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
         position,
         conn=conn,
@@ -14568,6 +14570,7 @@ def test_global_sell_snapshot_failure_releases_to_new_global_auction(
     )
     if conn.in_transaction:
         conn.commit()
+    _bind_complete_reauction_monitor_for_test(conn, position)
     assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
         position,
         conn=conn,
@@ -14606,7 +14609,13 @@ def test_global_sell_snapshot_failure_releases_to_new_global_auction(
     assert obligation["schema_version"] == 4
     assert obligation["book_state"] == "UNKNOWN"
     assert obligation["held_token_id"] == NO_TOKEN
-    assert requested_obligations == [obligation]
+    lineage_fields = {'selection_epoch_identity', 'sell_book_witness_identity',
+                      'debt_event_id', 'monitor_event_id'}
+    assert len(requested_obligations) == 1
+    assert {k: v for k, v in requested_obligations[0].items() if k not in lineage_fields} == {
+        k: v for k, v in obligation.items() if k not in lineage_fields
+    }
+    assert all(requested_obligations[0][key] for key in lineage_fields)
     assert position.state == "holding"
     assert position.order_status == "filled"
     assert position.last_exit_error == ""
@@ -14699,6 +14708,7 @@ def test_global_sell_snapshot_failure_releases_to_new_global_auction(
         )
         return True
 
+    _bind_complete_reauction_monitor_for_test(conn, failed_wake)
     assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
         failed_wake,
         conn=conn,
@@ -18346,3 +18356,167 @@ def test_pending_exit_fallback_order_id_is_not_projected_on_unknown_truth(conn):
     assert stats["pending_exit_defer_reason"] == "order_truth_incomplete"
     assert position.last_exit_order_id == ""
     assert position.exit_retry_count == 0
+
+
+@pytest.mark.parametrize('direction', ['buy_yes', 'buy_no'])
+@pytest.mark.parametrize('missing', [
+    'selection_epoch_identity', 'sell_book_witness_identity',
+    'debt_event_id', 'monitor_event_id',
+])
+def test_unarmed_v4_publish_claim_does_not_own_exit_and_can_complete(conn, direction, missing):
+    from src.execution import exit_lifecycle
+    from src.execution.exit_safety import global_sell_reauction_publish_claim_blocks_exit_command
+
+    position_id = 'unarmed-v4-claim'
+    held_token = NO_TOKEN if direction == 'buy_no' else YES_TOKEN
+    _seed_canonical_position_identity(
+        conn, position_id=position_id, token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN, direction=direction, shares=10,
+    )
+    conn.execute(
+        "UPDATE position_current SET condition_id = 'condition-claim' WHERE position_id = ?",
+        (position_id,),
+    )
+    position = SimpleNamespace(
+        trade_id=position_id, token_id=YES_TOKEN, no_token_id=NO_TOKEN,
+        direction=direction, strategy_key='center_buy', env='live',
+    )
+    obligation = {
+        'schema_version': 4, 'position_id': position_id, 'held_token_id': held_token,
+        'scope_identity': 'scope', 'generation': 'generation',
+        'selection_epoch_identity': 'epoch', 'sell_book_witness_identity': 'book',
+        'debt_event_id': 'debt', 'monitor_event_id': 'monitor',
+    }
+    incomplete = {k: v for k, v in obligation.items() if k != missing}
+    payload = {
+        'global_sell_reauction_status': 'publish_claimed',
+        'release_reason': 'GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED',
+        'held_sell_reauction_obligation': incomplete,
+    }
+    conn.execute('''INSERT INTO position_events
+        (event_id, position_id, event_version, sequence_no, event_type, occurred_at,
+         phase_before, phase_after, strategy_key, source_module, payload_json, env)
+        VALUES (?, ?, 1, 1, 'EXIT_RETRY_RELEASED', ?, 'day0_window', 'day0_window',
+                'center_buy', 'tests.test_exit_safety', ?, 'live')''',
+        ('old-unarmed-claim', position_id, _NOW.isoformat(), json.dumps(payload)))
+    conn.commit()
+    assert not global_sell_reauction_publish_claim_blocks_exit_command(conn, position_id)
+    # Includes the same-generation idempotence branch: it may not preserve an unarmed fence.
+    assert not exit_lifecycle._record_global_sell_reauction_publish_claim(conn, position, incomplete)
+    assert conn.execute('SELECT count(*) FROM position_events').fetchone()[0] == 1
+    assert exit_lifecycle._record_global_sell_reauction_publish_claim(conn, position, obligation)
+    assert global_sell_reauction_publish_claim_blocks_exit_command(conn, position_id)
+    assert exit_lifecycle.record_global_sell_reauction_reserved(conn, position)
+    assert not global_sell_reauction_publish_claim_blocks_exit_command(conn, position_id)
+    assert conn.execute('SELECT count(*) FROM venue_commands').fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('damage', [
+    '{', '[]', {'schema_version': 3}, {'position_id': 'other'},
+    {'held_token_id': 'other'}, {'scope_identity': ''},
+    {'generation': ''}, {'monitor_event_id': {}},
+])
+def test_malformed_or_unknown_publish_claim_remains_fenced(conn, damage):
+    from src.execution.exit_safety import global_sell_reauction_publish_claim_blocks_exit_command
+
+    _seed_canonical_position_identity(conn, position_id='bad-claim', token_id=YES_TOKEN, shares=10)
+    obligation = {
+        'schema_version': 4, 'position_id': 'bad-claim', 'held_token_id': YES_TOKEN,
+        'scope_identity': 'scope', 'generation': 'generation',
+    }
+    if isinstance(damage, dict):
+        obligation.update(damage)
+        raw = json.dumps({
+            'global_sell_reauction_status': 'publish_claimed',
+            'release_reason': 'GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED',
+            'held_sell_reauction_obligation': obligation,
+        })
+    else:
+        raw = damage
+    conn.execute('''INSERT INTO position_events
+        (event_id, position_id, event_version, sequence_no, event_type, occurred_at,
+         phase_before, phase_after, strategy_key, source_module, payload_json, env)
+        VALUES ('bad-claim-event', 'bad-claim', 1, 1, 'EXIT_RETRY_RELEASED', ?,
+                'day0_window', 'day0_window', 'center_buy', 'tests.test_exit_safety', ?, 'live')''',
+        (_NOW.isoformat(), raw))
+    assert global_sell_reauction_publish_claim_blocks_exit_command(conn, 'bad-claim')
+
+
+@pytest.mark.parametrize('missing_no_token', [None, ''])
+def test_unarmed_claim_with_missing_canonical_no_token_stays_fenced(conn, missing_no_token):
+    from src.execution.exit_safety import global_sell_reauction_publish_claim_blocks_exit_command
+
+    _seed_canonical_position_identity(conn, position_id='missing-no', token_id=YES_TOKEN,
+                                      no_token_id=NO_TOKEN, direction='buy_no', shares=10)
+    conn.execute('UPDATE position_current SET no_token_id=? WHERE position_id=?',
+                 (missing_no_token, 'missing-no'))
+    raw = json.dumps({
+        'global_sell_reauction_status': 'publish_claimed',
+        'release_reason': 'GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED',
+        'held_sell_reauction_obligation': {
+            'schema_version': 4, 'position_id': 'missing-no', 'held_token_id': YES_TOKEN,
+            'scope_identity': 'scope', 'generation': 'generation',
+        },
+    })
+    conn.execute('''INSERT INTO position_events
+        (event_id, position_id, event_version, sequence_no, event_type, occurred_at,
+         phase_before, phase_after, strategy_key, source_module, payload_json, env)
+        VALUES ('missing-no-claim', 'missing-no', 1, 1, 'EXIT_RETRY_RELEASED', ?,
+                'day0_window', 'day0_window', 'center_buy', 'tests.test_exit_safety', ?, 'live')''',
+        (_NOW.isoformat(), raw))
+    assert global_sell_reauction_publish_claim_blocks_exit_command(conn, 'missing-no')
+
+
+@pytest.mark.parametrize('phase', ['active', 'day0_window', 'pending_exit'])
+@pytest.mark.parametrize('mismatch', ['direction', 'token'])
+def test_publish_claim_rejects_runtime_canonical_identity_mismatch(conn, phase, mismatch):
+    from src.execution import exit_lifecycle
+
+    _seed_canonical_position_identity(conn, position_id='identity-claim', token_id=YES_TOKEN,
+                                      no_token_id=NO_TOKEN, shares=10)
+    conn.execute('UPDATE position_current SET phase=?,condition_id=? WHERE position_id=?',
+                 (phase, 'condition-identity', 'identity-claim'))
+    position = SimpleNamespace(trade_id='identity-claim', direction='buy_yes',
+                               token_id=YES_TOKEN, no_token_id=NO_TOKEN, strategy_key='center_buy')
+    obligation = {
+        'schema_version': 4, 'position_id': position.trade_id, 'held_token_id': YES_TOKEN,
+        'scope_identity': 'scope', 'generation': 'generation',
+        'selection_epoch_identity': 'epoch', 'sell_book_witness_identity': 'book',
+        'debt_event_id': 'debt', 'monitor_event_id': 'monitor',
+    }
+    assert exit_lifecycle._record_global_sell_reauction_publish_claim(conn, position, obligation)
+    count = conn.execute('SELECT count(*) FROM position_events').fetchone()[0]
+    if mismatch == 'direction':
+        position.direction = 'buy_no'
+        obligation['held_token_id'] = NO_TOKEN
+    else:
+        position.token_id = 'stale-token'
+        obligation['held_token_id'] = 'stale-token'
+    # Existing same-generation and new-generation paths must both validate canonical identity.
+    for generation in ('generation', 'next-generation'):
+        obligation['generation'] = generation
+        assert not exit_lifecycle._record_global_sell_reauction_publish_claim(conn, position, obligation)
+        assert conn.execute('SELECT count(*) FROM position_events').fetchone()[0] == count
+
+
+def _bind_complete_reauction_monitor_for_test(conn, position):
+    """Model the canonical monitor that must arm a released residual debt."""
+    from src.execution.exit_lifecycle import latest_held_sell_reauction_obligation
+
+    obligation = latest_held_sell_reauction_obligation(conn, position)
+    assert obligation['schema_version'] == 4
+    seq = conn.execute('SELECT coalesce(max(sequence_no),0)+1 FROM position_events WHERE position_id=?',
+                       (position.trade_id,)).fetchone()[0]
+    event_id = f'{position.trade_id}:monitor_refreshed:{seq}'
+    obligation.update(selection_epoch_identity='current-epoch', sell_book_witness_identity='current-book',
+                      debt_event_id=event_id, monitor_event_id=event_id)
+    phase = conn.execute('SELECT phase FROM position_current WHERE position_id=?',
+                         (position.trade_id,)).fetchone()[0]
+    conn.execute('''INSERT INTO position_events
+        (event_id, position_id, event_version, sequence_no, event_type, occurred_at,
+         phase_before, phase_after, strategy_key, source_module, payload_json, env)
+        VALUES (?, ?, 1, ?, 'MONITOR_REFRESHED', ?, ?, ?, 'center_buy',
+                'tests.test_exit_safety', ?, 'live')''',
+        (event_id, position.trade_id, seq, _NOW.isoformat(), phase, phase,
+         json.dumps({'held_sell_reauction_obligation': obligation})))
+    conn.commit()

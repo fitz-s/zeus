@@ -215,6 +215,43 @@ def init_exit_mutex_schema(conn: sqlite3.Connection) -> None:
     conn.execute(_EXIT_MUTEX_SCHEMA)
 
 
+def global_sell_reauction_publish_claim_lineage(
+    payload: object,
+    *,
+    position_id: str,
+    held_token_id: str,
+) -> Literal["complete", "pending", "invalid"]:
+    """Distinguish an owned V4 publication from unarmed recovery debt."""
+
+    if (
+        not isinstance(payload, Mapping)
+        or payload.get("global_sell_reauction_status") != "publish_claimed"
+        or payload.get("release_reason") != "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED"
+    ):
+        return "invalid"
+    obligation = payload.get("held_sell_reauction_obligation")
+    if not isinstance(obligation, Mapping) or obligation.get("schema_version") != 4:
+        return "invalid"
+    if any(
+        not isinstance(obligation.get(key), str) or not obligation[key].strip()
+        for key in ("position_id", "held_token_id", "scope_identity", "generation")
+    ):
+        return "invalid"
+    if (
+        obligation["position_id"] != position_id
+        or not held_token_id
+        or obligation["held_token_id"] != held_token_id
+    ):
+        return "invalid"
+    lineage = tuple(obligation.get(key) for key in (
+        "selection_epoch_identity", "sell_book_witness_identity",
+        "debt_event_id", "monitor_event_id",
+    ))
+    if any(value is not None and not isinstance(value, str) for value in lineage):
+        return "invalid"
+    return "complete" if all(value and value.strip() for value in lineage) else "pending"
+
+
 def global_sell_reauction_publish_claim_blocks_exit_command(
     conn: sqlite3.Connection,
     position_id: str,
@@ -223,10 +260,11 @@ def global_sell_reauction_publish_claim_blocks_exit_command(
 
     row = conn.execute(
         """
-        SELECT payload_json
-          FROM position_events
-         WHERE position_id = ? AND event_type = 'EXIT_RETRY_RELEASED'
-         ORDER BY sequence_no DESC
+        SELECT pe.payload_json, pc.direction, pc.token_id, pc.no_token_id
+          FROM position_events pe
+          LEFT JOIN position_current pc ON pc.position_id = pe.position_id
+         WHERE pe.position_id = ? AND pe.event_type = 'EXIT_RETRY_RELEASED'
+         ORDER BY pe.sequence_no DESC
          LIMIT 1
         """,
         (str(position_id),),
@@ -237,12 +275,20 @@ def global_sell_reauction_publish_claim_blocks_exit_command(
         payload = json.loads(str(row[0] or "{}"))
     except (TypeError, json.JSONDecodeError):
         return True
-    return bool(
-        isinstance(payload, dict)
-        and payload.get("global_sell_reauction_status") == "publish_claimed"
-        and payload.get("release_reason")
-        == "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED"
+    if not isinstance(payload, dict):
+        return True
+    if payload.get("global_sell_reauction_status") != "publish_claimed":
+        return False
+    held_token_id = str(
+        (row[3] or "") if row[1] == "buy_no"
+        else (row[2] or "") if row[1] == "buy_yes" else ""
     )
+    # SCOPE: only a typed unarmed V4 claim. DRAIN: canonical monitoring binds
+    # its lineage and retries publication. RESET: complete claims fence again.
+    # An unarmed claim cannot publish a wake and therefore owns no command slot.
+    return global_sell_reauction_publish_claim_lineage(
+        payload, position_id=str(position_id), held_token_id=held_token_id,
+    ) != "pending"
 
 
 def _mutex_key(position_id: int | str, token_id: str) -> str:

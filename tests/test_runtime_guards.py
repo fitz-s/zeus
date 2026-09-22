@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
 # Lifecycle: created=2026-04-28; last_reviewed=2026-08-31; last_reused=2026-08-31
 # Created: 2026-04-28
-# Last reused/audited: 2026-09-05
+# Last reused/audited: 2026-09-22
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity; docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-2 cluster projection; docs/archive/2026-Q2/task_2026-05-22_crosscheck_valid_window/CROSSCHECK_VALID_WINDOW_PLAN.md.
 #                  2026-08-15 economic-ready recent-exit hotfix.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
@@ -16282,6 +16282,246 @@ def test_day0_existing_canonical_event_does_not_repair_when_later_absorbing_even
     assert torn_phase == "active"
 
 
+def test_day0_redecision_guard_recovers_existing_pending_exit_admission(tmp_path):
+    """A temporary runtime release must not reopen a canonical Day0 epoch."""
+    conn = get_connection(tmp_path / "day0-redecision-guard.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+
+    from src.engine.lifecycle_events import build_day0_window_entered_canonical_write
+    from src.state.db import append_many_and_project
+
+    position_id = "day0-redecision-guard"
+    day0 = _position(
+        trade_id=position_id,
+        state="day0_window",
+        day0_entered_at="2026-04-01T16:00:00Z",
+    )
+    events, projection = build_day0_window_entered_canonical_write(
+        day0,
+        day0_entered_at=day0.day0_entered_at,
+        sequence_no=1,
+        previous_phase="active",
+        source_module="tests/test_runtime_guards:day0_redecision_guard",
+    )
+    append_many_and_project(conn, events, projection)
+
+    pending = _position(
+        trade_id=position_id,
+        state="day0_window",
+        day0_entered_at="2026-04-01T16:00:00Z",
+        exit_state="backoff_exhausted",
+        order_status="backoff_exhausted",
+    )
+    assert exit_lifecycle_module._dual_write_canonical_pending_exit_if_available(
+        conn,
+        pending,
+        reason="EXIT_ORDER_REJECTED",
+        error="backoff exhausted",
+    ) is True
+
+    # The retry release has a transient active runtime shape and no timestamp
+    # on the projection-loaded object; canonical Day0 + pending_exit is the
+    # semantic admission witness that must survive that release.
+    released = _position(
+        trade_id=position_id,
+        state="entered",
+        day0_entered_at="",
+        pre_exit_state="day0_window",
+        strategy_key="opening_inertia",
+    )
+    assert cycle_runtime._day0_transition_already_admitted(conn, released) is True
+    assert conn.execute(
+        "SELECT phase FROM position_current WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()[0] == "pending_exit"
+    released.last_monitor_prob = 0.61
+    released.last_monitor_prob_is_fresh = True
+    released.last_monitor_market_price = 0.44
+    released.last_monitor_market_price_is_fresh = True
+    released.last_monitor_best_bid = 0.43
+    released.last_monitor_best_ask = 0.45
+    assert cycle_runtime._emit_monitor_refreshed_canonical_if_available(
+        conn,
+        released,
+        deps=types.SimpleNamespace(
+            logger=logging.getLogger("test_day0_redecision_guard"),
+            _utcnow=lambda: datetime.now(timezone.utc) + timedelta(minutes=1),
+        ),
+    ) is True
+    monitor_row = conn.execute(
+        """
+        SELECT phase_before, phase_after
+          FROM position_events
+         WHERE position_id = ? AND event_type = 'MONITOR_REFRESHED'
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position_id,),
+    ).fetchone()
+    assert monitor_row is not None
+    assert tuple(monitor_row) == ("pending_exit", "pending_exit")
+    conn.close()
+
+
+def test_day0_redecision_guard_propagates_real_database_errors():
+    class BrokenConnection:
+        def execute(self, *args, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        cycle_runtime._day0_transition_already_admitted(
+            BrokenConnection(),
+            _position(trade_id="day0-db-error", day0_entered_at=""),
+        )
+
+
+def test_monitoring_phase_enters_day0_once_for_first_active_admission(monkeypatch):
+    pos = _position(
+        trade_id="day0-first-admission",
+        state="entered",
+        target_date="2026-04-01",
+        day0_entered_at="",
+    )
+    portfolio = PortfolioState(positions=[pos])
+    artifact = CycleArtifact(mode="day0_capture", started_at="2026-04-01T20:00:00Z")
+    summary = {"monitors": 0, "exits": 0}
+    day0_emits = []
+    monitor_emits = []
+    refresh_calls = []
+
+    monkeypatch.setattr(
+        "src.engine.dispatch.should_enter_day0_window",
+        lambda **kwargs: True,
+    )
+    monkeypatch.setattr(cycle_runtime, "_day0_hard_fact_position_eligible", lambda _pos: False)
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_day0_window_entered_canonical_if_available",
+        lambda *args, **kwargs: day0_emits.append(True) or True,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *args, **kwargs: monitor_emits.append(True) or True,
+    )
+
+    def _refresh(_conn, _clob, refreshed_pos, **_kwargs):
+        refresh_calls.append(refreshed_pos.trade_id)
+        refreshed_pos.last_monitor_prob = 0.61
+        refreshed_pos.last_monitor_prob_is_fresh = True
+        refreshed_pos.last_monitor_market_price = 0.44
+        refreshed_pos.last_monitor_market_price_is_fresh = True
+        refreshed_pos.last_monitor_best_bid = 0.43
+        refreshed_pos.last_monitor_best_ask = 0.45
+        return types.SimpleNamespace(
+            p_market=np.array([0.44]),
+            p_posterior=0.61,
+            divergence_score=0.0,
+            market_velocity_1h=0.0,
+            forward_edge=0.17,
+        )
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", _refresh)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, ctx: ExitDecision(False, "NO_EXIT"),
+    )
+
+    p_dirty, t_dirty = cycle_runtime.execute_monitoring_phase(
+        conn=None,
+        clob=types.SimpleNamespace(),
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        summary=summary,
+        deps=_monitor_chain_deps(datetime(2026, 4, 1, 20, 0, tzinfo=timezone.utc)),
+        run_exit_preflight=False,
+    )
+
+    assert p_dirty is True
+    assert t_dirty is False
+    assert pos.state == "day0_window"
+    assert day0_emits == [True]
+    assert refresh_calls == [pos.trade_id]
+    assert monitor_emits == [True]
+
+
+def test_monitoring_phase_day0_redecision_skips_transition_and_refreshes(monkeypatch):
+    pos = _position(
+        trade_id="day0-existing-redecision",
+        state="entered",
+        target_date="2026-04-01",
+        day0_entered_at="2026-04-01T16:00:00Z",
+        pre_exit_state="day0_window",
+    )
+    portfolio = PortfolioState(positions=[pos])
+    artifact = CycleArtifact(mode="exit_monitor", started_at="2026-04-01T20:00:00Z")
+    summary = {"monitors": 0, "exits": 0}
+    day0_emits = []
+    monitor_emits = []
+    refresh_calls = []
+
+    monkeypatch.setattr(
+        "src.engine.dispatch.should_enter_day0_window",
+        lambda **kwargs: True,
+    )
+    monkeypatch.setattr(cycle_runtime, "_day0_hard_fact_position_eligible", lambda _pos: False)
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_day0_window_entered_canonical_if_available",
+        lambda *args, **kwargs: day0_emits.append(True) or True,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *args, **kwargs: monitor_emits.append(True) or True,
+    )
+
+    def _refresh(_conn, _clob, refreshed_pos, **_kwargs):
+        refresh_calls.append(refreshed_pos.trade_id)
+        refreshed_pos.last_monitor_prob = 0.61
+        refreshed_pos.last_monitor_prob_is_fresh = True
+        refreshed_pos.last_monitor_market_price = 0.44
+        refreshed_pos.last_monitor_market_price_is_fresh = True
+        refreshed_pos.last_monitor_best_bid = 0.43
+        refreshed_pos.last_monitor_best_ask = 0.45
+        return types.SimpleNamespace(
+            p_market=np.array([0.44]),
+            p_posterior=0.61,
+            divergence_score=0.0,
+            market_velocity_1h=0.0,
+            forward_edge=0.17,
+        )
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", _refresh)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, ctx: ExitDecision(False, "NO_EXIT"),
+    )
+
+    p_dirty, t_dirty = cycle_runtime.execute_monitoring_phase(
+        conn=None,
+        clob=types.SimpleNamespace(),
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        summary=summary,
+        deps=_monitor_chain_deps(datetime(2026, 4, 1, 20, 0, tzinfo=timezone.utc)),
+        run_exit_preflight=False,
+    )
+
+    assert p_dirty is True
+    assert t_dirty is False
+    assert pos.state == "entered"
+    assert summary["day0_redecision_already_admitted"] == 1
+    assert day0_emits == []
+    assert refresh_calls == [pos.trade_id]
+    assert monitor_emits == [True]
+
+
 def test_exit_dual_write_backfills_only_missing_entry_events_for_partial_history(tmp_path):
     """Partial canonical entry history must not be duplicated during backfill."""
     conn = get_connection(tmp_path / "zeus.db")
@@ -17645,6 +17885,10 @@ def test_global_sell_reauction_debt_waits_for_in_band_bid_before_publish_claim(
             "held_token_id": pos.token_id,
             "scope_identity": "scope-1",
             "generation": "generation-1",
+            "selection_epoch_identity": "selection-epoch-1",
+            "sell_book_witness_identity": "book-witness-1",
+            "debt_event_id": "debt-event-1",
+            "monitor_event_id": "monitor-event-1",
         },
     )
     monkeypatch.setattr(
@@ -17699,6 +17943,10 @@ def test_pending_exit_global_sell_reauction_claims_with_monitor_priority(
         "held_token_id": pos.token_id,
         "scope_identity": "scope-1",
         "generation": "generation-1",
+        "selection_epoch_identity": "selection-epoch-1",
+        "sell_book_witness_identity": "book-witness-1",
+        "debt_event_id": "debt-event-1",
+        "monitor_event_id": "monitor-event-1",
     }
     priorities = []
     requests = []

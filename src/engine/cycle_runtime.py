@@ -3446,6 +3446,74 @@ def _emit_day0_window_entered_canonical_if_available(
     return True
 
 
+def _day0_transition_already_admitted(conn, pos) -> bool:
+    """Return whether this held position already has a live Day0 admission.
+
+    A backoff release may temporarily restore a held position to ``active``
+    for redecision while its canonical lifecycle remains ``pending_exit``.
+    That runtime convenience must not be mistaken for a new Day0 epoch.  The
+    runtime timestamp is a test/legacy seam only when no canonical connection
+    exists.  After a restart, recover the sticky admission from canonical
+    history; a later ACTIVE projection/chain correction does not mint a new
+    Day0 epoch for the same held identity.  Terminal canonical truth remains
+    excluded and is handled by the normal lifecycle gates.
+
+    Only a missing legacy table is treated as an unavailable canonical
+    surface.  Other database and identity failures propagate so they cannot
+    silently authorize a different lifecycle path.
+    """
+
+    if conn is None:
+        return bool(str(getattr(pos, "day0_entered_at", "") or "").strip())
+
+    position_id = str(getattr(pos, "trade_id", "") or "").strip()
+    if not position_id:
+        raise ValueError("DAY0_TRANSITION_IDENTITY_UNAVAILABLE")
+    try:
+        latest = conn.execute(
+            """
+            SELECT event_type, phase_after
+              FROM position_events
+             WHERE position_id = ?
+             ORDER BY sequence_no DESC, rowid DESC
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return False
+        raise
+    if latest is None:
+        return False
+
+    latest_phase = str(latest[1] or "")
+    if latest_phase in {
+        LifecyclePhase.ACTIVE.value,
+        LifecyclePhase.DAY0_WINDOW.value,
+        LifecyclePhase.PENDING_EXIT.value,
+    }:
+        try:
+            prior_day0 = conn.execute(
+                """
+                SELECT 1
+                  FROM position_events
+                 WHERE position_id = ?
+                   AND event_type = 'DAY0_WINDOW_ENTERED'
+                 LIMIT 1
+                """,
+                (position_id,),
+            ).fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).lower():
+                return False
+            raise
+        return prior_day0 is not None
+    if str(latest[0] or "") == "DAY0_WINDOW_ENTERED":
+        return True
+    return False
+
+
 def _monitor_refreshed_phase_for_position(pos) -> str:
     state = _position_state_value(pos)
     exit_state = _semantic_value(getattr(pos, "exit_state", ""))
@@ -9415,9 +9483,24 @@ def execute_monitoring_phase(
                     city_timezone=city.timezone,
                     decision_time_utc=_now_utc,
                 )
-                if (_enter_day0
-                        and _position_state_value(pos) in {"active", "entered", "holding"}
-                        and not getattr(pos, "exit_state", "")):
+                day0_redecision_guarded = False
+                if (
+                    _enter_day0
+                    and _position_state_value(pos)
+                    in {"active", "entered", "holding"}
+                    and not getattr(pos, "exit_state", "")
+                ):
+                    if _day0_transition_already_admitted(conn, pos):
+                        day0_redecision_guarded = True
+                        summary["day0_redecision_already_admitted"] = (
+                            summary.get("day0_redecision_already_admitted", 0) + 1
+                        )
+                if (
+                    _enter_day0
+                    and _position_state_value(pos) in {"active", "entered", "holding"}
+                    and not getattr(pos, "exit_state", "")
+                    and not day0_redecision_guarded
+                ):
                     new_state = enter_day0_window_runtime_state(
                         pos.state,
                         exit_state=getattr(pos, "exit_state", ""),

@@ -12773,7 +12773,40 @@ def _record_global_sell_reauction_publish_claim(
     generation = str(obligation.get("generation") or "").strip()
     if not trade_id or not generation:
         return False
+    from src.execution.exit_safety import global_sell_reauction_publish_claim_lineage
+
     try:
+        cursor = conn.execute(
+            "SELECT * FROM position_current WHERE position_id = ? LIMIT 1",
+            (trade_id,),
+        )
+        current = cursor.fetchone()
+        if current is None:
+            return False
+        projection = (
+            dict(current)
+            if isinstance(current, sqlite3.Row)
+            else dict(zip((item[0] for item in cursor.description), current))
+        )
+        direction = projection.get("direction")
+        canonical_token = str(
+            (projection.get("no_token_id") or "") if direction == "buy_no"
+            else (projection.get("token_id") or "") if direction == "buy_yes" else ""
+        )
+        if (
+            direction != getattr(position, "direction", None)
+            or _asset_id_for_position(position) != canonical_token
+            or global_sell_reauction_publish_claim_lineage(
+                {
+                    "global_sell_reauction_status": "publish_claimed",
+                    "release_reason": "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
+                    "held_sell_reauction_obligation": obligation,
+                },
+                position_id=trade_id,
+                held_token_id=canonical_token,
+            ) != "complete"
+        ):
+            return False
         latest = conn.execute(
             """
             SELECT payload_json
@@ -12795,20 +12828,13 @@ def _record_global_sell_reauction_publish_claim(
             and latest_payload.get("global_sell_reauction_status") == "publish_claimed"
             and isinstance(latest_obligation, dict)
             and str(latest_obligation.get("generation") or "") == generation
+            and global_sell_reauction_publish_claim_lineage(
+                latest_payload,
+                position_id=trade_id,
+                held_token_id=canonical_token,
+            ) == "complete"
         ):
             return True
-        cursor = conn.execute(
-            "SELECT * FROM position_current WHERE position_id = ? LIMIT 1",
-            (trade_id,),
-        )
-        current = cursor.fetchone()
-        if current is None:
-            return False
-        projection = (
-            dict(current)
-            if isinstance(current, sqlite3.Row)
-            else dict(zip((item[0] for item in cursor.description), current))
-        )
         phase = str(projection.get("phase") or "")
         if _pending_exit_no_order_waits_for_liquidity(position, conn=conn):
             return False
