@@ -1250,8 +1250,11 @@ def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
             conn,
             positions=groups.get("restart_blocking_stale_positions", ()),
         )
-        reauction_handoff_ids = tuple(
-            sorted({*event_handoff_ids, *lineage_handoff_ids})
+        publish_claim_handoff_ids = (
+            _pending_publish_claim_reauction_restart_handoff_ids(
+                conn,
+                positions=groups.get("restart_blocking_stale_positions", ()),
+            )
         )
     except (RuntimeError, sqlite3.Error) as exc:
         return {
@@ -1261,8 +1264,23 @@ def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
     finally:
         try:
             conn.close()
-        except UnboundLocalError:
+        except (UnboundLocalError, sqlite3.Error):
             pass
+
+    publish_claim_handoff_ids = _pending_publish_claim_current_book_handoff_ids(
+        trade_db,
+        positions=groups.get("restart_blocking_stale_positions", ()),
+        candidate_ids=publish_claim_handoff_ids,
+    )
+    reauction_handoff_ids = tuple(
+        sorted(
+            {
+                *event_handoff_ids,
+                *lineage_handoff_ids,
+                *publish_claim_handoff_ids,
+            }
+        )
+    )
 
     open_count = int(cadence.get("open_position_count") or 0)
     monitored_ids = tuple(
@@ -2617,6 +2635,252 @@ def _v4_lineage_reauction_restart_handoff_ids(
             continue
         verified.append(position_id)
     return tuple(verified)
+
+
+def _pending_publish_claim_reauction_restart_handoff_ids(
+    conn: sqlite3.Connection,
+    *,
+    positions: object,
+) -> tuple[str, ...]:
+    """Admit the narrow publish-claim monitor debt for restart handoff only.
+
+    A publish claim is usable here only when its canonical release precedes the
+    exact fresh monitor, and the newest rejection proves the loaded runtime
+    still owns the claim.  This function grants no SELL authority; it only
+    removes an already-proven debt from the pre-stop monitor partition.
+    """
+
+    candidates = {
+        str(item.get("position_id") or "").strip(): str(
+            item.get("last_monitor_refreshed_at") or ""
+        ).strip()
+        for item in positions
+        if isinstance(item, dict)
+        and str(item.get("position_id") or "").strip()
+        and str(item.get("last_monitor_refreshed_at") or "").strip()
+    }
+    if not candidates:
+        return ()
+    try:
+        position_columns = _sqlite_table_columns(conn, "position_current")
+        event_columns = _sqlite_table_columns(conn, "position_events")
+    except (RuntimeError, sqlite3.Error):
+        return ()
+    if not {
+        "position_id",
+        "direction",
+        "token_id",
+        "no_token_id",
+    }.issubset(position_columns) or not {
+        "position_id",
+        "sequence_no",
+        "event_type",
+        "occurred_at",
+        "payload_json",
+    }.issubset(event_columns):
+        return ()
+
+    from src.execution.exit_safety import (
+        global_sell_reauction_publish_claim_lineage,
+    )
+
+    qualified: list[str] = []
+    for position_id, expected_occurred_at in sorted(candidates.items()):
+        monitor = conn.execute(
+            """
+            SELECT pe.sequence_no, pe.occurred_at, pe.payload_json,
+                   pc.direction, pc.token_id, pc.no_token_id
+              FROM position_events pe
+              JOIN position_current pc ON pc.position_id = pe.position_id
+             WHERE pe.position_id = ?
+               AND pe.event_type = 'MONITOR_REFRESHED'
+             ORDER BY pe.sequence_no DESC, datetime(pe.occurred_at) DESC
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+        if monitor is None or str(monitor[1] or "") != expected_occurred_at:
+            continue
+        try:
+            monitor_payload = json.loads(str(monitor[2] or "{}"))
+            if not isinstance(monitor_payload, dict):
+                continue
+            probability_raw = monitor_payload.get("last_monitor_prob")
+            best_bid_raw = monitor_payload.get("last_monitor_best_bid")
+            market_price_raw = monitor_payload.get("last_monitor_market_price")
+            if (
+                isinstance(probability_raw, bool)
+                or isinstance(best_bid_raw, bool)
+                or isinstance(market_price_raw, bool)
+            ):
+                continue
+            probability = float(probability_raw)
+            best_bid = float(best_bid_raw)
+            market_price = float(market_price_raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        direction = str(monitor[3] or "").strip().lower()
+        held_token_id = str(
+            monitor[5] or ""
+            if direction == "buy_no"
+            else monitor[4] or ""
+            if direction == "buy_yes"
+            else ""
+        ).strip()
+        validations = monitor_payload.get("applied_validations")
+        if (
+            monitor_payload.get("last_monitor_prob_is_fresh") is not True
+            or monitor_payload.get("last_monitor_market_price_is_fresh") is not True
+            or monitor_payload.get("held_sell_full_depth_action_authority") is not True
+            or monitor_payload.get("exit_decision_available") is not True
+            or monitor_payload.get("exit_decision_should_exit") is not False
+            or not math.isfinite(probability)
+            or not 0.0 <= probability <= 1.0
+            or not math.isfinite(best_bid)
+            or not 0.05 <= best_bid <= 0.95
+            or not math.isfinite(market_price)
+            or not 0.0 <= market_price <= 1.0
+            or not held_token_id
+            or monitor_payload.get("exit_decision_reason")
+            != "GLOBAL_FULL_FAMILY_PREPARATION_PENDING"
+            or monitor_payload.get("exit_decision_trigger")
+            != "GLOBAL_FULL_FAMILY_PREPARATION_PENDING"
+            or not isinstance(validations, list)
+            or "global_auction_full_family_preparation:PUBLISHED"
+            not in {str(value) for value in validations}
+        ):
+            continue
+        try:
+            monitor_sequence = int(monitor[0] or 0)
+        except (TypeError, ValueError):
+            continue
+
+        rejection = conn.execute(
+            """
+            SELECT sequence_no, payload_json
+              FROM position_events
+             WHERE position_id = ? AND event_type = 'EXIT_ORDER_REJECTED'
+             ORDER BY sequence_no DESC, datetime(occurred_at) DESC
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+        if rejection is None:
+            continue
+        try:
+            rejection_sequence = int(rejection[0] or 0)
+        except (TypeError, ValueError):
+            continue
+        if rejection_sequence <= monitor_sequence:
+            continue
+        try:
+            rejection_payload = json.loads(str(rejection[1] or "{}"))
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if (
+            not isinstance(rejection_payload, dict)
+            or rejection_payload.get("error")
+            != "global_sell_reauction_publish_claim_owned"
+        ):
+            continue
+
+        release = conn.execute(
+            """
+            SELECT sequence_no, payload_json
+              FROM position_events
+             WHERE position_id = ? AND event_type = 'EXIT_RETRY_RELEASED'
+             ORDER BY sequence_no DESC, datetime(occurred_at) DESC
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+        if release is None:
+            continue
+        try:
+            release_sequence = int(release[0] or 0)
+        except (TypeError, ValueError):
+            continue
+        if release_sequence >= monitor_sequence:
+            continue
+        try:
+            release_payload = json.loads(str(release[1] or "{}"))
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if (
+            global_sell_reauction_publish_claim_lineage(
+                release_payload,
+                position_id=position_id,
+                held_token_id=held_token_id,
+            )
+            != "pending"
+        ):
+            continue
+        qualified.append(position_id)
+
+    if not qualified:
+        return ()
+    return tuple(qualified)
+
+
+def _pending_publish_claim_current_book_handoff_ids(
+    trade_db: Path,
+    *,
+    positions: object,
+    candidate_ids: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Prove current held books after canonical rows have been read."""
+
+    if not candidate_ids:
+        return ()
+    try:
+        repair_pending = _loaded_live_runtime_repair_pending()
+    except (OSError, RuntimeError):
+        return ()
+    if repair_pending.get("pending") is not True:
+        return ()
+    snapshot_ids = _current_quote_only_repair_snapshot_ids(
+        trade_db,
+        position_ids=candidate_ids,
+    )
+    missing_ids = tuple(
+        position_id for position_id in candidate_ids if position_id not in snapshot_ids
+    )
+    if missing_ids:
+        snapshot_ids = tuple(
+            dict.fromkeys(
+                (*snapshot_ids, *_current_quote_only_repair_live_book_ids(
+                    trade_db,
+                    position_ids=missing_ids,
+                    require_no_executable_exit=False,
+                ))
+            )
+        )
+    if set(snapshot_ids) != set(candidate_ids) or len(snapshot_ids) != len(candidate_ids):
+        return ()
+    try:
+        quote_sidecar = _held_quote_sidecar_current_evidence()
+    except (OSError, RuntimeError):
+        return ()
+    if quote_sidecar.get("current") is not True:
+        return ()
+    try:
+        verify_conn = sqlite3.connect(
+            f"file:{trade_db}?mode=ro", uri=True, timeout=2.0
+        )
+        verify_ids = _pending_publish_claim_reauction_restart_handoff_ids(
+            verify_conn,
+            positions=positions,
+        )
+    except sqlite3.Error:
+        return ()
+    finally:
+        try:
+            verify_conn.close()
+        except (UnboundLocalError, sqlite3.Error):
+            pass
+    if set(verify_ids) != set(candidate_ids) or len(verify_ids) != len(candidate_ids):
+        return ()
+    return tuple(candidate_ids)
 
 
 def _loaded_live_restart_obligation_gate(

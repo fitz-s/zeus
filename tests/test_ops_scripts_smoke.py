@@ -7176,6 +7176,225 @@ def test_deploy_live_pre_stop_handoff_pairs_fresh_monitor_with_v4_lineage(
     assert handoff["restart_blocking_position_count"] == int(not expected_green)
 
 
+@pytest.mark.parametrize(
+    ("mutation", "expected_green"),
+    (
+        ("valid", True),
+        ("complete_lineage", False),
+        ("invalid_lineage", False),
+        ("mismatch_lineage", False),
+        ("wrong_reason", False),
+        ("old_rejection", False),
+        ("wrong_rejection", False),
+        ("stale_book", False),
+        ("sidecar_false", False),
+        ("repair_false", False),
+        ("toctou_complete", False),
+        ("toctou_monitor", False),
+    ),
+)
+def test_deploy_live_pre_stop_handoff_admits_only_pending_publish_claim(
+    monkeypatch, tmp_path, mutation, expected_green
+):
+    """The 33a publish claim is restart debt, never a new SELL authority."""
+
+    dl = _load(
+        f"deploy_live_pending_publish_claim_{mutation}",
+        "deploy_live.py",
+    )
+    trade_db = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(trade_db)
+    conn.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            direction TEXT,
+            token_id TEXT,
+            no_token_id TEXT
+        );
+        CREATE TABLE position_events (
+            event_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            sequence_no INTEGER,
+            event_type TEXT,
+            occurred_at TEXT,
+            payload_json TEXT
+        );
+        """
+    )
+    now = datetime.now(timezone.utc)
+    occurred_at = (now - timedelta(minutes=40)).isoformat()
+    held_token_id = "held-no-token"
+    conn.execute(
+        "INSERT INTO position_current VALUES (?, ?, ?, ?)",
+        ("pos-open", "buy_no", "yes-token", held_token_id),
+    )
+    obligation = {
+        "schema_version": 4,
+        "position_id": "other-pos" if mutation == "mismatch_lineage" else "pos-open",
+        "held_token_id": held_token_id,
+        "scope_identity": "scope-33a",
+        "generation": "generation-33a",
+        "selection_epoch_identity": (
+            "selection-33a" if mutation == "complete_lineage" else ""
+        ),
+        "sell_book_witness_identity": (
+            "book-33a" if mutation == "complete_lineage" else ""
+        ),
+        "debt_event_id": "pos-open:exit_retry_released:210",
+        "monitor_event_id": "pos-open:monitor_refreshed:329",
+    }
+    release_payload = {
+        "status": "publish_claimed",
+        "global_sell_reauction_status": (
+            "invalid_status"
+            if mutation == "invalid_lineage"
+            else "publish_claimed"
+        ),
+        "release_reason": "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
+        "held_sell_reauction_obligation": obligation,
+    }
+    monitor_payload = {
+        "last_monitor_prob": 0.8521666666666667,
+        "last_monitor_prob_is_fresh": True,
+        "last_monitor_market_price": 0.95,
+        "last_monitor_best_bid": 0.95,
+        "last_monitor_market_price_is_fresh": True,
+        "held_sell_full_depth_action_authority": True,
+        "exit_decision_available": True,
+        "exit_decision_should_exit": False,
+        "exit_decision_reason": (
+            "WRONG_REASON"
+            if mutation == "wrong_reason"
+            else "GLOBAL_FULL_FAMILY_PREPARATION_PENDING"
+        ),
+        "exit_decision_trigger": "GLOBAL_FULL_FAMILY_PREPARATION_PENDING",
+        "applied_validations": [
+            "global_auction_full_family_preparation:PUBLISHED"
+        ],
+    }
+    reject_sequence = 333
+    if mutation == "old_rejection":
+        reject_sequence = 1
+    reject_error = (
+        "other_error"
+        if mutation == "wrong_rejection"
+        else "global_sell_reauction_publish_claim_owned"
+    )
+    rows = [
+        (
+            "pos-open:exit_retry_released:210",
+            "pos-open",
+            210,
+            "EXIT_RETRY_RELEASED",
+            occurred_at,
+            json.dumps(release_payload, sort_keys=True),
+        ),
+        (
+            "pos-open:monitor_refreshed:329",
+            "pos-open",
+            329,
+            "MONITOR_REFRESHED",
+            occurred_at,
+            json.dumps(monitor_payload, sort_keys=True),
+        ),
+        (
+            "pos-open:exit_order_rejected:333",
+            "pos-open",
+            reject_sequence,
+            "EXIT_ORDER_REJECTED",
+            occurred_at,
+            json.dumps({"error": reject_error}, sort_keys=True),
+        ),
+    ]
+    conn.executemany(
+        "INSERT INTO position_events VALUES (?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+    conn.commit()
+    conn.close()
+
+    candidate = {
+        "position_id": "pos-open",
+        "last_monitor_refreshed_at": occurred_at,
+    }
+    monkeypatch.setattr(dl, "_exact_v4_reauction_restart_handoff_ids", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(
+        dl, "_v4_lineage_reauction_restart_handoff_ids", lambda *_args, **_kwargs: ()
+    )
+    monkeypatch.setattr(
+        dl,
+        "_loaded_live_runtime_repair_pending",
+        lambda: {"pending": mutation != "repair_false"},
+    )
+    toctou_state = {"mutated": False}
+
+    def current_snapshot(*_args, **_kwargs):
+        if mutation.startswith("toctou_") and not toctou_state["mutated"]:
+            toctou_state["mutated"] = True
+            mutate_conn = sqlite3.connect(trade_db)
+            if mutation == "toctou_complete":
+                complete_payload = dict(release_payload)
+                complete_obligation = dict(obligation)
+                complete_obligation["selection_epoch_identity"] = "selection-complete"
+                complete_obligation["sell_book_witness_identity"] = "book-complete"
+                complete_payload["held_sell_reauction_obligation"] = complete_obligation
+                mutate_conn.execute(
+                    "UPDATE position_events SET payload_json = ? WHERE event_id = ?",
+                    (
+                        json.dumps(complete_payload, sort_keys=True),
+                        "pos-open:exit_retry_released:210",
+                    ),
+                )
+            else:
+                mutate_conn.execute(
+                    "UPDATE position_events SET occurred_at = ? WHERE event_id = ?",
+                    ((now - timedelta(minutes=39)).isoformat(), "pos-open:monitor_refreshed:329"),
+                )
+            mutate_conn.commit()
+            mutate_conn.close()
+        return () if mutation == "stale_book" else ("pos-open",)
+
+    monkeypatch.setattr(dl, "_current_quote_only_repair_snapshot_ids", current_snapshot)
+    monkeypatch.setattr(
+        dl,
+        "_current_quote_only_repair_live_book_ids",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_held_quote_sidecar_current_evidence",
+        lambda: {"current": mutation != "sidecar_false"},
+    )
+    cadence = {
+        "open_position_count": 1,
+        "monitored_position_ids": ["pos-open"],
+        "fresh_position_count": 0,
+        "future_monitor_event_count": 0,
+        "non_monitor_chain_risk_position_count": 0,
+        "settlement_recoverable_positions": [],
+    }
+    groups = {
+        "restart_blocking_stale_position_count": 1,
+        "restart_blocking_stale_positions": [candidate],
+        "probability_only_stale_position_count": 0,
+        "probability_only_stale_positions": [],
+        "quote_only_stale_position_count": 0,
+        "quote_only_stale_positions": [],
+    }
+    monkeypatch.setattr(dl, "collect_monitor_cadence_evidence", lambda *_args, **_kwargs: cadence)
+    monkeypatch.setattr(dl, "monitor_restart_blocking_evidence", lambda _cadence: groups)
+
+    handoff = dl._pre_stop_monitor_handoff_evidence(trade_db)
+
+    assert handoff["green"] is expected_green
+    assert handoff["reauction_handoff_position_count"] == int(expected_green)
+    assert handoff["restart_blocking_position_count"] == int(not expected_green)
+    assert handoff["stale_classified_position_ids"] == (
+        () if expected_green else ("pos-open",)
+    )
+
+
 def test_deploy_live_loaded_restart_refuses_unpaused_monitor_handoff(
     monkeypatch, tmp_path
 ):
