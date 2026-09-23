@@ -2193,8 +2193,9 @@ def test_source_transport_error_terminalization_excludes_ambiguous_statuses() ->
     )
 
 
-def test_source_exact_run_geometry_gap_terminalizes_only_that_source_cycle(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize("complete_candidate", [False, True])
+def test_source_target_candidate_keeps_trigger_and_committed_cycles_distinct(
+    tmp_path, monkeypatch, complete_candidate
 ) -> None:
     import src.data.bayes_precision_fusion_download as dl
     import src.data.openmeteo_model_updates as updates
@@ -2249,10 +2250,14 @@ def test_source_exact_run_geometry_gap_terminalizes_only_that_source_cycle(
         dl,
         "download_bayes_precision_fusion_extra_raw_inputs",
         lambda **_kwargs: {
-            "status": "BAYES_PRECISION_FUSION_EXTRA_EXACT_RUN_UNMATERIALIZABLE",
+            "status": (
+                "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
+                if complete_candidate
+                else "BAYES_PRECISION_FUSION_EXTRA_EXACT_RUN_UNMATERIALIZABLE"
+            ),
             "target_count": 1,
-            "written_row_count": 0,
-            "exact_run_unmaterializable": (
+            "written_row_count": int(complete_candidate),
+            "exact_run_unmaterializable": () if complete_candidate else (
                 {
                     "model": "icon_eu",
                     "city": "Moscow",
@@ -2262,6 +2267,14 @@ def test_source_exact_run_geometry_gap_terminalizes_only_that_source_cycle(
                 },
             ),
             "single_runs_request_cycles": {"icon_eu": _CYCLE.isoformat()},
+            "single_runs_advertised_trigger_cycles": {"icon_eu": _CYCLE.isoformat()},
+            "single_runs_target_request_cycles": {
+                "icon_eu|Moscow|2026-07-17": ((_CYCLE - timedelta(hours=6)).isoformat(),),
+            },
+            "single_runs_written_cycles": (
+                {"icon_eu|Moscow|2026-07-17": ((_CYCLE - timedelta(hours=6)).isoformat(),)}
+                if complete_candidate else {}
+            ),
         },
     )
 
@@ -2274,12 +2287,27 @@ def test_source_exact_run_geometry_gap_terminalizes_only_that_source_cycle(
         max_wall_clock_seconds=1.0,
     )
 
-    assert report["status"] == (
-        "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_PERMANENT_FAILURE"
-    )
+    from src.data.source_clock_update_probe import source_clock_scoped_download_cursor_sources
+
+    expected = "RAW_INPUTS_DOWNLOADED" if complete_candidate else "TRANSPORT_RETRYABLE"
+    assert report["status"] == f"SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_{expected}"
     result = report["source_results"]["icon_eu"]
-    assert result["status"] == "SOURCE_CLOCK_SOURCE_PERMANENT_FAILURE"
-    assert result["exact_run_unmaterializable"][0]["city"] == "Moscow"
+    assert result["status"] == f"SOURCE_CLOCK_SOURCE_{expected}"
+    assert result["cycle"] == _CYCLE.isoformat()
+    assert result["advertised_trigger_cycles"] == (_CYCLE.isoformat(),)
+    candidate = (_CYCLE - timedelta(hours=6)).isoformat()
+    assert result["single_runs_target_request_cycles"] == {
+        "icon_eu|Moscow|2026-07-17": (candidate,),
+    }
+    assert result["single_runs_written_cycles"] == (
+        {"icon_eu|Moscow|2026-07-17": (candidate,)} if complete_candidate else {}
+    )
+    frozen = {"source_runs": {"icon_eu": {"initialisation_time": _CYCLE.isoformat()}}}
+    assert source_clock_scoped_download_cursor_sources(
+        report, source_clock_report=frozen,
+    ) == (("icon_eu",) if complete_candidate else ())
+    if not complete_candidate:
+        assert result["exact_run_unmaterializable"][0]["city"] == "Moscow"
 
 
 def test_downloaded_extras_records_fixpoint_and_success_health(_cfg_with_db, _redirect_health):
@@ -2378,3 +2406,86 @@ def test_callsite_failsoft_does_not_latch(tmp_path, monkeypatch, _redirect_healt
     assert prod._extras_fixpoint_latched(_CYCLE) is False
     r2 = prod._replacement_cycle_availability_poll_if_needed(cfg)
     assert r2["bayes_precision_fusion_extras_status"] == "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED"
+
+
+def test_frozen_source_clock_capture_uses_complete_target_candidates_end_to_end(
+    tmp_path, monkeypatch,
+) -> None:
+    """Real wrapper, target planner, HTTP parser, writer and cursor share one identity."""
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_client as client
+    import src.data.openmeteo_model_updates as updates
+    import src.data.replacement_forecast_current_target_plan as target_plan
+    import src.data.replacement_forecast_seed_discovery as discovery
+    import src.data.source_clock_update_probe as probe
+    import src.strategy.live_inference.source_clock_city_weights as weights
+    from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
+
+    latest = datetime(2026, 9, 23, 3, tzinfo=UTC)
+    available = latest + timedelta(hours=3, minutes=2)
+    now = latest + timedelta(hours=3, minutes=42)
+    old = latest - timedelta(hours=3)
+    older = old - timedelta(hours=6)
+    target = "2026-09-25"
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz or UTC)
+
+    monkeypatch.setattr(dl, "datetime", FixedDatetime)
+    db = tmp_path / "zeus-forecasts.db"
+    with sqlite3.connect(db) as conn:
+        ensure_replacement_forecast_live_schema(conn)
+    metadata = tmp_path / "updates.jsonl"
+    updates.write_model_updates_jsonl(metadata, (updates.OpenMeteoModelUpdate(
+        model="icon_eu", last_run_initialisation_time=latest,
+        last_run_availability_time=available, update_interval_seconds=10800,
+        raw={"last_run_initialisation_time": latest.timestamp(),
+             "data_end_time": datetime(2026, 9, 24, 10, tzinfo=UTC).timestamp()},
+    ),))
+    monkeypatch.setattr(probe, "DEFAULT_MODEL_UPDATES_JSONL", metadata)
+    monkeypatch.setitem(prod.settings["edli"], "replacement_0_1_bayes_precision_fusion_capture_enabled", True)
+    monkeypatch.setattr(dl, "bayes_precision_fusion_quota_cooldown_seconds", lambda: 0)
+    monkeypatch.setattr(discovery, "held_position_family_priorities", lambda: {})
+    monkeypatch.setattr(weights, "affected_cities_for_source_updates", lambda _: ("Amsterdam",))
+    monkeypatch.setattr(target_plan, "replacement_forecast_current_target_keys", lambda _: tuple(
+        target_plan.ReplacementForecastTargetKey("Amsterdam", target, metric)
+        for metric in ("high", "low")
+    ))
+    seen = []
+
+    def fetch(_url, params, **_kwargs):
+        seen.append(params["run"])
+        temperatures = ([None] * 24 if params["run"] == latest.strftime("%Y-%m-%dT%H:%M")
+                        else [10.0 + hour / 10.0 for hour in range(24)])
+        return {"hourly": {"time": [f"{target}T{hour:02d}:00" for hour in range(24)],
+                           "temperature_2m": temperatures},
+                "hourly_units": {"temperature_2m": "C"}}
+
+    monkeypatch.setattr(client, "fetch", fetch)
+    frozen = {"updated_sources": ["icon_eu"], "affected_cities": ["Amsterdam"],
+              "source_runs": {"icon_eu": {"initialisation_time": latest.isoformat(),
+                  "availability_time": available.isoformat(), "update_interval_seconds": 10800}}}
+    class Report:
+        def as_dict(self):
+            return frozen
+
+    report = prod._download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
+        {"forecast_db": str(db), "source_clock_fanout_workers": 1},
+        source_clock_report=Report(), max_wall_clock_seconds=5, decision_time=now,
+    )
+    assert set(seen) == {run.strftime("%Y-%m-%dT%H:%M") for run in (old, older)}
+    with sqlite3.connect(db) as conn:
+        rows = conn.execute("SELECT source_cycle_time,source_available_at,captured_at,metric FROM raw_model_forecasts").fetchall()
+    assert len(rows) == 4
+    assert {row[0] for row in rows} == {old.isoformat(), older.isoformat()}
+    assert {(row[1], row[2]) for row in rows} == {(now.isoformat(), now.isoformat())}
+    assert {row[3] for row in rows} == {"high", "low"}
+    result = report["source_results"]["icon_eu"]
+    assert result["cycle"] == latest.isoformat()
+    assert result["advertised_trigger_cycles"] == (latest.isoformat(),)
+    assert result["single_runs_written_cycles"] == {
+        f"icon_eu|Amsterdam|{target}": tuple(sorted((old.isoformat(), older.isoformat()))),
+    }
+    assert probe.source_clock_scoped_download_cursor_sources(report, source_clock_report=frozen) == ("icon_eu",)

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -1234,9 +1234,7 @@ def test_source_clock_exact_run_geometry_gap_is_terminal_for_that_run(
         frozen_source_runs={"icon_eu": (run, run)},
     )
 
-    assert report["status"] == (
-        "BAYES_PRECISION_FUSION_EXTRA_EXACT_RUN_UNMATERIALIZABLE"
-    )
+    assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
     assert report["written_row_count"] == 0
     assert len(report["exact_run_unmaterializable"]) == 2
     assert {row["city"] for row in report["exact_run_unmaterializable"]} == {
@@ -1315,7 +1313,7 @@ def test_source_clock_exact_run_gap_does_not_discard_other_city_progress(
         allow_single_runs_fallback=False,
     )
 
-    assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
+    assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
     assert report["written_row_count"] == 1
     assert report["committed_families"] == (("Berlin", "2026-06-09", "high"),)
     assert report["exact_run_unmaterializable"][0]["city"] == "Paris"
@@ -2187,10 +2185,7 @@ def test_default_previous_runs_fetch_uses_om_ecmwf_id_for_anchor(monkeypatch) ->
     )
 
 
-_MEMO_GAP_REASON = (
-    "ValueError:partial local-day coverage is not an elapsed-prefix-only "
-    "Day0 slice with remaining-day coverage"
-)
+_MEMO_GAP_REASON = "metadata:data_end_time_before_target_end"
 
 
 def _one_city_two_date_targets(date_a: str, date_b: str):
@@ -2293,8 +2288,7 @@ def test_memoized_exact_run_gap_is_not_refetched_for_the_same_run(
             "reason": _MEMO_GAP_REASON,
         },
     )
-    assert second["status"] != "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
-    assert second["status"] == "BAYES_PRECISION_FUSION_EXTRA_EXACT_RUN_UNMATERIALIZABLE"
+    assert second["status"] == "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
 
 
 def test_memoized_exact_run_gap_is_scoped_to_the_run_not_the_target(
@@ -2638,8 +2632,8 @@ def test_shared_single_runs_cache_bypasses_a_preexisting_internal_hole(monkeypat
     )["ecmwf_ifs"] == (2.0, -1.0)
 
 
-def test_shared_single_runs_cache_reuses_normal_trailing_horizon_null(monkeypatch) -> None:
-    """A horizon suffix remains the existing coverage gate, not a retry-loop cache miss."""
+def test_shared_single_runs_cache_retries_unknown_trailing_horizon_null(monkeypatch) -> None:
+    """An incomplete target can become complete; its raw prefix must not freeze it."""
     import src.data.bayes_precision_fusion_download as dl
     import src.data.openmeteo_client as client
 
@@ -2666,7 +2660,7 @@ def test_shared_single_runs_cache_reuses_normal_trailing_horizon_null(monkeypatc
         models=["ecmwf_ifs"], locations=[location], run=run, forecast_hours=120
     )
 
-    assert len(calls) == 1
+    assert len(calls) == 2
     assert first == second
 
 
@@ -3486,6 +3480,10 @@ def test_single_location_120h_payload_donates_to_cross_process_72h_request(
         return _CHENGDU_120H_PAYLOAD
 
     monkeypatch.setattr(client, "fetch", _fetch)
+    complete_location = (
+        _CHENGDU_REQUEST_LATITUDE, _CHENGDU_REQUEST_LONGITUDE,
+        _CHENGDU_TIMEZONE, (date(2026, 9, 8),),
+    )
 
     dl._default_live_fetch_batched(
         models=["ecmwf_ifs"],
@@ -3493,14 +3491,14 @@ def test_single_location_120h_payload_donates_to_cross_process_72h_request(
         longitude=_CHENGDU_REQUEST_LONGITUDE,
         timezone_name=_CHENGDU_TIMEZONE,
         run=_CHENGDU_RUN,
-        target_local_date=date(2026, 9, 7),
+        target_local_date=date(2026, 9, 8),
         forecast_hours=120,
     )
     assert len(calls) == 1
 
     _fresh_single_runs_cache_process(dl)
     (sliced,) = dl._fetch_single_runs_hourly_payloads_batched(
-        models=["ecmwf_ifs"], locations=[_CHENGDU_LOCATION], run=_CHENGDU_RUN,
+        models=["ecmwf_ifs"], locations=[complete_location], run=_CHENGDU_RUN,
         forecast_hours=72, past_hours=1,
     )
     assert len(calls) == 1, "the (72,1) request must be served from the single-location 120-h donor"
@@ -3529,9 +3527,13 @@ def test_single_location_72h_request_is_served_from_a_cross_process_120h_donor(
         return _CHENGDU_120H_PAYLOAD
 
     monkeypatch.setattr(client, "fetch", _fetch)
+    complete_location = (
+        _CHENGDU_REQUEST_LATITUDE, _CHENGDU_REQUEST_LONGITUDE,
+        _CHENGDU_TIMEZONE, (date(2026, 9, 8),),
+    )
 
     dl._fetch_single_runs_hourly_payloads_batched(
-        models=["ecmwf_ifs"], locations=[_CHENGDU_LOCATION], run=_CHENGDU_RUN, forecast_hours=120,
+        models=["ecmwf_ifs"], locations=[complete_location], run=_CHENGDU_RUN, forecast_hours=120,
     )
     assert len(calls) == 1
 
@@ -3542,12 +3544,12 @@ def test_single_location_72h_request_is_served_from_a_cross_process_120h_donor(
         longitude=_CHENGDU_REQUEST_LONGITUDE,
         timezone_name=_CHENGDU_TIMEZONE,
         run=_CHENGDU_RUN,
-        target_local_date=date(2026, 9, 7),
+        target_local_date=date(2026, 9, 8),
         forecast_hours=72,
     )
     assert len(calls) == 1, "the single-location 72-h request must be served from the 120-h donor"
     native = dl._parse_batched_single_runs_payload(
-        _CHENGDU_72H_PAYLOAD, ["ecmwf_ifs"], date(2026, 9, 7), _CHENGDU_TIMEZONE,
+        _CHENGDU_72H_PAYLOAD, ["ecmwf_ifs"], date(2026, 9, 8), _CHENGDU_TIMEZONE,
     )
     assert served == native
 
@@ -3901,3 +3903,389 @@ def test_derived_offgrid_run_needs_complete_pair_before_possession_write(
         microsecond=(availability.microsecond // 1000) * 1000
     )
     assert recorded_precision_availability <= datetime.fromisoformat(rows[0][4])
+
+
+def test_target_run_selection_uses_matching_metadata_and_actual_dst_day() -> None:
+    from zoneinfo import ZoneInfo
+
+    import src.data.bayes_precision_fusion_download as dl
+
+    run = datetime(2026, 10, 24, 3, tzinfo=UTC)
+    latest = dl._SourceClockSingleRunsRequest(
+        run=run, source_available_at=run.isoformat(),
+        data_end_time=datetime(2026, 10, 25, 23, tzinfo=UTC),
+    )
+    decision = datetime(2026, 10, 24, 8, tzinfo=UTC)
+    # Amsterdam's fall-back day is 25h, ending at 23Z. Exclusive end exactly
+    # at that boundary qualifies latest; one hour earlier requires old archive.
+    assert (
+        dl._target_single_runs_request(
+            "icon_eu", latest, target_local_date=date(2026, 10, 25),
+            timezone_name="Europe/Amsterdam", decision_time=decision,
+        ) == latest
+    )
+    shorter = dl._SourceClockSingleRunsRequest(
+        run=run, source_available_at=run.isoformat(),
+        data_end_time=datetime(2026, 10, 25, 22, tzinfo=UTC),
+    )
+    selected = dl._target_single_runs_request(
+        "icon_eu", shorter, target_local_date=date(2026, 10, 25),
+        timezone_name="Europe/Amsterdam", decision_time=decision,
+    )
+    assert selected.run == run - timedelta(hours=3)
+    assert selected.availability_from_successful_possession
+    spring_end = datetime(2026, 3, 30, tzinfo=ZoneInfo("Europe/Amsterdam"))
+    assert spring_end.astimezone(UTC) == datetime(2026, 3, 29, 22, tzinfo=UTC)
+    assert dl._metadata_data_end_time(
+        {"last_run_initialisation_time": run.timestamp(), "data_end_time": 1792969200},
+        run,
+    ) == datetime.fromtimestamp(1792969200, tz=UTC)
+    assert dl._metadata_data_end_time(
+        {"last_run_initialisation_time": (run - timedelta(hours=3)).timestamp(),
+         "data_end_time": 1792969200}, run,
+    ) is None
+    spring_latest = dl._SourceClockSingleRunsRequest(
+        run=datetime(2026, 3, 28, 3, tzinfo=UTC),
+        source_available_at=None,
+        data_end_time=datetime(2026, 3, 29, 22, tzinfo=UTC),
+    )
+    assert dl._target_single_runs_request(
+        "icon_eu", spring_latest, target_local_date=date(2026, 3, 29),
+        timezone_name="Europe/Amsterdam",
+        decision_time=datetime(2026, 3, 28, 8, tzinfo=UTC),
+    ) == spring_latest  # spring day ends after 23 physical hours
+
+
+def test_out_of_age_previous_archive_is_not_requested() -> None:
+    import src.data.bayes_precision_fusion_download as dl
+
+    latest = dl._SourceClockSingleRunsRequest(
+        run=datetime(2026, 9, 22, 6, tzinfo=UTC),
+        source_available_at="2026-09-22T13:16:40+00:00",
+        data_end_time=datetime(2026, 9, 24, 19, tzinfo=UTC),
+    )
+    now = datetime(2026, 9, 23, 6, 42, tzinfo=UTC)
+    assert dl._target_single_runs_request(
+        "ukmo_global_deterministic_10km", latest,
+        target_local_date=date(2026, 9, 25),
+        timezone_name="Europe/Amsterdam", decision_time=now,
+    ) is None  # 22/00 is 30h42m old; no freshness waiver
+    assert dl._target_single_runs_request(
+        "unverified_model", latest, target_local_date=date(2026, 9, 25),
+        timezone_name="Europe/Amsterdam", decision_time=now,
+    ) == latest  # never invent archive cadence for an unverified model
+
+
+def test_out_of_age_target_capture_keeps_trigger_retryable_without_http(
+    tmp_path, monkeypatch,
+) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+
+    now = datetime(2026, 9, 23, 6, 42, tzinfo=UTC)
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz or UTC)
+
+    monkeypatch.setattr(dl, "datetime", FixedDatetime)
+    latest = datetime(2026, 9, 22, 6, tzinfo=UTC)
+    monkeypatch.setattr(dl, "_read_source_clock_single_runs_requests", lambda **_: {
+        "ukmo_global_deterministic_10km": dl._SourceClockSingleRunsRequest(
+            run=latest, source_available_at=latest.isoformat(),
+            data_end_time=datetime(2026, 9, 24, 19, tzinfo=UTC),
+        ),
+    })
+    monkeypatch.setattr(dl, "_default_live_fetch_batched", lambda **_: (
+        _ for _ in ()
+    ).throw(AssertionError("out-of-age candidate must never hit API")))
+    db = _forecast_db(tmp_path)
+    target = dl.BayesPrecisionFusionDownloadTarget(
+        city="Amsterdam", metric="high", target_date="2026-09-25",
+        lead_days=2, latitude=52.31, longitude=4.76,
+        timezone_name="Europe/Amsterdam",
+    )
+    report = dl.download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=db, cycle=latest, targets=[target],
+        models=("ukmo_global_deterministic_10km",),
+        include_previous_runs=False, prune_after=False,
+    )
+    assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
+    assert report["written_row_count"] == _count(db) == 0
+    assert report["single_runs_target_request_cycles"]["ukmo_global_deterministic_10km|Amsterdam|2026-09-25"] == ()
+    assert report["single_runs_written_cycles"] == {}
+    assert report["transport_errors"] == ()
+
+
+def test_v1_generic_gap_memo_cannot_freeze_current_retry(tmp_path, monkeypatch) -> None:
+    import json
+    import src.data.bayes_precision_fusion_download as dl
+
+    scope = ("icon_eu", "Amsterdam", "2026-09-25", "2026-09-23T03:00:00+00:00")
+    path = tmp_path / "gap.json"
+    path.write_text(json.dumps({"schema_version": 1, "entries": {
+        "|".join(scope): {"reason": "ValueError:partial local-day coverage"},
+    }}), encoding="utf-8")
+    monkeypatch.setattr(dl, "_exact_run_gap_memo_persistence_enabled", lambda: True)
+    monkeypatch.setattr(dl, "_exact_run_gap_memo_path", lambda: path)
+    dl._EXACT_RUN_UNMATERIALIZABLE_MEMO.clear()
+    dl._load_persisted_exact_run_memo(force=True)
+    assert scope not in dl._EXACT_RUN_UNMATERIALIZABLE_MEMO
+    dl._EXACT_RUN_UNMATERIALIZABLE_MEMO[scope] = "ValueError:partial local-day coverage"
+    dl._prune_exact_run_memo(cycle_utc=datetime(2026, 9, 23, 3, tzinfo=UTC))
+    assert dl._EXACT_RUN_UNMATERIALIZABLE_MEMO[scope].startswith("ValueError:")
+
+
+@pytest.mark.parametrize("frozen", (False, True))
+def test_target_aware_reader_and_fast_path_write_real_old_cycle_after_complete_pair(
+    tmp_path, monkeypatch, frozen,
+) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_client as client
+    import src.data.openmeteo_model_updates as model_updates
+    import src.data.source_clock_update_probe as probe
+
+    now = datetime(2026, 9, 23, 6, 42, tzinfo=UTC)
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz or UTC)
+
+    monkeypatch.setattr(dl, "datetime", FixedDatetime)
+    latest = datetime(2026, 9, 23, 3, tzinfo=UTC)
+    old = datetime(2026, 9, 23, 0, tzinfo=UTC)
+    updates_path = tmp_path / "updates.jsonl"
+    model_updates.write_model_updates_jsonl(updates_path, [model_updates.OpenMeteoModelUpdate(
+        model="icon_eu", last_run_initialisation_time=latest,
+        last_run_availability_time=datetime(2026, 9, 23, 6, 2, tzinfo=UTC),
+        raw={"last_run_initialisation_time": latest.timestamp(),
+             "data_end_time": datetime(2026, 9, 24, 10, tzinfo=UTC).timestamp()},
+    )])
+    monkeypatch.setattr(probe, "DEFAULT_MODEL_UPDATES_JSONL", updates_path)
+    assert dl._read_source_clock_single_runs_requests(decision_time=now)["icon_eu"].data_end_time == datetime(2026, 9, 24, 10, tzinfo=UTC)
+
+    seen: list[str] = []
+    def _fetch(_url, params, **_kwargs):
+        seen.append(str(params["run"]))
+        target = date(2026, 9, 23) if params["run"] == latest.strftime("%Y-%m-%dT%H:%M") else date(2026, 9, 25)
+        return _complete_hourly_local_day_payload(target, base=25.0)
+
+    monkeypatch.setattr(client, "fetch", _fetch)
+    db = _forecast_db(tmp_path)
+    targets = [dl.BayesPrecisionFusionDownloadTarget(
+        city="Amsterdam", metric=metric, target_date=target.isoformat(),
+        lead_days=lead, latitude=52.31, longitude=4.76,
+        timezone_name="Europe/Amsterdam",
+    ) for target, lead in ((date(2026, 9, 23), 0), (date(2026, 9, 25), 2))
+       for metric in ("high", "low")]
+    report = dl.download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=db, cycle=latest, targets=targets, models=("icon_eu",),
+        include_previous_runs=False, prune_after=False,
+        allow_single_runs_fallback=False,
+        frozen_source_runs={"icon_eu": (
+            latest, datetime(2026, 9, 23, 6, 2, tzinfo=UTC),
+        )} if frozen else None,
+    )
+    older = datetime(2026, 9, 22, 18, tzinfo=UTC)
+    assert report["written_row_count"] == 6
+    assert sorted(seen) == sorted([
+        latest.strftime("%Y-%m-%dT%H:%M"),
+        old.strftime("%Y-%m-%dT%H:%M"),
+        older.strftime("%Y-%m-%dT%H:%M"),
+    ])
+    with sqlite3.connect(db) as conn:
+        rows = conn.execute(
+            "SELECT target_date, metric, source_cycle_time, source_available_at, captured_at, lead_days "
+            "FROM raw_model_forecasts ORDER BY target_date,metric"
+        ).fetchall()
+    assert {r[2] for r in rows[:2]} == {latest.isoformat()}
+    assert {r[2] for r in rows[2:]} == {old.isoformat(), older.isoformat()}
+    assert {r[3] for r in rows[2:]} == {now.isoformat()}
+    assert {r[4] for r in rows[2:]} == {now.isoformat()}
+    assert {r[5] for r in rows[2:]} == {2}
+    assert report["single_runs_request_cycles"]["icon_eu"] == latest.isoformat()
+    assert report["single_runs_target_request_cycles"]["icon_eu|Amsterdam|2026-09-25"] == (
+        old.isoformat(), older.isoformat(),
+    )
+    assert report["single_runs_advertised_trigger_cycles"] == {"icon_eu": latest.isoformat()}
+    assert report["single_runs_written_cycles"] == {
+        "icon_eu|Amsterdam|2026-09-23": (latest.isoformat(),),
+        "icon_eu|Amsterdam|2026-09-25": tuple(sorted((old.isoformat(), older.isoformat()))),
+    }
+
+
+def test_frozen_metadata_mismatch_or_conflicting_horizon_keeps_exact_run(
+    tmp_path, monkeypatch,
+) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_client as client
+    import src.data.openmeteo_model_updates as model_updates
+    import src.data.source_clock_update_probe as probe
+
+    latest = datetime(2026, 9, 23, 3, tzinfo=UTC)
+    available = datetime(2026, 9, 23, 6, 2, tzinfo=UTC)
+    end = datetime(2026, 9, 24, 10, tzinfo=UTC)
+    updates_path = tmp_path / "updates.jsonl"
+    def _update(run, availability, horizon):
+        return model_updates.OpenMeteoModelUpdate(
+            model="icon_eu", last_run_initialisation_time=run,
+            last_run_availability_time=availability,
+            raw={"last_run_initialisation_time": run.timestamp(),
+                 "data_end_time": horizon.timestamp()},
+        )
+
+    monkeypatch.setattr(probe, "DEFAULT_MODEL_UPDATES_JSONL", updates_path)
+    db = _forecast_db(tmp_path)
+    target = dl.BayesPrecisionFusionDownloadTarget(
+        city="Amsterdam", metric="high", target_date="2026-09-25",
+        lead_days=2, latitude=52.31, longitude=4.76,
+        timezone_name="Europe/Amsterdam",
+    )
+    seen: list[str] = []
+    def _fetch(_url, params, **_kwargs):
+        seen.append(str(params["run"]))
+        payload = _complete_hourly_local_day_payload(date(2026, 9, 25))
+        payload["hourly"]["time"] = payload["hourly"]["time"][:11]
+        payload["hourly"]["temperature_2m"] = payload["hourly"]["temperature_2m"][:11]
+        return payload
+
+    monkeypatch.setattr(client, "fetch", _fetch)
+    frozen = {"icon_eu": (latest, available)}
+    for updates in (
+        [_update(latest, available + timedelta(seconds=1), end)],
+        [_update(latest + timedelta(hours=3), available, end)],
+        [_update(latest, available, end),
+         _update(latest, available, end + timedelta(hours=1))],
+        [_update(latest, available, end),
+         model_updates.OpenMeteoModelUpdate(
+             model="icon_eu", last_run_initialisation_time=latest,
+             last_run_availability_time=available,
+             raw={"last_run_initialisation_time": (
+                 latest - timedelta(hours=3)
+             ).timestamp(), "data_end_time": end.timestamp()},
+         )],
+    ):
+        model_updates.write_model_updates_jsonl(updates_path, updates)
+        assert dl._read_matching_frozen_data_ends({
+            "icon_eu": dl._SourceClockSingleRunsRequest(latest, available.isoformat()),
+        }) == {}
+        seen.clear()
+        report = dl.download_bayes_precision_fusion_extra_raw_inputs(
+            forecast_db=db, cycle=latest, targets=[target], models=("icon_eu",),
+            include_previous_runs=False, prune_after=False,
+            allow_single_runs_fallback=False, frozen_source_runs=frozen,
+        )
+        assert seen == [latest.strftime("%Y-%m-%dT%H:%M")]
+        assert report["written_row_count"] == _count(db) == 0
+        assert report["single_runs_target_request_cycles"]["icon_eu|Amsterdam|2026-09-25"] == (latest.isoformat(),)
+
+
+def test_explicit_derived_frozen_run_never_backtracks_from_metadata(
+    tmp_path, monkeypatch,
+) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_model_updates as model_updates
+    import src.data.source_clock_update_probe as probe
+
+    run = datetime(2026, 9, 23, 3, tzinfo=UTC)
+    updates_path = tmp_path / "updates.jsonl"
+    model_updates.write_model_updates_jsonl(updates_path, [model_updates.OpenMeteoModelUpdate(
+        model="icon_eu", last_run_initialisation_time=run,
+        last_run_availability_time=datetime(2026, 9, 23, 6, 2, tzinfo=UTC),
+        raw={"last_run_initialisation_time": run.timestamp(),
+             "data_end_time": datetime(2026, 9, 24, 10, tzinfo=UTC).timestamp()},
+    )])
+    monkeypatch.setattr(probe, "DEFAULT_MODEL_UPDATES_JSONL", updates_path)
+    seen: list[dict[str, object]] = []
+    monkeypatch.setattr(dl, "_default_live_fetch_batched", lambda **kwargs: (
+        seen.append(kwargs) or {"icon_eu": (21.0, 11.0)}
+    ))
+    db = _forecast_db(tmp_path)
+    target = dl.BayesPrecisionFusionDownloadTarget(
+        city="Amsterdam", metric="high", target_date="2026-09-25",
+        lead_days=2, latitude=52.31, longitude=4.76,
+        timezone_name="Europe/Amsterdam",
+    )
+    report = dl.download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=db, cycle=run, targets=[target], models=("icon_eu",),
+        include_previous_runs=False, prune_after=False,
+        frozen_source_runs={"icon_eu": dl._DerivedOffGridSingleRunsRun(run)},
+    )
+    assert report["written_row_count"] == 1
+    assert [request["run"] for request in seen] == [run]
+    assert seen[0]["allow_standard_meta_fallback"] is False
+    assert report["single_runs_target_request_cycles"]["icon_eu|Amsterdam|2026-09-25"] == (run.isoformat(),)
+
+
+def test_target_aware_batched_partial_then_complete_is_retryable_without_fallback(
+    tmp_path, monkeypatch,
+) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_client as client
+
+    dl._EXACT_RUN_UNMATERIALIZABLE_MEMO.clear()
+    now = datetime(2026, 9, 23, 6, 42, tzinfo=UTC)
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz or UTC)
+
+    monkeypatch.setattr(dl, "datetime", FixedDatetime)
+    latest = datetime(2026, 9, 23, 3, tzinfo=UTC)
+    old = datetime(2026, 9, 23, 0, tzinfo=UTC)
+    older = datetime(2026, 9, 22, 18, tzinfo=UTC)
+    monkeypatch.setattr(dl, "_read_source_clock_single_runs_requests", lambda **_: {
+        "icon_eu": dl._SourceClockSingleRunsRequest(
+            run=latest, source_available_at=now.isoformat(),
+            data_end_time=datetime(2026, 9, 24, 10, tzinfo=UTC),
+        )
+    })
+    monkeypatch.setattr(
+        dl, "_fetch_standard_meta_stamped_payloads",
+        lambda **_: (_ for _ in ()).throw(AssertionError("no standard fallback")),
+    )
+    complete = False
+    seen: list[str] = []
+    def _fetch(_url, params, **_kwargs):
+        run = str(params["run"])
+        seen.append(run)
+        if run == older.strftime("%Y-%m-%dT%H:%M"):
+            raise RuntimeError("archived run transport unavailable")
+        assert run == old.strftime("%Y-%m-%dT%H:%M")
+        payload = _complete_hourly_local_day_payload(date(2026, 9, 25))
+        if not complete:
+            payload["hourly"]["time"] = payload["hourly"]["time"][:11]
+            payload["hourly"]["temperature_2m"] = payload["hourly"]["temperature_2m"][:11]
+        return payload
+
+    monkeypatch.setattr(client, "fetch", _fetch)
+    db = _forecast_db(tmp_path)
+    targets = [dl.BayesPrecisionFusionDownloadTarget(
+        city="Amsterdam", metric=metric, target_date="2026-09-25",
+        lead_days=2, latitude=52.31, longitude=4.76,
+        timezone_name="Europe/Amsterdam",
+    ) for metric in ("high", "low")]
+    kwargs = dict(
+        forecast_db=db, cycle=latest, targets=targets, models=("icon_eu",),
+        include_previous_runs=False, prune_after=False,
+        allow_single_runs_fallback=False,
+    )
+    first = dl.download_bayes_precision_fusion_extra_raw_inputs(**kwargs)
+    assert first["written_row_count"] == _count(db) == 0
+    assert first["status"] == "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
+    assert first["transport_errors"]  # only the 18Z transport, not the 00Z partial
+    assert len(first["exact_run_unmaterializable"]) == 1
+    assert dl._EXACT_RUN_UNMATERIALIZABLE_MEMO == {}
+    complete = True
+    second = dl.download_bayes_precision_fusion_extra_raw_inputs(**kwargs)
+    assert second["written_row_count"] == _count(db) == 2
+    assert seen.count(old.strftime("%Y-%m-%dT%H:%M")) == 2
+    with sqlite3.connect(db) as conn:
+        rows = conn.execute(
+            "SELECT metric,source_cycle_time,source_available_at,captured_at "
+            "FROM raw_model_forecasts ORDER BY metric"
+        ).fetchall()
+    assert [(r[0], r[1]) for r in rows] == [
+        ("high", old.isoformat()), ("low", old.isoformat()),
+    ]
+    assert {r[2] for r in rows} == {now.isoformat()}
+    assert {r[3] for r in rows} == {now.isoformat()}

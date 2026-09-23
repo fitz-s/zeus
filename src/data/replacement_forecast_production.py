@@ -2719,18 +2719,19 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                 for item in source_reports
             )
             expected_cycle = source_cycles[source].isoformat()
-            actual_cycles = {
+            advertised_trigger_cycles = {
                 str(cycle)
                 for item in source_reports
                 for cycle in (
-                    (item.get("single_runs_request_cycles") or {}).get(source),
+                    (item.get("single_runs_advertised_trigger_cycles")
+                     or item.get("single_runs_request_cycles") or {}).get(source),
                 )
                 if cycle
             }
             identity_mismatch = (
                 bool(targets_by_source[source])
                 and isinstance(frozen_runs, Mapping)
-                and actual_cycles != {expected_cycle}
+                and advertised_trigger_cycles != {expected_cycle}
             )
             if not targets_by_source[source]:
                 status = "SOURCE_CLOCK_SOURCE_NO_TARGETS"
@@ -2753,12 +2754,6 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             ):
                 status = "SOURCE_CLOCK_SOURCE_PERMANENT_FAILURE"
             elif (
-                statuses
-                == {"BAYES_PRECISION_FUSION_EXTRA_EXACT_RUN_UNMATERIALIZABLE"}
-                and source_exact_run_unmaterializable
-            ):
-                status = "SOURCE_CLOCK_SOURCE_PERMANENT_FAILURE"
-            elif (
                 "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE" in statuses
                 or source_incomplete
                 or source_exact_run_unmaterializable
@@ -2770,15 +2765,39 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                 status = "SOURCE_CLOCK_SOURCE_RAW_INPUTS_DOWNLOADED"
             else:
                 status = "SOURCE_CLOCK_SOURCE_CAPTURE_FAILSOFT_SKIPPED"
+            # Metadata triggers, candidate requests and committed row cycles are
+            # different clocks. Only the advertised trigger can advance its cursor.
+            target_cycle_reports: dict[str, dict[str, tuple[str, ...]]] = {}
+            for field in (
+                "single_runs_target_request_cycles", "single_runs_written_cycles",
+            ):
+                scopes: dict[str, set[str]] = {}
+                for item in source_reports:
+                    values = item.get(field)
+                    if not isinstance(values, Mapping):
+                        continue
+                    for scope, cycles in values.items():
+                        if (
+                            not str(scope).startswith(source + "|")
+                            or not isinstance(cycles, (list, tuple))
+                        ):
+                            continue
+                        scopes.setdefault(str(scope), set()).update(str(c) for c in cycles)
+                target_cycle_reports[field] = {
+                    scope: tuple(sorted(cycles)) for scope, cycles in sorted(scopes.items())
+                }
             source_results[source] = {
                 "status": status,
                 "cycle": (
-                    next(iter(actual_cycles))
-                    if len(actual_cycles) == 1
+                    next(iter(advertised_trigger_cycles))
+                    if len(advertised_trigger_cycles) == 1
                     else expected_cycle
                 ),
                 "expected_cycle": expected_cycle,
-                "actual_cycles": tuple(sorted(actual_cycles)),
+                "advertised_trigger_cycles": tuple(sorted(advertised_trigger_cycles)),
+                # Compatibility alias; never describes target-specific committed rows.
+                "actual_cycles": tuple(sorted(advertised_trigger_cycles)),
+                **target_cycle_reports,
                 "target_count": sum(
                     int(item.get("target_count") or 0)
                     for item in source_reports

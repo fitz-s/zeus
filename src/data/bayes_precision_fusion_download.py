@@ -447,6 +447,7 @@ class _SourceClockSingleRunsRequest:
     run: datetime
     source_available_at: str | None
     availability_from_successful_possession: bool = False
+    data_end_time: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -459,6 +460,79 @@ class _DerivedOffGridSingleRunsRun:
     """
 
     run: datetime
+
+
+# Only these models have checked standard-grid Single Runs archive candidates.
+# Metadata update_interval is not necessarily the archive cadence (some feeds
+# publish rolling updates that Single Runs does not serve).
+_TARGET_BACKTRACK_MODELS = frozenset({"icon_eu", "ukmo_global_deterministic_10km"})
+
+
+def _metadata_data_end_time(
+    raw: Mapping[str, object] | None, run: datetime,
+) -> datetime | None:
+    if not isinstance(raw, Mapping):
+        return None
+    def _clock(value: object) -> datetime | None:
+        try:
+            if isinstance(value, (float, int)) and not isinstance(value, bool):
+                return datetime.fromtimestamp(value, tz=UTC)
+            if isinstance(value, str):
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                return parsed.astimezone(UTC) if parsed.tzinfo is not None else None
+        except (ValueError, OverflowError, OSError):
+            pass
+        return None
+
+    if _clock(raw.get("last_run_initialisation_time")) != run:
+        return None
+    value = raw.get("data_end_time")
+    end = _clock(value)
+    return end if end is not None and end > run else None
+
+
+def _target_single_runs_request(
+    model: str,
+    request: _SourceClockSingleRunsRequest,
+    *,
+    target_local_date: date,
+    timezone_name: str,
+    decision_time: datetime,
+) -> _SourceClockSingleRunsRequest | None:
+    """Use a proven archive cadence only when latest metadata cannot span this day.
+
+    The metadata end is exclusive. An older archive is not assumed complete:
+    possession and the ordinary full HIGH/LOW parser must still prove its value.
+    None means this exact latest target is structurally out of range and there is
+    no in-age archive candidate. The next metadata update gets a fresh decision.
+    """
+    end = request.data_end_time
+    if model not in _TARGET_BACKTRACK_MODELS or end is None or request.run.minute != 0:
+        return request
+    local_end = datetime.combine(
+        target_local_date + timedelta(days=1), datetime.min.time(),
+        tzinfo=ZoneInfo(timezone_name),
+    ).astimezone(UTC)
+    if end >= local_end:
+        return request
+    from src.data.replacement_forecast_cycle_policy import (  # noqa: PLC0415
+        cycle_age_outside_bound,
+    )
+
+    # Both products have verified Single Runs on the standard 00/06/12/18Z
+    # archive grid. Off-grid model-update clocks are not archive identities.
+    candidate = request.run.replace(
+        hour=(request.run.hour // 6) * 6, minute=0, second=0, microsecond=0,
+    )
+    if candidate >= request.run:
+        candidate -= timedelta(hours=6)
+    if cycle_age_outside_bound(decision_time, candidate):
+        return None
+    return _SourceClockSingleRunsRequest(
+        run=candidate,
+        source_available_at=None,
+        availability_from_successful_possession=True,
+    )
 
 
 @dataclass(frozen=True)
@@ -501,10 +575,62 @@ def _read_source_clock_single_runs_requests(
             out[str(update.model)] = _SourceClockSingleRunsRequest(
                 run=run,
                 source_available_at=update.last_run_availability_time.astimezone(UTC).isoformat(),
+                data_end_time=_metadata_data_end_time(update.raw, run),
             )
         except Exception:
             continue
     return out
+
+
+def _read_matching_frozen_data_ends(
+    requests: Mapping[str, _SourceClockSingleRunsRequest],
+) -> dict[str, datetime]:
+    """Supplement a frozen tuple only with unambiguous matching current metadata.
+
+    The event's (model, initialisation, availability) remains authoritative.
+    Metadata for another trigger, a malformed raw identity, or conflicting
+    duplicate horizons cannot grant archived target selection.
+    """
+    try:
+        from src.data.source_clock_update_probe import DEFAULT_MODEL_UPDATES_JSONL  # noqa: PLC0415
+        from src.data.openmeteo_model_updates import read_model_updates_jsonl  # noqa: PLC0415
+
+        updates = read_model_updates_jsonl(DEFAULT_MODEL_UPDATES_JSONL)
+    except Exception:
+        return {}
+    ends: dict[str, set[datetime | None]] = {}
+    for update in updates:
+        model = str(update.model)
+        request = requests.get(model)
+        if (
+            request is None
+            or request.availability_from_successful_possession
+            or request.source_available_at is None
+        ):
+            continue
+        try:
+            available = datetime.fromisoformat(request.source_available_at)
+            if available.utcoffset() is None:
+                continue
+            init = update.last_run_initialisation_time
+            published = update.last_run_availability_time
+            if init.utcoffset() is None or published.utcoffset() is None:
+                continue
+            if (
+                init.astimezone(UTC) != request.run
+                or published.astimezone(UTC) != available.astimezone(UTC)
+            ):
+                continue
+            ends.setdefault(model, set()).add(
+                _metadata_data_end_time(update.raw, request.run)
+            )
+        except (ValueError, TypeError, AttributeError):
+            continue
+    return {
+        model: next(iter(candidates))
+        for model, candidates in ends.items()
+        if len(candidates) == 1 and None not in candidates
+    }
 
 # Open-Meteo PREVIOUS-RUNS model ids keyed by the STORED model identity. The previous-runs API
 # model id can differ from both the stored identity AND the single-runs id: the anchor is stored
@@ -587,16 +713,10 @@ _BATCH_EXACT_RUN_UNMATERIALIZABLE_KEY = (
 )
 _SOURCE_CLOCK_LOCATION_BATCH_SIZE = 25
 
-# Parser-level gaps that are a property of the RUN, not of the transport: an immutable run
-# either covers the target local day or it never will, so re-issuing the identical request
-# can only burn quota. Every other gap reason (transport, timeout, quota abort, 4xx/5xx,
-# temperature_series_missing, malformed payload) may succeed on a retry and is NOT memoized.
-_EXACT_RUN_IMMUTABLE_GAP_REASONS = (
-    "ValueError:partial local-day coverage",
-    "ValueError:insufficient Open-Meteo hourly samples inside target local day",
-)
-# (model, city, target_date, run_iso) -> reason. A run is immutable: once a target local day
-# is proven unmaterializable from it, re-fetching the same run cannot change the answer.
+# Only exact matching metadata, not a currently partial API response, proves
+# structural horizon exclusion. The same archive may become complete on retry.
+_EXACT_RUN_IMMUTABLE_GAP_REASONS = ("metadata:data_end_time_before_target_end",)
+# (model, city, target_date, run_iso) -> structurally proven metadata reason.
 _EXACT_RUN_UNMATERIALIZABLE_MEMO: dict[tuple[str, str, str, str], str] = {}
 _EXACT_RUN_MEMO_RETENTION_DAYS = 3
 
@@ -608,10 +728,9 @@ _EXACT_RUN_MEMO_RETENTION_DAYS = 3
 # (owner_pid alternates between the two in state/openmeteo_quota.json for the same
 # request hash). Persisting the memo to a small shared, lock-guarded state file — the
 # exact pattern already used by state/openmeteo_quota.json — makes a proven gap durable
-# and cross-process, without changing WHICH reasons are memoizable (the whitelist above
-# is untouched: transport/temperature_series_missing gaps still are NOT memoized, since
-# those may legitimately resolve on retry per the existing design).
-_EXACT_RUN_GAP_MEMO_SCHEMA_VERSION = 1
+# and cross-process. Schema v2 intentionally discards v1 partial-payload reasons:
+# transport, malformed responses and a presently incomplete horizon remain retryable.
+_EXACT_RUN_GAP_MEMO_SCHEMA_VERSION = 2
 _EXACT_RUN_GAP_MEMO_LOAD_INTERVAL_SECONDS = 30.0
 _exact_run_gap_memo_state_path: Path | None = None
 _exact_run_gap_memo_last_loaded_monotonic: float = 0.0
@@ -663,6 +782,8 @@ def _load_persisted_exact_run_memo(*, force: bool = False) -> None:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return
+    if not isinstance(payload, dict) or payload.get("schema_version") != _EXACT_RUN_GAP_MEMO_SCHEMA_VERSION:
+        return  # v1 permanently classified retryable partial payloads; discard it.
     entries = payload.get("entries") if isinstance(payload, dict) else None
     if not isinstance(entries, dict):
         return
@@ -673,7 +794,7 @@ def _load_persisted_exact_run_memo(*, force: bool = False) -> None:
         if len(parts) != 4:
             continue
         reason = entry.get("reason")
-        if not isinstance(reason, str) or not reason:
+        if not isinstance(reason, str) or not reason.startswith(_EXACT_RUN_IMMUTABLE_GAP_REASONS):
             continue
         scope = (parts[0], parts[1], parts[2], parts[3])
         _EXACT_RUN_UNMATERIALIZABLE_MEMO.setdefault(scope, reason)
@@ -899,26 +1020,15 @@ def _single_runs_payload_has_reusable_hourly_axis(
     target_local_dates: Sequence[date],
 ) -> bool:
     """Whether this request's target-day slices are safe to replay from raw cache."""
-    hourly = payload.get("hourly")
-    if not isinstance(hourly, Mapping):
-        return False
-    times = hourly.get("time")
-    for model in models:
-        om_id = OPENMETEO_MODEL_IDS.get(model, model)
-        keyed_var = f"temperature_2m_{om_id}"
-        values = hourly.get(keyed_var)
-        if values is None and len(models) == 1:
-            values = hourly.get("temperature_2m")
-        if values is None:
+    # A finite prefix is not a complete target. Do not pin an incomplete
+    # response for 24h; let the same exact run become complete on a later fetch.
+    # The parser also preserves its existing elapsed-prefix Day0 acceptance.
+    for target_local_date in target_local_dates:
+        parsed = _parse_batched_single_runs_payload(
+            payload, list(models), target_local_date, timezone_name,
+        )
+        if any(model not in parsed for model in models):
             return False
-        for target_local_date in target_local_dates:
-            if _target_hourly_internal_axis_gap_reason(
-                times,
-                values,
-                target_local_date=target_local_date,
-                timezone_name=timezone_name,
-            ) is not None:
-                return False
     return True
 
 
@@ -2865,12 +2975,12 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     rows: list[dict[str, object]] = []
     total_written = 0
     committed_families: set[tuple[str, str, str]] = set()
+    committed_single_runs_cycles: dict[str, set[str]] = {}
     dropped: list[str] = []
     domain_excluded: list[str] = []
     transport_errors: list[str] = []
     transport_outcomes: list[dict[str, object]] = []
     exact_run_unmaterializable: list[dict[str, str]] = []
-    attempted_single_scopes: set[tuple[str, str, str, str]] = set()
     exact_run_unmaterializable_scopes: set[tuple[str, str, str, str]] = set()
     retryable_single_run_gap_scopes: set[tuple[str, str, str, str]] = set()
     abort_transport = False
@@ -2927,12 +3037,56 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                     )
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"invalid frozen source run for {model!r}") from exc
+        if not _use_legacy_per_model:
+            matched_ends = _read_matching_frozen_data_ends(source_clock_single_runs)
+            source_clock_single_runs = {
+                model: _SourceClockSingleRunsRequest(
+                    run=request.run,
+                    source_available_at=request.source_available_at,
+                    availability_from_successful_possession=request.availability_from_successful_possession,
+                    data_end_time=matched_ends.get(model),
+                )
+                for model, request in source_clock_single_runs.items()
+            }
     else:
         source_clock_single_runs = (
             {}
             if _use_legacy_per_model
             else _read_source_clock_single_runs_requests(decision_time=captured_at)
         )
+    target_requests: dict[tuple[str, str, str], _SourceClockSingleRunsRequest | None] = {}
+    older_target_requests: dict[tuple[str, str, str], _SourceClockSingleRunsRequest] = {}
+    if not _use_legacy_per_model:
+        for target in target_list:
+            for model in requested_models:
+                latest = source_clock_single_runs.get(model)
+                if (
+                    latest is not None
+                    and not latest.availability_from_successful_possession
+                ):
+                    request = _target_single_runs_request(
+                        model, latest,
+                        target_local_date=date.fromisoformat(target.target_date),
+                        timezone_name=target.timezone_name,
+                        decision_time=captured_at,
+                    )
+                else:
+                    request = latest or _SourceClockSingleRunsRequest(
+                        run=cycle_utc, source_available_at=source_available_iso,
+                    )
+                key = (model, target.city, target.target_date)
+                target_requests[key] = request
+                if (request is not None and latest is not None
+                        and request is not latest):
+                    from src.data.replacement_forecast_cycle_policy import (  # noqa: PLC0415
+                        cycle_age_outside_bound,
+                    )
+                    older = request.run - timedelta(hours=6)
+                    if not cycle_age_outside_bound(captured_at, older):
+                        older_target_requests[key] = _SourceClockSingleRunsRequest(
+                            run=older, source_available_at=None,
+                            availability_from_successful_possession=True,
+                        )
     target_cities = tuple(sorted({target.city for target in target_list}))
     target_dates = tuple(sorted({target.target_date for target in target_list}))
     request_cycles = tuple(
@@ -2944,6 +3098,8 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                     for model, request in source_clock_single_runs.items()
                     if model in requested_models
                 ),
+                *(request.run.isoformat() for request in target_requests.values() if request is not None),
+                *(request.run.isoformat() for request in older_target_requests.values()),
             }
         )
     )
@@ -3021,14 +3177,24 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     }
     single_fast_transport_failed: set[tuple[str, str, str]] = set()
 
-    def _single_runs_request_for_model(model: str) -> _SourceClockSingleRunsRequest:
-        return source_clock_single_runs.get(
-            model,
-            _SourceClockSingleRunsRequest(
-                run=cycle_utc,
-                source_available_at=source_available_iso,
-            ),
+    def _single_runs_request_for_model(
+        model: str, city: str | None = None, target_date: str | None = None,
+    ) -> _SourceClockSingleRunsRequest | None:
+        if city is not None and target_date is not None:
+            return target_requests[(model, city, target_date)]
+        return source_clock_single_runs.get(model) or _SourceClockSingleRunsRequest(
+            run=cycle_utc, source_available_at=source_available_iso,
         )
+
+    def _target_request_candidates(
+        model: str, city: str, target_date: str,
+    ) -> tuple[_SourceClockSingleRunsRequest, ...]:
+        key = (model, city, target_date)
+        primary = target_requests[key]
+        if primary is None:
+            return ()
+        older = older_target_requests.get(key)
+        return (primary, older) if older is not None else (primary,)
 
     def _has_persisted_row(
         *,
@@ -3052,12 +3218,15 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     ) -> bool:
         """A prior pass proved this (model, city, target_date) unmaterializable from THIS run.
 
-        The scope still enters the report (so the source-clock status stays honest and the
-        cursor commits) but never enters attempted_single_scopes — no request is issued.
+        The scope still enters the report, but no exact request is issued. A
+        missing target remains retryable until fresh metadata or a valid row drains it.
         """
         scope = (model, city, target_date, source_cycle_time)
         reason = _EXACT_RUN_UNMATERIALIZABLE_MEMO.get(scope)
         if reason is None:
+            return False
+        if not reason.startswith(_EXACT_RUN_IMMUTABLE_GAP_REASONS):
+            del _EXACT_RUN_UNMATERIALIZABLE_MEMO[scope]
             return False
         if scope not in exact_run_unmaterializable_scopes:
             exact_run_unmaterializable_scopes.add(scope)
@@ -3070,7 +3239,22 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                     "reason": reason,
                 }
             )
+        retryable_single_run_gap_scopes.add(scope)
         return True
+
+    def _structural_target_gap(model: str, city: str, target_date: str) -> None:
+        latest = source_clock_single_runs[model]
+        scope = (model, city, target_date, latest.run.isoformat())
+        reason = _EXACT_RUN_IMMUTABLE_GAP_REASONS[0]
+        # Re-evaluate the matching metadata on every pass: its horizon can be
+        # corrected while the latest run identity remains the same.
+        if scope not in exact_run_unmaterializable_scopes:
+            exact_run_unmaterializable_scopes.add(scope)
+            exact_run_unmaterializable.append({
+                "model": model, "city": city, "target_date": target_date,
+                "source_cycle_time": latest.run.isoformat(), "reason": reason,
+            })
+        retryable_single_run_gap_scopes.add(scope)
 
     # De-duplicate targets by (city, target_date, lead_days) for the batched fetch path.
     # The metric dimension is NOT a fetch axis — both high and low come from one payload.
@@ -3122,50 +3306,51 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                 or model in SINGLE_RUNS_UNSERVABLE_MODELS
             ):
                 continue
-            request = _single_runs_request_for_model(model)
-            if (
-                model not in source_clock_single_runs
-                and not _model_publishes_cycle(model, request.run.hour)
-            ):
+            requests = _target_request_candidates(model, city, target_date)
+            if not requests:
+                _structural_target_gap(model, city, target_date)
                 continue
-            request_cycle_iso = request.run.isoformat()
-            persisted_metric_count = sum(
-                _has_persisted_row(
+            for request in requests:
+                if (
+                    model not in source_clock_single_runs
+                    and not _model_publishes_cycle(model, request.run.hour)
+                ):
+                    continue
+                request_cycle_iso = request.run.isoformat()
+                persisted_metric_count = sum(
+                    _has_persisted_row(
+                        model=model,
+                        city=city,
+                        target_date=target_date,
+                        metric=metric,
+                        source_cycle_time=request_cycle_iso,
+                        endpoint="single_runs",
+                    )
+                    for metric in required_metrics
+                )
+                if persisted_metric_count == len(required_metrics):
+                    single_success_models.add(model)
+                    continue
+                if _memoized_unmaterializable(
                     model=model,
                     city=city,
                     target_date=target_date,
-                    metric=metric,
                     source_cycle_time=request_cycle_iso,
-                    endpoint="single_runs",
+                ):
+                    if persisted_metric_count:
+                        single_success_models.add(model)
+                    continue
+                location_key = (
+                    request.run,
+                    request.availability_from_successful_possession,
                 )
-                for metric in required_metrics
-            )
-            if persisted_metric_count == len(required_metrics):
-                single_success_models.add(model)
-                continue
-            if _memoized_unmaterializable(
-                model=model,
-                city=city,
-                target_date=target_date,
-                source_cycle_time=request_cycle_iso,
-            ):
-                # A memo-only skip proves nothing was captured — only a persisted metric
-                # may claim single-runs success for this model.
-                if persisted_metric_count:
-                    single_success_models.add(model)
-                continue
-            location_key = (
-                request.run,
-                request.availability_from_successful_possession,
-            )
-            city_plan = locations_by_run[location_key].get(city)
-            if city_plan is None:
-                locations_by_run[location_key][city] = (
-                    ref,
-                    [(target_date, date.fromisoformat(target_date))],
-                )
-            else:
-                city_plan[1].append((target_date, date.fromisoformat(target_date)))
+                city_plan = locations_by_run[location_key].get(city)
+                if city_plan is None:
+                    locations_by_run[location_key][city] = (
+                        ref, [(target_date, date.fromisoformat(target_date))],
+                    )
+                else:
+                    city_plan[1].append((target_date, date.fromisoformat(target_date)))
 
         for (run, possession_bound), city_plans in sorted(locations_by_run.items()):
             planned = list(city_plans.items())
@@ -3190,9 +3375,10 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                         locations=locations,
                         run=run,
                         forecast_hours=forecast_hours,
-                        source_available_at=_single_runs_request_for_model(
-                            model
-                        ).source_available_at,
+                        source_available_at=(
+                            None if possession_bound
+                            else _single_runs_request_for_model(model).source_available_at
+                        ),
                         allow_standard_meta_fallback=not possession_bound,
                         deadline_monotonic=(
                             wall_clock_deadline - 0.25
@@ -3317,7 +3503,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
             # Domain gate + source-clock run selection for single_runs.  Models are grouped by
             # their real public run so one Open-Meteo request never mixes 06Z and 12Z identities.
             single_models_by_run: dict[tuple[datetime, bool], list[str]] = defaultdict(list)
-            single_request_by_model: dict[str, _SourceClockSingleRunsRequest] = {}
+            single_request_by_model: dict[tuple[str, str], _SourceClockSingleRunsRequest] = {}
             required_metrics = {target.metric for target in city_targets}
             for model in all_models:
                 if not _model_in_domain(model, lat=ref.latitude, lon=ref.longitude, lead_days=int(ref.lead_days)):
@@ -3331,53 +3517,48 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                 if model in SINGLE_RUNS_UNSERVABLE_MODELS:
                     dropped.append(f"{model}:single_runs_unservable")
                     continue
-                request = _single_runs_request_for_model(model)
-                # R3: skip fixed-grid requests that don't match provider cadence.  When
-                # source-clock metadata provides an explicit run for this model, trust that
-                # run instead; several regional feeds publish outside the 00/06/12/18 grid.
-                if model not in source_clock_single_runs and not _model_publishes_cycle(model, request.run.hour):
-                    _LOG.debug(
-                        "BAYES_PRECISION_FUSION R3 cadence skip: %s does not publish at %02dZ",
-                        model,
-                        request.run.hour,
-                    )
+                requests = _target_request_candidates(model, city, target_date)
+                if not requests:
+                    _structural_target_gap(model, city, target_date)
                     continue
-                request_cycle_iso = request.run.isoformat()
-                fast_fail_key = (model, city, request_cycle_iso)
-                if not allow_single_runs_fallback and fast_fail_key in single_fast_transport_failed:
-                    dropped.append(f"{model}:single_runs_fast_transport_cached_drop")
-                    continue
-                # R1+R2 skip: check every metric in the current target family. An absent
-                # non-market sibling must not keep a successful batch permanently incomplete.
-                metrics_needed = [
-                    met for met in required_metrics
-                    if not _has_persisted_row(
+                for request in requests:
+                    # Metadata pins the current clock; older target candidates have
+                    # separately verified standard archive cadence.
+                    if model not in source_clock_single_runs and not _model_publishes_cycle(model, request.run.hour):
+                        _LOG.debug(
+                            "BAYES_PRECISION_FUSION R3 cadence skip: %s does not publish at %02dZ",
+                            model, request.run.hour,
+                        )
+                        continue
+                    request_cycle_iso = request.run.isoformat()
+                    fast_fail_key = (model, city, request_cycle_iso)
+                    if not allow_single_runs_fallback and fast_fail_key in single_fast_transport_failed:
+                        dropped.append(f"{model}:single_runs_fast_transport_cached_drop")
+                        continue
+                    metrics_needed = [
+                        met for met in required_metrics
+                        if not _has_persisted_row(
+                            model=model, city=city, target_date=target_date,
+                            metric=met, source_cycle_time=request_cycle_iso,
+                            endpoint="single_runs",
+                        )
+                    ]
+                    if not metrics_needed:
+                        single_success_models.add(model)
+                        continue
+                    if _memoized_unmaterializable(
                         model=model,
                         city=city,
                         target_date=target_date,
-                        metric=met,
                         source_cycle_time=request_cycle_iso,
-                        endpoint="single_runs",
-                    )
-                ]
-                if not metrics_needed:
-                    single_success_models.add(model)
-                    continue
-                if _memoized_unmaterializable(
-                    model=model,
-                    city=city,
-                    target_date=target_date,
-                    source_cycle_time=request_cycle_iso,
-                ):
-                    # Immutable run × target local day already proven empty — drop the model
-                    # from this city/date request so no HTTP call is made when none remain.
-                    if len(metrics_needed) < len(required_metrics):
-                        single_success_models.add(model)
-                    continue
-                single_request_by_model[model] = request
-                single_models_by_run[
-                    (request.run, request.availability_from_successful_possession)
-                ].append(model)
+                    ):
+                        if len(metrics_needed) < len(required_metrics):
+                            single_success_models.add(model)
+                        continue
+                    single_request_by_model[(model, request_cycle_iso)] = request
+                    single_models_by_run[
+                        (request.run, request.availability_from_successful_possession)
+                    ].append(model)
 
             # ONE batched single_runs fetch covers all in-domain models + both metrics.
             for (single_run, possession_bound), single_models in sorted(
@@ -3386,10 +3567,6 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                 if _timebox_expired():
                     timeboxed = True
                     break
-                for model in single_models:
-                    attempted_single_scopes.add(
-                        (model, city, target_date, single_run.isoformat())
-                    )
                 location_result = location_results.pop(
                     (city, target_date, single_run.isoformat()),
                     None,
@@ -3410,7 +3587,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                             forecast_hours=forecast_hours,
                             source_available_at=(
                                 single_request_by_model[
-                                    single_models[0]
+                                    (single_models[0], single_run.isoformat())
                                 ].source_available_at
                                 if len(single_models) == 1
                                 else None
@@ -3474,7 +3651,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                         dropped.append(f"{model}:single_runs")
                         continue
                     high_c, low_c = hilo
-                    request = single_request_by_model.get(model) or _single_runs_request_for_model(model)
+                    request = single_request_by_model[(model, single_run.isoformat())]
                     request_cycle_iso = request.run.isoformat()
                     if (
                         request.availability_from_successful_possession
@@ -3632,6 +3809,40 @@ def download_bayes_precision_fusion_extra_raw_inputs(
             total_written += chunk_written
             if chunk_written > 0:
                 committed_families.update(pending_families)
+                # This normal path prefilters persisted identities; an
+                # independent writer could still win INSERT OR IGNORE while
+                # our chunk waits for the lock. Resolve that rare partial case
+                # against the exact captured stamp after the commit.
+                ambiguous_rows: set[tuple[str, str, str, str]] = set()
+                if chunk_written != len(rows):
+                    from src.state.db import _connect as _ro_connect  # noqa: PLC0415
+
+                    with contextlib.closing(_ro_connect(Path(forecast_db))) as read_conn:
+                        for row in rows:
+                            if row["endpoint"] != "single_runs":
+                                continue
+                            identity = (
+                                str(row["model"]), str(row["city"]),
+                                str(row["target_date"]), str(row["source_cycle_time"]),
+                            )
+                            if read_conn.execute(
+                                "SELECT 1 FROM raw_model_forecasts WHERE model=? AND city=? "
+                                "AND target_date=? AND source_cycle_time=? AND metric=? "
+                                "AND endpoint='single_runs' AND captured_at=? LIMIT 1",
+                                (*identity[:3], identity[3], row["metric"], row["captured_at"]),
+                            ).fetchone():
+                                ambiguous_rows.add(identity)
+                for row in rows:
+                    if row["endpoint"] != "single_runs":
+                        continue
+                    identity = (
+                        str(row["model"]), str(row["city"]),
+                        str(row["target_date"]), str(row["source_cycle_time"]),
+                    )
+                    if chunk_written != len(rows) and identity not in ambiguous_rows:
+                        continue
+                    key = "|".join(identity[:3])
+                    committed_single_runs_cycles.setdefault(key, set()).add(identity[3])
             rows = []
         if timeboxed:
             timebox_unattempted_target_groups = len(target_groups) - group_index - 1
@@ -3698,17 +3909,8 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE"
         if timeboxed
         else "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
-        if (transport_errors or retryable_single_run_gap_scopes) and (
-            abort_transport or not single_success_models
-        )
-        else "BAYES_PRECISION_FUSION_EXTRA_EXACT_RUN_UNMATERIALIZABLE"
-        # Memoized scopes are skipped WITHOUT being attempted, so the terminal verdict keys
-        # on the unmaterializable set: every scope still in play is proven empty for this
-        # immutable run. That maps to SOURCE_CLOCK_SOURCE_PERMANENT_FAILURE upstream, which
-        # commits the source cursor instead of re-detecting the same change every 15s.
-        if (
-            exact_run_unmaterializable_scopes
-            and attempted_single_scopes <= exact_run_unmaterializable_scopes
+        if retryable_single_run_gap_scopes or (
+            transport_errors and (abort_transport or not single_success_models)
         )
         else "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
     )
@@ -3743,5 +3945,23 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         "single_runs_request_cycles": {
             model: _single_runs_request_for_model(model).run.isoformat()
             for model in requested_models
+        },
+        "single_runs_advertised_trigger_cycles": {
+            model: _single_runs_request_for_model(model).run.isoformat()
+            for model in requested_models
+        },
+        # The map above is the advertised source-clock trigger, which the
+        # production identity gate compares with its frozen expected cycle.
+        # Target-specific archives are separate physical runs, never a cursor.
+        "single_runs_target_request_cycles": {
+            "|".join((model, city, target_date)): tuple(
+                request.run.isoformat()
+                for request in _target_request_candidates(model, city, target_date)
+            )
+            for model, city, target_date in target_requests
+        },
+        "single_runs_written_cycles": {
+            scope: tuple(sorted(cycles))
+            for scope, cycles in sorted(committed_single_runs_cycles.items())
         },
     }
