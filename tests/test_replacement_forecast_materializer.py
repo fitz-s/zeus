@@ -6574,6 +6574,122 @@ def _low_revision_request() -> ReplacementForecastMaterializeRequest:
     )
 
 
+def _built_low_revision_request(tmp_path: Path) -> ReplacementForecastMaterializeRequest:
+    """Pass a real seed through the production JSON builder and dataclass adapter."""
+    from src.data.replacement_forecast_materialization_request_builder import (
+        build_materialize_request_dataclass,
+        build_replacement_forecast_materialization_request,
+    )
+    from tests.test_replacement_forecast_materialization_request_builder import _write_inputs
+
+    seed = _write_inputs(tmp_path)
+    seed.update(
+        temperature_metric="low",
+        source_cycle_time=_dt(12).isoformat(),
+        computed_at=_dt(20).isoformat(),
+        expires_at=_dt(22).isoformat(),
+        baseline_source_run_id="new12",
+        baseline_data_version=_current_baseline_data_version("low"),
+        baseline_source_available_at=_dt(12, 5).isoformat(),
+        day0_observation_state="zero_target_date_observations",
+        openmeteo_source_cycle_time=_dt(0).isoformat(),
+    )
+    built = build_replacement_forecast_materialization_request(
+        seed, base_dir=tmp_path,
+    )
+    assert built.ok is True, built.reason_codes
+    assert built.request is not None
+    return build_materialize_request_dataclass(built.request, base_dir=tmp_path)
+
+
+@pytest.mark.parametrize("world_shadow", ("empty", "retired_only"))
+def test_low_revision_real_request_prefers_forecast_authority_over_attached_world_shadow(
+    tmp_path: Path, world_shadow: str,
+) -> None:
+    """The materializer's attached world ghosts cannot hide current forecast coverage."""
+    from src.data.replacement_input_hwm import (
+        latest_eligible_ensemble_input_cycle,
+    )
+
+    conn = _low_revision_authority_conn()
+    request = _built_low_revision_request(tmp_path)
+    conn.execute("ATTACH DATABASE ':memory:' AS world")
+    conn.execute("CREATE TABLE world.source_run AS SELECT * FROM main.source_run WHERE 0")
+    conn.execute(
+        "CREATE TABLE world.source_run_coverage AS "
+        "SELECT * FROM main.source_run_coverage WHERE 0"
+    )
+    if world_shadow == "retired_only":
+        conn.execute(
+            "INSERT INTO world.source_run "
+            "SELECT * FROM main.source_run WHERE source_run_id='old18'"
+        )
+        conn.execute(
+            "INSERT INTO world.source_run_coverage "
+            "SELECT * FROM main.source_run_coverage WHERE source_run_id='old18'"
+        )
+
+    assert latest_eligible_ensemble_input_cycle(
+        conn, city=request.city, target_date=request.target_date,
+        metric="low", decision_time=request.computed_at,
+    ) == _dt(12)
+    assert materializer_mod._cycle_monotone_block_reasons(
+        conn, request, metric="low"
+    ) == ()
+
+
+def test_low_revision_real_request_prefers_attached_forecasts_over_world_main_shadow(
+    tmp_path: Path,
+) -> None:
+    """The source selector keeps attached forecasts ahead of world-main ghosts."""
+    from src.data.replacement_input_hwm import latest_eligible_ensemble_input_cycle
+    forecast_db = tmp_path / "forecasts.db"
+    forecast_conn = _low_revision_authority_conn(forecast_db)
+    forecast_conn.close()
+    request = _built_low_revision_request(tmp_path)
+    world_conn = sqlite3.connect(":memory:")
+    world_conn.row_factory = sqlite3.Row
+    world_conn.execute("ATTACH DATABASE ? AS forecasts", (str(forecast_db),))
+    world_conn.execute(
+        "CREATE TABLE source_run AS SELECT * FROM forecasts.source_run WHERE 0"
+    )
+    world_conn.execute(
+        "CREATE TABLE source_run_coverage AS "
+        "SELECT * FROM forecasts.source_run_coverage WHERE 0"
+    )
+
+    assert latest_eligible_ensemble_input_cycle(
+        world_conn, city=request.city, target_date=request.target_date,
+        metric="low", decision_time=request.computed_at,
+    ) == _dt(12)
+
+
+@pytest.mark.parametrize(
+    "table_name", ("source_run", "source_run_coverage", "ensemble_snapshots")
+)
+def test_low_revision_world_only_fallback_preserves_attached_authority(
+    tmp_path: Path, table_name: str,
+) -> None:
+    """A world-only legacy reader keeps its explicitly attached authority."""
+    from src.data.replacement_input_hwm import (
+        _authority_table_ref,
+        latest_eligible_ensemble_input_cycle,
+    )
+
+    world_db = tmp_path / "world.db"
+    world_writer = _low_revision_authority_conn(world_db)
+    world_writer.close()
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("ATTACH DATABASE ? AS world", (str(world_db),))
+
+    assert _authority_table_ref(conn, table_name) == f"world.{table_name}"
+    assert latest_eligible_ensemble_input_cycle(
+        conn, city="Shanghai", target_date="2026-06-07",
+        metric="low", decision_time=_dt(20),
+    ) == _dt(12)
+
+
 def test_low_revision_migration_materializes_current_12z_and_rebinds_readiness(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

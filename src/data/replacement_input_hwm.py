@@ -315,17 +315,13 @@ def _authority_table_ref(conn: sqlite3.Connection, table_name: str) -> str | Non
         if "forecasts" in attached:
             if _table_ref_exists(conn, f"forecasts.{table_name}"):
                 return f"forecasts.{table_name}"
+        # The materializer opens forecasts as MAIN and attaches WORLD for
+        # observations. WORLD's legacy names must not shadow canonical inputs.
+        if _table_ref_exists(conn, f"main.{table_name}"):
+            return table_name
         if "world" in attached:
             if _table_ref_exists(conn, f"world.{table_name}"):
                 return f"world.{table_name}"
-    except sqlite3.OperationalError as exc:
-        _raise_hwm_read_unavailable(
-            exc,
-            basis="replacement_input_hwm_table_lookup_unavailable",
-        )
-    try:
-        if _table_ref_exists(conn, table_name):
-            return table_name
     except sqlite3.OperationalError as exc:
         _raise_hwm_read_unavailable(
             exc,
