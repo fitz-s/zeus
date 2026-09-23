@@ -353,16 +353,47 @@ def sell_action_authority_identity(
 ) -> str:
     """Bind one statistical SELL permission to the exact served probability."""
 
-    values = tuple(str(value or "").strip() for value in (
+    values = [str(value or "").strip() for value in (
         family_key,
         probability_witness_identity,
         status,
         reason,
-    ))
+    )]
     if not all(values):
         raise ValueError("GLOBAL_SELL_ACTION_AUTHORITY_INCOMPLETE")
+    revision = "sell-temporal-authority-v1"
+    stale_prefix = "day0_extreme_maturity_unavailable:observation_stale:"
+    if values[2] == "unavailable" and values[3].startswith(stale_prefix + "age_minutes="):
+        age_text, separator, remainder = values[3][
+            len(stale_prefix + "age_minutes="):
+        ].partition(",budget_minutes=")
+        budget_text, clock_separator, clock_text = remainder.partition(",observation_time=")
+        try:
+            age, budget = float(age_text), float(budget_text)
+            observed_at = datetime.fromisoformat(clock_text)
+            canonical_stale = (
+                separator
+                and clock_separator
+                and observed_at.tzinfo is not None
+                and observed_at.astimezone(timezone.utc).isoformat() == clock_text
+                and math.isfinite(age)
+                and math.isfinite(budget)
+                and age >= budget >= 0
+                and f"{age:.1f}" == age_text
+                and f"{budget:.1f}" == budget_text
+            )
+        except (ValueError, OverflowError):
+            canonical_stale = False
+        if canonical_stale:
+            # Advancing diagnostic age cannot change an already unavailable
+            # maturity verdict. Bind the physical observation clock explicitly:
+            # equivalent q can legitimately have different ENTRY/HELD provenance.
+            # Status, budget and observation changes must still invalidate it.
+            # Keep the complete age-bearing reason on the prepared family/receipt.
+            values[3] = stale_prefix + "budget_minutes=" + budget_text + ",observation_time=" + clock_text
+            revision = "sell-temporal-stale-observation-authority-v2"
     return hashlib.sha256(
-        "\x1f".join((*values, "sell-temporal-authority-v1")).encode("utf-8")
+        "\x1f".join((*values, revision)).encode("utf-8")
     ).hexdigest()
 
 

@@ -348,7 +348,7 @@ def test_day0_temporal_exit_authority_requires_intraday_observation():
             "unavailable",
             (
                 "day0_extreme_maturity_unavailable:observation_stale:"
-                "age_minutes=750.0,budget_minutes=100.0"
+                "age_minutes=750.0,budget_minutes=100.0,observation_time=2026-07-24T01:00:00+00:00"
             ),
         ),
     ],

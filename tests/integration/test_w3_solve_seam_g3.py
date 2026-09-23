@@ -13085,6 +13085,9 @@ def test_live_adapter_selection_telemetry_isolates_unsupported_family(monkeypatc
     "supersession_reason",
     (
         'GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED',
+        'GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:GLOBAL_SELL_DAY0_STATISTICAL_AUTHORITY_IDENTITY_SUPERSEDED',
+        'GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:GLOBAL_SELL_DAY0_STATISTICAL_AUTHORITY_SUPERSEDED:mature',
+        'GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:GLOBAL_SELL_DAY0_STATISTICAL_AUTHORITY_SUPERSEDED:immature',
         'GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:'
         'REPLACEMENT_RAW_INPUT_HWM:basis=current_ensemble_snapshot_superseded:latest_snapshot_id=2:consumed_ensemble_cycle=old',
         'GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:'
@@ -20022,6 +20025,8 @@ def test_persist_tier0_candidate_set_skips_candidates_without_city_date_context(
         ),
         ("GLOBAL_ACTUATION_BOOK_SUPERSEDED", "BATCH_BLOCKED"),
         ("UNCLASSIFIED_PREFLIGHT_FAILURE", "BATCH_BLOCKED"),
+        ("GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:GLOBAL_SELL_DAY0_STATISTICAL_AUTHORITY_SUPERSEDED:unknown", "BATCH_BLOCKED"),
+        ("GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:GLOBAL_SELL_DAY0_STATISTICAL_AUTHORITY_IDENTITY_SUPERSEDED:malformed", "BATCH_BLOCKED"),
         (
             "GLOBAL_ACTUATION_PROOF_NO_LONGER_ELIGIBLE:"
             "QKERNEL_EDGE_LCB_NON_POSITIVE",
@@ -37060,6 +37065,9 @@ def test_global_batch_reauctions_with_tightened_candidate_q(monkeypatch):
         "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:GLOBAL_BUY_JIT_MAKER_WITNESS_SUPERSEDED:current_limit_or_cashflow_changed",
         "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:GLOBAL_BUY_JIT_MAKER_WITNESS_SUPERSEDED:current_fill_distance_band_changed",
         "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:GLOBAL_SELL_ENTRY_CALIBRATION_SUPERSEDED",
+        'GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:GLOBAL_SELL_DAY0_STATISTICAL_AUTHORITY_IDENTITY_SUPERSEDED',
+        'GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:GLOBAL_SELL_DAY0_STATISTICAL_AUTHORITY_SUPERSEDED:mature',
+        'GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:GLOBAL_SELL_DAY0_STATISTICAL_AUTHORITY_SUPERSEDED:immature',
         'GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:'
         'REPLACEMENT_RAW_INPUT_HWM:basis=current_ensemble_snapshot_superseded:latest_snapshot_id=2:consumed_ensemble_cycle=old',
         'GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:'
@@ -37070,6 +37078,9 @@ def test_global_batch_reauctions_with_tightened_candidate_q(monkeypatch):
         "market-authority",
         "market-authority-fill-band",
         "calibration-artifact",
+        "sell-temporal-identity",
+        "sell-temporal-mature",
+        "sell-temporal-immature",
         "ensemble-clock",
         "raw-model-clock",
     ),
@@ -47084,3 +47095,128 @@ def test_day0_exact_tail_survives_zero_hit_bootstrap_global_caps(tail):
     assert caps[("c1", "NO")] == 0.0
     assert np.array_equal(point, np.array([tail, 1.0 - tail]))
     assert np.array_equal(samples, np.tile(np.array([0.0, 1.0]), (500, 1)))
+
+
+def test_stale_observation_age_does_not_change_sell_authority(monkeypatch):
+    """A source-identical SELL must not expire whenever rounded age advances."""
+    from src.signal import day0_obs_latency
+
+    observation_time = _dt.datetime(2026, 9, 23, 2, 4, 30, tzinfo=_dt.timezone.utc)
+    decision_time = observation_time + _dt.timedelta(minutes=132.8)
+    monkeypatch.setattr(era, "_observed_day0_extreme_native", lambda *_: 29.0)
+    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {
+        "Busan": SimpleNamespace(timezone="Asia/Seoul"),
+    })
+    monkeypatch.setattr(day0_obs_latency, "staleness_budget_minutes", lambda _: 100.0)
+    payloads = []
+    identities = []
+    for at in (decision_time, decision_time + _dt.timedelta(seconds=22.7)):
+        payload = {"observation_time": observation_time.isoformat()}
+        era._record_day0_temporal_exit_authority(
+            payload=payload, family=SimpleNamespace(city="Busan", target_date="2026-09-23"),
+            metric="high", decision_time=at,
+        )
+        payloads.append(payload)
+        identities.append(bridge.sell_action_authority_identity(
+            family_key="family-busan", probability_witness_identity="same-source-q",
+            status=payload["_edli_day0_exit_authority_status"],
+            reason=payload["_edli_day0_exit_authority_reason"],
+        ))
+    assert payloads[0]["_edli_day0_exit_authority_status"] == "unavailable"
+    assert "age_minutes=132.8" in payloads[0]["_edli_day0_exit_authority_reason"]
+    assert "age_minutes=133.2" in payloads[1]["_edli_day0_exit_authority_reason"]
+    assert identities[0] == identities[1]
+
+
+@pytest.mark.parametrize("changed", (
+    {"probability_witness_identity": "new-source-q"},
+    {"status": "immature"},
+    {"reason": "day0_extreme_maturity_unavailable:observation_stale:age_minutes=132.8,budget_minutes=100.0,observation_time=2026-09-23T02:05:00+00:00"},
+    {"reason": "day0_extreme_maturity_unavailable:observation_stale:age_minutes=132.8,budget_minutes=100.0"},
+    {"reason": "day0_extreme_maturity_unavailable:observation_stale:age_minutes=133.2,budget_minutes=101.0,observation_time=2026-09-23T02:04:30+00:00"},
+    {"reason": "day0_extreme_maturity_unavailable:observation_age_missing"},
+    {"reason": "day0_extreme_maturity_unavailable:observation_stale:age_minutes=99.9,budget_minutes=100.0,observation_time=2026-09-23T02:04:30+00:00"},
+    {"reason": "day0_extreme_maturity_unavailable:observation_stale:age_minutes=nan,budget_minutes=100.0,observation_time=2026-09-23T02:04:30+00:00"},
+    {"reason": "day0_extreme_maturity_unavailable:observation_stale:age_minutes=133.2,budget_minutes=100.0:corrupt"},
+))
+def test_stale_sell_authority_still_binds_source_status_budget_and_reason(changed):
+    original = dict(
+        family_key="family-busan", probability_witness_identity="same-source-q",
+        status="unavailable",
+        reason="day0_extreme_maturity_unavailable:observation_stale:age_minutes=132.8,budget_minutes=100.0,observation_time=2026-09-23T02:04:30+00:00",
+    )
+    assert bridge.sell_action_authority_identity(**original) != (
+        bridge.sell_action_authority_identity(**{**original, **changed})
+    )
+
+
+@pytest.mark.parametrize("observation_changed", (False, True))
+def test_global_sell_jit_accepts_only_diagnostic_stale_age_advance(monkeypatch, observation_changed):
+    event = _global_scope_event(city="Alpha", source_run_id="same-source")
+    reason_prefix = "day0_extreme_maturity_unavailable:observation_stale:"
+    actuation = _adapter_sell_actuation(
+        event, probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+        exit_authority_status="unavailable",
+        exit_authority_reason=reason_prefix + "age_minutes=132.8,budget_minutes=100.0,observation_time=2026-09-23T02:04:30+00:00",
+    )
+    candidate = actuation.decision.candidate
+    candidate = replace(candidate, sell_action_authority_identity=bridge.sell_action_authority_identity(
+        family_key=candidate.family_key, probability_witness_identity=candidate.probability_witness_identity,
+        status=candidate.exit_authority_status, reason=candidate.exit_authority_reason,
+    ))
+    actuation = SimpleNamespace(
+        decision=replace(actuation.decision, candidate=candidate), winner_event_id=event.event_id,
+    )
+    current_reason = reason_prefix + "age_minutes=133.2,budget_minutes=100.0,observation_time=2026-09-23T02:04:30+00:00"
+    if observation_changed:
+        current_reason = current_reason.replace("02:04:30", "02:05:00")
+    monkeypatch.setattr(era, "_current_global_actuation_prepared_family", lambda *_, **__: (
+        SimpleNamespace(
+            day0_exit_authority_status="unavailable",
+            day0_exit_authority_reason=current_reason,
+            sell_action_authority_identity=bridge.sell_action_authority_identity(
+                family_key=candidate.family_key,
+                probability_witness_identity=candidate.probability_witness_identity,
+                status="unavailable", reason=current_reason,
+            ),
+        ), {},
+    ))
+    checked = []
+    def wealth_gate(*_, **__):
+        checked.append(True)
+        return "TEST_CURRENT_WEALTH_GATE"
+    monkeypatch.setattr(era, "_global_actuation_current_wealth_block_reason", wealth_gate)
+    with sqlite3.connect(":memory:") as conn:
+        receipt = era._submit_current_global_sell(
+            event, decision_time=_dt.datetime(2026, 7, 13, 12, tzinfo=_dt.timezone.utc),
+            global_actuation=actuation, trade_conn=conn, global_claim_conn=conn,
+            forecast_conn=object(), topology_conn=object(), calibration_conn=object(),
+            preflight_only=True, preflight_receipt=None,
+        )
+    assert checked == ([] if observation_changed else [True])
+    if observation_changed:
+        assert receipt.reason.endswith("GLOBAL_SELL_DAY0_STATISTICAL_AUTHORITY_IDENTITY_SUPERSEDED")
+        assert era._global_preflight_block_status(receipt.reason) == "PROBABILITY_SUPERSEDED"
+    else:
+        assert receipt.reason.endswith("TEST_CURRENT_WEALTH_GATE")
+    assert receipt.proof_accepted is False
+    assert receipt.submitted is False
+
+
+@pytest.mark.parametrize("clock", ("2026-09-23T02:04:30", "2026-09-23T11:04:30+09:00", "0001-01-01T00:00:00+14:00", "invalid"))
+def test_noncanonical_stale_clock_preserves_full_diagnostic_identity(clock):
+    def identity(age):
+        return bridge.sell_action_authority_identity(
+            family_key="family", probability_witness_identity="same-q", status="unavailable",
+            reason=f"day0_extreme_maturity_unavailable:observation_stale:age_minutes={age},budget_minutes=100.0,observation_time={clock}",
+        )
+    assert identity("132.8") != identity("133.2")
+
+
+def test_stale_age_rounded_to_budget_still_binds_the_same_observation():
+    def identity(age):
+        return bridge.sell_action_authority_identity(
+            family_key="family", probability_witness_identity="same-q", status="unavailable",
+            reason=f"day0_extreme_maturity_unavailable:observation_stale:age_minutes={age:.1f},budget_minutes=100.0,observation_time=2026-09-23T02:04:30+00:00",
+        )
+    assert identity(100.04) == identity(100.14)

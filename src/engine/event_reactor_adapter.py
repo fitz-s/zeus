@@ -1514,6 +1514,16 @@ def _global_preflight_source_clock_superseded(reason: str) -> bool:
     )
 
 
+def _global_preflight_sell_temporal_authority_superseded(reason: str) -> bool:
+    prefix = "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:"
+    return reason == prefix + "GLOBAL_SELL_DAY0_STATISTICAL_AUTHORITY_IDENTITY_SUPERSEDED" or (
+        reason in {
+            prefix + "GLOBAL_SELL_DAY0_STATISTICAL_AUTHORITY_SUPERSEDED:" + status
+            for status in ("mature", "immature", "unavailable", "not_applicable")
+        }
+    )
+
+
 def _evict_superseded_global_probability_family_cache(
     namespace: str | None,
     *,
@@ -1534,6 +1544,7 @@ def _evict_superseded_global_probability_family_cache(
     if not (
         reason.endswith("GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED")
         or _global_preflight_source_clock_superseded(reason)
+        or _global_preflight_sell_temporal_authority_superseded(reason)
         or "model_identity_drift" in reason
     ):
         return False
@@ -15896,8 +15907,12 @@ def _global_preflight_candidate_receipt(
 def _global_preflight_block_status(reason: str) -> str:
     """Fall through only when current evidence proves this candidate infeasible."""
 
-    if _global_preflight_source_clock_superseded(reason):
-        # SCOPE: the winner's source clock advanced; its cached q is retired.
+    if (
+        _global_preflight_source_clock_superseded(reason)
+        or _global_preflight_sell_temporal_authority_superseded(reason)
+    ):
+        # SCOPE: the winner's source or temporal authority changed; retire its
+        # cached family instead of selecting an unverifiable SELL again.
         # DRAIN: rebuild the complete q/book/wealth auction within the existing
         # reauction budget. RESET: only fresh evidence can authorize a new
         # winner; missing successors and repeated drift remain fail-closed.
@@ -47401,6 +47416,23 @@ def _day0_probability_clock(decision_time: "datetime | None") -> "datetime | Non
     return decision_time.astimezone(timezone.utc).replace(second=0, microsecond=0)
 
 
+def _day0_physical_observation_time(payload: Mapping[str, object]) -> datetime | None:
+    """Return the exact physical frontier clock shared by age and SELL identity."""
+    raw = (
+        payload.get("_edli_day0_probability_boundary_observation_time")
+        or payload.get("_edli_day0_physical_frontier_observation_time")
+        or payload.get("observation_time")
+        or payload.get("observation_available_at")
+    )
+    if not raw:
+        return None
+    try:
+        observed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        return observed.astimezone(timezone.utc) if observed.tzinfo is not None else None
+    except (TypeError, ValueError, OSError):
+        return None
+
+
 def _day0_observation_age_minutes(
     payload: dict[str, object], decision_time: "datetime | None"
 ) -> float | None:
@@ -47415,18 +47447,10 @@ def _day0_observation_age_minutes(
     """
     if decision_time is None:
         return None
-    raw = (
-        payload.get("_edli_day0_probability_boundary_observation_time")
-        or payload.get("_edli_day0_physical_frontier_observation_time")
-        or payload.get("observation_time")
-        or payload.get("observation_available_at")
-    )
-    if not raw:
+    observed = _day0_physical_observation_time(payload)
+    if observed is None:
         return None
     try:
-        observed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-        if observed.tzinfo is None:
-            return None
         age = (decision_time.astimezone(timezone.utc) - observed.astimezone(timezone.utc)).total_seconds() / 60.0
     except (TypeError, ValueError, OSError):
         return None
@@ -47788,10 +47812,12 @@ def _record_day0_temporal_exit_authority(
             )
             return
         if observation_age_minutes > observation_budget_minutes:
+            observed_at = _day0_physical_observation_time(payload)
             payload[reason_key] = (
                 "day0_extreme_maturity_unavailable:observation_stale:"
                 f"age_minutes={observation_age_minutes:.1f},"
                 f"budget_minutes={observation_budget_minutes:.1f}"
+                + (f",observation_time={observed_at.isoformat()}" if observed_at is not None else "")
             )
             return
 
