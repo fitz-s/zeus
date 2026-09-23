@@ -1023,7 +1023,7 @@ def test_loader_preserves_current_label_and_raw_input_availability() -> None:
     }
 
 
-def test_main_preserves_same_day_active_bytes_until_explicit_atomic_activation(
+def test_main_preserves_same_day_active_bytes_for_candidate_only_generation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     forecast_db = tmp_path / "forecast.db"
@@ -1074,13 +1074,37 @@ def test_main_preserves_same_day_active_bytes_until_explicit_atomic_activation(
     assert writes == [candidate.name]
     assert sorted(out_dir.glob("city_weights_20260302_*.json")) == [candidate]
 
-    # Explicit activation writes the immutable artifact first, then atomically swaps ACTIVE.
-    assert fscw.main([*argv, "--activate"]) == 0
-    pointer = json.loads(active.read_text(encoding="utf-8"))
-    assert pointer == {
-        "artifact": candidate.name,
-        "sha256": candidate_sha,
-        "as_of": "2026-03-02T00:00:00+00:00",
-    }
     assert candidate.read_bytes() == candidate_bytes
-    assert writes == [candidate.name, "ACTIVE.json"]
+    assert active.read_bytes() == active_before
+    assert writes == [candidate.name]
+
+
+def test_main_rejects_activation_before_database_or_artifact_side_effects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out_dir = tmp_path / "candidates"
+    out_dir.mkdir()
+    active = out_dir / "ACTIVE.json"
+    active.write_bytes(b'{"artifact":"served.json","sha256":"old"}\n')
+    before = {path.name: path.read_bytes() for path in out_dir.iterdir()}
+    called = False
+
+    def unexpected_build(*_args: object, **_kwargs: object) -> dict[str, object]:
+        nonlocal called
+        called = True
+        return {"settlement_rows_used": 1, "cities": {}}
+
+    monkeypatch.setattr(fscw, "build_artifact", unexpected_build)
+    with pytest.raises(
+        ValueError, match="candidate-only; artifact-specific OOS activation unsupported"
+    ):
+        fscw.main([
+            "--fcst", str(tmp_path / "missing.db"),
+            "--as-of", "2026-03-02",
+            "--out-dir", str(out_dir),
+            "--activate",
+        ])
+
+    assert called is False
+    assert {path.name: path.read_bytes() for path in out_dir.iterdir()} == before
+    assert not list(out_dir.glob("city_weights_*.json"))

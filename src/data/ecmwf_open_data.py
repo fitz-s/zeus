@@ -1222,6 +1222,18 @@ def probe_open_ens_cycle_release(
     cfg = TRACKS[track]
     probe_step = min(STEP_HOURS)
     absent_pf_mirrors = 0
+    first_unknown_reason: str | None = None
+
+    def remember_unknown(reason: str) -> None:
+        nonlocal first_unknown_reason
+        if first_unknown_reason is None:
+            first_unknown_reason = reason
+
+    def network_reason(exc: BaseException) -> str:
+        if time.monotonic() >= deadline_monotonic:
+            return "AVAILABILITY_PROBE_DEADLINE"
+        return f"NETWORK:{type(exc).__name__}"
+
     # Azure's Client constructor obtains an SAS token before the
     # deadline-aware session is installed. Do not create that network path.
     if any(mirror not in _PROBE_SAFE_CLIENT_SOURCES for mirror in _DOWNLOAD_SOURCES):
@@ -1250,19 +1262,23 @@ def probe_open_ens_cycle_release(
             if getattr(exc.response, "status_code", None) == 404:
                 absent_pf_mirrors += 1
                 continue
-            return {"status": "unknown", "reason": f"HTTP_{getattr(exc.response, 'status_code', 'UNKNOWN')}"}
+            remember_unknown(f"HTTP_{getattr(exc.response, 'status_code', 'UNKNOWN')}")
+            continue
         except ValueError as exc:
             if "Cannot find index entries matching" in str(exc):
                 absent_pf_mirrors += 1
                 continue
-            return {"status": "unknown", "reason": f"INDEX_ERROR:{type(exc).__name__}"}
+            remember_unknown(f"INDEX_ERROR:{type(exc).__name__}")
+            continue
         except (requests.RequestException, OSError) as exc:
-            return {"status": "unknown", "reason": f"NETWORK:{type(exc).__name__}"}
+            remember_unknown(network_reason(exc))
+            continue
 
         # Any PF index evidence means the newest cycle has begun publishing.
         # Missing/incomplete CF must therefore retain newest-cycle priority.
         if pf_members != 50:
-            return {"status": "unknown", "reason": f"INCOMPLETE_PF_MEMBERS:{pf_members}"}
+            remember_unknown(f"INCOMPLETE_PF_MEMBERS:{pf_members}")
+            continue
         try:
             try:
                 cf_members = _probe_index_member_count(
@@ -1289,8 +1305,10 @@ def probe_open_ens_cycle_release(
                         step=probe_step,
                         deadline_monotonic=deadline_monotonic,
                     )
-                except (requests.HTTPError, ValueError):
-                    return {"status": "unknown", "reason": "INCOMPLETE_CF"}
+                except ValueError as exc:
+                    if "Cannot find index entries matching" in str(exc):
+                        raise ValueError("Cannot find index entries matching {'type': ['cf', 'fc']}")
+                    raise
             if cf_members == 1:
                 return {
                     "status": "released",
@@ -1299,13 +1317,26 @@ def probe_open_ens_cycle_release(
                     "cf_members": cf_members,
                     "step": probe_step,
                 }
-            return {"status": "unknown", "reason": f"INCOMPLETE_CF_MEMBERS:{cf_members}"}
+            remember_unknown(f"INCOMPLETE_CF_MEMBERS:{cf_members}")
+        except requests.HTTPError as exc:
+            if getattr(exc.response, "status_code", None) == 404:
+                remember_unknown("INCOMPLETE_CF")
+            else:
+                remember_unknown(f"HTTP_{getattr(exc.response, 'status_code', 'UNKNOWN')}")
         except (requests.RequestException, OSError) as exc:
-            return {"status": "unknown", "reason": f"NETWORK:{type(exc).__name__}"}
+            remember_unknown(network_reason(exc))
+        except ValueError as exc:
+            if "Cannot find index entries matching" in str(exc):
+                remember_unknown("INCOMPLETE_CF")
+            else:
+                remember_unknown(f"INDEX_ERROR:{type(exc).__name__}")
 
-    if absent_pf_mirrors == len(_DOWNLOAD_SOURCES):
+    if _DOWNLOAD_SOURCES and absent_pf_mirrors == len(_DOWNLOAD_SOURCES):
         return {"status": "not_released", "reason": "NOT_RELEASED_PF_INDEX"}
-    return {"status": "unknown", "reason": "AVAILABILITY_PROBE_INCOMPLETE"}
+    return {
+        "status": "unknown",
+        "reason": first_unknown_reason or "AVAILABILITY_PROBE_INCOMPLETE",
+    }
 
 
 def _retrieve_step_with_controlled_ranges(
@@ -2388,7 +2419,8 @@ def _fetch_one_step(
 
     Returns (status, detail) where status is one of:
       "OK"           — file written and atomic-renamed; detail = Path
-      "NOT_RELEASED" — 404 on all mirrors; detail = None
+      "NOT_RELEASED" — every configured mirror reports a definite 404 or
+                       missing-index for this step; detail = None
       "FAILED"       — retry budget exhausted; detail = error string
 
     Per-step file naming uses param to avoid cross-track collision when
@@ -2419,7 +2451,10 @@ def _fetch_one_step(
     from ecmwf.opendata import Client  # imported here: conda env only on main interpreter
 
     last_err: str | None = None
+    definitive_missing_mirrors = 0
+    had_mirror_failure = False
     for mirror in mirrors:
+        mirror_missing = False
         for attempt in range(_PER_STEP_MAX_RETRIES):
             if time.monotonic() >= deadline:
                 return ("FAILED", _deadline_failure_reason(cycle_deadline=_deadline))
@@ -2499,18 +2534,22 @@ def _fetch_one_step(
             except requests.HTTPError as exc:
                 code = getattr(exc.response, "status_code", None)
                 if code == 404:
-                    # 404 means upstream has not published this step yet.
-                    # All mirrors sync within ~5 s of origin, so rotating
-                    # mirrors won't help — return immediately.
-                    return ("NOT_RELEASED", None)
+                    # A 404 is definitive only for this mirror.  Replicas can
+                    # publish at different times, so continue with the next
+                    # configured source before classifying the step absent.
+                    mirror_missing = True
+                    break
                 if code in _RETRYABLE_HTTP:
+                    had_mirror_failure = True
                     last_err = f"HTTP_{code}_mirror_{mirror}_attempt_{attempt}"
                     if attempt + 1 < _PER_STEP_MAX_RETRIES and not _sleep_step_retry(deadline):
                         return ("FAILED", _deadline_failure_reason(cycle_deadline=_deadline))
                     continue
+                had_mirror_failure = True
                 last_err = f"HTTP_{code}_mirror_{mirror}"
                 break   # non-retryable; try next mirror
             except (requests.ConnectionError, requests.Timeout) as exc:
+                had_mirror_failure = True
                 last_err = f"NET_{type(exc).__name__}_mirror_{mirror}_attempt_{attempt}"
                 if time.monotonic() >= deadline:
                     return ("FAILED", _deadline_failure_reason(cycle_deadline=_deadline))
@@ -2519,22 +2558,29 @@ def _fetch_one_step(
                 continue
             except OSError as exc:
                 # disk/path errors during atomic rename or partial-file write
+                had_mirror_failure = True
                 last_err = f"OS_{type(exc).__name__}_mirror_{mirror}"
                 break   # unexpected at filesystem layer; try next mirror
             except ValueError as exc:
                 # SDK raises ValueError("Cannot find index entries matching ...")
                 # when the requested step is absent from the .index file
-                # (step not yet published). All mirrors sync from the same
-                # index — rotating won't help. PLAN v3 §5.1 expected HTTP 404
-                # here, but multiurl resolves the index BEFORE the byte-range
-                # GET, so a missing step manifests as ValueError, not HTTPError.
+                # (step not yet published). This is definitive only for the
+                # current mirror; multiurl resolves the index BEFORE the
+                # byte-range GET, so a missing step manifests as ValueError,
+                # not HTTPError. Continue with the next configured mirror.
                 if "Cannot find index entries matching" in str(exc):
-                    return ("NOT_RELEASED", None)
+                    mirror_missing = True
+                    break
                 raise   # Unknown ValueError — propagate
             # ImportError, AttributeError, TypeError, etc. propagate to the
             # ThreadPoolExecutor future; main thread surfaces them in logs.
             # Antibody 2026-05-11: silent-swallow of ModuleNotFoundError caused
             # post-deploy 23ms-fast-fail with no traceback.
+        if mirror_missing:
+            definitive_missing_mirrors += 1
+
+    if mirrors and definitive_missing_mirrors == len(mirrors) and not had_mirror_failure:
+        return ("NOT_RELEASED", None)
     return ("FAILED", last_err or "EXHAUSTED")
 
 

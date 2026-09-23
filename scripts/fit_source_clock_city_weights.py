@@ -16,8 +16,8 @@ Replaces ``state/fusion_source_compare/grid_aware_retest_20260625/city_one_schem
 (frozen 2026-06-25, never refit, city-only i.e. metric-agnostic) with a reproducible artifact
 written to a content-addressed
 ``state/source_clock_weights/city_weights_<YYYYMMDD>_<sha256>.json`` candidate. The existing
-``state/source_clock_weights/ACTIVE.json`` pointer is changed only by explicit ``--activate``
-after separate OOS validation. The consumer switch lives in
+``state/source_clock_weights/ACTIVE.json`` is never changed by this candidate generator:
+artifact-specific OOS activation is unsupported. The consumer switch lives in
 ``src/strategy/live_inference/source_clock_city_weights.py::scheme_for_city``.
 
 DATA (STRICTLY WALK-FORWARD): the shared current-resolver settlement reader admits only
@@ -58,11 +58,10 @@ pins it).
 Refresh cadence (documented, NOT wired as a scheduler job — that is a deploy decision):
 weekly cron candidate, e.g. ``0 6 * * 1 cd /path/to/zeus && python3
 scripts/fit_source_clock_city_weights.py --as-of <UTC instant>``. This only creates a candidate;
-activation remains an explicit operator action after the outer OOS validation passes.
+artifact-specific activation is unsupported until the validator can bind proof to exact bytes.
 
 READ-ONLY over state/zeus-forecasts.db (file:...?mode=ro). Writes a candidate artifact under
-state/source_clock_weights/; it changes the active pointer only with ``--activate``. It never
-touches the legacy CSV or any DB.
+state/source_clock_weights/; it never changes ``ACTIVE.json``, the legacy CSV, or any DB.
 """
 from __future__ import annotations
 
@@ -757,7 +756,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     p.add_argument("--out-dir", type=Path, default=OUT_DIR_DEFAULT)
     p.add_argument(
         "--activate", action="store_true",
-        help="replace ACTIVE.json with this candidate after separate OOS validation",
+        help="unsupported: candidate-only; artifact-specific OOS activation unsupported",
     )
     return p.parse_args(argv)
 
@@ -781,6 +780,8 @@ def _write_immutable_artifact(path: Path, artifact: object, payload: bytes) -> N
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.activate:
+        raise ValueError("candidate-only; artifact-specific OOS activation unsupported")
     generated_at = args.generated_at or _dt.datetime.now(_dt.UTC).isoformat()
     conn = sqlite3.connect(f"file:{args.fcst}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
@@ -803,13 +804,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     fname = f"city_weights_{cutoff.date().isoformat().replace('-', '')}_{sha}.json"
     artifact_path = args.out_dir / fname
     _write_immutable_artifact(artifact_path, artifact, payload)
-    if args.activate:
-        pointer = {"artifact": fname, "sha256": sha, "as_of": cutoff.isoformat()}
-        write_json_atomic(
-            args.out_dir / "ACTIVE.json",
-            pointer,
-            writer_identity="fit_source_clock_city_weights",
-        )
     print(
         f"Wrote candidate {artifact_path} (sha256={sha}); "
         f"settlement_rows_used={artifact['settlement_rows_used']}; activated={args.activate}"

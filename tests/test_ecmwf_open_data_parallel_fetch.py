@@ -1,6 +1,6 @@
 # Created: 2026-05-11
-# Last reused/audited: 2026-09-14
-# Authority basis: PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md §5.4 + §6
+# Last reused/audited: 2026-09-22
+# Authority basis: ECMWF mirror failover repair task (2026-09-22)
 """Unit tests for ECMWF Open Data parallel SDK fetch (Candidate H).
 
 Tests the new _fetch_one_step + ThreadPoolExecutor path introduced by
@@ -804,6 +804,141 @@ def test_fetch_one_step_does_not_sleep_after_final_retry(tmp_path, monkeypatch):
     assert len(sleeps) == mod._PER_STEP_MAX_RETRIES - 1
 
 
+def _fetch_http_error(status_code: int):
+    import requests
+
+    return requests.HTTPError(response=SimpleNamespace(status_code=status_code))
+
+
+@pytest.mark.parametrize("missing_kind", ["http404", "index"])
+def test_fetch_one_step_fails_over_after_first_mirror_definitive_missing(
+    tmp_path, monkeypatch, missing_kind
+):
+    """A mirror-local 404/index miss must not suppress a later mirror."""
+    import sys
+    import types
+
+    import src.data.ecmwf_open_data as mod
+
+    class _Client:
+        def __init__(self, source=None):
+            self.source = source
+            self.url = f"https://{source}.example/base"
+
+    fake_opendata = types.ModuleType("ecmwf.opendata")
+    fake_opendata.Client = _Client
+    fake_ecmwf = types.ModuleType("ecmwf")
+    fake_ecmwf.opendata = fake_opendata
+    monkeypatch.setitem(sys.modules, "ecmwf", fake_ecmwf)
+    monkeypatch.setitem(sys.modules, "ecmwf.opendata", fake_opendata)
+    monkeypatch.setattr(mod, "_PER_STEP_MAX_RETRIES", 1)
+    calls: list[tuple[str, str]] = []
+
+    def fake_retrieve(client, *, target, **kwargs):
+        kind = kwargs["type"][0]
+        calls.append((client.source, kind))
+        if client.source == "aws":
+            if missing_kind == "http404":
+                raise _fetch_http_error(404)
+            raise ValueError("Cannot find index entries matching {'step': [3]}")
+        Path(target).write_bytes(kind.upper().encode())
+
+    monkeypatch.setattr(mod, "_retrieve_step_with_controlled_ranges", fake_retrieve)
+    status, canonical = mod._fetch_one_step(
+        cycle_date=RUN_DATE,
+        cycle_hour=RUN_HOUR,
+        param="mx2t3",
+        step=3,
+        output_dir=tmp_path,
+        mirrors=("aws", "google"),
+    )
+
+    assert status == "OK"
+    assert Path(canonical).read_bytes() == b"CFPF"
+    assert calls == [("aws", "pf"), ("google", "pf"), ("google", "cf")]
+
+
+def test_fetch_one_step_reports_not_released_only_when_all_mirrors_are_definitely_missing(
+    tmp_path, monkeypatch
+):
+    """All configured mirrors must independently prove absence."""
+    import sys
+    import types
+
+    import src.data.ecmwf_open_data as mod
+
+    class _Client:
+        def __init__(self, source=None):
+            self.source = source
+            self.url = f"https://{source}.example/base"
+
+    fake_opendata = types.ModuleType("ecmwf.opendata")
+    fake_opendata.Client = _Client
+    fake_ecmwf = types.ModuleType("ecmwf")
+    fake_ecmwf.opendata = fake_opendata
+    monkeypatch.setitem(sys.modules, "ecmwf", fake_ecmwf)
+    monkeypatch.setitem(sys.modules, "ecmwf.opendata", fake_opendata)
+    monkeypatch.setattr(mod, "_PER_STEP_MAX_RETRIES", 1)
+
+    def missing_retrieve(client, **_kwargs):
+        if client.source == "aws":
+            raise _fetch_http_error(404)
+        raise ValueError("Cannot find index entries matching {'step': [3]}")
+
+    monkeypatch.setattr(mod, "_retrieve_step_with_controlled_ranges", missing_retrieve)
+    status, detail = mod._fetch_one_step(
+        cycle_date=RUN_DATE,
+        cycle_hour=RUN_HOUR,
+        param="mn2t3",
+        step=3,
+        output_dir=tmp_path,
+        mirrors=("aws", "google"),
+    )
+
+    assert (status, detail) == ("NOT_RELEASED", None)
+
+
+def test_fetch_one_step_does_not_relabel_transport_failure_as_not_released(
+    tmp_path, monkeypatch
+):
+    """A retryable/transport mirror failure keeps the final status FAILED."""
+    import sys
+    import types
+
+    import src.data.ecmwf_open_data as mod
+
+    class _Client:
+        def __init__(self, source=None):
+            self.source = source
+            self.url = f"https://{source}.example/base"
+
+    fake_opendata = types.ModuleType("ecmwf.opendata")
+    fake_opendata.Client = _Client
+    fake_ecmwf = types.ModuleType("ecmwf")
+    fake_ecmwf.opendata = fake_opendata
+    monkeypatch.setitem(sys.modules, "ecmwf", fake_ecmwf)
+    monkeypatch.setitem(sys.modules, "ecmwf.opendata", fake_opendata)
+    monkeypatch.setattr(mod, "_PER_STEP_MAX_RETRIES", 1)
+
+    def failed_retrieve(client, **_kwargs):
+        if client.source == "aws":
+            raise _fetch_http_error(503)
+        raise _fetch_http_error(404)
+
+    monkeypatch.setattr(mod, "_retrieve_step_with_controlled_ranges", failed_retrieve)
+    status, detail = mod._fetch_one_step(
+        cycle_date=RUN_DATE,
+        cycle_hour=RUN_HOUR,
+        param="mx2t3",
+        step=3,
+        output_dir=tmp_path,
+        mirrors=("aws", "google"),
+    )
+
+    assert status == "FAILED"
+    assert str(detail).startswith("HTTP_503_mirror_aws_attempt_0")
+
+
 # ---------------------------------------------------------------------------
 # test 7: concat order is ascending step (REL-1)
 # ---------------------------------------------------------------------------
@@ -1072,6 +1207,98 @@ def test_availability_probe_requires_exact_full_member_index_evidence(monkeypatc
 
     assert result["status"] == "released"
     assert calls == [("mx2t3", "pf", 3), ("mx2t3", "cf", 3)]
+
+
+def test_availability_probe_fails_over_after_first_mirror_pf_transport_error(monkeypatch):
+    """A PF network error on one mirror cannot suppress a complete next mirror."""
+    import requests
+    import src.data.ecmwf_open_data as mod
+
+    monkeypatch.setattr(mod, "_DOWNLOAD_SOURCES", ("aws", "google"))
+    monkeypatch.setattr(
+        mod,
+        "_probe_index_member_count",
+        lambda client, *, ensemble_type, **_kwargs: (
+            (_ for _ in ()).throw(
+                requests.HTTPError(response=SimpleNamespace(status_code=503))
+            )
+            if client.source == "aws"
+            else (50 if ensemble_type == "pf" else 1)
+        ),
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "ecmwf.opendata",
+        SimpleNamespace(Client=lambda *, source: SimpleNamespace(source=source)),
+    )
+
+    result = mod.probe_open_ens_cycle_release(
+        track="mx2t6_high",
+        run_date=RUN_DATE,
+        run_hour=RUN_HOUR,
+        deadline_monotonic=time.monotonic() + 1.0,
+    )
+
+    assert result["status"] == "released"
+    assert result["mirror"] == "google"
+
+
+def test_availability_probe_fails_over_after_first_mirror_missing_cf(monkeypatch):
+    """A complete PF but missing CF/oper on one mirror must try the next mirror."""
+    import src.data.ecmwf_open_data as mod
+
+    monkeypatch.setattr(mod, "_DOWNLOAD_SOURCES", ("aws", "google"))
+
+    def member_count(client, *, ensemble_type, **_kwargs):
+        if client.source == "aws" and ensemble_type != "pf":
+            raise ValueError("Cannot find index entries matching {'type': ['cf']}")
+        return 50 if ensemble_type == "pf" else 1
+
+    monkeypatch.setattr(mod, "_probe_index_member_count", member_count)
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "ecmwf.opendata",
+        SimpleNamespace(Client=lambda *, source: SimpleNamespace(source=source)),
+    )
+
+    result = mod.probe_open_ens_cycle_release(
+        track="mn2t6_low",
+        run_date=RUN_DATE,
+        run_hour=RUN_HOUR,
+        deadline_monotonic=time.monotonic() + 1.0,
+    )
+
+    assert result["status"] == "released"
+    assert result["mirror"] == "google"
+
+
+def test_availability_probe_unknown_plus_pf_absence_stays_unknown(monkeypatch):
+    """A PF network error plus another mirror's absence is not NOT_RELEASED."""
+    import requests
+    import src.data.ecmwf_open_data as mod
+
+    monkeypatch.setattr(mod, "_DOWNLOAD_SOURCES", ("aws", "google"))
+
+    def member_count(client, **_kwargs):
+        if client.source == "aws":
+            raise requests.ConnectionError("mirror unavailable")
+        raise ValueError("Cannot find index entries matching {'type': ['pf']}")
+
+    monkeypatch.setattr(mod, "_probe_index_member_count", member_count)
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "ecmwf.opendata",
+        SimpleNamespace(Client=lambda *, source: SimpleNamespace(source=source)),
+    )
+
+    result = mod.probe_open_ens_cycle_release(
+        track="mn2t6_low",
+        run_date=RUN_DATE,
+        run_hour=RUN_HOUR,
+        deadline_monotonic=time.monotonic() + 1.0,
+    )
+
+    assert result == {"status": "unknown", "reason": "NETWORK:ConnectionError"}
 
 
 @pytest.mark.parametrize("pf_members,cf_members", ((49, 2), (51, 0), (50, 0)))
