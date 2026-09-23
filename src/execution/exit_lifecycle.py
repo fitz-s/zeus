@@ -14950,6 +14950,7 @@ def run_exit_monitor_cycle(
         ),
     }
     full_book_open_position_count = 0
+    full_book_canonical_scope_complete = False
     succeeded = False
     monitor_completion_marked = False
     try:
@@ -15050,14 +15051,14 @@ def run_exit_monitor_cycle(
                 summary["monitoring_error"] = str(exc)
 
             succeeded = "monitoring_error" not in summary
-            if (
-                succeeded
-                and target_families is None
-                and not _full_book_monitor_completed_canonical_coverage(
-                    summary,
-                    open_position_count=full_book_open_position_count,
+            if succeeded and target_families is None:
+                full_book_canonical_scope_complete = (
+                    _full_book_monitor_completed_canonical_coverage(
+                        summary,
+                        open_position_count=full_book_open_position_count,
+                    )
                 )
-            ):
+            if succeeded and target_families is None and not full_book_canonical_scope_complete:
                 # SCOPE: this admitted periodic full-book pass only. DRAIN: a
                 # later pass writes canonical MONITOR_REFRESHED decisions for
                 # every admitted candidate, or proves that a candidate became
@@ -15121,9 +15122,27 @@ def run_exit_monitor_cycle(
                             _aid_box[0],
                         )
             else:
-                summary["monitoring_error"] = "MONITOR_ARTIFACT_WRITE_DEFERRED"
-                summary["held_monitor_failure_outcome"] = "ARTIFACT_WRITE_DEFERRED"
-                succeeded = False
+                # The per-position canonical monitor writes already establish
+                # the completed full-book cadence fact.  This exit_monitor
+                # decision_log artifact is a derived/audit record, so a
+                # bounded artifact lease defer cannot re-open a fully covered
+                # monitor debt.
+                # Targeted wakes deliberately retain their existing failure
+                # behavior: no target-scope completeness predicate exists.
+                if not (
+                    succeeded
+                    and target_families is None
+                    and full_book_canonical_scope_complete
+                ):
+                    # Preserve an earlier canonical-coverage failure.  The
+                    # artifact defer is real diagnostic evidence, but cannot
+                    # erase the more important outstanding capital debt.
+                    if "monitoring_error" not in summary:
+                        summary["monitoring_error"] = "MONITOR_ARTIFACT_WRITE_DEFERRED"
+                        summary["held_monitor_failure_outcome"] = (
+                            "ARTIFACT_WRITE_DEFERRED"
+                        )
+                    succeeded = False
                 mark_held_position_monitor_complete()
                 monitor_completion_marked = True
 
@@ -15167,6 +15186,17 @@ def run_exit_monitor_cycle(
         if succeeded:
             _schedule_exit_monitor_status_pulse(summary)
 
+        no_action_authority_position_ids = list(
+            dict.fromkeys(
+                str(value).strip()
+                for value in summary.get(
+                    "held_monitor_no_action_authority_position_ids",
+                    (),
+                )
+                or ()
+                if str(value).strip()
+            )
+        )
         _write_scheduler_health(
             "exit_monitor",
             failed=not succeeded,
@@ -15174,6 +15204,19 @@ def run_exit_monitor_cycle(
             extra={
                 "monitors": summary.get("monitors", 0),
                 "exits": summary.get("exits", 0),
+                # Always write both booleans so a succeeding pass clears a
+                # prior deferred-artifact observation instead of retaining it
+                # through scheduler-health's last-value projection.
+                "monitor_artifact_write_deferred": bool(
+                    summary.get("monitor_artifact_write_deferred")
+                ),
+                "canonical_scope_complete": bool(
+                    full_book_canonical_scope_complete
+                ),
+                "no_action_authority_position_ids": no_action_authority_position_ids,
+                "no_action_authority_position_count": len(
+                    no_action_authority_position_ids
+                ),
             },
         )
     if outcome is not None:

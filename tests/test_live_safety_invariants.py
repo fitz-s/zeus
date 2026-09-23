@@ -24689,6 +24689,305 @@ def test_incomplete_full_book_persists_typed_outcome_before_artifact(monkeypatch
     conn.close()
 
 
+@pytest.mark.parametrize(
+    (
+        "case",
+        "canonical_ids",
+        "no_action_ids",
+        "write_failed",
+        "target_families",
+        "expected_success",
+        "expected_error",
+        "expected_scope_complete",
+        "preempted",
+        "phase_error",
+    ),
+    [
+        (
+            "full_book_complete",
+            ["healthy", "also-healthy"],
+            [],
+            0,
+            None,
+            True,
+            None,
+            True,
+            False,
+            False,
+        ),
+        (
+            "full_book_e245_no_action",
+            ["healthy", "e245-stale"],
+            ["e245-stale"],
+            0,
+            None,
+            True,
+            None,
+            True,
+            False,
+            False,
+        ),
+        (
+            "full_book_missing_canonical",
+            ["healthy"],
+            [],
+            0,
+            None,
+            False,
+            "FULL_BOOK_MONITOR_CANONICAL_COVERAGE_INCOMPLETE",
+            False,
+            False,
+            False,
+        ),
+        (
+            "full_book_canonical_write_failure",
+            ["healthy", "also-healthy"],
+            [],
+            1,
+            None,
+            False,
+            "FULL_BOOK_MONITOR_CANONICAL_COVERAGE_INCOMPLETE",
+            False,
+            False,
+            False,
+        ),
+        (
+            "full_book_preempted",
+            ["healthy", "also-healthy"],
+            [],
+            0,
+            None,
+            False,
+            "FULL_BOOK_MONITOR_CANONICAL_COVERAGE_INCOMPLETE",
+            False,
+            True,
+            False,
+        ),
+        (
+            "full_book_phase_exception",
+            [],
+            [],
+            0,
+            None,
+            False,
+            "phase boom",
+            False,
+            False,
+            True,
+        ),
+        (
+            "targeted_complete_but_deferred",
+            ["healthy", "also-healthy"],
+            [],
+            0,
+            (("Amsterdam", "2026-09-22", "high"),),
+            False,
+            "MONITOR_ARTIFACT_WRITE_DEFERRED",
+            False,
+            False,
+            False,
+        ),
+    ],
+)
+def test_exit_monitor_artifact_defer_requires_existing_full_book_completion(
+    monkeypatch,
+    case,
+    canonical_ids,
+    no_action_ids,
+    write_failed,
+    target_families,
+    expected_success,
+    expected_error,
+    expected_scope_complete,
+    preempted,
+    phase_error,
+):
+    """A deferred audit row cannot replace or erase canonical monitor evidence."""
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from src.engine import cycle_runner
+    from src.execution import exit_lifecycle
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+
+    position_ids = (
+        ["healthy", "e245-stale"]
+        if case == "full_book_e245_no_action"
+        else ["healthy", "also-healthy"]
+    )
+    conn = sqlite3.connect(":memory:")
+    active = threading.Event()
+    health_calls = []
+    pulse_payloads = []
+    exports = []
+    portfolio = SimpleNamespace(
+        positions=[
+            SimpleNamespace(
+                trade_id=pid,
+                city="Amsterdam",
+                target_date="2026-09-22",
+                temperature_metric="high",
+            )
+            for pid in position_ids
+        ],
+        daily_baseline_total=0.0,
+        bankroll=0.0,
+    )
+
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda **_kwargs: conn)
+    monkeypatch.setattr(
+        cycle_runner,
+        "get_held_monitor_bootstrap_connection",
+        lambda **_kwargs: sqlite3.connect(":memory:"),
+    )
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda **_kwargs: portfolio)
+    monkeypatch.setattr(cycle_runner, "get_tracker", lambda: object())
+
+    def monitor(_conn, _clob, _portfolio, _artifact, _tracker, summary, **_kwargs):
+        if phase_error:
+            raise RuntimeError("phase boom")
+        summary.update(
+            held_monitor_candidates=len(position_ids),
+            held_monitor_candidate_position_ids=list(position_ids),
+            held_monitor_canonical_position_ids=list(canonical_ids),
+            held_monitor_discharged_position_ids=[],
+            held_monitor_no_action_authority_position_ids=list(no_action_ids),
+            monitor_canonical_write_failed=write_failed,
+            held_monitor_preempted=preempted,
+        )
+        return case in {"full_book_complete", "full_book_e245_no_action"}, False
+
+    def defer_artifact(_conn, _artifact, *, summary, deadline_monotonic):
+        summary["monitor_artifact_write_deferred"] = "writer remains busy"
+        return False, None
+
+    monkeypatch.setattr(cycle_runner, "_execute_monitoring_phase", monitor)
+    monkeypatch.setattr("src.risk_allocator.summary", lambda: {"configured": False})
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_held_monitor_clob_client",
+        lambda: nullcontext(object()),
+    )
+    monkeypatch.setattr(exit_lifecycle, "_persist_exit_monitor_artifact", defer_artifact)
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_schedule_exit_monitor_status_pulse",
+        lambda payload: pulse_payloads.append(dict(payload)),
+    )
+    monkeypatch.setattr(
+        cycle_runner,
+        "save_portfolio",
+        lambda *_args, **_kwargs: exports.append(True),
+    )
+    monkeypatch.setattr(
+        "src.observability.scheduler_health._write_scheduler_health",
+        lambda *_args, **kwargs: health_calls.append(kwargs),
+    )
+
+    assert exit_lifecycle.run_exit_monitor_cycle(
+        held_position_monitor_active=active,
+        mark_held_position_monitor_complete=active.clear,
+        monitor_deadline_monotonic=time.monotonic() + 30.0,
+        target_families=target_families,
+    ) is expected_success
+    assert not active.is_set()
+    assert exports == []  # no `artifact_id=None` portfolio export
+    assert len(pulse_payloads) == int(expected_success)
+    if target_families is None:
+        assert len(health_calls) == 1
+        extra = health_calls[0]["extra"]
+        assert extra["monitor_artifact_write_deferred"] is True
+        assert extra["canonical_scope_complete"] is expected_scope_complete
+        assert extra["no_action_authority_position_ids"] == no_action_ids
+        assert extra["no_action_authority_position_count"] == len(no_action_ids)
+        assert health_calls[0]["failed"] is (not expected_success)
+        assert health_calls[0]["reason"] == expected_error
+    else:
+        assert health_calls == []
+    conn.close()
+
+
+def test_exit_monitor_health_clears_deferred_artifact_after_old_red_new_green(
+    monkeypatch,
+):
+    """A later successful append overwrites deferred health fields explicitly."""
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from src.engine import cycle_runner
+    from src.execution import exit_lifecycle
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+
+    active = threading.Event()
+    health_calls = []
+    levels = iter((RiskLevel.RED, RiskLevel.GREEN))
+    artifacts = iter((False, True))
+    connections = []
+    portfolio = SimpleNamespace(
+        positions=[SimpleNamespace(trade_id="healthy")],
+        daily_baseline_total=0.0,
+        bankroll=0.0,
+    )
+
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: next(levels))
+    monkeypatch.setattr(
+        cycle_runner,
+        "get_connection",
+        lambda **_kwargs: connections.append(sqlite3.connect(":memory:")) or connections[-1],
+    )
+    monkeypatch.setattr(
+        cycle_runner,
+        "get_held_monitor_bootstrap_connection",
+        lambda **_kwargs: sqlite3.connect(":memory:"),
+    )
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda **_kwargs: portfolio)
+    monkeypatch.setattr(cycle_runner, "get_tracker", lambda: object())
+    monkeypatch.setattr(cycle_runner, "_execute_force_exit_sweep", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        cycle_runner,
+        "_execute_monitoring_phase",
+        lambda _conn, _clob, _portfolio, _artifact, _tracker, summary, **_kwargs: (
+            summary.update(
+                held_monitor_candidates=1,
+                held_monitor_candidate_position_ids=["healthy"],
+                held_monitor_canonical_position_ids=["healthy"],
+                held_monitor_discharged_position_ids=[],
+                held_monitor_no_action_authority_position_ids=[],
+            )
+            or (False, False)
+        ),
+    )
+    monkeypatch.setattr("src.risk_allocator.summary", lambda: {"configured": False})
+    monkeypatch.setattr(exit_lifecycle, "_held_monitor_clob_client", lambda: nullcontext(object()))
+
+    def persist(_conn, _artifact, *, summary, deadline_monotonic):
+        if next(artifacts):
+            return True, 17
+        summary["monitor_artifact_write_deferred"] = "writer remains busy"
+        return False, None
+
+    monkeypatch.setattr(exit_lifecycle, "_persist_exit_monitor_artifact", persist)
+    monkeypatch.setattr(exit_lifecycle, "_schedule_exit_monitor_status_pulse", lambda _payload: None)
+    monkeypatch.setattr(
+        "src.observability.scheduler_health._write_scheduler_health",
+        lambda *_args, **kwargs: health_calls.append(kwargs),
+    )
+
+    for _ in range(2):
+        assert exit_lifecycle.run_exit_monitor_cycle(
+            held_position_monitor_active=active,
+            mark_held_position_monitor_complete=active.clear,
+            monitor_deadline_monotonic=time.monotonic() + 30.0,
+        ) is True
+
+    assert [call["extra"]["monitor_artifact_write_deferred"] for call in health_calls] == [True, False]
+    assert [call["extra"]["canonical_scope_complete"] for call in health_calls] == [True, True]
+    assert all(call["failed"] is False for call in health_calls)
+
+
 def test_full_book_pulse_carries_write_lock_release_and_open_count_telemetry(
     monkeypatch,
 ):
