@@ -29,6 +29,8 @@ shut down (Phase 3), the ingest daemon acquires locks uncontested.
 from __future__ import annotations
 
 import functools
+import itertools
+from copy import deepcopy
 import json
 import logging
 import os
@@ -82,6 +84,19 @@ _REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC = 0.0
 _REPLACEMENT_BPF_NO_PROGRESS_FAILURES = 0
 _REPLACEMENT_BPF_NO_PROGRESS_RETRY_NOT_BEFORE_MONOTONIC = 0.0
 _REPLACEMENT_HELD_PARTITION_FIRST = "critical"
+_BROAD_RESEED_LOCK = threading.Lock()
+_BROAD_RESEED_CONDITION = threading.Condition(_BROAD_RESEED_LOCK)
+_BROAD_RESEED_ACTIVE: dict[str, Any] | None = None
+_BROAD_RESEED_PENDING: dict[str, Any] | None = None
+_BROAD_RESEED_THREAD: threading.Thread | None = None
+_BROAD_RESEED_SEQUENCE = itertools.count()
+_BROAD_RESEED_POLLS_IN_FLIGHT = 0
+_BROAD_RESEED_DIRTY = False
+# SCOPE: (cursor path, source) whose later raw/callback proof is incomplete.
+# DRAIN: next 15s poll re-probes the unchanged durable cursor and enqueues the
+# required per-receipt broad scans. RESET: a quiescent successful worker drain
+# clears only its in-memory block; failure leaves the durable cursor untouched.
+_BROAD_RESEED_BLOCKED_SOURCES: set[tuple[str, str]] = set()
 
 # SIGTERM-unif (WAVE-4): captured at module load so the forensic elapsed
 # computed in _graceful_shutdown matches what src/main.py and
@@ -3240,7 +3255,250 @@ def _station_forecast_source_clock_tick() -> dict[str, object]:
     return report
 
 
+def _run_broad_reseed_batch(batch: dict[str, Any]) -> bool:
+    """Use one manifest snapshot for both broad triggers; retain their own receipts."""
+    from src.data.replacement_forecast_production import (  # noqa: PLC0415
+        _enqueue_cycle_advance_reseeds_if_needed,
+        _enqueue_fusion_upgrade_reseeds_if_needed,
+    )
+
+    cfg = batch["cfg"]
+    snapshot: dict[str, object] = {}
+    errors: list[str] = []
+    for request in batch["requests"].values():
+        # Each distinct raw receipt retains its original trigger limit. Sharing
+        # one scan across several receipts could acknowledge unvisited scopes.
+        for prefix, trigger in (
+            ("fusion_upgrade", _enqueue_fusion_upgrade_reseeds_if_needed),
+            ("cycle_advance", _enqueue_cycle_advance_reseeds_if_needed),
+        ):
+            if prefix == "cycle_advance" and not request["include_cycle_advance"]:
+                continue
+            try:
+                trigger_report = trigger(cfg, manifest_snapshot=snapshot)
+            except Exception as exc:  # noqa: BLE001 - the other organ still gets a chance.
+                errors.append(f"{prefix}:{type(exc).__name__}: {str(exc)[:180]}")
+                continue
+            error = _replacement_reseed_error(prefix, trigger_report)
+            if error is not None:
+                errors.append(error)
+    if errors:
+        logger.warning("replacement broad reseed retryable: %s", errors)
+    return not errors
+
+
+def _run_broad_reseed_batches() -> None:
+    """One worker drains one active and at most one coalesced pending batch."""
+    global _BROAD_RESEED_ACTIVE, _BROAD_RESEED_PENDING, _BROAD_RESEED_THREAD
+    global _BROAD_RESEED_DIRTY
+
+    from src.data.source_clock_update_probe import advance_source_clock_cursor
+
+    candidates: list[dict[str, object]] = []
+    while True:
+        with _BROAD_RESEED_CONDITION:
+            batch = _BROAD_RESEED_ACTIVE
+        if batch is None:
+            return
+        started = time.monotonic()
+        try:
+            if not _run_broad_reseed_batch(batch):
+                raise RuntimeError("broad reseed trigger receipt unproven")
+            with _BROAD_RESEED_CONDITION:
+                if len(candidates) + len(batch["requests"]) > 64:
+                    _BROAD_RESEED_BLOCKED_SOURCES.update(
+                        (str(request["payload"].get("cursor_path") or ""), source)
+                        for request in batch["requests"].values()
+                        for source in request["payload"].get("updated_sources") or ()
+                    )
+                elif not _BROAD_RESEED_DIRTY:
+                    candidates.extend(batch["requests"].values())
+            logger.info(
+                "replacement broad reseed completed: elapsed_s=%.2f requests=%d "
+                "cycle_required=%s cursor_pending=True",
+                time.monotonic() - started,
+                len(batch["requests"]),
+                batch["include_cycle_advance"],
+            )
+        except Exception:  # noqa: BLE001 - unchanged cursor retries on next poll.
+            logger.exception("replacement broad reseed failed; cursor remains deferred")
+            with _BROAD_RESEED_CONDITION:
+                _BROAD_RESEED_ACTIVE = None
+                _BROAD_RESEED_PENDING = None
+                _BROAD_RESEED_THREAD = None
+                _BROAD_RESEED_DIRTY = _BROAD_RESEED_POLLS_IN_FLIGHT > 0
+                if not _BROAD_RESEED_DIRTY:
+                    _BROAD_RESEED_BLOCKED_SOURCES.clear()
+                _BROAD_RESEED_CONDITION.notify_all()
+            return
+        with _BROAD_RESEED_CONDITION:
+            # A poll may be downloading the same-cycle raw revision but has not
+            # enqueued it yet. Its entry barrier must finish before any cursor
+            # can commit, and its pending batch must receive its own scan.
+            while _BROAD_RESEED_PENDING is None and _BROAD_RESEED_POLLS_IN_FLIGHT:
+                _BROAD_RESEED_CONDITION.wait()
+            if _BROAD_RESEED_PENDING is not None:
+                _BROAD_RESEED_ACTIVE = _BROAD_RESEED_PENDING
+                _BROAD_RESEED_PENDING = None
+                continue
+            advanced_sources: set[str] = set()
+            deferred_sources: set[str] = set()
+            if _BROAD_RESEED_DIRTY:
+                logger.warning(
+                    "replacement broad reseed cursor deferred: unproven later raw "
+                    "or callback receipt; next poll retries"
+                )
+            else:
+                # Short existing file CAS holds the entry lock so a new poll
+                # cannot begin between the quiescence check and cursor commit.
+                try:
+                    for request in candidates:
+                        payload = request["payload"]
+                        for source in request["cursor_sources"]:
+                            key = (str(payload.get("cursor_path") or ""), source)
+                            if key in _BROAD_RESEED_BLOCKED_SOURCES:
+                                deferred_sources.add(source)
+                                continue
+                            advanced = advance_source_clock_cursor(payload, sources=(source,))
+                            if source in advanced:
+                                advanced_sources.add(source)
+                            else:
+                                deferred_sources.add(source)
+                except Exception:  # noqa: BLE001 - unadvanced sources retry via cursor.
+                    logger.exception("replacement broad reseed cursor CAS failed")
+            logger.info(
+                "replacement broad reseed drain: requests=%d advanced_sources=%s "
+                "deferred_sources=%s dirty=%s",
+                len(candidates),
+                tuple(sorted(advanced_sources)),
+                tuple(sorted(deferred_sources)),
+                _BROAD_RESEED_DIRTY,
+            )
+            _BROAD_RESEED_ACTIVE = None
+            _BROAD_RESEED_THREAD = None
+            _BROAD_RESEED_DIRTY = False
+            _BROAD_RESEED_BLOCKED_SOURCES.clear()
+            _BROAD_RESEED_CONDITION.notify_all()
+            return
+
+
+def _enqueue_broad_reseed_batch(
+    cfg: dict[str, object],
+    *,
+    include_cycle_advance: bool,
+    source_clock_payload: dict[str, object],
+    cursor_sources: tuple[str, ...],
+    download_report: dict[str, object],
+) -> str:
+    """Keep active work isolated and bound the later one-scan pending batch."""
+    global _BROAD_RESEED_ACTIVE, _BROAD_RESEED_PENDING, _BROAD_RESEED_THREAD
+    global _BROAD_RESEED_DIRTY
+
+    frozen_cfg = deepcopy(cfg)
+    frozen_payload = deepcopy({
+        key: source_clock_payload.get(key)
+        for key in ("cursor_path", "updated_sources", "cursor_values", "cursor_preimage", "source_runs")
+    })
+    # Raw revisions within the same provider cycle need distinct work. A poll
+    # receipt has no immutable raw-revision ID, so its ordered receipt number
+    # keeps otherwise identical cursor identities distinct. At most 64 receipts
+    # share a single later scan.
+    request = {
+        "payload": frozen_payload,
+        "cursor_sources": cursor_sources,
+        "include_cycle_advance": include_cycle_advance,
+    }
+    identity = (
+        str(frozen_payload.get("cursor_path") or ""),
+        tuple(sorted((frozen_payload.get("cursor_values") or {}).items())),
+        tuple(sorted((frozen_payload.get("cursor_preimage") or {}).items())),
+        str(download_report.get("status") or ""),
+        tuple(sorted(cursor_sources)),
+        next(_BROAD_RESEED_SEQUENCE),
+    )
+    batch = {
+        "cfg": frozen_cfg,
+        "include_cycle_advance": include_cycle_advance,
+        "requests": {identity: request},
+    }
+    with _BROAD_RESEED_CONDITION:
+        if set(cursor_sources) != set(frozen_payload.get("updated_sources") or ()):
+            # A source-commit callback may still be running (or have failed),
+            # including on the same cycle as an earlier successful batch.
+            _BROAD_RESEED_BLOCKED_SOURCES.update(
+                (str(frozen_payload.get("cursor_path") or ""), source)
+                for source in set(frozen_payload.get("updated_sources") or ())
+                - set(cursor_sources)
+            )
+        if _BROAD_RESEED_ACTIVE is None:
+            _BROAD_RESEED_ACTIVE = batch
+            worker = threading.Thread(
+                target=_run_broad_reseed_batches,
+                name="source-clock-broad-reseed",
+                daemon=True,
+            )
+            _BROAD_RESEED_THREAD = worker
+            try:
+                worker.start()
+            except Exception:
+                _BROAD_RESEED_ACTIVE = None
+                _BROAD_RESEED_THREAD = None
+                raise
+            _BROAD_RESEED_CONDITION.notify_all()
+            return "SOURCE_BROAD_RESEEDS_ASYNC_PENDING"
+        if _BROAD_RESEED_ACTIVE["cfg"] != frozen_cfg or (
+            _BROAD_RESEED_PENDING is not None
+            and _BROAD_RESEED_PENDING["cfg"] != frozen_cfg
+        ):
+            # The cursor stays unchanged, so the next poll re-probes this config.
+            _BROAD_RESEED_BLOCKED_SOURCES.update(
+                (str(frozen_payload.get("cursor_path") or ""), str(source))
+                for source in (frozen_payload.get("updated_sources") or ())
+            )
+            return "SOURCE_BROAD_RESEEDS_DEFERRED_CONFIG"
+        if _BROAD_RESEED_PENDING is None:
+            _BROAD_RESEED_PENDING = batch
+        else:
+            if len(_BROAD_RESEED_PENDING["requests"]) >= 64:
+                _BROAD_RESEED_BLOCKED_SOURCES.update(
+                    (str(frozen_payload.get("cursor_path") or ""), str(source))
+                    for source in (frozen_payload.get("updated_sources") or ())
+                )
+                return "SOURCE_BROAD_RESEEDS_ASYNC_CAPACITY_DEFERRED"
+            _BROAD_RESEED_PENDING["include_cycle_advance"] |= include_cycle_advance
+            _BROAD_RESEED_PENDING["requests"].update(batch["requests"])
+        _BROAD_RESEED_CONDITION.notify_all()
+        return "SOURCE_BROAD_RESEEDS_ASYNC_PENDING"
+
+
+def _source_clock_poll_in_flight(fn):
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        global _BROAD_RESEED_POLLS_IN_FLIGHT, _BROAD_RESEED_DIRTY
+
+        with _BROAD_RESEED_CONDITION:
+            _BROAD_RESEED_POLLS_IN_FLIGHT += 1
+        try:
+            return fn(*args, **kwargs)
+        except Exception:
+            # The callback/download may have committed raw before failing to
+            # return a receipt. No source-level identity is available here.
+            with _BROAD_RESEED_CONDITION:
+                _BROAD_RESEED_DIRTY = True
+            raise
+        finally:
+            with _BROAD_RESEED_CONDITION:
+                _BROAD_RESEED_POLLS_IN_FLIGHT -= 1
+                if _BROAD_RESEED_POLLS_IN_FLIGHT == 0 and _BROAD_RESEED_ACTIVE is None:
+                    _BROAD_RESEED_DIRTY = False
+                    _BROAD_RESEED_BLOCKED_SOURCES.clear()
+                _BROAD_RESEED_CONDITION.notify_all()
+
+    return wrapped
+
+
 @_scheduler_job("ingest_replacement_availability_poll")
+@_source_clock_poll_in_flight
 def _replacement_availability_poll_tick():
     """Fast source-clock poll for replacement raw-input fetches.
 
@@ -3252,6 +3510,7 @@ def _replacement_availability_poll_tick():
     survives. Fail-soft: any error logs and the next tick retries; every lane it calls
     is idempotent per persisted row/manifest.
     """
+    global _BROAD_RESEED_DIRTY
     from src.data.replacement_forecast_production import (  # noqa: PLC0415
         _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed,
         _download_replacement_forecast_current_targets_if_needed,
@@ -3871,7 +4130,13 @@ def _replacement_availability_poll_tick():
         == "SOURCE_CLOCK_BPF_SCOPED_QUOTA_COOLDOWN_SKIPPED"
     ):
         if _replacement_maintenance_due():
-            report = _attach_reseed_reports(report)
+            report["reseed_maintenance_status"] = _enqueue_broad_reseed_batch(
+                cfg,
+                include_cycle_advance=True,
+                source_clock_payload=source_clock_payload,
+                cursor_sources=(),
+                download_report=report,
+            )
         else:
             report["reseed_maintenance_status"] = (
                 "RESEED_MAINTENANCE_NOT_DUE"
@@ -3890,35 +4155,26 @@ def _replacement_availability_poll_tick():
             # catch-up. The trigger's durable transition marker makes the overlap
             # idempotent per (scope, raw revision); do not duplicate the unrelated
             # cycle-advance scan here.
-            broad_fusion_report: dict[str, object] = {}
-            _attach_reseed_reports(
-                broad_fusion_report,
-                include_cycle_advance=False,
-            )
-            for key in (
-                "fusion_upgrade_status",
-                "fusion_upgrade_seeds_enqueued",
-            ):
-                if key in broad_fusion_report:
-                    report[f"broad_{key}"] = broad_fusion_report[key]
-            broad_errors = tuple(broad_fusion_report.get("reseed_errors") or ())
-            if broad_errors:
-                report["reseed_errors"] = tuple(
-                    dict.fromkeys((*tuple(report.get("reseed_errors") or ()), *broad_errors))
+            cursor_sources = (
+                source_clock_scoped_download_cursor_sources(
+                    report, source_clock_report=source_clock_report,
                 )
-                report["retryable"] = True
+                if pending_notifications == 0 and not report.get("reseed_errors")
+                else ()
+            )
+            async_status = _enqueue_broad_reseed_batch(
+                cfg,
+                include_cycle_advance=False,
+                source_clock_payload=source_clock_payload,
+                cursor_sources=cursor_sources,
+                download_report=report,
+            )
             if pending_notifications > 0:
                 report["reseed_maintenance_status"] = (
                     "SOURCE_COMMIT_RESEEDS_DEFERRED"
                 )
-            elif broad_errors:
-                report["reseed_maintenance_status"] = (
-                    "SOURCE_COMMIT_RESEEDS_RETRYABLE"
-                )
             else:
-                report["reseed_maintenance_status"] = (
-                    "SOURCE_COMMIT_RESEEDS_PUBLISHED"
-                )
+                report["reseed_maintenance_status"] = async_status
         elif (
             (anchor_reseed_published or pending_notifications > 0)
             and not notification_errors
@@ -3931,11 +4187,20 @@ def _replacement_availability_poll_tick():
         else:
             # No committed callback completed, or at least one callback failed.
             # Preserve the broad scan as the authoritative catch-up path.
-            report = _attach_reseed_reports(report)
-            report["reseed_maintenance_status"] = (
-                "SOURCE_BROAD_RESEEDS_RETRYABLE"
-                if notification_errors or report.get("reseed_errors")
-                else "SOURCE_BROAD_RESEEDS_PUBLISHED"
+            cursor_sources = (
+                source_clock_scoped_download_cursor_sources(
+                    report, source_clock_report=source_clock_report,
+                )
+                if not notification_errors and pending_notifications == 0
+                and not report.get("reseed_errors")
+                else ()
+            )
+            report["reseed_maintenance_status"] = _enqueue_broad_reseed_batch(
+                cfg,
+                include_cycle_advance=True,
+                source_clock_payload=source_clock_payload,
+                cursor_sources=cursor_sources,
+                download_report=report,
             )
     reseed_publication_proven = (
         not notification_errors
@@ -3956,11 +4221,30 @@ def _replacement_availability_poll_tick():
         if reseed_publication_proven
         else ()
     )
-    advanced_sources = (
-        advance_source_clock_cursor(source_clock_report, sources=cursor_sources)
-        if cursor_sources
-        else ()
-    )
+    advanced_sources: tuple[str, ...] = ()
+    if cursor_sources:
+        with _BROAD_RESEED_CONDITION:
+            if (
+                _BROAD_RESEED_ACTIVE is None
+                and _BROAD_RESEED_PENDING is None
+                and not _BROAD_RESEED_DIRTY
+                and _BROAD_RESEED_POLLS_IN_FLIGHT == 1
+                and not any(
+                    (str(source_clock_payload.get("cursor_path") or ""), source)
+                    in _BROAD_RESEED_BLOCKED_SOURCES
+                    for source in cursor_sources
+                )
+            ):
+                advanced_sources = advance_source_clock_cursor(
+                    source_clock_report, sources=cursor_sources,
+                )
+            else:
+                # Even an anchor-only success cannot acknowledge the same
+                # source while broad/in-flight raw may belong to a later scan.
+                _BROAD_RESEED_BLOCKED_SOURCES.update(
+                    (str(source_clock_payload.get("cursor_path") or ""), source)
+                    for source in cursor_sources
+                )
     report["source_clock_cursor_advanced_sources"] = advanced_sources
     report["source_clock_cursor_deferred_sources"] = tuple(
         sorted(set(source_clock_report.updated_sources) - set(advanced_sources))

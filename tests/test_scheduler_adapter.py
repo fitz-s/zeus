@@ -1,14 +1,528 @@
-# Lifecycle: created=2026-05-24; last_reviewed=2026-09-03; last_reused=2026-09-03
+# Lifecycle: created=2026-05-24; last_reviewed=2026-09-23; last_reused=2026-09-23
 # Purpose: Current single-live scheduler set and causal executor-class assignment.
 # Reuse: Inspect docs/operations/current/plans/data_temporal_kernel/PLAN.md + the target module before relying on it.
 # Created: 2026-05-24
-# Last reused or audited: 2026-09-03
+# Last reused or audited: 2026-09-23
 # Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md (PR6);
 #   operator spec §7 (Scheduler adapter / executor classes).
 """PR6: registry -> scheduler executor-class assignment (pure planner, daemon wiring deferred)."""
 from __future__ import annotations
 
 import pytest
+
+
+@pytest.fixture
+def broad_reseed_join(monkeypatch):
+    """Finish the async source-clock worker before monkeypatch restores triggers."""
+    def join():
+        import src.ingest_main as ingest_main
+
+        worker = getattr(ingest_main, "_BROAD_RESEED_THREAD", None)
+        if worker is not None:
+            worker.join(timeout=5)
+            assert not worker.is_alive()
+        assert getattr(ingest_main, "_BROAD_RESEED_ACTIVE", None) is None
+        assert getattr(ingest_main, "_BROAD_RESEED_PENDING", None) is None
+
+    yield join
+    join()
+
+
+def test_source_clock_poll_returns_while_broad_trigger_is_blocked(
+    monkeypatch, broad_reseed_join,
+) -> None:
+    """Regression: broad work must not consume the next 15-second probe slot."""
+    import threading
+
+    import src.data.replacement_forecast_production as prod
+    import src.data.source_clock_update_probe as probe
+    import src.ingest_main as ingest_main
+
+    entered = threading.Event()
+    release = threading.Event()
+    returned = threading.Event()
+    result: list[dict[str, object]] = []
+
+    class _Changed:
+        updated_sources = ("icon_global",)
+
+        def as_dict(self):
+            return {"status": "SOURCE_CLOCK_UPDATES_CHANGED", "updated_sources": ["icon_global"]}
+
+    monkeypatch.setattr(prod, "_replacement_forecast_live_materialization_queue_config", lambda: {"test": 1})
+    monkeypatch.setattr(prod, "_recover_held_common_cycle_anchors_if_needed", lambda *_a, **_k: None)
+    monkeypatch.setattr(probe, "probe_openmeteo_source_clock_updates", lambda **_k: _Changed())
+    monkeypatch.setattr(prod, "_download_bayes_precision_fusion_source_clock_raw_inputs_if_needed", lambda *_a, **_k: {"status": "SOURCE_CLOCK_BPF_SCOPED_NO_TARGETS", "updated_sources": ["icon_global"]})
+    monkeypatch.setattr(probe, "source_clock_scoped_download_cursor_sources", lambda *_a, **_k: ("icon_global",))
+    monkeypatch.setattr(probe, "advance_source_clock_cursor", lambda *_a, **_k: ("icon_global",))
+
+    def fusion(_cfg, **_kwargs):
+        entered.set()
+        assert release.wait(timeout=5)
+        return {"status": "FUSION_UPGRADE_TRIGGER"}
+
+    monkeypatch.setattr(prod, "_enqueue_fusion_upgrade_reseeds_if_needed", fusion)
+    monkeypatch.setattr(prod, "_enqueue_cycle_advance_reseeds_if_needed", lambda *_a, **_k: {"status": "CYCLE_ADVANCE_TRIGGER"})
+
+    def poll():
+        try:
+            result.append(ingest_main._replacement_availability_poll_tick.__wrapped__())
+        finally:
+            returned.set()
+
+    polling = threading.Thread(target=poll)
+    polling.start()
+    try:
+        assert entered.wait(timeout=2)
+        assert returned.wait(timeout=1), "broad trigger held the source-clock poll"
+        assert result[0]["source_clock_cursor_advanced_sources"] == ()
+    finally:
+        release.set()
+        polling.join(timeout=5)
+        broad_reseed_join()
+    assert not polling.is_alive()
+
+
+def test_source_clock_broad_reseed_does_not_hold_next_provider_poll(
+    monkeypatch, broad_reseed_join,
+) -> None:
+    """A later raw commit receives its own scan and cursor proof after the active scan."""
+    import threading
+
+    import src.data.replacement_forecast_production as prod
+    import src.data.source_clock_update_probe as probe
+    import src.ingest_main as ingest_main
+
+    entered = threading.Event()
+    release = threading.Event()
+    cycles = iter(("2026-09-23T06:00:00+00:00", "2026-09-23T12:00:00+00:00"))
+    advances: list[tuple[str, str]] = []
+    trigger_calls: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(prod, "_replacement_forecast_live_materialization_queue_config", lambda: {"test": 1})
+    monkeypatch.setattr(prod, "_recover_held_common_cycle_anchors_if_needed", lambda *_a, **_k: None)
+    def probe_next(**_kwargs):
+        cycle = next(cycles)
+        return probe.SourceClockUpdateProbeReport(
+            status="SOURCE_CLOCK_UPDATES_CHANGED",
+            model_count=1,
+            updated_sources=("icon_global",),
+            affected_cities=("Munich",),
+            model_updates_path="/tmp/test-source-clock-updates",
+            cursor_path="/tmp/test-source-clock-cursor",
+            cursor_values=(("icon_global", cycle),),
+            cursor_preimage=(("icon_global", None),),
+            source_runs=(("icon_global", cycle, cycle, 3600),),
+        )
+
+    monkeypatch.setattr(probe, "probe_openmeteo_source_clock_updates", probe_next)
+
+    def download(_cfg, *, source_clock_report, **_kwargs):
+        return {
+            "status": "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+            "source_results": {
+                "icon_global": {
+                    "status": "SOURCE_CLOCK_SOURCE_RAW_INPUTS_DOWNLOADED",
+                    "cycle": source_clock_report.source_runs[0][1],
+                },
+            },
+        }
+
+    monkeypatch.setattr(prod, "_download_bayes_precision_fusion_source_clock_raw_inputs_if_needed", download)
+    monkeypatch.setattr(probe, "advance_source_clock_cursor", lambda payload, *, sources: advances.append((sources[0], payload["cursor_values"][sources[0]])) or sources)
+
+    def fusion(_cfg, *, manifest_snapshot=None, **_kwargs):
+        trigger_calls.append(("fusion", manifest_snapshot))
+        if len(trigger_calls) == 1:
+            entered.set()
+            assert release.wait(timeout=5)
+        return {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 1}
+
+    def cycle(_cfg, *, manifest_snapshot=None, **_kwargs):
+        trigger_calls.append(("cycle", manifest_snapshot))
+        return {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 1}
+
+    monkeypatch.setattr(prod, "_enqueue_fusion_upgrade_reseeds_if_needed", fusion)
+    monkeypatch.setattr(prod, "_enqueue_cycle_advance_reseeds_if_needed", cycle)
+    try:
+        first = ingest_main._replacement_availability_poll_tick.__wrapped__()
+        assert entered.wait(timeout=2)
+        second = ingest_main._replacement_availability_poll_tick.__wrapped__()
+        assert first["reseed_maintenance_status"] == "SOURCE_BROAD_RESEEDS_ASYNC_PENDING"
+        assert second["reseed_maintenance_status"] == "SOURCE_BROAD_RESEEDS_ASYNC_PENDING"
+        assert len(ingest_main._BROAD_RESEED_PENDING["requests"]) == 1
+        assert advances == []
+    finally:
+        release.set()
+        broad_reseed_join()
+
+    assert [name for name, _ in trigger_calls] == ["fusion", "cycle", "fusion", "cycle"]
+    assert trigger_calls[0][1] is trigger_calls[1][1]
+    assert trigger_calls[2][1] is trigger_calls[3][1]
+    assert trigger_calls[0][1] is not trigger_calls[2][1]
+    assert advances == [
+        ("icon_global", "2026-09-23T06:00:00+00:00"),
+        ("icon_global", "2026-09-23T12:00:00+00:00"),
+    ]
+
+
+def test_same_cycle_raw_inflight_and_failed_pending_keep_cursor_unadvanced(
+    monkeypatch, broad_reseed_join,
+) -> None:
+    import threading
+
+    import src.data.replacement_forecast_production as prod
+    import src.data.source_clock_update_probe as probe
+    import src.ingest_main as ingest_main
+
+    raw_inflight = threading.Event()
+    release_raw = threading.Event()
+    first_scan_started = threading.Event()
+    release_first_scan = threading.Event()
+    first_scan_done = threading.Event()
+    advances: list[tuple[str, ...]] = []
+    eligible_batches: list[tuple[str, ...]] = []
+    scans = [0]
+    cycle_time = "2026-09-23T06:00:00+00:00"
+    poll_thread: threading.Thread | None = None
+
+    def source_report(**_kwargs):
+        return probe.SourceClockUpdateProbeReport(
+            status="SOURCE_CLOCK_UPDATES_CHANGED", model_count=1,
+            updated_sources=("icon_global",), affected_cities=("Munich",),
+            model_updates_path="/tmp/updates", cursor_path="/tmp/cursor",
+            cursor_values=(("icon_global", cycle_time),),
+            cursor_preimage=(("icon_global", None),),
+            source_runs=(("icon_global", cycle_time, cycle_time, 3600),),
+        )
+
+    def download(_cfg, *, source_clock_report, **_kwargs):
+        if scans[0] > 0:
+            raw_inflight.set()
+            assert release_raw.wait(timeout=5)
+        return {
+            "status": "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+            "source_results": {"icon_global": {
+                "status": "SOURCE_CLOCK_SOURCE_RAW_INPUTS_DOWNLOADED",
+                "cycle": source_clock_report.source_runs[0][1],
+            }},
+        }
+
+    def fusion(_cfg, **_kwargs):
+        scans[0] += 1
+        if scans[0] == 1:
+            first_scan_started.set()
+            assert release_first_scan.wait(timeout=5)
+        return {
+            "status": (
+                "FUSION_UPGRADE_TRIGGER" if scans[0] == 1
+                else "FUSION_UPGRADE_TRIGGER_FAILSOFT_SKIPPED"
+            ),
+        }
+
+    def cycle_trigger(_cfg, **_kwargs):
+        first_scan_done.set()
+        return {"status": "CYCLE_ADVANCE_TRIGGER"}
+
+    monkeypatch.setattr(prod, "_replacement_forecast_live_materialization_queue_config", lambda: {"test": 1})
+    monkeypatch.setattr(prod, "_recover_held_common_cycle_anchors_if_needed", lambda *_a, **_k: None)
+    monkeypatch.setattr(probe, "probe_openmeteo_source_clock_updates", source_report)
+    real_cursor_sources = probe.source_clock_scoped_download_cursor_sources
+
+    def eligible_sources(report, *, source_clock_report):
+        result = real_cursor_sources(report, source_clock_report=source_clock_report)
+        eligible_batches.append(result)
+        return result
+
+    monkeypatch.setattr(probe, "source_clock_scoped_download_cursor_sources", eligible_sources)
+    monkeypatch.setattr(prod, "_download_bayes_precision_fusion_source_clock_raw_inputs_if_needed", download)
+    monkeypatch.setattr(prod, "_enqueue_fusion_upgrade_reseeds_if_needed", fusion)
+    monkeypatch.setattr(prod, "_enqueue_cycle_advance_reseeds_if_needed", cycle_trigger)
+    monkeypatch.setattr(probe, "advance_source_clock_cursor", lambda _payload, *, sources: advances.append(sources) or sources)
+
+    try:
+        first = ingest_main._replacement_availability_poll_tick.__wrapped__()
+        assert first["source_clock_cursor_advanced_sources"] == ()
+        assert first_scan_started.wait(timeout=2)
+        assert tuple(ingest_main._BROAD_RESEED_ACTIVE["requests"].values())[0][
+            "cursor_sources"
+        ] == ("icon_global",)
+        poll_thread = threading.Thread(target=ingest_main._replacement_availability_poll_tick.__wrapped__)
+        poll_thread.start()
+        assert raw_inflight.wait(timeout=2)
+        release_first_scan.set()
+        assert first_scan_done.wait(timeout=2)
+        assert advances == [], "first scan cannot acknowledge while later raw is in flight"
+    finally:
+        release_first_scan.set()
+        release_raw.set()
+        if poll_thread is not None:
+            poll_thread.join(timeout=5)
+        broad_reseed_join()
+
+    assert poll_thread is not None and not poll_thread.is_alive()
+    assert scans == [2]
+    assert eligible_batches == [("icon_global",), ("icon_global",)]
+    assert advances == [], "failed pending same-cycle raw must also block old cursor"
+
+
+def test_broad_reseed_pending_is_bounded_and_preserves_distinct_sources(
+    monkeypatch, broad_reseed_join,
+) -> None:
+    import threading
+
+    import src.ingest_main as ingest_main
+
+    entered = threading.Event()
+    release = threading.Event()
+    seen: list[tuple[str, ...]] = []
+
+    def run(batch):
+        seen.append(tuple(source for request in batch["requests"].values() for source in request["cursor_sources"]))
+        if len(seen) == 1:
+            entered.set()
+            assert release.wait(timeout=5)
+        return True
+
+    monkeypatch.setattr(ingest_main, "_run_broad_reseed_batch", run)
+    monkeypatch.setattr("src.data.source_clock_update_probe.advance_source_clock_cursor", lambda _payload, *, sources: sources)
+
+    def enqueue(source, *, cfg=None):
+        return ingest_main._enqueue_broad_reseed_batch(
+            cfg or {"test": 1},
+            include_cycle_advance=source == "cycle",
+            source_clock_payload={"cursor_path": "/tmp/test", "updated_sources": [source], "cursor_values": {source: "v1"}, "cursor_preimage": {source: None}},
+            cursor_sources=(source,),
+            download_report={"status": "downloaded"},
+        )
+
+    try:
+        assert enqueue("active") == "SOURCE_BROAD_RESEEDS_ASYNC_PENDING"
+        assert entered.wait(timeout=2)
+        assert enqueue("other", cfg={"test": 2}) == "SOURCE_BROAD_RESEEDS_DEFERRED_CONFIG"
+        for i in range(64):
+            assert enqueue(f"source{i}") == "SOURCE_BROAD_RESEEDS_ASYNC_PENDING"
+        assert enqueue("overflow") == "SOURCE_BROAD_RESEEDS_ASYNC_CAPACITY_DEFERRED"
+        assert len(ingest_main._BROAD_RESEED_PENDING["requests"]) == 64
+    finally:
+        release.set()
+        broad_reseed_join()
+
+    assert seen[0] == ("active",)
+    assert seen[1] == tuple(f"source{i}" for i in range(64))
+
+
+def test_broad_reseed_failure_defers_cursor_and_next_poll_retries(
+    monkeypatch, broad_reseed_join,
+) -> None:
+    import src.data.replacement_forecast_production as prod
+    import src.data.source_clock_update_probe as probe
+    import src.ingest_main as ingest_main
+
+    attempts = [0]
+    advances: list[tuple[str, ...]] = []
+    snapshots: list[dict[str, object]] = []
+
+    def fusion(_cfg, *, manifest_snapshot):
+        attempts[0] += 1
+        snapshots.append(manifest_snapshot)
+        if attempts[0] == 1:
+            return {"status": "FUSION_UPGRADE_TRIGGER_FAILSOFT_SKIPPED"}
+        return {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 1}
+
+    def cycle(_cfg, *, manifest_snapshot):
+        assert manifest_snapshot is snapshots[-1]
+        return {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 1}
+
+    monkeypatch.setattr(prod, "_enqueue_fusion_upgrade_reseeds_if_needed", fusion)
+    monkeypatch.setattr(prod, "_enqueue_cycle_advance_reseeds_if_needed", cycle)
+    monkeypatch.setattr(probe, "advance_source_clock_cursor", lambda _payload, *, sources: advances.append(tuple(sources)) or sources)
+
+    def enqueue():
+        return ingest_main._enqueue_broad_reseed_batch(
+            {"test": 1},
+            include_cycle_advance=True,
+            source_clock_payload={"cursor_path": "/tmp/test", "updated_sources": ["icon_global"], "cursor_values": {"icon_global": "v1"}, "cursor_preimage": {"icon_global": None}},
+            cursor_sources=("icon_global",),
+            download_report={"status": "downloaded"},
+        )
+
+    assert enqueue() == "SOURCE_BROAD_RESEEDS_ASYNC_PENDING"
+    broad_reseed_join()
+    assert advances == []
+    assert enqueue() == "SOURCE_BROAD_RESEEDS_ASYNC_PENDING"
+    broad_reseed_join()
+    assert attempts == [2]
+    assert advances == [("icon_global",)]
+
+
+def test_broad_reseed_partial_source_proof_advances_only_eligible_source(
+    monkeypatch, broad_reseed_join,
+) -> None:
+    import src.data.replacement_forecast_production as prod
+    import src.data.source_clock_update_probe as probe
+    import src.ingest_main as ingest_main
+
+    advanced: list[str] = []
+    monkeypatch.setattr(prod, "_enqueue_fusion_upgrade_reseeds_if_needed", lambda _cfg, **_kw: {"status": "FUSION_UPGRADE_TRIGGER"})
+    monkeypatch.setattr(prod, "_enqueue_cycle_advance_reseeds_if_needed", lambda _cfg, **_kw: {"status": "CYCLE_ADVANCE_TRIGGER"})
+    monkeypatch.setattr(probe, "advance_source_clock_cursor", lambda _payload, *, sources: advanced.extend(sources) or sources)
+    assert ingest_main._enqueue_broad_reseed_batch(
+        {"test": 1}, include_cycle_advance=True,
+        source_clock_payload={
+            "cursor_path": "/tmp/private-cursor", "updated_sources": ["icon_d2", "ukmo"],
+            "cursor_values": {"icon_d2": "v1", "ukmo": "v1"},
+            "cursor_preimage": {"icon_d2": None, "ukmo": None},
+        },
+        cursor_sources=("ukmo",),
+        download_report={"status": "partial"},
+    ) == "SOURCE_BROAD_RESEEDS_ASYNC_PENDING"
+    broad_reseed_join()
+    assert advanced == ["ukmo"]
+
+
+def test_poll_exception_after_raw_commit_invalidates_earlier_cursor_candidate(
+    monkeypatch, broad_reseed_join,
+) -> None:
+    import threading
+
+    import pytest
+
+    import src.data.replacement_forecast_production as prod
+    import src.data.source_clock_update_probe as probe
+    import src.ingest_main as ingest_main
+
+    first_scan_started = threading.Event()
+    release_scan = threading.Event()
+    raw_committed = threading.Event()
+    advances: list[str] = []
+
+    def fusion(_cfg, **_kwargs):
+        first_scan_started.set()
+        assert release_scan.wait(timeout=5)
+        return {"status": "FUSION_UPGRADE_TRIGGER"}
+
+    monkeypatch.setattr(prod, "_enqueue_fusion_upgrade_reseeds_if_needed", fusion)
+    monkeypatch.setattr(prod, "_enqueue_cycle_advance_reseeds_if_needed", lambda _cfg, **_kwargs: {"status": "CYCLE_ADVANCE_TRIGGER"})
+    monkeypatch.setattr(probe, "advance_source_clock_cursor", lambda _payload, *, sources: advances.extend(sources) or sources)
+    assert ingest_main._enqueue_broad_reseed_batch(
+        {"test": 1}, include_cycle_advance=True,
+        source_clock_payload={
+            "cursor_path": "/tmp/test", "updated_sources": ["icon_global"],
+            "cursor_values": {"icon_global": "v1"},
+            "cursor_preimage": {"icon_global": None},
+        },
+        cursor_sources=("icon_global",),
+        download_report={"status": "downloaded"},
+    ) == "SOURCE_BROAD_RESEEDS_ASYNC_PENDING"
+    try:
+        assert first_scan_started.wait(timeout=2)
+
+        def failing_poll():
+            raw_committed.set()
+            raise RuntimeError("download failed after raw commit")
+
+        with pytest.raises(RuntimeError):
+            ingest_main._source_clock_poll_in_flight(failing_poll)()
+        assert raw_committed.is_set()
+    finally:
+        release_scan.set()
+        broad_reseed_join()
+    assert advances == []
+
+
+def test_pending_distinct_raw_receipts_each_keep_their_trigger_limit(
+    monkeypatch, tmp_path, broad_reseed_join,
+) -> None:
+    import threading
+
+    import src.data.replacement_forecast_production as prod
+    import src.data.source_clock_update_probe as probe
+    import src.ingest_main as ingest_main
+
+    entered = threading.Event()
+    release = threading.Event()
+    seeds: list[str] = []
+    advances: list[tuple[str, ...]] = []
+
+    def fusion(cfg, *, manifest_snapshot):
+        assert cfg["seed_limit"] == 1
+        assert isinstance(manifest_snapshot, dict)
+        if not seeds:
+            entered.set()
+            assert release.wait(timeout=5)
+        # Model the producer's one-seed-per-call limit: the second distinct
+        # receipt needs another call even when the first reports success.
+        seeds.append(("scope-A", "scope-B")[len(seeds)])
+        return {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 1}
+
+    monkeypatch.setattr(prod, "_enqueue_fusion_upgrade_reseeds_if_needed", fusion)
+    monkeypatch.setattr(probe, "advance_source_clock_cursor", lambda _payload, *, sources: advances.append(sources) or sources)
+
+    def enqueue(scope):
+        return ingest_main._enqueue_broad_reseed_batch(
+            {"seed_limit": 1, "seed_dir": tmp_path},
+            include_cycle_advance=False,
+            source_clock_payload={
+                "cursor_path": str(tmp_path / "cursor"),
+                "updated_sources": ["icon_global"],
+                "cursor_values": {"icon_global": "same-cycle"},
+                "cursor_preimage": {"icon_global": None},
+            },
+            cursor_sources=("icon_global",),
+            download_report={"status": scope},
+        )
+
+    try:
+        assert enqueue("scope-A") == "SOURCE_BROAD_RESEEDS_ASYNC_PENDING"
+        assert entered.wait(timeout=2)
+        assert enqueue("scope-B") == "SOURCE_BROAD_RESEEDS_ASYNC_PENDING"
+        assert advances == []
+    finally:
+        release.set()
+        broad_reseed_join()
+    assert seeds == ["scope-A", "scope-B"]
+    assert len(advances) == 2
+
+
+def test_broad_reseed_cursor_cas_cannot_rewind_later_provider_run(
+    monkeypatch, tmp_path, broad_reseed_join,
+) -> None:
+    """Use the production cursor writer against a private test cursor file."""
+    import json
+
+    import src.data.replacement_forecast_production as prod
+    import src.ingest_main as ingest_main
+
+    cursor_path = tmp_path / "cursor.json"
+    early = "2026-09-23T06:00:00+00:00"
+    later = "2026-09-23T12:00:00+00:00"
+    route_hash = "a" * 64
+
+    def payload(cycle):
+        return {
+            "cursor_path": str(cursor_path),
+            "updated_sources": ["icon_global"],
+            "cursor_values": {"icon_global": f"v4:{cycle}:{route_hash}"},
+            "cursor_preimage": {"icon_global": None},
+            "source_runs": {"icon_global": {"initialisation_time": cycle}},
+        }
+
+    monkeypatch.setattr(prod, "_enqueue_fusion_upgrade_reseeds_if_needed", lambda _cfg, **_kw: {"status": "FUSION_UPGRADE_TRIGGER"})
+    monkeypatch.setattr(prod, "_enqueue_cycle_advance_reseeds_if_needed", lambda _cfg, **_kw: {"status": "CYCLE_ADVANCE_TRIGGER"})
+    for cycle in (later, early):
+        assert ingest_main._enqueue_broad_reseed_batch(
+            {"test": 1},
+            include_cycle_advance=True,
+            source_clock_payload=payload(cycle),
+            cursor_sources=("icon_global",),
+            download_report={"status": "downloaded"},
+        ) == "SOURCE_BROAD_RESEEDS_ASYNC_PENDING"
+        broad_reseed_join()
+
+    assert json.loads(cursor_path.read_text(encoding="utf-8"))["icon_global"] == (
+        f"v4:{later}:{route_hash}"
+    )
 
 
 def test_legacy_scheduler_mode_flags_deleted() -> None:
@@ -593,7 +1107,9 @@ def test_replacement_discovery_runs_with_backlog_and_retries_pending_family(
     assert daemon._replacement_forecast_last_discovery_revision is None
 
 
-def test_replacement_availability_fast_poll_passes_changed_source_clock_report(monkeypatch) -> None:
+def test_replacement_availability_fast_poll_passes_changed_source_clock_report(
+    monkeypatch, broad_reseed_join
+) -> None:
     """A scoped commit must run one broad catch-up without duplicating its markers."""
     import src.ingest_main as ingest_main
     import src.data.replacement_forecast_production as prod
@@ -738,16 +1254,17 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
     monkeypatch.setattr(prod, "_enqueue_cycle_advance_reseeds_if_needed", _cycle_reseed)
 
     result = ingest_main._replacement_availability_poll_tick.__wrapped__()
+    broad_reseed_join()
 
     assert result["status"] == "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
     assert result["source_clock_updated_sources"] == ["icon_global"]
     assert "current_target_download" not in result
     assert result["fusion_upgrade_seeds_enqueued"] == 2
-    assert result["broad_fusion_upgrade_seeds_enqueued"] == 1
+    assert "broad_fusion_upgrade_seeds_enqueued" not in result
     assert result["cycle_advance_seeds_enqueued"] == 2
     assert result["cycle_advance_detail"]["held_advances_detected"] == 1
-    assert result["source_clock_cursor_advanced_sources"] == ("icon_global",)
-    assert result["source_clock_cursor_deferred_sources"] == ()
+    assert result["source_clock_cursor_advanced_sources"] == ()
+    assert result["source_clock_cursor_deferred_sources"] == ("icon_global",)
     assert probe_kwargs == [{"advance_cursor": False}]
     assert fusion_calls[0]["scopes"] == (
         ("Seoul", "2026-07-03", "high"),
@@ -771,7 +1288,8 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
         ("Seoul", "2026-07-03", "high"),
         ("Wellington", "2026-07-03", "high"),
     )
-    assert fusion_calls[1] == {"changed_sources": None}
+    assert fusion_calls[1] == {"manifest_snapshot": {}}
+    assert fusion_calls[1]["manifest_snapshot"] is not cycle_calls[0]["manifest_snapshot"]
     assert markers == {
         (scope, raw_revision) for scope in all_changed_scopes
     }
@@ -785,13 +1303,11 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
         "fusion_reseed",
         "cursor",
     ]
-    assert result["reseed_maintenance_status"] == (
-        "SOURCE_COMMIT_RESEEDS_PUBLISHED"
-    )
+    assert result["reseed_maintenance_status"] == "SOURCE_BROAD_RESEEDS_ASYNC_PENDING"
 
 
 def test_replacement_availability_pending_callback_runs_broad_fusion_catchup(
-    monkeypatch,
+    monkeypatch, broad_reseed_join,
 ) -> None:
     """A callback that outlives the poll cannot suppress the one broad fusion catch-up."""
     import threading
@@ -910,7 +1426,8 @@ def test_replacement_availability_pending_callback_runs_broad_fusion_catchup(
         )
         assert result["source_clock_cursor_advanced_sources"] == ()
         assert result["source_clock_cursor_deferred_sources"] == ("icon_global",)
-        assert fusion_calls == [{"changed_sources": None}]
+        broad_reseed_join()
+        assert fusion_calls == [{"manifest_snapshot": {}}]
         assert cycle_calls == []
     finally:
         release_callback.set()
@@ -931,6 +1448,7 @@ def test_replacement_availability_pending_callback_runs_broad_fusion_catchup(
 def test_pending_callback_broad_trigger_persists_missed_revision_before_cursor(
     monkeypatch,
     tmp_path,
+    broad_reseed_join,
 ) -> None:
     """The real broad trigger durably queues a missed raw revision before cursor advance."""
     import json
@@ -1174,17 +1692,148 @@ def test_pending_callback_broad_trigger_persists_missed_revision_before_cursor(
 
     try:
         result = ingest_main._replacement_availability_poll_tick.__wrapped__()
+        broad_reseed_join()
     finally:
         release_callback.set()
         if callback_thread is not None:
             callback_thread.join(timeout=5)
 
     assert result["reseed_maintenance_status"] == "SOURCE_COMMIT_RESEEDS_DEFERRED"
-    assert result["broad_fusion_upgrade_seeds_enqueued"] == 1
+    assert "broad_fusion_upgrade_seeds_enqueued" not in result
     assert result["source_clock_cursor_advanced_sources"] == ()
     assert result["source_clock_cursor_deferred_sources"] == ("icon_global",)
     assert cursor_evidence == []
     assert callback_thread is not None and not callback_thread.is_alive()
+
+
+def test_pending_broad_receipts_preserve_real_producer_limit_one_per_scan(
+    monkeypatch, tmp_path, broad_reseed_join,
+) -> None:
+    """Two raw families need two real trigger calls when the seed limit is one."""
+    import json
+    import sqlite3
+    import threading
+    from datetime import datetime, timezone
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    import src.data.replacement_forecast_current_target_plan as target_plan
+    import src.data.replacement_forecast_production as prod
+    import src.data.replacement_fusion_upgrade_trigger as fusion_trigger
+    import src.data.source_clock_update_probe as probe
+    import src.ingest_main as ingest_main
+    from src.data.replacement_forecast_readiness import SOURCE_ID
+    from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
+
+    db = tmp_path / "forecasts.db"
+    seed_dir = tmp_path / "seeds"
+    carrier = "2026-07-28T06:00:00+00:00"
+    newer = "2026-07-28T12:00:00+00:00"
+    conn = sqlite3.connect(db)
+    ensure_replacement_forecast_live_schema(conn)
+    raw_ids = {}
+    for city in ("London", "Paris"):
+        conn.execute(
+            """INSERT INTO raw_model_forecasts
+                (model, city, target_date, metric, source_cycle_time,
+                 source_available_at, captured_at, lead_days, forecast_value_c, endpoint)
+                VALUES ('icon_global', ?, '2026-07-30', 'low', ?, ?, ?, 2, 18.0, 'single_runs')""",
+            (city, carrier, carrier, carrier),
+        )
+        old_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        provenance = {"bayes_precision_fusion": {
+            "used_models": ["icon_global"],
+            "current_value_serving": {"icon_global": {"raw_model_forecast_id": old_id}},
+            "source_clock_one_scheme": {"configured_sources": ["icon_global"]},
+        }}
+        conn.execute(
+            """INSERT INTO forecast_posteriors
+                (source_id, product_id, data_version, city, target_date,
+                 temperature_metric, source_cycle_time, source_available_at,
+                 computed_at, q_json, q_lcb_json, posterior_method,
+                 dependency_source_run_ids_json, provenance_json,
+                 runtime_layer, training_allowed)
+                VALUES (?, 'pid', 'dv', ?, '2026-07-30', 'low', ?, ?, ?,
+                        '{}', '{}', ?, '{}', ?, 'live', 0)""",
+            (SOURCE_ID, city, carrier, carrier, "2026-07-28T10:00:00+00:00",
+             SOURCE_ID, json.dumps(provenance)),
+        )
+        conn.execute(
+            """INSERT INTO raw_model_forecasts
+                (model, city, target_date, metric, source_cycle_time,
+                 source_available_at, captured_at, lead_days, forecast_value_c, endpoint)
+                VALUES ('icon_global', ?, '2026-07-30', 'low', ?, ?, ?, 2, 17.0, 'single_runs')""",
+            (city, newer, newer, newer),
+        )
+        raw_ids[city] = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(target_plan, "build_replacement_forecast_current_target_plan", lambda *_a, **_k: SimpleNamespace(
+        status="READY", reason_codes=(), rows=tuple(
+            SimpleNamespace(city=city, target_date="2026-07-30", temperature_metric="low",
+                            day0_observed_extreme_required=False)
+            for city in ("London", "Paris")
+        ),
+    ))
+    monkeypatch.setattr(prod, "_prepared_reseed_manifests", lambda *_a, **_k: (
+        datetime(2026, 7, 28, 13, tzinfo=timezone.utc), (),
+    ))
+
+    def build_private(_conn, **kwargs):
+        stage = Path(kwargs["seed_file"])
+        stage.parent.mkdir(parents=True, exist_ok=True)
+        stage.write_text(json.dumps({"city": kwargs["city"]}) + "\n", encoding="utf-8")
+        return stage
+
+    monkeypatch.setattr(fusion_trigger, "_build_and_write_upgrade_seed", build_private)
+    original_fusion = prod._enqueue_fusion_upgrade_reseeds_if_needed
+    entered = threading.Event()
+    release = threading.Event()
+    calls = [0]
+
+    def fusion(cfg, **kwargs):
+        calls[0] += 1
+        if calls[0] == 1:
+            entered.set()
+            assert release.wait(timeout=5)
+        return original_fusion(cfg, **kwargs)
+
+    monkeypatch.setattr(prod, "_enqueue_fusion_upgrade_reseeds_if_needed", fusion)
+    advanced: list[str] = []
+    monkeypatch.setattr(probe, "advance_source_clock_cursor", lambda _payload, *, sources: advanced.extend(sources) or sources)
+    cfg = {"forecast_db": db, "seed_dir": seed_dir, "raw_manifest_dir": tmp_path / "raw", "seed_limit": 1}
+    payload = {
+        "cursor_path": str(tmp_path / "cursor"), "updated_sources": ["icon_global"],
+        "cursor_values": {"icon_global": "same-cycle"},
+        "cursor_preimage": {"icon_global": None},
+    }
+    try:
+        assert ingest_main._enqueue_broad_reseed_batch(
+            cfg, include_cycle_advance=False, source_clock_payload=payload,
+            cursor_sources=("icon_global",), download_report={"status": "raw-A"},
+        ) == "SOURCE_BROAD_RESEEDS_ASYNC_PENDING"
+        assert entered.wait(timeout=2)
+        assert ingest_main._enqueue_broad_reseed_batch(
+            cfg, include_cycle_advance=False, source_clock_payload=payload,
+            cursor_sources=("icon_global",), download_report={"status": "raw-B"},
+        ) == "SOURCE_BROAD_RESEEDS_ASYNC_PENDING"
+        assert advanced == []
+    finally:
+        release.set()
+        broad_reseed_join()
+
+    evidence = sqlite3.connect(db).execute(
+        """SELECT city, capturable_family_set, seed_file FROM fusion_upgrade_enqueues
+           WHERE city IN ('London', 'Paris') ORDER BY city"""
+    ).fetchall()
+    assert calls == [2]
+    assert {row[0] for row in evidence} == {"London", "Paris"}
+    for city, marker, seed_file in evidence:
+        assert f"|input_revision=icon_global:{raw_ids[city]}" in marker
+        assert Path(seed_file).is_file()
+        assert json.loads(Path(seed_file).read_text(encoding="utf-8"))["city"] == city
+    assert len(advanced) == 2
 
 
 def test_ecmwf_source_clock_captures_anchor_before_single_runs_fanout(monkeypatch) -> None:
@@ -1396,7 +2045,7 @@ def test_source_commit_reseed_triggers_share_one_manifest_snapshot(
 
 
 def test_replacement_availability_notification_error_keeps_global_reseed(
-    monkeypatch,
+    monkeypatch, broad_reseed_join,
 ) -> None:
     import src.data.replacement_forecast_production as prod
     import src.data.source_clock_update_probe as source_clock_probe
@@ -1481,17 +2130,15 @@ def test_replacement_availability_notification_error_keeps_global_reseed(
     )
 
     result = ingest_main._replacement_availability_poll_tick.__wrapped__()
+    broad_reseed_join()
 
     assert result["source_commit_notification_errors"]
-    assert fusion_calls == [{"changed_sources": None}]
-    assert cycle_calls == [{}]
+    assert fusion_calls == [{"manifest_snapshot": cycle_calls[0]["manifest_snapshot"]}]
+    assert cycle_calls == [{"manifest_snapshot": fusion_calls[0]["manifest_snapshot"]}]
     assert result["reseed_maintenance_status"] == (
-        "SOURCE_BROAD_RESEEDS_RETRYABLE"
+        "SOURCE_BROAD_RESEEDS_ASYNC_PENDING"
     )
-    assert result["reseed_errors"] == (
-        "fusion_upgrade:RESEED_CONFIGURATION_UNAVAILABLE",
-        "cycle_advance:RESEED_CONFIGURATION_UNAVAILABLE",
-    )
+    assert "reseed_errors" not in result
     assert result["source_clock_cursor_advanced_sources"] == ()
     assert result["source_clock_cursor_deferred_sources"] == ("icon_global",)
     assert ingest_main._REPLACEMENT_BPF_NO_PROGRESS_FAILURES == 0
@@ -1499,7 +2146,7 @@ def test_replacement_availability_notification_error_keeps_global_reseed(
 
 
 def test_replacement_availability_cooldown_keeps_metadata_probe_alive_but_suppresses_reseeds(
-    monkeypatch,
+    monkeypatch, broad_reseed_join,
 ) -> None:
     import src.data.replacement_forecast_production as prod
     import src.data.source_clock_update_probe as source_clock_probe
@@ -1550,7 +2197,7 @@ def test_replacement_availability_cooldown_keeps_metadata_probe_alive_but_suppre
     monkeypatch.setattr(
         prod,
         "_enqueue_cycle_advance_reseeds_if_needed",
-        lambda _cfg: calls.append("cycle_reseed")
+        lambda _cfg, **_kwargs: calls.append("cycle_reseed")
         or {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 0},
     )
     monkeypatch.setattr(ingest_main.time, "monotonic", lambda: 100.0)
@@ -1562,20 +2209,18 @@ def test_replacement_availability_cooldown_keeps_metadata_probe_alive_but_suppre
 
     first = ingest_main._replacement_availability_poll_tick.__wrapped__()
     second = ingest_main._replacement_availability_poll_tick.__wrapped__()
+    broad_reseed_join()
 
-    assert first["fusion_upgrade_status"] == "FUSION_UPGRADE_TRIGGER"
-    assert first["cycle_advance_status"] == "CYCLE_ADVANCE_TRIGGER"
+    assert first["reseed_maintenance_status"] == "SOURCE_BROAD_RESEEDS_ASYNC_PENDING"
     assert second["reseed_maintenance_status"] == (
         "RESEED_MAINTENANCE_NOT_DUE"
     )
     assert "fusion_upgrade_status" not in second
-    assert calls == [
-        "probe",
-        "scoped_download",
-        "fusion_reseed",
-        "cycle_reseed",
-        "probe",
-        "scoped_download",
+    assert [call for call in calls if call in {"probe", "scoped_download"}] == [
+        "probe", "scoped_download", "probe", "scoped_download",
+    ]
+    assert [call for call in calls if call.endswith("reseed")] == [
+        "fusion_reseed", "cycle_reseed",
     ]
     assert ingest_main._REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC == 341.0
 
