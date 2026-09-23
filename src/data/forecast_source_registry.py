@@ -15,7 +15,10 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Literal
-from src.contracts.ensemble_snapshot_provenance import ECMWF_OPENDATA_HIGH_DATA_VERSION
+from src.contracts.ensemble_snapshot_provenance import (
+    ECMWF_OPENDATA_HIGH_DATA_VERSION,
+    ECMWF_OPENDATA_LOW_DATA_VERSION,
+)
 
 from src.data.forecast_ingest_protocol import ForecastAuthorityTier, ForecastIngestProtocol
 from src.data.tigge_client import TIGGEIngest
@@ -325,7 +328,7 @@ REPLACEMENT_FORECAST_PRODUCTS: dict[str, ForecastProductSpec] = {
         param="mx2t3/mn2t3",
         aggregation_window_policy="period_3h_local_calendar_day",
         high_data_version=ECMWF_OPENDATA_HIGH_DATA_VERSION,
-        low_data_version="ecmwf_opendata_mn2t3_local_calendar_day_min",
+        low_data_version=ECMWF_OPENDATA_LOW_DATA_VERSION,
         expected_members=51,
         training_allowed=True,
     ),

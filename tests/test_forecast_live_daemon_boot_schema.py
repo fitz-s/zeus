@@ -1,5 +1,5 @@
 # Created: 2026-07-20
-# Last reused/audited: 2026-09-01
+# Last reused/audited: 2026-09-23
 # Authority basis: operator-directed DB hot-path, fault-isolation, and committed ENS wake liveness.
 
 from __future__ import annotations
@@ -600,8 +600,9 @@ def test_coordinate_manifest_seals_source_run_and_dataset_identity(track: str) -
     assert ":coordsha:" in expected_a
     assert identity_a["data_version"].endswith(expected_a.split(":coordsha:", 1)[1].split(":", 1)[0])
     assert identity_b["data_version"].endswith(expected_b.split(":coordsha:", 1)[1].split(":", 1)[0])
-    assert expected_a.endswith(":high_boundary_v2") == (track == "mx2t6_high")
-    assert daemon._job_run_id(identity_a).endswith(":high_boundary_v2") == (track == "mx2t6_high")
+    expected_suffix = ":high_boundary_v2" if track == "mx2t6_high" else ":low_window_v2"
+    assert expected_a.endswith(expected_suffix)
+    assert daemon._job_run_id(identity_a).endswith(expected_suffix)
     if track == "mx2t6_high":
         legacy = dict(identity_a, data_version=str(identity_a["data_version"]).replace("_boundary_v2", ""))
         assert daemon._job_run_id(legacy) != daemon._job_run_id(identity_a)
@@ -620,6 +621,39 @@ def test_coordinate_manifest_seals_source_run_and_dataset_identity(track: str) -
         identity_a,
         {"source_run_id": expected_a, "data_version": "legacy-base"},
     ).startswith("DATA_VERSION_IDENTITY_MISMATCH")
+
+
+def test_low_uncertified_coordinate_identity_is_readable_but_not_current() -> None:
+    from hashlib import sha256
+    from src.contracts.ensemble_snapshot_provenance import (
+        ECMWF_OPENDATA_LOW_DATA_VERSION,
+        ECMWF_OPENDATA_LOW_DATA_VERSION_UNCERTIFIED,
+        assert_data_version_allowed,
+        coordinate_bound_data_version,
+        split_coordinate_bound_data_version,
+        opendata_source_run_revision_suffix,
+    )
+    from src.contracts.snapshot_ingest_contract import metric_identity_for_data_version
+
+    manifest_sha = sha256(b'{"coordinate_basis":"A"}').hexdigest()
+    old_identity = coordinate_bound_data_version(
+        ECMWF_OPENDATA_LOW_DATA_VERSION_UNCERTIFIED, manifest_sha
+    )
+    current_identity = coordinate_bound_data_version(
+        ECMWF_OPENDATA_LOW_DATA_VERSION, manifest_sha
+    )
+
+    # Historical LOW rows remain decodable through the strict coordinate parser.
+    assert_data_version_allowed(old_identity)
+    assert split_coordinate_bound_data_version(old_identity) == (
+        ECMWF_OPENDATA_LOW_DATA_VERSION_UNCERTIFIED,
+        manifest_sha,
+    )
+    assert metric_identity_for_data_version(old_identity).data_version == old_identity
+    assert metric_identity_for_data_version(current_identity).data_version == current_identity
+    assert opendata_source_run_revision_suffix(old_identity) == ""
+    assert opendata_source_run_revision_suffix(current_identity) == ":low_window_v2"
+    assert old_identity != current_identity
 
 
 def test_manifest_is_sealed_once_and_old_job_cannot_be_current(monkeypatch) -> None:

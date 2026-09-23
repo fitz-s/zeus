@@ -143,7 +143,7 @@ _HIGH_DATA_VERSION_BY_SOURCE_FAMILY: dict[str, str] = {
 }
 _LOW_DATA_VERSION_BY_SOURCE_FAMILY: dict[str, str] = {
     "tigge": "tigge_mn2t6_local_calendar_day_min",
-    "ecmwf_opendata": "ecmwf_opendata_mn2t3_local_calendar_day_min",
+    "ecmwf_opendata": "ecmwf_opendata_mn2t3_local_calendar_day_min_window_v2",
 }
 
 # Source-family → physical_quantity registry (PR #85 review: physical_quantity

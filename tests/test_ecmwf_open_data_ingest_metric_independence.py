@@ -1,7 +1,7 @@
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
 # Authority basis: PIPELINE_REVIEW.md §7 + PR #190 root-cause
-# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
+# Lifecycle: created=2026-05-19; last_reviewed=2026-09-23; last_reused=never
 # Purpose: Antibody tests — ECMWFOpenDataIngest metric independence (HIGH/LOW path isolation).
 # Reuse: Run when modifying ecmwf_open_data_ingest.py, _fetch_db_payload, or ensemble_client ingest dispatch.
 """Antibody tests: ECMWFOpenDataIngest metric independence.
@@ -36,6 +36,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+from src.contracts.ensemble_snapshot_provenance import (
+    ECMWF_OPENDATA_HIGH_DATA_VERSION,
+    ECMWF_OPENDATA_LOW_DATA_VERSION,
+    opendata_source_run_revision_suffix,
+)
 
 
 _ANCHOR = datetime(2026, 5, 19, 12, 0, 0, tzinfo=timezone.utc)
@@ -102,11 +108,13 @@ def _seal_current_coordinates(conn):
     manifest = runtime_coordinate_manifest_json()
     digest = hashlib.sha256(manifest.encode()).hexdigest()
     for metric, track in (("high", "mx2t6_high"), ("low", "mn2t6_low")):
+        data_version = data_version_for_track(track, manifest)
         conn.execute(
             "UPDATE ensemble_snapshots SET dataset_id=?, manifest_hash=?, provenance_json=?, source_run_id=? WHERE temperature_metric=?",
-            (data_version_for_track(track, manifest), hashlib.sha256((metric + manifest).encode()).hexdigest(),
+            (data_version, hashlib.sha256((metric + manifest).encode()).hexdigest(),
              json.dumps({"manifest_sha256": digest}),
-             f"ecmwf_open_data:{track}:2026-05-19T00Z:coordsha:{digest}" + (":high_boundary_v2" if metric == "high" else ""), metric),
+             f"ecmwf_open_data:{track}:2026-05-19T00Z:coordsha:{digest}"
+             f"{opendata_source_run_revision_suffix(data_version)}", metric),
         )
 
 
@@ -122,9 +130,9 @@ def _make_db(tmp_path: Path, metrics: list[str]) -> Path:
     for metric in metrics:
         base = 20.0 if metric == "high" else 10.0
         dv = (
-            "ecmwf_opendata_mx2t3_local_calendar_day_max"
+            ECMWF_OPENDATA_HIGH_DATA_VERSION
             if metric == "high"
-            else "ecmwf_opendata_mn2t3_local_calendar_day_min"
+            else ECMWF_OPENDATA_LOW_DATA_VERSION
         )
         conn.execute(
             _INSERT_SQL,

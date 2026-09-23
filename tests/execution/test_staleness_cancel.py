@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-27
+# Last reused/audited: 2026-09-23
 # Authority basis: docs/rebuild/schema_packets/w1_2_order_state_extension_schema_packet_2026-07-02.md
 #   (SCH-W1.2-ORDER-STATE) + docs/operations/current/plans/order_engine_rebuild_execution_plan_2026-07-02.md
 #   W4 row (C3 staleness path, same packet: DELETE maker_rest_escalation).
@@ -184,10 +184,16 @@ def _trade_db() -> sqlite3.Connection:
 
 def _forecasts_db() -> sqlite3.Connection:
     from src.state.schema.v2_schema import apply_canonical_schema
+    from src.state.db import (
+        _create_readiness_state, _create_source_run, _create_source_run_coverage,
+    )
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     apply_canonical_schema(conn)
+    _create_source_run(conn)
+    _create_source_run_coverage(conn)
+    _create_readiness_state(conn)
     return conn
 
 
@@ -410,9 +416,14 @@ def _seed_posterior(
     posterior_identity_hash: str,
     source_cycle_time: str,
     provenance_json: str = "{}",
+    snapshot_id: int = 1,
+    snapshot_dataset: str | None = None,
 ) -> None:
     from src.data.replacement_forecast_source_run_identity import (
         expected_replacement_dependency_identity_by_role,
+    )
+    from src.data.replacement_forecast_readiness import (
+        HIGH_DATA_VERSION, LOW_DATA_VERSION, SOURCE_ID,
     )
 
     city, target_date, metric = family
@@ -425,11 +436,12 @@ def _seed_posterior(
             snapshot_id, city, target_date, temperature_metric, physical_quantity,
             observation_field, available_at, fetch_time, lead_hours, members_json,
             model_version, dataset_id, source_id, authority, causality_status,
-            boundary_ambiguous
-        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, 1, '[]', 'fixture', ?,
-                  'ecmwf_open_data', 'VERIFIED', 'OK', 0)
+            boundary_ambiguous, source_run_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, '[]', 'fixture', ?,
+                  'ecmwf_open_data', 'VERIFIED', 'OK', 0, ?)
         """,
         (
+            snapshot_id,
             city,
             target_date,
             metric,
@@ -437,8 +449,36 @@ def _seed_posterior(
             "high_temp" if metric == "high" else "low_temp",
             source_cycle_time,
             source_cycle_time,
-            expected_dataset or "fixture-current-dataset",
+            snapshot_dataset or expected_dataset or "fixture-current-dataset",
+            f"run-{snapshot_id}",
         ),
+    )
+    conn.execute(
+        """INSERT OR IGNORE INTO source_run (
+            source_run_id, source_id, track, release_calendar_key, ingest_mode,
+            origin_mode, source_cycle_time, imported_at, completeness_status, status
+        ) VALUES (?, 'ecmwf_open_data', 'ensemble', 'fixture', 'SCHEDULED_LIVE',
+                  'SCHEDULED_LIVE', ?, ?, 'COMPLETE', 'SUCCESS')""",
+        (f"run-{snapshot_id}", source_cycle_time, source_cycle_time),
+    )
+    conn.execute(
+        """INSERT OR IGNORE INTO source_run_coverage (
+            coverage_id, source_run_id, source_id, source_transport,
+            release_calendar_key, track, city_id, city, city_timezone,
+            target_local_date, temperature_metric, physical_quantity,
+            observation_field, data_version, expected_members, observed_members,
+            expected_steps_json, observed_steps_json, snapshot_ids_json,
+            target_window_start_utc, target_window_end_utc, completeness_status,
+            readiness_status, computed_at, expires_at, recorded_at
+        ) VALUES (?, ?, 'ecmwf_open_data', 'fixture', 'fixture', 'ensemble',
+                  'fixture-city', ?, 'UTC', ?, ?, ?, ?, ?, 1, 1, '[1]', '[1]', ?,
+                  ?, ?, 'COMPLETE', 'LIVE_ELIGIBLE', ?, ?, ?)""",
+        (f"coverage-{snapshot_id}", f"run-{snapshot_id}", city, target_date,
+         metric, "mx2t3_local_calendar_day_max" if metric == "high" else "mn2t3_local_calendar_day_min",
+         "high_temp" if metric == "high" else "low_temp",
+         snapshot_dataset or expected_dataset or "fixture-current-dataset",
+         json.dumps([snapshot_id]), source_cycle_time, "2099-01-01T00:00:00+00:00",
+         source_cycle_time, "2099-01-01T00:00:00+00:00", source_cycle_time),
     )
     conn.execute(
         """
@@ -446,10 +486,40 @@ def _seed_posterior(
             source_id, product_id, data_version, city, target_date, temperature_metric,
             source_cycle_time, source_available_at, computed_at, q_json, posterior_method,
             posterior_identity_hash, provenance_json, dependency_source_run_ids_json
-        ) VALUES ('openmeteo', 'openmeteo_ecmwf_ifs9_bayes_fusion_v1', 'v1', ?, ?, ?, ?, ?, ?, '{}', 'bayes', ?, ?, ?)
+        ) VALUES (?, 'openmeteo_ecmwf_ifs9_bayes_fusion_v1', ?, ?, ?, ?, ?, ?, ?, '{}', 'bayes', ?, ?, ?)
         """,
-        (city, target_date, metric, source_cycle_time, source_cycle_time, source_cycle_time,
-         posterior_identity_hash, provenance_json, json.dumps({"current_ensemble_snapshot": 1})),
+        (SOURCE_ID, HIGH_DATA_VERSION if metric == "high" else LOW_DATA_VERSION,
+         city, target_date, metric, source_cycle_time, source_cycle_time, source_cycle_time,
+         posterior_identity_hash, provenance_json, json.dumps({"current_ensemble_snapshot": snapshot_id})),
+    )
+    conn.commit()
+
+
+def _certify_latest_posterior(conn, family, *, computed_at: str = "2026-07-03T21:00:00+00:00") -> None:
+    from src.data.replacement_forecast_readiness import (
+        HIGH_DATA_VERSION, LOW_DATA_VERSION, PRODUCT_ID, SOURCE_ID, STRATEGY_KEY,
+    )
+
+    city, target_date, metric = family
+    row = conn.execute(
+        "SELECT posterior_id, source_available_at FROM forecast_posteriors ORDER BY posterior_id DESC LIMIT 1"
+    ).fetchone()
+    conn.execute(
+        """INSERT OR REPLACE INTO readiness_state (
+            readiness_id, scope_key, scope_type, city, target_local_date,
+            temperature_metric, source_id, data_version, strategy_key,
+            status, computed_at, expires_at, dependency_json
+        ) VALUES ('test-ready', 'test-scope', 'strategy', ?, ?, ?, ?, ?, ?, 'READY', ?, ?, ?)""",
+        (city, target_date, metric, SOURCE_ID,
+         HIGH_DATA_VERSION if metric == "high" else LOW_DATA_VERSION,
+         STRATEGY_KEY, computed_at, "2026-07-05T00:00:00+00:00",
+         json.dumps({"dependencies": [{
+             "role": "soft_anchor_posterior", "source_id": SOURCE_ID,
+             "product_id": PRODUCT_ID,
+             "data_version": HIGH_DATA_VERSION if metric == "high" else LOW_DATA_VERSION,
+             "status": "READY", "posterior_id": row[0],
+             "source_available_at": row[1],
+         }]})),
     )
     conn.commit()
 
@@ -781,12 +851,86 @@ class TestResolveOrderFamilies:
 
 
 class TestReadCurrentFamilyQVersions:
+    def test_certified_low_window_v2_supersedes_retained_uncertified_18z(self):
+        from src.contracts.ensemble_snapshot_provenance import (
+            ECMWF_OPENDATA_LOW_DATA_VERSION_UNCERTIFIED,
+        )
+
+        conn = _forecasts_db()
+        family = ("Miami", "2026-07-04", "low")
+        _seed_posterior(
+            conn, family=family, posterior_identity_hash="q-old-18z",
+            source_cycle_time="2026-07-03T18:00:00+00:00", snapshot_id=1,
+            snapshot_dataset=ECMWF_OPENDATA_LOW_DATA_VERSION_UNCERTIFIED,
+        )
+        _seed_posterior(
+            conn, family=family, posterior_identity_hash="q-certified-12z",
+            source_cycle_time="2026-07-03T12:00:00+00:00", snapshot_id=2,
+        )
+        _certify_latest_posterior(conn, family)
+
+        current = read_current_family_q_versions(conn, [family], now=NOW)
+
+        assert current[family] == "q-certified-12z"
+        assert classify_cancel_set(
+            [_entry("rest", q_version="q-certified-12z", age_minutes=5)],
+            {"rest": family}, current, now=NOW, deadline_minutes=DEADLINE_MIN,
+        ) == []
+
+    def test_missing_or_invalid_certificate_never_uses_uncertified_row(self):
+        conn = _forecasts_db()
+        _seed_posterior(
+            conn, family=FAMILY, posterior_identity_hash="q-uncertified",
+            source_cycle_time="2026-07-03T12:00:00+00:00",
+        )
+        unknown = read_current_family_q_versions(conn, [FAMILY], now=NOW)
+        assert unknown[FAMILY] is None
+        assert classify_cancel_set(
+            [_entry("rest", q_version="q-uncertified", age_minutes=5)],
+            {"rest": FAMILY}, unknown, now=NOW, deadline_minutes=DEADLINE_MIN,
+        ) == []
+
+        _certify_latest_posterior(conn, FAMILY)
+        conn.execute(
+            "UPDATE readiness_state SET dependency_json = ?",
+            (json.dumps({"dependencies": [{"role": "soft_anchor_posterior", "posterior_id": 999}]}),),
+        )
+        conn.commit()
+        assert read_current_family_q_versions(conn, [FAMILY], now=NOW)[FAMILY] is None
+
+        conn.execute("UPDATE readiness_state SET status = 'BLOCKED'")
+        conn.commit()
+        assert read_current_family_q_versions(conn, [FAMILY], now=NOW)[FAMILY] is None
+
+        conn.execute("DROP TABLE readiness_state")
+        assert read_current_family_q_versions(conn, [FAMILY], now=NOW)[FAMILY] is None
+
+    def test_certified_current_snapshot_without_coverage_is_blocked(self):
+        conn = _forecasts_db()
+        _seed_posterior(
+            conn, family=FAMILY, posterior_identity_hash="q-covered",
+            source_cycle_time="2026-07-03T12:00:00+00:00",
+        )
+        _certify_latest_posterior(conn, FAMILY)
+        conn.execute(
+            "UPDATE source_run_coverage SET readiness_status = 'BLOCKED' WHERE source_run_id = 'run-1'"
+        )
+        conn.commit()
+
+        result = read_current_family_q_versions(conn, [FAMILY], now=NOW)
+
+        assert result[FAMILY] == (
+            "__Q_AUTHORITY_BLOCKED__:q-covered:REPLACEMENT_CURRENT_ENSEMBLE_SNAPSHOT_COVERAGE_BLOCKED"
+        )
+
+
     def test_freshest_posterior_wins(self):
         conn = _forecasts_db()
         _seed_posterior(conn, family=FAMILY, posterior_identity_hash="q-old", source_cycle_time="2026-07-03T00:00:00+00:00")
         _seed_posterior(conn, family=FAMILY, posterior_identity_hash="q-new", source_cycle_time="2026-07-03T12:00:00+00:00")
+        _certify_latest_posterior(conn, FAMILY)
 
-        result = read_current_family_q_versions(conn, [FAMILY])
+        result = read_current_family_q_versions(conn, [FAMILY], now=NOW)
 
         assert result[FAMILY] == "q-new"
 
@@ -803,6 +947,7 @@ class TestReadCurrentFamilyQVersions:
             posterior_identity_hash="q-old",
             source_cycle_time="2026-07-03T00:00:00+00:00",
         )
+        _certify_latest_posterior(conn, FAMILY, computed_at="2026-07-03T07:00:00+00:00")
         for model in ("ecmwf_ifs", "icon_global"):
             _seed_raw_model_forecast(
                 conn,
@@ -830,13 +975,14 @@ class TestReadCurrentFamilyQVersions:
             posterior_identity_hash="q-old",
             source_cycle_time="2026-07-03T00:00:00+00:00",
         )
+        _certify_latest_posterior(conn, FAMILY)
         conn.execute(
             "UPDATE ensemble_snapshots SET dataset_id = ? WHERE snapshot_id = 1",
             ("ecmwf_opendata_mx2t3_local_calendar_day_max",),
         )
         conn.commit()
 
-        result = read_current_family_q_versions(conn, [FAMILY])
+        result = read_current_family_q_versions(conn, [FAMILY], now=NOW)
 
         assert result[FAMILY].startswith("__Q_AUTHORITY_BLOCKED__:q-old:")
         assert "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_MISMATCH" in result[FAMILY]
@@ -849,13 +995,14 @@ class TestReadCurrentFamilyQVersions:
             posterior_identity_hash="q-old",
             source_cycle_time="2026-07-03T00:00:00+00:00",
         )
+        _certify_latest_posterior(conn, FAMILY)
         conn.execute(
             "UPDATE forecast_posteriors SET dependency_source_run_ids_json = ?",
             ("{malformed",),
         )
         conn.commit()
 
-        result = read_current_family_q_versions(conn, [FAMILY])
+        result = read_current_family_q_versions(conn, [FAMILY], now=NOW)
 
         assert result[FAMILY] == (
             "__Q_AUTHORITY_BLOCKED__:q-old:current_ensemble_dependency_unparseable"

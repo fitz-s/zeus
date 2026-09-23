@@ -1,11 +1,11 @@
 # Created: 2026-06-04
-# Last reused/audited: 2026-06-04
+# Last reused/audited: 2026-09-23
 # Authority basis: src/contracts/ensemble_snapshot_provenance.py
 #   (CANONICAL_ENSEMBLE_DATA_VERSIONS gate) + ingest_grib_to_snapshots.py
 #   inline _v1 normalization (commit referenced "#38 / #362"). Antibody for
 #   the 2026-05-30 DataVersionRejectedError on
 #   data_version='ecmwf_opendata_mx2t3_local_calendar_day_max_v1'.
-# Lifecycle: created=2026-06-04; last_reviewed=2026-06-05; last_reused=2026-06-05
+# Lifecycle: created=2026-06-04; last_reviewed=2026-09-23; last_reused=2026-09-23
 # Purpose: Relationship antibody — the OpenData producer's data_version must be a subset of the CANONICAL_ENSEMBLE_DATA_VERSIONS gate (no _v1 rejection drift).
 # Reuse: Re-run when CANONICAL_ENSEMBLE_DATA_VERSIONS or the OpenData ingest normalization changes.
 """Relationship test: OpenData producer ⊆ ensemble_snapshots gate.
@@ -60,8 +60,8 @@ from src.contracts.ensemble_snapshot_provenance import (
 # normalized form OR if the normalization is removed — not silently track a
 # constant rename.
 _PRODUCER_EMITTED_V1 = {
-    ECMWF_OPENDATA_HIGH_DATA_VERSION: "ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
-    ECMWF_OPENDATA_LOW_DATA_VERSION: "ecmwf_opendata_mn2t3_local_calendar_day_min_v1",
+    ECMWF_OPENDATA_HIGH_DATA_VERSION: f"{ECMWF_OPENDATA_HIGH_DATA_VERSION}_v1",
+    ECMWF_OPENDATA_LOW_DATA_VERSION: f"{ECMWF_OPENDATA_LOW_DATA_VERSION}_v1",
 }
 
 

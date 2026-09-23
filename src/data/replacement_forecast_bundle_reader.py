@@ -51,6 +51,8 @@ from src.data.replacement_forecast_source_run_identity import (
 )
 from src.data.replacement_input_hwm import (
     ReplacementInputHwmReadUnavailable,
+    _authority_table_ref,
+    ensemble_source_authority_predicate,
     latest_eligible_ensemble_input_cycle,
     latest_live_input_cycle,
     replacement_live_input_lag_reason,
@@ -691,7 +693,16 @@ def _current_ensemble_snapshot_identity_reason(
     target_date: str,
     metric: str,
 ) -> str | None:
-    """Require the posterior's current ENS snapshot to be current-coordinate bound."""
+    """Require the posterior's current ENS snapshot to be current and target-covered.
+
+    The snapshot identity is necessary but not sufficient: a producer can persist a
+    row with the right dataset/city/date/metric while its source run is outside the
+    target horizon or its per-target coverage is blocked.  Reuse the shared HWM
+    source-authority predicate here so every consumer sees the same attached-DB and
+    source-run/coverage semantics.  SCOPE is this posterior's exact snapshot and
+    city/date/metric; DRAIN is the next source-run coverage publication; RESET is
+    a current target-local-day coverage row that is LIVE_ELIGIBLE before expiry.
+    """
     expected = expected_replacement_dependency_identity_by_role(metric).get(
         "baseline_b0"
     )
@@ -727,6 +738,48 @@ def _current_ensemble_snapshot_identity_reason(
         or row[4] != metric
     ):
         return "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_MISMATCH"
+
+    decision_time = datetime.now(timezone.utc)
+    try:
+        ensemble_ref = _authority_table_ref(conn, "ensemble_snapshots")
+        authority = ensemble_source_authority_predicate(
+            conn,
+            ensemble_alias="ensemble_snapshot",
+            decision_time=decision_time,
+        )
+    except ReplacementInputHwmReadUnavailable:
+        return "REPLACEMENT_CURRENT_ENSEMBLE_SNAPSHOT_AUTHORITY_UNAVAILABLE"
+    except Exception:  # noqa: BLE001 — malformed authority surface is unavailable
+        return "REPLACEMENT_CURRENT_ENSEMBLE_SNAPSHOT_AUTHORITY_UNAVAILABLE"
+    if ensemble_ref is None or authority is None:
+        return "REPLACEMENT_CURRENT_ENSEMBLE_SNAPSHOT_AUTHORITY_UNAVAILABLE"
+    authority_sql, authority_params = authority
+    try:
+        covered = conn.execute(
+            f"""
+            SELECT 1
+              FROM {ensemble_ref} AS ensemble_snapshot
+             WHERE ensemble_snapshot.snapshot_id = ?
+               AND ensemble_snapshot.city = ?
+               AND ensemble_snapshot.target_date = ?
+               AND ensemble_snapshot.temperature_metric = ?
+               AND {authority_sql}
+             LIMIT 1
+            """,
+            (
+                snapshot_id,
+                city,
+                target_date,
+                metric,
+                *authority_params,
+            ),
+        ).fetchone()
+    except ReplacementInputHwmReadUnavailable:
+        return "REPLACEMENT_CURRENT_ENSEMBLE_SNAPSHOT_AUTHORITY_UNAVAILABLE"
+    except Exception:  # noqa: BLE001 — malformed authority surface is unavailable
+        return "REPLACEMENT_CURRENT_ENSEMBLE_SNAPSHOT_AUTHORITY_UNAVAILABLE"
+    if covered is None:
+        return "REPLACEMENT_CURRENT_ENSEMBLE_SNAPSHOT_COVERAGE_BLOCKED"
     return None
 
 

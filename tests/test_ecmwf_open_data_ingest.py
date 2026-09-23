@@ -1,7 +1,7 @@
 # Created: 2026-05-19
-# Last reused/audited: 2026-05-19
+# Last reused/audited: 2026-09-23
 # Authority basis: docs/operations/task_2026-05-04_tigge_ingest_resilience/DESIGN_PHASE3_LIVE_ROUTING_FIX.md
-# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=2026-05-19
+# Lifecycle: created=2026-05-19; last_reviewed=2026-09-23; last_reused=2026-09-23
 # Purpose: Relationship antibody verifying ECMWFOpenDataIngest DB rows → ForecastBundle provenance.
 #   Antibody 1: source_id provenance — bundle.source_id == "ecmwf_open_data" (mis-provenance was the blocker)
 #   Antibody 2: 51-member count preserved end-to-end through fetch → ForecastBundle → ensemble_client
@@ -21,6 +21,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+from src.contracts.ensemble_snapshot_provenance import (
+    ECMWF_OPENDATA_HIGH_DATA_VERSION,
+    ECMWF_OPENDATA_LOW_DATA_VERSION,
+    opendata_source_run_revision_suffix,
+)
 
 
 # Anchor time so freshness window (24h) is deterministic regardless of when tests run.
@@ -80,11 +86,13 @@ def _seal_current_coordinates(conn):
     manifest = runtime_coordinate_manifest_json()
     digest = hashlib.sha256(manifest.encode()).hexdigest()
     for metric, track in (("high", "mx2t6_high"), ("low", "mn2t6_low")):
+        data_version = data_version_for_track(track, manifest)
         conn.execute(
             "UPDATE ensemble_snapshots SET dataset_id=?, manifest_hash=?, provenance_json=?, source_run_id=? WHERE temperature_metric=?",
-            (data_version_for_track(track, manifest), hashlib.sha256((metric + manifest).encode()).hexdigest(),
+            (data_version, hashlib.sha256((metric + manifest).encode()).hexdigest(),
              json.dumps({"manifest_sha256": digest}),
-             f"ecmwf_open_data:{track}:2026-05-19T00Z:coordsha:{digest}" + (":high_boundary_v2" if metric == "high" else ""), metric),
+             f"ecmwf_open_data:{track}:2026-05-19T00Z:coordsha:{digest}"
+             f"{opendata_source_run_revision_suffix(data_version)}", metric),
         )
 
 
@@ -114,8 +122,8 @@ def staged_forecasts_db(tmp_path: Path, monkeypatch):
     low_members = _make_members(10.0)
 
     for metric, data_version, members in (
-        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max", high_members),
-        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min", low_members),
+        ("high", ECMWF_OPENDATA_HIGH_DATA_VERSION, high_members),
+        ("low", ECMWF_OPENDATA_LOW_DATA_VERSION, low_members),
     ):
         conn.execute(
             """INSERT INTO ensemble_snapshots
@@ -337,6 +345,7 @@ def test_day0_fetch_selects_current_coordinates_and_invalidates_prior_profile_ca
     track = "mx2t6_high" if metric == "high" else "mn2t6_low"
     base_value = 20.0 if metric == "high" else 10.0
     digest_b = hashlib.sha256(manifest_b.encode()).hexdigest()
+    data_version_b = data_version_for_track(track, manifest_b)
     with sqlite3.connect(staged_forecasts_db) as conn:
         # The other profile arrives later, but must not win the current query.
         conn.execute(
@@ -347,7 +356,8 @@ def test_day0_fetch_selects_current_coordinates_and_invalidates_prior_profile_ca
             (fake_city.name, _TARGET_DATE, metric, _ISSUE_TIME, _AVAILABLE_AT,
              _DB_FETCH_TIME, _RECORDED_AT, json.dumps(_make_members(base_value + 30)),
              data_version_for_track(track, manifest_b), digest_b,
-             f"ecmwf_open_data:{track}:2026-05-19T00Z:coordsha:{digest_b}" + (":high_boundary_v2" if metric == "high" else ""),
+             f"ecmwf_open_data:{track}:2026-05-19T00Z:coordsha:{digest_b}"
+             f"{opendata_source_run_revision_suffix(data_version_b)}",
              json.dumps({"manifest_sha256": digest_b})),
         )
     first = client.fetch_ensemble(fake_city, forecast_days=1, model="ecmwf_ifs025",
@@ -356,7 +366,10 @@ def test_day0_fetch_selects_current_coordinates_and_invalidates_prior_profile_ca
     assert first["data_version"] == data_version_for_track(track, manifest_a)
     identity = first["snapshot_identity_by_metric_target_date"][metric][_TARGET_DATE]
     assert identity["dataset_id"] == first["data_version"]
-    assert identity["source_run_id"].endswith(":coordsha:" + first["coordinate_manifest_sha"] + (":high_boundary_v2" if metric == "high" else ""))
+    assert identity["source_run_id"].endswith(
+        ":coordsha:" + first["coordinate_manifest_sha"]
+        + opendata_source_run_revision_suffix(first["data_version"])
+    )
     assert all(datetime.fromisoformat(t).astimezone(ZoneInfo(fake_city.timezone)).date().isoformat() == _TARGET_DATE
                for t in first["times"])
     current["manifest"] = manifest_b

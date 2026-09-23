@@ -61,6 +61,9 @@ from src.contracts.replacement_pipeline_files import (
 
 from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest
 from src.data.replacement_forecast_readiness import SOURCE_ID
+from src.data.replacement_input_hwm import (
+    retired_low_uncertified_incumbent_yields_to_current_ensemble,
+)
 from src.engine.time_context import has_city_local_day_ended, has_city_local_day_started
 
 _LOG = logging.getLogger("zeus.replacement_cycle_advance_trigger")
@@ -689,6 +692,7 @@ def _latest_posterior_covers_target_cycle(
     target_cycle_iso: str,
     as_of: datetime,
     minimum_computed_at: datetime | None = None,
+    incoming_baseline_source_run_id: str | None = None,
 ) -> bool:
     """True when the latest posterior covers the cycle and required computation clock."""
     target_cycle = _parse_cycle(target_cycle_iso)
@@ -723,6 +727,15 @@ def _latest_posterior_covers_target_cycle(
         row["source_cycle_time"] if hasattr(row, "keys") else row[0]
     )
     if consumed_cycle is None or consumed_cycle < target_cycle:
+        return False
+    if incoming_baseline_source_run_id and retired_low_uncertified_incumbent_yields_to_current_ensemble(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        incoming_baseline_source_run_id=incoming_baseline_source_run_id,
+        decision_time=as_of,
+    ):
         return False
     if minimum_computed_at is None:
         return True
@@ -1093,6 +1106,7 @@ def _enqueue_decision(
     day0_observed_extreme_unit: str | None = None,
     as_of: datetime | None = None,
     minimum_posterior_computed_at: datetime | None = None,
+    incoming_baseline_source_run_id: str | None = None,
 ) -> _CycleAdvanceEnqueueDecision:
     """Classify whether this exact family/cycle can publish a new seed now.
 
@@ -1311,6 +1325,7 @@ def _enqueue_decision(
             target_cycle_iso=target_cycle_iso,
             as_of=decision_as_of,
             minimum_computed_at=minimum_posterior_computed_at,
+            incoming_baseline_source_run_id=incoming_baseline_source_run_id,
         ):
             return _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
         if not _delete_missing_owned_cycle_advance_marker(
@@ -2125,9 +2140,21 @@ def enqueue_cycle_advance_reseeds(
                     newer_ensemble_cycle.isoformat(),
                 )
                 continue
+            retired_low_migration = bool(
+                causal_baseline_source_run_id
+                and retired_low_uncertified_incumbent_yields_to_current_ensemble(
+                    conn,
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                    incoming_baseline_source_run_id=causal_baseline_source_run_id,
+                    decision_time=now,
+                )
+            )
             if (
                 not missing_posterior
                 and family_cycle < consumed_cycle_dt(consumed_cycle_iso)
+                and not retired_low_migration
             ):
                 report["family_cycle_not_newer"] = int(
                     report.get("family_cycle_not_newer", 0)
@@ -2210,6 +2237,7 @@ def enqueue_cycle_advance_reseeds(
                     day0_observed_extreme_c=day0_payload.get("day0_observed_extreme_c"),
                     day0_observed_extreme_unit=day0_payload.get("day0_observed_extreme_unit"),
                     as_of=now,
+                    incoming_baseline_source_run_id=causal_baseline_source_run_id,
                 )
                 if enqueue_decision is _CycleAdvanceEnqueueDecision.RETRY_PENDING:
                     report["retry_pending"] = int(report.get("retry_pending", 0)) + 1

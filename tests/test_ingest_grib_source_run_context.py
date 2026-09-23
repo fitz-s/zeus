@@ -1,5 +1,5 @@
 # Created: 2026-05-03
-# Last reused/audited: 2026-08-03
+# Last reused/audited: 2026-09-23
 # Authority basis: LOW local-day-min interval provenance contract plus the original SourceRunContext contract.
 """GRIB ingester source-run context linkage tests."""
 
@@ -9,9 +9,12 @@ import hashlib
 import json
 import sqlite3
 import sys
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
+
+import pytest
 
 from src.contracts.ensemble_snapshot_provenance import (
     ECMWF_OPENDATA_HIGH_DATA_VERSION,
@@ -896,3 +899,97 @@ def test_low_interval_provenance_identity_is_json_deterministic() -> None:
     changed = _low_local_day_min_interval_evidence(mutated)
     assert changed is not None
     assert changed["identity_sha256"] != first["identity_sha256"]
+
+
+def _complete_low_window_payload(city, timezone_name, target, issue):
+    payload = _low_boundary_payload(ambiguous_count=0)
+    start_local = datetime.fromisoformat(target).replace(tzinfo=ZoneInfo(timezone_name))
+    start = start_local.astimezone(UTC)
+    end = (start_local + timedelta(days=1)).astimezone(UTC)
+    issue_dt = datetime.fromisoformat(issue)
+    inner, boundary = [], []
+    for hour in range(0, 180, 3):
+        left, right = issue_dt + timedelta(hours=hour), issue_dt + timedelta(hours=hour + 3)
+        if left < end and right > start:
+            (inner if start <= left and right <= end else boundary).append([hour, hour + 3])
+    payload.update(city=city, timezone=timezone_name, target_date_local=target,
+                   issue_time_utc=issue, local_day_start_utc=start.isoformat(),
+                   local_day_end_utc=end.isoformat(), selected_step_ranges_inner=inner,
+                   selected_step_ranges_boundary=boundary)
+    for key in tuple(payload):
+        if key.startswith("forecast_window_"):
+            payload.pop(key)
+    for member in payload["members"]:
+        member["inner_step_ranges"] = list(inner)
+        member["boundary_step_ranges"] = list(boundary)
+    if city == "NYC":
+        payload.update(unit="F", members_unit="F")
+    return normalize_low_boundary_evidence(payload)
+
+
+@pytest.mark.parametrize("city,timezone_name", [
+    ("Auckland", "Pacific/Auckland"), ("Busan", "Asia/Seoul"),
+    ("Seoul", "Asia/Seoul"), ("Tokyo", "Asia/Tokyo"),
+    ("Wellington", "Pacific/Auckland"),
+])
+def test_low_horizon_truncation_never_claims_complete_day(city, timezone_name):
+    from ingest_grib_to_snapshots import _contract_evidence_fields
+
+    payload = _complete_low_window_payload(
+        city, timezone_name, "2026-09-29", "2026-09-22T18:00:00+00:00",
+    )
+    for member in payload["members"]:
+        for key in ("inner_step_ranges", "boundary_step_ranges"):
+            member[key] = [r for r in member[key] if r[1] <= 144]
+    for key in ("selected_step_ranges_inner", "selected_step_ranges_boundary"):
+        payload[key] = [r for r in payload[key] if r[1] <= 144]
+    result = _contract_evidence_fields(payload, LOW_LOCALDAY_MIN, source_id="ecmwf_open_data")
+    assert result["contributes_to_target_extrema"] == 0
+    assert "low_native_local_day_window_incomplete" in json.loads(result["forecast_window_block_reasons_json"])
+
+
+@pytest.mark.parametrize("target,issue,hours", [
+    ("2026-03-08", "2026-03-07T00:00:00+00:00", 23),
+    ("2026-11-01", "2026-10-31T00:00:00+00:00", 25),
+])
+def test_low_native_window_coverage_respects_dst_and_one_member_gap(target, issue, hours):
+    from ingest_grib_to_snapshots import _contract_evidence_fields
+
+    payload = _complete_low_window_payload("NYC", "America/New_York", target, issue)
+    assert (datetime.fromisoformat(payload["local_day_end_utc"]) - datetime.fromisoformat(payload["local_day_start_utc"])).total_seconds() == hours * 3600
+    complete = _contract_evidence_fields(payload, LOW_LOCALDAY_MIN, source_id="ecmwf_open_data")
+    assert complete["contributes_to_target_extrema"] == 1
+    payload["members"][-1]["inner_step_ranges"].pop(2)
+    result = _contract_evidence_fields(payload, LOW_LOCALDAY_MIN, source_id="ecmwf_open_data")
+    assert result["contributes_to_target_extrema"] == 0
+    assert "low_native_local_day_window_incomplete" in json.loads(result["forecast_window_block_reasons_json"])
+
+
+def test_low_truncated_day_is_not_training_truth_after_ingest(tmp_path):
+    payload = _complete_low_window_payload(
+        "Seoul", "Asia/Seoul", "2026-09-29", "2026-09-22T18:00:00+00:00",
+    )
+    for member in payload["members"]:
+        for key in ("inner_step_ranges", "boundary_step_ranges"):
+            member[key] = [r for r in member[key] if r[1] <= 144]
+    for key in ("selected_step_ranges_inner", "selected_step_ranges_boundary"):
+        payload[key] = [r for r in payload[key] if r[1] <= 144]
+    payload["training_allowed"] = True
+    issue = datetime.fromisoformat(payload["issue_time_utc"])
+    payload["generated_at"] = (issue + timedelta(hours=8)).isoformat()
+    path = tmp_path / "truncated-low.json"
+    path.write_text(json.dumps(payload))
+    conn = _conn()
+    context = SourceRunContext(
+        source_id="ecmwf_open_data", source_transport="ensemble_snapshots_db_reader",
+        source_run_id="ecmwf_open_data:mn2t6_low:2026-09-22T18Z",
+        release_calendar_key="ecmwf_open_data:mn2t6_low:short",
+        source_cycle_time=issue, source_release_time=issue,
+        source_available_at=issue + timedelta(hours=8),
+    )
+    ingest_json_file(conn, path, metric=LOW_LOCALDAY_MIN,
+                     model_version="ecmwf_ens", overwrite=False, source_run_context=context)
+    row = conn.execute("SELECT training_allowed, contributes_to_target_extrema, forecast_window_block_reasons_json FROM ensemble_snapshots").fetchone()
+    assert row["training_allowed"] == 0
+    assert row["contributes_to_target_extrema"] == 0
+    assert "low_native_local_day_window_incomplete" in json.loads(row["forecast_window_block_reasons_json"])

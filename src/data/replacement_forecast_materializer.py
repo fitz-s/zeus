@@ -63,7 +63,10 @@ from src.data.replacement_forecast_readiness import (
     ReplacementForecastDependency,
     build_replacement_forecast_readiness,
 )
-from src.data.replacement_input_hwm import ensemble_source_authority_sql
+from src.data.replacement_input_hwm import (
+    ensemble_source_authority_sql,
+    retired_low_uncertified_incumbent_yields_to_current_ensemble,
+)
 from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
 from src.calibration import center_debias_live_fit
 from src.contracts.availability_time import proof_of_possession_available_at
@@ -2052,7 +2055,7 @@ def _prewrite_block_reasons(request: ReplacementForecastMaterializeRequest) -> t
         ("openmeteo_ifs9_anchor", _to_utc(request.openmeteo_source_available_at, field_name="openmeteo_source_available_at")),
     ]
     expected = expected_replacement_dependency_identity_by_role(metric)
-    if not str(request.baseline_source_run_id or "").strip():
+    if not str(getattr(request, "baseline_source_run_id", "") or "").strip():
         reasons.append("REPLACEMENT_MATERIALIZATION_BASELINE_SOURCE_RUN_ID_MISSING")
     if not str(request.openmeteo_source_run_id or "").strip():
         reasons.append("REPLACEMENT_MATERIALIZATION_OPENMETEO_SOURCE_RUN_ID_MISSING")
@@ -2183,7 +2186,7 @@ def _cycle_monotone_block_reasons(
     try:
         row = conn.execute(
             """
-            SELECT source_cycle_time
+            SELECT posterior_id, source_cycle_time
             FROM forecast_posteriors
             WHERE source_id = ? AND city = ? AND target_date = ? AND temperature_metric = ?
             ORDER BY computed_at DESC
@@ -2195,7 +2198,7 @@ def _cycle_monotone_block_reasons(
         return ()
     if row is None:
         return ()
-    consumed_iso = row[0] if not hasattr(row, "keys") else row["source_cycle_time"]
+    consumed_iso = row[1] if not hasattr(row, "keys") else row["source_cycle_time"]
     if consumed_iso is None or not str(consumed_iso).strip():
         return ()
     try:
@@ -2203,6 +2206,17 @@ def _cycle_monotone_block_reasons(
     except Exception:
         return ()
     if request_cycle < consumed_cycle:
+        incumbent_posterior_id = int(row[0] if not hasattr(row, "keys") else row["posterior_id"])
+        if retired_low_uncertified_incumbent_yields_to_current_ensemble(
+            conn,
+            city=request.city,
+            target_date=_date_text(request.target_date),
+            metric=metric,
+            incoming_baseline_source_run_id=str(getattr(request, "baseline_source_run_id", "") or ""),
+            decision_time=_to_utc(getattr(request, "computed_at", request.source_cycle_time), field_name="computed_at"),
+            incumbent_posterior_id=incumbent_posterior_id,
+        ):
+            return ()
         import logging  # noqa: PLC0415
 
         logging.getLogger("zeus.replacement_cycle_monotone").warning(
@@ -7915,6 +7929,16 @@ def _readiness_cert_cycle_regression_reasons(
     if incumbent_key is None or incoming_key is None:
         return ()
     if _serving_key_strictly_newer(incumbent_key, incoming_key):
+        if retired_low_uncertified_incumbent_yields_to_current_ensemble(
+            conn,
+            city=request.city,
+            target_date=_date_text(request.target_date),
+            metric=metric,
+            incoming_baseline_source_run_id=str(getattr(request, "baseline_source_run_id", "") or ""),
+            decision_time=_to_utc(request.computed_at, field_name="computed_at"),
+            incumbent_posterior_id=incumbent_posterior_id,
+        ):
+            return ()
         import logging  # noqa: PLC0415
 
         logging.getLogger("zeus.replacement_readiness_cert_monotone").warning(

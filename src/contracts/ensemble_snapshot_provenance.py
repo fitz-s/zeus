@@ -77,7 +77,8 @@ from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 # the allow-list so the 1568 historical rows remain readable.
 ECMWF_OPENDATA_HIGH_DATA_VERSION_UNCERTIFIED = "ecmwf_opendata_mx2t3_local_calendar_day_max"
 ECMWF_OPENDATA_HIGH_DATA_VERSION = "ecmwf_opendata_mx2t3_local_calendar_day_max_boundary_v2"
-ECMWF_OPENDATA_LOW_DATA_VERSION = "ecmwf_opendata_mn2t3_local_calendar_day_min"
+ECMWF_OPENDATA_LOW_DATA_VERSION_UNCERTIFIED = "ecmwf_opendata_mn2t3_local_calendar_day_min"
+ECMWF_OPENDATA_LOW_DATA_VERSION = "ecmwf_opendata_mn2t3_local_calendar_day_min_window_v2"
 
 # Coordinate-bound Open Data identities preserve the immutable snapshot's
 # manifest coordinate system.  The base is deliberately closed: accepting an
@@ -86,6 +87,7 @@ ECMWF_OPENDATA_LOW_DATA_VERSION = "ecmwf_opendata_mn2t3_local_calendar_day_min"
 _COORDINATE_BOUND_BASE_DATA_VERSIONS: frozenset[str] = frozenset({
     ECMWF_OPENDATA_HIGH_DATA_VERSION,
     ECMWF_OPENDATA_HIGH_DATA_VERSION_UNCERTIFIED,
+    ECMWF_OPENDATA_LOW_DATA_VERSION_UNCERTIFIED,
     ECMWF_OPENDATA_LOW_DATA_VERSION,
 })
 _COORDINATE_BOUND_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -120,10 +122,14 @@ def split_coordinate_bound_data_version(
     return None
 
 def opendata_source_run_revision_suffix(data_version: str) -> str:
-    """Keep certified HIGH runs distinct from immutable pre-certificate runs."""
+    """Keep certified Open Data runs distinct from prior physical identities."""
     identity = split_coordinate_bound_data_version(data_version)
     base = identity[0] if identity is not None else data_version
-    return ":high_boundary_v2" if base == ECMWF_OPENDATA_HIGH_DATA_VERSION else ""
+    if base == ECMWF_OPENDATA_HIGH_DATA_VERSION:
+        return ":high_boundary_v2"
+    if base == ECMWF_OPENDATA_LOW_DATA_VERSION:
+        return ":low_window_v2"
+    return ""
 
 
 # Legacy versions (mx2t6 era, written before 2026-05-07). Kept in the
@@ -154,6 +160,7 @@ CANONICAL_ENSEMBLE_DATA_VERSIONS: frozenset[str] = frozenset({
     LOW_LOCALDAY_MIN.data_version,
     ECMWF_OPENDATA_HIGH_DATA_VERSION,
     ECMWF_OPENDATA_HIGH_DATA_VERSION_UNCERTIFIED,
+    ECMWF_OPENDATA_LOW_DATA_VERSION_UNCERTIFIED,
     ECMWF_OPENDATA_LOW_DATA_VERSION,
     TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
     ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,

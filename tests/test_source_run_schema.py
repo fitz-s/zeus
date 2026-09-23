@@ -1,5 +1,5 @@
 # Created: 2026-05-02
-# Last reused/audited: 2026-09-04
+# Last reused/audited: 2026-09-23
 # Authority basis: docs/operations/task_2026-05-02_data_daemon_readiness/PLAN.md PR45b source-run provenance contract.
 
 from __future__ import annotations
@@ -65,6 +65,45 @@ def test_source_run_coverage_hwm_uses_run_identity_index() -> None:
         )
     )
     assert "sqlite_autoindex_source_run_coverage_2" in plan
+
+
+def test_ensemble_source_authority_rejects_complete_run_without_target_coverage() -> None:
+    from src.data.replacement_input_hwm import ensemble_source_authority_sql
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE source_run (
+            source_run_id TEXT PRIMARY KEY,
+            status TEXT,
+            completeness_status TEXT,
+            partial_run INTEGER,
+            imported_at TEXT
+        );
+        CREATE TABLE ensemble_snapshots (
+            snapshot_id INTEGER PRIMARY KEY,
+            source_run_id TEXT
+        );
+        INSERT INTO source_run VALUES (
+            'complete-but-uncovered', 'SUCCESS', 'COMPLETE', 0,
+            '2026-09-22T18:30:00+00:00'
+        );
+        INSERT INTO ensemble_snapshots VALUES (1365052, 'complete-but-uncovered');
+        """
+    )
+    predicate, params = ensemble_source_authority_sql(
+        ensemble_alias="ensemble_snapshot",
+        source_run_ref="source_run",
+        source_run_clock_columns=("imported_at",),
+        coverage_ref=None,
+        decision_time=datetime(2026, 9, 22, 19, tzinfo=timezone.utc),
+    )
+    assert conn.execute(
+        "SELECT snapshot_id FROM ensemble_snapshots AS ensemble_snapshot WHERE "
+        + predicate,
+        params,
+    ).fetchone() is None
+    conn.close()
 
 
 def test_source_run_repo_round_trips_complete_run() -> None:

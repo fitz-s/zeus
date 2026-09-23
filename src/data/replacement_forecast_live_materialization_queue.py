@@ -1477,16 +1477,19 @@ def _seed_source_cycle_boundary(
             ).fetchone()
             from src.data.replacement_input_hwm import (  # noqa: PLC0415
                 latest_eligible_ensemble_input_cycle,
+                retired_low_uncertified_incumbent_yields_to_current_ensemble,
             )
 
+            decision_time = datetime.now(timezone.utc)
             latest_ensemble_cycle = latest_eligible_ensemble_input_cycle(
                 conn,
                 city=str(seed.get("city")),
                 target_date=str(seed.get("target_date")),
                 metric=str(seed.get("temperature_metric")),
-                decision_time=datetime.now(timezone.utc),
+                decision_time=decision_time,
             )
             baseline_cycle = None
+            retired_incumbent_migration = False
             baseline_source_run_id = str(
                 seed.get("baseline_source_run_id") or ""
             ).strip()
@@ -1510,6 +1513,17 @@ def _seed_source_cycle_boundary(
                         if hasattr(baseline_row, "keys")
                         else baseline_row[0]
                     )
+            if row is not None:
+                retired_incumbent_migration = (
+                    retired_low_uncertified_incumbent_yields_to_current_ensemble(
+                        conn,
+                        city=str(seed.get("city")),
+                        target_date=str(seed.get("target_date")),
+                        metric=str(seed.get("temperature_metric")),
+                        incoming_baseline_source_run_id=baseline_source_run_id,
+                        decision_time=decision_time,
+                    )
+                )
         finally:
             if owns_conn:
                 conn.close()
@@ -1521,7 +1535,8 @@ def _seed_source_cycle_boundary(
         current_raw = row["source_cycle_time"] if hasattr(row, "keys") else row[0]
         current_cycle = _parse_utc_iso(current_raw)
         if current_cycle is not None and request_cycle < current_cycle:
-            return "current_posterior", current_cycle.isoformat()
+            if not retired_incumbent_migration:
+                return "current_posterior", current_cycle.isoformat()
         try:
             provenance = json.loads(
                 str(row["provenance_json"] if hasattr(row, "keys") else row[2])

@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-24; last_reviewed=2026-04-24; last_reused=never
+# Lifecycle: created=2026-04-24; last_reviewed=2026-09-23; last_reused=never
 # Purpose: M3 antibody — pins the CANONICAL_DATA_VERSIONS →
 #          CANONICAL_ENSEMBLE_DATA_VERSIONS rename + parallel observation
 #          + settlement allowlists. Renames drift fast; this test catches
@@ -34,12 +34,10 @@ def test_ensemble_set_contains_metric_tracks_and_source_variants():
     assert mod.ECMWF_OPENDATA_LOW_DATA_VERSION in ensemble
     assert mod.TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION in ensemble
     assert mod.ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION in ensemble
-    # 2026-05-08: frozenset has 9 entries — 6 named constants + 3 legacy
-    # bridge entries (_ECMWF_OPENDATA_HIGH_DATA_VERSION_LEGACY,
-    # _ECMWF_OPENDATA_LOW_DATA_VERSION_LEGACY,
-    # _ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION_LEGACY) added for
-    # historical row compatibility per PR #85.
-    assert len(ensemble) == 9
+    # 2026-09-22: the LOW native-window identity adds one active version while
+    # retaining the uncertified mx2t3/mn2t3 identities for historical reads.
+    assert len(ensemble) == 11
+    assert mod.ECMWF_OPENDATA_LOW_DATA_VERSION_UNCERTIFIED in ensemble
 
 
 def test_deprecation_alias_is_identity():

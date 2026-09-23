@@ -48,7 +48,7 @@ import sqlite3
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -495,8 +495,8 @@ def _provenance_json(
     reader-inert full blobs computed by the ingest contract and by
     ``_low_local_day_min_interval_evidence`` respectively; only their identity
     fingerprints (sha256 + member_count) are persisted here. If the full
-    evidence is ever needed it is reproducible from ``members_json`` plus the
-    ingest contract (``src/contracts/snapshot_ingest_contract.py``).
+    evidence is ever needed, retain the extraction payload: scalar
+    ``members_json`` alone cannot reconstruct native boundary endpoints.
     """
     prov = {
         "data_version": payload.get("data_version"),
@@ -893,6 +893,55 @@ def _forecast_window_from_payload(
     }
 
 
+def _low_native_windows_cover_day(payload: dict, *, city_timezone: str, target_date: str) -> bool:
+    """Require every member's native windows to cover the whole local day."""
+    try:
+        zone = ZoneInfo(city_timezone)
+        start_local = datetime.combine(date.fromisoformat(target_date), datetime.min.time(), zone)
+        start = start_local.astimezone(timezone.utc)
+        end = (start_local + timedelta(days=1)).astimezone(timezone.utc)
+        if (payload.get("timezone") != city_timezone
+                or _parse_iso_datetime(payload.get("local_day_start_utc")) != start
+                or _parse_iso_datetime(payload.get("local_day_end_utc")) != end):
+            return False
+        issue = _parse_iso_datetime(payload.get("issue_time_utc"))
+        members = payload.get("members")
+        if issue is None or issue.tzinfo is None or not isinstance(members, list):
+            return False
+        if (len(members) != 51 or any(not isinstance(m, dict) for m in members)
+                or any(type(m.get("member")) is not int for m in members)
+                or {m["member"] for m in members} != set(range(51))):
+            return False
+        for member in members:
+            intervals = []
+            for key in ("inner_step_ranges", "boundary_step_ranges"):
+                ranges = member.get(key)
+                if not isinstance(ranges, list):
+                    return False
+                for raw in ranges:
+                    if not (isinstance(raw, str) or (
+                        isinstance(raw, (list, tuple)) and len(raw) == 2
+                        and all(type(h) is int for h in raw)
+                    )):
+                        return False
+                    interval = _parse_step_range(raw)
+                    if interval is None or interval[0] < 0 or interval[1] - interval[0] != 3:
+                        return False
+                    left, right = (issue + timedelta(hours=h) for h in interval)
+                    if left < end and right > start:
+                        intervals.append((max(start, left), min(end, right)))
+            frontier = start
+            for left, right in sorted(intervals):
+                if left > frontier:
+                    return False
+                frontier = max(frontier, right)
+            if frontier != end:
+                return False
+        return True
+    except (TypeError, ValueError, OverflowError, ZoneInfoNotFoundError):
+        return False
+
+
 def _contract_evidence_fields(
     payload: dict,
     metric: MetricIdentity,
@@ -934,6 +983,13 @@ def _contract_evidence_fields(
     target_date = str(payload.get("target_date_local") or payload.get("target_date") or "")
     window_fields = _forecast_window_from_payload(payload, city_timezone=city_timezone)
     block_reasons = list(window_fields.pop("block_reasons", []))
+    if metric.temperature_metric == "low" and source_id == "ecmwf_open_data":
+        if not _low_native_windows_cover_day(
+            payload, city_timezone=str(city.timezone), target_date=target_date,
+        ):
+            # SCOPE: this exact target/member window. DRAIN: complete native
+            # steps or a later cycle. RESET: every member covers the local day.
+            block_reasons.append("low_native_local_day_window_incomplete")
     high_certificate = _high_local_day_max_boundary_certificate(payload)
     if high_certificate is not None:
         if high_certificate["status"] == "EXACT":
@@ -1208,6 +1264,10 @@ def ingest_json_file(
     )
     high_certificate = _high_local_day_max_boundary_certificate(payload)
     if high_certificate is not None and high_certificate["status"] != "EXACT":
+        training_allowed = 0
+    if "low_native_local_day_window_incomplete" in json.loads(
+        contract_evidence["forecast_window_block_reasons_json"]
+    ):
         training_allowed = 0
     prov_json = _provenance_json(payload, metric, contract_evidence=contract_evidence)
     lead_hours = _lead_hours(payload)

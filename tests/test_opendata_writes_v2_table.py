@@ -1,5 +1,5 @@
 # Created: 2026-05-01
-# Last reused/audited: 2026-08-02
+# Last reused/audited: 2026-09-23
 # Authority basis: Operator directive 2026-05-01 — antibody for Invariant A;
 #   docs/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
 #   Phase 5 forecast authority chain ownership.
@@ -26,6 +26,7 @@ from src.contracts.ensemble_snapshot_provenance import (
     CANONICAL_ENSEMBLE_DATA_VERSIONS,
     ECMWF_OPENDATA_HIGH_DATA_VERSION,
     ECMWF_OPENDATA_LOW_DATA_VERSION,
+    opendata_source_run_revision_suffix,
 )
 from src.data.executable_forecast_reader import read_executable_forecast
 from src.state.readiness_repo import write_readiness_state
@@ -1089,7 +1090,10 @@ def test_coordinate_revision_appends_without_rebinding_prior_evidence(tmp_path, 
             now_utc=datetime(2026, 5, 1, 9 + index, tzinfo=timezone.utc),
         )
         assert result["status"] == "ok"
-        assert result["source_run_id"].endswith(":coordsha:" + digest + (":high_boundary_v2" if track == "mx2t6_high" else ""))
+        assert result["source_run_id"].endswith(
+            ":coordsha:" + digest
+            + opendata_source_run_revision_suffix(result["data_version"])
+        )
         assert result["data_version"].endswith("__coordsha_" + digest)
         if first_run is None:
             first_run = result["source_run_id"]

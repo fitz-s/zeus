@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-09-20
-# Lifecycle: created=2026-06-06; last_reviewed=2026-09-20; last_reused=2026-09-20
+# Last reused/audited: 2026-09-23
+# Lifecycle: created=2026-06-06; last_reviewed=2026-09-23; last_reused=2026-09-23
 # Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + Bayes-fusion replacement live layer.
 # Reuse: Run before changing replacement forecast live/experiment write path.
 # Authority basis: Operator-directed replacement forecast simple-switch readiness.
@@ -51,11 +51,13 @@ from src.data.replacement_forecast_source_run_identity import (
 )
 from src.data.replacement_forecast_readiness import LIVE_RUNTIME_LAYER, STRATEGY_KEY
 from src.state.db import _create_readiness_state
+from src.state.db import _create_source_run, _create_source_run_coverage
 from src.state.schema.v2_schema import (
     _ensure_forecast_posteriors_runtime_layer_compatibility,
     apply_canonical_schema,
 )
 from src.state.source_run_repo import write_source_run
+from src.state.readiness_repo import write_readiness_state
 
 UTC = timezone.utc
 _DEFAULT_PRECISION_GUARD = object()
@@ -248,6 +250,9 @@ def _install_live_fusion(
     *,
     complete: bool = True,
     shape_lag_hours: float = 0.0,
+    snapshot_id: int = 9001,
+    shape_cycle_time: datetime | None = None,
+    current_serving: dict[str, dict[str, object]] | None = None,
 ) -> None:
     members = tuple(25.0 + (index - 25) * 0.02 for index in range(51))
     override = _BayesPrecisionFusionFusionOverride(
@@ -267,9 +272,13 @@ def _install_live_fusion(
         decorrelated_providers_complete=complete,
         decorrelated_providers_served=5 if complete else 4,
         decorrelated_providers_expected=5,
-        current_value_serving={"ecmwf_ifs9": {"served_via": "single_runs"}},
+        current_value_serving=(
+            current_serving
+            if current_serving is not None
+            else {"ecmwf_ifs9": {"served_via": "single_runs"}}
+        ),
         current_evidence_shape={
-            "snapshot_id": 9001,
+            "snapshot_id": snapshot_id,
             "shape_hash": "test-current-shape",
             "semantics_revision": (
                 materializer_mod.CURRENT_EVIDENCE_SEMANTICS_REVISION
@@ -277,7 +286,7 @@ def _install_live_fusion(
                 else materializer_mod.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
             ),
             "source_cycle_time": (
-                _dt(0) - timedelta(hours=shape_lag_hours)
+                (shape_cycle_time or _dt(0)) - timedelta(hours=shape_lag_hours)
             ).isoformat(),
             "source_available_at": _dt(1).isoformat(),
             "shape_lag_hours": shape_lag_hours,
@@ -3750,6 +3759,33 @@ def _create_target_frontier_tables(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    _set_target_frontier_coverage(conn, snapshot_id=101)
+    conn.commit()
+
+
+def _set_target_frontier_coverage(
+    conn: sqlite3.Connection,
+    *,
+    snapshot_id: int,
+    city: str = "Shanghai",
+    coverage_id: str = "b0-coverage-current",
+    source_run_id: str = "b0-run",
+    track: str = "mx2t6_high",
+    release_key: str = "ecmwf_open_data:mx2t6_high:short",
+) -> None:
+    """Make this fixture snapshot explicitly live-eligible for its target."""
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO source_run_coverage VALUES (
+            ?, ?, 'ecmwf_open_data', ?, ?, ?,
+            '2026-06-07', 'high', 51, 51, '[0,3,6]', '[0,3,6]', ?,
+            'COMPLETE', 'LIVE_ELIGIBLE',
+            '2026-06-06T03:10:00+00:00', '2026-06-06T06:00:00+00:00',
+            '2026-06-06T03:10:00+00:00'
+        )
+        """,
+        (coverage_id, source_run_id, release_key, track, city, f"[{snapshot_id}]"),
+    )
 
 
 def test_target_dependency_witness_is_bounded_to_exact_target_rows() -> None:
@@ -3805,6 +3841,7 @@ def test_target_dependency_witness_is_bounded_to_exact_target_rows() -> None:
         )
         """
     )
+    _set_target_frontier_coverage(conn, snapshot_id=102)
     with pytest.raises(cli._TargetDependencyWitnessUnavailable):
         cli._revalidate_target_dependency_witness(conn, prepared, baseline)
     conn.close()
@@ -3981,6 +4018,13 @@ def test_target_witness_detects_same_fetch_time_source_run_replacement() -> None
          WHERE source_run_id = 'b0-run'
         """
     )
+    conn.execute(
+        """
+        UPDATE source_run_coverage
+           SET completeness_status = 'PARTIAL', readiness_status = 'BLOCKED'
+         WHERE source_run_id = 'b0-run'
+        """
+    )
 
     with pytest.raises(cli._TargetDependencyWitnessUnavailable):
         cli._revalidate_target_dependency_witness(conn, prepared, baseline)
@@ -4067,7 +4111,10 @@ def test_shared_frontier_helpers_match_materializer_selectors() -> None:
     assert snapshot_id == snapshot.snapshot_id == 101
 
 
-def test_current_ensemble_accepts_only_exact_complete_target_window_from_partial_run() -> None:
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_current_ensemble_requires_exact_complete_target_coverage(
+    metric: str,
+) -> None:
     from src.data.replacement_forecast_materializer import (
         read_current_evidence_snapshot_identity,
     )
@@ -4076,7 +4123,13 @@ def test_current_ensemble_accepts_only_exact_complete_target_window_from_partial
     conn = _conn()
     _ensure_source_run_table(conn)
     _ensure_source_run_coverage_table(conn)
-    request = _request()
+    track = f"m{'x' if metric == 'high' else 'n'}2t6_{metric}_short_horizon"
+    release_key = f"ecmwf_open_data:{track}"
+    request = replace(
+        _request(),
+        temperature_metric=metric,
+        baseline_data_version=_current_baseline_data_version(metric),
+    )
 
     def write_run(
         *, status: str, completeness: str, partial: bool, imported_at: datetime
@@ -4086,8 +4139,8 @@ def test_current_ensemble_accepts_only_exact_complete_target_window_from_partial
             conn,
             source_run_id="ens-run",
             source_id="ecmwf_open_data",
-            track="mx2t6_high_short_horizon",
-            release_calendar_key="ecmwf_open_data:mx2t6_high:short",
+            track=track,
+            release_calendar_key=release_key,
             source_cycle_time=_dt(0),
             source_available_at=_dt(2),
             fetch_finished_at=imported_at,
@@ -4100,10 +4153,13 @@ def test_current_ensemble_accepts_only_exact_complete_target_window_from_partial
             observed_steps_json=list(range(3, observed_count + 1, 3)),
             expected_count=48,
             observed_count=observed_count,
-            data_version=_current_baseline_data_version("high"),
+            data_version=_current_baseline_data_version(metric),
         )
 
-    write_run(status="PARTIAL", completeness="PARTIAL", partial=True, imported_at=_dt(3))
+    # A transport-complete run without this exact target proof must not elect
+    # the snapshot.  The 18Z D+5 incident had this shape: the run was SUCCESS
+    # while the target needed 162/165h and its coverage was blocked.
+    write_run(status="SUCCESS", completeness="COMPLETE", partial=False, imported_at=_dt(3))
     conn.execute(
         f"""
         INSERT INTO ensemble_snapshots (
@@ -4115,11 +4171,11 @@ def test_current_ensemble_accepts_only_exact_complete_target_window_from_partial
             forecast_window_attribution_status, contributes_to_target_extrema,
             members_unit
         ) VALUES (
-            101, 'Shanghai', '2026-06-07', 'high',
-            'temperature_max', 'high_temp', '2026-06-06T00:00:00+00:00',
+            101, 'Shanghai', '2026-06-07', '{metric}',
+            'temperature_{'max' if metric == 'high' else 'min'}', '{metric}_temp', '2026-06-06T00:00:00+00:00',
             '2026-06-06T03:00:00+00:00', '2026-06-06T03:00:00+00:00', 24,
             '[20.0,21.0]', 'ecmwf_ens',
-            '{_current_baseline_data_version("high")}', 'ecmwf_open_data',
+            '{_current_baseline_data_version(metric)}', 'ecmwf_open_data',
             'ens-run', '2026-06-06T00:00:00+00:00',
             '2026-06-06T03:00:00+00:00', 'VERIFIED', 'OK', 0,
             'FULLY_INSIDE_TARGET_LOCAL_DAY', 1, 'degC'
@@ -4129,12 +4185,12 @@ def test_current_ensemble_accepts_only_exact_complete_target_window_from_partial
 
     def selected() -> tuple[object | None, datetime | None]:
         return (
-            read_current_evidence_snapshot_identity(conn, request, metric="high"),
+            read_current_evidence_snapshot_identity(conn, request, metric=metric),
             latest_eligible_ensemble_input_cycle(
                 conn,
                 city=request.city,
                 target_date=request.target_date,
-                metric="high",
+                metric=metric,
                 decision_time=request.computed_at,
             ),
         )
@@ -4142,11 +4198,11 @@ def test_current_ensemble_accepts_only_exact_complete_target_window_from_partial
     assert selected() == (None, None)
 
     conn.execute(
-        """
+        f"""
         INSERT INTO source_run_coverage VALUES (
             'coverage-1', 'ens-run', 'ecmwf_open_data',
-            'ecmwf_open_data:mx2t6_high:short',
-            'mx2t6_high_short_horizon', 'Shanghai', '2026-06-07', 'high',
+            '{release_key}',
+            '{track}', 'Shanghai', '2026-06-07', '{metric}',
             51, 51, '[0,3,6]', '[0,3,6]', '[101]',
             'COMPLETE', 'LIVE_ELIGIBLE',
             '2026-06-06T03:10:00+00:00',
@@ -4155,6 +4211,38 @@ def test_current_ensemble_accepts_only_exact_complete_target_window_from_partial
         )
         """
     )
+    identity, cycle = selected()
+    assert identity is not None
+    assert identity.snapshot_id == 101
+    assert cycle == _dt(0)
+
+    # Explicit target failure wins over whole-run SUCCESS.  The values model
+    # the real D+5 geometry: the target requires 162/165h while this run ends
+    # at 144h.
+    conn.execute(
+        """
+        UPDATE source_run_coverage
+           SET completeness_status = 'HORIZON_OUT_OF_RANGE',
+               readiness_status = 'BLOCKED',
+               expected_steps_json = '[3,6,144,162,165]',
+               observed_steps_json = '[3,6,144]',
+               expires_at = NULL
+        """
+    )
+    assert selected() == (None, None)
+    conn.execute(
+        """
+        UPDATE source_run_coverage
+           SET completeness_status = 'COMPLETE',
+               readiness_status = 'LIVE_ELIGIBLE',
+               expected_steps_json = '[0,3,6]',
+               observed_steps_json = '[0,3,6]',
+               expires_at = '2026-06-06T06:00:00+00:00'
+        """
+    )
+
+    # Incremental runs retain the same exact-coverage path.
+    write_run(status="PARTIAL", completeness="PARTIAL", partial=True, imported_at=_dt(3, 20))
     identity, cycle = selected()
     assert identity is not None
     assert identity.snapshot_id == 101
@@ -4342,6 +4430,7 @@ def test_final_ens_frontier_detects_absent_to_present() -> None:
         )
         """
     )
+    _set_target_frontier_coverage(conn, snapshot_id=102)
 
     current = cli._revalidate_target_dependency_witness(conn, prepared, baseline)
     conn.close()
@@ -4370,6 +4459,12 @@ def test_final_ens_frontier_exact_city_update_supersedes_casefold() -> None:
             '[19.0,22.0]', 'degC', '{_current_baseline_data_version("high")}'
         )
         """
+    )
+    _set_target_frontier_coverage(
+        conn,
+        snapshot_id=102,
+        city="shanghai",
+        coverage_id="b0-coverage-102",
     )
     baseline = cli._target_dependency_witness(conn, prepared)
     assert baseline.ensemble_identity is not None
@@ -4440,6 +4535,7 @@ def test_final_ens_selector_has_indexed_logarithmic_work() -> None:
             """,
             ((snapshot_id,) for snapshot_id in range(1, row_count + 1)),
         )
+        _set_target_frontier_coverage(conn, snapshot_id=row_count)
         request = _prepared_target_frontier(row_count).request
 
         def measured(city: str) -> tuple[int | None, int, list[str]]:
@@ -4769,6 +4865,14 @@ def test_final_frontier_queries_use_exact_target_indexes_without_temp_sort() -> 
                   '2026-06-06T00:00:00+00:00', '2026-06-06T03:00:00+00:00',
                   'ens-run', 'FULLY_INSIDE_TARGET_LOCAL_DAY', 1, 'OK', 0, 'degC')
         """
+    )
+    _set_target_frontier_coverage(
+        conn,
+        snapshot_id=101,
+        coverage_id="ens-coverage-101",
+        source_run_id="ens-run",
+        track="mx2t6_high_short_horizon",
+        release_key="ecmwf_open_data:mx2t6_high:short",
     )
     traced: list[str] = []
     conn.set_trace_callback(traced.append)
@@ -6084,7 +6188,7 @@ def _insert_coordinate_bound_frontier_row(
     ("metric", "base"),
     (
         ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max_boundary_v2"),
-        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min"),
+        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min_window_v2"),
     ),
 )
 def test_current_evidence_uses_only_the_request_coordinate_dataset(
@@ -6300,3 +6404,430 @@ def test_independent_anchor_clock_does_not_launder_future_or_stale_input(anchor_
         else "REPLACEMENT_MATERIALIZATION_OM9_SOURCE_CYCLE_TOO_STALE"
     )
     assert expected in reasons
+
+
+def test_seed_cycle_boundary_allows_only_proven_retired_low_migration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An old 18Z LOW cannot suppress exact current window-v2 12Z work."""
+    from src.data import replacement_forecast_live_materialization_queue as queue
+    from src.data import replacement_input_hwm
+
+    db = tmp_path / "forecast.db"
+    conn = sqlite3.connect(db)
+    conn.executescript("""
+      CREATE TABLE forecast_posteriors (posterior_id INTEGER PRIMARY KEY, source_id TEXT, city TEXT,
+        target_date TEXT, temperature_metric TEXT, source_cycle_time TEXT, computed_at TEXT,
+        runtime_layer TEXT, provenance_json TEXT);
+      CREATE INDEX idx_forecast_posteriors_runtime_layer_target ON forecast_posteriors(runtime_layer,city,target_date,temperature_metric,computed_at);
+      INSERT INTO forecast_posteriors VALUES (1,'openmeteo_ecmwf_ifs9_bayes_fusion','Seoul','2026-09-23','low','2026-09-22T18:00:00+00:00','2026-09-23T05:05:10+00:00','live','{}');
+    """)
+    conn.close()
+    monkeypatch.setattr(replacement_input_hwm, "latest_eligible_ensemble_input_cycle", lambda *_a, **_k: datetime(2026,9,22,12,tzinfo=timezone.utc))
+    monkeypatch.setattr(replacement_input_hwm, "retired_low_uncertified_incumbent_yields_to_current_ensemble", lambda *_a, **_k: True)
+    seed = {'city':'Seoul','target_date':'2026-09-23','temperature_metric':'low','source_cycle_time':'2026-09-22T12:00:00+00:00','baseline_source_run_id':'v2-12'}
+    assert queue._seed_source_cycle_boundary(forecast_db=db, seed=seed) is None
+    monkeypatch.setattr(replacement_input_hwm, "retired_low_uncertified_incumbent_yields_to_current_ensemble", lambda *_a, **_k: False)
+    assert queue._seed_source_cycle_boundary(forecast_db=db, seed=seed) == ('current_posterior','2026-09-22T18:00:00+00:00')
+
+
+def _low_revision_authority_conn(db_path: Path | None = None) -> sqlite3.Connection:
+    """A forecast-class DB with genuine run, target coverage and ENS schema."""
+    from src.contracts.ensemble_snapshot_provenance import (
+        ECMWF_OPENDATA_LOW_DATA_VERSION_UNCERTIFIED,
+        coordinate_bound_data_version,
+    )
+
+    if db_path is None:
+        conn = _conn()
+    else:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        apply_canonical_schema(conn, forecast_tables=True)
+        _create_readiness_state(conn)
+    _create_source_run(conn)
+    _create_source_run_coverage(conn)
+    current_version = _current_baseline_data_version("low")
+    old_version = coordinate_bound_data_version(
+        ECMWF_OPENDATA_LOW_DATA_VERSION_UNCERTIFIED,
+        current_version.rsplit("__coordsha_", 1)[1],
+    )
+    expected = expected_replacement_dependency_identity_by_role("low")["baseline_b0"]
+    for run_id, snapshot_id, hour, version in (
+        ("old18", 18, 18, old_version),
+        ("new12", 12, 12, current_version),
+    ):
+        cycle = _dt(hour)
+        issued = cycle + timedelta(minutes=5)
+        track = "mn2t6_low_short_horizon"
+        release_key = "ecmwf_open_data:mn2t6_low_short_horizon"
+        write_source_run(
+            conn, source_run_id=run_id, source_id="ecmwf_open_data",
+            track=track, release_calendar_key=release_key,
+            source_cycle_time=cycle, source_available_at=issued,
+            fetch_finished_at=issued, captured_at=issued, imported_at=issued,
+            target_local_date="2026-06-07", city_id="Shanghai",
+            city_timezone="Asia/Shanghai", temperature_metric="low",
+            physical_quantity=expected.physical_quantity,
+            observation_field=expected.observation_field, data_version=version,
+            expected_members=51, observed_members=51,
+            expected_steps_json=[0, 3, 6], observed_steps_json=[0, 3, 6],
+            expected_count=3, observed_count=3,
+            status="SUCCESS", completeness_status="COMPLETE",
+        )
+        conn.execute(
+            """INSERT INTO source_run_coverage (
+                coverage_id, source_run_id, source_id, source_transport,
+                release_calendar_key, track, city_id, city, city_timezone,
+                target_local_date, temperature_metric, physical_quantity,
+                observation_field, data_version, expected_members, observed_members,
+                expected_steps_json, observed_steps_json, snapshot_ids_json,
+                target_window_start_utc, target_window_end_utc,
+                completeness_status, readiness_status, computed_at, expires_at,
+                recorded_at
+            ) VALUES (?, ?, 'ecmwf_open_data', 'native_grib', ?, ?,
+                      'Shanghai', 'Shanghai', 'Asia/Shanghai', '2026-06-07',
+                      'low', ?, ?, ?, 51, 51, '[0,3,6]', '[0,3,6]', ?,
+                      '2026-06-06T16:00:00+00:00', '2026-06-07T16:00:00+00:00',
+                      'COMPLETE', 'LIVE_ELIGIBLE', ?,
+                      '2026-06-07T03:00:00+00:00', ?)""",
+            (f"coverage-{run_id}", run_id, release_key, track,
+             expected.physical_quantity, expected.observation_field, version,
+             json.dumps([snapshot_id]), issued.isoformat(), issued.isoformat()),
+        )
+        conn.execute(
+            """INSERT INTO ensemble_snapshots (
+                snapshot_id, city, target_date, temperature_metric,
+                physical_quantity, observation_field, issue_time, available_at,
+                fetch_time, lead_hours, members_json, model_version, dataset_id,
+                source_id, source_run_id, source_cycle_time, source_available_at,
+                authority, causality_status, boundary_ambiguous,
+                forecast_window_attribution_status, contributes_to_target_extrema,
+                members_unit, recorded_at
+            ) VALUES (?, 'Shanghai', '2026-06-07', 'low', ?, ?, ?, ?, ?, 24,
+                      ?, 'ecmwf_ens', ?, 'ecmwf_open_data', ?, ?, ?,
+                      'VERIFIED', 'OK', 0, 'FULLY_INSIDE_TARGET_LOCAL_DAY',
+                      1, 'degC', ?)""",
+            (snapshot_id, expected.physical_quantity, expected.observation_field,
+             cycle.isoformat(), issued.isoformat(), issued.isoformat(),
+             json.dumps([19.0 + index * 0.01 for index in range(51)]), version,
+             run_id, cycle.isoformat(), issued.isoformat(), issued.isoformat()),
+        )
+    for raw_id, model in enumerate(("ecmwf_ifs9", "gfs", "icon", "gem", "jma"), 101):
+        conn.execute(
+            """INSERT INTO raw_model_forecasts (
+                raw_model_forecast_id, model, city, target_date, metric,
+                source_cycle_time, source_available_at, captured_at, lead_days,
+                forecast_value_c, endpoint
+            ) VALUES (?, ?, 'Shanghai', '2026-06-07', 'low', ?, ?, ?, 1,
+                      22.0, 'single_runs')""",
+            (raw_id, model, _dt(12).isoformat(),
+             _dt(12, 5).isoformat(), _dt(12, 5).isoformat()),
+        )
+    soft = expected_replacement_dependency_identity_by_role("low")["soft_anchor_posterior"]
+    conn.execute(
+        """INSERT INTO forecast_posteriors (
+            source_id, product_id, data_version, city, target_date,
+            temperature_metric, source_cycle_time, source_available_at,
+            computed_at, q_json, q_lcb_json, posterior_method,
+            dependency_source_run_ids_json, provenance_json, runtime_layer
+        ) VALUES (?, 'old-soft', ?, 'Shanghai', '2026-06-07', 'low',
+                  '2026-06-06T18:00:00+00:00', '2026-06-06T18:05:00+00:00',
+                  '2026-06-06T19:00:00+00:00', '{}', '{}', 'old-uncertified',
+                  ?, ?, 'live')""",
+        (soft.source_id, soft.data_version,
+         json.dumps({"baseline_b0": "old18", "current_ensemble_snapshot": 18}),
+         json.dumps({"bayes_precision_fusion": {"current_evidence_shape": {"snapshot_id": 18}}})),
+    )
+    incumbent_id = conn.execute(
+        "SELECT posterior_id FROM forecast_posteriors WHERE source_cycle_time=?",
+        (_dt(18).isoformat(),),
+    ).fetchone()[0]
+    write_readiness_state(
+        conn, readiness_id="old-uncertified-readiness", scope_type="strategy",
+        status="READY", computed_at=_dt(19), city_id="Shanghai",
+        city="Shanghai", city_timezone="Asia/Shanghai",
+        target_local_date="2026-06-07", metric="low", temperature_metric="low",
+        physical_quantity=soft.physical_quantity,
+        observation_field=soft.observation_field,
+        data_version=materializer_mod.LOW_DATA_VERSION,
+        source_id=soft.source_id, track="soft_anchor_posterior",
+        source_run_id=f"posterior:{incumbent_id}", strategy_key=STRATEGY_KEY,
+        expires_at=_dt(22),
+    )
+    conn.commit()
+    return conn
+
+
+def _low_revision_request() -> ReplacementForecastMaterializeRequest:
+    from src.contracts.replacement_pipeline_files import (
+        DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS,
+    )
+
+    return replace(
+        _request(source_cycle_time=_dt(12), computed_at=_dt(20),
+                 expires_at=_dt(22), baseline_source_run_id="new12",
+                 baseline_source_available_at=_dt(12, 5),
+                 day0_observation_state=DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS),
+        temperature_metric="low",
+        baseline_data_version=_current_baseline_data_version("low"),
+    )
+
+
+def test_low_revision_migration_materializes_current_12z_and_rebinds_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fully evidenced old 18Z LOW yields to current window-v2 12Z q."""
+    from src.data.replacement_input_hwm import latest_eligible_ensemble_input_cycle
+
+    conn = _low_revision_authority_conn()
+    _install_live_fusion(monkeypatch, snapshot_id=12, shape_cycle_time=_dt(12))
+    request = _low_revision_request()
+    assert latest_eligible_ensemble_input_cycle(
+        conn, city="Shanghai", target_date=request.target_date,
+        metric="low", decision_time=request.computed_at,
+    ) == _dt(12)
+    prior = conn.execute("SELECT * FROM readiness_state").fetchone()
+    assert prior["source_run_id"] == "posterior:1"
+
+    result = materialize_replacement_forecast_live(conn, request)
+
+    assert result.ok is True, result.reason_codes
+    posterior = conn.execute(
+        "SELECT * FROM forecast_posteriors WHERE posterior_id=?", (result.posterior_id,)
+    ).fetchone()
+    readiness = conn.execute(
+        "SELECT * FROM readiness_state WHERE readiness_id=?", (result.readiness_id,)
+    ).fetchone()
+    assert posterior["source_cycle_time"] == _dt(12).isoformat()
+    assert json.loads(posterior["dependency_source_run_ids_json"])["baseline_b0"] == "new12"
+    assert readiness["status"] == "READY"
+    assert str(result.posterior_id) in readiness["source_run_id"]
+    assert conn.execute("SELECT count(*) FROM readiness_state").fetchone()[0] == 1
+
+
+def test_low_revision_repeat_materialization_keeps_one_new_certificate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The identical 12Z input reuses its posterior and readiness identity."""
+    conn = _low_revision_authority_conn()
+    _install_live_fusion(monkeypatch, snapshot_id=12, shape_cycle_time=_dt(12))
+    request = _low_revision_request()
+
+    first = materialize_replacement_forecast_live(conn, request)
+    second = materialize_replacement_forecast_live(conn, request)
+
+    assert first.ok is True
+    assert second.ok is True
+    assert second.posterior_id == first.posterior_id
+    assert second.readiness_id == first.readiness_id
+    assert conn.execute("SELECT count(*) FROM forecast_posteriors").fetchone()[0] == 2
+
+
+@pytest.mark.parametrize("purpose", ("ENTRY", "HELD_REDECISION"))
+def test_low_revision_bundle_consumer_reads_certified_12z_over_retained_18z(
+    purpose: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ENTRY and HELD read the newly certified q despite retained old 18Z."""
+    from src.data import replacement_forecast_bundle_reader as bundle_reader
+    monkeypatch.setattr(bundle_reader, "datetime", _LowRevisionQueueClock)
+    from src.data.replacement_forecast_bundle_reader import (
+        ReplacementForecastAuthorityPurpose,
+        read_replacement_forecast_bundle,
+    )
+    from src.data.replacement_forecast_readiness import (
+        ReplacementForecastReadinessDecision,
+    )
+
+    conn = _low_revision_authority_conn()
+    current_serving = {
+        model: {
+            "served_via": "single_runs", "raw_model_forecast_id": raw_id,
+            "served_cycle": _dt(12).isoformat(),
+            "captured_at": _dt(12, 5).isoformat(),
+        }
+        for raw_id, model in enumerate(("ecmwf_ifs9", "gfs", "icon", "gem", "jma"), 101)
+    }
+    _install_live_fusion(
+        monkeypatch, snapshot_id=12, shape_cycle_time=_dt(12),
+        current_serving=current_serving,
+    )
+    request = _low_revision_request()
+    result = materialize_replacement_forecast_live(conn, request)
+    assert result.ok is True, result.reason_codes
+    cert = conn.execute(
+        "SELECT * FROM readiness_state WHERE readiness_id=?", (result.readiness_id,),
+    ).fetchone()
+    posterior = conn.execute(
+        "SELECT * FROM forecast_posteriors WHERE posterior_id=?", (result.posterior_id,),
+    ).fetchone()
+    readiness = ReplacementForecastReadinessDecision(
+        readiness_id=cert["readiness_id"], status=cert["status"],
+        reason_codes=tuple(json.loads(cert["reason_codes_json"])),
+        dependency_json=json.loads(cert["dependency_json"]),
+        provenance_json=json.loads(cert["provenance_json"]),
+        expires_at=datetime.fromisoformat(cert["expires_at"]),
+    )
+    assert conn.execute("SELECT count(*) FROM forecast_posteriors").fetchone()[0] == 2
+
+    served = read_replacement_forecast_bundle(
+        conn, baseline_bundle=_BaselineBundle(_Evidence("new12")),
+        readiness=readiness, city="Shanghai", target_date=request.target_date,
+        temperature_metric="low", decision_time=_dt(20, 1).isoformat(),
+        current_bin_topology_hash=posterior["bin_topology_hash"],
+        enforce_raw_input_hwm=True,
+        authority_purpose=ReplacementForecastAuthorityPurpose[purpose],
+    )
+
+    assert served.ok is True, served.reason_code
+    assert served.bundle is not None
+    assert served.bundle.posterior_id == result.posterior_id
+    assert served.bundle.source_cycle_time == _dt(12).isoformat()
+    assert served.bundle.baseline_source_run_id == "new12"
+
+
+@pytest.mark.parametrize("invalidity", ("same_revision", "expired_candidate"))
+def test_low_revision_materializer_keeps_old_certificate_when_migration_is_unproven(
+    invalidity: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Neither same-version rollback nor expired target proof writes a new q."""
+    conn = _low_revision_authority_conn()
+    _install_live_fusion(monkeypatch, snapshot_id=12, shape_cycle_time=_dt(12))
+    if invalidity == "same_revision":
+        current = _current_baseline_data_version("low")
+        conn.execute("UPDATE source_run SET dataset_id=? WHERE source_run_id='old18'", (current,))
+        conn.execute("UPDATE source_run_coverage SET data_version=? WHERE source_run_id='old18'", (current,))
+        conn.execute("UPDATE ensemble_snapshots SET dataset_id=? WHERE snapshot_id=18", (current,))
+    else:
+        conn.execute("UPDATE source_run_coverage SET expires_at=? WHERE source_run_id='new12'", (_dt(19).isoformat(),))
+
+    result = materialize_replacement_forecast_live(conn, _low_revision_request())
+
+    assert result.ok is False
+    assert "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION" in result.reason_codes
+    assert conn.execute("SELECT count(*) FROM forecast_posteriors").fetchone()[0] == 1
+    assert conn.execute("SELECT source_run_id FROM readiness_state").fetchone()[0] == "posterior:1"
+
+
+@pytest.mark.parametrize(
+    ("table", "column", "where"),
+    (
+        ("source_run_coverage", "computed_at", "source_run_id='old18'"),
+        ("source_run_coverage", "recorded_at", "source_run_id='old18'"),
+        ("forecast_posteriors", "computed_at", "source_cycle_time='2026-06-06T18:00:00+00:00'"),
+        ("ensemble_snapshots", "recorded_at", "snapshot_id=18"),
+        ("ensemble_snapshots", "source_available_at", "snapshot_id=18"),
+    ),
+)
+def test_low_revision_refuses_individual_future_incumbent_evidence(
+    table: str, column: str, where: str,
+) -> None:
+    """Each incumbent evidence clock must independently precede the decision."""
+    from src.data.replacement_input_hwm import (
+        retired_low_uncertified_incumbent_yields_to_current_ensemble,
+    )
+
+    conn = _low_revision_authority_conn()
+    check = lambda: retired_low_uncertified_incumbent_yields_to_current_ensemble(
+        conn, city="Shanghai", target_date="2026-06-07", metric="low",
+        incoming_baseline_source_run_id="new12", decision_time=_dt(20),
+    )
+    assert check() is True
+    conn.execute(
+        f"UPDATE {table} SET {column}=? WHERE {where}",
+        (_dt(21).isoformat(),),
+    )
+    assert check() is False
+
+
+def test_low_revision_refuses_expired_current_target_coverage() -> None:
+    """A current run loses migration authority when target coverage expires."""
+    from src.data.replacement_input_hwm import (
+        retired_low_uncertified_incumbent_yields_to_current_ensemble,
+    )
+
+    conn = _low_revision_authority_conn()
+    conn.execute(
+        "UPDATE source_run_coverage SET expires_at=? WHERE source_run_id='new12'",
+        (_dt(19).isoformat(),),
+    )
+    assert retired_low_uncertified_incumbent_yields_to_current_ensemble(
+        conn, city="Shanghai", target_date="2026-06-07", metric="low",
+        incoming_baseline_source_run_id="new12", decision_time=_dt(20),
+    ) is False
+
+
+def test_low_revision_refuses_incumbent_run_imported_after_decision() -> None:
+    """A future old-run ingest cannot establish historical rollback authority."""
+    from src.data.replacement_input_hwm import (
+        retired_low_uncertified_incumbent_yields_to_current_ensemble,
+    )
+
+    conn = _low_revision_authority_conn()
+    conn.execute(
+        "UPDATE source_run SET imported_at=? WHERE source_run_id='old18'",
+        (_dt(21).isoformat(),),
+    )
+    assert retired_low_uncertified_incumbent_yields_to_current_ensemble(
+        conn, city="Shanghai", target_date="2026-06-07", metric="low",
+        incoming_baseline_source_run_id="new12", decision_time=_dt(20),
+    ) is False
+
+
+class _LowRevisionQueueClock(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return _dt(20)
+
+
+def test_low_revision_queue_boundary_and_marker_are_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The normal queue admits one exact migration seed, then its marker dedupes."""
+    from src.data import replacement_forecast_live_materialization_queue as queue
+    monkeypatch.setattr(queue, "datetime", _LowRevisionQueueClock)
+
+    db_path = tmp_path / "forecast.db"
+    conn = _low_revision_authority_conn(db_path)
+    seed = {
+        "city": "Shanghai", "target_date": "2026-06-07",
+        "temperature_metric": "low", "source_cycle_time": _dt(12).isoformat(),
+        "baseline_source_run_id": "new12",
+    }
+    assert queue._seed_source_cycle_boundary(forecast_db=db_path, seed=seed) is None
+    seed_path = tmp_path / "new12.seed.json"
+    seed_path.write_text("{}", encoding="utf-8")
+    assert cycle_advance._record_enqueue(
+        conn, city="Shanghai", target_date="2026-06-07", metric="low",
+        consumed_cycle_iso=_dt(18).isoformat(), target_cycle_iso=_dt(12).isoformat(),
+        held_position=True, seed_file=str(seed_path),
+    ) is True
+    assert cycle_advance._already_enqueued(
+        conn, city="Shanghai", target_date="2026-06-07", metric="low",
+        target_cycle_iso=_dt(12).isoformat(),
+    ) is True
+    assert conn.execute("SELECT count(*) FROM cycle_advance_enqueues").fetchone()[0] == 1
+
+
+def test_low_revision_queue_refuses_same_version_backward_cycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 18Z-to-12Z exception closes once the incumbent is current v2."""
+    from src.data import replacement_forecast_live_materialization_queue as queue
+    monkeypatch.setattr(queue, "datetime", _LowRevisionQueueClock)
+
+    db_path = tmp_path / "forecast.db"
+    conn = _low_revision_authority_conn(db_path)
+    current = _current_baseline_data_version("low")
+    conn.execute("UPDATE source_run SET dataset_id=? WHERE source_run_id='old18'", (current,))
+    conn.execute("UPDATE source_run_coverage SET data_version=? WHERE source_run_id='old18'", (current,))
+    conn.execute("UPDATE ensemble_snapshots SET dataset_id=? WHERE snapshot_id=18", (current,))
+    conn.commit()
+    seed = {
+        "city": "Shanghai", "target_date": "2026-06-07",
+        "temperature_metric": "low", "source_cycle_time": _dt(12).isoformat(),
+        "baseline_source_run_id": "new12",
+    }
+    assert queue._seed_source_cycle_boundary(forecast_db=db_path, seed=seed) == (
+        "current_posterior", _dt(18).isoformat(),
+    )

@@ -21,6 +21,9 @@ from typing import Literal
 
 from src.contracts.ensemble_snapshot_provenance import (
     ECMWF_OPENDATA_HIGH_DATA_VERSION,
+    ECMWF_OPENDATA_HIGH_DATA_VERSION_UNCERTIFIED,
+    ECMWF_OPENDATA_LOW_DATA_VERSION,
+    ECMWF_OPENDATA_LOW_DATA_VERSION_UNCERTIFIED,
     ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
     TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
     _ECMWF_OPENDATA_HIGH_DATA_VERSION_LEGACY,
@@ -45,8 +48,8 @@ from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, Metri
 # legacy 6h MetricIdentity caused PHYSICAL_QUANTITY_MISMATCH on every
 # correctly-tagged 3h row, dropping post-cutover Open Data rows on the
 # floor. Per-quantity MetricIdentity restores 3h identity end-to-end.
-_ECMWF_OPENDATA_HIGH_DATA_VERSION = "ecmwf_opendata_mx2t3_local_calendar_day_max"
-_ECMWF_OPENDATA_LOW_DATA_VERSION = "ecmwf_opendata_mn2t3_local_calendar_day_min"
+_ECMWF_OPENDATA_HIGH_DATA_VERSION = ECMWF_OPENDATA_HIGH_DATA_VERSION_UNCERTIFIED
+_ECMWF_OPENDATA_LOW_DATA_VERSION = ECMWF_OPENDATA_LOW_DATA_VERSION_UNCERTIFIED
 # Legacy versions imported from canonical source (ensemble_snapshot_provenance.py:82-83).
 # Local re-definitions removed 2026-05-07; use the imported names above.
 
@@ -66,6 +69,12 @@ _LOW_LOCALDAY_MIN_OPENDATA_3H = MetricIdentity(
     physical_quantity="mn2t3_local_calendar_day_min",
     observation_field="low_temp",
     data_version=_ECMWF_OPENDATA_LOW_DATA_VERSION,
+)
+_LOW_LOCALDAY_MIN_OPENDATA_WINDOW_V2 = MetricIdentity(
+    temperature_metric="low",
+    physical_quantity="mn2t3_local_calendar_day_min",
+    observation_field="low_temp",
+    data_version=ECMWF_OPENDATA_LOW_DATA_VERSION,
 )
 
 _ALLOWED_DATA_VERSIONS: dict[str, MetricIdentity] = {
@@ -90,7 +99,10 @@ _ALLOWED_DATA_VERSIONS: dict[str, MetricIdentity] = {
     # (ingest_grib_to_snapshots.py:615-617), so the contract now needs
     # to accept it.
     _ECMWF_OPENDATA_HIGH_DATA_VERSION: _HIGH_LOCALDAY_MAX_OPENDATA_3H,
+    # Historical mx2t3/mn2t3 identities remain decodable for existing rows;
+    # active source-run identity is the window-v2 entry below.
     _ECMWF_OPENDATA_LOW_DATA_VERSION: _LOW_LOCALDAY_MIN_OPENDATA_3H,
+    ECMWF_OPENDATA_LOW_DATA_VERSION: _LOW_LOCALDAY_MIN_OPENDATA_WINDOW_V2,
     TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION: LOW_LOCALDAY_MIN,
     ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION: LOW_LOCALDAY_MIN,
     # Legacy bridge — mx2t6/mn2t6 era rows written before 2026-05-07.

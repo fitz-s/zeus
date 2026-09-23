@@ -55,10 +55,6 @@ UTC = timezone.utc
 # main.py's _edli_open_maker_rests_for_screen imports this constant from here now).
 OPEN_REST_FACT_STATES = tuple(sorted(OPEN_ORDER_FACT_STATES))
 
-# The forecast_posteriors product_id this family q_version read targets — matches the
-# phase-1 posterior lookup event_reactor_adapter._forecast_authority_payload_from_posterior
-# uses (src/engine/event_reactor_adapter.py:11309).
-_REPLACEMENT_0_1_PRODUCT_ID = "openmeteo_ecmwf_ifs9_bayes_fusion_v1"
 _Q_AUTHORITY_BLOCKED_PREFIX = "__Q_AUTHORITY_BLOCKED__:"
 
 FamilyKey = tuple[str, str, str]
@@ -477,35 +473,80 @@ def read_current_family_q_versions(
     *,
     now: datetime | None = None,
 ) -> dict[FamilyKey, str | None]:
-    """Freshest live ``posterior_identity_hash`` per distinct family.
+    """Read the exact live readiness-bound q identity for each family.
 
-    Lightweight CURRENT-VALUE read for staleness classification — the same
-    ``forecast_posteriors`` lookup shape ``event_reactor_adapter._forecast_authority_payload_from_posterior``
-    uses (ORDER BY source_cycle_time DESC, computed_at DESC LIMIT 1), without the heavier
-    freshness/HWM/member-count gates that lookup applies for decision authority: this read
-    only needs "what q is this family being decided against right now," not a licensed
-    decision payload. A family with no posterior row yet is BLOCKED/no-servable-q ->
-    ``None`` (INDETERMINATE for every one of its orders' q-staleness comparison).
+    SCOPE is the current city/date/metric certificate. DRAIN is the next
+    certified redecision; RESET is its valid current posterior pointer. A
+    missing/invalid certificate means no servable q, so fresh rests remain
+    INDETERMINATE until a certified redecision or their normal TTL. A bound
+    posterior with invalid current carrier/HWM retains blocked cancellation.
     """
+    from src.data.replacement_forecast_bundle_reader import (
+        _current_ensemble_snapshot_identity_reason,
+        _readiness_posterior_id,
+    )
+    from src.data.replacement_forecast_readiness import (
+        HIGH_DATA_VERSION,
+        LIVE_RUNTIME_LAYER,
+        LOW_DATA_VERSION,
+        PRODUCT_ID,
+        READY_STATUS,
+        SOURCE_ID,
+        latest_replacement_readiness,
+    )
+
     out: dict[FamilyKey, str | None] = {}
     decision_time = (now or datetime.now(UTC)).astimezone(UTC)
+
     for family in {f for f in families if f}:
         city, target_date, metric = family
+        data_version = HIGH_DATA_VERSION if metric == "high" else LOW_DATA_VERSION
+        try:
+            readiness = latest_replacement_readiness(
+                forecasts_conn,
+                city=city,
+                target_date=target_date,
+                temperature_metric=metric,
+                decision_time=decision_time,
+            )
+        except Exception:  # noqa: BLE001 — unreadable readiness is unknown
+            out[family] = None
+            continue
+        if (
+            readiness is None
+            or readiness.status != READY_STATUS
+            or readiness.expires_at is None
+            or readiness.expires_at <= decision_time
+        ):
+            out[family] = None
+            continue
+        try:
+            posterior_id = _readiness_posterior_id(
+                readiness, data_version=data_version, decision_time=decision_time,
+            )
+        except Exception:  # noqa: BLE001 — malformed pointer cannot license q
+            posterior_id = None
+        if posterior_id is None:
+            out[family] = None
+            continue
         try:
             row = forecasts_conn.execute(
                 """
                 SELECT posterior_identity_hash, source_cycle_time, computed_at
                        , dependency_source_run_ids_json
                   FROM forecast_posteriors
-                 WHERE product_id = ?
+                 WHERE posterior_id = ? AND source_id = ? AND product_id = ?
+                   AND data_version = ? AND runtime_layer = ? AND training_allowed = 0
                    AND city = ? AND target_date = ? AND temperature_metric = ?
-                 ORDER BY source_cycle_time DESC, computed_at DESC
+                   AND computed_at <= ? AND source_available_at <= ?
                  LIMIT 1
                 """,
-                (_REPLACEMENT_0_1_PRODUCT_ID, city, target_date, metric),
+                (posterior_id, SOURCE_ID, PRODUCT_ID, data_version, LIVE_RUNTIME_LAYER,
+                 city, target_date, metric, decision_time.isoformat(), decision_time.isoformat()),
             ).fetchone()
-        except Exception:  # noqa: BLE001 — fail-closed to INDETERMINATE, never raise
-            row = None
+        except Exception:  # noqa: BLE001 — unreadable posterior is unknown
+            out[family] = None
+            continue
         if not row or not row[0]:
             out[family] = None
             continue
@@ -519,10 +560,6 @@ def read_current_family_q_versions(
             out[family] = f"{_Q_AUTHORITY_BLOCKED_PREFIX}{q_version}:current_ensemble_dependency_unparseable"
             continue
         try:
-            from src.data.replacement_forecast_bundle_reader import (
-                _current_ensemble_snapshot_identity_reason,
-            )
-
             current_snapshot_reason = _current_ensemble_snapshot_identity_reason(
                 forecasts_conn,
                 dependency_json=dependency_json,

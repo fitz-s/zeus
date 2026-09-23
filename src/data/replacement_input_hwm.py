@@ -345,10 +345,11 @@ def ensemble_source_authority_sql(
 ) -> tuple[str, tuple[object, ...]]:
     """Build the shared decision-time ENS source-authority predicate.
 
-    A whole-run COMPLETE row remains sufficient.  An incrementally published
-    run is also sufficient only for the exact snapshot whose target-local-day
-    coverage is already COMPLETE/LIVE_ELIGIBLE, contains every required step
-    and expected member, and was durably recorded before the decision cut.
+    Every run needs exact target-local-day coverage for the selected snapshot.
+    A run-level ``SUCCESS`` proves transport completion, not that this city,
+    target day, metric, member set, and required step geometry are usable.
+    The coverage row must be COMPLETE/LIVE_ELIGIBLE, contain every required
+    step and expected member, and be durably recorded before the decision cut.
     """
 
     run_clock_expr = (
@@ -362,20 +363,15 @@ def ensemble_source_authority_sql(
     )
 
     decision_iso = decision_time.astimezone(UTC).isoformat()
-    complete_run = """
-        source_run.status = 'SUCCESS'
-        AND source_run.completeness_status = 'COMPLETE'
-        AND source_run.partial_run = 0
-    """
-    partial_target = "0"
-    partial_params: tuple[object, ...] = ()
+    target_coverage = "0"
+    coverage_params: tuple[object, ...] = ()
     if coverage_ref is not None:
         coverage_index_clause = ""
         if coverage_identity_index is not None:
             if not coverage_identity_index.replace("_", "").isalnum():
                 raise ValueError("source-run coverage index identity is invalid")
             coverage_index_clause = f" INDEXED BY {coverage_identity_index}"
-        partial_target = f"""
+        target_coverage = f"""
                 source_run.status IN ('PARTIAL', 'SUCCESS')
                 AND source_run.completeness_status IN ('PARTIAL', 'COMPLETE')
                 AND EXISTS (
@@ -406,7 +402,7 @@ def ensemble_source_authority_sql(
                            = CAST({ensemble_alias}.snapshot_id AS TEXT)
                 )
         """
-        partial_params = (decision_iso, decision_iso, decision_iso)
+        coverage_params = (decision_iso, decision_iso, decision_iso)
 
     return (
         f"""
@@ -415,10 +411,10 @@ def ensemble_source_authority_sql(
               FROM {source_run_ref} AS source_run
              WHERE source_run.source_run_id = {ensemble_alias}.source_run_id
                AND datetime({run_clock_expr}) <= datetime(?)
-               AND (({complete_run}) OR ({partial_target}))
+               AND ({target_coverage})
         )
         """,
-        (decision_iso, *partial_params),
+        (decision_iso, *coverage_params),
     )
 
 
@@ -2356,3 +2352,178 @@ def replacement_live_input_lag_reason(
         # A retryable SQLite failure is UNKNOWN authority, never honest absence.
         # Consumers treat every non-None reason as fail-closed stale evidence.
         return exc.blocker_reason()
+
+
+def retired_low_uncertified_incumbent_yields_to_current_ensemble(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: object,
+    metric: str,
+    incoming_baseline_source_run_id: str,
+    decision_time: datetime,
+    incumbent_posterior_id: int | None = None,
+) -> bool:
+    """Prove the sole lawful LOW cycle rollback: uncertified -> window-v2.
+
+    A newer clock from the retired pre-window LOW dataset cannot suppress an
+    older clock from the current window-v2 dataset.  This is deliberately not a
+    general data-version escape hatch: both revisions must be coordinate-bound
+    to the same manifest SHA, the incumbent must bind an exact target snapshot,
+    and the incoming run must be the current authority-selected exact snapshot.
+    Any absent, unreadable, or stale proof preserves the ordinary cycle HWM.
+    """
+    if metric != "low" or not incoming_baseline_source_run_id:
+        return False
+    try:
+        from src.contracts.ensemble_snapshot_provenance import (
+            ECMWF_OPENDATA_LOW_DATA_VERSION,
+            ECMWF_OPENDATA_LOW_DATA_VERSION_UNCERTIFIED,
+            split_coordinate_bound_data_version,
+        )
+        from src.data.replacement_forecast_source_run_identity import (
+            expected_replacement_dependency_identity_by_role,
+            validate_replacement_source_run_identity,
+        )
+
+        expected = expected_replacement_dependency_identity_by_role(metric)["baseline_b0"]
+        expected_version = expected.data_version
+        expected_identity = split_coordinate_bound_data_version(str(expected_version or ""))
+        if expected_identity is None or expected_identity[0] != ECMWF_OPENDATA_LOW_DATA_VERSION:
+            return False
+        target_date_text = str(target_date)
+        if incumbent_posterior_id is None:
+            incumbent = conn.execute(
+                """
+                SELECT posterior_id, dependency_source_run_ids_json, provenance_json
+                  FROM forecast_posteriors
+                 WHERE source_id = 'openmeteo_ecmwf_ifs9_bayes_fusion'
+                   AND runtime_layer = 'live' AND city = ? AND target_date = ?
+                   AND temperature_metric = ? AND datetime(computed_at) <= datetime(?)
+                 ORDER BY computed_at DESC, posterior_id DESC LIMIT 1
+                """,
+                (city, target_date_text, metric, decision_time.astimezone(UTC).isoformat()),
+            ).fetchone()
+        else:
+            incumbent = conn.execute(
+                """SELECT posterior_id, dependency_source_run_ids_json, provenance_json
+                     FROM forecast_posteriors
+                    WHERE posterior_id = ?
+                      AND source_id = 'openmeteo_ecmwf_ifs9_bayes_fusion'
+                      AND runtime_layer = 'live' AND city = ? AND target_date = ?
+                      AND temperature_metric = ? AND datetime(computed_at) <= datetime(?) LIMIT 1""",
+                (incumbent_posterior_id, city, target_date_text, metric, decision_time.astimezone(UTC).isoformat()),
+            ).fetchone()
+        if incumbent is None:
+            return False
+        dependencies = json.loads(str(incumbent[1] if not hasattr(incumbent, "keys") else incumbent["dependency_source_run_ids_json"]))
+        provenance = json.loads(str(incumbent[2] if not hasattr(incumbent, "keys") else incumbent["provenance_json"]))
+        if not isinstance(dependencies, Mapping) or not isinstance(provenance, Mapping):
+            return False
+        fusion = provenance.get("bayes_precision_fusion")
+        shape = fusion.get("current_evidence_shape") if isinstance(fusion, Mapping) else None
+        incumbent_run_id = str(dependencies.get("baseline_b0") or "").strip()
+        incumbent_snapshot_id = dependencies.get("current_ensemble_snapshot")
+        if (
+            not incumbent_run_id
+            or not isinstance(incumbent_snapshot_id, int)
+            or not isinstance(shape, Mapping)
+            or shape.get("snapshot_id") != incumbent_snapshot_id
+        ):
+            return False
+        incumbent_run = conn.execute(
+            "SELECT * FROM source_run WHERE source_run_id = ? LIMIT 1", (incumbent_run_id,)
+        ).fetchone()
+        if incumbent_run is None or not hasattr(incumbent_run, "keys"):
+            return False
+        # Match the current ENS authority's durable-possession clock priority.
+        incumbent_clock = next(
+            (
+                incumbent_run[column]
+                for column in (
+                    "imported_at", "fetch_finished_at", "captured_at", "source_available_at",
+                )
+                if column in incumbent_run.keys() and incumbent_run[column] is not None
+            ),
+            None,
+        )
+        incumbent_available_at = _parse_source_cycle_utc(incumbent_clock)
+        if incumbent_available_at is None or incumbent_available_at > decision_time.astimezone(UTC):
+            return False
+        coverage = conn.execute(
+            """
+            SELECT * FROM source_run_coverage
+             WHERE source_run_id = ? AND lower(city) = lower(?)
+               AND target_local_date = ? AND temperature_metric = ?
+               AND datetime(recorded_at) <= datetime(?)
+               AND datetime(computed_at) <= datetime(?)
+             ORDER BY recorded_at DESC LIMIT 1
+            """,
+            (
+                incumbent_run_id, city, target_date_text, metric,
+                decision_time.astimezone(UTC).isoformat(),
+                decision_time.astimezone(UTC).isoformat(),
+            ),
+        ).fetchone()
+        if incumbent_run is None or coverage is None:
+            return False
+        incumbent_version = str(
+            (incumbent_run["dataset_id"] if hasattr(incumbent_run, "keys") else "") or ""
+        )
+        incumbent_identity = split_coordinate_bound_data_version(incumbent_version)
+        if (
+            incumbent_identity is None
+            or incumbent_identity[0] != ECMWF_OPENDATA_LOW_DATA_VERSION_UNCERTIFIED
+            or incumbent_identity[1] != expected_identity[1]
+        ):
+            return False
+        if str(coverage["data_version"] if hasattr(coverage, "keys") else "") != incumbent_version:
+            return False
+        incumbent_validity = validate_replacement_source_run_identity(
+            role="baseline_b0", temperature_metric=metric,
+            source_run=dict(incumbent_run), coverage=dict(coverage),
+        )
+        permitted = {
+            "REPLACEMENT_SOURCE_RUN_DATA_VERSION_MISMATCH",
+            "REPLACEMENT_SOURCE_RUN_COVERAGE_DATA_VERSION_MISMATCH",
+        }
+        if not set(incumbent_validity.reason_codes) or not set(incumbent_validity.reason_codes).issubset(permitted):
+            return False
+        snapshot = conn.execute(
+            """
+            SELECT snapshot_id FROM ensemble_snapshots
+             WHERE snapshot_id = ? AND source_run_id = ?
+               AND lower(city) = lower(?) AND target_date = ?
+               AND temperature_metric = ? AND dataset_id = ?
+               AND source_id = 'ecmwf_open_data' AND model_version = 'ecmwf_ens'
+               AND datetime(source_available_at) <= datetime(?)
+               AND datetime(recorded_at) <= datetime(?)
+             LIMIT 1
+            """,
+            (incumbent_snapshot_id, incumbent_run_id, city, target_date_text,
+             metric, incumbent_version, decision_time.astimezone(UTC).isoformat(),
+             decision_time.astimezone(UTC).isoformat()),
+        ).fetchone()
+        if snapshot is None:
+            return False
+        snapshot_ids = json.loads(str(coverage["snapshot_ids_json"] if hasattr(coverage, "keys") else ""))
+        if not isinstance(snapshot_ids, list) or len(snapshot_ids) != 1 or str(snapshot_ids[0]) != str(snapshot[0]):
+            return False
+        mark = _latest_eligible_ensemble_input_mark(
+            conn, city=city, target_date=target_date, metric=metric,
+            decision_time=decision_time,
+        )
+        if mark is None:
+            return False
+        current_snapshot = conn.execute(
+            """SELECT source_run_id FROM ensemble_snapshots
+                 WHERE snapshot_id = ? AND lower(city) = lower(?) AND target_date = ?
+                   AND temperature_metric = ? AND dataset_id = ? LIMIT 1""",
+            (mark[0], city, target_date_text, metric, expected_version),
+        ).fetchone()
+        return (
+            current_snapshot is not None
+            and str(current_snapshot[0]) == str(incoming_baseline_source_run_id)
+        )
+    except (sqlite3.Error, TypeError, ValueError, KeyError, json.JSONDecodeError):
+        return False

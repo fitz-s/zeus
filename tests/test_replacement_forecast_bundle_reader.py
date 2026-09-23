@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-09-22
-# Lifecycle: created=2026-06-06; last_reviewed=2026-09-22; last_reused=2026-09-22
+# Last reused/audited: 2026-09-23
+# Lifecycle: created=2026-06-06; last_reviewed=2026-09-23; last_reused=2026-09-23
 # Purpose: Protect replacement posterior bundle reader no-bypass semantics.
 # Reuse: Run before wiring replacement posterior into executable forecast reader or event reactor.
 # Authority basis: Operator-directed live replacement forecast bundle reader semantics.
@@ -3449,3 +3449,189 @@ def test_raw_hwm_reuses_bound_posterior_provenance(monkeypatch) -> None:
         and "FROM FORECAST_POSTERIORS" in statement.upper()
     ]
     assert len(posterior_reads) == 1
+
+
+def _coverage_identity_conn(
+    monkeypatch,
+    *,
+    coverage_status: str | None,
+    coverage_readiness: str | None,
+    run_status: str,
+    run_completeness: str,
+    partial_run: int,
+) -> sqlite3.Connection:
+    """Build the smallest source-run/coverage surface for the carrier gate."""
+
+    import src.config as config
+
+    monkeypatch.setattr(
+        config,
+        "runtime_coordinate_manifest_json",
+        lambda: '{"coordinate_basis":"bundle-coverage-test"}',
+    )
+    metric = "low"
+    city = "Shanghai"
+    target_date = "2026-09-29"
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE ensemble_snapshots (
+            snapshot_id INTEGER PRIMARY KEY,
+            dataset_id TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            source_run_id TEXT NOT NULL
+        );
+        CREATE TABLE source_run (
+            source_run_id TEXT PRIMARY KEY,
+            source_id TEXT NOT NULL,
+            release_calendar_key TEXT NOT NULL,
+            track TEXT NOT NULL,
+            source_available_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            completeness_status TEXT NOT NULL,
+            partial_run INTEGER NOT NULL
+        );
+        CREATE TABLE source_run_coverage (
+            coverage_id TEXT PRIMARY KEY,
+            source_run_id TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            release_calendar_key TEXT NOT NULL,
+            track TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_local_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            expected_members INTEGER NOT NULL,
+            observed_members INTEGER NOT NULL,
+            expected_steps_json TEXT NOT NULL,
+            observed_steps_json TEXT NOT NULL,
+            snapshot_ids_json TEXT NOT NULL,
+            completeness_status TEXT NOT NULL,
+            readiness_status TEXT NOT NULL,
+            computed_at TEXT NOT NULL,
+            expires_at TEXT,
+            recorded_at TEXT NOT NULL
+        );
+        """
+    )
+    expected_dataset = reader.expected_replacement_dependency_identity_by_role("low")[
+        "baseline_b0"
+    ].data_version
+    assert expected_dataset
+    source_run_id = "low-run-1"
+    conn.execute(
+        """
+        INSERT INTO source_run (
+            source_run_id, source_id, release_calendar_key, track,
+            source_available_at, status, completeness_status, partial_run
+        ) VALUES (?, 'ecmwf_open_data', 'ecmwf_open_data.enfo', 'operational', ?, ?, ?, ?)
+        """,
+        (
+            source_run_id,
+            (now - timedelta(minutes=2)).isoformat(),
+            run_status,
+            run_completeness,
+            partial_run,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots (
+            snapshot_id, dataset_id, source_id, city, target_date,
+            temperature_metric, source_run_id
+        ) VALUES (1, ?, 'ecmwf_open_data', ?, ?, ?, ?)
+        """,
+        (expected_dataset, city, target_date, metric, source_run_id),
+    )
+    if coverage_status is not None:
+        conn.execute(
+            """
+            INSERT INTO source_run_coverage (
+                coverage_id, source_run_id, source_id, release_calendar_key, track,
+                city, target_local_date, temperature_metric, expected_members,
+                observed_members, expected_steps_json, observed_steps_json,
+                snapshot_ids_json, completeness_status, readiness_status,
+                computed_at, expires_at, recorded_at
+            ) VALUES (
+                'coverage-1', ?, 'ecmwf_open_data', 'ecmwf_open_data.enfo',
+                'operational', ?, ?, ?, 51, 51, '[0,3,6]', '[0,3,6]', '[1]',
+                ?, ?, ?, ?, ?
+            )
+            """,
+            (
+                source_run_id,
+                city,
+                target_date,
+                metric,
+                coverage_status,
+                coverage_readiness,
+                (now - timedelta(minutes=1)).isoformat(),
+                (now + timedelta(hours=1)).isoformat(),
+                now.isoformat(),
+            ),
+        )
+    conn.commit()
+    return conn
+
+
+def test_current_ensemble_snapshot_rejects_intrinsic_valid_but_blocked_target_coverage(
+    monkeypatch,
+):
+    conn = _coverage_identity_conn(
+        monkeypatch,
+        coverage_status="HORIZON_OUT_OF_RANGE",
+        coverage_readiness="BLOCKED",
+        run_status="PARTIAL",
+        run_completeness="PARTIAL",
+        partial_run=1,
+    )
+    reason = reader._current_ensemble_snapshot_identity_reason(
+        conn,
+        dependency_json={"current_ensemble_snapshot": 1},
+        city="Shanghai",
+        target_date="2026-09-29",
+        metric="low",
+    )
+    assert reason == "REPLACEMENT_CURRENT_ENSEMBLE_SNAPSHOT_COVERAGE_BLOCKED"
+
+
+def test_current_ensemble_snapshot_accepts_complete_current_target_coverage(monkeypatch):
+    conn = _coverage_identity_conn(
+        monkeypatch,
+        coverage_status="COMPLETE",
+        coverage_readiness="LIVE_ELIGIBLE",
+        run_status="SUCCESS",
+        run_completeness="COMPLETE",
+        partial_run=0,
+    )
+    reason = reader._current_ensemble_snapshot_identity_reason(
+        conn,
+        dependency_json={"current_ensemble_snapshot": 1},
+        city="Shanghai",
+        target_date="2026-09-29",
+        metric="low",
+    )
+    assert reason is None
+
+
+def test_current_ensemble_snapshot_rejects_missing_target_coverage(monkeypatch):
+    conn = _coverage_identity_conn(
+        monkeypatch,
+        coverage_status=None,
+        coverage_readiness=None,
+        run_status="PARTIAL",
+        run_completeness="PARTIAL",
+        partial_run=1,
+    )
+    reason = reader._current_ensemble_snapshot_identity_reason(
+        conn,
+        dependency_json={"current_ensemble_snapshot": 1},
+        city="Shanghai",
+        target_date="2026-09-29",
+        metric="low",
+    )
+    assert reason == "REPLACEMENT_CURRENT_ENSEMBLE_SNAPSHOT_COVERAGE_BLOCKED"

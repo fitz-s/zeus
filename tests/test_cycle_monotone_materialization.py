@@ -2,7 +2,7 @@
 # Last reused or audited: 2026-09-15 (causal baseline completion witness;
 #   external review FINDING 2: per-family materializable-cycle
 #   gate + typed leg-artifact-missing reason)
-# Lifecycle: created=2026-06-12; last_reviewed=2026-09-15; last_reused=2026-09-15
+# Lifecycle: created=2026-06-12; last_reviewed=2026-09-23; last_reused=2026-09-23
 # Purpose: Relationship tests for consumed-cycle monotonicity and single-family BPF reseed repair.
 # Reuse: Run when replacement cycle-advance, materialization reseed, or freshness gates change.
 # Authority basis: U5 step 2a (operator regime-unification + freshness investigation 2026-06-12,
@@ -2509,3 +2509,17 @@ def test_availability_stamp_is_proof_of_possession_bound() -> None:
             )
     finally:
         mod._persist_chunk_with_lock_retry = orig  # type: ignore[assignment]
+
+
+def test_retired_low_revision_allows_only_the_proven_cycle_rollback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The materializer retains same-version monotonicity but admits v1->v2 repair."""
+    import src.data.replacement_forecast_materializer as materializer
+    conn = _conn()
+    _insert_posterior(conn, city='Seoul', target_date='2026-09-23', metric='low', cycle_iso='2026-09-22T18:00:00+00:00', computed_at='2026-09-23T05:05:10+00:00')
+    req = _Req(city='Seoul', target_date=date(2026,9,23), metric='low', source_cycle_time=datetime(2026,9,22,12,tzinfo=UTC))
+    monkeypatch.setattr(materializer, 'retired_low_uncertified_incumbent_yields_to_current_ensemble', lambda *_a, **_k: True)
+    assert _cycle_monotone_block_reasons(conn, req, metric='low') == ()
+    monkeypatch.setattr(materializer, 'retired_low_uncertified_incumbent_yields_to_current_ensemble', lambda *_a, **_k: False)
+    assert _REGRESSION_REASON in _cycle_monotone_block_reasons(conn, req, metric='low')
