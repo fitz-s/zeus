@@ -3921,6 +3921,7 @@ def _replacement_bayes_precision_fusion_override(
             read_freshest_coherent_instrument_values,
             read_current_instrument_values,
         )
+        from src.forecast.model_selection import source_physically_eligible  # noqa: PLC0415
 
         served_current: dict[str, object] = {}
         persisted_current: dict[str, tuple[float, int]] = {}
@@ -3935,6 +3936,12 @@ def _replacement_bayes_precision_fusion_override(
                 # skip (_station_live_omitted below) serves that live fusion center.
                 include_station_sources=True,
             )
+            served_current = {
+                model: value for model, value in served_current.items()
+                if source_physically_eligible(
+                    model, lat=lat, lon=lon, lead_days=lead_days
+                )
+            }
             served_current = _freshest_declared_provider_representatives(
                 served_current
             )
@@ -4246,8 +4253,15 @@ def _replacement_bayes_precision_fusion_override(
                 fixed_weight_center_from_values,
                 scheme_for_city,
             )
-
             _scheme = scheme_for_city(request.city, metric=metric)
+            _eligible_scheme_models = (
+                () if _scheme is None else tuple(
+                    str(model) for model in _scheme.weights
+                    if source_physically_eligible(
+                        str(model), lat=lat, lon=lon, lead_days=lead_days
+                    )
+                )
+            )
             # ADD-DATA (operator directive 2026-06-28 "加数据不禁数据"): a station-calibrated
             # source (cwa_*/hko_* family) that is LIVE in the precision fusion but absent from the
             # frozen grid_aware scheme must be ADDED, never banned by the frozen snapshot. When such
@@ -4264,6 +4278,8 @@ def _replacement_bayes_precision_fusion_override(
             }
             if _scheme is not None:
                 for _m, (_value, _rid) in persisted_current.items():
+                    if str(_m) not in _eligible_scheme_models:
+                        continue
                     try:
                         _source_values[str(_m)] = float(_value)
                     except (TypeError, ValueError):
@@ -4285,7 +4301,7 @@ def _replacement_bayes_precision_fusion_override(
                     metric=metric,
                     target_date=target_date,
                     decision_time_iso=computed_at.isoformat(),
-                    models=tuple(str(model) for model in _scheme.weights),
+                    models=_eligible_scheme_models,
                     cohort_window_hours=BETWEEN_COHORT_WINDOW_HOURS,
                 )
             )

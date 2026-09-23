@@ -1,9 +1,9 @@
-# Lifecycle: created=2026-06-08; last_reviewed=2026-06-17; last_reused=2026-06-17
+# Lifecycle: created=2026-06-08; last_reviewed=2026-09-23; last_reused=2026-09-23
 # Purpose: F4 regional polygon gate — icon_d2 in-polygon ENTERS; out-of-polygon cities ABSENT;
 #   arome France-only; lead>1 excludes regional; icon_seamless NEVER in candidate set.
 # Reuse: Run with pytest; update if domain polygons or regional eligibility logic in model_selection change.
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-17
+# Last reused or audited: 2026-09-23
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §4 selection, §7 antibodies
 #   (regional-outside-domain polygon). BAYES_PRECISION_FUSION_PROOF_RESULT.md:
 #   "icon_d2 used ONLY at in-box cities; Moscow 0/0; icon_seamless removed from candidate set 2026-06-17".
@@ -18,7 +18,21 @@ from src.forecast.model_selection import (
     load_domain_polygons,
     regional_eligible,
     select_models,
+    source_physically_eligible,
 )
+
+
+def test_current_source_physical_gate_is_not_provider_rep_priority() -> None:
+    from src.config import runtime_cities_by_name
+
+    london = runtime_cities_by_name()["London"]
+    for lead, d2_eligible in ((1, True), (2, False)):
+        kwargs = {"lat": london.lat, "lon": london.lon, "lead_days": lead}
+        assert source_physically_eligible("icon_d2", **kwargs) is d2_eligible
+        assert source_physically_eligible("icon_global", **kwargs)
+        assert source_physically_eligible("ukmo_global_deterministic_10km", **kwargs)
+        assert not source_physically_eligible("unknown_gridded_provider", **kwargs)
+        assert not source_physically_eligible("gfs_global", **kwargs)
 
 
 def test_fresh_provider_rep_outranks_stale_higher_resolution_member() -> None:

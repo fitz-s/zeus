@@ -3238,8 +3238,8 @@ def _extras_coverage_missing(
 ) -> tuple[set[tuple[str, str, str]], int] | None:
     """Return scopes missing causal current-center and coherent single-runs inputs.
 
-    This is a minimum raw-input capture gate, not posterior/q readiness. Each
-    provider's own metadata-pinned target run supplies the current center; the
+    This is raw-input capture and requestable preferred-source retry debt, not
+    posterior/q readiness. Each provider's metadata-pinned target run supplies the
     existing materializer cohort selector supplies the simultaneous between term.
     Both require two families. Unknown metadata or an unreadable probe retries.
     """
@@ -3268,7 +3268,10 @@ def _extras_coverage_missing(
             BETWEEN_COHORT_WINDOW_HOURS,
             _bayes_precision_fusion_city_local_lead_days,
         )
-        from src.forecast.model_selection import select_models  # noqa: PLC0415
+        from src.forecast.model_selection import (  # noqa: PLC0415
+            select_models,
+            source_physically_eligible,
+        )
 
         from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
             build_replacement_forecast_current_target_plan,
@@ -3354,10 +3357,17 @@ def _extras_coverage_missing(
                 if city_cfg is None:
                     continue
                 scheme = scheme_for_city(city, metric=metric)
-                configured_models = None if scheme is None else set(scheme.weights)
+                lead_days = _bayes_precision_fusion_city_local_lead_days(
+                    computed_at=now,
+                    target_local_date=_date.fromisoformat(target_date),
+                    tz_name=str(city_cfg.timezone),
+                )
                 expected: dict[str, set[datetime]] = {}
                 for model, latest in requests.items():
-                    if configured_models is not None and model not in configured_models:
+                    if not source_physically_eligible(
+                        model, lat=float(city_cfg.lat), lon=float(city_cfg.lon),
+                        lead_days=lead_days,
+                    ):
                         continue
                     target_request = _target_single_runs_request(
                         model, latest,
@@ -3377,6 +3387,7 @@ def _extras_coverage_missing(
                     expected[model] = allowed
                 if len({provider_family_for_source(model) for model in expected}) < 2:
                     continue
+                preferred = set(scheme.weights) & expected.keys() if scheme is not None else set()
                 rows = _read_source_clock_rows(
                     conn,
                     city=city, metric=metric, target_date=target_date,
@@ -3407,19 +3418,19 @@ def _extras_coverage_missing(
                     if run in expected.get(model, ()):
                         current_values.setdefault(model, value.value_c)
                         current_cycles.setdefault(model, run)
-                if configured_models is None:
-                    lead_days = _bayes_precision_fusion_city_local_lead_days(
-                        computed_at=now,
-                        target_local_date=_date.fromisoformat(target_date),
-                        tz_name=str(city_cfg.timezone),
-                    )
+                # A physically possible, requestable preferred source remains
+                # capture debt even when a different family pair can fall back.
+                # An impossible preferred regional must not block the fallback.
+                if preferred - current_values.keys():
+                    continue
+                if len({provider_family_for_source(model) for model in preferred}) >= 2:
+                    selected_models = preferred
+                else:
                     selected_models = set(select_models(
                         present_models=current_values,
                         lat=float(city_cfg.lat), lon=float(city_cfg.lon),
                         lead_days=lead_days,
-                    ).used_models)
-                else:
-                    selected_models = configured_models
+                    ).used_models) | preferred
                 current_families = {
                     provider_family_for_source(model)
                     for model in current_values if model in selected_models
@@ -3434,7 +3445,10 @@ def _extras_coverage_missing(
                     cohort_window_hours=BETWEEN_COHORT_WINDOW_HOURS,
                     single_runs_only=True,
                 )
-                if len({provider_family_for_source(model) for model in coherent}) >= 2:
+                if (
+                    preferred <= coherent.keys()
+                    and len({provider_family_for_source(model) for model in coherent}) >= 2
+                ):
                     have.add((city, metric, target_date))
                 elif cohort_backtrack_candidates is not None:
                     for model, run in sorted(

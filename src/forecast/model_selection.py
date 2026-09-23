@@ -262,6 +262,30 @@ def regional_eligible(
     return point_in_ring(lat, lon, poly.ring)
 
 
+def source_physically_eligible(
+    model_name: str,
+    *,
+    lat: float,
+    lon: float,
+    lead_days: int,
+    polygons: Mapping[str, DomainPolygon] | None = None,
+) -> bool:
+    """Whether a declared source can describe this city and target lead.
+
+    This does not choose a provider-family representative: a configured scheme
+    may legitimately contain a global member alongside a regional member.
+    Unknown gridded models cannot acquire authority by appearing in a row or
+    weight artifact. Station sources retain their separate station gate.
+    """
+    if model_name in (ANCHOR_MODEL, *DECORR_GLOBALS):
+        return True
+    if model_name.startswith(("cwa_", "hko_")):
+        return True
+    return regional_eligible(
+        model_name, lat=lat, lon=lon, lead_days=lead_days, polygons=polygons
+    )
+
+
 def _corr(a: Sequence[float], b: Sequence[float]) -> float:
     n = min(len(a), len(b))
     if n < 2:

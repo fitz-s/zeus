@@ -272,6 +272,62 @@ def test_external_metadata_families_cannot_complete_configured_scheme(
     assert _current_source_clock_missing(db, decision_time=decision) == set()
 
 
+@pytest.mark.parametrize("city", ("London", "Milan"))
+def test_d2_preferred_source_cannot_hold_d2_fallback_capture_in_debt(
+    tmp_path, monkeypatch, city,
+) -> None:
+    from src.strategy.live_inference import source_clock_city_weights as weights
+
+    db = _current_source_clock_db(tmp_path)
+    run = datetime(2026, 9, 23, 0, tzinfo=UTC)
+    decision = run + timedelta(hours=10)
+    monkeypatch.setattr(
+        weights, "scheme_for_city",
+        lambda _city, *, metric: SimpleNamespace(weights={
+            "ecmwf_ifs": 0.5, "icon_d2": 0.5,
+        }),
+    )
+    _current_source_clock_metadata(monkeypatch, {
+        model: run for model in (
+            "ecmwf_ifs", "icon_d2", "icon_eu", "ukmo_global_deterministic_10km",
+        )
+    })
+    for model in ("ecmwf_ifs", "icon_eu", "ukmo_global_deterministic_10km"):
+        _current_source_clock_row(db, model, run, city=city)
+    assert _current_source_clock_missing(db, city=city, decision_time=decision) == set()
+
+
+def test_preferred_capture_debt_reappears_when_metadata_becomes_requestable(
+    tmp_path, monkeypatch,
+) -> None:
+    from src.strategy.live_inference import source_clock_city_weights as weights
+
+    db = _current_source_clock_db(tmp_path)
+    run = datetime(2026, 9, 23, 0, tzinfo=UTC)
+    decision = run + timedelta(hours=10)
+    monkeypatch.setattr(
+        weights, "scheme_for_city",
+        lambda _city, *, metric: SimpleNamespace(weights={
+            "icon_global": 0.5, "ukmo_global_deterministic_10km": 0.5,
+        }),
+    )
+    _current_source_clock_metadata(monkeypatch, {
+        "ecmwf_ifs": run, "ukmo_global_deterministic_10km": run,
+    })
+    for model in ("ecmwf_ifs", "ukmo_global_deterministic_10km"):
+        _current_source_clock_row(db, model, run)
+    assert _current_source_clock_missing(db, decision_time=decision) == set()
+    _current_source_clock_metadata(monkeypatch, {
+        "ecmwf_ifs": run, "icon_global": run,
+        "ukmo_global_deterministic_10km": run,
+    })
+    assert _current_source_clock_missing(db, decision_time=decision) == {
+        ("Denver", "high", "2026-09-25")
+    }
+    _current_source_clock_row(db, "icon_global", run)
+    assert _current_source_clock_missing(db, decision_time=decision) == set()
+
+
 def test_short_metadata_horizon_admits_only_proven_target_backtrack(
     tmp_path, monkeypatch,
 ) -> None:

@@ -483,6 +483,117 @@ def test_hourly_cwa_extreme_persisted_row_enters_real_precision_override_when_co
         assert model in override.low_n_prior_weighted_models
 
 
+@pytest.mark.parametrize(("city", "metric", "scheme_models", "d2_newer"), (
+    ("London", "high", ("ecmwf_ifs", "icon_d2", "icon_global", "ukmo_global_deterministic_10km"), False),
+    ("Milan", "high", ("ecmwf_ifs", "icon_d2", "icon_global", "ukmo_global_deterministic_10km"), False),
+    ("London", "high", ("icon_d2", "ukmo_uk_deterministic_2km"), False),
+    ("Milan", "high", ("icon_d2", "meteofrance_arome_france_hd"), False),
+    ("London", "low", ("ecmwf_ifs", "icon_d2"), False),
+    ("London", "high", ("icon_d2", "ukmo_uk_deterministic_2km"), True),
+))
+def test_source_clock_scheme_rejects_possessed_d2_at_d2_lead_but_keeps_global(
+    monkeypatch: pytest.MonkeyPatch, city: str, metric: str,
+    scheme_models: tuple[str, ...], d2_newer: bool,
+) -> None:
+    """A valid persisted row cannot extend a regional model's physical horizon."""
+    from src.config import runtime_cities_by_name
+    from src.strategy.live_inference.source_clock_city_weights import CityOneScheme
+
+    conn = _conn()
+    city_cfg = runtime_cities_by_name()[city]
+    run = datetime(2026, 9, 23, 0, tzinfo=UTC)
+    models = tuple(dict.fromkeys((
+        "ecmwf_ifs", "icon_d2", "icon_global", "ukmo_global_deterministic_10km",
+        *scheme_models,
+    )))
+    for index, model in enumerate(models):
+        model_run = run + timedelta(hours=3) if model == "icon_d2" and d2_newer else run
+        conn.execute(
+            """INSERT INTO raw_model_forecasts (
+                model, city, target_date, metric, source_cycle_time,
+                source_available_at, captured_at, recorded_at, lead_days,
+                forecast_value_c, endpoint, coverage_status
+            ) VALUES (?, ?, '2026-09-25', ?, ?, ?, ?, ?, 2, ?, 'single_runs', 'COVERED')""",
+            (model, city, metric, model_run.isoformat(),
+             (model_run + timedelta(minutes=5)).isoformat(),
+             (model_run + timedelta(minutes=10)).isoformat(),
+             (model_run + timedelta(minutes=11)).isoformat(), 20.0 + index),
+        )
+    scheme = CityOneScheme(
+        city=city, scheme_status="ACTIVE", final_sources=scheme_models,
+        weights=dict.fromkeys(scheme_models, 1.0 / len(scheme_models)), sample_n=30,
+        walkforward_pass=True, one_scheme_status="ACTIVE",
+    )
+    monkeypatch.setattr(
+        "src.strategy.live_inference.source_clock_city_weights.scheme_for_city",
+        lambda *_args, **_kwargs: scheme,
+    )
+    capture = SimpleNamespace(
+        has_extras=True, anchor_z=20.0, anchor_tau0=1.0,
+        likelihood=tuple(SimpleNamespace(
+            model=model, z=22.0, train_residuals=(), n_train=0,
+            residuals_by_date={},
+        ) for model in ("icon_global", "ukmo_global_deterministic_10km")),
+        disagree_var=0.0, anchor_raw_m2_native=None, anchor_raw_n_train=0,
+        dropped_models=(),
+        selection=SimpleNamespace(excluded_regionals=(), dropped_aliases=()),
+    )
+    monkeypatch.setattr(
+        "src.data.bayes_precision_fusion_capture.capture_bayes_precision_instruments",
+        lambda **_kwargs: capture,
+    )
+    monkeypatch.setattr(
+        "src.forecast.bayes_precision_fusion.fuse_bayes_precision_posterior",
+        lambda **_kwargs: SimpleNamespace(
+            sd=0.5, method="TEST_FUSION",
+            used_models=("icon_global", "ukmo_global_deterministic_10km"),
+            regional_models=(),
+        ),
+    )
+
+    class _Shape:
+        center_sigma_c = 0.5
+        predictive_sigma_c = 1.2
+        members_c = (20.0, 21.0, 22.0)
+
+        @staticmethod
+        def as_payload() -> dict[str, object]:
+            return {"source": "test-current-ens-shape"}
+
+    monkeypatch.setattr(materializer_mod, "_read_current_evidence_shape", lambda *_a, **_kw: _Shape())
+    for target, d2_eligible in ((date(2026, 9, 25), False), (date(2026, 9, 24), True)):
+        # The physical target changes; copy the raw evidence to that exact natural key.
+        if d2_eligible:
+            conn.execute(
+                """UPDATE raw_model_forecasts SET target_date='2026-09-24', lead_days=1
+                   WHERE city=?""",
+                (city,),
+            )
+        request = replace(
+            _request(), city=city, city_id=city,
+            city_timezone=city_cfg.timezone, temperature_metric=metric,
+            target_date=target, source_cycle_time=run,
+            computed_at=run + timedelta(hours=4 if d2_newer else 1),
+        )
+        override = materializer_mod._replacement_bayes_precision_fusion_override(
+            request, metric=metric, anchor_value_corrected_c=20.0, conn=conn,
+        )
+        assert override is not None
+        assert ("icon_d2" in override.used_models) is d2_eligible
+        if len(scheme_models) == 2 and not d2_eligible:
+            assert override.source_clock_one_scheme is not None
+            assert override.source_clock_one_scheme["fallback_reason"] == (
+                "configured_current_provider_pair_unavailable"
+            )
+            assert override.source_clock_one_scheme["fallback_to"] == "current_precision_fusion"
+            assert set(override.used_models) == {
+                "ecmwf_ifs", "icon_global", "ukmo_global_deterministic_10km",
+            }
+        elif len(scheme_models) == 4:
+            assert "icon_global" in override.used_models
+            assert "ukmo_global_deterministic_10km" in override.used_models
+
+
 def test_posterior_identity_binds_day0_carrier_operator_and_content(monkeypatch: pytest.MonkeyPatch) -> None:
     """Equal q values must not alias carrier certificates across migrations."""
 
