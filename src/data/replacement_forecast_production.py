@@ -1283,6 +1283,9 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                 for city, target_date, metric in capture_target_scopes
             ]
         )
+        cohort_backtrack_candidates: dict[
+            tuple[str, str, str], tuple[str, datetime]
+        ] = {}
         coverage = (
             None
             if capture_when_covered
@@ -1293,6 +1296,7 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                 capture_rows=capture_rows,
                 held_priority=held_priority,
                 deadline_monotonic=deadline_monotonic,
+                cohort_backtrack_candidates=cohort_backtrack_candidates,
             )
         )
         missing_scopes = None if coverage is None else coverage[0]
@@ -1424,6 +1428,8 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                 priority_group_keys=(set() if capture_when_covered else priority_group_keys),
             )
             download_error: Exception | None = None
+            archive_result: dict[str, object] | None = None
+            archive_error: Exception | None = None
             try:
                 remaining_seconds = max_wall_clock_seconds
                 if deadline_monotonic is not None:
@@ -1449,28 +1455,104 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                             deadline_remaining_seconds,
                         )
                 if deadline_monotonic is None or remaining_seconds > 0.0:
-                    download_kwargs: dict[str, object] = {
-                        "forecast_db": Path(str(forecast_db)),
-                        # Exact single_runs source identity remains per-model
-                        # frozen metadata, never this planning watermark.
-                        "cycle": cycle,
-                        "targets": rotated_targets,
-                        "release_lag_hours": release_lag_hours,
-                        "max_wall_clock_seconds": remaining_seconds,
-                    }
-                    if models is not None:
-                        download_kwargs["models"] = models
-                    if quota_lane != "source_clock":
-                        download_kwargs["quota_lane"] = quota_lane
-                    if frozen_source_runs is not None:
-                        download_kwargs["frozen_source_runs"] = frozen_source_runs
-                    if not include_previous_runs:
-                        download_kwargs["include_previous_runs"] = False
-                    if not prune_after:
-                        download_kwargs["prune_after"] = False
-                    result = download_bayes_precision_fusion_extra_raw_inputs(
-                        **download_kwargs,
+                    # Only an actually rotated first group can advance this
+                    # invocation's sequential attempt receipt. One exact old
+                    # run may make its already-captured latest center coherent;
+                    # the raw downloader proves availability after HTTP success.
+                    first_group = (
+                        (rotated_targets[0].city, rotated_targets[0].target_date)
+                        if rotated_targets else None
                     )
+                    if (
+                        first_group is not None
+                        and not capture_when_covered
+                        and frozen_source_runs is None
+                        and models is None
+                        and deadline_monotonic is not None
+                    ):
+                        candidate = next(
+                            (
+                                cohort_backtrack_candidates.get(
+                                    (target.city, target.metric, target.target_date)
+                                )
+                                for target in rotated_targets
+                                if (target.city, target.target_date) == first_group
+                                and cohort_backtrack_candidates.get(
+                                    (target.city, target.metric, target.target_date)
+                                ) is not None
+                            ),
+                            None,
+                        )
+                        if candidate is not None:
+                            from src.data.bayes_precision_fusion_download import (  # noqa: PLC0415
+                                _DerivedOffGridSingleRunsRun,
+                            )
+
+                            archive_model, archive_cycle = candidate
+                            archive_targets = tuple(
+                                target for target in rotated_targets
+                                if (target.city, target.target_date) == first_group
+                                and cohort_backtrack_candidates.get(
+                                    (target.city, target.metric, target.target_date)
+                                ) == candidate
+                            )
+                            archive_budget = max(
+                                0.0, deadline_monotonic - time.monotonic()
+                            ) / 2.0
+                            if archive_targets and archive_budget > 0.0:
+                                try:
+                                    archive_result = download_bayes_precision_fusion_extra_raw_inputs(
+                                        forecast_db=Path(str(forecast_db)),
+                                        cycle=cycle,
+                                        targets=archive_targets,
+                                        models=(archive_model,),
+                                        release_lag_hours=release_lag_hours,
+                                        max_wall_clock_seconds=archive_budget,
+                                        quota_lane=quota_lane,
+                                        frozen_source_runs={
+                                            archive_model: _DerivedOffGridSingleRunsRun(
+                                                run=archive_cycle
+                                            ),
+                                        },
+                                        include_previous_runs=False,
+                                        prune_after=False,
+                                    )
+                                except Exception as exc:
+                                    # Optional between-cohort repair cannot strand
+                                    # the ordinary metadata-current center fanout.
+                                    archive_error = exc
+                            remaining_seconds = max(
+                                0.0, deadline_monotonic - time.monotonic()
+                            )
+                    if remaining_seconds is not None and remaining_seconds <= 0.0:
+                        result = {
+                            "status": "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE",
+                            "timeboxed_incomplete": True,
+                            "attempted_target_group_count": 0,
+                        }
+                    else:
+                        download_kwargs: dict[str, object] = {
+                            "forecast_db": Path(str(forecast_db)),
+                            # Exact single_runs source identity remains per-model
+                            # frozen metadata, never this planning watermark.
+                            "cycle": cycle,
+                            "targets": rotated_targets,
+                            "release_lag_hours": release_lag_hours,
+                            "max_wall_clock_seconds": remaining_seconds,
+                        }
+                        if models is not None:
+                            download_kwargs["models"] = models
+                        if quota_lane != "source_clock":
+                            download_kwargs["quota_lane"] = quota_lane
+                        if frozen_source_runs is not None:
+                            download_kwargs["frozen_source_runs"] = frozen_source_runs
+                        if not include_previous_runs:
+                            download_kwargs["include_previous_runs"] = False
+                        if not prune_after:
+                            download_kwargs["prune_after"] = False
+                        result = download_bayes_precision_fusion_extra_raw_inputs(
+                            **download_kwargs,
+                        )
             except Exception as exc:
                 download_error = exc
                 result = {
@@ -1496,6 +1578,43 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                         if attempted == raw_attempted
                         else "OUT_OF_RANGE_CLAMPED"
                     )
+            if archive_result is not None:
+                raw_archive_attempted = archive_result.get("attempted_target_group_count")
+                archive_attempted = int(
+                    isinstance(raw_archive_attempted, int)
+                    and not isinstance(raw_archive_attempted, bool)
+                    and raw_archive_attempted > 0
+                )
+                attempted = max(attempted, archive_attempted)
+                if archive_attempted:
+                    result["attempted_target_group_count"] = attempted
+                    if receipt_status in {"EXCEPTION_NO_RECEIPT", "MISSING_OR_INVALID"}:
+                        receipt_status = "EXACT_ARCHIVE"
+                result["written_row_count"] = (
+                    int(result.get("written_row_count") or 0)
+                    + int(archive_result.get("written_row_count") or 0)
+                )
+                result["committed_families"] = tuple(dict.fromkeys(
+                    tuple(scope) for scope in (
+                        *(archive_result.get("committed_families") or ()),
+                        *(result.get("committed_families") or ()),
+                    )
+                ))
+                result["coherent_archive_capture"] = {
+                    "status": archive_result.get("status"),
+                    "written_row_count": archive_result.get("written_row_count"),
+                    "attempted_target_group_count": archive_attempted,
+                }
+            elif archive_error is not None:
+                result["coherent_archive_capture"] = {
+                    "status": "EXCEPTION_NO_RECEIPT",
+                    "error": str(archive_error)[:200],
+                    "attempted_target_group_count": 0,
+                }
+                logger.warning(
+                    "BPF optional coherent archive capture failed; current fanout continued: %s",
+                    archive_error,
+                )
             rotation_write = _advance_bpf_extra_rotation(
                 cycle=cycle,
                 rotated_targets=rotated_targets,
@@ -3098,6 +3217,12 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
 
 
 _EXTRAS_FIXPOINT_HEALTH_JOB = "bayes_precision_fusion_capture"
+# These exact Single Runs products have a proven 00/06/12/18Z archive grid.
+# Hourly/three-hourly regional metadata is not evidence that its older archive
+# exists; expand only with product-specific transport proof and tests.
+_COHORT_STANDARD_ARCHIVE_MODELS = frozenset({
+    "ecmwf_ifs", "icon_global", "icon_eu", "ukmo_global_deterministic_10km",
+})
 
 
 def _extras_coverage_missing(
@@ -3109,29 +3234,41 @@ def _extras_coverage_missing(
     capture_rows: Sequence[object] | None = None,
     held_priority: Mapping[tuple[str, str, str], int] | None = None,
     deadline_monotonic: float | None = None,
+    cohort_backtrack_candidates: dict[tuple[str, str, str], tuple[str, datetime]] | None = None,
 ) -> tuple[set[tuple[str, str, str]], int] | None:
-    """Per-(city, metric, target_date) coverage gap for ``cycle``'s BPF single_runs capture.
+    """Return scopes missing causal current-center and coherent single-runs inputs.
 
-    Returns ``(missing_scopes, planned_count)`` where ``missing_scopes`` is the set of planned
-    scopes without two provider families at this cycle's exact natural key, and
-    ``planned_count`` is the size of the plan. Returns ``None`` on any probe error
-    (caller fails-open = re-run).
-
-    THE DENOMINATOR is the current-market plan plus canonical held-position
-    families, the same union both fan-outs build their download targets from. A scope is "covered"
-    iff it has >=2 distinct provider families in ``single_runs`` rows at the exact
-    (city, metric, target_date, source_cycle_time) key the materializer's q-path reads
-    (replacement_current_value_serving.read_current_instrument_values) — so completeness here
-    is byte-aligned with the live shape's minimum provider-family requirement. One
-    provider row is partial capture, not completeness. A ``previous_runs`` substitute
-    is a q FALLBACK, not cycle completeness, so it is deliberately NOT counted: the
-    cycle's own two provider families must land or capture keeps retrying for THIS cycle.
+    This is a minimum raw-input capture gate, not posterior/q readiness. Each
+    provider's own metadata-pinned target run supplies the current center; the
+    existing materializer cohort selector supplies the simultaneous between term.
+    Both require two families. Unknown metadata or an unreadable probe retries.
     """
     forecast_db = cfg.get("forecast_db")
     if forecast_db is None:
         return None
     try:
-        from datetime import timezone as _tz  # noqa: PLC0415
+        from datetime import date as _date, timedelta as _timedelta  # noqa: PLC0415
+
+        from src.data.bayes_precision_fusion_download import (  # noqa: PLC0415
+            _model_publishes_cycle,
+            _read_source_clock_single_runs_requests,
+            _target_single_runs_request,
+        )
+        from src.data.replacement_current_value_serving import (  # noqa: PLC0415
+            PREVIOUS_RUNS_SUBSTITUTION_MAX_AGE_HOURS,
+            _read_source_clock_rows,
+            _served_source_clock_row,
+            current_value_serving_schema,
+            read_freshest_coherent_instrument_values,
+        )
+        from src.data.replacement_forecast_cycle_policy import (  # noqa: PLC0415
+            cycle_age_outside_bound,
+        )
+        from src.data.replacement_forecast_materializer import (  # noqa: PLC0415
+            BETWEEN_COHORT_WINDOW_HOURS,
+            _bayes_precision_fusion_city_local_lead_days,
+        )
+        from src.forecast.model_selection import select_models  # noqa: PLC0415
 
         from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
             build_replacement_forecast_current_target_plan,
@@ -3182,6 +3319,13 @@ def _extras_coverage_missing(
         }
         if not need:
             return (set(), 0)  # no planned scopes (e.g. no open markets) => nothing to capture
+        now = decision_time or datetime.now(timezone.utc)
+        if now.utcoffset() is None:
+            return None
+        now = now.astimezone(timezone.utc)
+        requests = _read_source_clock_single_runs_requests(decision_time=now)
+        if not requests:
+            return (need, len(need))
         conn = _connect_read_only(
             Path(str(forecast_db)), deadline_monotonic=deadline_monotonic
         )
@@ -3190,28 +3334,139 @@ def _extras_coverage_missing(
                 lambda: int(time.monotonic() >= deadline_monotonic), 1000
             )
         try:
-            cycle_iso = cycle.astimezone(_tz.utc).isoformat()
-            rows = conn.execute(
-                "SELECT DISTINCT city, metric, target_date, model "
-                "FROM raw_model_forecasts "
-                "WHERE source_cycle_time = ? AND endpoint = 'single_runs'",
-                (cycle_iso,),
-            ).fetchall()
+            schema = current_value_serving_schema(conn)
+            if not (
+                schema.has_captured_at and schema.has_source_available_at
+                and schema.has_recorded_at and schema.has_coverage_status
+            ):
+                return (need, len(need))
+            from src.strategy.live_inference.source_clock_vnext import (  # noqa: PLC0415
+                provider_family_for_source,
+            )
+            from src.strategy.live_inference.source_clock_city_weights import (  # noqa: PLC0415
+                scheme_for_city,
+            )
+
+            have: set[tuple[str, str, str]] = set()
+            for city, metric, target_date in sorted(need):
+                _check_source_preflight_deadline(deadline_monotonic)
+                city_cfg = cities_by_name.get(city)
+                if city_cfg is None:
+                    continue
+                scheme = scheme_for_city(city, metric=metric)
+                configured_models = None if scheme is None else set(scheme.weights)
+                expected: dict[str, set[datetime]] = {}
+                for model, latest in requests.items():
+                    if configured_models is not None and model not in configured_models:
+                        continue
+                    target_request = _target_single_runs_request(
+                        model, latest,
+                        target_local_date=_date.fromisoformat(target_date),
+                        timezone_name=str(city_cfg.timezone),
+                        decision_time=now,
+                    )
+                    if target_request is None or cycle_age_outside_bound(
+                        now, target_request.run
+                    ):
+                        continue
+                    allowed = {target_request.run}
+                    if target_request is not latest:
+                        older = target_request.run - _timedelta(hours=6)
+                        if not cycle_age_outside_bound(now, older):
+                            allowed.add(older)
+                    expected[model] = allowed
+                if len({provider_family_for_source(model) for model in expected}) < 2:
+                    continue
+                rows = _read_source_clock_rows(
+                    conn,
+                    city=city, metric=metric, target_date=target_date,
+                    decision_iso=now.isoformat(), schema=schema,
+                    max_substitution_age_hours=PREVIOUS_RUNS_SUBSTITUTION_MAX_AGE_HOURS,
+                    single_runs_only=True,
+                )
+                current_values: dict[str, float] = {}
+                current_cycles: dict[str, datetime] = {}
+                for row in rows:
+                    served = _served_source_clock_row(
+                        row, schema=schema,
+                        max_substitution_age_hours=PREVIOUS_RUNS_SUBSTITUTION_MAX_AGE_HOURS,
+                        single_runs_decision_time=now,
+                    )
+                    if served is None:
+                        continue
+                    model, value = served
+                    try:
+                        run = datetime.fromisoformat(
+                            value.served_cycle.replace("Z", "+00:00")
+                        )
+                        if run.utcoffset() is None:
+                            continue
+                        run = run.astimezone(timezone.utc)
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                    if run in expected.get(model, ()):
+                        current_values.setdefault(model, value.value_c)
+                        current_cycles.setdefault(model, run)
+                if configured_models is None:
+                    lead_days = _bayes_precision_fusion_city_local_lead_days(
+                        computed_at=now,
+                        target_local_date=_date.fromisoformat(target_date),
+                        tz_name=str(city_cfg.timezone),
+                    )
+                    selected_models = set(select_models(
+                        present_models=current_values,
+                        lat=float(city_cfg.lat), lon=float(city_cfg.lon),
+                        lead_days=lead_days,
+                    ).used_models)
+                else:
+                    selected_models = configured_models
+                current_families = {
+                    provider_family_for_source(model)
+                    for model in current_values if model in selected_models
+                }
+                if len(current_families) < 2:
+                    continue
+                coherent = read_freshest_coherent_instrument_values(
+                    conn,
+                    city=city, metric=metric, target_date=target_date,
+                    decision_time_iso=now.isoformat(),
+                    models=tuple(model for model in expected if model in selected_models),
+                    cohort_window_hours=BETWEEN_COHORT_WINDOW_HOURS,
+                    single_runs_only=True,
+                )
+                if len({provider_family_for_source(model) for model in coherent}) >= 2:
+                    have.add((city, metric, target_date))
+                elif cohort_backtrack_candidates is not None:
+                    for model, run in sorted(
+                        current_cycles.items(), key=lambda item: item[1], reverse=True
+                    ):
+                        if (
+                            model not in selected_models
+                            or model not in _COHORT_STANDARD_ARCHIVE_MODELS
+                            or run.minute != 0
+                            or run.hour not in (0, 6, 12, 18)
+                        ):
+                            continue
+                        older = run - _timedelta(hours=6)
+                        if (
+                            cycle_age_outside_bound(now, older)
+                            or not _model_publishes_cycle(model, older.hour)
+                        ):
+                            continue
+                        if any(
+                            other in selected_models
+                            and provider_family_for_source(other)
+                            != provider_family_for_source(model)
+                            and abs((older - other_run).total_seconds())
+                            <= BETWEEN_COHORT_WINDOW_HOURS * 3600.0
+                            for other, other_run in current_cycles.items()
+                        ):
+                            cohort_backtrack_candidates[(city, metric, target_date)] = (
+                                model, older
+                            )
+                            break
         finally:
             conn.close()
-        from src.strategy.live_inference.source_clock_vnext import (  # noqa: PLC0415
-            provider_family_for_source,
-        )
-
-        families_by_scope: dict[tuple[str, str, str], set[str]] = {}
-        for city, metric, target_date, model in rows:
-            scope = (str(city), str(metric), str(target_date))
-            families_by_scope.setdefault(scope, set()).add(
-                provider_family_for_source(str(model))
-            )
-        have = {
-            scope for scope, families in families_by_scope.items() if len(families) >= 2
-        }
         return (need - have, len(need))
     except TimeoutError:
         raise
@@ -3226,12 +3481,7 @@ def _extras_coverage_missing(
 
 
 def _extras_fixpoint_latched(cycle: datetime) -> bool:
-    """True iff the prior full extras pass for THIS cycle landed ZERO new rows while coverage
-    was still incomplete — i.e. the residual gap is provably unservable for this cycle right now
-    (a fixpoint), so re-running the fan-out cannot make progress. The latch is keyed on the
-    cycle ISO, so the instant ``_probe_resolved_available_cycle`` advances to a newer cycle the
-    latch is stale (cycle mismatch) and the new cycle gets the full self-healing treatment from
-    scratch — no count is stored, no prune is needed (architect cross-check 2026-06-16)."""
+    """Read legacy diagnostic state; it no longer controls capture admission."""
     try:
         from datetime import timezone as _tz  # noqa: PLC0415
         import json as _json  # noqa: PLC0415
@@ -3255,13 +3505,7 @@ def _held_position_extras_missing_scopes(
     cfg: dict[str, object],
     missing_scopes: set[tuple[str, str, str]],
 ) -> set[tuple[str, str, str]]:
-    """Held-position scopes whose BPF current capture is still missing.
-
-    A per-cycle extras fixpoint is a resource-control latch for ordinary current
-    targets. It must not become a live-money dead end: if a held family still
-    lacks the current raw inputs required for a fresh posterior, the capture lane
-    keeps retrying until the cycle rolls or the scope is covered.
-    """
+    """Held-position scopes whose BPF current capture is still missing."""
     if not missing_scopes:
         return set()
     try:
@@ -3289,14 +3533,7 @@ def _held_position_extras_missing_scopes(
 
 
 def _record_extras_fixpoint(cfg: dict[str, object], cycle: datetime, *, written: int) -> None:
-    """Update the per-cycle fixpoint latch from the fan-out's own progress signal.
-
-    LATCH iff this pass landed ZERO new rows (``written == 0``) AND coverage is STILL incomplete
-    for ``cycle`` -> the residual is unservable now, stop looping (complete-with-gap, logged).
-    UN-LATCH on any progress (``written > 0``) or full coverage -> self-healing resumes. The
-    downloader is per-row idempotent (bayes_precision_fusion_download.py:918-957), so on a
-    steady-state re-run where nothing new is servable ``written`` is exactly 0 — that zero IS
-    the fixpoint signal; no cross-tick count needs persisting. Best-effort (never raises)."""
+    """Record zero-write diagnosis without suppressing later missing-scope retries."""
     try:
         from datetime import timezone as _tz  # noqa: PLC0415
 
@@ -3307,13 +3544,12 @@ def _record_extras_fixpoint(cfg: dict[str, object], cycle: datetime, *, written:
         cov = _extras_coverage_missing(cfg, cycle)
         # cov None (probe error) or non-empty missing-set => still-incomplete.
         still_incomplete = cov is None or bool(cov[0])
-        latched = bool(written == 0 and still_incomplete)
+        zero_progress = bool(written == 0 and still_incomplete)
         cycle_iso = cycle.astimezone(_tz.utc).isoformat()
-        if latched and cov is not None:
+        if zero_progress and cov is not None:
             logger.info(
-                "BAYES_PRECISION_FUSION extras FIXPOINT for cycle %s: pass landed 0 new rows with "
-                "%d/%d planned scopes still missing single_runs -> complete-with-gap (unservable "
-                "this cycle; will re-heal when the cycle advances): %s",
+                "BAYES_PRECISION_FUSION extras zero-write for cycle %s: "
+                "%d/%d scopes still missing causal single_runs; retry remains eligible: %s",
                 cycle_iso,
                 len(cov[0]),
                 cov[1],
@@ -3326,7 +3562,8 @@ def _record_extras_fixpoint(cfg: dict[str, object], cycle: datetime, *, written:
             failed=False,
             extra={
                 "extras_fixpoint_cycle": cycle_iso,
-                "extras_fixpoint_latched": latched,
+                "extras_fixpoint_latched": False,
+                "extras_zero_progress_observed": zero_progress,
             },
         )
     except Exception:
@@ -3419,48 +3656,11 @@ def _record_bayes_precision_fusion_capture_health(
 
 
 def _extras_cycle_incomplete(cfg: dict[str, object], cycle: datetime | None = None) -> bool:
-    """Coverage-aware probe: does ``cycle`` (default: probe-resolved) still need its BPF extras?
+    """Retry every scope missing causal current-center or coherent single-runs inputs.
 
-    Returns True (run the extras fan-out) when ANY planned (city, metric, target_date) scope
-    lacks its persisted current ``single_runs`` capture at this cycle's source_cycle_time AND
-    the per-cycle fixpoint latch is NOT set; False (skip) when every planned scope is covered OR
-    the residual gap is a proven unservable-this-cycle fixpoint. Returns True on any probe error
-    so the caller fails-open (safe default = run the extras).
-
-    WHY THE FLAT ROW-COUNT GATE WAS WRONG (fix 2026-06-16, root cause
-    docs/evidence/timing_audit/capture_reactor_stall_rootcause_2026-06-16.md):
-    the prior gate compared ``COUNT(*) WHERE source_cycle_time=?`` against a flat floor of
-    200 rows — BLIND to per-(city, target_date) coverage. The near-day (lead=0) leg alone is
-    ~382 rows for one cycle, so the gate declared the WHOLE cycle "complete" and skipped the
-    fan-out while lead+1/lead+2 city scopes were still un-captured. Those scopes were then
-    permanently stranded: the q-path (replacement_forecast_materializer.py:966-975 ->
-    read_current_instrument_values) found no current single_runs row, returned None, and
-    q_shape fell back to the old non-fused posterior shape
-    (EXTRAS_CURRENT_CYCLE_COMPLETE_SKIPPED fired 318×; lead+1 was 93% STALE). The new gate is
-    coverage-aware (``_extras_coverage_missing``): incomplete iff a PLANNED scope's own
-    single_runs is absent, so it keeps re-running until every planned lead's scopes land.
-
-    TERMINATION (the loop provably halts — no infinite re-run). Two independent bounds:
-      A. PER-CYCLE FIXPOINT (the explicit unservable-case handler). Each fan-out pass is
-         per-row idempotent (bayes_precision_fusion_download.py:918-957) so the covered set for
-         a fixed cycle C is monotone non-decreasing. ``_record_extras_fixpoint`` watches the
-         pass's own ``written_row_count``: a pass that lands ZERO new rows while still
-         incomplete means the residual scopes are unservable for C right now (Open-Meteo beyond
-         its publish horizon, a city/model it will not serve this cycle, or a statically-
-         excluded model the downloader never even requests) -> it LATCHES, and this gate then
-         returns False (complete-with-gap, logged). Any later progress un-latches. So for a
-         FIXED C the fan-out runs at most until the covered count stops increasing — a strictly
-         monotone bounded sequence -> finite re-runs. This distinguishes "not yet captured but
-         servable -> re-run" (written>0 keeps healing) from "unservable -> complete-with-gap".
-      B. CROSS-CYCLE ROLLOVER (makes complete-with-gap safe). The probe is keyed to
-         ``_probe_resolved_bayes_precision_fusion_extras_cycle()`` — the newest cycle the
-         provider metadata/S3 frontier declares on the fixed 00/06/12/18Z grid. The real
-         download is the single-runs availability proof. When the provider frontier advances
-         to C', the latch (keyed on C's ISO) goes stale and C' is healed from scratch. A
-         permanently-unservable scope thus halts looping for C but never poisons C+1.
-         => INVARIANT: for any cycle C the fan-out runs on finitely many ticks — bounded by
-            min(ticks-until-covered-count-stops-rising, C's ~6h active-probe window) — and the
-            unservable residual is surfaced (logged), never silently looped on.
+    An empty write can be a transient transport failure or a target that becomes
+    servable later on the same planning cycle. Quota, deadline and the scheduler's
+    timed backoff bound retries; old zero-write health is diagnostic only.
     """
     try:
         if cycle is None:
@@ -3473,28 +3673,6 @@ def _extras_cycle_incomplete(cfg: dict[str, object], cycle: datetime | None = No
         missing, planned = cov
         if not missing:
             return False  # every planned scope captured for this cycle => complete (terminates)
-        if _extras_fixpoint_latched(cycle):
-            held_missing = _held_position_extras_missing_scopes(cfg, missing)
-            if held_missing:
-                logger.warning(
-                    "BAYES_PRECISION_FUSION extras FIXPOINT pierced for held positions at cycle %s: "
-                    "%d held scope(s) still missing current single_runs; re-running fan-out for "
-                    "live redecision: %s",
-                    cycle.isoformat(),
-                    len(held_missing),
-                    ", ".join(sorted(f"{c}/{m}/{d}" for c, m, d in held_missing)[:20]),
-                )
-                return True
-            # Residual is a proven unservable-this-cycle fixpoint -> stop re-running (the latch
-            # auto-clears when the cycle advances; bound B). Surface that we are skipping ON a gap.
-            logger.info(
-                "BAYES_PRECISION_FUSION extras coverage-incomplete for cycle %s but FIXPOINT-latched "
-                "(%d/%d planned scopes unservable this cycle) -> skip re-run (complete-with-gap)",
-                cycle.isoformat(),
-                len(missing),
-                planned,
-            )
-            return False
         logger.info(
             "BAYES_PRECISION_FUSION extras coverage-incomplete for cycle %s: %d/%d planned "
             "scopes still missing single_runs (re-running fan-out): %s",
@@ -4060,14 +4238,11 @@ def _replacement_cycle_availability_poll_if_needed(
     # fetched this tick, OR (b) the
     # current-cycle's extras are COVERAGE-incomplete (per-(city,metric,target_date) probe, fix
     # 2026-06-16 — was a coverage-blind flat row-count that stranded lead+1/+2 scopes).
-    # When every planned scope is captured (or the residual is a proven unservable-this-cycle
-    # fixpoint), skip. The next genuine publish re-triggers. Fail-open: any probe error -> run.
+    # Skip only when every planned scope has the causal minimum inputs. A prior
+    # zero-write pass cannot prove that a missing scope will never become servable.
     #
-    # CYCLE CAPTURED ONCE (architect cross-check 2026-06-16): resolve the probe cycle a single
-    # time and reuse it for both the gate and the post-pass fixpoint record so the latch can
-    # never key to a cycle the gate didn't evaluate (the sub-second re-resolve race). The
-    # fan-out re-resolves internally for its OWN target build; momentary disagreement costs at
-    # most one benign extra pass and self-corrects next tick.
+    # Resolve the planning cycle once for this pass and its zero-write diagnosis;
+    # actual provider run identities are checked per model by the coverage probe.
     _extras_cycle = _probe_resolved_bayes_precision_fusion_extras_cycle()
     _should_run_extras = (
         not anchor_gap_blocks_extras
@@ -4087,10 +4262,8 @@ def _replacement_cycle_availability_poll_if_needed(
         if bayes_precision_fusion_report is not None:
             _bpf_status = bayes_precision_fusion_report.get("status")
             report["bayes_precision_fusion_extras_status"] = _bpf_status
-            # Fixpoint record (termination bound A): latch complete-with-gap when THIS pass
-            # landed 0 new rows while still incomplete; un-latch on progress. Uses the pass's
-            # own written_row_count — the per-row-idempotent downloader makes 0 the honest
-            # "nothing new servable" signal. Keyed on _extras_cycle; auto-clears on rollover.
+            # Record a zero-write observation, but never let it suppress a later
+            # retry after transport recovery, new metadata or a new market scope.
             # ONLY record on a status that actually RAN the download to completion: a fail-soft
             # skip (FAILSOFT_SKIPPED / NO_TARGETS / UNRESOLVED_SKIP) carries no written_row_count
             # and is a TRANSIENT error, NOT proof the residual is unservable — latching on it

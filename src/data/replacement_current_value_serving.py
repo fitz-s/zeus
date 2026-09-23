@@ -57,7 +57,7 @@ from __future__ import annotations
 import math
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Freshness horizon for a previous_runs substitution: the row's captured_at may be at most this
 # many hours after its served source_cycle_time. Live extras captures land 0-9h after the cycle
@@ -195,6 +195,8 @@ class CurrentValueServingSchema:
 
     has_captured_at: bool
     has_source_available_at: bool
+    has_recorded_at: bool
+    has_coverage_status: bool
 
 
 def current_value_serving_schema(
@@ -212,6 +214,8 @@ def current_value_serving_schema(
     return CurrentValueServingSchema(
         has_captured_at="captured_at" in columns,
         has_source_available_at="source_available_at" in columns,
+        has_recorded_at="recorded_at" in columns,
+        has_coverage_status="coverage_status" in columns,
     )
 
 
@@ -250,6 +254,7 @@ def _read_source_clock_rows(
     decision_iso: str,
     schema: CurrentValueServingSchema,
     max_substitution_age_hours: float,
+    single_runs_only: bool = False,
 ) -> list[sqlite3.Row]:
     """Read the complete production target-family candidate stream."""
 
@@ -260,6 +265,7 @@ def _read_source_clock_rows(
         decision_iso=decision_iso,
         schema=schema,
         max_substitution_age_hours=max_substitution_age_hours,
+        single_runs_only=single_runs_only,
     )
     try:
         return conn.execute(sql, params).fetchall()
@@ -276,10 +282,13 @@ def _source_clock_rows_query(
     decision_iso: str,
     schema: CurrentValueServingSchema,
     max_substitution_age_hours: float,
+    single_runs_only: bool = False,
 ) -> tuple[str, tuple[object, ...]]:
     """Build the complete production ordering used only before the final lock."""
 
     captured_select = ", captured_at" if schema.has_captured_at else ""
+    if single_runs_only:
+        captured_select += ", source_available_at, recorded_at"
     possession_predicate = (
         "captured_at IS NOT NULL AND datetime(captured_at) <= datetime(?)"
         if schema.has_captured_at
@@ -303,6 +312,15 @@ def _source_clock_rows_query(
                 OR (julianday(captured_at) - julianday(source_cycle_time)) * 24.0 <= ?
               )
         """
+    strict_guard = ""
+    if single_runs_only:
+        strict_guard = """
+          AND source_available_at IS NOT NULL
+          AND recorded_at IS NOT NULL
+          AND coverage_status = 'COVERED'
+          AND datetime(source_available_at) <= datetime(?)
+          AND datetime(recorded_at) <= datetime(?)
+        """
     order_clause = (
         "captured_at DESC NULLS LAST, raw_model_forecast_id DESC"
         if schema.has_captured_at
@@ -314,7 +332,10 @@ def _source_clock_rows_query(
         params.append(decision_iso)
     if previous_age_guard:
         params.extend((SERVED_VIA_PREVIOUS_RUNS, max_substitution_age_hours))
-    params.extend((SERVED_VIA_SINGLE_RUNS, SERVED_VIA_PREVIOUS_RUNS))
+    if single_runs_only:
+        params.extend((decision_iso, decision_iso, SERVED_VIA_SINGLE_RUNS))
+    else:
+        params.extend((SERVED_VIA_SINGLE_RUNS, SERVED_VIA_PREVIOUS_RUNS))
     return (
         f"""
         SELECT raw_model_forecast_id, model, forecast_value_c, lead_days,
@@ -325,7 +346,8 @@ def _source_clock_rows_query(
            AND {possession_predicate}
            {source_available_guard}
            {previous_age_guard}
-           AND endpoint IN (?, ?)
+           {strict_guard}
+           AND endpoint {'= ?' if single_runs_only else 'IN (?, ?)'}
          ORDER BY model,
                   datetime(source_cycle_time) DESC,
                   CASE endpoint WHEN 'single_runs' THEN 0 ELSE 1 END,
@@ -341,6 +363,7 @@ def _served_source_clock_row(
     *,
     schema: CurrentValueServingSchema,
     max_substitution_age_hours: float,
+    single_runs_decision_time: datetime | None = None,
 ) -> tuple[str, ServedInstrumentValue] | None:
     """Parse one ordered row with the production serving validity rules."""
 
@@ -360,6 +383,23 @@ def _served_source_clock_row(
         )
     except (TypeError, ValueError, OverflowError):
         return None
+    if single_runs_decision_time is not None:
+        if endpoint != SERVED_VIA_SINGLE_RUNS or not captured:
+            return None
+        for raw, allow_naive_utc in (
+            (served_cycle, False), (captured, False),
+            (row[7], False), (row[8], True),
+        ):
+            try:
+                stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+                if stamp.tzinfo is None:
+                    if not allow_naive_utc:
+                        return None
+                    stamp = stamp.replace(tzinfo=timezone.utc)
+                if stamp > single_runs_decision_time:
+                    return None
+            except (TypeError, ValueError, OverflowError):
+                return None
     if (
         endpoint == SERVED_VIA_PREVIOUS_RUNS
         and model in _PRODUCT_MISMATCHED_PREVIOUS_RUNS
@@ -718,6 +758,7 @@ def read_freshest_coherent_instrument_values(
     cohort_window_hours: float,
     max_substitution_age_hours: float = PREVIOUS_RUNS_SUBSTITUTION_MAX_AGE_HOURS,
     include_station_sources: bool = False,
+    single_runs_only: bool = False,
 ) -> dict[str, ServedInstrumentValue]:
     """Return the newest causal multi-family provider cohort.
 
@@ -750,6 +791,11 @@ def read_freshest_coherent_instrument_values(
     schema = current_value_serving_schema(conn)
     if not schema.has_captured_at and not schema.has_source_available_at:
         return {}
+    if single_runs_only and not (
+        schema.has_captured_at and schema.has_source_available_at
+        and schema.has_recorded_at and schema.has_coverage_status
+    ):
+        return {}
 
     requested = set(models)
     by_model_cycle: dict[tuple[str, datetime], ServedInstrumentValue] = {}
@@ -762,11 +808,13 @@ def read_freshest_coherent_instrument_values(
         decision_iso=decision_time.isoformat(),
         schema=schema,
         max_substitution_age_hours=max_substitution_age_hours,
+        single_runs_only=single_runs_only,
     ):
         served = _served_source_clock_row(
             row,
             schema=schema,
             max_substitution_age_hours=max_substitution_age_hours,
+            single_runs_decision_time=decision_time if single_runs_only else None,
         )
         if served is None:
             continue

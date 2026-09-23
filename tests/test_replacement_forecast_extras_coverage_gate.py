@@ -1,25 +1,22 @@
 # Created: 2026-06-16
-# Last reused or audited: 2026-09-03
-# Lifecycle: created=2026-06-16; last_reviewed=2026-09-03; last_reused=2026-09-03
+# Last reused or audited: 2026-09-23
+# Lifecycle: created=2026-06-16; last_reviewed=2026-09-23; last_reused=2026-09-23
 # Authority basis: docs/evidence/timing_audit/capture_reactor_stall_rootcause_2026-06-16.md
 #   (PRIMARY/CODE fix) + docs/evidence/timing_audit/impl_flat_threshold_capture_fix_2026-06-16.md.
 #   BAYES_PRECISION_FUSION_SPEC §6 F1 (the q-path consumes the persisted single_runs capture).
-# Purpose: Relationship tests for BPF extras coverage completeness and fixpoint termination.
+# Purpose: Relationship tests for causal BPF capture coverage and retry admission.
 # Reuse: Run when replacement_forecast_production BPF extras capture, coverage, or cycle selection changes.
 """Coverage-aware BPF extras self-healing gate (_extras_cycle_incomplete) + termination.
 
 These tests pin the 2026-06-16 fix that replaced the coverage-BLIND flat row-count gate
 (``COUNT(*) WHERE source_cycle_time=? < 200``) with a per-(city, metric, target_date)
-single_runs coverage probe against the SAME plan the fan-out builds from. The flat gate
-declared a cycle "complete" once the near-day (lead=0) leg alone exceeded 200 rows, stranding
-the still-uncaptured lead+1/lead+2 scopes -> q-path CAPTURE_MISSING -> legacy q_shape.
+single_runs coverage probe. Current capture qualification uses metadata-pinned model runs,
+causal clocks, physical coverage and the existing coherent-cohort selector.
 
 Proven here:
   (a) a cycle with a FULL near-day leg but MISSING lead+1 scopes is INCOMPLETE (gate re-runs);
-  (b) one provider family is partial, while two provider families are COMPLETE;
-  (c) an UNSERVABLE-upstream residual does NOT loop forever: once a fan-out pass lands 0 new
-      rows while still incomplete, the per-cycle fixpoint latch flips the gate to
-      complete-with-gap (terminates), and the latch auto-clears when the cycle advances.
+  (b) one provider family is partial; two causal, coherent families can complete;
+  (c) a zero-write pass cannot permanently suppress later recovery on the same cycle.
 """
 from __future__ import annotations
 
@@ -30,6 +27,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -97,6 +95,573 @@ def _insert_single_runs(db: Path, *, city: str, metric: str, target_date: str, m
         conn.commit()
     finally:
         conn.close()
+
+
+def _current_source_clock_db(tmp_path: Path) -> Path:
+    db = tmp_path / "current-source-clock.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            """CREATE TABLE raw_model_forecasts (
+                raw_model_forecast_id INTEGER PRIMARY KEY, model TEXT, city TEXT,
+                target_date TEXT, metric TEXT, source_cycle_time TEXT,
+                source_available_at TEXT, captured_at TEXT, recorded_at TEXT,
+                forecast_value_c REAL, lead_days INTEGER, endpoint TEXT,
+                coverage_status TEXT
+            )"""
+        )
+    return db
+
+
+def _current_source_clock_row(
+    db: Path, model: str, run: datetime, *, endpoint: str = "single_runs",
+    available: datetime | None = None, captured: datetime | None = None,
+    recorded: datetime | None = None, coverage: str = "COVERED",
+    city: str = "Denver", target_date: str = "2026-09-25",
+    metric: str = "high",
+) -> None:
+    available = available or run + timedelta(minutes=5)
+    captured = captured or available + timedelta(minutes=5)
+    recorded = recorded or captured + timedelta(minutes=1)
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            """INSERT INTO raw_model_forecasts
+                (model,city,target_date,metric,source_cycle_time,source_available_at,
+                 captured_at,recorded_at,forecast_value_c,lead_days,endpoint,coverage_status)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (model,city,target_date,metric,run.isoformat(),available.isoformat(),
+             captured.isoformat(),recorded.isoformat(),25.0,2,endpoint,coverage),
+        )
+
+
+def _current_source_clock_metadata(
+    monkeypatch, latest: dict[str, datetime], *, ends: dict[str, datetime] | None = None,
+) -> None:
+    from src.data import openmeteo_model_updates as updates
+
+    monkeypatch.setattr(
+        updates, "read_model_updates_jsonl",
+        lambda _path: tuple(
+            updates.OpenMeteoModelUpdate(
+                model=model,
+                last_run_initialisation_time=run,
+                last_run_availability_time=run + timedelta(minutes=5),
+                raw={
+                    "last_run_initialisation_time": run.isoformat(),
+                    "data_end_time": (ends or {}).get(
+                        model, datetime(2026, 9, 26, 12, tzinfo=UTC)
+                    ).isoformat(),
+                },
+            ) for model, run in latest.items()
+        ),
+    )
+
+
+def _current_source_clock_missing(
+    db: Path, *, decision_time: datetime, target_date: str = "2026-09-25",
+    city: str = "Denver",
+    cohort_backtrack_candidates: dict | None = None,
+) -> set[tuple[str, str, str]]:
+    result = prod._extras_coverage_missing(
+        {"forecast_db": db},
+        datetime(2026, 9, 23, 0, tzinfo=UTC),
+        decision_time=decision_time,
+        capture_rows=(_PlanRow(city, "high", target_date),),
+        held_priority={},
+        cohort_backtrack_candidates=cohort_backtrack_candidates,
+    )
+    assert result is not None and result[1] == 1
+    return result[0]
+
+
+def test_current_source_clock_pair_can_span_distinct_metadata_pinned_runs(
+    tmp_path, monkeypatch,
+) -> None:
+    db = _current_source_clock_db(tmp_path)
+    icon = datetime(2026, 9, 23, 6, tzinfo=UTC)
+    nbm = datetime(2026, 9, 23, 8, tzinfo=UTC)
+    _current_source_clock_metadata(
+        monkeypatch, {"icon_global": icon, "ncep_nbm_conus": nbm},
+    )
+    _current_source_clock_row(db, "icon_global", icon)
+    _current_source_clock_row(db, "ncep_nbm_conus", nbm)
+
+    assert _current_source_clock_missing(
+        db, decision_time=datetime(2026, 9, 23, 10, tzinfo=UTC),
+    ) == set()
+
+
+def test_metadata_advance_does_not_make_old_coherent_pair_current(
+    tmp_path, monkeypatch,
+) -> None:
+    db = _current_source_clock_db(tmp_path)
+    old = datetime(2026, 9, 23, 0, tzinfo=UTC)
+    latest = old + timedelta(hours=6)
+    _current_source_clock_metadata(
+        monkeypatch, {"ecmwf_ifs": latest, "ukmo_global_deterministic_10km": old},
+    )
+    _current_source_clock_row(db, "ecmwf_ifs", old)
+    _current_source_clock_row(db, "ukmo_global_deterministic_10km", old)
+
+    assert _current_source_clock_missing(
+        db, decision_time=datetime(2026, 9, 23, 10, tzinfo=UTC),
+    ) == {("Denver", "high", "2026-09-25")}
+
+
+def test_asynchronous_six_hour_pair_is_missing_without_coherent_single_runs(
+    tmp_path, monkeypatch,
+) -> None:
+    db = _current_source_clock_db(tmp_path)
+    old = datetime(2026, 9, 23, 0, tzinfo=UTC)
+    icon = old + timedelta(hours=6)
+    _current_source_clock_metadata(
+        monkeypatch, {"icon_global": icon, "ukmo_global_deterministic_10km": old},
+    )
+    _current_source_clock_row(db, "icon_global", icon)
+    _current_source_clock_row(db, "ukmo_global_deterministic_10km", old)
+    candidates: dict = {}
+    assert _current_source_clock_missing(
+        db, decision_time=old + timedelta(hours=10),
+        cohort_backtrack_candidates=candidates,
+    ) == {("Denver", "high", "2026-09-25")}
+    assert candidates == {("Denver", "high", "2026-09-25"): ("icon_global", old)}
+
+
+def test_latest_center_and_older_single_runs_cohort_both_count(
+    tmp_path, monkeypatch,
+) -> None:
+    db = _current_source_clock_db(tmp_path)
+    icon = datetime(2026, 9, 23, 6, tzinfo=UTC)
+    ecmwf = icon + timedelta(hours=6)
+    _current_source_clock_metadata(
+        monkeypatch, {"icon_global": icon, "ecmwf_ifs": ecmwf},
+    )
+    _current_source_clock_row(db, "icon_global", icon)
+    _current_source_clock_row(db, "ecmwf_ifs", ecmwf)
+    _current_source_clock_row(db, "ecmwf_ifs", icon)
+    assert _current_source_clock_missing(
+        db, decision_time=ecmwf + timedelta(hours=1),
+    ) == set()
+
+
+def test_external_metadata_families_cannot_complete_configured_scheme(
+    tmp_path, monkeypatch,
+) -> None:
+    from src.strategy.live_inference import source_clock_city_weights as weights
+
+    db = _current_source_clock_db(tmp_path)
+    run = datetime(2026, 9, 23, 0, tzinfo=UTC)
+    _current_source_clock_metadata(monkeypatch, {
+        model: run for model in (
+            "icon_global", "ukmo_global_deterministic_10km",
+            "ecmwf_ifs", "ncep_nbm_conus",
+        )
+    })
+    monkeypatch.setattr(
+        weights, "scheme_for_city",
+        lambda _city, *, metric: SimpleNamespace(weights={
+            "icon_global": 0.5, "ukmo_global_deterministic_10km": 0.5,
+        }),
+    )
+    for model in ("ecmwf_ifs", "ncep_nbm_conus", "icon_global"):
+        _current_source_clock_row(db, model, run)
+    decision = run + timedelta(hours=10)
+    assert _current_source_clock_missing(db, decision_time=decision) == {
+        ("Denver", "high", "2026-09-25")
+    }
+    _current_source_clock_row(db, "ukmo_global_deterministic_10km", run)
+    assert _current_source_clock_missing(db, decision_time=decision) == set()
+
+
+def test_short_metadata_horizon_admits_only_proven_target_backtrack(
+    tmp_path, monkeypatch,
+) -> None:
+    db = _current_source_clock_db(tmp_path)
+    midnight = datetime(2026, 9, 23, 0, tzinfo=UTC)
+    latest_icon = midnight + timedelta(hours=3)
+    _current_source_clock_metadata(
+        monkeypatch,
+        {"icon_eu": latest_icon, "ukmo_global_deterministic_10km": midnight},
+        ends={"icon_eu": datetime(2026, 9, 24, 10, tzinfo=UTC)},
+    )
+    for model in ("icon_eu", "ukmo_global_deterministic_10km"):
+        _current_source_clock_row(db, model, midnight, city="Amsterdam")
+    assert _current_source_clock_missing(
+        db, city="Amsterdam", decision_time=midnight + timedelta(hours=10),
+    ) == set()
+
+
+def test_day0_partial_physical_capture_does_not_complete_pair(
+    tmp_path, monkeypatch,
+) -> None:
+    db = _current_source_clock_db(tmp_path)
+    run = datetime(2026, 9, 23, 0, tzinfo=UTC)
+    _current_source_clock_metadata(monkeypatch, {
+        "icon_global": run, "ukmo_global_deterministic_10km": run,
+    })
+    _current_source_clock_row(db, "icon_global", run, target_date="2026-09-23")
+    _current_source_clock_row(
+        db, "ukmo_global_deterministic_10km", run,
+        target_date="2026-09-23", coverage="PARTIAL",
+    )
+    assert _current_source_clock_missing(
+        db, target_date="2026-09-23", decision_time=run + timedelta(hours=10),
+    ) == {("Denver", "high", "2026-09-23")}
+
+
+def test_active_rotation_repairs_cohort_archive_and_keeps_commit_on_normal_failure(
+    tmp_path, monkeypatch,
+) -> None:
+    from src.data import bayes_precision_fusion_download as downloader
+
+    db = _current_source_clock_db(tmp_path)
+    old = datetime(2026, 9, 23, 0, tzinfo=UTC)
+    latest = old + timedelta(hours=6)
+    _current_source_clock_metadata(
+        monkeypatch, {"icon_global": latest, "ukmo_global_deterministic_10km": old},
+    )
+    _current_source_clock_row(db, "icon_global", latest)
+    _current_source_clock_row(db, "ukmo_global_deterministic_10km", old)
+    monkeypatch.setattr(downloader, "bayes_precision_fusion_quota_cooldown_seconds", lambda: 0)
+    calls: list[dict] = []
+
+    def download(**kwargs):
+        calls.append(kwargs)
+        if kwargs.get("frozen_source_runs"):
+            frozen = kwargs["frozen_source_runs"]["icon_global"]
+            assert isinstance(frozen, downloader._DerivedOffGridSingleRunsRun)
+            assert frozen.run == old
+            assert kwargs["models"] == ("icon_global",)
+            assert kwargs["include_previous_runs"] is False
+            assert kwargs["prune_after"] is False
+            assert [(t.city, t.metric, t.target_date) for t in kwargs["targets"]] == [
+                ("Denver", "high", "2026-09-25")
+            ]
+            _current_source_clock_row(db, "icon_global", old)
+            return {
+                "status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+                "attempted_target_group_count": 1,
+                "written_row_count": 1,
+                "committed_families": (("Denver", "2026-09-25", "high"),),
+            }
+        raise RuntimeError("normal fanout failed after archive commit")
+
+    monkeypatch.setattr(downloader, "download_bayes_precision_fusion_extra_raw_inputs", download)
+    cfg = {"forecast_db": db, "bpf_extra_rotation_state_path": tmp_path / "rotation.json"}
+    report = prod._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+        cfg, max_wall_clock_seconds=5.0, planning_cycle=old,
+        capture_target_scopes=(("Denver", "2026-09-25", "high"),),
+    )
+    assert len(calls) == 2
+    assert report["written_row_count"] == 1
+    assert report["committed_families"] == (("Denver", "2026-09-25", "high"),)
+    assert report["target_rotation_attempted_group_count"] == 1
+    assert report["target_rotation_last_attempted_group"] == ("Denver", "2026-09-25")
+    assert _current_source_clock_missing(
+        db, decision_time=datetime.now(UTC),
+    ) == set()
+
+
+def test_active_wrapper_unbounded_legacy_call_does_not_compare_none_budget(
+    tmp_path, monkeypatch,
+) -> None:
+    from src.data import bayes_precision_fusion_download as downloader
+
+    db = _current_source_clock_db(tmp_path)
+    cycle = datetime(2026, 9, 23, 0, tzinfo=UTC)
+    monkeypatch.setattr(downloader, "bayes_precision_fusion_quota_cooldown_seconds", lambda: 0)
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        downloader, "download_bayes_precision_fusion_extra_raw_inputs",
+        lambda **kwargs: calls.append(kwargs) or {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+            "attempted_target_group_count": 1, "written_row_count": 0,
+        },
+    )
+    report = prod._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+        {"forecast_db": db, "bpf_extra_rotation_state_path": tmp_path / "rotation.json"},
+        max_wall_clock_seconds=None, planning_cycle=cycle,
+        capture_target_scopes=(("Denver", "2026-09-25", "high"),),
+    )
+    assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
+    assert report["target_rotation_attempted_group_count"] == 1
+    assert len(calls) == 1
+
+
+def test_completed_scope_does_not_latch_new_metric_or_metadata_run(
+    tmp_path, monkeypatch,
+) -> None:
+    from src.data import bayes_precision_fusion_download as downloader
+
+    db = _current_source_clock_db(tmp_path)
+    old = datetime(2026, 9, 23, 0, tzinfo=UTC)
+    later = old + timedelta(hours=6)
+    _current_source_clock_metadata(monkeypatch, {
+        "icon_global": old, "ukmo_global_deterministic_10km": old,
+    })
+    for model in ("icon_global", "ukmo_global_deterministic_10km"):
+        _current_source_clock_row(db, model, old)
+    monkeypatch.setattr(downloader, "bayes_precision_fusion_quota_cooldown_seconds", lambda: 0)
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        downloader, "download_bayes_precision_fusion_extra_raw_inputs",
+        lambda **kwargs: calls.append(tuple(kwargs["targets"])) or {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+            "attempted_target_group_count": 1, "written_row_count": 0,
+        },
+    )
+    cfg = {"forecast_db": db, "bpf_extra_rotation_state_path": tmp_path / "rotation.json"}
+    scopes = (("Denver", "2026-09-25", "high"),)
+    report = prod._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+        cfg, max_wall_clock_seconds=5.0, planning_cycle=old,
+        capture_target_scopes=scopes,
+    )
+    assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS"
+    assert calls == []
+
+    # The same planning cycle gains a LOW market and a new provider run. Both
+    # scopes now need fresh current-center evidence, irrespective of old success.
+    _current_source_clock_metadata(monkeypatch, {
+        "icon_global": later, "ukmo_global_deterministic_10km": old,
+    })
+    report = prod._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+        cfg, max_wall_clock_seconds=5.0, planning_cycle=old,
+        capture_target_scopes=(*scopes, ("Denver", "2026-09-25", "low")),
+    )
+    assert report["target_rotation_attempted_group_count"] == 1
+    assert len(calls) == 1
+    assert {(target.metric, target.target_date) for target in calls[0]} == {
+        ("high", "2026-09-25"), ("low", "2026-09-25"),
+    }
+
+
+def test_slow_archive_preserves_normal_current_attempt_within_parent_budget(
+    tmp_path, monkeypatch,
+) -> None:
+    from src.data import bayes_precision_fusion_download as downloader
+
+    db = _current_source_clock_db(tmp_path)
+    old = datetime(2026, 9, 23, 0, tzinfo=UTC)
+    _current_source_clock_metadata(
+        monkeypatch, {"icon_global": old + timedelta(hours=6),
+                      "ukmo_global_deterministic_10km": old},
+    )
+    _current_source_clock_row(db, "icon_global", old + timedelta(hours=6))
+    _current_source_clock_row(db, "ukmo_global_deterministic_10km", old)
+    monkeypatch.setattr(downloader, "bayes_precision_fusion_quota_cooldown_seconds", lambda: 0)
+    clock = [100.0]
+    monkeypatch.setattr(prod.time, "monotonic", lambda: clock[0])
+    calls: list[str] = []
+
+    def download(**kwargs):
+        if kwargs.get("frozen_source_runs"):
+            calls.append("archive")
+            assert 0 < kwargs["max_wall_clock_seconds"] <= 2.5
+            clock[0] += kwargs["max_wall_clock_seconds"]
+        else:
+            calls.append("current")
+            assert kwargs["max_wall_clock_seconds"] >= 2.5
+        return {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+            "attempted_target_group_count": 1, "written_row_count": 0,
+        }
+
+    monkeypatch.setattr(downloader, "download_bayes_precision_fusion_extra_raw_inputs", download)
+    report = prod._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+        {"forecast_db": db, "bpf_extra_rotation_state_path": tmp_path / "rotation.json"},
+        max_wall_clock_seconds=5.0, planning_cycle=old,
+        capture_target_scopes=(("Denver", "2026-09-25", "high"),),
+    )
+    assert calls == ["archive", "current"]
+    assert report["target_rotation_attempted_group_count"] == 1
+    assert report["committed_families"] == ()
+
+
+def test_archive_exception_preserves_current_capture_and_commit_wake_evidence(
+    tmp_path, monkeypatch,
+) -> None:
+    from src.data import bayes_precision_fusion_download as downloader
+
+    db = _current_source_clock_db(tmp_path)
+    old = datetime(2026, 9, 23, 0, tzinfo=UTC)
+    _current_source_clock_metadata(monkeypatch, {
+        "icon_global": old + timedelta(hours=6),
+        "ukmo_global_deterministic_10km": old,
+    })
+    _current_source_clock_row(db, "icon_global", old + timedelta(hours=6))
+    _current_source_clock_row(db, "ukmo_global_deterministic_10km", old)
+    monkeypatch.setattr(downloader, "bayes_precision_fusion_quota_cooldown_seconds", lambda: 0)
+    clock = [100.0]
+    monkeypatch.setattr(prod.time, "monotonic", lambda: clock[0])
+    calls: list[str] = []
+
+    def download(**kwargs):
+        if kwargs.get("frozen_source_runs"):
+            calls.append("archive")
+            clock[0] += kwargs["max_wall_clock_seconds"]
+            raise RuntimeError("archive transport rejected")
+        calls.append("current")
+        assert kwargs["max_wall_clock_seconds"] >= 2.5
+        return {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+            "attempted_target_group_count": 1, "written_row_count": 1,
+            "committed_families": (("Denver", "2026-09-25", "high"),),
+        }
+
+    monkeypatch.setattr(downloader, "download_bayes_precision_fusion_extra_raw_inputs", download)
+    report = prod._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+        {"forecast_db": db, "bpf_extra_rotation_state_path": tmp_path / "rotation.json"},
+        max_wall_clock_seconds=5.0, planning_cycle=old,
+        capture_target_scopes=(("Denver", "2026-09-25", "high"),),
+    )
+    assert calls == ["archive", "current"]
+    assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
+    assert report["coherent_archive_capture"] == {
+        "status": "EXCEPTION_NO_RECEIPT",
+        "error": "archive transport rejected",
+        "attempted_target_group_count": 0,
+    }
+    assert report["written_row_count"] == 1
+    assert report["committed_families"] == (("Denver", "2026-09-25", "high"),)
+    assert report["target_rotation_attempted_group_count"] == 1
+
+
+def test_cohort_archive_real_http_parser_commits_only_proven_old_run(
+    tmp_path, monkeypatch,
+) -> None:
+    from src.data import bayes_precision_fusion_download as downloader
+    from src.data import openmeteo_client
+    from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
+
+    db = tmp_path / "forecast.db"
+    with sqlite3.connect(db) as conn:
+        ensure_replacement_forecast_live_schema(conn)
+    old = datetime(2026, 9, 23, 0, tzinfo=UTC)
+    latest = old + timedelta(hours=6)
+    _current_source_clock_metadata(monkeypatch, {
+        "icon_global": latest, "ukmo_global_deterministic_10km": old,
+    })
+    for metric in ("high", "low"):
+        _current_source_clock_row(db, "icon_global", latest, metric=metric)
+        _current_source_clock_row(db, "ukmo_global_deterministic_10km", old, metric=metric)
+    monkeypatch.setattr(downloader, "bayes_precision_fusion_quota_cooldown_seconds", lambda: 0)
+    requested_runs: list[str] = []
+
+    def fetch(_url, params, **_kwargs):
+        requested_runs.append(params["run"])
+        assert params["run"] == "2026-09-23T00:00"
+        return {
+            "hourly": {
+                "time": [f"2026-09-25T{hour:02d}:00" for hour in range(24)],
+                "temperature_2m": [20.0 + hour / 10 for hour in range(24)],
+            },
+            "hourly_units": {"temperature_2m": "C"},
+        }
+
+    monkeypatch.setattr(openmeteo_client, "fetch", fetch)
+    original_download = downloader.download_bayes_precision_fusion_extra_raw_inputs
+    normal_attempts: list[dict] = []
+
+    def download(**kwargs):
+        if kwargs.get("frozen_source_runs"):
+            return original_download(**kwargs)
+        normal_attempts.append(kwargs)
+        return {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE",
+            "timeboxed_incomplete": True,
+            "attempted_target_group_count": 0, "written_row_count": 0,
+        }
+
+    monkeypatch.setattr(downloader, "download_bayes_precision_fusion_extra_raw_inputs", download)
+    report = prod._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+        {"forecast_db": db, "bpf_extra_rotation_state_path": tmp_path / "rotation.json"},
+        max_wall_clock_seconds=5.0, planning_cycle=old,
+        capture_target_scopes=(
+            ("Denver", "2026-09-25", "high"),
+            ("Denver", "2026-09-25", "low"),
+        ),
+    )
+    assert requested_runs == ["2026-09-23T00:00"]
+    assert len(normal_attempts) == 1
+    assert report["written_row_count"] == 2
+    assert set(map(tuple, report["committed_families"])) == {
+        ("Denver", "2026-09-25", metric) for metric in ("high", "low")
+    }
+    assert report["target_rotation_attempted_group_count"] == 1
+    with sqlite3.connect(db) as conn:
+        rows = conn.execute(
+            "SELECT metric,source_cycle_time,source_available_at,captured_at,coverage_status "
+            "FROM raw_model_forecasts WHERE model='icon_global' AND source_cycle_time=?",
+            (old.isoformat(),),
+        ).fetchall()
+    assert {row[0] for row in rows} == {"high", "low"}
+    assert all(row[1] == old.isoformat() and row[4] == "COVERED" for row in rows)
+    assert all(old <= datetime.fromisoformat(row[2]) <= datetime.fromisoformat(row[3]) for row in rows)
+
+
+def test_unproved_nonstandard_archive_is_not_scheduled(tmp_path, monkeypatch) -> None:
+    db = _current_source_clock_db(tmp_path)
+    old = datetime(2026, 9, 23, 0, tzinfo=UTC)
+    _current_source_clock_metadata(monkeypatch, {
+        "ncep_nbm_conus": old + timedelta(hours=8),
+        "ukmo_global_deterministic_10km": old,
+    })
+    _current_source_clock_row(db, "ncep_nbm_conus", old + timedelta(hours=8))
+    _current_source_clock_row(db, "ukmo_global_deterministic_10km", old)
+    candidates: dict = {}
+    assert _current_source_clock_missing(
+        db, decision_time=old + timedelta(hours=10),
+        cohort_backtrack_candidates=candidates,
+    ) == {("Denver", "high", "2026-09-25")}
+    assert candidates == {}
+
+
+@pytest.mark.parametrize("defect", (
+    "previous_only", "unknown_metadata", "future_available", "future_capture",
+    "future_recorded", "partial_coverage", "stale_cycle", "same_family",
+    "subsecond_future_available", "subsecond_future_capture",
+    "subsecond_future_recorded",
+))
+def test_current_source_clock_gate_rejects_unproved_inputs(
+    tmp_path, monkeypatch, defect,
+) -> None:
+    db = _current_source_clock_db(tmp_path)
+    run = datetime(2026, 9, 23, 0, tzinfo=UTC)
+    decision = run + timedelta(hours=10)
+    models = (
+        ("icon_global", "icon_eu")
+        if defect == "same_family"
+        else ("ecmwf_ifs", "ukmo_global_deterministic_10km")
+    )
+    _current_source_clock_metadata(
+        monkeypatch,
+        {model: run for model in models if not (defect == "unknown_metadata" and model == models[1])},
+    )
+    _current_source_clock_row(db, models[0], run)
+    kwargs = {
+        "endpoint": "previous_runs" if defect == "previous_only" else "single_runs",
+        "coverage": "PARTIAL" if defect == "partial_coverage" else "COVERED",
+    }
+    if defect == "future_available":
+        kwargs["available"] = decision + timedelta(minutes=1)
+    elif defect == "future_capture":
+        kwargs["captured"] = decision + timedelta(minutes=1)
+    elif defect == "future_recorded":
+        kwargs["recorded"] = decision + timedelta(minutes=1)
+    elif defect == "subsecond_future_available":
+        kwargs["available"] = decision + timedelta(milliseconds=500)
+        kwargs["captured"] = decision - timedelta(minutes=1)
+        kwargs["recorded"] = decision - timedelta(minutes=1)
+    elif defect == "subsecond_future_capture":
+        kwargs["captured"] = decision + timedelta(milliseconds=500)
+        kwargs["recorded"] = decision - timedelta(minutes=1)
+    elif defect == "subsecond_future_recorded":
+        kwargs["recorded"] = decision + timedelta(milliseconds=500)
+    _current_source_clock_row(db, models[1], run, **kwargs)
+    if defect == "stale_cycle":
+        decision = run + timedelta(hours=31)
+    assert _current_source_clock_missing(db, decision_time=decision) == {
+        ("Denver", "high", "2026-09-25")
+    }
 
 
 def test_source_cycle_local_decision_window_is_timezone_aware() -> None:
@@ -383,13 +948,15 @@ def test_full_near_day_missing_lead1_is_incomplete(_cfg_with_db, _redirect_healt
 # --- (b) all planned scopes captured -> COMPLETE (terminates) ---------------------------------
 
 
-def test_all_planned_scopes_captured_is_complete(_cfg_with_db, _redirect_health):
+def test_unstamped_planned_scopes_are_not_causal_completion(_cfg_with_db, _redirect_health):
     cfg, db = _cfg_with_db
     for c in _NEAR_DAY_CITIES:
         _insert_single_runs(db, city=c, metric="high", target_date=_NEAR_DAY, models=_MODELS)
     for c in _LEAD1_CITIES:
         _insert_single_runs(db, city=c, metric="high", target_date=_LEAD1, models=_MODELS)
-    assert prod._extras_cycle_incomplete(cfg, _CYCLE) is False
+    # These legacy fixture rows lack possession/physical coverage clocks and
+    # cannot prove the modern metadata-pinned current-center pair.
+    assert prod._extras_cycle_incomplete(cfg, _CYCLE) is True
 
 
 def test_one_provider_family_does_not_complete_a_scope(
@@ -418,17 +985,11 @@ def test_no_planned_scopes_is_complete(_cfg_with_db, _redirect_health, monkeypat
     assert prod._extras_cycle_incomplete(cfg, _CYCLE) is False
 
 
-# --- (c) unservable upstream does NOT loop forever (fixpoint terminates) -----------------------
+# --- (c) zero writes do not establish permanent unservability -------------------------------
 
 
-def test_unservable_residual_terminates_via_fixpoint(_cfg_with_db, _redirect_health):
-    """lead+1 is permanently unservable for THIS cycle (upstream never publishes it).
-
-    Tick 1: near-day captured, lead+1 missing -> gate INCOMPLETE (correct: try to fill it).
-    A fan-out pass then lands 0 NEW rows (nothing servable) -> _record_extras_fixpoint LATCHES.
-    Tick 2: still missing, but the latch is set -> gate COMPLETE-WITH-GAP (terminates the loop)
-            instead of re-running forever every 5-min tick.
-    """
+def test_zero_write_does_not_prove_missing_scopes_unservable(_cfg_with_db, _redirect_health):
+    """One zero-write pass is diagnostic, not permanent completion of a gap."""
     cfg, db = _cfg_with_db
     for c in _NEAR_DAY_CITIES:
         _insert_single_runs(db, city=c, metric="high", target_date=_NEAR_DAY, models=_MODELS)
@@ -437,12 +998,10 @@ def test_unservable_residual_terminates_via_fixpoint(_cfg_with_db, _redirect_hea
     assert prod._extras_fixpoint_latched(_CYCLE) is False
     assert prod._extras_cycle_incomplete(cfg, _CYCLE) is True
 
-    # The fan-out ran and produced ZERO new rows (lead+1 unservable this cycle) -> latch.
+    # A zero write can be transport failure; quota/backoff separately bound retry.
     prod._record_extras_fixpoint(cfg, _CYCLE, written=0)
-    assert prod._extras_fixpoint_latched(_CYCLE) is True
-
-    # Tick 2: the gap persists, but the gate now SKIPS (complete-with-gap) -> loop terminates.
-    assert prod._extras_cycle_incomplete(cfg, _CYCLE) is False
+    assert prod._extras_fixpoint_latched(_CYCLE) is False
+    assert prod._extras_cycle_incomplete(cfg, _CYCLE) is True
 
 
 def test_fixpoint_does_not_suppress_missing_held_position_scope(
@@ -454,7 +1013,7 @@ def test_fixpoint_does_not_suppress_missing_held_position_scope(
         _insert_single_runs(db, city=c, metric="high", target_date=_NEAR_DAY, models=_MODELS)
 
     prod._record_extras_fixpoint(cfg, _CYCLE, written=0)
-    assert prod._extras_fixpoint_latched(_CYCLE) is True
+    assert prod._extras_fixpoint_latched(_CYCLE) is False
     monkeypatch.setattr(
         prod,
         "_held_position_extras_missing_scopes",
@@ -501,18 +1060,17 @@ def test_held_position_missing_scope_uses_extras_tuple_order(tmp_path):
     }
 
 
-def test_progress_unlatches_so_servable_data_keeps_healing(_cfg_with_db, _redirect_health):
-    """A latch must NOT freeze a cycle that is still making progress: if a later pass lands new
-    rows (written>0), the latch clears and the gate resumes re-running until coverage is full."""
+def test_progress_keeps_servable_data_healing(_cfg_with_db, _redirect_health):
+    """Zero-write diagnosis and subsequent progress both leave missing scopes retryable."""
     cfg, db = _cfg_with_db
     for c in _NEAR_DAY_CITIES:
         _insert_single_runs(db, city=c, metric="high", target_date=_NEAR_DAY, models=_MODELS)
 
-    # A zero-progress pass latches...
+    # A zero-progress observation remains retryable.
     prod._record_extras_fixpoint(cfg, _CYCLE, written=0)
-    assert prod._extras_fixpoint_latched(_CYCLE) is True
+    assert prod._extras_fixpoint_latched(_CYCLE) is False
 
-    # ...then lead+1 starts to arrive (a later pass landed rows) -> a progress record un-latches.
+    # Then lead+1 starts to arrive; the diagnostic records the progress.
     _insert_single_runs(db, city="Lucknow", metric="high", target_date=_LEAD1, models=_MODELS)
     prod._record_extras_fixpoint(cfg, _CYCLE, written=4)
     assert prod._extras_fixpoint_latched(_CYCLE) is False
@@ -520,14 +1078,13 @@ def test_progress_unlatches_so_servable_data_keeps_healing(_cfg_with_db, _redire
     assert prod._extras_cycle_incomplete(cfg, _CYCLE) is True
 
 
-def test_latch_auto_clears_when_cycle_advances(_cfg_with_db, _redirect_health):
-    """The latch is keyed on the cycle ISO: a NEWER cycle is never blocked by an older cycle's
-    unservable-gap latch (cross-cycle termination bound B — complete-with-gap is C-scoped)."""
+def test_zero_write_diagnostic_never_blocks_cycle_advance(_cfg_with_db, _redirect_health):
+    """Neither the current nor a newer planning cycle inherits zero-write admission."""
     cfg, db = _cfg_with_db
     for c in _NEAR_DAY_CITIES:
         _insert_single_runs(db, city=c, metric="high", target_date=_NEAR_DAY, models=_MODELS)
     prod._record_extras_fixpoint(cfg, _CYCLE, written=0)
-    assert prod._extras_fixpoint_latched(_CYCLE) is True
+    assert prod._extras_fixpoint_latched(_CYCLE) is False
 
     newer = datetime(2026, 6, 16, 6, 0, tzinfo=UTC)  # next 6h cycle
     assert prod._extras_fixpoint_latched(newer) is False
@@ -548,14 +1105,7 @@ def test_probe_error_fails_open(_cfg_with_db, _redirect_health, monkeypatch):
 
 
 def test_failsoft_skip_does_not_latch(_cfg_with_db, _redirect_health):
-    """A TRANSIENT fan-out fail-soft (no rows, no progress) must NOT be mistaken for an
-    unservable fixpoint. _record_extras_fixpoint latches on written==0+incomplete, but the
-    CALL SITE only records it on the DOWNLOADED status — a FAILSOFT_SKIPPED carries no
-    written_row_count and is transient, so the call site must skip the record entirely.
-
-    This test pins the call-site contract directly: a FAILSOFT status -> no latch written ->
-    the gate keeps re-running (self-healing), distinguishing transient error from unservable.
-    """
+    """A transient fail-soft or a zero-write success leaves missing scopes retryable."""
     cfg, db = _cfg_with_db
     for c in _NEAR_DAY_CITIES:
         _insert_single_runs(db, city=c, metric="high", target_date=_NEAR_DAY, models=_MODELS)
@@ -565,9 +1115,10 @@ def test_failsoft_skip_does_not_latch(_cfg_with_db, _redirect_health):
     assert prod._extras_fixpoint_latched(_CYCLE) is False
     # The gate stays incomplete (lead+1 absent, no latch) -> keeps healing on the next tick.
     assert prod._extras_cycle_incomplete(cfg, _CYCLE) is True
-    # Contrast: a DOWNLOADED-status zero-progress pass DOES latch (the unservable case).
+    # A DOWNLOADED-status zero-progress pass is still not unservability proof.
     prod._record_extras_fixpoint(cfg, _CYCLE, written=0)
-    assert prod._extras_fixpoint_latched(_CYCLE) is True
+    assert prod._extras_fixpoint_latched(_CYCLE) is False
+    assert prod._extras_cycle_incomplete(cfg, _CYCLE) is True
 
 
 def test_unresolved_extras_probe_marks_capture_health_failed(_cfg_with_db, _redirect_health):
@@ -2406,7 +2957,8 @@ def test_downloaded_extras_records_fixpoint_and_success_health(_cfg_with_db, _re
     assert capture["status"] == "OK"
     assert capture["business_liveness"] == {
         "extras_fixpoint_cycle": _CYCLE_ISO,
-        "extras_fixpoint_latched": True,
+        "extras_fixpoint_latched": False,
+        "extras_zero_progress_observed": True,
     }
 
 
@@ -2458,21 +3010,19 @@ def _wire_poll(monkeypatch, tmp_path, *, download_report):
     return cfg
 
 
-def test_callsite_downloaded_zero_progress_latches_then_skips(tmp_path, monkeypatch, _redirect_health):
-    """End-to-end: a DOWNLOADED pass that writes 0 rows while still incomplete -> the poll
-    latches the fixpoint -> a SECOND poll skips the fan-out (complete-with-gap). Proves the loop
-    terminates through the real wiring, not just the helper in isolation."""
+def test_callsite_zero_progress_retries_same_cycle_missing_scope(tmp_path, monkeypatch, _redirect_health):
+    """A zero-write pass cannot strand the same planning cycle on the next poll."""
     cfg = _wire_poll(
         monkeypatch, tmp_path,
         download_report={"status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED", "written_row_count": 0},
     )
-    # Tick 1: incomplete -> fan-out runs -> 0 written -> latched.
+    # Tick 1: incomplete -> fan-out runs -> 0 written.
     r1 = prod._replacement_cycle_availability_poll_if_needed(cfg)
     assert r1["bayes_precision_fusion_extras_status"] == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
-    assert prod._extras_fixpoint_latched(_CYCLE) is True
-    # Tick 2: still incomplete, but latched -> the gate SKIPS the fan-out (loop terminated).
+    assert prod._extras_fixpoint_latched(_CYCLE) is False
+    # Tick 2: still incomplete and the fan-out remains reachable.
     r2 = prod._replacement_cycle_availability_poll_if_needed(cfg)
-    assert r2["bayes_precision_fusion_extras_status"] == "EXTRAS_CURRENT_CYCLE_COMPLETE_SKIPPED"
+    assert r2["bayes_precision_fusion_extras_status"] == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
 
 
 def test_callsite_failsoft_does_not_latch(tmp_path, monkeypatch, _redirect_health):

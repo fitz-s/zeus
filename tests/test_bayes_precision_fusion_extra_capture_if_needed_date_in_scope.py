@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-06-08; last_reviewed=2026-09-20; last_reused=2026-09-20
+# Lifecycle: created=2026-06-08; last_reviewed=2026-09-23; last_reused=2026-09-23
 # Purpose: Relationship regression test for BAYES_PRECISION_FUSION extra-model capture wiring in src/main.py; guards against bare `date` NameError (BLOCKER 9) and verifies capture is gated by the edli flag.
 # Reuse: Run with pytest; update if the BAYES_PRECISION_FUSION extra-capture wiring or flag gate in src/main.py changes.
 # Created: 2026-06-08
-# Last reused or audited: 2026-09-20
+# Last reused or audited: 2026-09-23
 # Authority basis: PR#400 review (src/main.py:4909 bare `date` NameError swallowed by
 #   fail-soft); CONTINUITY_AND_WIRING.md §4 step 2 + BAYES_PRECISION_FUSION_SPEC.md §6 F1 (BAYES_PRECISION_FUSION multi-model
 #   SHADOW capture gated by edli.replacement_0_1_bayes_precision_fusion_capture_enabled).
@@ -410,9 +410,14 @@ def test_lightweight_market_capture_covers_every_city_metric_across_ticks(
         )
         assert report["target_rotation_attempted_group_count"] == 1
     assert seen == ["Amsterdam", "Amsterdam", "London", "Paris", "Amsterdam"]
-    assert production._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+    # The legacy six-column rows written by this synthetic downloader have no
+    # possession or physical-coverage proof. Rotation remains fair, but they
+    # cannot close source-clock capture debt merely by adding two model names.
+    retry = production._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
         cfg, max_wall_clock_seconds=3.0
-    )["status"] == "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS"
+    )
+    assert retry["status"] != "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS"
+    assert retry["target_rotation_attempted_group_count"] == 1
 
 
 def test_candidate_accrual_uses_current_targets_after_live_coverage(monkeypatch, tmp_path) -> None:
