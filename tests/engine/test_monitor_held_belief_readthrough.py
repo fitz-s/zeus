@@ -1871,15 +1871,21 @@ def test_day0_newer_observation_reseeds_instead_of_pinning_prior_carrier(monkeyp
 
 
 @pytest.mark.parametrize(
-    ("metric", "raw_value"),
-    (("high", 34.0), ("low", 12.0)),
+    ("metric", "raw_value", "reason_code"),
+    (
+        ("high", 34.0, "REPLACEMENT_PINNED_DAY0_SOURCE_STATION_MISMATCH"),
+        ("low", 12.0, "REPLACEMENT_PINNED_DAY0_SOURCE_STATION_MISMATCH"),
+        ("high", 34.0, "REPLACEMENT_PINNED_ELIGIBLE_ENS_HWM_UNAVAILABLE"),
+        ("low", 12.0, "REPLACEMENT_PINNED_ELIGIBLE_ENS_HWM_UNAVAILABLE"),
+    ),
 )
-def test_day0_blocked_prior_station_mismatch_defers_to_current_authority(
+def test_day0_deferable_blocked_prior_carrier_defers_to_current_authority(
     monkeypatch,
     metric,
     raw_value,
+    reason_code,
 ):
-    """A rejected t1 station carrier cannot veto the t2 current-event route."""
+    """A deferable rejected prior carrier cannot veto current-event routing."""
     import src.data.replacement_forecast_bundle_reader as bundle_reader
     import src.engine.event_reactor_adapter as era
     import src.engine.monitor_refresh as mr
@@ -1914,7 +1920,7 @@ def test_day0_blocked_prior_station_mismatch_defers_to_current_authority(
             status="BLOCKED",
             ok=False,
             bundle=None,
-            reason_code="REPLACEMENT_PINNED_DAY0_SOURCE_STATION_MISMATCH",
+            reason_code=reason_code,
         )
 
     def prepare(*_args, **kwargs):
