@@ -13092,6 +13092,8 @@ def test_live_adapter_selection_telemetry_isolates_unsupported_family(monkeypatc
         'REPLACEMENT_RAW_INPUT_HWM:basis=current_ensemble_snapshot_superseded:latest_snapshot_id=2:consumed_ensemble_cycle=old',
         'GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:'
         'REPLACEMENT_RAW_INPUT_HWM:basis=used_raw_model_forecasts_superseded:model=icon_d2:latest_raw_id=2:consumed_raw_id=1',
+        'GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:'
+        'REPLACEMENT_RAW_INPUT_HWM:basis=source_cycle_time_raw_forecast_artifacts_lag:latest_raw_cycle=2026-09-23T00:00:00+00:00:posterior_cycle=2026-09-22T18:00:00+00:00:consumed_anchor_cycle=2026-09-22T18:00:00+00:00:lag_h=6.00',
     ),
 )
 def test_superseded_preflight_evicts_only_selected_family_probability_cache(
@@ -37075,6 +37077,8 @@ def test_global_batch_reauctions_with_tightened_candidate_q(monkeypatch):
         'REPLACEMENT_RAW_INPUT_HWM:basis=current_ensemble_snapshot_superseded:latest_snapshot_id=2:consumed_ensemble_cycle=old',
         'GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:'
         'REPLACEMENT_RAW_INPUT_HWM:basis=used_raw_model_forecasts_superseded:model=icon_d2:latest_raw_id=2:consumed_raw_id=1',
+        'GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:'
+        'REPLACEMENT_RAW_INPUT_HWM:basis=source_cycle_time_raw_forecast_artifacts_lag:latest_raw_cycle=2026-09-23T00:00:00+00:00:posterior_cycle=2026-09-22T18:00:00+00:00:consumed_anchor_cycle=2026-09-22T18:00:00+00:00:lag_h=6.00',
     ),
     ids=(
         "probability",
@@ -37086,6 +37090,7 @@ def test_global_batch_reauctions_with_tightened_candidate_q(monkeypatch):
         "sell-temporal-immature",
         "ensemble-clock",
         "raw-model-clock",
+        "raw-artifact-cycle",
     ),
 )
 def test_global_batch_rebuilds_full_cut_after_stale_sell_authority(
@@ -47245,3 +47250,114 @@ def test_stale_age_rounded_to_budget_still_binds_the_same_observation():
             reason=f"day0_extreme_maturity_unavailable:observation_stale:age_minutes={age:.1f},budget_minutes=100.0,observation_time=2026-09-23T02:04:30+00:00",
         )
     assert identity(100.04) == identity(100.14)
+
+
+def _unquoted_day0_tail_fixture():
+    family, prepared = _prepared_current_day0_entry_fixture()
+    family.candidates = tuple(
+        era.MarketTopologyCandidate(
+            city=family.city, target_date=family.target_date, metric=family.metric,
+            condition_id=c.condition_id, yes_token_id=c.yes_token_id,
+            no_token_id=c.no_token_id if index == 0 else None, bin=c.bin,
+        )
+        for index, c in enumerate(family.candidates)
+    )
+    return family, prepared
+
+
+def _map_unquoted_day0_family(family, prepared):
+    return era._day0_probability_and_fdr_from_prepared_witness(
+        prepared_global_family=prepared, current_day0_payload={},
+        payload={"rounded_value": 19.0, "metric": "high"}, family=family,
+        native_costs=era._native_costs_by_candidate_direction(family, []),
+        decision_time=_dt.datetime(2026, 7, 10, 20, tzinfo=_dt.timezone.utc),
+    )
+
+
+def test_unquoted_day0_tail_identity_preserves_complete_q_without_creating_liquidity():
+    family, prepared = _unquoted_day0_tail_fixture()
+    with pytest.raises(ValueError, match="GLOBAL_DAY0_PREPARED_WITNESS_BINDING_INVALID"):
+        _map_unquoted_day0_family(family, prepared)
+    snapshots = [{"condition_id": "condition-0"}]
+    original_snapshots = copy.deepcopy(snapshots)
+    family.candidates = era._complete_unquoted_day0_topology(
+        family.candidates, prepared_global_family=prepared,
+        snapshot_rows=snapshots, selected_condition_id="condition-0",
+    )
+    assert family.candidates[1].no_token_id == "no-1"
+    assert snapshots == original_snapshots
+    q, bounds, p_values, prefilter, _ = _map_unquoted_day0_family(family, prepared)
+    assert q == {"condition-0": 0.25, "condition-1": 0.75}
+    assert len(bounds) == 4
+    assert set(prefilter) == set(bounds)
+    assert not any(prefilter.values())
+    costs = era._native_costs_by_candidate_direction(family, [])
+    assert costs[("condition-1", "buy_yes")][1] is None
+    assert costs[("condition-1", "buy_no")][1] is None
+
+
+@pytest.mark.parametrize("mutation", ("yes", "no", "condition", "bin", "duplicate_binding", "missing_binding", "snapshot_present", "selected_missing"))
+def test_unquoted_day0_tail_completion_preserves_identity_rejections(mutation):
+    family, prepared = _unquoted_day0_tail_fixture()
+    first, tail = family.candidates
+    snapshots = [{"condition_id": "condition-0"}]
+    selected = "condition-0"
+    if mutation in {"yes", "no", "condition", "bin"}:
+        changes = {
+            "yes": {"yes_token_id": "wrong-yes"},
+            "no": {"no_token_id": "wrong-no"},
+            "condition": {"condition_id": "wrong-condition"},
+            "bin": {"bin": Bin(low=22.0, high=None, unit="C", label="22C or above")},
+        }[mutation]
+        family.candidates = (first, replace(tail, **changes))
+    elif mutation in {"duplicate_binding", "missing_binding"}:
+        bindings = prepared.probability_witness.bindings
+        prepared = SimpleNamespace(probability_witness=SimpleNamespace(
+            bindings=(bindings[0], bindings[0]) if mutation == "duplicate_binding" else bindings[:1],
+        ))
+    elif mutation == "snapshot_present":
+        snapshots.append({"condition_id": "condition-1"})
+    else:
+        selected = "condition-1"
+    with pytest.raises(ValueError, match="GLOBAL_DAY0_PREPARED_WITNESS_BINDING_INVALID"):
+        family.candidates = era._complete_unquoted_day0_topology(
+            family.candidates, prepared_global_family=prepared,
+            snapshot_rows=snapshots, selected_condition_id=selected,
+        )
+        _map_unquoted_day0_family(family, prepared)
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+@pytest.mark.parametrize("held_q,bid,admitted", (
+    pytest.param(.806675, ".85", True, id="tokyo-profitable-sale"),
+    pytest.param(.806675, ".56", False, id="wide-spread-low-bid-hold"),
+    pytest.param(1.0, ".90", False, id="certain-payoff-hold"),
+    pytest.param(.167894, ".30", True, id="busan-profitable-sale"),
+    pytest.param(.859458, ".88", True, id="manila-profitable-sale"),
+    pytest.param(.807577, ".83", True, id="paris-profitable-sale"),
+))
+def test_sep23_exit_regressions_use_current_bid_and_held_probability(side, held_q, bid, admitted):
+    """Protect decision-time SELL/HOLD comparisons, not hindsight winner labels."""
+    from src.solve.solver import CandidatePortfolioEndowment, _score_global_single_order_sell_expected
+
+    template = _adapter_sell_actuation(SimpleNamespace(event_id="sep23-exit-regression"))
+    token = f"{side.lower()}-token"
+    curve = replace(
+        template.decision.candidate.executable_sell_curve, token_id=token, side=side,
+        levels=(BidBookLevel(price=Decimal(bid), size=Decimal("5")),),
+        fee_model=FeeModel(fee_rate=Decimal(".05")),
+    )
+    candidate = replace(
+        template.decision.candidate, side=side, token_id=token, held_shares=Decimal("5"),
+        executable_sell_curve=curve, proposal_sell_curve=curve,
+        execution_curve_identity=executable_curve_identity(curve),
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+    )
+    score = _score_global_single_order_sell_expected(
+        candidate, held_probability_mean=held_q, sample_count=2, band_alpha=.05,
+        endowment=CandidatePortfolioEndowment(
+            loss_wealth_floor_usd=Decimal("1000000"), win_wealth_floor_usd=Decimal("1000005"),
+            current_token_shares=Decimal("5"), ledger_snapshot_id="ledger-1",
+        ),
+    )
+    assert (score.candidate is not None and not score.rejection_reasons) is admitted

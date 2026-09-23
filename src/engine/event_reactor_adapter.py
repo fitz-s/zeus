@@ -1510,6 +1510,7 @@ def _global_preflight_source_clock_superseded(reason: str) -> bool:
         (
             prefix + "current_ensemble_snapshot_superseded:",
             prefix + "used_raw_model_forecasts_superseded:",
+            prefix + "source_cycle_time_raw_forecast_artifacts_lag:",
         )
     )
 
@@ -19931,6 +19932,18 @@ def _build_event_bound_no_submit_receipt_core(
     # positive conservative EV is still +EV. Fired 0x in 7 live days. Sizing
     # by opening-tick age belongs to Kelly's phase-aware multiplier; EV
     # admission belongs to TRADE_SCORE / capital-efficiency.
+    try:
+        topology = _complete_unquoted_day0_topology(
+            topology,
+            prepared_global_family=current_global_day0_entry_family,
+            snapshot_rows=family_rows,
+            selected_condition_id=str(getattr(global_candidate, "condition_id", "") or ""),
+        )
+    except ValueError as exc:
+        return EventSubmissionReceipt(
+            False, event.event_id, event.causal_snapshot_id,
+            reason=f"EVENT_BOUND_MARKET_TOPOLOGY_INVALID:{exc}",
+        )
     decision = EventBoundDecisionEngine().evaluate(
         EventBoundDecisionRequest(
             event=event,
@@ -50660,6 +50673,45 @@ def _selected_snapshot_row_for_event(
             continue
         return row
     return None
+
+
+def _complete_unquoted_day0_topology(
+    topology: tuple[MarketTopologyCandidate, ...],
+    *,
+    prepared_global_family: object | None,
+    snapshot_rows: list[dict[str, Any]],
+    selected_condition_id: str,
+) -> tuple[MarketTopologyCandidate, ...]:
+    """Complete unquoted sibling identity from the already JIT-verified witness."""
+
+    if prepared_global_family is None:
+        return topology
+    witness = getattr(prepared_global_family, "probability_witness", None)
+    bindings = tuple(getattr(witness, "bindings", ()) or ())
+    by_condition = {str(binding.condition_id or ""): binding for binding in bindings}
+    if not bindings or len(by_condition) != len(bindings) or "" in by_condition:
+        raise ValueError("GLOBAL_DAY0_PREPARED_WITNESS_BINDING_INVALID")
+    quoted = {str(row.get("condition_id") or "") for row in snapshot_rows}
+    completed = []
+    for candidate in topology:
+        condition_id = str(candidate.condition_id or "")
+        if candidate.no_token_id or condition_id in quoted or condition_id == selected_condition_id:
+            completed.append(candidate)
+            continue
+        binding = by_condition.get(condition_id)
+        if (
+            binding is None
+            or _candidate_bin_id_from_topology(candidate) != str(binding.bin_id or "")
+            or not candidate.yes_token_id
+            or candidate.yes_token_id != binding.yes_token_id
+            or not binding.no_token_id
+            or binding.no_token_id == binding.yes_token_id
+        ):
+            raise ValueError("GLOBAL_DAY0_PREPARED_WITNESS_BINDING_INVALID")
+        # Identity is not liquidity: keep snapshot_rows untouched. Both native
+        # costs stay absent, and the strict full-family q/FDR mapper still runs.
+        completed.append(dataclass_replace(candidate, no_token_id=binding.no_token_id))
+    return tuple(completed)
 
 
 def _snapshot_token_maps_by_condition(rows: list[dict[str, Any]]) -> dict[str, dict[str, str]]:
