@@ -1,4 +1,5 @@
 # Created: 2026-09-19
+# Last reused/audited: 2026-09-23
 # Authority basis: docs/operations/current/storage_and_latency_next_levers_2026-09-19.md
 #   — the live bundle lookup in replacement_forecast_bundle_reader filters on a
 #   json_extract over a ~93 KB provenance_json blob.
@@ -181,14 +182,14 @@ def test_center_debias_keys_are_generated_columns() -> None:
 
 
 def test_center_debias_sql_does_not_json_extract_the_blob() -> None:
-    """The shipped query must use the columns, not re-read the blob."""
-    from src.calibration.center_debias_live_fit import _RESIDUAL_SQL
+    """Rank candidates from the index; read generated values only for winners."""
+    from src.calibration.center_debias_live_fit import _LATE_FALLBACK_SQL, _RESIDUAL_SQL
 
-    assert "json_extract(p.provenance_json" not in _RESIDUAL_SQL, (
-        "center-debias SQL still json_extracts provenance_json; the generated "
-        "columns exist but the query does not use them"
-    )
-    assert "p.q_shape" in _RESIDUAL_SQL and "p.anchor_value_c" in _RESIDUAL_SQL
+    for sql in (_RESIDUAL_SQL, _LATE_FALLBACK_SQL):
+        assert "provenance_json" not in sql
+        assert "json_extract" not in sql
+    assert "q_shape" not in _RESIDUAL_SQL and "anchor_value_c" not in _RESIDUAL_SQL
+    assert "q_shape" in _LATE_FALLBACK_SQL and "anchor_value_c" in _LATE_FALLBACK_SQL
 
 
 def test_every_generated_column_the_shipped_sql_reads_exists_in_production() -> None:
@@ -202,11 +203,26 @@ def test_every_generated_column_the_shipped_sql_reads_exists_in_production() -> 
     """
     import re
 
-    from src.calibration.center_debias_live_fit import _RESIDUAL_SQL
+    from src.calibration.center_debias_live_fit import _LATE_FALLBACK_SQL, _RESIDUAL_SQL
 
     conn = _forecasts_conn()
     try:
         available = {row[1] for row in conn.execute("PRAGMA table_xinfo(forecast_posteriors)")}
+        # Compile the actual candidate and fallback queries against canonical
+        # DDL, including unqualified columns the p.<col> scan cannot inspect.
+        start, end, cutoff = (
+            "2026-09-21T00:00:00+00:00",
+            "2026-09-22T00:00:00+00:00",
+            "2026-09-23T00:00:00+00:00",
+        )
+        conn.execute(
+            _RESIDUAL_SQL.format(windows="(?, ?, ?, ?, ?)"),
+            ("London", "2026-09-22", 1, start, end, "high", cutoff),
+        ).fetchall()
+        conn.execute(
+            _LATE_FALLBACK_SQL,
+            ("London", "2026-09-22", "high", start, end, cutoff, cutoff),
+        ).fetchall()
     finally:
         conn.close()
     referenced = set(re.findall(r"\bp\.([a-z_][a-z0-9_]*)", _RESIDUAL_SQL))

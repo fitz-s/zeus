@@ -31,6 +31,7 @@ registry references that derivation instead of declaring a number.
 from __future__ import annotations
 
 import logging
+import time
 import urllib.error
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -122,7 +123,9 @@ def probe_openmeteo_single_run_available(
         return False
 
 
-def probe_bucket_run_declared(cycle: datetime) -> bool:
+def probe_bucket_run_declared(
+    cycle: datetime, *, deadline_monotonic: float | None = None
+) -> bool:
     """True iff the S3 data_spatial bucket declares this run (rung-3 transport probe).
 
     Declaration (a latest/in-progress manifest with reference_time == cycle) is the
@@ -136,14 +139,25 @@ def probe_bucket_run_declared(cycle: datetime) -> bool:
             select_declaring_manifest,
         )
 
-        manifests = fetch_bucket_run_manifest()
+        manifests = fetch_bucket_run_manifest(deadline_monotonic=deadline_monotonic)
         return (
             select_declaring_manifest(manifests, wanted_run=cycle.astimezone(UTC))
             is not None
         )
     except Exception as exc:  # noqa: BLE001 — probe noise = not available yet
+        _check_probe_deadline(deadline_monotonic)
         logger.debug("bucket run probe error (treated unavailable): %s", exc)
         return False
+
+
+def _check_probe_deadline(deadline_monotonic: float | None) -> float:
+    remaining = (
+        float("inf") if deadline_monotonic is None
+        else deadline_monotonic - time.monotonic()
+    )
+    if remaining <= 0:
+        raise TimeoutError("anchor availability probe deadline expired")
+    return remaining
 
 
 class AnchorAvailabilityProbe:
@@ -162,6 +176,7 @@ class AnchorAvailabilityProbe:
         meta_fetch: Callable[..., Mapping[str, Any]] | None = None,
         cached_updates_path: str | Path | None = DEFAULT_MODEL_UPDATES_JSONL,
         allow_metered_fallback: bool = False,
+        deadline_monotonic: float | None = None,
     ) -> None:
         self._urlopen = urlopen
         self._meta_fetch = meta_fetch
@@ -169,10 +184,12 @@ class AnchorAvailabilityProbe:
             None if cached_updates_path is None else Path(cached_updates_path)
         )
         self._allow_metered_fallback = bool(allow_metered_fallback)
+        self._deadline_monotonic = deadline_monotonic
         self._meta_loaded = False
         self._meta: Mapping[str, Any] | None = None
 
     def _model_meta(self) -> Mapping[str, Any] | None:
+        _check_probe_deadline(self._deadline_monotonic)
         if self._meta_loaded:
             return self._meta
         self._meta_loaded = True
@@ -211,15 +228,27 @@ class AnchorAvailabilityProbe:
                     fetch_openmeteo_ifs9_model_meta,
                 )
 
-                self._meta = fetch_openmeteo_ifs9_model_meta()
+                self._meta = (
+                    fetch_openmeteo_ifs9_model_meta()
+                    if self._deadline_monotonic is None
+                    else fetch_openmeteo_ifs9_model_meta(
+                        timeout=min(
+                            20.0, _check_probe_deadline(self._deadline_monotonic)
+                        ),
+                        max_retries=1,
+                        fast_fail_429=True,
+                    )
+                )
             else:
                 self._meta = self._meta_fetch()
         except Exception as exc:  # noqa: BLE001 -- next transport rung remains valid.
+            _check_probe_deadline(self._deadline_monotonic)
             logger.debug("anchor meta probe error (treated unavailable): %s", exc)
             self._meta = None
         return self._meta
 
     def __call__(self, cycle: datetime) -> bool:
+        _check_probe_deadline(self._deadline_monotonic)
         # Free signals first: the cached model meta and the public S3 bucket
         # manifest confirm publication without spending API quota. The metered
         # single-runs probe is the last rung, paid only when neither free
@@ -244,8 +273,21 @@ class AnchorAvailabilityProbe:
                 # unmetered metadata or bucket frontier advances on the normal poll.
                 # RESET: malformed/unavailable metadata retains the metered fallback.
                 if wanted > current_run:
-                    return probe_bucket_run_declared(cycle)
-        if probe_bucket_run_declared(cycle):
+                    return (
+                        probe_bucket_run_declared(cycle)
+                        if self._deadline_monotonic is None
+                        else probe_bucket_run_declared(
+                            cycle, deadline_monotonic=self._deadline_monotonic
+                        )
+                    )
+        declared = (
+            probe_bucket_run_declared(cycle)
+            if self._deadline_monotonic is None
+            else probe_bucket_run_declared(
+                cycle, deadline_monotonic=self._deadline_monotonic
+            )
+        )
+        if declared:
             return True
         if not self._allow_metered_fallback:
             return False
@@ -274,6 +316,7 @@ def resolve_provider_anchor_cycle_availability(
     now: datetime,
     *,
     max_lookback_cycles: int = DEFAULT_MAX_LOOKBACK_CYCLES,
+    deadline_monotonic: float | None = None,
 ) -> tuple["AnchorCycleAvailability", ...]:
     """Resolve provider availability from one coherent per-poll meta snapshot."""
 
@@ -282,12 +325,13 @@ def resolve_provider_anchor_cycle_availability(
     probe: Callable[[datetime], bool] = (
         current_probe
         if current_probe is not _DEFAULT_ANCHOR_PROBE
-        else AnchorAvailabilityProbe()
+        else AnchorAvailabilityProbe(deadline_monotonic=deadline_monotonic)
     )
     return resolve_anchor_cycle_availability(
         now,
         probe_anchor=probe,
         max_lookback_cycles=max_lookback_cycles,
+        deadline_monotonic=deadline_monotonic,
     )
 
 
@@ -308,16 +352,19 @@ def resolve_anchor_cycle_availability(
     *,
     probe_anchor: Callable[[datetime], bool],
     max_lookback_cycles: int = DEFAULT_MAX_LOOKBACK_CYCLES,
+    deadline_monotonic: float | None = None,
 ) -> tuple[AnchorCycleAvailability, ...]:
     """Anchor-only availability for the current replacement live chain."""
 
     out: list[AnchorCycleAvailability] = []
     anchor_known_available_from: datetime | None = None
     for cycle in candidate_cycles(now, max_lookback_cycles=max_lookback_cycles):
+        _check_probe_deadline(deadline_monotonic)
         if anchor_known_available_from is not None and cycle <= anchor_known_available_from:
             anchor_ok = True
         else:
             anchor_ok = bool(probe_anchor(cycle))
+            _check_probe_deadline(deadline_monotonic)
             if anchor_ok:
                 anchor_known_available_from = cycle
         out.append(AnchorCycleAvailability(cycle=cycle, anchor_available=anchor_ok))

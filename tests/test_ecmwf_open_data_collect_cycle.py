@@ -1,5 +1,5 @@
 # Created: 2026-05-11
-# Last reused/audited: 2026-05-11
+# Last reused/audited: 2026-09-23
 # Authority basis: PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md §5.5
 #   Cross-track filename collision antibody: per-step filenames include param
 #   (e.g. .step003_mx2t3.grib2 vs .step003_mn2t3.grib2) so concurrent mx2t6_high
@@ -16,15 +16,481 @@ from __future__ import annotations
 import sqlite3
 import hashlib
 import json
-from datetime import date, datetime, timezone
+import time
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from src.state.db import init_schema
+from src.state.db import init_schema, init_schema_forecasts
 from src.state.schema.v2_schema import apply_canonical_schema
 from src.state.source_run_repo import write_source_run
+
+
+def _native_partial_scope_payload(
+    *, track: str, target: date, issue: date, manifest_sha: str,
+) -> dict[str, object]:
+    """Small full-member native-window payload for one London target day."""
+    from tests.test_opendata_writes_v2_table import _make_opendata_high_payload
+    from src.data import ecmwf_open_data
+
+    start = datetime.combine(target, datetime.min.time(), tzinfo=timezone.utc) - timedelta(hours=1)
+    end = start + timedelta(days=1)
+    issue_iso = f"{issue.isoformat()}T00:00:00+00:00"
+    payload = _make_opendata_high_payload(
+        target.isoformat(), issue_iso,
+        local_day_start_iso=start.isoformat(), local_day_end_iso=end.isoformat(),
+        forecast_window_start_iso=start.isoformat(),
+        forecast_window_end_iso=end.isoformat(),
+    )
+    cfg = ecmwf_open_data.TRACKS[track]
+    payload.update(
+        manifest_sha256=manifest_sha, manifest_hash=manifest_sha,
+        data_version=cfg["data_version"],
+        lead_day=(target - issue).days,
+    )
+    if track == "mn2t6_low":
+        payload.update(
+            physical_quantity="mn2t3_local_calendar_day_min",
+            param="mn2t3", paramId=122, short_name="mn2t3",
+            step_type="min", temperature_metric="low",
+        )
+        for member in payload["members"]:
+            member["inner_min_native_unit"] = member.pop("inner_max_native_unit")
+            member.pop("boundary_max_native_unit")
+            member["boundary_min_native_unit"] = 30.0
+            member["boundary_ambiguous"] = False
+            for window in member["native_windows"]:
+                if f'{window["start_step_hours"]}-{window["end_step_hours"]}' in member["boundary_step_ranges"]:
+                    window["value_native_unit"] = 30.0
+    return payload
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+def test_partial_retry_preserves_qualified_far_scope_and_publishes_near_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, track: str,
+) -> None:
+    """A near-only 503 retry cannot erase the far target from an earlier full run."""
+    from src.config import runtime_coordinate_manifest_json
+    from src.data import ecmwf_open_data
+    from src.data.replacement_input_hwm import latest_eligible_ensemble_input_cycle
+
+    t1 = datetime.now(timezone.utc).replace(microsecond=0)
+    t2 = t1 + timedelta(minutes=2)
+    cut = t1 + timedelta(minutes=1)
+    clock = {"now": t1}
+
+    class CollectionDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock["now"].astimezone(tz) if tz else clock["now"].replace(tzinfo=None)
+
+    monkeypatch.setattr(ecmwf_open_data, "datetime", CollectionDateTime)
+    monkeypatch.setattr(ecmwf_open_data._ingest_grib_module, "datetime", CollectionDateTime)
+    run_date = t1.date()
+    near, far = run_date + timedelta(days=1), run_date + timedelta(days=2)
+    metric = "high" if track == "mx2t6_high" else "low"
+    root = tmp_path / "51 source data"
+    conn = sqlite3.connect(tmp_path / "forecasts.db")
+    conn.row_factory = sqlite3.Row
+    init_schema_forecasts(conn)
+    monkeypatch.setattr(ecmwf_open_data, "FIFTY_ONE_ROOT", root)
+    monkeypatch.setattr(ecmwf_open_data, "STEP_HOURS", list(range(3, 73, 3)))
+    manifest = runtime_coordinate_manifest_json()
+    manifest_sha = hashlib.sha256(manifest.encode()).hexdigest()
+    cfg = ecmwf_open_data.TRACKS[track]
+    json_dir = (
+        root / "raw" / "coordinate_manifests" / manifest_sha
+        / cfg["extract_subdir"] / "london" / run_date.strftime("%Y%m%d")
+    )
+    json_dir.mkdir(parents=True)
+    far_payload = _native_partial_scope_payload(
+        track=track, target=far, issue=run_date, manifest_sha=manifest_sha,
+    )
+    far_path = json_dir / f"{cfg['extract_subdir']}_target_{far.isoformat()}_lead_2.json"
+    far_path.write_text(json.dumps(far_payload), encoding="utf-8")
+
+    failed_far = False
+
+    def fetch(*, cycle_date, cycle_hour, param, step, output_dir, mirrors):
+        del mirrors
+        if failed_far and step >= 51:
+            return "FAILED", "HTTP_503"
+        ecmwf_open_data._step_cache_path(
+            output_dir, run_date=cycle_date, run_hour=cycle_hour,
+            step=step, param=param,
+        ).write_bytes(b"raw-grib-fixture")
+        return "OK", None
+
+    first = ecmwf_open_data.collect_open_ens_cycle(
+        track=track, run_date=run_date, run_hour=0, conn=conn,
+        skip_extract=True, _fetch_impl=fetch,
+        now_utc=clock["now"],
+    )
+    assert first["status"] == "ok", first
+    old_far = conn.execute(
+        "SELECT snapshot_id, members_json, source_available_at, fetch_time "
+        "FROM ensemble_snapshots WHERE city='London' AND target_date=? "
+        "AND temperature_metric=?", (far.isoformat(), metric),
+    ).fetchone()
+    old_coverage = conn.execute(
+        "SELECT coverage_id, snapshot_ids_json, computed_at, recorded_at, "
+        "readiness_status FROM source_run_coverage WHERE city='London' "
+        "AND target_local_date=? AND temperature_metric=?",
+        (far.isoformat(), metric),
+    ).fetchone()
+    assert old_far is not None and old_coverage["readiness_status"] == "LIVE_ELIGIBLE", tuple(
+        conn.execute(
+            "SELECT readiness_status, reason_code, expected_steps_json, observed_steps_json "
+            "FROM source_run_coverage WHERE city='London' AND target_local_date=? "
+            "AND temperature_metric=?", (far.isoformat(), metric),
+        ).fetchone()
+    )
+    assert latest_eligible_ensemble_input_cycle(
+        conn, city="London", target_date=far, metric=metric, decision_time=cut,
+    ) == datetime.combine(run_date, datetime.min.time(), tzinfo=timezone.utc), (
+        tuple(conn.execute(
+            "SELECT source_available_at, imported_at, fetch_finished_at, captured_at "
+            "FROM source_run WHERE source_run_id=?", (first["source_run_id"],),
+        ).fetchone()),
+        tuple(conn.execute(
+            "SELECT source_available_at, fetch_time FROM ensemble_snapshots "
+            "WHERE city='London' AND target_date=? AND temperature_metric=?",
+            (far.isoformat(), metric),
+        ).fetchone()),
+        tuple(old_coverage), cut,
+    )
+    first_possession = conn.execute(
+        "SELECT source_available_at, imported_at FROM source_run WHERE source_run_id=?",
+        (first["source_run_id"],),
+    ).fetchone()
+
+    near_payload = _native_partial_scope_payload(
+        track=track, target=near, issue=run_date, manifest_sha=manifest_sha,
+    )
+    for member in near_payload["members"]:
+        for field in ("value_native_unit", "inner_max_native_unit", "boundary_max_native_unit",
+                      "inner_min_native_unit", "boundary_min_native_unit"):
+            if member.get(field) is not None:
+                member[field] += 1.0
+        for native_window in member["native_windows"]:
+            native_window["value_native_unit"] += 1.0
+    near_path = json_dir / f"{cfg['extract_subdir']}_target_{near.isoformat()}_lead_1.json"
+    near_path.write_text(json.dumps(near_payload), encoding="utf-8")
+    failed_far = True
+    clock["now"] = t2
+    second = ecmwf_open_data.collect_open_ens_cycle(
+        track=track, run_date=run_date, run_hour=0, conn=conn,
+        skip_extract=True, _fetch_impl=fetch,
+        now_utc=clock["now"],
+    )
+    assert second["status"] == "ok", second
+    current_far = conn.execute(
+        "SELECT snapshot_id, members_json, source_available_at, fetch_time "
+        "FROM ensemble_snapshots WHERE city='London' AND target_date=? "
+        "AND temperature_metric=?", (far.isoformat(), metric),
+    ).fetchone()
+    current_coverage = conn.execute(
+        "SELECT coverage_id, snapshot_ids_json, computed_at, recorded_at, "
+        "readiness_status FROM source_run_coverage WHERE city='London' "
+        "AND target_local_date=? AND temperature_metric=?",
+        (far.isoformat(), metric),
+    ).fetchone()
+    assert tuple(current_far) == tuple(old_far)
+    assert tuple(current_coverage) == tuple(old_coverage)
+    near_row = conn.execute(
+        "SELECT snapshot_id, members_json, source_available_at, fetch_time "
+        "FROM ensemble_snapshots WHERE city='London' AND target_date=? "
+        "AND temperature_metric=?", (near.isoformat(), metric),
+    ).fetchone()
+    near_coverage = conn.execute(
+        "SELECT coverage_id, snapshot_ids_json, computed_at, recorded_at, "
+        "readiness_status FROM source_run_coverage WHERE city='London' "
+        "AND target_local_date=? AND temperature_metric=?",
+        (near.isoformat(), metric),
+    ).fetchone()
+    assert near_row is not None and near_coverage["readiness_status"] == "LIVE_ELIGIBLE"
+    assert json.loads(near_row["members_json"])[0] != json.loads(old_far["members_json"])[0]
+    assert second["stages"][0]["status"] == "PARTIAL"
+    assert second["stages"][0]["failed_steps"] == list(range(51, 73, 3))
+    run = conn.execute("SELECT status, completeness_status, partial_run, "
+                       "observed_steps_json, reason_code FROM source_run "
+                       "WHERE source_run_id=?", (first["source_run_id"],)).fetchone()
+    assert run["status"] == "SUCCESS" and run["completeness_status"] == "COMPLETE"
+    assert run["partial_run"] == 0
+    assert json.loads(run["observed_steps_json"]) == list(range(3, 73, 3))
+    assert tuple(conn.execute(
+        "SELECT source_available_at, imported_at FROM source_run WHERE source_run_id=?",
+        (first["source_run_id"],),
+    ).fetchone()) == tuple(first_possession)
+    assert latest_eligible_ensemble_input_cycle(
+        conn, city="London", target_date=far, metric=metric, decision_time=cut,
+    ) == datetime.combine(run_date, datetime.min.time(), tzinfo=timezone.utc)
+    assert latest_eligible_ensemble_input_cycle(
+        conn, city="London", target_date=near, metric=metric, decision_time=cut,
+    ) is None
+    assert latest_eligible_ensemble_input_cycle(
+        conn, city="London", target_date=far, metric=metric,
+        decision_time=t2 + timedelta(minutes=1),
+    ) == datetime.combine(run_date, datetime.min.time(), tzinfo=timezone.utc)
+    third = ecmwf_open_data.collect_open_ens_cycle(
+        track=track, run_date=run_date, run_hour=0, conn=conn,
+        skip_extract=True, _fetch_impl=fetch,
+        now_utc=clock["now"],
+    )
+    assert third["status"] == "ok", third
+    repeat_near = conn.execute(
+        "SELECT snapshot_id, members_json, source_available_at, fetch_time "
+        "FROM ensemble_snapshots WHERE city='London' AND target_date=? "
+        "AND temperature_metric=?", (near.isoformat(), metric),
+    ).fetchone()
+    repeat_coverage = conn.execute(
+        "SELECT coverage_id, snapshot_ids_json, computed_at, recorded_at, "
+        "readiness_status FROM source_run_coverage WHERE city='London' "
+        "AND target_local_date=? AND temperature_metric=?",
+        (near.isoformat(), metric),
+    ).fetchone()
+    assert tuple(repeat_near) == tuple(near_row)
+    assert tuple(repeat_coverage) == tuple(near_coverage)
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+def test_partial_first_attempt_cannot_certify_far_scope_without_prior_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, track: str,
+) -> None:
+    """An incomplete far JSON cannot authorize a new far snapshot on a partial run."""
+    from src.config import runtime_coordinate_manifest_json
+    from src.data import ecmwf_open_data
+    from src.data.replacement_input_hwm import latest_eligible_ensemble_input_cycle
+
+    run_date = datetime.now(timezone.utc).date()
+    near, far = run_date + timedelta(days=1), run_date + timedelta(days=2)
+    metric = "high" if track == "mx2t6_high" else "low"
+    root = tmp_path / "51 source data"
+    conn = sqlite3.connect(tmp_path / "forecasts.db")
+    conn.row_factory = sqlite3.Row
+    init_schema_forecasts(conn)
+    monkeypatch.setattr(ecmwf_open_data, "FIFTY_ONE_ROOT", root)
+    monkeypatch.setattr(ecmwf_open_data, "STEP_HOURS", list(range(3, 73, 3)))
+    manifest_sha = hashlib.sha256(runtime_coordinate_manifest_json().encode()).hexdigest()
+    cfg = ecmwf_open_data.TRACKS[track]
+    json_dir = (
+        root / "raw" / "coordinate_manifests" / manifest_sha
+        / cfg["extract_subdir"] / "london" / run_date.strftime("%Y%m%d")
+    )
+    json_dir.mkdir(parents=True)
+    for target, lead in ((near, 1), (far, 2)):
+        payload = _native_partial_scope_payload(
+            track=track, target=target, issue=run_date, manifest_sha=manifest_sha,
+        )
+        (json_dir / f"{cfg['extract_subdir']}_target_{target.isoformat()}_lead_{lead}.json").write_text(
+            json.dumps(payload), encoding="utf-8",
+        )
+
+    def fetch(*, cycle_date, cycle_hour, param, step, output_dir, mirrors):
+        del mirrors
+        if step >= 51:
+            return "FAILED", "HTTP_503"
+        ecmwf_open_data._step_cache_path(
+            output_dir, run_date=cycle_date, run_hour=cycle_hour,
+            step=step, param=param,
+        ).write_bytes(b"raw-grib-fixture")
+        return "OK", None
+
+    result = ecmwf_open_data.collect_open_ens_cycle(
+        track=track, run_date=run_date, run_hour=0, conn=conn,
+        skip_extract=True, _fetch_impl=fetch,
+        now_utc=datetime.now(timezone.utc),
+    )
+    assert result["status"] == "ok", result
+    near_coverage = conn.execute(
+        "SELECT readiness_status FROM source_run_coverage WHERE city='London' "
+        "AND target_local_date=? AND temperature_metric=?", (near.isoformat(), metric),
+    ).fetchone()
+    far_snapshot = conn.execute(
+        "SELECT snapshot_id FROM ensemble_snapshots WHERE city='London' "
+        "AND target_date=? AND temperature_metric=?", (far.isoformat(), metric),
+    ).fetchone()
+    far_coverage = conn.execute(
+        "SELECT readiness_status FROM source_run_coverage WHERE city='London' "
+        "AND target_local_date=? AND temperature_metric=?", (far.isoformat(), metric),
+    ).fetchone()
+    assert near_coverage is not None and near_coverage["readiness_status"] == "LIVE_ELIGIBLE"
+    assert far_snapshot is None
+    assert far_coverage is None or far_coverage["readiness_status"] != "LIVE_ELIGIBLE"
+    assert latest_eligible_ensemble_input_cycle(
+        conn, city="London", target_date=far, metric=metric,
+        decision_time=datetime.now(timezone.utc) + timedelta(minutes=1),
+    ) is None
+    first_possession = tuple(conn.execute(
+        "SELECT source_available_at, imported_at FROM source_run WHERE source_run_id=?",
+        (result["source_run_id"],),
+    ).fetchone())
+
+    previous_near = tuple(conn.execute(
+        "SELECT * FROM ensemble_snapshots WHERE city='London' AND target_date=? "
+        "AND temperature_metric=?", (near.isoformat(), metric),
+    ).fetchone())
+    previous_near_coverage = tuple(conn.execute(
+        "SELECT * FROM source_run_coverage WHERE city='London' "
+        "AND target_local_date=? AND temperature_metric=?", (near.isoformat(), metric),
+    ).fetchone())
+
+    def full_fetch(*, cycle_date, cycle_hour, param, step, output_dir, mirrors):
+        del mirrors
+        ecmwf_open_data._step_cache_path(
+            output_dir, run_date=cycle_date, run_hour=cycle_hour,
+            step=step, param=param,
+        ).write_bytes(b"raw-grib-fixture")
+        return "OK", None
+
+    completed = ecmwf_open_data.collect_open_ens_cycle(
+        track=track, run_date=run_date, run_hour=0, conn=conn,
+        skip_extract=True, _fetch_impl=full_fetch,
+        now_utc=datetime.now(timezone.utc) + timedelta(minutes=2),
+    )
+    assert completed["status"] == "ok", completed
+    retained_near = conn.execute(
+        "SELECT * FROM ensemble_snapshots WHERE city='London' AND target_date=? "
+        "AND temperature_metric=?", (near.isoformat(), metric),
+    ).fetchone()
+    assert retained_near is not None and tuple(retained_near) == previous_near
+    retained_near_coverage = conn.execute(
+        "SELECT * FROM source_run_coverage WHERE city='London' "
+        "AND target_local_date=? AND temperature_metric=?", (near.isoformat(), metric),
+    ).fetchone()
+    assert retained_near_coverage is not None and tuple(retained_near_coverage) == previous_near_coverage
+    recovered_run = conn.execute(
+        "SELECT status, completeness_status, partial_run, observed_steps_json "
+        "FROM source_run WHERE source_run_id=?", (completed["source_run_id"],),
+    ).fetchone()
+    assert tuple(recovered_run)[:3] == ("SUCCESS", "COMPLETE", 0)
+    assert json.loads(recovered_run["observed_steps_json"]) == list(range(3, 73, 3))
+    assert tuple(conn.execute(
+        "SELECT source_available_at, imported_at FROM source_run WHERE source_run_id=?",
+        (result["source_run_id"],),
+    ).fetchone()) == first_possession
+    recovered_far = conn.execute(
+        "SELECT readiness_status FROM source_run_coverage WHERE city='London' "
+        "AND target_local_date=? AND temperature_metric=?", (far.isoformat(), metric),
+    ).fetchone()
+    assert recovered_far is not None and recovered_far["readiness_status"] == "LIVE_ELIGIBLE"
+    assert latest_eligible_ensemble_input_cycle(
+        conn, city="London", target_date=far, metric=metric,
+        decision_time=datetime.now(timezone.utc) + timedelta(minutes=3),
+    ) == datetime.combine(run_date, datetime.min.time(), tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+@pytest.mark.parametrize(
+    ("failure_mode", "expected_status"),
+    (("failed", "download_failed"),
+     ("not_released", "skipped_not_released"),
+     ("deadline", "download_failed")),
+)
+def test_zero_ok_retry_preserves_same_run_qualified_far_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    track: str, failure_mode: str, expected_status: str,
+) -> None:
+    """A failed retry cannot revoke the existing complete same-run certificate."""
+    from src.config import runtime_coordinate_manifest_json
+    from src.data import ecmwf_open_data
+    from src.data.replacement_input_hwm import latest_eligible_ensemble_input_cycle
+
+    run_date = datetime.now(timezone.utc).date()
+    far, near = run_date + timedelta(days=2), run_date + timedelta(days=1)
+    metric = "high" if track == "mx2t6_high" else "low"
+    root = tmp_path / "51 source data"
+    conn = sqlite3.connect(tmp_path / "forecasts.db")
+    conn.row_factory = sqlite3.Row
+    init_schema_forecasts(conn)
+    monkeypatch.setattr(ecmwf_open_data, "FIFTY_ONE_ROOT", root)
+    monkeypatch.setattr(ecmwf_open_data, "STEP_HOURS", list(range(3, 73, 3)))
+    monkeypatch.setattr(ecmwf_open_data, "_write_stderr_dump", lambda *_: None)
+    manifest_sha = hashlib.sha256(runtime_coordinate_manifest_json().encode()).hexdigest()
+    cfg = ecmwf_open_data.TRACKS[track]
+    json_dir = (
+        root / "raw" / "coordinate_manifests" / manifest_sha
+        / cfg["extract_subdir"] / "london" / run_date.strftime("%Y%m%d")
+    )
+    json_dir.mkdir(parents=True)
+    far_payload = _native_partial_scope_payload(
+        track=track, target=far, issue=run_date, manifest_sha=manifest_sha,
+    )
+    (json_dir / f"{cfg['extract_subdir']}_target_{far.isoformat()}_lead_2.json").write_text(
+        json.dumps(far_payload), encoding="utf-8",
+    )
+
+    def fetch(*, cycle_date, cycle_hour, param, step, output_dir, mirrors):
+        del mirrors
+        ecmwf_open_data._step_cache_path(
+            output_dir, run_date=cycle_date, run_hour=cycle_hour,
+            step=step, param=param,
+        ).write_bytes(b"raw-grib-fixture")
+        return "OK", None
+
+    first = ecmwf_open_data.collect_open_ens_cycle(
+        track=track, run_date=run_date, run_hour=0, conn=conn,
+        skip_extract=True, _fetch_impl=fetch,
+        now_utc=datetime.now(timezone.utc),
+    )
+    assert first["status"] == "ok", first
+    run_id = first["source_run_id"]
+    query_scope = (far.isoformat(), metric)
+    old_run = tuple(conn.execute(
+        "SELECT * FROM source_run WHERE source_run_id=?", (run_id,),
+    ).fetchone())
+    old_snapshot = tuple(conn.execute(
+        "SELECT * FROM ensemble_snapshots WHERE city='London' AND target_date=? "
+        "AND temperature_metric=?", query_scope,
+    ).fetchone())
+    old_coverage = conn.execute(
+        "SELECT * FROM source_run_coverage WHERE city='London' "
+        "AND target_local_date=? AND temperature_metric=?", query_scope,
+    ).fetchone()
+    assert old_coverage["readiness_status"] == "LIVE_ELIGIBLE"
+    old_coverage = tuple(old_coverage)
+    expected_issue = datetime.combine(run_date, datetime.min.time(), tzinfo=timezone.utc)
+    def latest_far():
+        return latest_eligible_ensemble_input_cycle(
+            conn, city="London", target_date=far, metric=metric,
+            decision_time=datetime.now(timezone.utc) + timedelta(minutes=1),
+        )
+    assert latest_far() == expected_issue
+
+    def zero_ok(*, cycle_date, cycle_hour, param, step, output_dir, mirrors):
+        del cycle_date, cycle_hour, param, step, output_dir, mirrors
+        if failure_mode == "not_released":
+            return "NOT_RELEASED", "HTTP_404"
+        return "FAILED", "HTTP_503"
+
+    retry = ecmwf_open_data.collect_open_ens_cycle(
+        track=track, run_date=run_date, run_hour=0, conn=conn,
+        skip_extract=True, _fetch_impl=zero_ok,
+        cycle_deadline_monotonic=(time.monotonic() - 1 if failure_mode == "deadline" else None),
+        now_utc=datetime.now(timezone.utc),
+    )
+    assert retry["status"] == expected_status, retry
+    if failure_mode == "deadline":
+        assert retry["reason"] == "CYCLE_DEADLINE_EXCEEDED"
+    assert retry["snapshots_inserted"] == 0
+    assert tuple(conn.execute(
+        "SELECT * FROM source_run WHERE source_run_id=?", (run_id,),
+    ).fetchone()) == old_run
+    assert tuple(conn.execute(
+        "SELECT * FROM ensemble_snapshots WHERE city='London' AND target_date=? "
+        "AND temperature_metric=?", query_scope,
+    ).fetchone()) == old_snapshot
+    assert tuple(conn.execute(
+        "SELECT * FROM source_run_coverage WHERE city='London' "
+        "AND target_local_date=? AND temperature_metric=?", query_scope,
+    ).fetchone()) == old_coverage
+    assert latest_far() == expected_issue
+    assert conn.execute(
+        "SELECT 1 FROM source_run_coverage WHERE city='London' "
+        "AND target_local_date=? AND temperature_metric=?", (near.isoformat(), metric),
+    ).fetchone() is None
 
 
 def _make_conn(tmp_path: Path) -> sqlite3.Connection:

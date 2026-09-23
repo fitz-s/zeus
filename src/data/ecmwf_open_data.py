@@ -94,7 +94,7 @@ from src.state.db import (
 )
 from src.state.db_writer_lock import WriteClass, db_writer_lock
 from src.state.source_run_coverage_repo import write_source_run_coverage
-from src.state.source_run_repo import write_source_run
+from src.state.source_run_repo import get_source_run, write_source_run
 
 logger = logging.getLogger(__name__)
 
@@ -1698,8 +1698,19 @@ def _build_cycle_scoped_json_root(
     run_date: date,
     run_hour: int,
     tmp_root: Path,
+    preserve_scopes: set[tuple[str, str, str]] | None = None,
+    available_steps: set[int] | None = None,
 ) -> tuple[Path, str, int]:
-    """Build an ingest view containing only the selected source cycle's JSON."""
+    """Build an ingest view containing only the selected source cycle's JSON.
+
+    On a target-scoped PARTIAL retry, already-qualified same-run scopes are
+    excluded from this view.  A partial extractor payload for such a scope must
+    not INSERT OR REPLACE its prior qualified snapshot before the coverage
+    writer has a chance to preserve the old possession clock.  When
+    ``available_steps`` is supplied, a payload whose native window extends
+    beyond the current attempt is excluded as well; stale far-horizon JSON must
+    not become a new blocked snapshot on a near-only retry.
+    """
 
     cycle_dir_name = _cycle_extract_dir_name(run_date=run_date, run_hour=run_hour)
     source_subdir = raw_root / extract_subdir
@@ -1709,6 +1720,8 @@ def _build_cycle_scoped_json_root(
         return tmp_root, cycle_dir_name, 0
 
     linked = 0
+    preserve_scopes = preserve_scopes or set()
+    metric = "high" if extract_subdir.endswith("_max") else "low"
     for city_dir in source_subdir.iterdir():
         if not city_dir.is_dir():
             continue
@@ -1718,6 +1731,26 @@ def _build_cycle_scoped_json_root(
         view_cycle_dir = view_subdir / city_dir.name / cycle_dir_name
         view_cycle_dir.mkdir(parents=True, exist_ok=True)
         for source_json in sorted(source_cycle_dir.glob("*.json")):
+            target_match = re.search(r"_target_(\d{4}-\d{2}-\d{2})_", source_json.name)
+            scope = (city_dir.name, target_match.group(1), metric) if target_match else None
+            if scope in preserve_scopes:
+                continue
+            if available_steps is not None:
+                try:
+                    payload = json.loads(source_json.read_text(encoding="utf-8"))
+                    ranges = [
+                        *payload.get("selected_step_ranges_inner", []),
+                        *payload.get("selected_step_ranges_boundary", []),
+                    ]
+                    required_max_step = max(
+                        int(str(step_range).split("-", 1)[1])
+                        for step_range in ranges
+                        if "-" in str(step_range)
+                    ) if ranges else None
+                except (AttributeError, OSError, TypeError, ValueError, json.JSONDecodeError):
+                    required_max_step = None
+                if required_max_step is not None and required_max_step not in available_steps:
+                    continue
             target_json = view_cycle_dir / source_json.name
             try:
                 target_json.symlink_to(source_json.resolve())
@@ -1725,6 +1758,42 @@ def _build_cycle_scoped_json_root(
                 shutil.copy2(source_json, target_json)
             linked += 1
     return tmp_root, cycle_dir_name, linked
+
+
+def _qualified_partial_retry_scopes(
+    conn,
+    *,
+    source_run_id: str,
+) -> set[tuple[str, str, str]]:
+    """Return same-run scopes whose LIVE evidence must survive a PARTIAL retry."""
+
+    rows = conn.execute(
+        """
+        SELECT city, target_local_date, temperature_metric
+          FROM source_run_coverage
+         WHERE source_run_id = ?
+           AND completeness_status = 'COMPLETE'
+           AND readiness_status = 'LIVE_ELIGIBLE'
+        """,
+        (source_run_id,),
+    ).fetchall()
+    return {
+        (
+            str(row[0]).strip().lower().replace(" ", "-"),
+            str(row[1]).strip(),
+            str(row[2]).strip(),
+        )
+        for row in rows
+        if row[0] and row[1] and row[2]
+    }
+
+
+def _snapshot_scope_key(row: Mapping[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(row.get("city") or "").strip().lower().replace(" ", "-"),
+        str(row.get("target_date") or "").strip(),
+        str(row.get("temperature_metric") or "").strip(),
+    )
 
 
 def _select_cycle_for_track(*, track: str, now_utc: datetime) -> tuple[FetchDecision, dict[str, object]]:
@@ -1961,7 +2030,12 @@ def _snapshot_rows_for_source_run(conn, *, source_run_id: str, data_version: str
     ]
 
 
-def _clear_source_run_authority(conn, *, source_run_id: str) -> dict[str, int]:
+def _clear_source_run_authority(
+    conn,
+    *,
+    source_run_id: str,
+    preserve_existing_authority: bool = False,
+) -> dict[str, int]:
     """Clear small derived rows before rebuilding a source_run.
 
     Snapshot rows are intentionally not pre-deleted. The ingester uses the
@@ -1969,7 +2043,22 @@ def _clear_source_run_authority(conn, *, source_run_id: str) -> dict[str, int]:
     run turns a small deterministic overwrite into a slow table/index rewrite
     on the multi-GB forecasts DB. Residual rows that were not replaced by the
     new JSON set are removed after ingest by fetch_time.
+
+    A target-scoped PARTIAL retry must retain prior verified scopes from the
+    same source run.  Its current attempt is evaluated against the newly fetched
+    step set, while older scope coverage keeps its own possession clock.  The
+    caller therefore skips this destructive derived-row reset (and stale
+    snapshot cleanup) for PARTIAL attempts; a later complete retry drains the
+    old rows through the normal reset path.
     """
+
+    if preserve_existing_authority:
+        return {
+            "snapshots_deleted": 0,
+            "coverage_deleted": 0,
+            "producer_readiness_deleted": 0,
+            "source_run_deleted": 0,
+        }
 
     coverage_ids = [
         str(row[0])
@@ -2096,6 +2185,106 @@ def _coverage_reason(reason_codes: list[str]) -> str:
     )
 
 
+def _merge_source_run_aggregate_preserving_possession(
+    conn,
+    *,
+    existing: Mapping[str, Any],
+    source_run_id: str,
+    source_run_status: str,
+    source_run_completeness: str,
+    partial_run: bool,
+    observed_steps: list[int],
+    expected_steps: list[int],
+    expected_members: int,
+    observed_members: int,
+    expected_count: int,
+    observed_count: int,
+    valid_time_start: str | None,
+    valid_time_end: str | None,
+    reason_code: str | None,
+) -> tuple[str, str, bool, str | None]:
+    """Advance aggregate facts without re-stamping an already-qualified run.
+
+    ``source_run`` is the aggregate identity for one exact source cycle.  A
+    retry can add observed steps or upgrade PARTIAL to SUCCESS, but it must not
+    rewrite the prior possession clocks merely because an already-qualified
+    target was intentionally excluded from this attempt's coverage rebuild.
+    """
+
+    try:
+        prior_steps_raw = json.loads(str(existing.get("observed_steps_json") or "[]"))
+        prior_steps = {
+            int(step) for step in prior_steps_raw
+            if isinstance(step, (int, float, str)) and str(step).strip()
+        }
+    except (TypeError, ValueError, json.JSONDecodeError):
+        prior_steps = set()
+    merged_steps = sorted(prior_steps | {int(step) for step in observed_steps})
+    prior_status = str(existing.get("status") or "")
+    prior_completeness = str(existing.get("completeness_status") or "")
+    if prior_status == "SUCCESS" and prior_completeness == "COMPLETE":
+        merged_status = "SUCCESS"
+        merged_completeness = "COMPLETE"
+        merged_partial = bool(existing.get("partial_run") or 0)
+    elif (
+        prior_status == "PARTIAL"
+        and prior_completeness == "PARTIAL"
+        and source_run_status in {"FAILED", "SKIPPED_NOT_RELEASED"}
+    ):
+        merged_status = prior_status
+        merged_completeness = prior_completeness
+        merged_partial = bool(existing.get("partial_run") or 0)
+    elif source_run_status == "SUCCESS":
+        merged_status = "SUCCESS"
+        merged_completeness = "COMPLETE"
+        merged_partial = False
+    else:
+        merged_status = source_run_status
+        merged_completeness = source_run_completeness
+        merged_partial = partial_run
+    merged_reason = None if merged_status == "SUCCESS" else (reason_code or existing.get("reason_code"))
+    if merged_status not in {"SUCCESS", "FAILED", "PARTIAL", "SKIPPED_NOT_RELEASED"}:
+        raise ValueError(f"invalid merged source_run status: {merged_status}")
+    if merged_completeness not in {"COMPLETE", "MISSING", "PARTIAL", "NOT_RELEASED"}:
+        raise ValueError(f"invalid merged source_run completeness: {merged_completeness}")
+    if merged_partial and merged_completeness != "PARTIAL":
+        raise ValueError("merged partial_run requires PARTIAL completeness")
+    prior_start = existing.get("valid_time_start")
+    prior_end = existing.get("valid_time_end")
+    starts = [value for value in (prior_start, valid_time_start) if value]
+    ends = [value for value in (prior_end, valid_time_end) if value]
+    merged_start = min(starts) if starts else None
+    merged_end = max(ends) if ends else None
+    conn.execute(
+        """
+        UPDATE source_run
+           SET expected_members = ?, observed_members = ?,
+               expected_steps_json = ?, observed_steps_json = ?,
+               expected_count = ?, observed_count = ?,
+               valid_time_start = ?, valid_time_end = ?,
+               completeness_status = ?, partial_run = ?,
+               status = ?, reason_code = ?
+         WHERE source_run_id = ?
+        """,
+        (
+            max(int(existing.get("expected_members") or 0), expected_members),
+            max(int(existing.get("observed_members") or 0), observed_members),
+            json.dumps(expected_steps, sort_keys=True, separators=(",", ":")),
+            json.dumps(merged_steps, sort_keys=True, separators=(",", ":")),
+            max(int(existing.get("expected_count") or 0), expected_count),
+            max(int(existing.get("observed_count") or 0), observed_count),
+            merged_start,
+            merged_end,
+            merged_completeness,
+            1 if merged_partial else 0,
+            merged_status,
+            merged_reason,
+            source_run_id,
+        ),
+    )
+    return merged_status, merged_completeness, merged_partial, merged_reason
+
+
 def _write_source_authority_chain(
     conn,
     *,
@@ -2114,6 +2303,8 @@ def _write_source_authority_chain(
     download_observed_steps: list[int] | None = None,
     download_partial_run: bool | None = None,
     download_reason_code: str | None = None,
+    attempt_started_at: str | None = None,
+    preserve_scopes: set[tuple[str, str, str]] | None = None,
 ) -> dict[str, int | str | None]:
     """Write source_run + coverage rows for a completed ingest cycle.
 
@@ -2127,6 +2318,26 @@ def _write_source_authority_chain(
         source_run_id=source_run_id,
         data_version=data_version,
     )
+    # Keep the complete stored snapshot set for source_run-level facts
+    # (manifest, member count, valid-date range, and observed count).  A
+    # target-scoped PARTIAL retry may intentionally exclude already-qualified
+    # rows from the current coverage rebuild; treating that filtered set as the
+    # whole run would erase the prior run-level possession evidence.
+    coverage_rows = rows
+    if preserve_scopes:
+        coverage_rows = [
+            row for row in coverage_rows
+            if _snapshot_scope_key(row) not in preserve_scopes
+        ]
+    if download_partial_run and attempt_started_at:
+        attempt_start = _parse_utc(attempt_started_at)
+        if attempt_start is not None:
+            coverage_rows = [
+                row
+                for row in coverage_rows
+                if (_parse_utc(row.get("fetch_time")) or datetime.min.replace(tzinfo=timezone.utc))
+                >= attempt_start
+            ]
     source_run_status, source_run_completeness, partial_run, reason_code = _source_run_outcome(summary, status)
     snapshot_coordinate_manifest_shas = {
         manifest_sha
@@ -2200,8 +2411,7 @@ def _write_source_authority_chain(
         observed_steps = [step for step in STEP_HOURS if observed_step_horizons and step <= min(observed_step_horizons)]
     run_complete_time_iso: str = "" if partial_run else max(_avail_times, default="")
 
-    write_source_run(
-        conn,
+    source_run_kwargs = dict(
         source_run_id=source_run_id,
         source_id=SOURCE_ID,
         track=forecast_track,
@@ -2238,6 +2448,32 @@ def _write_source_authority_chain(
         status=source_run_status,
         reason_code=reason_code,
     )
+    existing_source_run = get_source_run(conn, source_run_id)
+    if preserve_scopes and existing_source_run is not None:
+        (
+            source_run_status,
+            source_run_completeness,
+            partial_run,
+            reason_code,
+        ) = _merge_source_run_aggregate_preserving_possession(
+            conn,
+            existing=existing_source_run,
+            source_run_id=source_run_id,
+            source_run_status=source_run_status,
+            source_run_completeness=source_run_completeness,
+            partial_run=partial_run,
+            observed_steps=observed_steps,
+            expected_steps=STEP_HOURS,
+            expected_members=51,
+            observed_members=observed_members,
+            expected_count=len(rows),
+            observed_count=len(rows),
+            valid_time_start=min((str(row["target_date"]) for row in rows), default=None),
+            valid_time_end=max((str(row["target_date"]) for row in rows), default=None),
+            reason_code=reason_code,
+        )
+    else:
+        write_source_run(conn, **source_run_kwargs)
 
     cities_by_name = runtime_cities_by_name()
     coverage_written = 0
@@ -2246,7 +2482,7 @@ def _write_source_authority_chain(
     # write wall-clock. The old computed_at+24h was a guess that re-stamped a fresh TTL on every
     # re-ingest and disagreed with the source's real staleness bound. See _source_cycle_expires_at.
     expires_at = _source_cycle_expires_at(source_cycle_time, forecast_track)
-    for row in rows:
+    for row in coverage_rows:
         city = cities_by_name.get(str(row["city"]))
         if city is None:
             logger.warning("ecmwf_open_data authority chain: city not configured: %s", row["city"])
@@ -2929,12 +3165,20 @@ def collect_open_ens_cycle(
         )
 
         # --- Early-return branches: FAILED and pure-NOT_RELEASED only ---
-        # SUCCESS and PARTIAL fall through to extract+ingest below.
+        # A transport failure is fatal when there is no validated step to ingest
+        # (or when the hard cycle deadline fired).  With at least one validated
+        # step, however, retain the failure as PARTIAL evidence and let the
+        # existing target-scoped coverage gate decide which local days qualify.
+        # This keeps a remote 503 from being relabelled NOT_RELEASED while
+        # avoiding a false whole-cycle SUCCESS.
 
-        if failed_steps:
-            reason = ";".join(
+        if failed_steps and (not ok_steps or deadline_exceeded):
+            reason_parts = [
                 f"step{s}:{results[s][1]}" for s in failed_steps[:5]
-            )
+            ]
+            if released_404:
+                reason_parts.append(f"NOT_RELEASED_STEPS={released_404}")
+            reason = ";".join(reason_parts)
             _write_stderr_dump(
                 PROJECT_ROOT / "tmp"
                 / f"ecmwf_open_data_{cycle_date.isoformat()}_{cycle_hour:02d}z_{track}.stderr.txt",
@@ -2953,39 +3197,49 @@ def collect_open_ens_cycle(
                     if _sr_own else None
                 )
                 with (_sr_lock if _sr_lock is not None else nullcontext()):
-                    write_source_run(
+                    if _qualified_partial_retry_scopes(
                         _sr_conn,
                         source_run_id=source_run_id,
-                        source_id=SOURCE_ID,
-                        track=forecast_track,
-                        release_calendar_key=release_calendar_key,
-                        source_cycle_time=source_cycle_time,
-                        source_issue_time=source_cycle_time,
-                        source_release_time=source_release_time,
-                        # C1-AVAIL-CLOCK (2026-06-16): proof of possession = computed_at (the real
-                        # wall-clock), via the canonical producer — never the cycle-fallback
-                        # source_release_time (the safe-fetch gate, not a publish event).
-                        source_available_at=proof_of_possession_available_at(computed_at),
-                        # M5-COLLECTION-CLOCK (2026-06-16): the download WAS attempted on this branch,
-                        # so fetch_started/finished are real (stamped around the loop above). No decode
-                        # ran and no forecast data was persisted (this is a FAILED-status row only), so
-                        # captured_at / imported_at are honestly NULL — never re-stamped with computed_at.
-                        fetch_started_at=_fetch_started_at,
-                        fetch_finished_at=_fetch_finished_at,
-                        captured_at=None,
-                        imported_at=None,
-                        data_version=cfg["data_version"],
-                        expected_members=51,
-                        observed_members=0,
-                        expected_steps_json=STEP_HOURS,
-                        observed_steps_json=ok_steps,
-                        expected_count=0,
-                        observed_count=0,
-                        completeness_status="MISSING",
-                        partial_run=False,
-                        status="FAILED",
-                        reason_code=reason[:500],
-                    )
+                    ):
+                        logger.info(
+                            "ecmwf_open_data: preserving qualified source_run on failed retry "
+                            "source_run_id=%s",
+                            source_run_id,
+                        )
+                    else:
+                        write_source_run(
+                            _sr_conn,
+                            source_run_id=source_run_id,
+                            source_id=SOURCE_ID,
+                            track=forecast_track,
+                            release_calendar_key=release_calendar_key,
+                            source_cycle_time=source_cycle_time,
+                            source_issue_time=source_cycle_time,
+                            source_release_time=source_release_time,
+                            # C1-AVAIL-CLOCK (2026-06-16): proof of possession = computed_at (the real
+                            # wall-clock), via the canonical producer — never the cycle-fallback
+                            # source_release_time (the safe-fetch gate, not a publish event).
+                            source_available_at=proof_of_possession_available_at(computed_at),
+                            # M5-COLLECTION-CLOCK (2026-06-16): the download WAS attempted on this branch,
+                            # so fetch_started/finished are real (stamped around the loop above). No decode
+                            # ran and no forecast data was persisted (this is a FAILED-status row only), so
+                            # captured_at / imported_at are honestly NULL — never re-stamped with computed_at.
+                            fetch_started_at=_fetch_started_at,
+                            fetch_finished_at=_fetch_finished_at,
+                            captured_at=None,
+                            imported_at=None,
+                            data_version=cfg["data_version"],
+                            expected_members=51,
+                            observed_members=0,
+                            expected_steps_json=STEP_HOURS,
+                            observed_steps_json=ok_steps,
+                            expected_count=0,
+                            observed_count=0,
+                            completeness_status="MISSING",
+                            partial_run=False,
+                            status="FAILED",
+                            reason_code=reason[:500],
+                        )
                     if _sr_own:
                         _sr_conn.commit()
                         _sr_conn.close()
@@ -3023,39 +3277,49 @@ def collect_open_ens_cycle(
                     if _sr_own else None
                 )
                 with (_sr_lock if _sr_lock is not None else nullcontext()):
-                    write_source_run(
+                    if _qualified_partial_retry_scopes(
                         _sr_conn,
                         source_run_id=source_run_id,
-                        source_id=SOURCE_ID,
-                        track=forecast_track,
-                        release_calendar_key=release_calendar_key,
-                        source_cycle_time=source_cycle_time,
-                        source_issue_time=source_cycle_time,
-                        source_release_time=source_release_time,
-                        # C1-AVAIL-CLOCK (2026-06-16): proof of possession = computed_at (the real
-                        # wall-clock), via the canonical producer — never the cycle-fallback
-                        # source_release_time (the safe-fetch gate, not a publish event).
-                        source_available_at=proof_of_possession_available_at(computed_at),
-                        # M5-COLLECTION-CLOCK (2026-06-16): the download WAS attempted, so fetch_started/
-                        # finished are real (stamped around the loop above). Nothing was released, so no
-                        # decode ran and no forecast data was persisted — captured_at / imported_at are
-                        # honestly NULL rather than re-stamped with computed_at.
-                        fetch_started_at=_fetch_started_at,
-                        fetch_finished_at=_fetch_finished_at,
-                        captured_at=None,
-                        imported_at=None,
-                        data_version=cfg["data_version"],
-                        expected_members=51,
-                        observed_members=0,
-                        expected_steps_json=STEP_HOURS,
-                        observed_steps_json=[],
-                        expected_count=0,
-                        observed_count=0,
-                        completeness_status="NOT_RELEASED",
-                        partial_run=False,
-                        status="SKIPPED_NOT_RELEASED",
-                        reason_code=reason[:500],
-                    )
+                    ):
+                        logger.info(
+                            "ecmwf_open_data: preserving qualified source_run on not-released retry "
+                            "source_run_id=%s",
+                            source_run_id,
+                        )
+                    else:
+                        write_source_run(
+                            _sr_conn,
+                            source_run_id=source_run_id,
+                            source_id=SOURCE_ID,
+                            track=forecast_track,
+                            release_calendar_key=release_calendar_key,
+                            source_cycle_time=source_cycle_time,
+                            source_issue_time=source_cycle_time,
+                            source_release_time=source_release_time,
+                            # C1-AVAIL-CLOCK (2026-06-16): proof of possession = computed_at (the real
+                            # wall-clock), via the canonical producer — never the cycle-fallback
+                            # source_release_time (the safe-fetch gate, not a publish event).
+                            source_available_at=proof_of_possession_available_at(computed_at),
+                            # M5-COLLECTION-CLOCK (2026-06-16): the download WAS attempted, so fetch_started/
+                            # finished are real (stamped around the loop above). Nothing was released, so no
+                            # decode ran and no forecast data was persisted — captured_at / imported_at are
+                            # honestly NULL rather than re-stamped with computed_at.
+                            fetch_started_at=_fetch_started_at,
+                            fetch_finished_at=_fetch_finished_at,
+                            captured_at=None,
+                            imported_at=None,
+                            data_version=cfg["data_version"],
+                            expected_members=51,
+                            observed_members=0,
+                            expected_steps_json=STEP_HOURS,
+                            observed_steps_json=[],
+                            expected_count=0,
+                            observed_count=0,
+                            completeness_status="NOT_RELEASED",
+                            partial_run=False,
+                            status="SKIPPED_NOT_RELEASED",
+                            reason_code=reason[:500],
+                        )
                     if _sr_own:
                         _sr_conn.commit()
                         _sr_conn.close()
@@ -3077,11 +3341,20 @@ def collect_open_ens_cycle(
                 "snapshots_inserted": 0,
             }
 
-        # SUCCESS (no released_404, no failed) OR PARTIAL (some OK + some 404).
-        # Both fall through to extract+ingest.  _write_source_authority_chain
-        # will receive download_observed_steps so it can set partial_run correctly.
-        _partial_cycle = bool(released_404)
-        _download_reason_code = f"NOT_RELEASED_STEPS={released_404}" if _partial_cycle else None
+        # SUCCESS (no released_404/failed) OR PARTIAL (some OK plus a 404 and/or
+        # transport failure).  Both fall through to extract+ingest.
+        # _write_source_authority_chain receives download_observed_steps and the
+        # partial flag so the canonical source_run remains PARTIAL.
+        _partial_cycle = bool(released_404 or failed_steps)
+        partial_reasons: list[str] = []
+        if failed_steps:
+            failed_detail = ";".join(
+                f"step{s}:{results[s][1]}" for s in failed_steps
+            )
+            partial_reasons.append(f"FAILED_STEPS={failed_detail}")
+        if released_404:
+            partial_reasons.append(f"NOT_RELEASED_STEPS={released_404}")
+        _download_reason_code = ";".join(partial_reasons) if partial_reasons else None
         download_observed_steps = ok_steps
 
         # Concat per-step files into the canonical output_path for the extractor.
@@ -3116,7 +3389,7 @@ def collect_open_ens_cycle(
             "ok": True,
             "status": "PARTIAL" if _partial_cycle else "SUCCESS",
             "ok_steps": ok_steps,
-            "failed_steps": [],
+            "failed_steps": failed_steps,
             "not_released_steps": released_404,
         })
 
@@ -3210,9 +3483,14 @@ def collect_open_ens_cycle(
                 track,
                 int((time.monotonic() - _ingest_t0) * 1000),
             )
+            preserve_scopes = _qualified_partial_retry_scopes(
+                conn,
+                source_run_id=source_run_id,
+            )
             cleared_authority = _clear_source_run_authority(
                 conn,
                 source_run_id=source_run_id,
+                preserve_existing_authority=bool(preserve_scopes),
             )
             logger.info(
                 "ingest_stage: cleared_prior_source_run track=%s source_run_id=%s %s",
@@ -3240,6 +3518,8 @@ def collect_open_ens_cycle(
                         run_date=cycle_date,
                         run_hour=cycle_hour,
                         tmp_root=Path(scoped_tmp),
+                        preserve_scopes=preserve_scopes,
+                        available_steps=set(download_observed_steps) if _partial_cycle else None,
                     )
                     # Boundary marker — rglob happens inside ingest_track. The
                     # temporary view is the selected source cycle only, so stale
@@ -3301,10 +3581,14 @@ def collect_open_ens_cycle(
                     summary.get("skipped_exists"),
                     summary.get("parse_error"),
                 )
-                stale_snapshots_deleted = _delete_stale_source_run_snapshots(
-                    conn,
-                    source_run_id=source_run_id,
-                    replace_started_at_iso=snapshot_replace_started_at,
+                stale_snapshots_deleted = (
+                    0
+                    if preserve_scopes
+                    else _delete_stale_source_run_snapshots(
+                        conn,
+                        source_run_id=source_run_id,
+                        replace_started_at_iso=snapshot_replace_started_at,
+                    )
                 )
                 cleared_authority["snapshots_deleted"] += stale_snapshots_deleted
                 logger.info(
@@ -3316,6 +3600,18 @@ def collect_open_ens_cycle(
             finally:
                 _ingest_grib_module._TRACK_CONFIGS[cfg["ingest_track"]]["json_subdir"] = original_subdir
             status = _status_for_ingest_summary(summary)
+            if (
+                status == "empty_ingest"
+                and preserve_scopes
+                and cycle_json_files == 0
+                and int(summary.get("parse_error", 0) or 0) == 0
+            ):
+                # A repeated PARTIAL retry may have no current JSON after all
+                # already-qualified scopes were excluded.  This is a truthful
+                # idempotent no-op, not an ingest failure; retained coverage
+                # remains the authority and the run still carries PARTIAL
+                # download facts below.
+                status = "ok"
             authority_computed_at = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
             authority_summary = _write_source_authority_chain(
                 conn,
@@ -3342,6 +3638,10 @@ def collect_open_ens_cycle(
                 download_observed_steps=download_observed_steps,
                 download_partial_run=_partial_cycle if download_observed_steps is not None else None,
                 download_reason_code=_download_reason_code,
+                attempt_started_at=(
+                    snapshot_replace_started_at if _partial_cycle else None
+                ),
+                preserve_scopes=preserve_scopes,
             )
             logger.info(
                 "ingest_stage: commit_start track=%s status=%s",

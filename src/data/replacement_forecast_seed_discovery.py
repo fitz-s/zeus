@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import sqlite3
+import time
 import threading
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -802,7 +803,9 @@ def _target_has_pending_queue_work(
     )
 
 
-def held_position_family_priorities() -> dict[tuple[str, str, str], int]:
+def held_position_family_priorities(
+    *, deadline_monotonic: float | None = None
+) -> dict[tuple[str, str, str], int]:
     """Return live held-family priority from canonical position_current.
 
     Forecast materialization is both an entry input and the held-position
@@ -811,11 +814,18 @@ def held_position_family_priorities() -> dict[tuple[str, str, str], int]:
     hold, and shift decisions.
     """
 
+    if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+        raise TimeoutError("held-family discovery deadline expired")
+
     path = _zeus_trade_db_path()
     if not path.exists():
         return {}
     try:
-        conn = _connect_read_only(path)
+        conn = _connect_read_only(path, deadline_monotonic=deadline_monotonic)
+        if deadline_monotonic is not None:
+            conn.set_progress_handler(
+                lambda: int(time.monotonic() >= deadline_monotonic), 1000
+            )
         conn.row_factory = sqlite3.Row
         try:
             conn.execute("PRAGMA query_only=ON")
@@ -838,10 +848,20 @@ def held_position_family_priorities() -> dict[tuple[str, str, str], int]:
             ).fetchall()
         finally:
             conn.close()
-    except Exception:
+    except TimeoutError:
+        raise
+    except Exception as exc:
+        if (
+            deadline_monotonic is not None
+            and time.monotonic() >= deadline_monotonic
+            and str(exc).lower() in {"interrupted", "db_connection_deadline_expired"}
+        ):
+            raise TimeoutError("held-family discovery deadline expired") from exc
         return {}
     priorities: dict[tuple[str, str, str], int] = {}
     for row in rows:
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            raise TimeoutError("held-family discovery deadline expired")
         phase = str(row["phase"] or "")
         key = (
             str(row["city"]),

@@ -7,6 +7,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import time
+
+import httpx
+import pytest
 
 from src.data.replacement_cycle_availability import (
     AnchorAvailabilityProbe,
@@ -299,6 +303,62 @@ class TestProbeResolvedSelection:
         assert AnchorAvailabilityProbe(meta_fetch=lambda: {})(
             _dt("2026-06-11T18:00:00")
         ) is True
+
+    def test_bucket_probe_bounds_each_http_leg_by_remaining_deadline(self, monkeypatch):
+        import src.data.openmeteo_ecmwf_ifs9_bucket_transport as bucket
+
+        now = [100.0]
+        monkeypatch.setattr(bucket.time, "monotonic", lambda: now[0])
+        timeouts: list[float] = []
+
+        def _get(_url, *, timeout):
+            timeouts.append(timeout)
+            now[0] = 103.0
+            return None
+
+        with pytest.raises(TimeoutError):
+            bucket.fetch_bucket_run_manifest(
+                http_get=_get, deadline_monotonic=103.0
+            )
+        assert timeouts == [3.0]
+
+    def test_deadline_metadata_429_does_not_sleep_or_retry(self, monkeypatch, tmp_path):
+        import src.data.openmeteo_client as client
+        import src.data.replacement_cycle_availability as rca
+        from src.data.openmeteo_quota import OpenMeteoQuotaTracker
+
+        requests: list[float] = []
+
+        class _RateLimitedClient:
+            def get(self, url, *, params, timeout):
+                requests.append(timeout)
+                request = httpx.Request("GET", url, params=params)
+                return httpx.Response(
+                    429, request=request, headers={"Retry-After": "120"}
+                )
+
+        monkeypatch.setattr(
+            client, "quota_tracker",
+            OpenMeteoQuotaTracker(state_path=tmp_path / "probe-quota.json"),
+        )
+        monkeypatch.setattr(client, "_SHARED_HTTP_CLIENT", _RateLimitedClient())
+        monkeypatch.setattr(
+            client.time,
+            "sleep",
+            lambda _seconds: (_ for _ in ()).throw(
+                AssertionError("deadline-bound metadata may not sleep through a 429")
+            ),
+        )
+        monkeypatch.setattr(
+            rca, "probe_bucket_run_declared", lambda _cycle, **_kwargs: False
+        )
+        deadline = time.monotonic() + 1.0
+        probe = AnchorAvailabilityProbe(
+            cached_updates_path=None, deadline_monotonic=deadline
+        )
+        assert probe(_dt("2026-06-11T18:00:00")) is False
+        assert len(requests) == 1
+        assert 0 < requests[0] <= 1.0
 
 
 class TestPollFetchDecision:

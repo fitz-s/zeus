@@ -225,6 +225,186 @@ def test_some_404_returns_PARTIAL_PARTIAL_and_extract_fires(tmp_path, monkeypatc
 
 
 # ---------------------------------------------------------------------------
+# test 2b: validated steps + transport failure → PARTIAL; 503 stays distinct
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("track", ["mx2t6_high", "mn2t6_low"])
+def test_mixed_transport_failure_keeps_validated_steps_and_partial_status(
+    tmp_path, monkeypatch, track
+):
+    """A sibling 503 must not discard validated steps or become NOT_RELEASED.
+
+    The missing step remains absent from ``observed_steps`` so the existing
+    target coverage gate can reject scopes that need it.  Both HIGH and LOW
+    tracks exercise the same collector boundary.
+    """
+    import src.data.ecmwf_open_data as mod
+
+    def fetch_impl(*, cycle_date, cycle_hour, param, step, output_dir, mirrors):
+        if step == 6:
+            return ("FAILED", "HTTP_503_mirror_aws_attempt_1")
+        if step == 9:
+            return ("NOT_RELEASED", None)
+        f = mod._step_cache_path(
+            output_dir,
+            run_date=cycle_date,
+            run_hour=cycle_hour,
+            step=step,
+            param=param,
+        )
+        _make_fake_grib(f)
+        return ("OK", f)
+
+    extract_called: list[str] = []
+
+    def runner(args, *, label: str, timeout: int) -> dict:
+        if "extract" in label:
+            extract_called.append(label)
+        return {"label": label, "ok": True, "returncode": 0, "stdout_tail": "", "stderr_tail": ""}
+
+    monkeypatch.setattr(mod, "STEP_HOURS", [3, 6, 9])
+    conn = _make_conn()
+    result = mod.collect_open_ens_cycle(
+        track=track,
+        run_date=RUN_DATE,
+        run_hour=RUN_HOUR,
+        skip_extract=False,
+        conn=conn,
+        _fetch_impl=fetch_impl,
+        _runner=runner,
+        _paths=_make_paths(mod, tmp_path),
+        now_utc=NOW_UTC,
+    )
+
+    download_stage = next(
+        s for s in result.get("stages", []) if "download_parallel" in s.get("label", "")
+    )
+    assert download_stage["ok"] is True
+    assert download_stage["status"] == "PARTIAL"
+    assert download_stage["ok_steps"] == [3]
+    assert download_stage["failed_steps"] == [6]
+    assert download_stage["not_released_steps"] == [9]
+    assert extract_called, "validated steps must still reach the existing extractor"
+    source_run = conn.execute(
+        "SELECT status, completeness_status, partial_run, reason_code "
+        "FROM source_run ORDER BY recorded_at DESC LIMIT 1"
+    ).fetchone()
+    assert source_run["status"] == "PARTIAL"
+    assert source_run["completeness_status"] == "PARTIAL"
+    assert source_run["partial_run"] == 1
+    assert "FAILED_STEPS=step6:HTTP_503_mirror_aws_attempt_1" in source_run["reason_code"]
+    assert "NOT_RELEASED_STEPS=[9]" in source_run["reason_code"]
+
+
+def test_partial_retry_preserves_prior_same_run_authority_rows(tmp_path):
+    """A target-scoped retry cannot erase prior same-run coverage/readiness."""
+    import src.data.ecmwf_open_data as mod
+
+    conn = _make_conn()
+    run_id = "ecmwf_open_data:mx2t6_high:2026-05-11T00Z:coordsha:test"
+    dataset = "ecmwf_opendata_mx2t3_local_calendar_day_max_boundary_v2"
+    conn.execute(
+        """
+        INSERT INTO source_run (
+            source_run_id, source_id, track, release_calendar_key,
+            ingest_mode, origin_mode, source_cycle_time, dataset_id,
+            expected_steps_json, observed_steps_json, completeness_status,
+            partial_run, status
+        ) VALUES (?, ?, ?, ?, 'SCHEDULED_LIVE', 'SCHEDULED_LIVE', ?, ?, ?, ?, 'COMPLETE', 0, 'SUCCESS')
+        """,
+        (run_id, "ecmwf_open_data", "mx2t6_high_full_horizon", "cycle", NOW_UTC.isoformat(), dataset, "[3]", "[3]"),
+    )
+    conn.execute(
+        """
+        INSERT INTO source_run_coverage (
+            coverage_id, source_run_id, source_id, source_transport,
+            release_calendar_key, track, city_id, city, city_timezone,
+            target_local_date, temperature_metric, physical_quantity,
+            observation_field, data_version, expected_members, observed_members,
+            expected_steps_json, observed_steps_json, target_window_start_utc,
+            target_window_end_utc, completeness_status, readiness_status,
+            computed_at
+        ) VALUES (?, ?, 'ecmwf_open_data', 'ensemble_snapshots_db_reader',
+            'cycle', 'mx2t6_high_full_horizon', 'TEST', 'Test', 'UTC',
+            '2026-05-11', 'high', 'mx2t3_local_calendar_day_max', 'temperature_2m_max',
+            ?, 51, 51, '[3]', '[3]', ?, ?, 'COMPLETE', 'LIVE_ELIGIBLE', ?)
+        """,
+        (
+            "coverage-old",
+            run_id,
+            dataset,
+            "2026-05-11T00:00:00+00:00",
+            "2026-05-12T00:00:00+00:00",
+            NOW_UTC.isoformat(),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO readiness_state (
+            readiness_id, scope_key, scope_type, source_run_id,
+            strategy_key, status, computed_at
+        ) VALUES ('producer_readiness:coverage-old', 'coverage-old', 'city_metric',
+            ?, 'producer_readiness', 'LIVE_ELIGIBLE', ?)
+        """,
+        (run_id, NOW_UTC.isoformat()),
+    )
+    before = {
+        "source_run": conn.execute(
+            "SELECT COUNT(*) FROM source_run WHERE source_run_id = ?", (run_id,)
+        ).fetchone()[0],
+        "coverage": conn.execute(
+            "SELECT COUNT(*) FROM source_run_coverage WHERE source_run_id = ?", (run_id,)
+        ).fetchone()[0],
+        "readiness": conn.execute(
+            "SELECT COUNT(*) FROM readiness_state WHERE source_run_id = ?", (run_id,)
+        ).fetchone()[0],
+    }
+
+    cleared = mod._clear_source_run_authority(
+        conn, source_run_id=run_id, preserve_existing_authority=True
+    )
+    assert cleared == {
+        "snapshots_deleted": 0,
+        "coverage_deleted": 0,
+        "producer_readiness_deleted": 0,
+        "source_run_deleted": 0,
+    }
+    assert before == {
+        "source_run": conn.execute(
+            "SELECT COUNT(*) FROM source_run WHERE source_run_id = ?", (run_id,)
+        ).fetchone()[0],
+        "coverage": conn.execute(
+            "SELECT COUNT(*) FROM source_run_coverage WHERE source_run_id = ?", (run_id,)
+        ).fetchone()[0],
+        "readiness": conn.execute(
+            "SELECT COUNT(*) FROM readiness_state WHERE source_run_id = ?", (run_id,)
+        ).fetchone()[0],
+    }
+
+    source = tmp_path / "raw" / "open_ens_mx2t6_localday_max" / "houston" / "20260511"
+    source.mkdir(parents=True)
+    old_json = source / "open_ens_mx2t6_localday_max_target_2026-05-11_lead_0.json"
+    new_json = source / "open_ens_mx2t6_localday_max_target_2026-05-12_lead_1.json"
+    old_json.write_text("{}")
+    new_json.write_text("{}")
+    scoped_root, _, linked = mod._build_cycle_scoped_json_root(
+        raw_root=tmp_path / "raw",
+        extract_subdir="open_ens_mx2t6_localday_max",
+        run_date=RUN_DATE,
+        run_hour=RUN_HOUR,
+        tmp_root=tmp_path / "view",
+        preserve_scopes={("houston", "2026-05-11", "high")},
+    )
+    assert linked == 1
+    assert not (
+        scoped_root / "open_ens_mx2t6_localday_max" / "houston" / "20260511" / old_json.name
+    ).exists()
+    assert (
+        scoped_root / "open_ens_mx2t6_localday_max" / "houston" / "20260511" / new_json.name
+    ).exists()
+
+
+# ---------------------------------------------------------------------------
 # test 3: all 404 → SKIPPED_NOT_RELEASED; extract NOT called
 # ---------------------------------------------------------------------------
 
@@ -271,7 +451,7 @@ def test_non_404_retry_exhaustion_returns_FAILED_and_extract_skipped(tmp_path, m
     import src.data.ecmwf_open_data as mod
 
     def fetch_impl(*, cycle_date, cycle_hour, param, step, output_dir, mirrors):
-        return ("FAILED", f"HTTP_503_mirror_aws_attempt_2")
+        return ("FAILED", "HTTP_503_mirror_aws_attempt_2")
 
     extract_called: list[str] = []
 
@@ -1043,10 +1223,10 @@ def test_thread_safety_max_workers_2(tmp_path, monkeypatch):
     assert sorted(steps_fetched) == [3, 6, 9], (
         f"Expected all steps to be fetched independently; got {steps_fetched}"
     )
-    # Step 6 failed → FAILED result (only one failed, no ok_steps mix with FAILED)
-    assert result["status"] == "download_failed", (
-        f"Expected download_failed when any step fails; got {result['status']!r}"
-    )
+    # Step 6 failed, but validated siblings continue through the PARTIAL path.
+    download = next(s for s in result["stages"] if "download_parallel" in s["label"])
+    assert download["status"] == "PARTIAL"
+    assert download["failed_steps"] == [6]
 
 
 def test_batch_does_not_abandon_worker_at_duplicate_outer_timeout(tmp_path, monkeypatch):
@@ -1683,7 +1863,7 @@ def test_free_download_slot_advances_while_first_step_waits(
     download = next(s for s in result["stages"] if "download_parallel" in s["label"])
     assert download["ok_steps"] == ([3, 9] if middle_raises else [3, 6, 9])
     if middle_raises:
-        assert result["status"] == "download_failed"
+        assert download["status"] == "PARTIAL"
         assert download["failed_steps"] == [6]
 
 

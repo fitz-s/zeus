@@ -54,7 +54,11 @@ import logging
 import math
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+from src.config import runtime_cities_by_name
+from src.data.current_settlement_history import read_current_settlement_history
 
 _LOG = logging.getLogger("zeus.center_debias_live_fit")
 
@@ -84,8 +88,8 @@ MAX_ABS_SHIFT_C = 2.0
 # Window length in hours for the deterministic cutoff floor.
 WINDOW_HOURS = 6
 
-# Rows whose settlement is unusable as truth are excluded in SQL rather than
-# filtered later, so an unsettled or unpriced cell is never materialized.
+# Settlement truth is supplied by read_current_settlement_history, which checks
+# the current resolver contract and point-in-time observation provenance.
 #
 # DEDUP BEFORE SHAPE FILTER — matches the study scripts and is the semantically
 # right decision proxy. The winner per (city, target_date, lead) is the LAST
@@ -95,64 +99,41 @@ WINDOW_HOURS = 6
 # because that day's served belief was the day0 one and its residual does not
 # describe the pre-day0 center this shift corrects.
 #
-# ``settled_at`` is NOT stored UTC: live rows carry real non-UTC offsets
-# (+08:00, +02:00, -07:00, -05:00, ...) and a handful use a space separator
-# instead of 'T'. A string-prefix compare treats a negative-offset row's
-# LOCAL wall clock as its instant, which can admit an outcome before it has
-# actually settled in UTC, and 'space' < 'T' lexicographically, so a
-# space-separated row can sort before a same-day cutoff it actually settles
-# after. ``julianday()`` parses both the offset and the space form, so the
-# comparison is on the real instant regardless of how it is written. A stray
-# two-digit offset with no colon (``+00`` rather than ``+00:00``) is the one
-# shape SQLite's parser rejects outright (returns NULL, which the WHERE
-# clause then drops as fail-closed exclusion rather than a leak); the
-# trailing-colon normalization below covers it so those rows are compared
-# like every other row instead of silently dropped.
+# Search the exact eligible city/date and local lead-day window through the
+# existing city/target index. This first pass reads covering-index columns only;
+# opening the large posterior row for every candidate would stall the live path.
+# The winning row's recorded clock is checked below, with an exact-window retry
+# when a backfill was recorded after the cutoff.
 _RESIDUAL_SQL = """
-WITH candidates AS (
-    SELECT city,
-           target_date,
-           computed_at,
-           posterior_id,
-           CAST(julianday(target_date) - julianday(date(computed_at)) AS INTEGER) AS lead
-    FROM forecast_posteriors
-    WHERE temperature_metric = :metric
-),
-winners AS (
-    SELECT city,
-           target_date,
-           lead,
-           posterior_id,
-           MAX(computed_at) AS computed_at
-    FROM candidates
-    WHERE lead IN (1, 2)
-    GROUP BY city, target_date, lead
+WITH eligible(city, target_date, lead, start_at, end_at) AS (VALUES {windows}),
+candidates AS (
+    SELECT e.city, e.target_date, e.lead, p.posterior_id,
+           ROW_NUMBER() OVER (
+               PARTITION BY e.city, e.target_date, e.lead
+               ORDER BY julianday(p.computed_at) DESC, p.posterior_id DESC
+           ) AS rank
+    FROM eligible AS e
+    JOIN forecast_posteriors AS p
+      ON p.city = e.city AND p.target_date = e.target_date
+    WHERE p.temperature_metric = ?
+      AND julianday(p.computed_at) >= julianday(e.start_at)
+      AND julianday(p.computed_at) < julianday(e.end_at)
+      AND julianday(p.computed_at) < julianday(?)
 )
-SELECT w.city AS city,
-       p.anchor_value_c AS center_c,
-       CASE WHEN s.settlement_unit = 'F'
-            THEN (s.settlement_value - 32.0) * 5.0 / 9.0
-            ELSE s.settlement_value
-       END AS settled_c
-FROM winners AS w
-JOIN forecast_posteriors AS p
-  ON p.posterior_id = w.posterior_id
-JOIN settlement_outcomes AS s
-  ON s.city = w.city
- AND s.target_date = w.target_date
- AND s.temperature_metric = :metric
-WHERE p.q_shape = 'fused_normal_direct'
-  AND p.anchor_value_c IS NOT NULL
-  AND s.authority = 'VERIFIED'
-  AND s.settlement_value IS NOT NULL
-  AND s.settlement_unit IN ('F', 'C')
-  AND s.settled_at IS NOT NULL
-  AND julianday(
-        CASE WHEN substr(s.settled_at, -3, 1) IN ('+', '-')
-             THEN s.settled_at || ':00'
-             ELSE s.settled_at
-        END
-      ) < julianday(:cutoff)
+SELECT city, target_date, lead, posterior_id FROM candidates WHERE rank = 1
+"""
+
+_LATE_FALLBACK_SQL = """
+SELECT posterior_id, recorded_at, q_shape, anchor_value_c
+FROM forecast_posteriors
+WHERE runtime_layer = 'live'
+  AND city = ? AND target_date = ? AND temperature_metric = ?
+  AND julianday(computed_at) >= julianday(?)
+  AND julianday(computed_at) < julianday(?)
+  AND julianday(computed_at) < julianday(?)
+  AND julianday(recorded_at) < julianday(?)
+ORDER BY julianday(computed_at) DESC, posterior_id DESC
+LIMIT 1
 """
 
 
@@ -259,8 +240,26 @@ def window_cutoff(now: datetime) -> str:
     return floored.isoformat().replace("+00:00", "Z")
 
 
+def _settlement_contract_identity(cities: dict) -> str:
+    """Invalidate a same-window fit whenever its resolver inputs change."""
+
+    fields = (
+        "settlement_source_type", "previous_settlement_source_type",
+        "settlement_source_type_effective_date", "wu_station",
+        "settlement_page_view", "settlement_unit", "timezone",
+    )
+    manifest = [
+        (name, tuple(getattr(city, field, None) for field in fields))
+        for name, city in sorted(cities.items())
+    ]
+    return hashlib.sha256(
+        json.dumps(manifest, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
 def load_residual_rows(
-    conn: sqlite3.Connection, *, metric: str, training_cutoff: str
+    conn: sqlite3.Connection, *, metric: str, training_cutoff: str,
+    cities_by_name: dict | None = None,
 ) -> list[tuple[str, float]]:
     """``(city, e)`` for every settled decision-proxy row, ``e = settled - center``.
 
@@ -269,16 +268,74 @@ def load_residual_rows(
     live path is applying on top of it.
     """
 
-    rows = conn.execute(
-        _RESIDUAL_SQL,
-        {"metric": str(metric), "cutoff": str(training_cutoff)},
-    ).fetchall()
-
+    cutoff = datetime.fromisoformat(training_cutoff.replace("Z", "+00:00"))
+    cities = cities_by_name if cities_by_name is not None else runtime_cities_by_name()
+    history = read_current_settlement_history(
+        conn, cities_by_name=cities, as_of=cutoff,
+    )
+    labels = {
+        (row.city, row.target_date): row
+        for row in history.rows if row.metric == metric
+    }
+    if not labels:
+        return []
+    winners: dict[tuple[str, str, int], int] = {}
+    bounds: dict[tuple[str, str, int], tuple[str, str]] = {}
+    windows: list[tuple[str, str, int, str, str]] = []
+    for city, target_date in sorted(labels):
+        tz = ZoneInfo(cities[city].timezone)
+        target = date.fromisoformat(target_date)
+        for lead in (1, 2):
+            local_day = target - timedelta(days=lead)
+            start = datetime.combine(local_day, time.min, tzinfo=tz).astimezone(timezone.utc)
+            end = datetime.combine(local_day + timedelta(days=1), time.min, tzinfo=tz).astimezone(timezone.utc)
+            windows.append((city, target_date, lead, start.isoformat(), end.isoformat()))
+            bounds[(city, target_date, lead)] = (start.isoformat(), end.isoformat())
+    for offset in range(0, len(windows), 150):
+        chunk = windows[offset:offset + 150]
+        placeholders = ", ".join("(?, ?, ?, ?, ?)" for _ in chunk)
+        params = [value for window in chunk for value in window]
+        params.extend((metric, training_cutoff))
+        for city, target_date, lead, posterior_id in conn.execute(
+            _RESIDUAL_SQL.format(windows=placeholders), params,
+        ):
+            winners[(city, target_date, lead)] = int(posterior_id)
+    selected: dict[int, tuple[object, object, object, object]] = {}
+    winner_ids = list(winners.values())
+    for start in range(0, len(winner_ids), 300):
+        chunk = winner_ids[start:start + 300]
+        placeholders = ", ".join("?" for _ in chunk)
+        for posterior_id, runtime_layer, recorded_at, shape, center in conn.execute(
+            f"SELECT posterior_id, runtime_layer, recorded_at, q_shape, anchor_value_c "
+            f"FROM forecast_posteriors WHERE posterior_id IN ({placeholders})", chunk,
+        ):
+            selected[int(posterior_id)] = (runtime_layer, recorded_at, shape, center)
     residuals: list[tuple[str, float]] = []
-    for row in rows:
-        city = row["city"] if isinstance(row, sqlite3.Row) else row[0]
-        center = row["center_c"] if isinstance(row, sqlite3.Row) else row[1]
-        settled = row["settled_c"] if isinstance(row, sqlite3.Row) else row[2]
+    for (city, target_date, lead), posterior_id in sorted(winners.items()):
+        runtime_layer, recorded_at, shape, center = selected[posterior_id]
+        try:
+            recorded = datetime.fromisoformat(str(recorded_at).replace("Z", "+00:00"))
+            # SQLite's recorded_at schema default is UTC without an offset.
+            if recorded.tzinfo is None:
+                recorded = recorded.replace(tzinfo=timezone.utc)
+        except ValueError:
+            recorded = cutoff
+        if runtime_layer != "live" or recorded >= cutoff:
+            start, end = bounds[(city, target_date, lead)]
+            fallback = conn.execute(
+                _LATE_FALLBACK_SQL,
+                (city, target_date, metric, start, end,
+                 training_cutoff, training_cutoff),
+            ).fetchone()
+            if fallback is None:
+                continue
+            _, _, shape, center = fallback
+        if shape != "fused_normal_direct" or center is None:
+            continue
+        label = labels.get((city, target_date))
+        assert label is not None
+        settled = ((label.settlement_value - 32.0) * 5.0 / 9.0
+                   if label.settlement_unit == "F" else label.settlement_value)
         if city is None or center is None or settled is None:
             continue
         try:
@@ -395,7 +452,7 @@ class CenterDebiasFitProvider:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._cache: dict[str, tuple[str, CenterDebiasArtifact | None]] = {}
+        self._cache: dict[str, tuple[str, str, CenterDebiasArtifact | None]] = {}
 
     def correction(
         self,
@@ -412,7 +469,11 @@ class CenterDebiasFitProvider:
             if metric_key not in ENABLED_METRICS:
                 return None
             cutoff = window_cutoff(now)
-            artifact = self._artifact(conn, metric=metric_key, cutoff=cutoff)
+            cities = runtime_cities_by_name()
+            contract = _settlement_contract_identity(cities)
+            artifact = self._artifact(
+                conn, metric=metric_key, cutoff=cutoff, contract=contract, cities=cities,
+            )
             if artifact is None:
                 return None
             shift = artifact.shift_for(city)
@@ -428,21 +489,24 @@ class CenterDebiasFitProvider:
             return None
 
     def _artifact(
-        self, conn: sqlite3.Connection, *, metric: str, cutoff: str
+        self, conn: sqlite3.Connection, *, metric: str, cutoff: str,
+        contract: str, cities: dict,
     ) -> CenterDebiasArtifact | None:
         with self._lock:
             cached = self._cache.get(metric)
-            if cached is not None and cached[0] == cutoff:
-                return cached[1]
-            artifact = self._fit(conn, metric=metric, cutoff=cutoff)
-            self._cache[metric] = (cutoff, artifact)
+            if cached is not None and cached[:2] == (cutoff, contract):
+                return cached[2]
+            artifact = self._fit(conn, metric=metric, cutoff=cutoff, cities=cities)
+            self._cache[metric] = (cutoff, contract, artifact)
             return artifact
 
     def _fit(
-        self, conn: sqlite3.Connection, *, metric: str, cutoff: str
+        self, conn: sqlite3.Connection, *, metric: str, cutoff: str, cities: dict
     ) -> CenterDebiasArtifact | None:
         try:
-            rows = load_residual_rows(conn, metric=metric, training_cutoff=cutoff)
+            rows = load_residual_rows(
+                conn, metric=metric, training_cutoff=cutoff, cities_by_name=cities,
+            )
         except Exception as exc:  # noqa: BLE001 - degrade to the uncorrected center
             _LOG.warning(
                 "center de-bias row load failed (serving uncorrected center): "

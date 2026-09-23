@@ -100,7 +100,11 @@ def _wire(monkeypatch, *, rows, state_root: Path, forecast_db="zeus-forecasts.db
 
     monkeypatch.setattr(
         plan_mod, "build_replacement_forecast_current_target_plan",
-        lambda _db: _plan(rows),
+        lambda _db, **_kwargs: _plan(rows),
+    )
+    monkeypatch.setattr(
+        plan_mod, "replacement_forecast_current_target_keys",
+        lambda _db, **_kwargs: tuple(rows),
     )
 
     calls: list[dict] = []
@@ -140,12 +144,12 @@ def _wire(monkeypatch, *, rows, state_root: Path, forecast_db="zeus-forecasts.db
         hour=0, minute=0, second=0, microsecond=0
     )
     monkeypatch.setattr(
-        production, "_probe_resolved_available_cycle", lambda: probed_cycle
+        production, "_probe_resolved_available_cycle", lambda **_kwargs: probed_cycle
     )
     monkeypatch.setattr(
         production,
         "_probe_resolved_bayes_precision_fusion_extras_cycle",
-        lambda: probed_cycle,
+        lambda **_kwargs: probed_cycle,
     )
 
     cfg_dict = {
@@ -220,6 +224,140 @@ def test_covered_rows_still_reach_the_downloader(monkeypatch, tmp_path) -> None:
     )
 
 
+def test_preflight_error_after_deadline_is_not_reported_as_timeout(
+    monkeypatch, tmp_path,
+) -> None:
+    now = [100.0]
+    monkeypatch.setattr(production.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(dl_mod, "bayes_precision_fusion_quota_cooldown_seconds", lambda: 0)
+
+    def _broken_probe(*, deadline_monotonic):
+        now[0] = deadline_monotonic
+        raise ValueError("provider metadata invalid")
+
+    monkeypatch.setattr(
+        production, "_probe_resolved_bayes_precision_fusion_extras_cycle", _broken_probe
+    )
+    report = production._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+        {"forecast_db": tmp_path / "forecast.db"}, max_wall_clock_seconds=2.0
+    )
+    assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED"
+    assert "provider metadata invalid" in report["error"]
+
+
+def test_lightweight_market_capture_covers_every_city_metric_across_ticks(
+    monkeypatch, tmp_path,
+) -> None:
+    target_date = (datetime.now(timezone.utc).date() + timedelta(days=2)).isoformat()
+    cycle = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    db = tmp_path / "forecast.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "CREATE TABLE market_events(city TEXT,target_date TEXT,"
+            "temperature_metric TEXT,token_id TEXT,range_label TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE raw_model_forecasts(city TEXT,metric TEXT,target_date TEXT,"
+            "model TEXT,source_cycle_time TEXT,endpoint TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO market_events VALUES(?,?,?,?,?)",
+            [
+                (city, target_date, metric, "token", "range")
+                for city in ("Amsterdam", "London", "Paris")
+                for metric in ("high", "low")
+            ],
+        )
+    monkeypatch.setattr(
+        plan_mod, "build_replacement_forecast_current_target_plan",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("raw acquisition must not build the full readiness plan")
+        ),
+    )
+    monkeypatch.setattr(
+        production, "_probe_resolved_bayes_precision_fusion_extras_cycle",
+        lambda **_kwargs: cycle,
+    )
+    monkeypatch.setattr(
+        dl_mod, "bayes_precision_fusion_quota_cooldown_seconds", lambda: 0
+    )
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
+        lambda **_kwargs: {},
+    )
+    seen: list[str] = []
+
+    def _download(**kwargs):
+        targets = kwargs["targets"]
+        city = targets[0].city
+        assert {target.metric for target in targets if target.city == city} == {
+            "high", "low"
+        }
+        seen.append(city)
+        if len(seen) == 1:
+            return {
+                "status": "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE",
+                "timeboxed_incomplete": True,
+                "attempted_target_group_count": 0,
+                "written_row_count": 0,
+            }
+        if len(seen) == 2:
+            return {
+                "status": "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+                "attempted_target_group_count": 1,
+                "written_row_count": 0,
+                "committed_families": (),
+            }
+        with sqlite3.connect(db) as conn:
+            conn.executemany(
+                "INSERT INTO raw_model_forecasts VALUES(?,?,?,?,?,?)",
+                [
+                    (city, metric, target_date, model, cycle.isoformat(), "single_runs")
+                    for metric in ("high", "low")
+                    for model in ("ecmwf_ifs", "icon_global")
+                ],
+            )
+        return {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+            "attempted_target_group_count": 1,
+            "written_row_count": 4,
+        }
+
+    monkeypatch.setattr(dl_mod, "download_bayes_precision_fusion_extra_raw_inputs", _download)
+    cfg = {"forecast_db": db, "bpf_extra_rotation_state_path": tmp_path / "rotation.json"}
+    first = production._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+        cfg, max_wall_clock_seconds=3.0
+    )
+    assert first["target_rotation_cursor_write_status"] == "NO_PROGRESS"
+    assert not (tmp_path / "rotation.json").exists()
+    failed = production._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+        cfg, max_wall_clock_seconds=3.0
+    )
+    assert failed["target_rotation_cursor_write_status"] == "PERSISTED"
+    assert failed["written_row_count"] == 0
+    assert failed["committed_families"] == ()
+    missing, planned = production._extras_coverage_missing(
+        cfg,
+        cycle,
+        capture_rows=plan_mod.replacement_forecast_current_target_keys(db),
+        held_priority={},
+    )
+    assert planned == 6
+    assert ("Amsterdam", "high", target_date) in missing
+    assert ("Amsterdam", "low", target_date) in missing
+    for _ in range(3):
+        report = production._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+            cfg, max_wall_clock_seconds=3.0
+        )
+        assert report["target_rotation_attempted_group_count"] == 1
+    assert seen == ["Amsterdam", "Amsterdam", "London", "Paris", "Amsterdam"]
+    assert production._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+        cfg, max_wall_clock_seconds=3.0
+    )["status"] == "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS"
+
+
 def test_candidate_accrual_uses_current_targets_after_live_coverage(monkeypatch, tmp_path) -> None:
     """A complete two-family live basket does not suppress background history/current
     capture for an unconfigured candidate. The candidate pass gets a distinct bounded
@@ -231,7 +369,7 @@ def test_candidate_accrual_uses_current_targets_after_live_coverage(monkeypatch,
     monkeypatch.setattr(
         plan_mod,
         "build_replacement_forecast_current_target_plan",
-        lambda _db: (_ for _ in ()).throw(
+        lambda _db, **_kwargs: (_ for _ in ()).throw(
             AssertionError("candidate capture must not build the full readiness plan")
         ),
     )
@@ -243,7 +381,7 @@ def test_candidate_accrual_uses_current_targets_after_live_coverage(monkeypatch,
     monkeypatch.setattr(
         production,
         "_probe_resolved_bayes_precision_fusion_extras_cycle",
-        lambda: (_ for _ in ()).throw(
+        lambda **_kwargs: (_ for _ in ()).throw(
             AssertionError("candidate metadata planning must never probe the anchor")
         ),
     )
@@ -701,7 +839,7 @@ def test_candidate_accrual_scope_planning_timebox_never_starts_capture(monkeypat
     monkeypatch.setattr(
         plan_mod,
         "build_replacement_forecast_current_target_plan",
-        lambda _db: (_ for _ in ()).throw(
+        lambda _db, **_kwargs: (_ for _ in ()).throw(
             AssertionError("candidate capture must not build the full readiness plan")
         ),
     )
@@ -732,7 +870,7 @@ def test_candidate_accrual_scope_planning_timebox_never_starts_capture(monkeypat
     monkeypatch.setattr(
         production,
         "_probe_resolved_bayes_precision_fusion_extras_cycle",
-        lambda: (_ for _ in ()).throw(
+        lambda **_kwargs: (_ for _ in ()).throw(
             AssertionError("candidate planning must not fall back to anchor probe")
         ),
     )
@@ -1277,12 +1415,12 @@ def test_full_fanout_admits_current_day0_and_prioritizes_held_gap(
     monkeypatch.setattr(
         production,
         "_probe_resolved_bayes_precision_fusion_extras_cycle",
-        lambda: cycle,
+        lambda **_kwargs: cycle,
     )
     monkeypatch.setattr(
         production,
         "_extras_coverage_missing",
-        lambda _cfg, _cycle, *, decision_time=None: (
+        lambda _cfg, _cycle, *, decision_time=None, **_kwargs: (
             {
                 ("Tokyo", "high", tokyo_day0.isoformat()),
                 ("Amsterdam", "high", amsterdam_day1.isoformat()),
@@ -1294,7 +1432,7 @@ def test_full_fanout_admits_current_day0_and_prioritizes_held_gap(
     monkeypatch.setattr(
         seed_discovery,
         "held_position_family_priorities",
-        lambda: {
+        lambda **_kwargs: {
             ("Tokyo", tokyo_day0.isoformat(), "high"): 0,
             ("Tokyo", tokyo_day1.isoformat(), "high"): 1,
         },
@@ -1646,12 +1784,16 @@ def test_rotation_advances_only_by_exact_downloader_progress_receipt(
     monkeypatch.setattr(
         plan_mod,
         "build_replacement_forecast_current_target_plan",
-        lambda _db: _plan(rows),
+        lambda _db, **_kwargs: _plan(rows),
+    )
+    monkeypatch.setattr(
+        plan_mod, "replacement_forecast_current_target_keys",
+        lambda _db, **_kwargs: tuple(rows),
     )
     monkeypatch.setattr(
         production,
         "_probe_resolved_bayes_precision_fusion_extras_cycle",
-        lambda: cycle,
+        lambda **_kwargs: cycle,
     )
     monkeypatch.setattr(
         dl_mod,
@@ -1735,12 +1877,16 @@ def test_overlapping_invocation_is_busy_and_cannot_download_or_advance(
     monkeypatch.setattr(
         plan_mod,
         "build_replacement_forecast_current_target_plan",
-        lambda _db: _plan(rows),
+        lambda _db, **_kwargs: _plan(rows),
+    )
+    monkeypatch.setattr(
+        plan_mod, "replacement_forecast_current_target_keys",
+        lambda _db, **_kwargs: tuple(rows),
     )
     monkeypatch.setattr(
         production,
         "_probe_resolved_bayes_precision_fusion_extras_cycle",
-        lambda: cycle,
+        lambda **_kwargs: cycle,
     )
     monkeypatch.setattr(
         dl_mod,
@@ -1795,12 +1941,16 @@ def test_cross_process_busy_owner_skips_download_and_cursor_write(
     monkeypatch.setattr(
         plan_mod,
         "build_replacement_forecast_current_target_plan",
-        lambda _db: _plan(rows),
+        lambda _db, **_kwargs: _plan(rows),
+    )
+    monkeypatch.setattr(
+        plan_mod, "replacement_forecast_current_target_keys",
+        lambda _db, **_kwargs: tuple(rows),
     )
     monkeypatch.setattr(
         production,
         "_probe_resolved_bayes_precision_fusion_extras_cycle",
-        lambda: cycle,
+        lambda **_kwargs: cycle,
     )
     monkeypatch.setattr(
         dl_mod,

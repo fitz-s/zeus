@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -2261,6 +2262,9 @@ def replacement_forecast_current_target_keys(
     forecast_db: Path | str,
     *,
     min_target_date: date | str | None = None,
+    deadline_monotonic: float | None = None,
+    now_utc: datetime | None = None,
+    require_local_day_not_ended: bool = False,
 ) -> tuple[ReplacementForecastTargetKey, ...]:
     """Return only current market scope identities needed by raw capture.
 
@@ -2278,8 +2282,23 @@ def replacement_forecast_current_target_keys(
         if isinstance(min_target_date, date)
         else str(min_target_date or datetime.now(tz=timezone.utc).date().isoformat())
     )
-    conn = _connect_read_only(db_path)
+    if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+        raise TimeoutError("current-target key read deadline expired")
+    try:
+        conn = (
+            _connect_read_only(db_path)
+            if deadline_monotonic is None
+            else _connect_read_only(db_path, deadline_monotonic=deadline_monotonic)
+        )
+    except sqlite3.OperationalError as exc:
+        if str(exc).lower() == "db_connection_deadline_expired":
+            raise TimeoutError("current-target key connection deadline expired") from exc
+        raise
     conn.row_factory = sqlite3.Row
+    if deadline_monotonic is not None:
+        conn.set_progress_handler(
+            lambda: int(time.monotonic() >= deadline_monotonic), 1000
+        )
     try:
         conn.execute("PRAGMA query_only=ON")
         tables = _table_names(conn)
@@ -2351,7 +2370,7 @@ def replacement_forecast_current_target_keys(
                 """,
                 (minimum_target_date,),
             ).fetchall()
-        return tuple(
+        keys = tuple(
             ReplacementForecastTargetKey(
                 city=str(row["city"]),
                 target_date=str(row["target_date"]),
@@ -2359,8 +2378,39 @@ def replacement_forecast_current_target_keys(
             )
             for row in rows
         )
+        if not require_local_day_not_ended:
+            return keys
+        reference_now = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        timezone_by_city = _city_timezone_by_name()
+        open_keys: list[ReplacementForecastTargetKey] = []
+        for key in keys:
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                raise TimeoutError("current-target key local-day deadline expired")
+            tz = timezone_by_city.get(key.city)
+            try:
+                ended = bool(tz) and has_city_local_day_ended(
+                    key.target_date, tz, reference_now
+                )
+            except (ValueError, ZoneInfoNotFoundError):
+                ended = False
+            if not ended:
+                open_keys.append(key)
+        return tuple(open_keys)
+    except sqlite3.OperationalError as exc:
+        if (
+            deadline_monotonic is not None
+            and time.monotonic() >= deadline_monotonic
+            and str(exc).lower() == "interrupted"
+        ):
+            raise TimeoutError("current-target key query deadline expired") from exc
+        raise
     finally:
         conn.close()
+
+
+def _check_target_plan_deadline(deadline_monotonic: float | None) -> None:
+    if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+        raise TimeoutError("current-target plan scope deadline expired")
 
 
 def build_replacement_forecast_current_target_plan(
@@ -2372,6 +2422,7 @@ def build_replacement_forecast_current_target_plan(
     now_utc: datetime | None = None,
     required_openmeteo_source_cycle_time: datetime | str | None = None,
     observation_conn: sqlite3.Connection | None = None,
+    deadline_monotonic: float | None = None,
 ) -> ReplacementForecastCurrentTargetPlan:
     """Return current market targets and the replacement artifacts needed for them."""
 
@@ -2404,8 +2455,27 @@ def build_replacement_forecast_current_target_plan(
             day0_observed_extreme_required_count=0,
             rows=(),
         )
-    conn = _connect_read_only(db_path)
+    if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+        raise TimeoutError("current-target plan deadline expired")
+    try:
+        conn = (
+            _connect_read_only(db_path)
+            if deadline_monotonic is None
+            else _connect_read_only(db_path, deadline_monotonic=deadline_monotonic)
+        )
+    except sqlite3.OperationalError as exc:
+        if (
+            deadline_monotonic is not None
+            and time.monotonic() >= deadline_monotonic
+            and str(exc).lower() == "db_connection_deadline_expired"
+        ):
+            raise TimeoutError("current-target plan connection deadline expired") from exc
+        raise
     conn.row_factory = sqlite3.Row
+    if deadline_monotonic is not None:
+        conn.set_progress_handler(
+            lambda: int(time.monotonic() >= deadline_monotonic), 1000
+        )
     release_input_hwm = None
     owned_observation_conn: sqlite3.Connection | None = None
     if observation_conn is None:
@@ -2416,10 +2486,27 @@ def build_replacement_forecast_current_target_plan(
             )
 
             if db_path.resolve() == Path(ZEUS_FORECASTS_DB_PATH).resolve():
-                owned_observation_conn = get_world_connection_read_only()
+                owned_observation_conn = (
+                    get_world_connection_read_only()
+                    if deadline_monotonic is None
+                    else get_world_connection_read_only(
+                        deadline_monotonic=deadline_monotonic
+                    )
+                )
                 owned_observation_conn.row_factory = sqlite3.Row
+                if deadline_monotonic is not None:
+                    owned_observation_conn.set_progress_handler(
+                        lambda: int(time.monotonic() >= deadline_monotonic), 1000
+                    )
                 observation_conn = owned_observation_conn
-        except Exception:
+        except Exception as exc:
+            if (
+                deadline_monotonic is not None
+                and time.monotonic() >= deadline_monotonic
+                and str(exc).lower() == "db_connection_deadline_expired"
+            ):
+                conn.close()
+                raise TimeoutError("world observation read deadline expired") from exc
             observation_conn = None
     try:
         conn.execute("PRAGMA query_only=ON")
@@ -2757,6 +2844,7 @@ def build_replacement_forecast_current_target_plan(
         # timezone/date on one row must not raise out of the whole plan either.
         _open_rows = []
         for row in rows:
+            _check_target_plan_deadline(deadline_monotonic)
             row_city = str(row["city"])
             row_target_date = str(row["target_date"])
             tz = timezone_by_city.get(row_city)
@@ -2774,6 +2862,7 @@ def build_replacement_forecast_current_target_plan(
                     )
             if not ended:
                 _open_rows.append(row)
+        _check_target_plan_deadline(deadline_monotonic)
         rows = _open_rows
         expected_by_metric = {
             metric: expected_replacement_dependency_identity_by_role(metric)
@@ -2825,11 +2914,13 @@ def build_replacement_forecast_current_target_plan(
             },
             decision_time=evaluation_now_utc,
         )
+        _check_target_plan_deadline(deadline_monotonic)
         manifest_coverage_by_scope: dict[
             tuple[str, str, str],
             tuple[int, str | None, str | None],
         ] = {}
         for row in rows:
+            _check_target_plan_deadline(deadline_monotonic)
             city = str(row["city"])
             target_date = str(row["target_date"])
             metric = str(row["temperature_metric"])
@@ -2853,6 +2944,7 @@ def build_replacement_forecast_current_target_plan(
             else:
                 coverage = (1, None, None) if not require_raw_artifacts else (0, None, None)
             manifest_coverage_by_scope[(city, target_date, metric)] = coverage
+        _check_target_plan_deadline(deadline_monotonic)
         dependency_requests = {
             (
                 str(row["city"]),
@@ -2901,6 +2993,7 @@ def build_replacement_forecast_current_target_plan(
             binding_supported=readiness_binding_supported,
         )
         for row in rows:
+            _check_target_plan_deadline(deadline_monotonic)
             metric = str(row["temperature_metric"])
             city = str(row["city"])
             target_date = str(row["target_date"])
@@ -2999,6 +3092,15 @@ def build_replacement_forecast_current_target_plan(
                     ),
                 )
             )
+        _check_target_plan_deadline(deadline_monotonic)
+    except sqlite3.OperationalError as exc:
+        if (
+            deadline_monotonic is not None
+            and time.monotonic() >= deadline_monotonic
+            and str(exc).lower() == "interrupted"
+        ):
+            raise TimeoutError("current-target plan query deadline expired") from exc
+        raise
     finally:
         if release_input_hwm is not None:
             release_input_hwm()
@@ -3020,6 +3122,7 @@ def build_replacement_forecast_current_target_plan(
         missing_fusion_current_values_count=missing_fusion_current_values_count,
         day0_observed_extreme_required_count=day0_observed_extreme_required_count,
     )
+    _check_target_plan_deadline(deadline_monotonic)
     return ReplacementForecastCurrentTargetPlan(
         status=status,
         reason_codes=reasons,

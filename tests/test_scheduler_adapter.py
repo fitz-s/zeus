@@ -2302,7 +2302,7 @@ def test_replacement_maintenance_tick_throttles_timeboxed_repair(monkeypatch) ->
 
     second = ingest_main._replacement_maintenance_tick()
     assert second["status"] == "REPLACEMENT_MAINTENANCE_NOT_DUE"
-    assert calls == [pytest.approx(1.0, abs=0.01)]
+    assert calls == [pytest.approx(0.5, abs=0.01)]
 
 
 def test_replacement_maintenance_uses_one_parent_deadline(monkeypatch) -> None:
@@ -2381,7 +2381,7 @@ def test_replacement_maintenance_uses_one_parent_deadline(monkeypatch) -> None:
 
     result = ingest_main._replacement_maintenance_tick.__wrapped__()
 
-    assert budgets == [("current", 10.0), ("extras", 3.0)]
+    assert budgets == [("current", 5.0), ("extras", 3.0)]
     scopes = (
         ("Munich", "2026-08-13", "high"),
         ("Shanghai", "2026-08-12", "high"),
@@ -2423,12 +2423,12 @@ def test_replacement_maintenance_reserves_held_probability_repair_budget(
     monkeypatch.setattr(
         ingest_main,
         "_all_held_current_target_scopes",
-        lambda: (day0_scope, future_scope),
+        lambda **_kwargs: (day0_scope, future_scope),
     )
     monkeypatch.setattr(
         ingest_main,
         "_held_day0_current_target_scopes",
-        lambda scopes: tuple(scope for scope in scopes if scope == day0_scope),
+        lambda scopes, **_kwargs: tuple(scope for scope in scopes if scope == day0_scope),
     )
     monkeypatch.setattr(
         "src.data.bayes_precision_fusion_download."
@@ -2497,6 +2497,357 @@ def test_replacement_maintenance_reserves_held_probability_repair_budget(
         "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
     )
     assert result["bayes_precision_fusion_extra_rows_written"] == 2
+
+
+@pytest.mark.parametrize("held", (False, True))
+def test_maintenance_preflight_deadline_preserves_bpf_on_every_tick(
+    monkeypatch, tmp_path, held,
+) -> None:
+    """A slow real anchor wrapper cannot starve active BPF in either market lane."""
+    import src.data.replacement_forecast_production as prod
+    import src.ingest_main as ingest_main
+
+    now = [100.0]
+    monkeypatch.setattr(ingest_main.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        ingest_main, "_replacement_current_target_poll_timeout_seconds", lambda _poll: 20.0
+    )
+    monkeypatch.setattr(ingest_main, "_replacement_maintenance_due", lambda: True)
+    monkeypatch.setattr(
+        ingest_main, "_replacement_bpf_no_progress_retry_after_seconds", lambda: 0.0
+    )
+    monkeypatch.setattr(
+        ingest_main, "_record_replacement_bpf_maintenance_progress", lambda _report: None
+    )
+    day0 = ("Amsterdam", "2026-09-23", "high")
+    ordinary = ("Amsterdam", "2026-09-24", "low")
+    monkeypatch.setattr(
+        ingest_main, "_all_held_current_target_scopes",
+        lambda **_kwargs: (day0, ordinary) if held else (),
+    )
+    monkeypatch.setattr(
+        ingest_main, "_held_day0_current_target_scopes",
+        lambda _scopes, **_kwargs: (day0,) if held else (),
+    )
+    monkeypatch.setattr(
+        "src.data.bayes_precision_fusion_download.bayes_precision_fusion_quota_cooldown_seconds",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        prod, "_replacement_forecast_live_materialization_queue_config",
+        lambda: {"forecast_db": tmp_path / "unused.db", "raw_manifest_dir": tmp_path},
+    )
+    probes: list[float] = []
+
+    def _slow_probe(*, deadline_monotonic):
+        probes.append(deadline_monotonic)
+        now[0] = deadline_monotonic
+        raise TimeoutError("probe reached its lane deadline")
+
+    monkeypatch.setattr(prod, "_probe_resolved_available_cycle", _slow_probe)
+    bpf_budgets: list[float] = []
+    monkeypatch.setattr(
+        prod, "_download_bayes_precision_fusion_extra_raw_inputs_if_needed",
+        lambda _cfg, *, max_wall_clock_seconds: (
+            bpf_budgets.append(max_wall_clock_seconds)
+            or {"status": "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS"}
+        ),
+    )
+    monkeypatch.setattr(
+        prod, "_enqueue_fusion_upgrade_reseeds_if_needed",
+        lambda *_args, **_kwargs: {"status": "NO_CHANGE"},
+    )
+    monkeypatch.setattr(
+        prod, "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda *_args, **_kwargs: {"status": "NO_CHANGE"},
+    )
+    monkeypatch.setattr(
+        prod, "_download_bayes_precision_fusion_candidate_accrual_if_needed",
+        lambda *_args, **_kwargs: {"status": "NO_TARGETS"},
+    )
+
+    for _ in range(10):
+        ingest_main._replacement_maintenance_tick.__wrapped__()
+        now[0] += 40.0
+
+    assert len(bpf_budgets) == 10
+    assert all(budget == pytest.approx(8.0) for budget in bpf_budgets)
+    assert len(probes) == (20 if held else 10)
+
+
+def test_held_scope_discovery_interrupts_real_sqlite_query(monkeypatch, tmp_path) -> None:
+    import sqlite3
+    import time
+
+    from src.data import replacement_forecast_seed_discovery as discovery
+
+    trade_db = tmp_path / "slow-held.db"
+    with sqlite3.connect(trade_db) as conn:
+        conn.execute(
+            "CREATE VIEW position_current AS WITH RECURSIVE seq(n) AS "
+            "(SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<1000000) "
+            "SELECT 'Amsterdam' AS city, '2026-09-25' AS target_date, "
+            "'high' AS temperature_metric, 'active' AS phase FROM seq"
+        )
+    monkeypatch.setattr(discovery, "_zeus_trade_db_path", lambda: trade_db)
+
+    with pytest.raises(TimeoutError, match="held-family discovery deadline expired"):
+        discovery.held_position_family_priorities(
+            deadline_monotonic=time.monotonic() + 0.02
+        )
+
+
+def test_held_quota_revalidation_uses_child_deadline_before_bpf(
+    monkeypatch, tmp_path,
+) -> None:
+    from datetime import datetime, timezone
+
+    import src.data.replacement_forecast_production as prod
+    import src.ingest_main as ingest_main
+
+    now = [100.0]
+    monkeypatch.setattr(ingest_main.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        ingest_main, "_replacement_current_target_poll_timeout_seconds", lambda _poll: 20.0
+    )
+    monkeypatch.setattr(ingest_main, "_replacement_maintenance_due", lambda: True)
+    monkeypatch.setattr(
+        ingest_main, "_replacement_bpf_no_progress_retry_after_seconds", lambda: 0.0
+    )
+    monkeypatch.setattr(
+        ingest_main, "_record_replacement_bpf_maintenance_progress", lambda _report: None
+    )
+    scopes = (
+        ("Amsterdam", "2026-09-23", "high"),
+        ("Amsterdam", "2026-09-24", "low"),
+    )
+    monkeypatch.setattr(
+        ingest_main, "_all_held_current_target_scopes", lambda **_kwargs: scopes
+    )
+    monkeypatch.setattr(
+        ingest_main, "_held_day0_current_target_scopes",
+        lambda _scopes, **_kwargs: scopes[:1],
+    )
+    monkeypatch.setattr(
+        "src.data.bayes_precision_fusion_download.bayes_precision_fusion_quota_cooldown_seconds",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        prod, "_replacement_forecast_live_materialization_queue_config",
+        lambda: {"forecast_db": tmp_path / "unused.db", "raw_manifest_dir": tmp_path},
+    )
+    cycle = datetime(2026, 9, 23, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(prod, "_probe_resolved_available_cycle", lambda **_kwargs: cycle)
+    monkeypatch.setattr(
+        prod, "_max_downloaded_current_target_cycle", lambda *_args, **_kwargs: None
+    )
+    revalidations: list[float] = []
+
+    def _slow_held(*, deadline_monotonic):
+        revalidations.append(deadline_monotonic)
+        now[0] = deadline_monotonic
+        raise TimeoutError("bounded canonical held read")
+
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
+        _slow_held,
+    )
+    bpf_budgets: list[float] = []
+    monkeypatch.setattr(
+        prod, "_download_bayes_precision_fusion_extra_raw_inputs_if_needed",
+        lambda _cfg, *, max_wall_clock_seconds: (
+            bpf_budgets.append(max_wall_clock_seconds)
+            or {"status": "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS"}
+        ),
+    )
+    monkeypatch.setattr(
+        prod, "_enqueue_fusion_upgrade_reseeds_if_needed",
+        lambda *_args, **_kwargs: {"status": "NO_CHANGE"},
+    )
+    monkeypatch.setattr(
+        prod, "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda *_args, **_kwargs: {"status": "NO_CHANGE"},
+    )
+    monkeypatch.setattr(
+        prod, "_download_bayes_precision_fusion_candidate_accrual_if_needed",
+        lambda *_args, **_kwargs: {"status": "NO_TARGETS"},
+    )
+
+    ingest_main._replacement_maintenance_tick.__wrapped__()
+    assert revalidations == [106.0, 112.0]
+    assert bpf_budgets == [8.0]
+
+
+def test_anchor_plan_stops_at_slow_manifest_scope_before_bpf(
+    monkeypatch, tmp_path,
+) -> None:
+    from datetime import datetime, timezone
+    import sqlite3
+
+    import scripts.download_replacement_forecast_current_targets as downloader
+    import src.data.replacement_forecast_current_target_plan as plan_mod
+    import src.data.replacement_forecast_production as prod
+    import src.ingest_main as ingest_main
+    forecast_db = tmp_path / "forecast.db"
+    with sqlite3.connect(forecast_db) as conn:
+        conn.execute(
+            "CREATE TABLE market_events(city TEXT,target_date TEXT,"
+            "temperature_metric TEXT,token_id TEXT,range_label TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE forecast_posteriors(city TEXT,target_date TEXT,"
+            "temperature_metric TEXT,source_id TEXT,data_version TEXT,"
+            "training_allowed INTEGER,runtime_layer TEXT,q_lcb_json TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE readiness_state(strategy_key TEXT,provenance_json TEXT,"
+            "status TEXT,expires_at TEXT,dependency_json TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE raw_forecast_artifacts(source_id TEXT,data_version TEXT,"
+            "artifact_path TEXT,product_id TEXT,product_metadata_json TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO market_events VALUES(?,?,?,?,?)",
+            [
+                (city, "2026-06-09", "high", "token", "range")
+                for city in ("Amsterdam", "London", "Paris")
+            ],
+        )
+    now = [100.0]
+    monkeypatch.setattr(ingest_main.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        ingest_main, "_replacement_current_target_poll_timeout_seconds", lambda _poll: 20.0
+    )
+    monkeypatch.setattr(ingest_main, "_replacement_maintenance_due", lambda: True)
+    monkeypatch.setattr(ingest_main, "_all_held_current_target_scopes", lambda **_kwargs: ())
+    monkeypatch.setattr(
+        ingest_main, "_replacement_bpf_no_progress_retry_after_seconds", lambda: 0.0
+    )
+    monkeypatch.setattr(
+        ingest_main, "_record_replacement_bpf_maintenance_progress", lambda _report: None
+    )
+    monkeypatch.setattr(
+        "src.data.bayes_precision_fusion_download.bayes_precision_fusion_quota_cooldown_seconds",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        prod, "_replacement_forecast_live_materialization_queue_config",
+        lambda: {"forecast_db": forecast_db, "raw_manifest_dir": tmp_path},
+    )
+    cycle = datetime(2026, 6, 8, 18, tzinfo=timezone.utc)
+    monkeypatch.setattr(prod, "_probe_resolved_available_cycle", lambda **_kwargs: cycle)
+    monkeypatch.setattr(
+        prod, "_max_downloaded_current_target_cycle", lambda *_args, **_kwargs: None
+    )
+    real_plan = plan_mod.build_replacement_forecast_current_target_plan
+    monkeypatch.setattr(
+        plan_mod,
+        "build_replacement_forecast_current_target_plan",
+        lambda db, **kwargs: real_plan(
+            db,
+            now_utc=datetime(2026, 6, 7, 12, tzinfo=timezone.utc),
+            **kwargs,
+        ),
+    )
+    monkeypatch.setattr(
+        plan_mod, "prime_frozen_replacement_artifact_hwm",
+        lambda *_args, **_kwargs: lambda: None,
+    )
+    manifest_scopes: list[str] = []
+
+    def _slow_manifest(_manifests, *, target_date, **_kwargs):
+        manifest_scopes.append(target_date)
+        now[0] = 112.0
+        return 0, None, None
+
+    monkeypatch.setattr(plan_mod, "_openmeteo_manifest_coverage", _slow_manifest)
+    writes: list[object] = []
+    monkeypatch.setattr(
+        downloader,
+        "download_current_target_openmeteo_inputs",
+        lambda **kwargs: writes.append(kwargs) or {"status": "DOWNLOADED"},
+    )
+    bpf_budgets: list[float] = []
+    monkeypatch.setattr(
+        prod, "_download_bayes_precision_fusion_extra_raw_inputs_if_needed",
+        lambda _cfg, *, max_wall_clock_seconds: (
+            bpf_budgets.append(max_wall_clock_seconds)
+            or {"status": "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS"}
+        ),
+    )
+    monkeypatch.setattr(
+        prod, "_enqueue_fusion_upgrade_reseeds_if_needed",
+        lambda *_args, **_kwargs: {"status": "NO_CHANGE"},
+    )
+    monkeypatch.setattr(
+        prod, "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda *_args, **_kwargs: {"status": "NO_CHANGE"},
+    )
+    monkeypatch.setattr(
+        prod, "_download_bayes_precision_fusion_candidate_accrual_if_needed",
+        lambda *_args, **_kwargs: {"status": "NO_TARGETS"},
+    )
+
+    report = ingest_main._replacement_maintenance_tick.__wrapped__()
+    assert manifest_scopes == ["2026-06-09"]
+    assert report["current_target_download"]["status"] == "CURRENT_TARGET_DOWNLOAD_TIMEOUT"
+    assert writes == []
+    assert bpf_budgets == [8.0]
+
+
+def test_attempted_bpf_transport_without_commit_does_not_wake_source(
+    monkeypatch,
+) -> None:
+    import src.data.replacement_forecast_production as prod
+    import src.ingest_main as ingest_main
+
+    monkeypatch.setattr(ingest_main, "_replacement_maintenance_due", lambda: True)
+    monkeypatch.setattr(ingest_main, "_all_held_current_target_scopes", lambda **_kwargs: ())
+    monkeypatch.setattr(
+        ingest_main, "_replacement_bpf_no_progress_retry_after_seconds", lambda: 0.0
+    )
+    monkeypatch.setattr(
+        ingest_main, "_record_replacement_bpf_maintenance_progress", lambda _report: None
+    )
+    monkeypatch.setattr(
+        "src.data.bayes_precision_fusion_download.bayes_precision_fusion_quota_cooldown_seconds",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        prod, "_replacement_forecast_live_materialization_queue_config", lambda: {}
+    )
+    monkeypatch.setattr(
+        prod, "_download_replacement_forecast_current_targets_if_needed",
+        lambda *_args, **_kwargs: {"status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS"},
+    )
+    monkeypatch.setattr(
+        prod, "_download_bayes_precision_fusion_extra_raw_inputs_if_needed",
+        lambda *_args, **_kwargs: {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+            "attempted_target_group_count": 1,
+            "written_row_count": 0,
+            "committed_families": (),
+        },
+    )
+    scoped_wakes: list[object] = []
+
+    def _reseed(_cfg, **kwargs):
+        if kwargs.get("scopes"):
+            scoped_wakes.append(kwargs["scopes"])
+        return {"status": "NO_CHANGE", "seeds_enqueued": 0}
+
+    monkeypatch.setattr(prod, "_enqueue_fusion_upgrade_reseeds_if_needed", _reseed)
+    monkeypatch.setattr(prod, "_enqueue_cycle_advance_reseeds_if_needed", _reseed)
+    monkeypatch.setattr(
+        prod, "_download_bayes_precision_fusion_candidate_accrual_if_needed",
+        lambda *_args, **_kwargs: {"status": "NO_TARGETS"},
+    )
+
+    report = ingest_main._replacement_maintenance_tick.__wrapped__()
+    assert report["bayes_precision_fusion_extra_rows_written"] == 0
+    assert "committed_family_count" not in report
+    assert scoped_wakes == []
 
 
 def test_replacement_maintenance_does_not_publish_failsoft_committed_reseed(
@@ -2761,12 +3112,12 @@ def test_replacement_maintenance_repairs_held_anchor_during_broad_cooldown(
     monkeypatch.setattr(
         ingest_main,
         "_all_held_current_target_scopes",
-        lambda: (past_scope, held_scope),
+        lambda **_kwargs: (past_scope, held_scope),
     )
     monkeypatch.setattr(
         ingest_main,
         "_held_day0_current_target_scopes",
-        lambda scopes: scopes,
+        lambda scopes, **_kwargs: scopes,
     )
     monkeypatch.setattr(
         "src.data.bayes_precision_fusion_download."
@@ -2876,12 +3227,12 @@ def test_replacement_maintenance_partitions_all_held_scopes_by_quota_lane(
     monkeypatch.setattr(
         ingest_main,
         "_all_held_current_target_scopes",
-        lambda: (day0_scope, future_scope),
+        lambda **_kwargs: (day0_scope, future_scope),
     )
     monkeypatch.setattr(
         ingest_main,
         "_held_day0_current_target_scopes",
-        lambda scopes: tuple(scope for scope in scopes if scope == day0_scope),
+        lambda scopes, **_kwargs: tuple(scope for scope in scopes if scope == day0_scope),
     )
     monkeypatch.setattr(
         "src.data.bayes_precision_fusion_download."
@@ -3080,7 +3431,7 @@ def test_replacement_maintenance_runs_candidate_accrual_after_committed_reseeds(
     calls: list[str] = []
     monkeypatch.setattr(ingest_main.time, "monotonic", lambda: 100.0)
     monkeypatch.setattr(ingest_main, "_REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC", 0.0)
-    monkeypatch.setattr(ingest_main, "_all_held_current_target_scopes", lambda: ())
+    monkeypatch.setattr(ingest_main, "_all_held_current_target_scopes", lambda **_kwargs: ())
     monkeypatch.setattr(ingest_main, "_replacement_bpf_no_progress_retry_after_seconds", lambda: 0)
     monkeypatch.setattr(ingest_main, "_record_replacement_bpf_maintenance_progress", lambda _report: None)
     monkeypatch.setattr(

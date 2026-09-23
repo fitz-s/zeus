@@ -339,9 +339,9 @@ def _redirect_health(tmp_path, monkeypatch):
 @pytest.fixture
 def _cfg_with_db(tmp_path, monkeypatch):
     db = _make_forecast_db(tmp_path)
-    monkeypatch.setattr(prod, "_probe_resolved_available_cycle", lambda: _CYCLE)
+    monkeypatch.setattr(prod, "_probe_resolved_available_cycle", lambda **_kwargs: _CYCLE)
     monkeypatch.setattr(
-        prod, "_probe_resolved_bayes_precision_fusion_extras_cycle", lambda: _CYCLE
+        prod, "_probe_resolved_bayes_precision_fusion_extras_cycle", lambda **_kwargs: _CYCLE
     )
     monkeypatch.setattr(
         "src.data.replacement_forecast_current_target_plan.build_replacement_forecast_current_target_plan",
@@ -2345,19 +2345,24 @@ def _wire_poll(monkeypatch, tmp_path, *, download_report):
     import src.data.replacement_cycle_availability as rca
     import src.data.bayes_precision_fusion_download as dl_mod
 
+
     db = _make_forecast_db(tmp_path)
     # Leg-fetch no-op: the anchor is already held at _CYCLE so fetch_*_cycle resolves to None
     # (branch A False) and the extras decision falls to branch B (the coverage gate).
     monkeypatch.setattr(rca, "probe_anchor_available_any", lambda c, **k: c <= _CYCLE)
     monkeypatch.setattr(rca, "probe_openmeteo_single_run_available", lambda c, **k: c <= _CYCLE)
     monkeypatch.setattr(prod, "_per_leg_downloaded_cycle", lambda d, sid: _CYCLE)
-    monkeypatch.setattr(prod, "_probe_resolved_available_cycle", lambda: _CYCLE)
+    monkeypatch.setattr(prod, "_probe_resolved_available_cycle", lambda **_kwargs: _CYCLE)
     monkeypatch.setattr(
-        prod, "_probe_resolved_bayes_precision_fusion_extras_cycle", lambda: _CYCLE
+        prod, "_probe_resolved_bayes_precision_fusion_extras_cycle", lambda **_kwargs: _CYCLE
     )
     monkeypatch.setattr(
         "src.data.replacement_forecast_current_target_plan.build_replacement_forecast_current_target_plan",
         lambda *a, **k: _plan_full_two_leads(),
+    )
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_current_target_plan.replacement_forecast_current_target_keys",
+        lambda *a, **k: _plan_full_two_leads().rows,
     )
     monkeypatch.setitem(_cfg.settings["edli"], "replacement_0_1_bayes_precision_fusion_capture_enabled", True)
     monkeypatch.setattr(

@@ -278,6 +278,7 @@ def _day0_priority_scopes() -> frozenset[tuple[str, str]]:
 
 def _held_day0_current_target_scopes(
     scopes: tuple[tuple[str, str, str], ...],
+    *, deadline_monotonic: float | None = None,
 ) -> tuple[tuple[str, str, str], ...]:
     """Exact current-target scopes allowed to borrow the held Day0 reserve."""
 
@@ -286,7 +287,13 @@ def _held_day0_current_target_scopes(
             held_position_family_priorities,
         )
 
-        priorities = held_position_family_priorities()
+        priorities = (
+            held_position_family_priorities()
+            if deadline_monotonic is None
+            else held_position_family_priorities(deadline_monotonic=deadline_monotonic)
+        )
+    except TimeoutError:
+        raise
     except Exception as exc:  # noqa: BLE001 - unreadable capital truth stays ordinary
         logger.warning(
             "HELD_DAY0_CURRENT_TARGET_SCOPE_READ_FAILED exc=%s: %s",
@@ -297,7 +304,9 @@ def _held_day0_current_target_scopes(
     return tuple(scope for scope in scopes if priorities.get(scope) == 0)
 
 
-def _all_held_current_target_scopes() -> tuple[tuple[str, str, str], ...]:
+def _all_held_current_target_scopes(
+    *, deadline_monotonic: float | None = None
+) -> tuple[tuple[str, str, str], ...]:
     """Every canonical open-exposure family, in deterministic order."""
 
     try:
@@ -305,7 +314,13 @@ def _all_held_current_target_scopes() -> tuple[tuple[str, str, str], ...]:
             held_position_family_priorities,
         )
 
-        priorities = held_position_family_priorities()
+        priorities = (
+            held_position_family_priorities()
+            if deadline_monotonic is None
+            else held_position_family_priorities(deadline_monotonic=deadline_monotonic)
+        )
+    except TimeoutError:
+        raise
     except Exception as exc:  # noqa: BLE001 - missing proof cannot widen quota scope
         logger.warning(
             "HELD_CURRENT_TARGET_UNIVERSE_READ_FAILED exc=%s: %s",
@@ -971,7 +986,7 @@ def _replacement_current_target_poll_timeout_seconds(poll_seconds: int | None = 
     return max(1.0, min(requested, 60.0))
 
 
-_REPLACEMENT_HELD_PROBABILITY_REPAIR_RESERVE_SECONDS = 8.0
+_REPLACEMENT_BPF_MAINTENANCE_RESERVE_SECONDS = 8.0
 
 
 def _next_replacement_held_partition_order(
@@ -2800,36 +2815,44 @@ def _replacement_maintenance_tick():
         _replacement_forecast_live_materialization_queue_config,
     )
 
-    cfg = _replacement_forecast_live_materialization_queue_config()
-    cooldown_seconds = bayes_precision_fusion_quota_cooldown_seconds()
-    held_scopes = _all_held_current_target_scopes()
     timeout_s = _replacement_current_target_poll_timeout_seconds(
         _replacement_availability_poll_seconds()
     )
+    deadline_monotonic = time.monotonic() + timeout_s
+
+    def _remaining_budget() -> float:
+        return max(0.0, deadline_monotonic - time.monotonic())
+
+    cfg = _replacement_forecast_live_materialization_queue_config()
+    cooldown_seconds = bayes_precision_fusion_quota_cooldown_seconds()
     broad_due = _replacement_maintenance_due()
     bpf_retry_after = (
         _replacement_bpf_no_progress_retry_after_seconds()
         if broad_due and cooldown_seconds <= 0
         else 0
     )
-    # SCOPE: one due maintenance tick with canonical held exposure and an
-    # available BPF transport. DRAIN: reserve part of the existing parent
-    # deadline for the BPF extras downloader, whose first batch is the held
-    # families missing current q. RESET: every tick recomputes exposure,
-    # cooldown, and backoff; no held debt or unavailable BPF returns the full
-    # parent budget to anchor repair.
+    # Do not let the trade-DB discovery consume the entire source maintenance
+    # clock. Its failure is unknown exposure, not proof there is no exposure.
+    held_scopes_unresolved = False
+    try:
+        held_scopes = _all_held_current_target_scopes(
+            deadline_monotonic=min(deadline_monotonic, time.monotonic() + 2.0)
+        )
+    except TimeoutError:
+        held_scopes = ()
+        held_scopes_unresolved = True
+    # SCOPE: one due maintenance tick with available BPF transport, including
+    # unheld market targets. DRAIN: reserve part of the existing parent clock
+    # for missing current-q inputs. RESET: each tick recomputes cooldown and
+    # backoff; unavailable BPF returns its share to anchor repair.
     bpf_repair_reserve_s = (
         min(
-            _REPLACEMENT_HELD_PROBABILITY_REPAIR_RESERVE_SECONDS,
+            _REPLACEMENT_BPF_MAINTENANCE_RESERVE_SECONDS,
             timeout_s / 2.0,
         )
-        if held_scopes and broad_due and cooldown_seconds <= 0 and bpf_retry_after <= 0
+        if broad_due and cooldown_seconds <= 0 and bpf_retry_after <= 0
         else 0.0
     )
-    deadline_monotonic = time.monotonic() + timeout_s
-
-    def _remaining_budget() -> float:
-        return max(0.0, deadline_monotonic - time.monotonic())
 
     held_report = None
     held_ordinary_report = None
@@ -2840,7 +2863,17 @@ def _replacement_maintenance_tick():
         # DRAIN: each maintenance tick repairs their current anchor and enqueues
         # targeted materialization below, even without a new source-clock edge.
         # RESET: current materializable anchor coverage plus current reseed markers.
-        critical_scopes = _held_day0_current_target_scopes(held_scopes)
+        try:
+            critical_scopes = _held_day0_current_target_scopes(
+                held_scopes,
+                deadline_monotonic=min(
+                    deadline_monotonic - bpf_repair_reserve_s,
+                    time.monotonic() + 2.0,
+                ),
+            )
+        except TimeoutError:
+            critical_scopes = ()
+            held_scopes_unresolved = True
         critical_set = set(critical_scopes)
         ordinary_scopes = tuple(
             scope for scope in held_scopes if scope not in critical_set
@@ -2857,7 +2890,10 @@ def _replacement_maintenance_tick():
             ordinary_scopes,
         ):
             kwargs: dict[str, object] = {
-                "max_wall_clock_seconds": held_lane_budget,
+                "max_wall_clock_seconds": min(
+                    held_lane_budget,
+                    max(0.0, _remaining_budget() - bpf_repair_reserve_s),
+                ),
                 "required_scopes": scopes,
             }
             # Every canonical open position is capital-critical. The phase
@@ -3003,6 +3039,8 @@ def _replacement_maintenance_tick():
             download_report
         ),
     }
+    if held_scopes_unresolved:
+        report["held_scope_discovery_status"] = "TIMEBOXED_UNKNOWN"
     if held_report is not None:
         report["held_current_target_download"] = (
             _compact_replacement_current_target_report(held_report)

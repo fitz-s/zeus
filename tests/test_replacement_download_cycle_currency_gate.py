@@ -25,6 +25,7 @@ import hashlib
 import multiprocessing
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -1969,7 +1970,7 @@ def _wire(monkeypatch, *, plan: _PlanStub, calls: list):
     import src.data.replacement_forecast_production as production
 
     monkeypatch.setattr(
-        production, "_probe_resolved_available_cycle", lambda: AVAILABLE_CYCLE
+        production, "_probe_resolved_available_cycle", lambda **_kwargs: AVAILABLE_CYCLE
     )
 
     def _fake_download(**kwargs):
@@ -2550,7 +2551,7 @@ def test_priority_quota_context_propagates_into_anchor_worker(
     assert observed == [True]
 
 
-def test_current_target_budget_starts_after_probe_and_plan(tmp_path, monkeypatch) -> None:
+def test_current_target_budget_includes_probe_and_plan(tmp_path, monkeypatch) -> None:
     db = _make_db(tmp_path, {
         "ecmwf_aifs_ens": STALE_CYCLE_ISO,
         "openmeteo_ecmwf_ifs_9km": STALE_CYCLE_ISO,
@@ -2561,7 +2562,7 @@ def test_current_target_budget_starts_after_probe_and_plan(tmp_path, monkeypatch
     import src.data.replacement_forecast_current_target_plan as plan_mod
     import src.data.replacement_forecast_production as production
 
-    def _probe():
+    def _probe(**_kwargs):
         clock[0] = 100.0
         return AVAILABLE_CYCLE
 
@@ -2582,14 +2583,110 @@ def test_current_target_budget_starts_after_probe_and_plan(tmp_path, monkeypatch
 
     monkeypatch.setattr(dl, "download_current_target_raw_inputs", _download)
 
-    report = _download_replacement_forecast_current_targets_if_needed(
-        _cfg(db, tmp_path),
-        max_wall_clock_seconds=5.0,
+    with pytest.raises(TimeoutError, match="preflight deadline expired"):
+        _download_replacement_forecast_current_targets_if_needed(
+            _cfg(db, tmp_path),
+            max_wall_clock_seconds=5.0,
+        )
+    assert calls == []
+
+
+def test_zero_source_budget_returns_before_provider_probe(tmp_path, monkeypatch) -> None:
+    import src.data.replacement_forecast_production as production
+
+    def _unexpected_probe(**_kwargs):
+        raise AssertionError("zero budget must not probe provider")
+
+    monkeypatch.setattr(production, "_probe_resolved_available_cycle", _unexpected_probe)
+    monkeypatch.setattr(
+        production, "_probe_resolved_bayes_precision_fusion_extras_cycle",
+        _unexpected_probe,
+    )
+    anchor = _download_replacement_forecast_current_targets_if_needed(
+        _cfg(tmp_path / "unused.db", tmp_path), max_wall_clock_seconds=0.0
+    )
+    bpf = production._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+        {"forecast_db": tmp_path / "unused.db"}, max_wall_clock_seconds=0.0
+    )
+    assert anchor["status"] == "CURRENT_TARGET_RAW_INPUTS_TIMEBOXED_INCOMPLETE"
+    assert bpf["status"] == "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE"
+
+
+def test_current_target_plan_interrupts_real_sqlite_query_at_deadline(tmp_path) -> None:
+    from src.data.replacement_forecast_current_target_plan import (
+        build_replacement_forecast_current_target_plan,
     )
 
-    assert report["status"] == "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED"
-    assert len(calls) == 1
-    assert calls[0]["max_wall_clock_seconds"] == 5.0
+    db = tmp_path / "slow-plan.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "CREATE VIEW market_events AS WITH RECURSIVE seq(n) AS "
+            "(SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<1000000) "
+            "SELECT 'Amsterdam' AS city, '2026-09-25' AS target_date, "
+            "'high' AS temperature_metric, 'token' AS token_id, "
+            "'1' AS range_label FROM seq"
+        )
+        conn.execute(
+            "CREATE TABLE forecast_posteriors(city TEXT,target_date TEXT,"
+            "temperature_metric TEXT,source_id TEXT,data_version TEXT,"
+            "training_allowed INTEGER,runtime_layer TEXT,q_lcb_json TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE readiness_state(strategy_key TEXT,provenance_json TEXT,"
+            "status TEXT,expires_at TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE raw_forecast_artifacts(source_id TEXT,data_version TEXT,"
+            "artifact_path TEXT,artifact_metadata_json TEXT)"
+        )
+
+    with pytest.raises(TimeoutError, match="query deadline expired"):
+        build_replacement_forecast_current_target_plan(
+            db,
+            deadline_monotonic=time.monotonic() + 0.02,
+        )
+
+
+def test_lightweight_keys_keep_western_day0_and_exclude_ended_eastern_day(
+    tmp_path,
+) -> None:
+    from src.data.replacement_forecast_current_target_plan import (
+        _default_min_target_date,
+        replacement_forecast_current_target_keys,
+    )
+
+    db = tmp_path / "local-day-keys.db"
+    now = datetime(2026, 9, 24, 1, tzinfo=timezone.utc)
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "CREATE TABLE market_events(city TEXT,target_date TEXT,"
+            "temperature_metric TEXT,token_id TEXT,range_label TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO market_events VALUES(?,?,?,?,?)",
+            [
+                (city, target_date, metric, "token", "range")
+                for city in ("Dallas", "Amsterdam")
+                for target_date in ("2026-09-23", "2026-09-24")
+                for metric in ("high", "low")
+            ],
+        )
+    keys = replacement_forecast_current_target_keys(
+        db,
+        min_target_date=_default_min_target_date(now),
+        now_utc=now,
+        require_local_day_not_ended=True,
+        deadline_monotonic=time.monotonic() + 1.0,
+    )
+    assert {(row.city, row.target_date, row.temperature_metric) for row in keys} == {
+        (city, target_date, metric)
+        for city, target_date in (
+            ("Dallas", "2026-09-23"),
+            ("Dallas", "2026-09-24"),
+            ("Amsterdam", "2026-09-24"),
+        )
+        for metric in ("high", "low")
+    }
 
 
 def test_timeboxed_current_target_slices_reuse_cycle_bucket_pool(
@@ -2616,7 +2713,7 @@ def test_timeboxed_current_target_slices_reuse_cycle_bucket_pool(
     pool = _Pool()
     production._close_current_target_bucket_pool()
     monkeypatch.setattr(
-        production, "_probe_resolved_available_cycle", lambda: AVAILABLE_CYCLE
+        production, "_probe_resolved_available_cycle", lambda **_kwargs: AVAILABLE_CYCLE
     )
     monkeypatch.setattr(
         plan_mod,
@@ -2683,7 +2780,7 @@ def test_scoped_success_does_not_discard_broad_timebox_bucket_pool(
 
     production._close_current_target_bucket_pool()
     monkeypatch.setattr(
-        production, "_probe_resolved_available_cycle", lambda: AVAILABLE_CYCLE
+        production, "_probe_resolved_available_cycle", lambda **_kwargs: AVAILABLE_CYCLE
     )
     monkeypatch.setattr(
         plan_mod,
@@ -2752,7 +2849,7 @@ def test_cycle_change_closes_timeboxed_pool_before_zero_budget_return(
     assert production._current_target_bucket_pool(AVAILABLE_CYCLE) is old_pool
     next_cycle = AVAILABLE_CYCLE.replace(hour=6)
     monkeypatch.setattr(
-        production, "_probe_resolved_available_cycle", lambda: next_cycle
+        production, "_probe_resolved_available_cycle", lambda **_kwargs: next_cycle
     )
     report = _download_replacement_forecast_current_targets_if_needed(
         _cfg(db, tmp_path),
@@ -2786,7 +2883,7 @@ def test_preflight_error_closes_timeboxed_cycle_pool(tmp_path, monkeypatch) -> N
     )
     assert production._current_target_bucket_pool(AVAILABLE_CYCLE) is pool
     monkeypatch.setattr(
-        production, "_probe_resolved_available_cycle", lambda: AVAILABLE_CYCLE
+        production, "_probe_resolved_available_cycle", lambda **_kwargs: AVAILABLE_CYCLE
     )
     monkeypatch.setattr(
         plan_mod,
@@ -2911,7 +3008,7 @@ def test_partial_current_cycle_manifests_do_not_skip_download(tmp_path, monkeypa
         return stale_non_cycle_plan
 
     monkeypatch.setattr(plan_mod, "build_replacement_forecast_current_target_plan", _plan_builder)
-    monkeypatch.setattr(production, "_probe_resolved_available_cycle", lambda: AVAILABLE_CYCLE)
+    monkeypatch.setattr(production, "_probe_resolved_available_cycle", lambda **_kwargs: AVAILABLE_CYCLE)
 
     def _fake_download(**kwargs):
         calls.append(kwargs)

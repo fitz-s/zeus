@@ -615,17 +615,23 @@ def _replacement_forecast_live_materialization_queue_config() -> dict[str, objec
 _CURRENT_TARGET_ARTIFACT_SOURCE_IDS = ("openmeteo_ecmwf_ifs_9km",)
 
 
-def _max_downloaded_current_target_cycle(forecast_db: Path) -> datetime | None:
+def _max_downloaded_current_target_cycle(
+    forecast_db: Path, *, deadline_monotonic: float | None = None
+) -> datetime | None:
     """High-water mark of downloaded current-target raw-input cycles, or None when unknown.
 
     None (no rows for either source, or any read error) means "cannot prove currency" ->
     the caller treats the cycle as stale and fires the idempotent download. The currency
     check must FAIL OPEN toward downloading; it must never freeze freshness.
     """
-    from src.state.db import _connect  # noqa: PLC0415
+    from src.state.db import _connect_read_only  # noqa: PLC0415
 
     try:
-        conn = _connect(Path(forecast_db))
+        conn = _connect_read_only(Path(forecast_db), deadline_monotonic=deadline_monotonic)
+        if deadline_monotonic is not None:
+            conn.set_progress_handler(
+                lambda: int(time.monotonic() >= deadline_monotonic), 1000
+            )
         try:
             maxes: list[datetime] = []
             for sid in _CURRENT_TARGET_ARTIFACT_SOURCE_IDS:
@@ -642,11 +648,26 @@ def _max_downloaded_current_target_cycle(forecast_db: Path) -> datetime | None:
             return min(maxes)
         finally:
             conn.close()
-    except Exception:
+    except TimeoutError:
+        raise
+    except Exception as exc:
+        if (
+            deadline_monotonic is not None
+            and time.monotonic() >= deadline_monotonic
+            and str(exc).lower() in {"interrupted", "db_connection_deadline_expired"}
+        ):
+            raise TimeoutError("current-target cycle read deadline expired") from exc
         return None
 
 
-def _probe_resolved_available_cycle() -> datetime | None:
+def _check_source_preflight_deadline(deadline_monotonic: float | None) -> None:
+    if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+        raise TimeoutError("replacement source preflight deadline expired")
+
+
+def _probe_resolved_available_cycle(
+    *, deadline_monotonic: float | None = None
+) -> datetime | None:
     """SINGLE run-selection authority for every production download lane (K4.0b(a)).
 
     The fetchable cycle is whatever the anchor provider probes CONFIRM is published — never
@@ -664,11 +685,14 @@ def _probe_resolved_available_cycle() -> datetime | None:
 
     availability = resolve_provider_anchor_cycle_availability(
         datetime.now(timezone.utc),
+        deadline_monotonic=deadline_monotonic,
     )
     return newest_complete_cycle(availability)
 
 
-def _probe_resolved_bayes_precision_fusion_extras_cycle() -> datetime | None:
+def _probe_resolved_bayes_precision_fusion_extras_cycle(
+    *, deadline_monotonic: float | None = None
+) -> datetime | None:
     """Newest provider-confirmed cycle for a BPF download attempt.
 
     Availability preflight and data capture must not both spend single-runs
@@ -676,13 +700,14 @@ def _probe_resolved_bayes_precision_fusion_extras_cycle() -> datetime | None:
     itself proves single-runs transport availability and durably records 400,
     cooldown, coverage, and written rows. No failed download becomes data.
     """
-    return _probe_resolved_available_cycle()
+    return _probe_resolved_available_cycle(deadline_monotonic=deadline_monotonic)
 
 
 def _critical_scopes_missing_current_anchor(
     forecast_db: Path,
     scopes: Sequence[tuple[str, str, str]],
     cycle: datetime,
+    *, deadline_monotonic: float | None = None,
 ) -> tuple[tuple[str, str, str], ...] | None:
     """Return exact scoped targets without materializable canonical raw at ``cycle``."""
 
@@ -693,15 +718,20 @@ def _critical_scopes_missing_current_anchor(
         _current_target_payload_file_materializable,
     )
     from src.config import cities_by_name  # noqa: PLC0415
-    from src.state.db import _connect  # noqa: PLC0415
+    from src.state.db import _connect_read_only  # noqa: PLC0415
 
     try:
-        conn = _connect(forecast_db, write_class=None)
+        conn = _connect_read_only(forecast_db, deadline_monotonic=deadline_monotonic)
+        if deadline_monotonic is not None:
+            conn.set_progress_handler(
+                lambda: int(time.monotonic() >= deadline_monotonic), 1000
+            )
         conn.execute("PRAGMA query_only=ON")
         try:
             missing: list[tuple[str, str, str]] = []
             cycle_iso = cycle.astimezone(timezone.utc).isoformat()
             for city, target_date, metric in scopes:
+                _check_source_preflight_deadline(deadline_monotonic)
                 identity = expected_replacement_dependency_identity_by_role(metric)[
                     "openmeteo_ifs9_anchor"
                 ]
@@ -741,10 +771,19 @@ def _critical_scopes_missing_current_anchor(
                     expected_byte_size=int(row[2]),
                 ):
                     missing.append((city, target_date, metric))
+                _check_source_preflight_deadline(deadline_monotonic)
             return tuple(missing)
         finally:
             conn.close()
-    except Exception:
+    except TimeoutError:
+        raise
+    except Exception as exc:
+        if (
+            deadline_monotonic is not None
+            and time.monotonic() >= deadline_monotonic
+            and str(exc).lower() in {"interrupted", "db_connection_deadline_expired"}
+        ):
+            raise TimeoutError("scoped anchor read deadline expired") from exc
         return None
 
 
@@ -796,12 +835,28 @@ def _download_replacement_forecast_current_targets_if_needed(
     quota_critical: bool = False,
     quota_priority: bool = False,
 ) -> dict[str, object] | None:
+    # SCOPE: this anchor slice, including probe and plan. DRAIN: retry in the
+    # next maintenance tick with a fresh lane budget. RESET: each invocation
+    # measures its own clock before provider or DB work begins.
+    deadline = (
+        time.monotonic() + max(0.0, float(max_wall_clock_seconds))
+        if max_wall_clock_seconds is not None
+        else None
+    )
     forecast_db = cfg.get("forecast_db")
     output_dir = cfg.get("download_output_dir") or cfg.get("raw_manifest_dir")
     if forecast_db is None or output_dir is None:
         raise ValueError("replacement current-target download requires forecast_db and raw_manifest_dir/download_output_dir")
     if quota_critical and quota_priority:
         raise ValueError("current-target quota lane must be critical or priority, not both")
+    if deadline is not None and max_wall_clock_seconds <= 0:
+        _close_current_target_bucket_pool()
+        return {
+            "status": "CURRENT_TARGET_RAW_INPUTS_TIMEBOXED_INCOMPLETE",
+            "timeboxed_incomplete": True,
+            "unattempted_target_count": len(required_scopes or ()),
+            "max_wall_clock_seconds": max_wall_clock_seconds,
+        }
     from scripts.download_replacement_forecast_current_targets import (
         download_current_target_openmeteo_inputs,
     )
@@ -823,7 +878,12 @@ def _download_replacement_forecast_current_targets_if_needed(
     # source_available_at metadata model passed to the downloader — it takes no part in
     # deciding WHICH run to fetch.
     release_lag_hours = float(cfg.get("download_release_lag_hours") or 14.0)
-    available_cycle = _probe_resolved_available_cycle()
+    available_cycle = (
+        _probe_resolved_available_cycle()
+        if deadline is None
+        else _probe_resolved_available_cycle(deadline_monotonic=deadline)
+    )
+    _check_source_preflight_deadline(deadline)
     if available_cycle is None:
         return {
             "status": "CYCLE_PROBE_UNRESOLVED_SKIP",
@@ -831,7 +891,14 @@ def _download_replacement_forecast_current_targets_if_needed(
             "retrying next tick — a guessed run is never requested",
         }
     _close_stale_current_target_bucket_pool(available_cycle)
-    downloaded_cycle = _max_downloaded_current_target_cycle(Path(str(forecast_db)))
+    downloaded_cycle = (
+        _max_downloaded_current_target_cycle(Path(str(forecast_db)))
+        if deadline is None
+        else _max_downloaded_current_target_cycle(
+            Path(str(forecast_db)), deadline_monotonic=deadline
+        )
+    )
+    _check_source_preflight_deadline(deadline)
     cycle_advanced = downloaded_cycle is None or downloaded_cycle < available_cycle
 
     plan = None
@@ -843,7 +910,9 @@ def _download_replacement_forecast_current_targets_if_needed(
         plan = build_replacement_forecast_current_target_plan(
             Path(str(forecast_db)),
             required_openmeteo_source_cycle_time=available_cycle,
+            **({"deadline_monotonic": deadline} if deadline is not None else {}),
         )
+        _check_source_preflight_deadline(deadline)
     else:
         required_scopes = tuple(dict.fromkeys(required_scopes))
         if not required_scopes:
@@ -856,7 +925,12 @@ def _download_replacement_forecast_current_targets_if_needed(
                 held_position_family_priorities,
             )
 
-            held_families = held_position_family_priorities()
+            held_families = (
+                held_position_family_priorities()
+                if deadline is None
+                else held_position_family_priorities(deadline_monotonic=deadline)
+            )
+            _check_source_preflight_deadline(deadline)
             unauthorized = tuple(
                 scope for scope in required_scopes if scope not in held_families
             )
@@ -927,7 +1001,9 @@ def _download_replacement_forecast_current_targets_if_needed(
             Path(str(forecast_db)),
             required_scopes,
             available_cycle,
+            **({"deadline_monotonic": deadline} if deadline is not None else {}),
         )
+        _check_source_preflight_deadline(deadline)
         if missing_scopes is None:
             raise RuntimeError("scoped current-target anchor coverage unreadable")
         if not missing_scopes:
@@ -979,11 +1055,6 @@ def _download_replacement_forecast_current_targets_if_needed(
             "available_cycle": available_cycle.isoformat(),
             "downloaded_cycle": None if downloaded_cycle is None else downloaded_cycle.isoformat(),
         }
-    deadline = (
-        time.monotonic() + max(0.0, float(max_wall_clock_seconds))
-        if max_wall_clock_seconds is not None
-        else None
-    )
     remaining = (
         max(0.0, deadline - time.monotonic())
         if deadline is not None
@@ -1105,6 +1176,22 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
     deadline_monotonic: float | None = None,
 ) -> dict[str, object] | None:
     """Download missing multi-model inputs within one bounded live-runtime slice."""
+    # SCOPE: this extras slice from provider probe through canonical coverage.
+    # DRAIN: retry unattempted groups next poll without advancing rotation.
+    # RESET: every invocation receives fresh parent/own clock allowance.
+    if max_wall_clock_seconds is not None:
+        own_deadline = time.monotonic() + max(0.0, float(max_wall_clock_seconds))
+        deadline_monotonic = (
+            min(deadline_monotonic, own_deadline)
+            if deadline_monotonic is not None else own_deadline
+        )
+    if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+        return {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE",
+            "timeboxed_incomplete": True,
+            "attempted_target_group_count": 0,
+            "max_wall_clock_seconds": 0.0,
+        }
     forecast_db = cfg.get("forecast_db")
     if forecast_db is None:
         return None
@@ -1114,7 +1201,8 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
         from src.config import cities_by_name  # noqa: PLC0415
         from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
             ReplacementForecastTargetKey,
-            build_replacement_forecast_current_target_plan,
+            _default_min_target_date,
+            replacement_forecast_current_target_keys,
         )
         from src.data.bayes_precision_fusion_download import (  # noqa: PLC0415
             BayesPrecisionFusionDownloadTarget,
@@ -1141,7 +1229,10 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
         # in ``frozen_source_runs`` below.
         cycle = planning_cycle
         if cycle is None:
-            cycle = _probe_resolved_bayes_precision_fusion_extras_cycle()
+            cycle = _probe_resolved_bayes_precision_fusion_extras_cycle(
+                deadline_monotonic=deadline_monotonic
+            )
+        _check_source_preflight_deadline(deadline_monotonic)
         if cycle is None and planning_cycle is None:
             # The single-runs probe can be unavailable while the anchor lane has
             # already durably captured a current-target cycle through another
@@ -1150,7 +1241,10 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
             # materializer is reading; transport/quota failures are then surfaced
             # by the downloader as retryable health instead of hiding behind a
             # probe skip.
-            cycle = _max_downloaded_current_target_cycle(Path(str(forecast_db)))
+            cycle = _max_downloaded_current_target_cycle(
+                Path(str(forecast_db)), deadline_monotonic=deadline_monotonic
+            )
+        _check_source_preflight_deadline(deadline_monotonic)
         if cycle is None:
             return {"status": "BAYES_PRECISION_FUSION_EXTRA_CYCLE_PROBE_UNRESOLVED_SKIP"}
 
@@ -1162,9 +1256,40 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
         # an elapsed-prefix-only vector, but the downstream parser must prove that it spans
         # decision time through the unresolved evening before any row becomes authority.
         decision_time = datetime.now(timezone.utc)
-        plan = None
-        if capture_target_scopes is None:
-            plan = build_replacement_forecast_current_target_plan(Path(str(forecast_db)))
+        try:
+            from src.data.replacement_forecast_seed_discovery import (  # noqa: PLC0415
+                held_position_family_priorities,
+            )
+
+            held_priority = held_position_family_priorities(
+                deadline_monotonic=deadline_monotonic
+            )
+        except TimeoutError:
+            raise
+        except Exception:
+            held_priority = {}
+        # Raw acquisition needs current market identities, not posterior,
+        # manifest and readiness joins. The latter remain materialization
+        # authority; spending this bounded capture lane on them stranded every
+        # city when the full plan exceeded its deadline.
+        capture_rows: list[ReplacementForecastTargetKey] = (
+            list(replacement_forecast_current_target_keys(
+                Path(str(forecast_db)),
+                min_target_date=_default_min_target_date(decision_time),
+                deadline_monotonic=deadline_monotonic,
+                now_utc=decision_time,
+                require_local_day_not_ended=True,
+            ))
+            if capture_target_scopes is None
+            else [
+                ReplacementForecastTargetKey(
+                    city=city,
+                    target_date=target_date,
+                    temperature_metric=metric,
+                )
+                for city, target_date, metric in capture_target_scopes
+            ]
+        )
         coverage = (
             None
             if capture_when_covered
@@ -1172,29 +1297,13 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                 cfg,
                 cycle,
                 decision_time=decision_time,
+                capture_rows=capture_rows,
+                held_priority=held_priority,
+                deadline_monotonic=deadline_monotonic,
             )
         )
         missing_scopes = None if coverage is None else coverage[0]
-        try:
-            from src.data.replacement_forecast_seed_discovery import (  # noqa: PLC0415
-                held_position_family_priorities,
-            )
-
-            held_priority = held_position_family_priorities()
-        except Exception:
-            held_priority = {}
-        capture_rows: list[object] = (
-            list(plan.rows)
-            if plan is not None
-            else [
-                ReplacementForecastTargetKey(
-                    city=city,
-                    target_date=target_date,
-                    temperature_metric=metric,
-                )
-                for city, target_date, metric in capture_target_scopes or ()
-            ]
-        )
+        _check_source_preflight_deadline(deadline_monotonic)
         planned_scopes = {
             (row.city, row.target_date, row.temperature_metric)
             for row in capture_rows
@@ -1309,6 +1418,7 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
             return result
 
         try:
+            _check_source_preflight_deadline(deadline_monotonic)
             (
                 rotated_targets,
                 rotation_start,
@@ -1421,6 +1531,13 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
             return result
         finally:
             _release_bpf_extra_rotation_owner(owner_fd)
+    except TimeoutError:
+        return {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE",
+            "timeboxed_incomplete": True,
+            "attempted_target_group_count": 0,
+            "max_wall_clock_seconds": max_wall_clock_seconds,
+        }
     except Exception as exc:  # noqa: BLE001 - fail-soft: extras accrual never breaks the cycle
         logger.warning("BAYES_PRECISION_FUSION extra-model capture skipped (fail-soft): %s", exc)
         return {"status": "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED", "error": str(exc)}
@@ -2988,6 +3105,10 @@ def _extras_coverage_missing(
     cycle: datetime,
     *,
     decision_time: datetime | None = None,
+    plan: object | None = None,
+    capture_rows: Sequence[object] | None = None,
+    held_priority: Mapping[tuple[str, str, str], int] | None = None,
+    deadline_monotonic: float | None = None,
 ) -> tuple[set[tuple[str, str, str]], int] | None:
     """Per-(city, metric, target_date) coverage gap for ``cycle``'s BPF single_runs capture.
 
@@ -3018,18 +3139,33 @@ def _extras_coverage_missing(
         from src.data.replacement_forecast_seed_discovery import (  # noqa: PLC0415
             held_position_family_priorities,
         )
-        from src.state.db import _connect  # noqa: PLC0415
+        from src.state.db import _connect_read_only  # noqa: PLC0415
 
-        plan = build_replacement_forecast_current_target_plan(Path(str(forecast_db)))
+        if plan is None and capture_rows is None:
+            plan = (
+                build_replacement_forecast_current_target_plan(Path(str(forecast_db)))
+                if deadline_monotonic is None
+                else build_replacement_forecast_current_target_plan(
+                    Path(str(forecast_db)), deadline_monotonic=deadline_monotonic
+                )
+            )
         from src.config import cities_by_name  # noqa: PLC0415
 
         capture_scopes = {
             (row.city, row.temperature_metric, row.target_date)
-            for row in plan.rows
+            for row in (plan.rows if plan is not None else capture_rows or ())
         }
+        if held_priority is None:
+            held_priority = (
+                held_position_family_priorities()
+                if deadline_monotonic is None
+                else held_position_family_priorities(
+                    deadline_monotonic=deadline_monotonic
+                )
+            )
         capture_scopes.update(
             (city, metric, target_date)
-            for city, target_date, metric in held_position_family_priorities()
+            for city, target_date, metric in held_priority
         )
         need = {
             (city, metric, target_date)
@@ -3046,7 +3182,13 @@ def _extras_coverage_missing(
         }
         if not need:
             return (set(), 0)  # no planned scopes (e.g. no open markets) => nothing to capture
-        conn = _connect(Path(str(forecast_db)))
+        conn = _connect_read_only(
+            Path(str(forecast_db)), deadline_monotonic=deadline_monotonic
+        )
+        if deadline_monotonic is not None:
+            conn.set_progress_handler(
+                lambda: int(time.monotonic() >= deadline_monotonic), 1000
+            )
         try:
             cycle_iso = cycle.astimezone(_tz.utc).isoformat()
             rows = conn.execute(
@@ -3071,7 +3213,15 @@ def _extras_coverage_missing(
             scope for scope, families in families_by_scope.items() if len(families) >= 2
         }
         return (need - have, len(need))
-    except Exception:
+    except TimeoutError:
+        raise
+    except Exception as exc:
+        if (
+            deadline_monotonic is not None
+            and time.monotonic() >= deadline_monotonic
+            and str(exc).lower() in {"interrupted", "db_connection_deadline_expired"}
+        ):
+            raise TimeoutError("BPF coverage read deadline expired") from exc
         return None
 
 
