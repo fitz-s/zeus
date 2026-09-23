@@ -5695,6 +5695,48 @@ def test_generic_completion_ack_failure_advances_scope_round(tmp_path, monkeypat
     assert acknowledgements == ["bad-ack", "next-scope"]
 
 
+def test_generic_scope_read_failure_preserves_fill_lane(tmp_path, monkeypatch):
+    import src.config as config
+    import src.main as main
+    import src.runtime.reactor_wake as wake_module
+
+    path = tmp_path / "wake.json"
+    monkeypatch.setattr(config, "state_path", lambda _name: path)
+    wake_module.publish_reactor_wake(
+        source="fill",
+        reason="position_fill_projected",
+        path=path,
+        wake_id="fill-after-generic-read-error",
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "strict_generic_held_family_completion_wakes",
+        lambda **_kwargs: (_ for _ in ()).throw(ValueError("invalid generic queue")),
+    )
+    selected = []
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
+    monkeypatch.setattr(
+        main, "_collateral_authority_wake_backoff_ids", lambda: frozenset()
+    )
+    monkeypatch.setattr(
+        main, "_paused_forecast_carrier_priority_allowed", lambda **_kwargs: False
+    )
+    monkeypatch.setattr(
+        main,
+        "_edli_event_reactor_cycle",
+        lambda **kwargs: selected.append(kwargs["producer_wake_reason"]) or True,
+    )
+    monkeypatch.setattr(main, "_position_fill_wake_held_families", lambda _ids: frozenset())
+    main._periodic_held_position_monitor_fairness_debt.clear()
+    main._edli_initialize_reactor_wake_cursor()
+    try:
+        assert main._edli_reactor_wake_poll_once() is True
+    finally:
+        main._edli_initialize_reactor_wake_cursor()
+    assert selected == ["position_fill_projected"]
+
+
 def test_family_completion_baton_keeps_exact_and_fill_ahead(tmp_path):
     from src.runtime import reactor_wake
 
