@@ -2823,6 +2823,30 @@ def _replacement_maintenance_tick():
     def _remaining_budget() -> float:
         return max(0.0, deadline_monotonic - time.monotonic())
 
+    stage_timings: dict[str, dict[str, float]] = {}
+
+    def _begin_stage(name: str) -> float:
+        started = time.monotonic()
+        logger.info(
+            "replacement maintenance stage %s begin remaining_seconds=%.3f",
+            name, max(0.0, deadline_monotonic - started),
+        )
+        return started
+
+    def _end_stage(name: str, started: float) -> None:
+        ended = time.monotonic()
+        timing = {
+            "elapsed_seconds": round(max(0.0, ended - started), 3),
+            "remaining_seconds": round(max(0.0, deadline_monotonic - ended), 3),
+        }
+        stage_timings[name] = timing
+        logger.info(
+            "replacement maintenance stage %s end elapsed_seconds=%.3f "
+            "remaining_seconds=%.3f",
+            name, timing["elapsed_seconds"], timing["remaining_seconds"],
+        )
+
+    held_stage_started = _begin_stage("held")
     cfg = _replacement_forecast_live_materialization_queue_config()
     cooldown_seconds = bayes_precision_fusion_quota_cooldown_seconds()
     broad_due = _replacement_maintenance_due()
@@ -2958,6 +2982,7 @@ def _replacement_maintenance_tick():
                 held_ordinary_report = partition_report
 
     held_reseed_scopes = tuple(sorted(held_reseed_scope_set))
+    _end_stage("held", held_stage_started)
 
     if not broad_due and held_report is None and held_ordinary_report is None:
         return {"status": "REPLACEMENT_MAINTENANCE_NOT_DUE"}
@@ -2976,6 +3001,7 @@ def _replacement_maintenance_tick():
         # Run the reserved active raw-input slice before the ordinary anchor
         # scan: a SQLite read that overshoots its deadline must not erase this
         # tick's BPF opportunity. Held anchor partitions have already run.
+        bpf_stage_started = _begin_stage("bpf")
         if bpf_retry_after > 0:
             extras_report = {
                 "status": "BAYES_PRECISION_FUSION_EXTRA_NO_PROGRESS_BACKOFF_SKIPPED",
@@ -3009,7 +3035,9 @@ def _replacement_maintenance_tick():
                         "error": f"{type(exc).__name__}: {str(exc)[:220]}",
                     }
             _record_replacement_bpf_maintenance_progress(extras_report)
+        _end_stage("bpf", bpf_stage_started)
 
+        broad_stage_started = _begin_stage("broad")
         try:
             download_report = _download_replacement_forecast_current_targets_if_needed(
                 cfg,
@@ -3031,6 +3059,7 @@ def _replacement_maintenance_tick():
                 "status": "CURRENT_TARGET_DOWNLOAD_FAILSOFT",
                 "error": f"{type(exc).__name__}: {str(exc)[:220]}",
             }
+        _end_stage("broad", broad_stage_started)
 
     report: dict[str, object] = {
         "status": "REPLACEMENT_MAINTENANCE_COMPLETED",
@@ -3055,6 +3084,7 @@ def _replacement_maintenance_tick():
         )
     if cooldown_seconds > 0:
         report["cooldown_seconds"] = cooldown_seconds
+    committed_reseed_started = _begin_stage("committed_reseed")
     committed_scopes = tuple(
         sorted(
             {
@@ -3118,7 +3148,9 @@ def _replacement_maintenance_tick():
                 committed_reseed_errors.append(f"committed_{reseed_error}")
                 continue
             committed_reseed_report_count += 1
+    _end_stage("committed_reseed", committed_reseed_started)
     if broad_due:
+        candidate_stage_started = _begin_stage("candidate")
         try:
             # Candidate capture is deliberately sequenced after all priority
             # current/held work and its committed reactions. Its own strict
@@ -3144,6 +3176,7 @@ def _replacement_maintenance_tick():
             report["bayes_precision_fusion_candidate_accrual_rows_written"] = (
                 candidate_accrual_report.get("written_row_count")
             )
+        _end_stage("candidate", candidate_stage_started)
     maintenance_errors = [
         error
         for error in (
@@ -3193,6 +3226,7 @@ def _replacement_maintenance_tick():
             extras_report,
         )
     )
+    ordinary_reseed_started = _begin_stage("ordinary_reseed")
     if not broad_due:
         report["broad_maintenance_status"] = "REPLACEMENT_MAINTENANCE_NOT_DUE"
         report["reseed_maintenance_status"] = (
@@ -3231,6 +3265,8 @@ def _replacement_maintenance_tick():
                 report[f"{prefix}_seeds_enqueued"] = reseed_report.get("seeds_enqueued")
             if reseed_error is not None:
                 maintenance_errors.append(reseed_error)
+    _end_stage("ordinary_reseed", ordinary_reseed_started)
+    report["stage_timings"] = stage_timings
     if maintenance_errors:
         report["status"] = "REPLACEMENT_MAINTENANCE_PARTIAL"
         report["retryable"] = True

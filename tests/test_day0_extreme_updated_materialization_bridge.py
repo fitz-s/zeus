@@ -72,6 +72,7 @@ def test_canonical_manifest_read_excludes_future_available_artifact() -> None:
             source_cycle_time TEXT,
             source_available_at TEXT,
             captured_at TEXT,
+            recorded_at TEXT,
             request_url TEXT,
             request_params_json TEXT,
             artifact_metadata_json TEXT,
@@ -87,9 +88,10 @@ def test_canonical_manifest_read_excludes_future_available_artifact() -> None:
         INSERT INTO raw_forecast_artifacts
             (source_id, product_id, data_version, artifact_path, sha256,
              byte_size, source_cycle_time, source_available_at, captured_at,
+             recorded_at,
              request_url, request_params_json, artifact_metadata_json,
              training_allowed)
-        VALUES (?, ?, ?, '/tmp/future-anchor.json', ?, 1, ?, ?, ?,
+        VALUES (?, ?, ?, '/tmp/future-anchor.json', ?, 1, ?, ?, ?, ?,
                 'https://example.invalid/anchor', '{"request":true}',
                 '{"city":"Shanghai","target_date":"2026-07-19"}', 0)
         """,
@@ -99,6 +101,7 @@ def test_canonical_manifest_read_excludes_future_available_artifact() -> None:
             identity.data_version,
             "0" * 64,
             "2026-07-19T00:00:00+00:00",
+            "2026-07-19T06:59:59.900000+00:00",
             "2026-07-19T06:59:59.900000+00:00",
             "2026-07-19T06:59:59.900000+00:00",
         ),
@@ -118,6 +121,86 @@ def test_canonical_manifest_read_excludes_future_available_artifact() -> None:
     )
     assert len(available) == 1
     assert available[0].product_metadata["artifact_id"] == 1
+    conn.close()
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("late_field", ("captured_at", "recorded_at"))
+def test_canonical_manifest_read_enforces_capture_and_recorded_pit(
+    metric: str,
+    late_field: str,
+) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE raw_forecast_artifacts (
+            artifact_id INTEGER PRIMARY KEY,
+            source_id TEXT,
+            product_id TEXT,
+            data_version TEXT,
+            artifact_path TEXT,
+            sha256 TEXT,
+            byte_size INTEGER,
+            source_cycle_time TEXT,
+            source_available_at TEXT,
+            captured_at TEXT,
+            recorded_at TEXT,
+            request_url TEXT,
+            request_params_json TEXT,
+            artifact_metadata_json TEXT,
+            training_allowed INTEGER
+        )
+        """
+    )
+    identity = expected_replacement_dependency_identity_by_role(metric)[
+        "openmeteo_ifs9_anchor"
+    ]
+    cycle = "2026-07-19T00:00:00+00:00"
+    source_available = "2026-07-19T05:00:00+00:00"
+    early_capture = "2026-07-19T05:10:00+00:00"
+    early_recorded = "2026-07-19T05:20:00+00:00"
+    late = "2026-07-19T06:10:00+00:00"
+
+    def insert(artifact_id: int, captured_at: str, recorded_at: str) -> None:
+        conn.execute(
+            """
+            INSERT INTO raw_forecast_artifacts
+                (artifact_id, source_id, product_id, data_version, artifact_path,
+                 sha256, byte_size, source_cycle_time, source_available_at, captured_at,
+                 recorded_at, request_url, request_params_json, artifact_metadata_json,
+                 training_allowed)
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 'https://example.invalid/anchor',
+                    '{"request":true}', ?, 0)
+            """,
+            (
+                artifact_id,
+                identity.source_id,
+                identity.product_id,
+                identity.data_version,
+                f"/tmp/{metric}-{artifact_id}.json",
+                "0" * 64,
+                cycle,
+                source_available,
+                captured_at,
+                recorded_at,
+                json.dumps({"city": "Shanghai", "target_date": "2026-07-19"}),
+            ),
+        )
+
+    insert(1, early_capture, early_recorded)
+    insert(
+        2,
+        late if late_field == "captured_at" else early_capture,
+        late if late_field == "recorded_at" else early_recorded,
+    )
+    manifests = cycle_advance._family_manifests_from_db(
+        conn,
+        city="Shanghai",
+        identity=identity,
+        computed_at=datetime(2026, 7, 19, 6, 0, tzinfo=UTC),
+    )
+    assert [manifest.product_metadata["artifact_id"] for manifest in manifests] == [1]
     conn.close()
 
 
@@ -1420,6 +1503,88 @@ def test_cycle_advance_batch_surfaces_retry_pending_as_non_success(
 
     assert report["retry_pending"] == 1, report
     assert report["status"] == "CYCLE_ADVANCE_RETRY_PENDING"
+
+
+def test_cycle_advance_scoped_reseed_uses_db_family_manifests_without_global_tree_scan(
+    tmp_path, monkeypatch
+) -> None:
+    db_path = _prepare_forecast_db(tmp_path)
+    cycle = datetime(2026, 7, 19, 0, tzinfo=UTC)
+    identity = expected_replacement_dependency_identity_by_role("high")[
+        "openmeteo_ifs9_anchor"
+    ]
+    canonical_path = tmp_path / "canonical-anchor.json"
+    canonical_path.write_text("{}\n", encoding="utf-8")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        UPDATE raw_forecast_artifacts
+           SET source_id = ?, product_id = ?, data_version = ?, artifact_path = ?,
+               sha256 = ?, byte_size = 1, source_available_at = ?, captured_at = ?,
+               recorded_at = ?, request_url = ?, request_params_json = ?,
+               artifact_metadata_json = ?
+         WHERE artifact_id = 1
+        """,
+        (
+            identity.source_id,
+            identity.product_id,
+            identity.data_version,
+            str(canonical_path),
+            "0" * 64,
+            "2026-07-19T05:00:00+00:00",
+            "2026-07-19T05:00:30+00:00",
+            "2026-07-19T05:00:40+00:00",
+            "https://example.invalid/anchor",
+            '{"request":true}',
+            json.dumps({"city": "Shanghai", "target_date": "2026-07-19"}),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        seed_discovery,
+        "_load_manifests",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("scoped reseed must not scan the global manifest tree")
+        ),
+    )
+    monkeypatch.setattr(cycle_advance, "freshest_materializable_cycle", lambda _conn: cycle)
+    monkeypatch.setattr(
+        seed_discovery,
+        "_day0_observed_extreme_seed_payload",
+        lambda **_kwargs: _day0_payload("2026-07-19T05:00:00+00:00"),
+    )
+
+    def _family_check(_conn, manifests, **_kwargs):
+        observed["manifests"] = manifests
+        return cycle, ()
+
+    monkeypatch.setattr(cycle_advance, "family_materializable_cycle", _family_check)
+
+    def _build(_conn, **kwargs):
+        observed["build_manifests"] = kwargs["manifests"]
+        path = Path(kwargs["output_path"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n", encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(cycle_advance, "_build_and_write_advance_seed", _build)
+    report = cycle_advance.enqueue_cycle_advance_reseeds(
+        forecast_db=db_path,
+        seed_dir=tmp_path / "seeds",
+        raw_manifest_dir=tmp_path / "raw-with-broken-unrelated-manifests",
+        computed_at=datetime(2026, 7, 19, 5, 2, tzinfo=UTC),
+        limit=1,
+        scopes=(("Shanghai", "2026-07-19", "high"),),
+        include_missing_posterior=True,
+    )
+
+    assert report["seeds_enqueued"] == 1
+    assert len(observed["manifests"]) == 1
+    assert observed["manifests"][0].product_metadata["artifact_id"] == 1
+    assert observed["build_manifests"] == observed["manifests"]
 
 
 def test_cycle_advance_keeps_missing_non_day0_owned_stage_when_posterior_covers(tmp_path) -> None:

@@ -158,7 +158,7 @@ def _family_manifests_from_db(
         """
         SELECT artifact_id, source_id, product_id, data_version, artifact_path, sha256,
                byte_size, source_cycle_time, source_available_at, captured_at,
-               request_url, request_params_json, artifact_metadata_json,
+               recorded_at, request_url, request_params_json, artifact_metadata_json,
                training_allowed
         FROM raw_forecast_artifacts
         WHERE source_id = ?
@@ -166,6 +166,8 @@ def _family_manifests_from_db(
           AND data_version = ?
           AND json_extract(artifact_metadata_json, '$.city') = ?
           AND julianday(source_available_at) <= julianday(?)
+          AND julianday(captured_at) <= julianday(?)
+          AND julianday(recorded_at) <= julianday(?)
         ORDER BY source_cycle_time DESC, captured_at DESC, artifact_id DESC
         LIMIT ?
         """,
@@ -174,6 +176,8 @@ def _family_manifests_from_db(
             identity.product_id,
             identity.data_version,
             str(city),
+            computed_at.astimezone(UTC).isoformat(),
+            computed_at.astimezone(UTC).isoformat(),
             computed_at.astimezone(UTC).isoformat(),
             int(limit),
         ),
@@ -1883,10 +1887,15 @@ def enqueue_cycle_advance_reseeds(
             for city, target_date, metric in open_scopes
         )
 
-    manifests = (
+    # Periodic maintenance owns the global catch-up scan. Explicit scopes must
+    # resolve canonical manifests from the DB per family; a broken/unrelated
+    # file elsewhere in raw_dir cannot delay this scoped re-decision. Caller-
+    # supplied manifests remain exact, including an empty tuple (which must
+    # still fail the normal authority checks rather than trigger a fallback scan).
+    default_manifests = (
         _load_manifests(raw_dir, computed_at=now)
-        if manifests is None
-        else tuple(manifests)
+        if scopes is None and manifests is None
+        else tuple(manifests) if manifests is not None else None
     )
 
     # HELD-position families (priority tier i). Read-only on the trades DB (mode=ro — the trigger
@@ -2028,9 +2037,19 @@ def enqueue_cycle_advance_reseeds(
 
                 city_cfg = cities_by_name.get(city)
                 city_timezone = str(getattr(city_cfg, "timezone", "") or "") or None
+                scope_manifests = default_manifests
+                if scope_manifests is None:
+                    scope_manifests = _family_manifests_from_db(
+                        conn,
+                        city=city,
+                        identity=expected_replacement_dependency_identity_by_role(metric)[
+                            "openmeteo_ifs9_anchor"
+                        ],
+                        computed_at=now,
+                    )
                 family_cycle, missing_legs = family_materializable_cycle(
                     conn,
-                    manifests,
+                    scope_manifests,
                     city=city,
                     target_date=target_date,
                     metric=metric,
@@ -2262,7 +2281,7 @@ def enqueue_cycle_advance_reseeds(
                     city=city,
                     target_date=target_date,
                     metric=metric,
-                    manifests=manifests,
+                    manifests=scope_manifests,
                     raw_dir=raw_dir,
                     seed_path=seed_path,
                     computed_at=now,

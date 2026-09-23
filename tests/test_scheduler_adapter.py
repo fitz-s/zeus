@@ -2525,6 +2525,86 @@ def test_replacement_maintenance_uses_one_parent_deadline(monkeypatch) -> None:
     assert result["committed_family_count"] == 2
 
 
+def test_replacement_maintenance_reports_stage_costs_including_post_deadline_candidate(
+    monkeypatch, caplog,
+) -> None:
+    import logging
+
+    import src.data.replacement_forecast_production as prod
+    import src.ingest_main as ingest_main
+
+    now = [100.0]
+    calls: list[str] = []
+    monkeypatch.setattr(ingest_main.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        ingest_main, "_replacement_current_target_poll_timeout_seconds",
+        lambda _poll: 20.0,
+    )
+    monkeypatch.setattr(ingest_main, "_replacement_maintenance_due", lambda: True)
+    monkeypatch.setattr(ingest_main, "_all_held_current_target_scopes", lambda **_kw: ())
+    monkeypatch.setattr(
+        ingest_main, "_replacement_bpf_no_progress_retry_after_seconds", lambda: 0.0,
+    )
+    monkeypatch.setattr(
+        ingest_main, "_record_replacement_bpf_maintenance_progress", lambda _report: None,
+    )
+    monkeypatch.setattr(
+        "src.data.bayes_precision_fusion_download.bayes_precision_fusion_quota_cooldown_seconds",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        prod, "_replacement_forecast_live_materialization_queue_config", lambda: {},
+    )
+
+    def bpf(_cfg, *, max_wall_clock_seconds):
+        calls.append("bpf")
+        assert max_wall_clock_seconds == 8.0
+        now[0] += 4.0
+        return {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE",
+            "timeboxed_incomplete": True,
+            "committed_families": (("Dallas", "2026-09-24", "high"),),
+        }
+
+    def broad(_cfg, *, max_wall_clock_seconds):
+        calls.append("broad")
+        assert max_wall_clock_seconds == 16.0
+        now[0] += 6.0
+        return {"status": "CURRENT_TARGET_RAW_INPUTS_TIMEBOXED_INCOMPLETE", "timeboxed_incomplete": True}
+
+    def reseed(_cfg, *, scopes, limit):
+        calls.append("reseed")
+        assert scopes == (("Dallas", "2026-09-24", "high"),)
+        assert limit == 1
+        now[0] += 1.0
+        return {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 0}
+
+    def candidate(_cfg):
+        calls.append("candidate")
+        now[0] += 30.0
+        return {"status": "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS"}
+
+    monkeypatch.setattr(prod, "_download_bayes_precision_fusion_extra_raw_inputs_if_needed", bpf)
+    monkeypatch.setattr(prod, "_download_replacement_forecast_current_targets_if_needed", broad)
+    monkeypatch.setattr(prod, "_enqueue_fusion_upgrade_reseeds_if_needed", reseed)
+    monkeypatch.setattr(prod, "_enqueue_cycle_advance_reseeds_if_needed", reseed)
+    monkeypatch.setattr(prod, "_download_bayes_precision_fusion_candidate_accrual_if_needed", candidate)
+
+    with caplog.at_level(logging.INFO, logger="zeus.ingest"):
+        report = ingest_main._replacement_maintenance_tick.__wrapped__()
+
+    assert calls == ["bpf", "broad", "reseed", "reseed", "candidate"]
+    assert report["status"] == "REPLACEMENT_MAINTENANCE_PARTIAL"
+    stages = report["stage_timings"]
+    assert stages["bpf"] == {"elapsed_seconds": 4.0, "remaining_seconds": 16.0}
+    assert stages["broad"] == {"elapsed_seconds": 6.0, "remaining_seconds": 10.0}
+    assert stages["committed_reseed"] == {"elapsed_seconds": 2.0, "remaining_seconds": 8.0}
+    assert stages["candidate"] == {"elapsed_seconds": 30.0, "remaining_seconds": 0.0}
+    assert stages["held"]["remaining_seconds"] == 20.0
+    assert "replacement maintenance stage candidate begin remaining_seconds=8.000" in caplog.text
+    assert "replacement maintenance stage candidate end elapsed_seconds=30.000" in caplog.text
+
+
 def test_replacement_maintenance_reserves_held_probability_repair_budget(
     monkeypatch,
 ) -> None:

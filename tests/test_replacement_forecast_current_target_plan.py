@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-09-02
-# Lifecycle: created=2026-06-06; last_reviewed=2026-09-02; last_reused=2026-09-02
+# Last reused/audited: 2026-09-23
+# Lifecycle: created=2026-06-06; last_reviewed=2026-09-23; last_reused=2026-09-23
 # Purpose: Protect current-market replacement forecast download and materialization planning.
 # Reuse: Run before changing current replacement target coverage or source-run matching.
 # Authority basis: Replacement forecast coverage must bind to the live baseline source_run, not stale city/date rows.
@@ -2678,6 +2678,82 @@ def test_current_target_keys_match_full_plan_scope_without_coverage_work(tmp_pat
         (row.city, row.target_date, row.temperature_metric)
         for row in plan.rows
     ]
+
+
+def test_market_root_local_day_keys_seek_city_dates_and_preserve_unknowns(
+    tmp_path, monkeypatch
+) -> None:
+    from src.data import replacement_forecast_current_target_plan as target_plan
+
+    db = tmp_path / "market-keys.db"
+    now = datetime(2026, 9, 24, 1, tzinfo=timezone.utc)
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "CREATE TABLE market_events(city TEXT,target_date TEXT,"
+            "temperature_metric TEXT,token_id TEXT,range_label TEXT)"
+        )
+        conn.execute(
+            "CREATE INDEX idx_market_events_city_date_metric "
+            "ON market_events(city,target_date,temperature_metric)"
+        )
+        conn.executemany(
+            "INSERT INTO market_events VALUES(?,?,?,?,?)",
+            [
+                ("unconfigured", "2025-01-01", "high", "old", "range")
+                for _ in range(15_000)
+            ] + [
+                (city, day, metric, "token", "range")
+                for city in ("Dallas", "Amsterdam", "unconfigured")
+                for day in ("2026-09-23", "2026-09-24")
+                for metric in ("high", "low")
+            ] + [
+                (None, "2026-09-24", "low", "token", "range"),
+                ("Dallas", "2026-09-24", "high", "", "range"),
+            ],
+        )
+    monkeypatch.setattr(
+        target_plan, "_city_timezone_by_name",
+        lambda: {"Dallas": "America/Chicago", "Amsterdam": "Europe/Amsterdam"},
+    )
+    statements: list[str] = []
+    original_connect = target_plan._connect_read_only
+
+    def traced_connect(*args, **kwargs):
+        conn = original_connect(*args, **kwargs)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(target_plan, "_connect_read_only", traced_connect)
+    keys = target_plan.replacement_forecast_current_target_keys(
+        db,
+        min_target_date="2026-09-23",
+        now_utc=now,
+        market_root=True,
+        require_local_day_not_ended=True,
+    )
+    assert {(key.city, key.target_date, key.temperature_metric) for key in keys} == {
+        (city, day, metric)
+        for city, day in (
+            ("Dallas", "2026-09-23"),
+            ("Dallas", "2026-09-24"),
+            ("Amsterdam", "2026-09-24"),
+            ("unconfigured", "2026-09-23"),
+            ("unconfigured", "2026-09-24"),
+        )
+        for metric in ("high", "low")
+    } | {("None", "2026-09-24", "low")}
+    select = next(
+        statement for statement in statements
+        if "SELECT city, target_date, temperature_metric" in statement
+    )
+    with sqlite3.connect(db) as conn:
+        plan = conn.execute("EXPLAIN QUERY PLAN " + select).fetchall()
+    assert any(
+        "SEARCH market_events USING INDEX idx_market_events_city_date_metric"
+        in str(row[3])
+        and "city=? AND target_date>?" in str(row[3])
+        for row in plan
+    ), plan
 
 
 def test_current_target_plan_reseeds_old_probability_semantics(tmp_path) -> None:

@@ -2316,7 +2316,36 @@ def replacement_forecast_current_target_keys(
         source_run_targets = _supports_source_run_targets(conn)
         if "source_run_coverage" in tables and not source_run_targets and not market_root:
             return ()
-        if market_root:
+        if market_root and require_local_day_not_ended:
+            # Enumerate every observed city through the covering city index,
+            # then seek its current dates. Preserve unknown and NULL cities;
+            # the local-day filter below retains its existing semantics.
+            rows = conn.execute(
+                """
+                SELECT city, target_date, temperature_metric
+                FROM market_events
+                WHERE city IN (SELECT DISTINCT city FROM market_events)
+                  AND token_id IS NOT NULL
+                  AND token_id != ''
+                  AND range_label IS NOT NULL
+                  AND range_label != ''
+                  AND temperature_metric IN ('high', 'low')
+                  AND target_date >= ?
+                UNION
+                SELECT city, target_date, temperature_metric
+                FROM market_events
+                WHERE city IS NULL
+                  AND token_id IS NOT NULL
+                  AND token_id != ''
+                  AND range_label IS NOT NULL
+                  AND range_label != ''
+                  AND temperature_metric IN ('high', 'low')
+                  AND target_date >= ?
+                ORDER BY target_date, city, temperature_metric
+                """,
+                (minimum_target_date, minimum_target_date),
+            ).fetchall()
+        elif market_root:
             rows = conn.execute(
                 """
                 SELECT DISTINCT city, target_date, temperature_metric
