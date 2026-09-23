@@ -13161,3 +13161,195 @@ def test_current_temperature_selects_latest_causal_observation(unit, case):
         )
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_direct_held_remaining_q_uses_no_daily_snapshot_and_matches_contract_path(
+    monkeypatch,
+    metric,
+):
+    """A held direct carrier prices hourly vectors, not rejected daily extrema."""
+    import src.engine.event_reactor_adapter as era
+
+    bins = [
+        Bin(25, 25, "C", "25°C"),
+        Bin(26, None, "C", "26°C or above"),
+    ]
+    family = SimpleNamespace(
+        city="Paris",
+        metric=metric,
+        target_date="2026-06-10",
+        event_type="DAY0_EXTREME_UPDATED",
+        bins=bins,
+        candidates=[
+            SimpleNamespace(condition_id="c25", bin=bins[0]),
+            SimpleNamespace(condition_id="c26", bin=bins[1]),
+        ],
+    )
+    snapshot = {
+        "settlement_unit": "C",
+        "temperature_metric": metric,
+        "members_json": "[20, 21, 22]",
+        "members_precision": 1.0,
+        "source_id": "rejected-daily-ens",
+    }
+    base_payload = {
+        "metric": metric,
+        "settlement_unit": "C",
+        "rounded_value": 25.0,
+        "settlement_source": "noaa_wrh_daily",
+        "evidence_finality": "FINAL_DAILY",
+        "observation_time": "2026-06-10T12:00:00+00:00",
+    }
+    direct_payload = {
+        **base_payload,
+        "_edli_day0_redecision_authority_scope": (
+            "held_exposure_current_day0_only_v1"
+        ),
+        "_edli_day0_direct_current_redecision_authority": True,
+    }
+    monkeypatch.setattr(era, "_day0_remaining_day_q_enabled", lambda: True)
+    monkeypatch.setattr(
+        era,
+        "_day0_remaining_day_members",
+        lambda **_kwargs: np.asarray([25.0, 25.4, 26.2]),
+    )
+    monkeypatch.setattr(
+        era,
+        "_make_day0_bootstrap_sampler",
+        lambda **_kwargs: (lambda _analysis, _n: np.asarray([0.5, 0.5])),
+    )
+
+    ordinary = era._market_analysis_from_event_snapshot(
+        calibration_conn=sqlite3.connect(":memory:"),
+        snapshot=snapshot,
+        family=family,
+        native_costs={},
+        payload=dict(base_payload),
+        decision_time=datetime(2026, 6, 10, 13, 0, tzinfo=UTC),
+    )
+    direct = era._market_analysis_from_event_snapshot(
+        calibration_conn=sqlite3.connect(":memory:"),
+        snapshot=None,
+        family=family,
+        native_costs={},
+        payload=direct_payload,
+        decision_time=datetime(2026, 6, 10, 13, 0, tzinfo=UTC),
+    )
+
+    assert direct.p_posterior == pytest.approx(ordinary.p_posterior)
+    assert direct.unit == "C"
+    assert direct.precision == 1.0
+    assert direct.forecast_context()["uncertainty"]["forecast_source"] == (
+        "noaa_wrh_daily"
+    )
+
+    def unexpected_daily_read(*_args, **_kwargs):
+        pytest.fail("held direct remaining q read daily ENS")
+
+    monkeypatch.setattr(era, "_forecast_snapshot_row_for_event", unexpected_daily_read)
+    monkeypatch.setattr(era, "_day0_seed_members_multimodel", unexpected_daily_read)
+    _, component_point_q, _ = era._day0_remaining_global_probability_components(
+        SimpleNamespace(),
+        forecast_conn=sqlite3.connect(":memory:"),
+        calibration_conn=sqlite3.connect(":memory:"),
+        family=family,
+        payload=dict(direct_payload),
+        decision_time=datetime(2026, 6, 10, 13, 0, tzinfo=UTC),
+    )
+    assert component_point_q == pytest.approx(ordinary.p_posterior)
+
+
+def test_direct_held_remaining_snapshotless_path_rejects_entry_and_bad_contract(
+    monkeypatch,
+):
+    import src.engine.event_reactor_adapter as era
+
+    bins = [Bin(25, 25, "C", "25°C"), Bin(26, None, "C", "26°C or above")]
+    family = SimpleNamespace(
+        city="Paris",
+        metric="high",
+        target_date="2026-06-10",
+        event_type="DAY0_EXTREME_UPDATED",
+        bins=bins,
+        candidates=[SimpleNamespace(condition_id="c25", bin=bins[0]), SimpleNamespace(condition_id="c26", bin=bins[1])],
+    )
+    payload = {
+        "metric": "high",
+        "settlement_unit": "C",
+        "rounded_value": 25.0,
+        "settlement_source": "noaa_wrh_daily",
+        "evidence_finality": "FINAL_DAILY",
+        "observation_time": "2026-06-10T12:00:00+00:00",
+        "_edli_day0_redecision_authority_scope": "held_exposure_current_day0_only_v1",
+        "_edli_day0_direct_current_redecision_authority": True,
+    }
+    monkeypatch.setattr(era, "_day0_remaining_day_q_enabled", lambda: True)
+    monkeypatch.setattr(era, "_day0_remaining_day_members", lambda **_kwargs: np.asarray([25.0, 26.0, 27.0]))
+    monkeypatch.setattr(era, "_make_day0_bootstrap_sampler", lambda **_kwargs: (lambda n: np.tile([0.5, 0.5], (n, 1))))
+
+    for entry_authority in (True, 0):
+        with pytest.raises(
+            ValueError,
+            match="DAY0_REMAINING_DIRECT_CONTRACT_AUTHORITY_REQUIRED",
+        ):
+            era._market_analysis_from_event_snapshot(
+                calibration_conn=sqlite3.connect(":memory:"),
+                snapshot=None,
+                family=family,
+                native_costs={},
+                payload=payload,
+                decision_time=datetime(2026, 6, 10, 13, 0, tzinfo=UTC),
+                entry_authority=entry_authority,
+            )
+    for incomplete_authority in (
+        {key: value for key, value in payload.items() if key != "_edli_day0_redecision_authority_scope"},
+        {key: value for key, value in payload.items() if key != "_edli_day0_direct_current_redecision_authority"},
+    ):
+        with pytest.raises(ValueError, match="DAY0_REMAINING_DIRECT_CONTRACT_AUTHORITY_REQUIRED"):
+            era._market_analysis_from_event_snapshot(
+                calibration_conn=sqlite3.connect(":memory:"),
+                snapshot=None,
+                family=family,
+                native_costs={},
+                payload=incomplete_authority,
+                decision_time=datetime(2026, 6, 10, 13, 0, tzinfo=UTC),
+            )
+    non_day0_family = SimpleNamespace(**{**family.__dict__, "event_type": "FORECAST_UPDATED"})
+    with pytest.raises(ValueError, match="DAY0_REMAINING_DIRECT_CONTRACT_AUTHORITY_REQUIRED"):
+        era._market_analysis_from_event_snapshot(
+            calibration_conn=sqlite3.connect(":memory:"),
+            snapshot=None,
+            family=non_day0_family,
+            native_costs={},
+            payload=payload,
+            decision_time=datetime(2026, 6, 10, 13, 0, tzinfo=UTC),
+        )
+    with pytest.raises(ValueError, match="DAY0_REMAINING_DIRECT_CONTRACT_IDENTITY_MISMATCH"):
+        era._day0_remaining_direct_contract_metadata(
+            family=family,
+            payload={**payload, "metric": "low"},
+            bins=bins,
+        )
+    for invalid_payload, invalid_bins in (
+        ({key: value for key, value in payload.items() if key != "settlement_unit"}, bins),
+        ({**payload, "settlement_unit": "F"}, bins),
+        (
+            payload,
+            [Bin(25, 26, "F", "25-26°F"), Bin(27, None, "F", "27°F or above")],
+        ),
+        (payload, [bins[0], Bin(27, None, "F", "27°F or above")]),
+    ):
+        with pytest.raises(ValueError, match="DAY0_REMAINING_DIRECT_CONTRACT_IDENTITY_MISMATCH"):
+            era._day0_remaining_direct_contract_metadata(
+                family=family,
+                payload=invalid_payload,
+                bins=invalid_bins,
+            )
+    monkeypatch.setattr(era, "_day0_remaining_day_members", lambda **_kwargs: None)
+    with pytest.raises(ValueError, match="DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE"):
+        era._market_analysis_from_event_snapshot(
+            calibration_conn=sqlite3.connect(":memory:"), snapshot=None,
+            family=family, native_costs={}, payload=payload,
+            decision_time=datetime(2026, 6, 10, 13, 0, tzinfo=UTC),
+        )

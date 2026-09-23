@@ -39928,7 +39928,15 @@ def _day0_remaining_global_probability_components(
     a same-day order.
     """
 
-    if snapshot is None:
+    direct_held_remaining = bool(
+        entry_authority is False
+        and _is_day0_extreme_event_context(family=family, payload=payload)
+        and payload.get("_edli_day0_redecision_authority_scope")
+        == "held_exposure_current_day0_only_v1"
+        and payload.get("_edli_day0_direct_current_redecision_authority")
+        is True
+    )
+    if snapshot is None and not direct_held_remaining:
         snapshot = _forecast_snapshot_row_for_event(
             forecast_conn,
             event=event,
@@ -39936,17 +39944,21 @@ def _day0_remaining_global_probability_components(
             allow_latest=True,
             decision_time=decision_time,
         )
-    if snapshot is None:
+    if snapshot is None and not direct_held_remaining:
         raise ValueError("Day0 base forecast snapshot missing for global inference")
-    seed_members = _day0_seed_members_multimodel(
-        forecast_conn,
-        family=family,
-        decision_time=decision_time,
+    seed_members = (
+        None
+        if direct_held_remaining
+        else _day0_seed_members_multimodel(
+            forecast_conn,
+            family=family,
+            decision_time=decision_time,
+        )
     )
     analysis = _market_analysis_from_event_snapshot(
         calibration_conn=calibration_conn,
         hourly_vector_conn=forecast_conn,
-        snapshot=snapshot,
+        snapshot=None if direct_held_remaining else snapshot,
         family=family,
         native_costs={},
         payload=payload,
@@ -45540,11 +45552,55 @@ def _day0_analysis_rng_seed(
     return int(stable_hash(seed_payload)[:16], 16)
 
 
+def _day0_remaining_direct_contract_metadata(
+    *,
+    family: object,
+    payload: Mapping[str, object],
+    bins: list[Bin],
+) -> tuple[object, SettlementSemantics, str]:
+    """Validate the contract metadata for a held direct remaining-day q.
+
+    This path deliberately has no daily-extrema snapshot: its probability
+    surface is the current causal hourly-vector bundle.  Unit and metric stay
+    fail-closed against the market family and settlement contract.
+    """
+
+    city = runtime_cities_by_name().get(str(getattr(family, "city", "") or ""))
+    if city is None:
+        raise ValueError(
+            "DAY0_REMAINING_DIRECT_CONTRACT_CITY_MISSING"
+        )
+    metric = str(getattr(family, "metric", "") or "").strip().lower()
+    payload_metric = str(
+        payload.get("metric") or payload.get("temperature_metric") or ""
+    ).strip().lower()
+    payload_unit = str(payload.get("settlement_unit") or "").strip().upper()
+    city_unit = str(getattr(city, "settlement_unit", "") or "").strip().upper()
+    bin_units = {str(getattr(bin_value, "unit", "") or "").strip().upper() for bin_value in bins}
+    if (
+        metric not in {"high", "low"}
+        or payload_metric != metric
+        or payload_unit not in {"C", "F"}
+        or city_unit not in {"C", "F"}
+        or payload_unit != city_unit
+        or bin_units != {city_unit}
+    ):
+        raise ValueError("DAY0_REMAINING_DIRECT_CONTRACT_IDENTITY_MISMATCH")
+    semantics = SettlementSemantics.for_city(city)
+    if (
+        semantics.measurement_unit != city_unit
+        or not math.isfinite(float(semantics.precision))
+        or float(semantics.precision) <= 0.0
+    ):
+        raise ValueError("DAY0_REMAINING_DIRECT_CONTRACT_SEMANTICS_INVALID")
+    return city, semantics, city_unit
+
+
 def _market_analysis_from_event_snapshot(
     *,
     calibration_conn: sqlite3.Connection,
     hourly_vector_conn: sqlite3.Connection | None = None,
-    snapshot: dict[str, Any],
+    snapshot: dict[str, Any] | None,
     family,
     native_costs: dict[tuple[str, str], tuple[dict[str, Any] | None, ExecutionPrice | None, float, float | None, str | None]],
     payload: dict[str, object],
@@ -45557,10 +45613,26 @@ def _market_analysis_from_event_snapshot(
 
     bins = list(family.bins)
     is_day0 = _is_day0_extreme_event_context(family=family, payload=payload)
+    direct_held_remaining = bool(
+        snapshot is None
+        and is_day0
+        and entry_authority is False
+        and payload.get("_edli_day0_redecision_authority_scope")
+        == "held_exposure_current_day0_only_v1"
+        and payload.get("_edli_day0_direct_current_redecision_authority")
+        is True
+    )
+    if snapshot is None and not direct_held_remaining:
+        raise ValueError("DAY0_REMAINING_DIRECT_CONTRACT_AUTHORITY_REQUIRED")
     # The Day0 random variable is the final extreme conditioned on current
-    # remaining-hour vectors.  Its full-day snapshot supplies only causal/unit
-    # metadata and must never be parsed as a fallback member distribution.
-    if day0_seed_members is not None and np.asarray(day0_seed_members, dtype=float).size >= 3:
+    # remaining-hour vectors.  An ordinary path uses its full-day snapshot only
+    # for causal/unit metadata; the held direct path verifies that metadata from
+    # its observed contract carrier and never parses daily extrema as fallback.
+    if (
+        not direct_held_remaining
+        and day0_seed_members is not None
+        and np.asarray(day0_seed_members, dtype=float).size >= 3
+    ):
         raw_members = np.asarray(day0_seed_members, dtype=float)
         payload["_edli_day0_seed_source"] = "raw_model_forecasts.multimodel"
     elif is_day0:
@@ -45592,7 +45664,20 @@ def _market_analysis_from_event_snapshot(
     # into a load-bearing fail-closed assertion at the q seam, so a future ingest
     # unit-swap (Kelvin leak / source swap / new city) cannot silently invert q
     # into the wrong bins (wrong-SIDE on a KNOWN market — Paris-class).
-    unit = _assert_settlement_unit_identity(snapshot=snapshot, payload=payload, city=city, bins=bins)
+    direct_semantics = None
+    if direct_held_remaining:
+        city, direct_semantics, unit = _day0_remaining_direct_contract_metadata(
+            family=family,
+            payload=payload,
+            bins=bins,
+        )
+    else:
+        unit = _assert_settlement_unit_identity(
+            snapshot=snapshot,
+            payload=payload,
+            city=city,
+            bins=bins,
+        )
     day0_probability_time = _day0_probability_clock(decision_time) if is_day0 else decision_time
     # === ONE-CALIBRATOR SEAM (#110 / ELEVATION S2) ===========================================
     # When EMOS serves this (city, season) cell, the traded distribution IS
@@ -45786,11 +45871,25 @@ def _market_analysis_from_event_snapshot(
             )
             if day0_extra_member_sigma > 0.0:
                 payload["_edli_day0_extra_member_sigma_native"] = float(day0_extra_member_sigma)
-        p_raw = _snapshot_p_raw(
-            snapshot, family=family, bins=bins, members=members, payload=payload,
-            extra_member_sigma=day0_extra_member_sigma,
-            decision_time=decision_time,
-        )
+        if direct_held_remaining:
+            p_raw = _normalize_event_bound_p_raw_vector(
+                _day0_remaining_p_raw_vector(
+                    members,
+                    city=city,
+                    settlement_semantics=direct_semantics,
+                    bins=bins,
+                    payload=payload,
+                    extra_member_sigma=day0_extra_member_sigma,
+                    decision_time=decision_time,
+                ),
+                bins=bins,
+            )
+        else:
+            p_raw = _snapshot_p_raw(
+                snapshot, family=family, bins=bins, members=members, payload=payload,
+                extra_member_sigma=day0_extra_member_sigma,
+                decision_time=decision_time,
+            )
         if _day0_rd_members is not None:
             # remaining-day mode: identity calibration (see block comment above)
             p_cal = np.asarray(p_raw, dtype=float)
@@ -46031,12 +46130,20 @@ def _market_analysis_from_event_snapshot(
         alpha=float(settings["edge"]["base_alpha"]["level1"]),
         bins=bins,
         member_maxes=members,  # §4.1: corrected array (hoisted above)
-        unit=unit,  # #101: the unit-identity-asserted agreed unit (snapshot==city==bins)
-        precision=float(snapshot.get("members_precision") or 1.0),
+        unit=unit,  # #101: agreed snapshot-or-direct contract unit == city == bins
+        precision=(
+            float(direct_semantics.precision)
+            if direct_held_remaining
+            else float(snapshot.get("members_precision") or 1.0)
+        ),
         round_fn=None,
         city_name=family.city,
         season="",
-        forecast_source=str(snapshot.get("source_id") or payload.get("source_id") or ""),
+        forecast_source=(
+            _day0_probability_conditioning_source(payload)
+            if direct_held_remaining
+            else str(snapshot.get("source_id") or payload.get("source_id") or "")
+        ),
         market_complete=True,
         posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
         bootstrap_probability_sampler=sampler,
@@ -46553,6 +46660,22 @@ def _maybe_apply_settlement_coverage_to_lcb(
     return verdicts
 
 
+def _normalize_event_bound_p_raw_vector(
+    values: np.ndarray,
+    *,
+    bins: list[Bin],
+) -> np.ndarray:
+    """Validate and normalize one event-bound bin vector identically by path."""
+
+    arr = np.asarray(values, dtype=float)
+    if arr.shape != (len(bins),) or not np.isfinite(arr).all() or np.any(arr < 0.0):
+        raise ValueError("event-bound p_raw vector invalid")
+    total = float(arr.sum())
+    if total <= 0.0:
+        raise ValueError("event-bound p_raw vector has zero mass")
+    return arr / total
+
+
 def _snapshot_p_raw(
     snapshot: dict[str, Any],
     *,
@@ -46587,13 +46710,7 @@ def _snapshot_p_raw(
             bins,
             extra_member_sigma=extra_member_sigma,
         )
-    if arr.shape != (len(bins),) or not np.isfinite(arr).all() or np.any(arr < 0.0):
-        raise ValueError("event-bound p_raw vector invalid")
-    total = float(arr.sum())
-    if total <= 0.0:
-        raise ValueError("event-bound p_raw vector has zero mass")
-    arr = arr / total
-    return arr
+    return _normalize_event_bound_p_raw_vector(arr, bins=bins)
 
 
 def _day0_remaining_p_raw_vector(
