@@ -25,6 +25,7 @@ from src.data.raw_forecast_artifact_manifest import (
 from src.data.replacement_forecast_cycle_policy import tradeable_grade_coverage_sql
 from src.data.replacement_forecast_current_target_plan import (
     _latest_authorized_day0_fact,
+    _openmeteo_manifest_metadata_allows_target_date,
     build_replacement_forecast_current_target_plan,
 )
 from src.data.replacement_forecast_materialization_seed_builder import (
@@ -501,7 +502,7 @@ def _manifest_payload_covers_target_local_day(
     can be a PARTIAL-HORIZON capture — when the provider's run was only partly published at
     fetch time the rung-1 single-runs response carried only the launch local day (24h). The
     ``payload_path.exists()`` guard in the downloader then never re-fetches it, so the 24h
-    file persists. ``_manifest_horizon_allows_target_date`` TRUSTS the declared 120h and
+    file persists. The manifest horizon predicate trusts the declared 120h and
     admits that 24h file for a LATER target date it physically cannot serve; the materialize
     subprocess then raises "insufficient Open-Meteo hourly samples inside target local day"
     and the whole eastward family produces no posterior (a discovery blackout). Selecting on
@@ -655,59 +656,12 @@ def _manifest_allows_city(manifest: RawForecastArtifactManifest, *, city: str) -
 
 
 def _manifest_allows_target_date(manifest: RawForecastArtifactManifest, *, target_date: str) -> bool:
-    metadata = manifest.product_metadata
-    dates = metadata.get("target_dates")
-    if isinstance(dates, list) and dates:
-        if target_date in {str(item).strip() for item in dates}:
-            return True
-        # Meta-stamped current-target artifacts are multi-day payloads even when
-        # their manifest retained the filename's start-date list. Let horizon
-        # admission decide, then _latest_manifest proves actual payload coverage.
-        if str(metadata.get("openmeteo_endpoint") or "") != "standard_api_meta_stamped":
-            return False
-        return _manifest_horizon_allows_target_date(metadata, target_date=target_date)
-    explicit = metadata.get("target_date")
-    if explicit is not None and str(explicit).strip():
-        if str(explicit).strip() == target_date:
-            return True
-    return _manifest_horizon_allows_target_date(metadata, target_date=target_date)
-
-
-def _manifest_horizon_allows_target_date(metadata: Mapping[str, object], *, target_date: str) -> bool:
-    """Allow single-runs manifests for any local target date inside their forecast horizon.
-
-    The Open-Meteo single-runs payload is one multi-day hourly file. Its legacy
-    manifest metadata records the local date used in the artifact filename, not
-    the complete set of target dates materializable from the file. The extracted
-    ``raw_model_forecasts`` rows are target-date scoped, so manifest admission
-    must use the same multi-day horizon or held day+1/day+2 families can be
-    marked stale while cycle-advance incorrectly reports no materializable
-    newer cycle.
-    """
-
-    artifact_class = str(metadata.get("artifact_class") or "")
-    endpoint = str(metadata.get("openmeteo_endpoint") or "")
-    if artifact_class != "openmeteo_ecmwf_ifs9_anchor_current_targets":
-        return False
-    if endpoint and endpoint not in {"single_runs_api", "standard_api_meta_stamped"}:
-        return False
-    start_raw = metadata.get("target_date")
-    if start_raw is None or not str(start_raw).strip():
-        return False
-    try:
-        start = date.fromisoformat(str(start_raw).strip())
-        wanted = date.fromisoformat(str(target_date).strip())
-        hours = int(float(metadata.get("forecast_hours") or 0))
-    except Exception:
-        return False
-    if hours <= 0:
-        return False
-    # A 120h hourly payload spans the start date plus up to five following
-    # local calendar dates depending on timezone/run hour. This is an admission
-    # bound only; materialization still fails closed if the payload lacks the
-    # requested local day.
-    max_extra_days = max(0, (hours + 23) // 24)
-    return start <= wanted <= start + timedelta(days=max_extra_days)
+    # Share acquisition's exact-target rule: hourly samples can span dates,
+    # but a target-specific precision certificate cannot. Missing certificates
+    # follow the existing current-target downloader and source-commit wake.
+    return _openmeteo_manifest_metadata_allows_target_date(
+        manifest.product_metadata, target_date=target_date,
+    )
 
 
 def _table_names(conn: sqlite3.Connection) -> set[str]:

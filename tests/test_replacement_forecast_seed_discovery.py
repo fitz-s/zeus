@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-08-30
-# Lifecycle: created=2026-06-06; last_reviewed=2026-08-30; last_reused=2026-08-30
+# Last reused/audited: 2026-09-23
+# Lifecycle: created=2026-06-06; last_reviewed=2026-09-23; last_reused=2026-09-23
 # Purpose: Protect automatic replacement seed discovery from DB context plus raw manifests.
 # Reuse: Run before enabling daemon-side replacement shadow materialization discovery.
 # Authority basis: Simple switch must not depend on hand-authored seeds once raw inputs exist.
@@ -1071,13 +1071,8 @@ def test_exact_target_dates_do_not_horizon_admit_wrong_daily_payload(tmp_path: P
     assert not _manifest_allows_target_date(manifest, target_date="2026-06-20")
 
 
-def test_meta_stamped_current_target_horizon_admits_covered_later_day(tmp_path: Path) -> None:
-    """Meta-stamped current-target payloads are multi-day live inputs.
-
-    Live evidence 2026-07-03: 12Z Open-Meteo payloads physically covered day+1,
-    but manifests carried target_dates=[start_day]. Seed discovery then selected
-    the older 00Z day+1 artifact and cycle-advance froze posteriors at 00Z.
-    """
+def test_meta_stamped_current_target_requires_exact_precision_day(tmp_path: Path) -> None:
+    """Hourly coverage cannot lend another local day's precision certificate."""
 
     raw_dir = tmp_path / "raw"
     precision = _write_file(raw_dir / "precision_metadata.json", {"city": "Paris"})
@@ -1144,7 +1139,7 @@ def test_meta_stamped_current_target_horizon_admits_covered_later_day(tmp_path: 
         },
     )
 
-    assert _manifest_allows_target_date(fresh_manifest, target_date="2026-06-21")
+    assert not _manifest_allows_target_date(fresh_manifest, target_date="2026-06-21")
     selected = _latest_manifest(
         (old_manifest, fresh_manifest),
         source_id="openmeteo_ecmwf_ifs_9km",
@@ -1154,7 +1149,7 @@ def test_meta_stamped_current_target_horizon_admits_covered_later_day(tmp_path: 
         city_timezone="Europe/Paris",
     )
 
-    assert selected is fresh_manifest
+    assert selected is None
 
 
 def test_latest_manifest_prefers_exact_target_scope_over_newer_horizon_sibling(
@@ -2266,3 +2261,61 @@ def test_seed_discovery_does_not_pass_explicit_utc_only_min_target_date(
     )
 
     assert "min_target_date" not in captured
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+@pytest.mark.parametrize("explicit_date_list", [False, True])
+def test_target_precision_scope_drains_after_exact_certificate_arrives(
+    tmp_path: Path, metric: str, explicit_date_list: bool,
+) -> None:
+    """INV-14: Houston's next-day samples cannot reuse yesterday's UTC window."""
+    from scripts.download_replacement_forecast_current_targets import (
+        _precision_metadata,
+        _current_target_scoped_payload,
+    )
+    from src.data.openmeteo_ecmwf_ifs9_anchor import LOW_DATA_VERSION
+    from src.data.replacement_forecast_current_target_plan import (
+        _openmeteo_manifest_metadata_allows_target_date,
+    )
+
+    data_version = OPENMETEO_HIGH_DATA_VERSION if metric == "high" else LOW_DATA_VERSION
+    payload = {"hourly": {"time": [f"2026-09-25T{hour:02}:00" for hour in range(24)],
+                           "temperature_2m": [25.0] * 24}}
+
+    def certificate(day: str) -> RawForecastArtifactManifest:
+        precision = _precision_metadata("Houston", day, anchor_sigma_c=3.0)
+        path = _write_file(tmp_path / f"{day}.json", _current_target_scoped_payload(
+            payload, city="Houston", target_date=day, metric=metric,
+        ))
+        precision_path = _write_file(tmp_path / f"precision_{day}.json", precision)
+        metadata = {
+            "artifact_class": "openmeteo_ecmwf_ifs9_anchor_current_targets",
+            "openmeteo_endpoint": "standard_api_meta_stamped",
+            "city": "Houston", "target_date": day, "forecast_hours": 120,
+            "openmeteo_payload_json": str(path),
+            "precision_metadata_json": str(precision_path),
+        }
+        if explicit_date_list:
+            metadata["target_dates"] = [day]
+        return RawForecastArtifactManifest.from_file(
+            path, source_id="openmeteo_ecmwf_ifs_9km",
+            product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+            data_version=data_version, source_cycle_time="2026-09-22T18:00:00+00:00",
+            source_available_at="2026-09-23T02:00:00+00:00",
+            captured_at="2026-09-23T02:00:00+00:00",
+            request_url="https://example.invalid/openmeteo",
+            request_params={"forecast_hours": 120}, product_metadata=metadata,
+        )
+
+    yesterday, exact = certificate("2026-09-24"), certificate("2026-09-25")
+    kwargs = dict(source_id="openmeteo_ecmwf_ifs_9km", data_version=data_version,
+                  city="Houston", target_date="2026-09-25", city_timezone="America/Chicago")
+    assert not _openmeteo_manifest_metadata_allows_target_date(
+        yesterday.product_metadata, target_date="2026-09-25",
+    )
+    assert _latest_manifest((yesterday,), **kwargs) is None
+    assert _latest_manifest((yesterday, exact), **kwargs) is exact
+    precision = json.loads(Path(exact.product_metadata["precision_metadata_json"]).read_text())
+    assert precision["local_day_start_utc"] == "2026-09-25T05:00:00+00:00"
+    assert precision["local_day_end_utc"] == "2026-09-26T05:00:00+00:00"
+    assert yesterday.captured_at == exact.captured_at
