@@ -13,6 +13,7 @@ DB-heavy jobs starve heartbeats:
     hko_source_clock_db — HKO conditional HTTP + short live write, isolated from METAR
     hko_final_source_clock_db — finalized HKO Daily Extract, isolated from realtime polling
     forecast_clock_db   — replacement forecast publication clock + scoped capture
+    forecast_repair_db  — minute-bounded replacement maintenance, separate from recalibration
     station_forecast_clock_db — official station forecast publication clocks
     oracle_guard_db     — Day0 source disagreement guard
     observation_db      — supplemental observation ingest
@@ -48,6 +49,7 @@ ExecutorClass = Literal[
     "hko_source_clock_db",
     "hko_final_source_clock_db",
     "forecast_clock_db",
+    "forecast_repair_db",
     "station_forecast_clock_db",
     "oracle_guard_db",
     "observation_db",
@@ -66,6 +68,10 @@ ExecutorClass = Literal[
 
 def executor_class_for(spec: SourceJobSpec) -> ExecutorClass:
     """Assign an executor class by job intent. writes_db jobs ALWAYS get a *_db class."""
+    if spec.job_id == "ingest_replacement_maintenance":
+        if spec.owner_daemon != "ingest_main" or spec.role != "derived" or not spec.writes_db:
+            raise ValueError("replacement maintenance requires ingest_main derived DB writer")
+        return "forecast_repair_db"
     if not spec.writes_db:
         if spec.job_id in {"ingest_heartbeat", "forecast_live_heartbeat"}:
             return "heartbeat"
@@ -207,6 +213,14 @@ def validate_executor_assignment(specs: list[JobBuildSpec] | None = None) -> lis
             violations.append(
                 f"{s.job_id}: writes_db job assigned file-only executor {s.executor_class!r}"
             )
+        if s.executor_class == "forecast_repair_db" and (
+            s.job_id != "ingest_replacement_maintenance"
+            or s.owner_daemon != "ingest_main"
+            or job is None or job.role != "derived" or not job.writes_db
+        ):
+            violations.append(f"{s.job_id}: unauthorized forecast_repair_db assignment")
+        if s.job_id == "ingest_replacement_maintenance" and s.executor_class != "forecast_repair_db":
+            violations.append(f"{s.job_id}: missing dedicated forecast_repair_db assignment")
     return violations
 
 
@@ -272,9 +286,10 @@ def expected_registry_job_ids(owner_daemon: str, forecast_live_owner_env: str) -
 def registry_executor_pools() -> dict[str, object]:
     """The APScheduler executor pools for registry mode.
 
-    Every DB lane is serial. The source-clock lane is separate so a long
-    observation/market ingest cannot queue time-sensitive publication work;
-    SQLite write exclusion remains enforced by the DB mutex at the job boundary.
+    Every DB lane is serial. Forecast repair has its own worker so long
+    recalibration cannot queue current-market capture; source-clock work is
+    separate from observation/market ingest. Existing DB mutexes still enforce
+    SQLite write exclusion at the job boundary.
     """
     from apscheduler.executors.pool import ThreadPoolExecutor
 
@@ -283,6 +298,7 @@ def registry_executor_pools() -> dict[str, object]:
         "hko_source_clock_db": ThreadPoolExecutor(max_workers=1),
         "hko_final_source_clock_db": ThreadPoolExecutor(max_workers=1),
         "forecast_clock_db": ThreadPoolExecutor(max_workers=1),
+        "forecast_repair_db": ThreadPoolExecutor(max_workers=1),
         "station_forecast_clock_db": ThreadPoolExecutor(max_workers=1),
         "oracle_guard_db": ThreadPoolExecutor(max_workers=1),
         "observation_db": ThreadPoolExecutor(max_workers=1),
@@ -353,6 +369,16 @@ def validate_lane_separation(specs: list[JobBuildSpec] | None = None) -> list[st
     # otherwise an owner-filtered spec list KeyErrors on the other daemon's jobs (PR review #329 D).
     for s in specs:
         job = JOB_REGISTRY.get(s.job_id)
+        if s.executor_class == "forecast_repair_db" and (
+            s.job_id != "ingest_replacement_maintenance"
+            or s.owner_daemon != "ingest_main"
+            or job is None or job.role != "derived" or not job.writes_db
+        ):
+            violations.append(
+                f"{s.job_id}: {s.owner_daemon} cannot use forecast_repair_db"
+            )
+        if s.job_id == "ingest_replacement_maintenance" and s.executor_class != "forecast_repair_db":
+            violations.append(f"{s.job_id}: replacement repair must use forecast_repair_db")
         if job is None:
             continue
         if s.executor_class in {

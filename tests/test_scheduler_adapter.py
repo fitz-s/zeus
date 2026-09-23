@@ -708,7 +708,8 @@ def test_executor_class_assignments_by_role() -> None:
         by_id["ingest_station_forecast_source_clock"].executor_class
         == "station_forecast_clock_db"
     )
-    assert by_id["ingest_replacement_maintenance"].executor_class == "derived_db"
+    assert by_id["ingest_replacement_maintenance"].executor_class == "forecast_repair_db"
+    assert by_id["ingest_etl_recalibrate"].executor_class == "derived_db"
     assert by_id["ingest_day0_oracle_anomaly"].executor_class == "oracle_guard_db"
     assert by_id["ingest_k2_obs_fast_tick"].executor_class == "observation_db"
     assert by_id["ingest_tigge_archive_backfill"].executor_class == "backfill_db"
@@ -736,6 +737,111 @@ def test_all_jobs_single_instance_coalesce_preserved() -> None:
     for s in build_job_specs():
         assert s.max_instances == 1, f"{s.job_id} max_instances must be 1"
         assert s.coalesce is True, f"{s.job_id} must coalesce"
+
+
+def test_forecast_repair_lane_admits_only_the_ingest_maintenance_owner() -> None:
+    from src.data.scheduler_adapter import (
+        JobBuildSpec, build_job_specs, validate_executor_assignment,
+        validate_lane_separation,
+    )
+
+    specs = build_job_specs()
+    assert validate_lane_separation(specs) == []
+    repair = [spec for spec in specs if spec.executor_class == "forecast_repair_db"]
+    assert [(spec.job_id, spec.owner_daemon) for spec in repair] == [
+        ("ingest_replacement_maintenance", "ingest_main")
+    ]
+    planted = [
+        JobBuildSpec("ingest_etl_recalibrate", "ingest_main", "forecast_repair_db", 1, True, 300),
+        JobBuildSpec("ingest_replacement_maintenance", "forecast_live_daemon", "forecast_repair_db", 1, True, 300),
+        JobBuildSpec("ingest_replacement_maintenance", "ingest_main", "derived_db", 1, True, 300),
+        JobBuildSpec("unregistered_writer", "ingest_main", "forecast_repair_db", 1, True, 300),
+    ]
+    for validator in (validate_executor_assignment, validate_lane_separation):
+        violations = validator(planted)
+        assert len(violations) == 4
+        assert "ingest_etl_recalibrate" in violations[0]
+        assert "ingest_replacement_maintenance" in violations[1]
+        assert "ingest_replacement_maintenance" in violations[2]
+        assert "unregistered_writer" in violations[3]
+
+
+def test_real_scheduler_runs_forecast_repair_while_derived_busy_without_overlap() -> None:
+    from datetime import datetime, timezone
+    from threading import Event
+
+    from apscheduler.events import EVENT_JOB_MAX_INSTANCES
+    from apscheduler.schedulers.background import BackgroundScheduler
+
+    from src.data.scheduler_adapter import build_job_specs, registry_executor_pools
+
+    specs = {spec.job_id: spec for spec in build_job_specs("ingest_main")}
+    derived = specs["ingest_etl_recalibrate"]
+    repair = specs["ingest_replacement_maintenance"]
+    derived_entered, derived_release = Event(), Event()
+    repair_entered, repair_release, repair_exited = Event(), Event(), Event()
+    overlap_rejected = Event()
+    repair_runs: list[int] = []
+    scheduler = BackgroundScheduler(executors=registry_executor_pools(), timezone=timezone.utc)
+    scheduler.add_listener(
+        lambda event: overlap_rejected.set()
+        if event.job_id == repair.job_id else None,
+        EVENT_JOB_MAX_INSTANCES,
+    )
+
+    def derived_job() -> None:
+        derived_entered.set()
+        assert derived_release.wait(3)
+
+    def repair_job() -> None:
+        repair_runs.append(1)
+        repair_entered.set()
+        try:
+            assert repair_release.wait(3)
+        finally:
+            repair_exited.set()
+
+    try:
+        scheduler.start()
+        scheduler.add_job(
+            derived_job, "date", run_date=datetime.now(timezone.utc),
+            id=derived.job_id, executor=derived.executor_class,
+            max_instances=derived.max_instances, coalesce=derived.coalesce,
+        )
+        assert derived_entered.wait(2), "long recalibration never entered derived_db"
+        scheduler.add_job(
+            repair_job, "interval", seconds=0.05,
+            next_run_time=datetime.now(timezone.utc),
+            id=repair.job_id, executor=repair.executor_class,
+            max_instances=repair.max_instances, coalesce=repair.coalesce,
+        )
+        assert repair_entered.wait(2), "forecast repair starved behind recalibration"
+        assert overlap_rejected.wait(2), "second repair run should be rejected while first is active"
+        assert repair_runs == [1]
+        assert not derived_release.is_set(), "repair must start while derived lane is still busy"
+        scheduler.remove_job(repair.job_id)
+    finally:
+        repair_release.set()
+        derived_release.set()
+        scheduler.shutdown(wait=True)
+    assert repair_exited.is_set()
+    assert repair_runs == [1]
+
+
+def test_forecast_repair_cannot_be_reclassified_as_file_only_or_other_owner() -> None:
+    from dataclasses import replace
+
+    from src.data.scheduler_adapter import executor_class_for
+    from src.data.source_job_registry import JOB_REGISTRY
+
+    maintenance = JOB_REGISTRY["ingest_replacement_maintenance"]
+    for forged in (
+        replace(maintenance, writes_db=False),
+        replace(maintenance, role="health"),
+        replace(maintenance, owner_daemon="forecast_live_daemon"),
+    ):
+        with pytest.raises(ValueError, match="requires ingest_main derived DB writer"):
+            executor_class_for(forged)
 
 
 def test_replacement_availability_poll_uses_fast_source_clock_cadence(monkeypatch) -> None:
@@ -4013,6 +4119,7 @@ def test_build_registry_scheduler_builds_exact_set_and_routes_executors() -> Non
             "hko_source_clock_db",
             "hko_final_source_clock_db",
             "forecast_clock_db",
+            "forecast_repair_db",
             "station_forecast_clock_db",
             "oracle_guard_db",
             "observation_db",
@@ -4068,7 +4175,8 @@ def test_ingest_main_registry_scheduler_replaces_manual_add_job_when_enabled() -
         by_id["ingest_station_forecast_source_clock"]["executor"]
         == "station_forecast_clock_db"
     )
-    assert by_id["ingest_replacement_maintenance"]["executor"] == "derived_db"
+    assert by_id["ingest_replacement_maintenance"]["executor"] == "forecast_repair_db"
+    assert by_id["ingest_etl_recalibrate"]["executor"] == "derived_db"
     assert "ingest_day0_metar_commit_retry" not in by_id
     assert by_id["ingest_day0_oracle_anomaly"]["executor"] == "oracle_guard_db"
     assert by_id["ingest_harvester_truth_writer"]["executor"] == "settlement_db"

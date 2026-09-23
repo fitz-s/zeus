@@ -36,10 +36,10 @@ owner, role, current executor, whether it writes a DB, source(s), family, dispat
     executor; OpenData registered by BOTH daemons; jobs scheduled but unregistered here),
   * PR6 can later GENERATE the APScheduler from this registry instead of hand-coded add_job.
 
-This is a *mirror* of current reality plus a classification. ``current_executor`` records what
-the code does today; ``writes_db`` records the audited write behaviour. The gap between them
-(e.g. UMA listener on ``fast`` yet writing the DB via record_resolution) is exactly what the
-efficiency audit surfaces — it is data, not a runtime change.
+This is a *mirror* of scheduled job identities plus a classification. The legacy
+``current_executor`` inventory field records the former default/fast schedule;
+actual registry-mode lanes come from ``scheduler_adapter.executor_class_for``.
+``writes_db`` records the audited write behaviour.
 """
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ from dataclasses import dataclass
 from typing import Literal, Optional
 
 Role = Literal["live", "backfill", "settlement", "derived", "health", "evidence"]
-Executor = Literal["default", "fast"]  # the CURRENT two APScheduler executors in ingest_main
+Executor = Literal["default", "fast"]  # historical inventory; actual lanes use scheduler_adapter
 # How the daemon dispatches the job (PR #329 review B; advisor point 2). The user-WS ingestor is
 # NOT an add_job — it is a long-running thread. As of the process-topology refactor
 # (system_decomposition_plan §8 Step 3, P3, 2026-06-08) it was LIFTED out of the order daemon
@@ -202,7 +202,8 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
                   callable_ref="_replacement_maintenance_tick", family="forecast",
                   misfire_grace_time=120,
                   notes="minute-bounded current-target repair and broad reseed catch-up; isolated "
-                        "from the 15s replacement publication clock on derived_db"),
+                        "from the 15s replacement publication clock and slow recalibration "
+                        "on dedicated serial forecast_repair_db"),
     SourceJobSpec("ingest_opendata_daily_mx2t6", "ingest_main", "live", "default", True,
                   source_id="ecmwf_open_data", callable_ref="_opendata_mx2t6_cycle", owner_gated=True,
                   misfire_grace_time=3600, family="forecast",
