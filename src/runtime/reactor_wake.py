@@ -257,6 +257,30 @@ def is_strict_generic_held_family_completion_wake(wake: object) -> bool:
     )
 
 
+def strict_generic_held_family_scope_identity(
+    wake: object,
+) -> tuple[str, ...] | None:
+    """Return the immutable scope served by one strict generic completion wake.
+
+    A current producer emits one family per strict generic wake.  Older
+    producers could emit several families together; preserve those wakes as
+    one compatibility scope so they can never be partially coalesced or
+    acknowledged.
+    """
+
+    if not is_strict_generic_held_family_completion_wake(wake):
+        return None
+    families = tuple(
+        tuple(str(part or "").strip() for part in family)
+        for family in tuple(getattr(wake, "forecast_families", ()) or ())
+    )
+    if len(families) == 1 and len(families[0]) == 3 and all(families[0]):
+        return ("singleton", *families[0])
+    # Compatibility scope is the complete family set, canonically ordered so
+    # producer ordering cannot make one legacy wake look like two scopes.
+    return ("legacy", *("|".join(family) for family in sorted(families)))
+
+
 def strict_generic_held_family_completion_wakes(
     *, path: Path | None = None, fail_on_error: bool = False
 ) -> tuple[ReactorWake, ...]:
@@ -1509,11 +1533,12 @@ def coalescible_reactor_wakes(
             if wake.wake_id != selected.wake_id and wake.reason == selected.reason
         ]
     elif is_strict_generic_held_family_completion_wake(selected):
+        selected_scope = strict_generic_held_family_scope_identity(selected)
         candidates = [
             wake
             for wake in queued
             if wake.wake_id != selected.wake_id
-            and is_strict_generic_held_family_completion_wake(wake)
+            and strict_generic_held_family_scope_identity(wake) == selected_scope
         ]
         max_wakes = min(
             max(1, int(max_wakes)),

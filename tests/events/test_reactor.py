@@ -5499,6 +5499,202 @@ def test_strict_family_completion_requires_success_baton_and_preserves_cap(tmp_p
     )
 
 
+def test_generic_completion_coalescing_isolated_by_singleton_scope_and_legacy_set(
+    tmp_path,
+):
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    family_a = ("Austin", "2026-09-22", "high")
+    family_b = ("Boston", "2026-09-22", "high")
+    singleton_a = reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=path,
+        wake_id="singleton-a",
+        published_at=datetime(2026, 9, 22, 13, 0, tzinfo=timezone.utc),
+        forecast_families=(family_a,),
+    )
+    reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=path,
+        wake_id="singleton-b",
+        published_at=datetime(2026, 9, 22, 13, 1, tzinfo=timezone.utc),
+        forecast_families=(family_b,),
+    )
+    reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=path,
+        wake_id="singleton-a-duplicate",
+        published_at=datetime(2026, 9, 22, 13, 2, tzinfo=timezone.utc),
+        forecast_families=(family_a,),
+    )
+
+    assert tuple(
+        wake.wake_id
+        for wake in reactor_wake.coalescible_reactor_wakes(singleton_a, path=path)
+    ) == ("singleton-a", "singleton-a-duplicate")
+
+    legacy = reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=path,
+        wake_id="legacy-a-b",
+        published_at=datetime(2026, 9, 22, 13, 3, tzinfo=timezone.utc),
+        forecast_families=(family_a, family_b),
+    )
+    assert tuple(
+        wake.wake_id
+        for wake in reactor_wake.coalescible_reactor_wakes(legacy, path=path)
+    ) == ("legacy-a-b",)
+    assert reactor_wake.strict_generic_held_family_scope_identity(singleton_a) == (
+        "singleton",
+        *family_a,
+    )
+    assert reactor_wake.strict_generic_held_family_scope_identity(legacy) == (
+        "legacy",
+        "Austin|2026-09-22|high",
+        "Boston|2026-09-22|high",
+    )
+    assert reactor_wake.acknowledge_reactor_wake(legacy, path=path)
+    assert reactor_wake.read_reactor_wake(path=path).wake_id == "singleton-a"
+
+
+def test_generic_completion_scope_round_skips_failed_duplicate_then_retries_oldest(
+    tmp_path, monkeypatch
+):
+    import src.config as config
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    monkeypatch.setattr(config, "state_path", lambda _name: path)
+    family_b = ("Boston", "2026-09-22", "high")
+    family_c = ("Chicago", "2026-09-22", "high")
+    family_d = ("Denver", "2026-09-22", "high")
+    family_legacy = ("El Paso", "2026-09-22", "high")
+    base = datetime(2026, 9, 22, 13, 0, tzinfo=timezone.utc)
+    for wake_id, family, offset in (
+        ("b-first", family_b, 0),
+        ("c-bad", family_c, 1),
+        ("d-good", family_d, 2),
+    ):
+        reactor_wake.publish_reactor_wake(
+            source="held_position_monitor",
+            reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+            path=path,
+            wake_id=wake_id,
+            published_at=base + timedelta(seconds=offset),
+            forecast_families=(family,),
+        )
+    reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=path,
+        wake_id="legacy-bad",
+        published_at=base + timedelta(seconds=3),
+        forecast_families=(family_legacy, family_b),
+    )
+
+    selected: list[tuple[str, ...]] = []
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
+    monkeypatch.setattr(
+        main, "_collateral_authority_wake_backoff_ids", lambda: frozenset()
+    )
+    monkeypatch.setattr(
+        main, "_paused_forecast_carrier_priority_allowed", lambda **_kwargs: False
+    )
+    monkeypatch.setattr(
+        main,
+        "_edli_event_reactor_cycle",
+        lambda **kwargs: selected.append(tuple(kwargs["producer_wake_ids"]))
+        or selected[-1][0] in {"d-good"},
+    )
+    main._edli_initialize_reactor_wake_cursor()
+    try:
+        assert main._edli_reactor_wake_poll_once() is False
+        reactor_wake.publish_reactor_wake(
+            source="held_position_monitor",
+            reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+            path=path,
+            wake_id="b-duplicate",
+            published_at=base + timedelta(seconds=3),
+            forecast_families=(family_b,),
+        )
+        assert main._edli_reactor_wake_poll_once() is False
+        assert main._edli_reactor_wake_poll_once() is True
+        assert main._edli_reactor_wake_poll_once() is False
+        assert main._edli_reactor_wake_poll_once() is False
+    finally:
+        main._edli_initialize_reactor_wake_cursor()
+
+    assert selected == [
+        ("b-first",),
+        ("c-bad",),
+        ("d-good",),
+        ("legacy-bad",),
+        ("b-first", "b-duplicate"),
+    ]
+    assert reactor_wake.read_reactor_wake(path=path).wake_id == "b-first"
+
+
+def test_generic_completion_ack_failure_advances_scope_round(tmp_path, monkeypatch):
+    import src.config as config
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    monkeypatch.setattr(config, "state_path", lambda _name: path)
+    base = datetime(2026, 9, 22, 13, 0, tzinfo=timezone.utc)
+    families = {
+        "bad-ack": ("Austin", "2026-09-22", "high"),
+        "next-scope": ("Boston", "2026-09-22", "high"),
+    }
+    for offset, (wake_id, family) in enumerate(families.items()):
+        reactor_wake.publish_reactor_wake(
+            source="held_position_monitor",
+            reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+            path=path,
+            wake_id=wake_id,
+            published_at=base + timedelta(seconds=offset),
+            forecast_families=(family,),
+        )
+
+    selected: list[str] = []
+    acknowledgements: list[str] = []
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
+    monkeypatch.setattr(
+        main, "_collateral_authority_wake_backoff_ids", lambda: frozenset()
+    )
+    monkeypatch.setattr(
+        main, "_paused_forecast_carrier_priority_allowed", lambda **_kwargs: False
+    )
+    monkeypatch.setattr(
+        main,
+        "_edli_event_reactor_cycle",
+        lambda **kwargs: selected.append(kwargs["producer_wake_ids"][0]) or True,
+    )
+    monkeypatch.setattr(
+        main,
+        "_acknowledge_edli_reactor_wake_batch",
+        lambda wake, _wakes, **_kwargs: acknowledgements.append(wake.wake_id)
+        or len(acknowledgements) > 1,
+    )
+    main._edli_initialize_reactor_wake_cursor()
+    try:
+        assert main._edli_reactor_wake_poll_once() is False
+        assert main._edli_reactor_wake_poll_once() is True
+    finally:
+        main._edli_initialize_reactor_wake_cursor()
+
+    assert selected == ["bad-ack", "next-scope"]
+    assert acknowledgements == ["bad-ack", "next-scope"]
+
+
 def test_family_completion_baton_keeps_exact_and_fill_ahead(tmp_path):
     from src.runtime import reactor_wake
 

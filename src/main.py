@@ -163,6 +163,8 @@ _edli_global_completion_yield = _OneTurnWakeExclusion()
 _edli_day0_post_monitor_yield = _OneTurnWakeExclusion()
 _edli_family_completion_post_monitor_yield = _OneTurnWakeExclusion()
 _edli_paused_forecast_post_monitor_yield = _OneTurnWakeExclusion()
+_edli_generic_completion_scope_lock = threading.Lock()
+_edli_generic_completion_attempted_scopes: set[tuple[str, ...]] = set()
 _edli_terminal_day0_cleanup_yield = threading.Event()
 _edli_failed_day0_price_yield = threading.Event()
 _HELD_POSITION_MONITOR_DEFER_JOBS = frozenset(
@@ -5052,6 +5054,8 @@ def _edli_initialize_reactor_wake_cursor() -> None:
     _edli_day0_post_monitor_yield.reset()
     _edli_family_completion_post_monitor_yield.reset()
     _edli_paused_forecast_post_monitor_yield.reset()
+    with _edli_generic_completion_scope_lock:
+        _edli_generic_completion_attempted_scopes.clear()
     _edli_terminal_day0_cleanup_yield.clear()
     _edli_failed_day0_price_yield.clear()
     _edli_collateral_authority_wake_backoff_until.clear()
@@ -6807,6 +6811,53 @@ def _is_strict_generic_held_family_completion_wake_batch(
     )
 
 
+def _generic_completion_scope(wake: object) -> tuple[str, ...] | None:
+    from src.runtime.reactor_wake import strict_generic_held_family_scope_identity
+
+    return strict_generic_held_family_scope_identity(wake)
+
+
+def _generic_completion_selection_exclusions(
+    wakes: tuple[object, ...],
+) -> frozenset[str]:
+    """Return wake IDs for generic scopes already attempted this process round."""
+
+    current_scopes = {
+        scope
+        for wake in wakes
+        if (scope := _generic_completion_scope(wake)) is not None
+    }
+    with _edli_generic_completion_scope_lock:
+        _edli_generic_completion_attempted_scopes.intersection_update(current_scopes)
+        # Complete a round over every visible scope, including legacy
+        # whole-set compatibility scopes.  Clearing after singleton scopes
+        # alone would repeatedly retry the oldest bad singleton and starve a
+        # later legacy scope forever.
+        if current_scopes and current_scopes <= (
+            _edli_generic_completion_attempted_scopes
+        ):
+            _edli_generic_completion_attempted_scopes.clear()
+            return frozenset()
+        attempted = set(_edli_generic_completion_attempted_scopes)
+    return frozenset(
+        str(getattr(wake, "wake_id", "") or "")
+        for wake in wakes
+        if _generic_completion_scope(wake) in attempted
+    )
+
+
+def _record_generic_completion_scope_attempt(wakes: tuple[object, ...]) -> None:
+    scopes = {
+        scope
+        for wake in wakes
+        if (scope := _generic_completion_scope(wake)) is not None
+    }
+    if not scopes:
+        return
+    with _edli_generic_completion_scope_lock:
+        _edli_generic_completion_attempted_scopes.update(scopes)
+
+
 def _edli_reactor_wake_poll_once() -> bool:
     """Run the canonical reactor once for a new durable-producer wake hint."""
 
@@ -6876,6 +6927,20 @@ def _edli_reactor_wake_poll_once() -> bool:
         _exit_monitor_excluded_wake_ids()
         | _collateral_authority_wake_backoff_ids()
     ) - exact_held_sell_wake_ids
+    try:
+        generic_completion_wakes = strict_generic_held_family_completion_wakes(
+            fail_on_error=True
+        )
+        excluded_wake_ids = frozenset(
+            excluded_wake_ids
+            | _generic_completion_selection_exclusions(generic_completion_wakes)
+        )
+    except (OSError, ValueError):
+        logger.warning(
+            "generic held completion scope selection unreadable; preserving other wake lanes",
+            exc_info=True,
+        )
+        generic_completion_wakes = ()
     global_yield_ids = (
         _edli_global_completion_yield.consume() - exact_held_sell_wake_ids
     )
@@ -7405,6 +7470,13 @@ def _edli_reactor_wake_poll_once() -> bool:
             **reactor_kwargs,
         )
     if ran is not True:
+        if family_scoped_held_completion:
+            # SCOPE: only the current singleton (or legacy whole-set) generic
+            # completion scope. DRAIN: a later poll advances to the oldest
+            # unattempted scope while this immutable wake remains queued.
+            # RESET: a successful cut/terminal HOLD acknowledges its batch;
+            # process restart clears the cursor in the initializer below.
+            _record_generic_completion_scope_attempt(wakes)
         _yield_incomplete_global_completion_once(
             wake,
             pending_held_sell_reauction_requests,
@@ -7495,6 +7567,11 @@ def _edli_reactor_wake_poll_once() -> bool:
         day0_wake=day0_wake,
         forecast_monitor_wake=bool(forecast_monitor_families),
     ):
+        if family_scoped_held_completion:
+            # Queue-ack failure is a failed completion cut even when the
+            # reactor returned HOLD/SELL success. Retain bytes for retry, but
+            # advance the process-local scope round so another family runs.
+            _record_generic_completion_scope_attempt(wakes)
         return False
     logger.debug(
         "EDLI reactor consumed wake id=%s source=%s reason=%s batch=%d events=%d families=%d",
