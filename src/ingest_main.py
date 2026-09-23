@@ -3454,6 +3454,35 @@ def _enqueue_broad_reseed_batch(
         tuple(sorted(cursor_sources)),
         next(_BROAD_RESEED_SEQUENCE),
     )
+    # Only redundant, non-authorizing probes share a pending scan. A successful
+    # download, an unknown write count, or any callback/anchor keeps its own
+    # receipt budget. Never deduplicate against an already-running snapshot.
+    no_commit_retry = (
+        not cursor_sources
+        and all(
+            type(download_report.get(key)) is int and download_report[key] == 0
+            for key in (
+                "written_row_count", "source_commit_notifications",
+                "source_commit_notifications_pending",
+            )
+        )
+        and download_report.get("committed_families") in ((), [])
+        and not download_report.get("source_commit_notification_errors")
+        and not download_report.get("reseed_errors")
+        and all(
+            download_report.get(key) is None
+            for key in (
+                "source_clock_anchor_download", "source_clock_held_anchor_download",
+                "source_clock_anchor_residual_download",
+            )
+        )
+    )
+    if no_commit_retry:
+        identity = (
+            "no_commit_retry",
+            json.dumps(frozen_payload, sort_keys=True, separators=(",", ":")),
+            include_cycle_advance,
+        )
     batch = {
         "cfg": frozen_cfg,
         "include_cycle_advance": include_cycle_advance,
@@ -3497,6 +3526,8 @@ def _enqueue_broad_reseed_batch(
         if _BROAD_RESEED_PENDING is None:
             _BROAD_RESEED_PENDING = batch
         else:
+            if identity in _BROAD_RESEED_PENDING["requests"]:
+                return "SOURCE_BROAD_RESEEDS_ASYNC_PENDING"
             if len(_BROAD_RESEED_PENDING["requests"]) >= 64:
                 _BROAD_RESEED_BLOCKED_SOURCES.update(
                     (str(frozen_payload.get("cursor_path") or ""), str(source))

@@ -312,6 +312,123 @@ def test_broad_reseed_pending_is_bounded_and_preserves_distinct_sources(
     assert seen[1] == tuple(f"source{i}" for i in range(64))
 
 
+@pytest.mark.parametrize("batch_fails", [False, True])
+def test_broad_reseed_coalesces_only_non_authorizing_pending_retries(
+    monkeypatch, broad_reseed_join, batch_fails,
+) -> None:
+    import threading
+
+    import src.data.replacement_forecast_production as prod
+    import src.ingest_main as ingest_main
+
+    entered = threading.Event()
+    release = threading.Event()
+    scans: list[object] = []
+    advances: list[object] = []
+
+    def fusion(_cfg, *, manifest_snapshot):
+        scans.append(manifest_snapshot)
+        if len(scans) == 1:
+            entered.set()
+            assert release.wait(timeout=5)
+        return {"status": "FUSION_UPGRADE_TRIGGER_FAILSOFT_SKIPPED"
+                if batch_fails and len(scans) > 1 else "FUSION_UPGRADE_TRIGGER"}
+
+    monkeypatch.setattr(prod, "_enqueue_fusion_upgrade_reseeds_if_needed", fusion)
+    monkeypatch.setattr(prod, "_enqueue_cycle_advance_reseeds_if_needed",
+                        lambda *_a, **_k: {"status": "CYCLE_ADVANCE_TRIGGER"})
+    monkeypatch.setattr("src.data.source_clock_update_probe.advance_source_clock_cursor",
+                        lambda _p, *, sources: advances.append(sources) or sources)
+    payload = {
+        "cursor_path": "/tmp/non-authorizing-retry-cursor",
+        "updated_sources": ["icon_global"],
+        "cursor_values": {"icon_global": "v1"},
+        "cursor_preimage": {"icon_global": None},
+        "source_runs": {"icon_global": {"initialisation_time": "v1"}},
+    }
+    retry = {
+        "status": "SOURCE_CLOCK_SOURCE_TRANSPORT_RETRYABLE",
+        "written_row_count": 0, "committed_families": (),
+        "source_commit_notifications": 0, "source_commit_notifications_pending": 0,
+    }
+
+    def enqueue(report, sources=()):
+        return ingest_main._enqueue_broad_reseed_batch(
+            {"test": 1}, include_cycle_advance=True,
+            source_clock_payload=payload, cursor_sources=sources,
+            download_report=report,
+        )
+
+    try:
+        enqueue(retry)
+        assert entered.wait(timeout=2)
+        for _ in range(27):
+            enqueue(retry)
+        assert len(ingest_main._BROAD_RESEED_PENDING["requests"]) == 1
+        enqueue({**retry, "written_row_count": 1,
+                 "committed_families": (("London", "2026-09-25", "high"),)},
+                ("icon_global",))
+        assert len(ingest_main._BROAD_RESEED_PENDING["requests"]) == 2
+        assert advances == []
+    finally:
+        release.set()
+        broad_reseed_join()
+    assert len(scans) == 3
+    assert scans[0] is not scans[1] and scans[1] is scans[2]
+    # The zero-write report never grants cursor authority, including when a
+    # later same-source report is eligible; the next clean poll must prove it.
+    assert advances == []
+
+
+@pytest.mark.parametrize("change", [
+    {"written_row_count": 1}, {"written_row_count": None},
+    {"source_commit_notifications": 1}, {"source_commit_notifications_pending": 1},
+    {"source_commit_notification_errors": ("failed",)},
+    {"reseed_errors": ("failed",)}, {"source_clock_anchor_download": {}},
+])
+def test_broad_reseed_uncertain_or_new_commit_receipts_keep_distinct_work(
+    monkeypatch, broad_reseed_join, change,
+) -> None:
+    import threading
+    import src.ingest_main as ingest_main
+
+    entered = threading.Event()
+    release = threading.Event()
+    seen: list[int] = []
+
+    def run(batch):
+        seen.append(len(batch["requests"]))
+        if len(seen) == 1:
+            entered.set()
+            assert release.wait(timeout=5)
+        return True
+
+    monkeypatch.setattr(ingest_main, "_run_broad_reseed_batch", run)
+    report = {
+        "written_row_count": 0, "committed_families": (),
+        "source_commit_notifications": 0, "source_commit_notifications_pending": 0,
+        **change,
+    }
+
+    def enqueue():
+        ingest_main._enqueue_broad_reseed_batch(
+            {"test": 1}, include_cycle_advance=True,
+            source_clock_payload={"cursor_path": "/tmp/uncertain-retry", "updated_sources": []},
+            cursor_sources=(), download_report=report,
+        )
+
+    try:
+        enqueue()
+        assert entered.wait(timeout=2)
+        enqueue()
+        enqueue()
+        assert len(ingest_main._BROAD_RESEED_PENDING["requests"]) == 2
+    finally:
+        release.set()
+        broad_reseed_join()
+    assert seen == [1, 2]
+
+
 def test_broad_reseed_failure_defers_cursor_and_next_poll_retries(
     monkeypatch, broad_reseed_join,
 ) -> None:

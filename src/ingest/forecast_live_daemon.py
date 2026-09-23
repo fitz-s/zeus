@@ -1633,21 +1633,98 @@ def _replacement_forecast_materialize_job(
     limit: int | None = None,
     seed_limit: int | None = None,
 ) -> dict[str, object]:
-    """Run one bounded background materialization lane."""
+    """Run up to three serialized background claims within one soft time budget."""
     from src.data.replacement_forecast_production import (
         _replacement_forecast_live_materialization_queue_config,
     )
 
     cfg = _replacement_forecast_live_materialization_queue_config()
-    return _replacement_forecast_materialize_lane(
-        cfg,
-        lane="background",
-        seed_limit=(
-            max(0, int(seed_limit))
-            if seed_limit is not None
-            else max(1, int(cfg.get("poll_batch_limit") or 1))
-        ),
+    batch_limit = 3 if limit is None else max(0, min(3, int(limit)))
+    if batch_limit == 0:
+        return {"status": "DEFERRED", "processed_count": 0, "failed_count": 0,
+                "seed_processed_count": 0, "seed_failed_count": 0,
+                "reason_codes": ("REPLACEMENT_BACKGROUND_EXPLICIT_ZERO_LIMIT",)}
+    first_seed_limit = (
+        max(0, int(seed_limit))
+        if seed_limit is not None
+        else max(1, int(cfg.get("poll_batch_limit") or 1))
     )
+    deadline = time.monotonic() + 45.0
+    reports: list[dict[str, object]] = []
+    for batch_index in range(batch_limit):
+        if batch_index and time.monotonic() >= deadline:
+            break
+        report = _replacement_forecast_materialize_lane(
+            cfg,
+            lane="background",
+            seed_limit=first_seed_limit if batch_index == 0 else 0,
+        )
+        reports.append(report)
+        if str(report.get("status") or "") in {"DEFERRED", "LOCKED"}:
+            break
+        if not any(
+            int(report.get(field) or 0)
+            for field in (
+                "processed_count", "failed_count", "seed_processed_count",
+                "seed_failed_count",
+            )
+        ):
+            break
+    return _merge_background_lane_reports(reports)
+
+
+def _merge_background_lane_reports(
+    reports: list[dict[str, object]],
+) -> dict[str, object]:
+    """Accumulate work while retaining the final claim's queue snapshot."""
+    merged = dict(reports[-1])
+    for field in (
+        "processed_count", "failed_count", "seed_processed_count",
+        "seed_failed_count", "committed_posterior_count",
+        "reactor_wake_published_count",
+    ):
+        merged[field] = sum(int(report.get(field) or 0) for report in reports)
+    for field in (
+        "processed_files", "failed_files", "seed_processed_files",
+        "seed_failed_files",
+    ):
+        merged[field] = tuple(
+            path for report in reports for path in (report.get(field) or ())
+        )
+    merged["reason_codes"] = tuple(dict.fromkeys(
+        reason for report in reports for reason in (report.get("reason_codes") or ())
+    ))
+    final_status = str(reports[-1].get("status") or "")
+    if final_status in {"DEFERRED", "LOCKED"} and len(reports) > 1:
+        # A failed claim did not reobserve the remaining queue. Keep the last
+        # real claim's snapshot rather than reporting a false zero backlog.
+        observed = next(
+            (report for report in reversed(reports[:-1])
+             if report.get("status") not in {"DEFERRED", "LOCKED"}),
+            None,
+        )
+        if observed is not None:
+            merged["skipped_count"] = int(observed.get("skipped_count") or 0)
+            merged["reason_codes"] += (
+                "REPLACEMENT_BACKGROUND_REMAINING_NOT_REOBSERVED",
+            )
+    if any(
+        report.get("status") == "FAILED"
+        or int(report.get("failed_count") or 0)
+        or int(report.get("seed_failed_count") or 0)
+        for report in reports
+    ):
+        merged["status"] = "FAILED"
+    elif final_status in {"DEFERRED", "LOCKED"}:
+        merged["status"] = final_status
+    elif any(
+        report.get("status") == "PROCESSED"
+        or int(report.get("processed_count") or 0)
+        or int(report.get("seed_processed_count") or 0)
+        for report in reports
+    ):
+        merged["status"] = "PROCESSED"
+    return merged
 
 
 @_scheduler_job(REPLACEMENT_FORECAST_PRIORITY_MATERIALIZE_JOB_ID)

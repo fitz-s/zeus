@@ -1,6 +1,6 @@
 # Created: 2026-07-19
-# Last reused/audited: 2026-09-15
-# Lifecycle: created=2026-07-19; last_reviewed=2026-09-15; last_reused=2026-09-15
+# Last reused/audited: 2026-09-23
+# Lifecycle: created=2026-07-19; last_reviewed=2026-09-23; last_reused=2026-09-23
 # Purpose: Prove Day0 reseed ownership and single-writer materialization ordering.
 # Reuse: Run after changing Day0 enqueue, replacement queue claims, or writer concurrency.
 # Authority basis: operator directive 2026-07-19 (Day0 is a zero-sum race against the market
@@ -3014,12 +3014,231 @@ def test_background_block_does_not_block_independent_priority_job(monkeypatch, t
     monkeypatch.setattr(forecast_live_daemon, "_replacement_forecast_materialize_lane", run_lane)
     background = threading.Thread(target=forecast_live_daemon._replacement_forecast_materialize_job)
     background.start()
-    assert background_started.wait(1.0)
-    forecast_live_daemon._replacement_forecast_priority_materialize_job()
-    assert priority_started.is_set()
-    release_background.set()
-    background.join(1.0)
+    try:
+        assert background_started.wait(1.0)
+        forecast_live_daemon._replacement_forecast_priority_materialize_job()
+        assert priority_started.is_set()
+    finally:
+        release_background.set()
+        background.join(2.0)
     assert not background.is_alive()
+
+
+def test_background_materialize_claims_three_real_requests_and_leaves_fourth(
+    monkeypatch, tmp_path,
+) -> None:
+    """The same minute gets three independent claims with one safe writer each."""
+    from datetime import timedelta
+
+    from src.data import replacement_forecast_live_materialization_queue as queue
+    from src.data import replacement_forecast_production as prod
+    from src.ingest import forecast_live_daemon as daemon
+
+    cfg = _queue_config(tmp_path)
+    request_dir = Path(cfg["request_dir"])
+    request_dir.mkdir()
+    target_date = (datetime.now(timezone.utc).date() + timedelta(days=2)).isoformat()
+    for city in ("London", "Oslo", "Paris", "Munich"):
+        (request_dir / f"{city}.json").write_text(json.dumps({
+            "city": city, "target_date": target_date, "temperature_metric": "high",
+            "source_cycle_time": "2026-09-23T00:00:00+00:00",
+            "baseline_source_run_id": "baseline:0",
+            "openmeteo_source_run_id": "openmeteo:0",
+        }), encoding="utf-8")
+    monkeypatch.setattr(prod, "_replacement_forecast_live_materialization_queue_config", lambda: cfg)
+    monkeypatch.setattr(queue, "_validate_request_payload", lambda _path: (True, "", ""))
+    commands: list[str] = []
+
+    def batch_runner(pending):
+        commands.extend(item.input_json.name for item in pending)
+        return {
+            item.input_json: subprocess.CompletedProcess(item.command, 0, stdout="", stderr="")
+            for item in pending
+        }
+
+    monkeypatch.setattr(queue, "_run_materialization_batch", batch_runner)
+    report = daemon._replacement_forecast_materialize_job()
+
+    assert report["status"] == "PROCESSED"
+    assert report["processed_count"] == 3
+    assert len(commands) == 3
+    assert len(tuple(request_dir.glob("*.json"))) == 1
+    assert report["skipped_count"] == 1
+    assert len(report["processed_files"]) == 3
+
+
+def test_background_materialize_soft_deadline_checks_before_next_claim(
+    monkeypatch, tmp_path,
+) -> None:
+    from types import SimpleNamespace
+
+    from src.data import replacement_forecast_production as prod
+    from src.ingest import forecast_live_daemon as daemon
+
+    monkeypatch.setattr(prod, "_replacement_forecast_live_materialization_queue_config", lambda: _queue_config(tmp_path))
+    clock = iter((100.0, 120.0, 145.0))
+    monkeypatch.setattr(daemon, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    calls: list[int] = []
+
+    def lane(_cfg, *, lane, seed_limit):
+        assert lane == "background"
+        calls.append(seed_limit)
+        return {"status": "PROCESSED", "processed_count": 1,
+                "processed_files": (f"request-{len(calls)}",), "skipped_count": 4 - len(calls)}
+
+    monkeypatch.setattr(daemon, "_replacement_forecast_materialize_lane", lane)
+    result = daemon._replacement_forecast_materialize_job(seed_limit=7)
+    assert calls == [7, 0]
+    assert result["processed_count"] == 2
+    assert result["skipped_count"] == 2
+    assert result["processed_files"] == ("request-1", "request-2")
+
+
+def test_background_seed_only_progress_reclaims_new_request(
+    monkeypatch, tmp_path,
+) -> None:
+    from src.data import replacement_forecast_production as prod
+    from src.ingest import forecast_live_daemon as daemon
+
+    monkeypatch.setattr(prod, "_replacement_forecast_live_materialization_queue_config", lambda: _queue_config(tmp_path))
+    calls: list[int] = []
+    results = iter((
+        {"status": "NO_REQUESTS", "seed_processed_count": 1,
+         "seed_processed_files": ("seed-A",), "skipped_count": 0},
+        {"status": "PROCESSED", "processed_count": 1,
+         "processed_files": ("new-request",), "committed_posterior_count": 1,
+         "reactor_wake_published_count": 1, "skipped_count": 0},
+        {"status": "NO_REQUESTS", "skipped_count": 0},
+    ))
+
+    def lane(_cfg, *, lane, seed_limit):
+        assert lane == "background"
+        calls.append(seed_limit)
+        return next(results)
+
+    monkeypatch.setattr(daemon, "_replacement_forecast_materialize_lane", lane)
+    result = daemon._replacement_forecast_materialize_job(seed_limit=5)
+    assert calls == [5, 0, 0]
+    assert result["status"] == "PROCESSED"
+    assert result["seed_processed_count"] == 1
+    assert result["processed_count"] == 1
+    assert result["committed_posterior_count"] == 1
+    assert result["reactor_wake_published_count"] == 1
+    assert result["seed_processed_files"] == ("seed-A",)
+    assert result["processed_files"] == ("new-request",)
+
+
+def test_background_aggregate_keeps_failed_seed_and_latest_queue_snapshot(
+    monkeypatch, tmp_path,
+) -> None:
+    from src.data import replacement_forecast_production as prod
+    from src.ingest import forecast_live_daemon as daemon
+
+    monkeypatch.setattr(prod, "_replacement_forecast_live_materialization_queue_config", lambda: _queue_config(tmp_path))
+    reports = iter((
+        {"status": "PROCESSED", "processed_count": 1, "processed_files": ("first",),
+         "committed_posterior_count": 1, "reactor_wake_published_count": 1,
+         "skipped_count": 2, "reason_codes": ("queued",)},
+        {"status": "NO_REQUESTS", "seed_failed_count": 1,
+         "seed_failed_files": ("bad-seed",), "skipped_count": 1,
+         "reason_codes": ("seed-failed", "queued")},
+        {"status": "NO_REQUESTS", "skipped_count": 0},
+    ))
+    monkeypatch.setattr(daemon, "_replacement_forecast_materialize_lane", lambda *_a, **_k: next(reports))
+    result = daemon._replacement_forecast_materialize_job()
+    assert result["status"] == "FAILED"
+    assert result["processed_count"] == 1
+    assert result["seed_failed_count"] == 1
+    assert result["seed_failed_files"] == ("bad-seed",)
+    assert result["committed_posterior_count"] == 1
+    assert result["reactor_wake_published_count"] == 1
+    assert result["skipped_count"] == 0
+    assert result["reason_codes"] == ("queued", "seed-failed")
+
+
+@pytest.mark.parametrize("terminal", ("LOCKED", "DEFERRED"))
+def test_background_second_claim_contention_remains_terminal(
+    monkeypatch, tmp_path, terminal,
+) -> None:
+    from src.data import replacement_forecast_production as prod
+    from src.ingest import forecast_live_daemon as daemon
+
+    monkeypatch.setattr(prod, "_replacement_forecast_live_materialization_queue_config", lambda: _queue_config(tmp_path))
+    calls: list[int] = []
+
+    def lane(_cfg, *, lane, seed_limit):
+        assert lane == "background"
+        calls.append(seed_limit)
+        if len(calls) == 1:
+            return {"status": "PROCESSED", "processed_count": 1,
+                    "processed_files": ("first",), "reason_codes": ("first_reason",),
+                    "skipped_count": 3}
+        return {"status": terminal, "reason_codes": ("claim_wait",),
+                "skipped_count": 2}
+
+    monkeypatch.setattr(daemon, "_replacement_forecast_materialize_lane", lane)
+    report = daemon._replacement_forecast_materialize_job(seed_limit=2)
+    assert calls == [2, 0]
+    assert report["status"] == terminal
+    assert report["processed_count"] == 1
+    assert report["processed_files"] == ("first",)
+    assert report["skipped_count"] == 3
+    assert report["reason_codes"] == (
+        "first_reason", "claim_wait",
+        "REPLACEMENT_BACKGROUND_REMAINING_NOT_REOBSERVED",
+    )
+
+
+def test_background_failure_outweighs_later_deferred_claim(
+    monkeypatch, tmp_path,
+) -> None:
+    from src.data import replacement_forecast_production as prod
+    from src.ingest import forecast_live_daemon as daemon
+
+    monkeypatch.setattr(prod, "_replacement_forecast_live_materialization_queue_config", lambda: _queue_config(tmp_path))
+    reports = iter((
+        {"status": "FAILED", "failed_count": 1, "failed_files": ("first",),
+         "skipped_count": 2, "reason_codes": ("failed_first",)},
+        {"status": "DEFERRED", "skipped_count": 0,
+         "reason_codes": ("claim_deadline",)},
+    ))
+    monkeypatch.setattr(daemon, "_replacement_forecast_materialize_lane", lambda *_a, **_k: next(reports))
+    result = daemon._replacement_forecast_materialize_job()
+    assert result["status"] == "FAILED"
+    assert result["failed_count"] == 1
+    assert result["failed_files"] == ("first",)
+    assert result["skipped_count"] == 2
+    assert result["reason_codes"] == (
+        "failed_first", "claim_deadline",
+        "REPLACEMENT_BACKGROUND_REMAINING_NOT_REOBSERVED",
+    )
+
+
+@pytest.mark.parametrize("requested, expected", ((0, 0), (1, 1), (2, 2), (99, 3)))
+def test_background_explicit_claim_limit_preserves_zero(
+    monkeypatch, tmp_path, requested, expected,
+) -> None:
+    from src.data import replacement_forecast_production as prod
+    from src.ingest import forecast_live_daemon as daemon
+
+    monkeypatch.setattr(prod, "_replacement_forecast_live_materialization_queue_config", lambda: _queue_config(tmp_path))
+    calls: list[int] = []
+
+    def lane(_cfg, *, lane, seed_limit):
+        assert lane == "background"
+        calls.append(seed_limit)
+        return {"status": "PROCESSED", "processed_count": 1, "skipped_count": 0}
+
+    monkeypatch.setattr(daemon, "_replacement_forecast_materialize_lane", lane)
+    report = daemon._replacement_forecast_materialize_job(limit=requested, seed_limit=4)
+    assert len(calls) == expected
+    assert calls == ([4] + [0] * (expected - 1) if expected else [])
+    assert report["processed_count"] == expected
+    if requested == 0:
+        assert report["status"] == "DEFERRED"
+        assert report["reason_codes"] == (
+            "REPLACEMENT_BACKGROUND_EXPLICIT_ZERO_LIMIT",
+        )
 
 
 def test_priority_job_exception_writes_failed_scheduler_health(monkeypatch, tmp_path) -> None:
