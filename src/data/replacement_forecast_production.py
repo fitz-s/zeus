@@ -849,6 +849,8 @@ def _download_replacement_forecast_current_targets_if_needed(
         raise ValueError("replacement current-target download requires forecast_db and raw_manifest_dir/download_output_dir")
     if quota_critical and quota_priority:
         raise ValueError("current-target quota lane must be critical or priority, not both")
+    if quota_critical and required_scopes is None:
+        raise ValueError("critical current-target quota requires explicit scopes")
     if deadline is not None and max_wall_clock_seconds <= 0:
         _close_current_target_bucket_pool()
         return {
@@ -861,7 +863,8 @@ def _download_replacement_forecast_current_targets_if_needed(
         download_current_target_openmeteo_inputs,
     )
     from src.data.replacement_forecast_current_target_plan import (
-        build_replacement_forecast_current_target_plan,
+        _default_min_target_date,
+        replacement_forecast_current_target_keys,
     )
 
     # CYCLE-CURRENCY ANTIBODY (2026-06-09): coverage ("a posterior exists for every target")
@@ -901,18 +904,40 @@ def _download_replacement_forecast_current_targets_if_needed(
     _check_source_preflight_deadline(deadline)
     cycle_advanced = downloaded_cycle is None or downloaded_cycle < available_cycle
 
-    plan = None
+    broad_scope_acquisition = required_scopes is None
+    target_count = 0
     structurally_unservable_critical_scopes: tuple[
         tuple[str, str, str], ...
     ] = ()
     critical_scope_exclusions: list[dict[str, object]] = []
-    if required_scopes is None:
-        plan = build_replacement_forecast_current_target_plan(
-            Path(str(forecast_db)),
-            required_openmeteo_source_cycle_time=available_cycle,
-            **({"deadline_monotonic": deadline} if deadline is not None else {}),
-        )
+    if broad_scope_acquisition:
+        # Raw acquisition needs the current market universe and exact-cycle raw
+        # proof, not the posterior/readiness joins owned by materialization.
+        decision_time = datetime.now(timezone.utc)
+        try:
+            keys = replacement_forecast_current_target_keys(
+                Path(str(forecast_db)),
+                min_target_date=_default_min_target_date(decision_time),
+                now_utc=decision_time,
+                require_local_day_not_ended=True,
+                market_root=True,
+                deadline_monotonic=deadline,
+            )
+        except Exception:
+            _close_current_target_bucket_pool(available_cycle)
+            raise
         _check_source_preflight_deadline(deadline)
+        required_scopes = tuple(
+            (key.city, key.target_date, key.temperature_metric) for key in keys
+        )
+        target_count = len(required_scopes)
+        if not required_scopes:
+            _close_current_target_bucket_pool()
+            return {
+                "status": "CURRENT_TARGET_SCOPED_DOWNLOAD_NO_TARGETS",
+                "available_cycle": available_cycle.isoformat(),
+                "target_count": 0,
+            }
     else:
         required_scopes = tuple(dict.fromkeys(required_scopes))
         if not required_scopes:
@@ -990,71 +1015,45 @@ def _download_replacement_forecast_current_targets_if_needed(
                     "scope_exclusions": critical_scope_exclusions,
                     "written_manifest_count": 0,
                 }
-        # Explicit ordinary held scopes need the same exact-cycle reuse proof as
-        # critical held scopes.  Previously only quota_critical entered this
-        # check, so already-materializable active positions re-downloaded the
-        # same provider cycle every minute until the local quota failed. SCOPE:
-        # only this explicit scoped slice. DRAIN: missing scopes continue into
-        # the existing bounded transport below. RESET: a newer provider cycle or
-        # a missing/invalid canonical artifact makes the scope missing again.
-        missing_scopes = _critical_scopes_missing_current_anchor(
-            Path(str(forecast_db)),
-            required_scopes,
-            available_cycle,
-            **({"deadline_monotonic": deadline} if deadline is not None else {}),
-        )
-        _check_source_preflight_deadline(deadline)
-        if missing_scopes is None:
-            raise RuntimeError("scoped current-target anchor coverage unreadable")
-        if not missing_scopes:
-            covered_report: dict[str, object] = {
-                "status": (
-                    "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED"
-                    if quota_critical
-                    else "CURRENT_TARGETS_ALREADY_COVERED"
-                ),
-                "available_cycle": available_cycle.isoformat(),
-                "downloaded_cycle": (
-                    None
-                    if downloaded_cycle is None
-                    else downloaded_cycle.isoformat()
-                ),
-                "target_count": len(required_scopes),
-                "written_manifest_count": 0,
-            }
-            if structurally_unservable_critical_scopes:
-                covered_report["structurally_unservable_scope_count"] = len(
-                    structurally_unservable_critical_scopes
-                )
-                covered_report["structurally_unservable_scopes"] = [
-                    list(scope)
-                    for scope in structurally_unservable_critical_scopes
-                ]
-                covered_report["scope_exclusions"] = critical_scope_exclusions
-            return covered_report
-        required_scopes = missing_scopes
-    if quota_critical and required_scopes is None:
-        raise ValueError("critical current-target quota requires explicit scopes")
-    cycle_targets_have_current_manifests = (
-        plan is not None and plan.missing_openmeteo_manifest_count <= 0
+    # Every lane must prove the exact cycle and locally materializable payload
+    # for each target; an older HWM or a readiness posterior cannot stand in.
+    missing_scopes = _critical_scopes_missing_current_anchor(
+        Path(str(forecast_db)),
+        required_scopes,
+        available_cycle,
+        **({"deadline_monotonic": deadline} if deadline is not None else {}),
     )
-    cycle_targets_are_materialized = plan is not None and plan.ready
-    if cycle_targets_are_materialized:
-        _close_current_target_bucket_pool()
-        return {
-            "status": "CURRENT_TARGETS_ALREADY_COVERED",
-            "coverage": plan.as_dict(),
+    _check_source_preflight_deadline(deadline)
+    if missing_scopes is None:
+        raise RuntimeError("current-target anchor coverage unreadable")
+    if not missing_scopes:
+        if broad_scope_acquisition:
+            _close_current_target_bucket_pool()
+        covered_report: dict[str, object] = {
+            "status": (
+                "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED"
+                if quota_critical
+                else "CURRENT_TARGETS_ALREADY_COVERED"
+            ),
             "available_cycle": available_cycle.isoformat(),
-            "downloaded_cycle": None if downloaded_cycle is None else downloaded_cycle.isoformat(),
+            "downloaded_cycle": (
+                None
+                if downloaded_cycle is None
+                else downloaded_cycle.isoformat()
+            ),
+            "target_count": len(required_scopes),
+            "written_manifest_count": 0,
         }
-    if cycle_targets_have_current_manifests:
-        _close_current_target_bucket_pool()
-        return {
-            "status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
-            "coverage": plan.as_dict(),
-            "available_cycle": available_cycle.isoformat(),
-            "downloaded_cycle": None if downloaded_cycle is None else downloaded_cycle.isoformat(),
-        }
+        if structurally_unservable_critical_scopes:
+            covered_report["structurally_unservable_scope_count"] = len(
+                structurally_unservable_critical_scopes
+            )
+            covered_report["structurally_unservable_scopes"] = [
+                list(scope) for scope in structurally_unservable_critical_scopes
+            ]
+            covered_report["scope_exclusions"] = critical_scope_exclusions
+        return covered_report
+    required_scopes = missing_scopes
     remaining = (
         max(0.0, deadline - time.monotonic())
         if deadline is not None
@@ -1066,18 +1065,12 @@ def _download_replacement_forecast_current_targets_if_needed(
             "available_cycle": available_cycle.isoformat(),
             "downloaded_cycle": None if downloaded_cycle is None else downloaded_cycle.isoformat(),
             "timeboxed_incomplete": True,
-            "unattempted_target_count": (
-                len(required_scopes)
-                if plan is None and required_scopes is not None
-                else plan.target_count
-            ),
+            "unattempted_target_count": len(required_scopes),
             "max_wall_clock_seconds": max_wall_clock_seconds,
-            "coverage": None if plan is None else plan.as_dict(),
         }
     cycle = available_cycle
     download_kwargs: dict[str, object] = {}
-    if required_scopes is not None:
-        download_kwargs["required_scopes"] = required_scopes
+    download_kwargs["required_scopes"] = required_scopes
     bucket_pool = _current_target_bucket_pool(cycle)
     try:
         quota_context = contextlib.nullcontext()
@@ -1100,27 +1093,24 @@ def _download_replacement_forecast_current_targets_if_needed(
                 forecast_db=Path(str(forecast_db)),
                 output_dir=Path(str(output_dir)),
                 cycle=cycle,
-                # ``required_scopes`` is already the bounded, freshly committed source
-                # batch. Applying the generic maintenance limit here silently drops the
-                # tail before the deadline can decide how much work fits, leaving raw
-                # model rows without the anchor required to materialize q.
+                # An explicit source-commit batch keeps its complete scope;
+                # broad market acquisition retains the ordinary rotating cap.
                 limit=(
-                    None
-                    if required_scopes is not None
-                    else int(cfg.get("download_limit") or 10)
+                    int(cfg.get("download_limit") or 10)
+                    if broad_scope_acquisition else None
                 ),
                 write_db=True,
                 release_lag_hours=release_lag_hours,
                 anchor_sigma_c=float(cfg.get("download_anchor_sigma_c") or 3.0),
-                # CYCLE-CURRENCY (K-root instance #3): when this call fires because the available
-                # cycle is AHEAD of the downloaded high-water mark, the NEW cycle's raw inputs are
-                # needed for ALL current targets — coverage ("a posterior exists") must not filter
-                # the target list. Once that cycle is already represented, a residual manifest gap
-                # must repair only uncovered rows; replaying every covered target each poll rewrites
-                # the same manifests and repeatedly drives global seed discovery.
+                # The exact-cycle checker has already selected every physically
+                # missing market target. Keep legacy flags for explicit-scoped
+                # downloader compatibility; required_scopes owns this request.
                 include_covered=cycle_advanced,
                 missing_manifests_only=not cycle_advanced,
-                precomputed_plan=plan,
+                precomputed_plan=None,
+                expand_metric_siblings=not broad_scope_acquisition,
+                scoped_rotation=not broad_scope_acquisition,
+                stable_rotation_key=broad_scope_acquisition,
                 max_wall_clock_seconds=remaining,
                 fetch_workers=int(cfg.get("source_clock_fanout_workers") or 4),
                 bucket_reader_pool=bucket_pool,
@@ -1137,13 +1127,15 @@ def _download_replacement_forecast_current_targets_if_needed(
     # later timebox restart from zero. Only the unscoped broad owner may close on local
     # completion. Cycle rollover, broad coverage, exceptions, and process exit retain
     # their existing cleanup paths.
-    if required_scopes is None and not bool(result.get("timeboxed_incomplete")):
+    if broad_scope_acquisition and not bool(result.get("timeboxed_incomplete")):
         _close_current_target_bucket_pool(cycle)
     result.setdefault("available_cycle", available_cycle.isoformat())
     result.setdefault(
         "downloaded_cycle",
         None if downloaded_cycle is None else downloaded_cycle.isoformat(),
     )
+    if broad_scope_acquisition:
+        result["market_target_count"] = target_count
     result["committed_families"] = _committed_current_target_anchor_scopes(
         result.get("written_manifests") or (),
         cycle=cycle,
@@ -1279,6 +1271,7 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                 deadline_monotonic=deadline_monotonic,
                 now_utc=decision_time,
                 require_local_day_not_ended=True,
+                market_root=True,
             ))
             if capture_target_scopes is None
             else [
@@ -2076,6 +2069,7 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         from src.data.openmeteo_model_updates import read_model_updates_jsonl  # noqa: PLC0415
         from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
             ReplacementForecastTargetKey,
+            _default_min_target_date,
             replacement_forecast_current_target_keys,
         )
         from src.data.replacement_forecast_seed_discovery import (  # noqa: PLC0415
@@ -2191,7 +2185,13 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             }
 
         all_target_keys = tuple(
-            replacement_forecast_current_target_keys(Path(str(forecast_db)))
+            replacement_forecast_current_target_keys(
+                Path(str(forecast_db)),
+                min_target_date=_default_min_target_date(now),
+                now_utc=now,
+                require_local_day_not_ended=True,
+                market_root=True,
+            )
         )
         planned_scopes = {
             (row.city, row.target_date, row.temperature_metric)

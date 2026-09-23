@@ -2265,13 +2265,13 @@ def replacement_forecast_current_target_keys(
     deadline_monotonic: float | None = None,
     now_utc: datetime | None = None,
     require_local_day_not_ended: bool = False,
+    market_root: bool = False,
 ) -> tuple[ReplacementForecastTargetKey, ...]:
     """Return only current market scope identities needed by raw capture.
 
-    Source-clock capture must not pay for manifest, posterior, readiness, and
-    input-HWM validation before it can start fetching a newly published run.
-    This keeps the target universe identical to the full plan while leaving
-    all coverage proof with ``build_replacement_forecast_current_target_plan``.
+    Raw acquisition can start from the current market identity even before
+    baseline source-run coverage exists; that coverage is materialization
+    authority, never proof that a market does not need weather input.
     """
 
     db_path = Path(forecast_db)
@@ -2314,9 +2314,24 @@ def replacement_forecast_current_target_keys(
         if not required_market_columns.issubset(_columns(conn, "market_events")):
             return ()
         source_run_targets = _supports_source_run_targets(conn)
-        if "source_run_coverage" in tables and not source_run_targets:
+        if "source_run_coverage" in tables and not source_run_targets and not market_root:
             return ()
-        if source_run_targets:
+        if market_root:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT city, target_date, temperature_metric
+                FROM market_events
+                WHERE token_id IS NOT NULL
+                  AND token_id != ''
+                  AND range_label IS NOT NULL
+                  AND range_label != ''
+                  AND temperature_metric IN ('high', 'low')
+                  AND target_date >= ?
+                ORDER BY target_date, city, temperature_metric
+                """,
+                (minimum_target_date,),
+            ).fetchall()
+        elif source_run_targets:
             expected_high = expected_replacement_dependency_identity_by_role("high")[
                 "baseline_b0"
             ]

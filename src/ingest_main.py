@@ -2973,39 +2973,16 @@ def _replacement_maintenance_tick():
             "cooldown_seconds": cooldown_seconds,
         }
     else:
-        try:
-            broad_current_budget = max(
-                0.0,
-                _remaining_budget() - bpf_repair_reserve_s,
-            )
-            download_report = _download_replacement_forecast_current_targets_if_needed(
-                cfg,
-                max_wall_clock_seconds=broad_current_budget,
-            )
-        except TimeoutError as exc:
-            download_report = {
-                "status": "CURRENT_TARGET_DOWNLOAD_TIMEOUT",
-                "timeout_seconds": timeout_s,
-                "error": str(exc)[:240],
-            }
-        except Exception as exc:  # noqa: BLE001 - reseed catch-up remains independent
-            logger.warning(
-                "replacement maintenance current-target repair failed: %s",
-                exc,
-                exc_info=True,
-            )
-            download_report = {
-                "status": "CURRENT_TARGET_DOWNLOAD_FAILSOFT",
-                "error": f"{type(exc).__name__}: {str(exc)[:220]}",
-            }
-
+        # Run the reserved active raw-input slice before the ordinary anchor
+        # scan: a SQLite read that overshoots its deadline must not erase this
+        # tick's BPF opportunity. Held anchor partitions have already run.
         if bpf_retry_after > 0:
             extras_report = {
                 "status": "BAYES_PRECISION_FUSION_EXTRA_NO_PROGRESS_BACKOFF_SKIPPED",
                 "retry_after_seconds": bpf_retry_after,
             }
         else:
-            remaining = _remaining_budget()
+            remaining = min(_remaining_budget(), bpf_repair_reserve_s)
             if remaining <= 0.0:
                 extras_report = {
                     "status": "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE",
@@ -3032,6 +3009,28 @@ def _replacement_maintenance_tick():
                         "error": f"{type(exc).__name__}: {str(exc)[:220]}",
                     }
             _record_replacement_bpf_maintenance_progress(extras_report)
+
+        try:
+            download_report = _download_replacement_forecast_current_targets_if_needed(
+                cfg,
+                max_wall_clock_seconds=_remaining_budget(),
+            )
+        except TimeoutError as exc:
+            download_report = {
+                "status": "CURRENT_TARGET_DOWNLOAD_TIMEOUT",
+                "timeout_seconds": timeout_s,
+                "error": str(exc)[:240],
+            }
+        except Exception as exc:  # noqa: BLE001 - reseed catch-up remains independent
+            logger.warning(
+                "replacement maintenance current-target repair failed: %s",
+                exc,
+                exc_info=True,
+            )
+            download_report = {
+                "status": "CURRENT_TARGET_DOWNLOAD_FAILSOFT",
+                "error": f"{type(exc).__name__}: {str(exc)[:220]}",
+            }
 
     report: dict[str, object] = {
         "status": "REPLACEMENT_MAINTENANCE_COMPLETED",

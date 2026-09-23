@@ -28,7 +28,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -853,6 +853,20 @@ def _make_db(tmp_path: Path, cycles_by_source: dict[str, str]) -> Path:
     db = tmp_path / "forecasts.db"
     conn = sqlite3.connect(db)
     conn.execute(_ARTIFACTS_DDL)
+    conn.execute(
+        "CREATE TABLE market_events(city TEXT,target_date TEXT,"
+        "temperature_metric TEXT,token_id TEXT,range_label TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO market_events VALUES(?,?,?,?,?)",
+        (
+            "Dallas",
+            (datetime.now(timezone.utc) + timedelta(days=2)).date().isoformat(),
+            "high",
+            "token",
+            "range",
+        ),
+    )
     for sid, cyc in cycles_by_source.items():
         conn.execute(
             "INSERT INTO raw_forecast_artifacts (source_id, product_id, data_version,"
@@ -1996,6 +2010,314 @@ def _cfg(db: Path, tmp_path: Path) -> dict:
     }
 
 
+def test_broad_anchor_uses_real_market_keys_and_exact_payload_without_readiness_plan(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as downloader
+    import src.data.replacement_forecast_current_target_plan as plan_mod
+    import src.data.replacement_forecast_production as production
+
+    cycle = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    target_date = (cycle + timedelta(days=1)).date().isoformat()
+    db = _make_db(tmp_path, {})
+    with sqlite3.connect(db) as conn:
+        conn.execute("DELETE FROM market_events")
+        conn.execute("CREATE TABLE source_run(source_run_id TEXT,source_cycle_time TEXT)")
+        conn.execute(
+            "CREATE TABLE source_run_coverage(source_run_id TEXT,source_id TEXT,"
+            "city TEXT,target_local_date TEXT,temperature_metric TEXT,"
+            "data_version TEXT,computed_at TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO market_events VALUES(?,?,?,?,?)",
+            [
+                (city, target_date, metric, "token", "range")
+                for city in ("Amsterdam", "Dallas")
+                for metric in ("high", "low")
+            ] + [("Dallas", target_date, "low", "", "ghost")],
+        )
+        # Canonical source-run schema exists, but an obsolete version and no
+        # coverage for the other three live scopes cannot suppress acquisition.
+        conn.execute(
+            "INSERT INTO source_run_coverage VALUES(?,?,?,?,?,?,?)",
+            ("old", "baseline", "Dallas", target_date, "high", "wrong-v0", cycle.isoformat()),
+        )
+        payload_path = tmp_path / "dallas-high.json"
+        payload_path.write_text(json.dumps(_anchor_payload(target_date)) + "\n")
+        payload = payload_path.read_bytes()
+        conn.execute(
+            "INSERT INTO raw_forecast_artifacts (source_id,product_id,data_version,"
+            "source_cycle_time,source_available_at,captured_at,artifact_path,sha256,"
+            "byte_size,artifact_metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                "openmeteo_ecmwf_ifs_9km",
+                "openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+                "openmeteo_ecmwf_ifs9_anchor_localday_high",
+                cycle.isoformat(),cycle.isoformat(),cycle.isoformat(),
+                str(payload_path),hashlib.sha256(payload).hexdigest(),len(payload),
+                json.dumps({"city":"Dallas","target_date":target_date,"metric":"high"}),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO raw_forecast_artifacts (source_id,product_id,data_version,"
+            "source_cycle_time,source_available_at,captured_at,artifact_path,sha256,"
+            "byte_size,artifact_metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                "openmeteo_ecmwf_ifs_9km",
+                "openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+                "wrong-localday-low-v0",
+                cycle.isoformat(),cycle.isoformat(),cycle.isoformat(),
+                str(payload_path),hashlib.sha256(payload).hexdigest(),len(payload),
+                json.dumps({"city":"Amsterdam","target_date":target_date,"metric":"low"}),
+            ),
+        )
+    monkeypatch.setattr(production, "_probe_resolved_available_cycle", lambda **_kw: cycle)
+    assert plan_mod.replacement_forecast_current_target_keys(
+        db, min_target_date=target_date,
+    ) == ()
+    assert len(plan_mod.replacement_forecast_current_target_keys(
+        db, min_target_date=target_date, market_root=True,
+    )) == 4
+    monkeypatch.setattr(
+        plan_mod, "build_replacement_forecast_current_target_plan",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("readiness plan in raw acquisition")),
+    )
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        downloader, "download_current_target_raw_inputs",
+        lambda **kwargs: calls.append(kwargs) or {
+            "status": "CURRENT_TARGET_RAW_INPUTS_TIMEBOXED_INCOMPLETE",
+            "timeboxed_incomplete": True,
+            "written_manifests": (),
+        },
+    )
+    report = production._download_replacement_forecast_current_targets_if_needed(
+        _cfg(db, tmp_path), max_wall_clock_seconds=5.0,
+    )
+    assert report["market_target_count"] == 4
+    assert report["committed_families"] == ()
+    assert len(calls) == 1
+    assert calls[0]["required_scopes"] == (
+        ("Amsterdam", target_date, "high"),
+        ("Amsterdam", target_date, "low"),
+        ("Dallas", target_date, "low"),
+    )
+    assert calls[0]["limit"] == 10
+    assert calls[0]["expand_metric_siblings"] is False
+    assert calls[0]["precomputed_plan"] is None
+
+    # A later invalid payload reopens only the exact scope; no HWM/plan skip.
+    payload_path.write_text('{"hourly": {"time": [], "temperature_2m": []}}\n')
+    production._download_replacement_forecast_current_targets_if_needed(
+        _cfg(db, tmp_path), max_wall_clock_seconds=5.0,
+    )
+    assert ("Dallas", target_date, "high") in calls[1]["required_scopes"]
+
+
+def test_complete_market_scope_skips_ghost_sibling_but_explicit_scope_expands(
+    tmp_path: Path,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as downloader
+
+    db = tmp_path / "forecasts.db"
+    target_date = (datetime.now(timezone.utc) + timedelta(days=1)).date().isoformat()
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "CREATE TABLE market_events(city TEXT,target_date TEXT,"
+            "temperature_metric TEXT,token_id TEXT,range_label TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO market_events VALUES(?,?,?,?,?)",
+            [
+                ("UnknownCity", target_date, "high", "live-token", "range"),
+                ("UnknownCity", target_date, "low", "", "ghost"),
+            ],
+        )
+    scope = (("UnknownCity", target_date, "high"),)
+    kwargs = dict(
+        forecast_db=db,
+        cycle=AVAILABLE_CYCLE,
+        limit=None,
+        write_db=False,
+        release_lag_hours=14.0,
+        anchor_sigma_c=3.0,
+        required_scopes=scope,
+        max_wall_clock_seconds=5.0,
+    )
+    broad = downloader.download_current_target_raw_inputs(
+        output_dir=tmp_path / "broad",
+        expand_metric_siblings=False,
+        **kwargs,
+    )
+    explicit = downloader.download_current_target_raw_inputs(
+        output_dir=tmp_path / "explicit",
+        **kwargs,
+    )
+    assert broad["target_count"] == 1
+    assert explicit["target_count"] == 2
+    assert broad["written_manifest_count"] == explicit["written_manifest_count"] == 0
+
+
+def test_broad_missing_scope_rotation_retries_failed_head_after_other_cities(
+    tmp_path: Path,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as downloader
+
+    def rows(*cities: str):
+        return tuple(
+            _TargetRow(city, "2026-09-25", "high", False, True)
+            for city in cities
+        )
+
+    path = downloader._current_target_rotation_state_path(
+        tmp_path, rows("Amsterdam", "Dallas", "London"), scoped=False
+    )
+    assert path == downloader._current_target_rotation_state_path(
+        tmp_path, rows("Amsterdam", "London"), scoped=False
+    )
+    cycle = AVAILABLE_CYCLE
+    membership = (
+        rows("Amsterdam", "Dallas", "London"),
+        rows("Amsterdam", "London"),  # Dallas completed on another lane.
+        rows("Aachen", "Amsterdam", "London"),  # New key sorts before Amsterdam.
+        rows("Aachen", "Amsterdam", "London"),
+    )
+    observed: list[str] = []
+    for current_rows in membership:
+        rotated, _, count, generation, token = downloader._rotate_current_target_rows(
+            current_rows, cycle=cycle, state_path=path, stable_rotation_key=True,
+        )
+        observed.append(rotated[0].city)
+        _, applied = downloader._advance_current_target_rotation(
+            cycle=cycle,
+            row_count=count,
+            attempted_count=1,
+            incomplete=True,
+            state_path=path,
+            expected_generation=generation,
+            expected_state_token=token,
+            stable_rotation_key=True,
+            last_attempted_family=(rotated[0].city, "2026-09-25", "high"),
+        )
+        assert applied
+    assert observed == ["Amsterdam", "London", "Aachen", "Amsterdam"]
+    assert json.loads(path.read_text())["last_attempted_family"] == [
+        "Amsterdam", "2026-09-25", "high",
+    ]
+
+
+def test_broad_rotation_migrates_v1_numeric_cursor_without_zero_attempt_advance(
+    tmp_path: Path,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as downloader
+
+    cycle = AVAILABLE_CYCLE
+    path = tmp_path / ".current_target_rotation.json"
+    path.write_text(json.dumps({
+        "version": 1, "cycle": cycle.isoformat(),
+        "next_start": 1, "generation": 7,
+    }))
+    rows = [
+        _TargetRow(city, "2026-09-25", "high", False, True)
+        for city in ("Amsterdam", "Dallas", "London")
+    ]
+    rotated, start, count, generation, token = downloader._rotate_current_target_rows(
+        rows, cycle=cycle, state_path=path, stable_rotation_key=True,
+    )
+    assert start == 1
+    assert rotated[0].city == "Dallas"
+    assert downloader._advance_current_target_rotation(
+        cycle=cycle, row_count=count, attempted_count=1, incomplete=True,
+        state_path=path, expected_generation=generation, expected_state_token=token,
+        stable_rotation_key=True,
+        last_attempted_family=("Dallas", "2026-09-25", "high"),
+    ) == (2, True)
+    _, _, count, generation, token = downloader._rotate_current_target_rows(
+        rows, cycle=cycle, state_path=path, stable_rotation_key=True,
+    )
+    assert downloader._advance_current_target_rotation(
+        cycle=cycle, row_count=count, attempted_count=0, incomplete=True,
+        state_path=path, expected_generation=generation, expected_state_token=token,
+        stable_rotation_key=True,
+    )[1] is True
+    assert downloader._advance_current_target_rotation(
+        cycle=cycle, row_count=count, attempted_count=1, incomplete=True,
+        state_path=path, expected_generation=generation, expected_state_token=token,
+        stable_rotation_key=True,
+        last_attempted_family=("London", "2026-09-25", "high"),
+    )[1] is False
+    assert json.loads(path.read_text())["last_attempted_family"] == [
+        "Dallas", "2026-09-25", "high",
+    ]
+    after, _, _, _, _ = downloader._rotate_current_target_rows(
+        (rows[0], rows[2]), cycle=cycle, state_path=path, stable_rotation_key=True,
+    )
+    assert after[0].city == "London"
+
+
+@pytest.mark.parametrize("pinned_timeout", (False, True))
+def test_broad_rotation_records_actual_reused_family_after_timeout(
+    tmp_path: Path, monkeypatch, pinned_timeout: bool,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as downloader
+
+    cycle = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    target_date = (cycle + timedelta(days=1)).date().isoformat()
+    scopes = tuple(
+        (city, target_date, "high")
+        for city in ("Amsterdam", "Dallas", "London")
+    )
+    db = _make_db(tmp_path, {})
+    output_dir = tmp_path / "raw"
+    raw_dir = output_dir / cycle.strftime("%Y%m%dT%H%M%SZ")
+    raw_dir.mkdir(parents=True)
+    dallas_payload = raw_dir / (
+        f"openmeteo_Dallas_{target_date}_high_{cycle.strftime('%Y%m%dT%H%M%SZ')}.json"
+    )
+    dallas_payload.write_text(json.dumps(_anchor_payload(target_date)) + "\n")
+    held = {scopes[0]: 0} if pinned_timeout else {}
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
+        lambda: held,
+    )
+    monkeypatch.setattr(downloader, "_single_runs_public_for_request", lambda _r: False)
+    monkeypatch.setattr(downloader.quota_tracker, "can_call", lambda: False)
+
+    def _resolve(**kwargs):
+        assert kwargs["city"] == "Amsterdam"
+        raise TimeoutError("first target timed out")
+
+    monkeypatch.setattr(downloader, "_resolve_anchor_payload", _resolve)
+    report = downloader.download_current_target_raw_inputs(
+        forecast_db=db,
+        output_dir=output_dir,
+        cycle=cycle,
+        limit=2,
+        write_db=False,
+        release_lag_hours=14.0,
+        anchor_sigma_c=3.0,
+        required_scopes=scopes,
+        expand_metric_siblings=False,
+        scoped_rotation=False,
+        stable_rotation_key=True,
+        max_wall_clock_seconds=5.0,
+    )
+    state_path = output_dir / ".current_target_rotation.json"
+    assert report["timeboxed_incomplete"] is True
+    assert json.loads(state_path.read_text())["last_attempted_family"] == [
+        "Dallas", target_date, "high",
+    ]
+    rows = [
+        _TargetRow(city, target_date, "high", False, True)
+        for city in ("Amsterdam", "Dallas", "London")
+    ]
+    rotated, _, _, _, _ = downloader._rotate_current_target_rows(
+        rows, cycle=cycle, state_path=state_path,
+        pinned_prefix_count=int(pinned_timeout), stable_rotation_key=True,
+    )
+    assert rotated[int(pinned_timeout)].city == "London"
+
+
 def test_ready_plan_with_stale_artifacts_still_downloads_new_cycle(tmp_path, monkeypatch) -> None:
     # THE 2026-06-09 incident shape: full posterior coverage + artifacts one cycle behind.
     db = _make_db(tmp_path, {
@@ -2887,11 +3209,11 @@ def test_preflight_error_closes_timeboxed_cycle_pool(tmp_path, monkeypatch) -> N
     )
     monkeypatch.setattr(
         plan_mod,
-        "build_replacement_forecast_current_target_plan",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("plan failed")),
+        "replacement_forecast_current_target_keys",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("scope read failed")),
     )
 
-    with pytest.raises(RuntimeError, match="plan failed"):
+    with pytest.raises(RuntimeError, match="scope read failed"):
         _download_replacement_forecast_current_targets_if_needed(_cfg(db, tmp_path))
 
     assert pool.close_count == 1
@@ -2925,7 +3247,7 @@ def test_direct_downloader_does_not_close_injected_bucket_pool(tmp_path) -> None
     assert pool.close_count == 0
 
 
-def test_ready_plan_with_current_artifacts_skips_without_download(tmp_path, monkeypatch) -> None:
+def test_current_cycle_hwm_with_invalid_artifact_retries_download(tmp_path, monkeypatch) -> None:
     db = _make_db(tmp_path, {
         "ecmwf_aifs_ens": CURRENT_CYCLE_ISO,
         "openmeteo_ecmwf_ifs_9km": CURRENT_CYCLE_ISO,
@@ -2934,9 +3256,9 @@ def test_ready_plan_with_current_artifacts_skips_without_download(tmp_path, monk
     _wire(monkeypatch, plan=_PlanStub(ready=True), calls=calls)
     report = _download_replacement_forecast_current_targets_if_needed(_cfg(db, tmp_path))
     assert report is not None
-    assert report["status"] == "CURRENT_TARGETS_ALREADY_COVERED"
-    assert calls == []
-    # The skip must be self-explaining (anti-silent-skip class): cycle facts in the report.
+    assert report["status"] == "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED"
+    assert len(calls) == 1
+    # Current HWM without a valid per-target payload is not acquisition proof.
     assert report["available_cycle"] == AVAILABLE_CYCLE.isoformat()
     assert report["downloaded_cycle"] == CURRENT_CYCLE_ISO
 

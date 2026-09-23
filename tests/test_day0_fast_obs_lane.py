@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused/audited: 2026-09-22
-# Lifecycle: created=2026-06-10; last_reviewed=2026-09-22; last_reused=2026-09-22
+# Last reused/audited: 2026-09-23
+# Lifecycle: created=2026-06-10; last_reviewed=2026-09-23; last_reused=2026-09-23
 # Authority basis: operator green-light 2026-06-10 items A/C/E (free METAR fast
 #   lane, live-obs hook wiring, WU-vs-METAR oracle anomaly guard); day0
 #   first-principles review /tmp/day0_first_principles_review.md §6.2;
@@ -5616,6 +5616,110 @@ def test_kma_mixed_window_uses_latest_contributing_noaa_clock() -> None:
     assert extremes.current_temp == 30.0
     assert extremes.last_obs_time == noaa.obs_time
     assert extremes.last_available_at == noaa.receipt_time
+
+
+def test_kma_extrema_canonicalization_is_station_local() -> None:
+    _availability, transport_id, _state_cls, _cursor_cls, _parse = _kma_contract_symbols()
+    observed = datetime(2026, 9, 23, 0, 0, tzinfo=UTC)
+    first_seen = datetime(2026, 9, 23, 1, 0, tzinfo=UTC)
+    kma_other_station = MetarReport(
+        station_id="RKSI", obs_time=observed, receipt_time=None, temp_c=25.0,
+        metar_type="METAR", raw="METAR RKSI 230000Z 25/20",
+        first_seen_at=first_seen, availability_basis=_availability,
+        transport_id=transport_id,
+    )
+    rpll_a = MetarReport(
+        station_id="RPLL", obs_time=observed, receipt_time=observed, temp_c=29.0,
+        metar_type="METAR", raw="RPLL 230000Z 29/26",
+    )
+    rpll_b = MetarReport(
+        station_id="RPLL", obs_time=observed, receipt_time=observed, temp_c=30.0,
+        metar_type="METAR", raw="RPLL 230000Z 30/26",
+    )
+    epwa = MetarReport(
+        station_id="EPWA", obs_time=observed, receipt_time=observed, temp_c=18.0,
+        metar_type="METAR", raw="EPWA 230000Z 18/10",
+    )
+    warsaw = SimpleNamespace(
+        name="Warsaw", timezone="Europe/Warsaw", settlement_unit="C", wu_station="EPWA",
+    )
+    manila = SimpleNamespace(
+        name="Manila", timezone="Asia/Manila", settlement_unit="C", wu_station="RPLL",
+    )
+
+    extremes = running_extremes_for_local_day(
+        [kma_other_station, rpll_a, rpll_b, epwa],
+        city=warsaw, target_date="2026-09-23",
+        as_of=datetime(2026, 9, 23, 2, 0, tzinfo=UTC),
+    )
+    assert extremes.sample_count == 1
+    assert extremes.high_so_far == 18.0
+    assert extremes.low_so_far == 18.0
+    legacy_only = running_extremes_for_local_day(
+        [kma_other_station, rpll_a, rpll_b, epwa],
+        city=manila, target_date="2026-09-23",
+        as_of=datetime(2026, 9, 23, 2, 0, tzinfo=UTC),
+    )
+    assert legacy_only.high_so_far == 30.0
+    assert legacy_only.low_so_far == 29.0
+
+
+def test_kma_extrema_keeps_same_station_conflict_and_cor_precedence() -> None:
+    import src.data.day0_fast_obs as fast_obs
+    _availability, transport_id, _state_cls, _cursor_cls, _parse = _kma_contract_symbols()
+    observed = datetime(2026, 9, 23, 0, 0, tzinfo=UTC)
+    first_seen = datetime(2026, 9, 23, 1, 0, tzinfo=UTC)
+    seoul = SimpleNamespace(
+        name="Seoul", timezone="Asia/Seoul", settlement_unit="C", wu_station="RKSI",
+    )
+    warsaw = SimpleNamespace(
+        name="Warsaw", timezone="Europe/Warsaw", settlement_unit="C", wu_station="EPWA",
+    )
+    bad_a = MetarReport(
+        station_id="RKSI", obs_time=observed, receipt_time=None, temp_c=25.0,
+        metar_type="COR", raw="METAR COR RKSI 230000Z 25/20",
+        first_seen_at=first_seen, availability_basis=_availability,
+        transport_id=transport_id,
+    )
+    bad_b = MetarReport(
+        station_id="RKSI", obs_time=observed, receipt_time=None, temp_c=26.0,
+        metar_type="COR", raw="METAR COR RKSI 230000Z 26/20",
+        first_seen_at=first_seen, availability_basis=_availability,
+        transport_id=transport_id,
+    )
+    epwa = MetarReport(
+        station_id="EPWA", obs_time=observed, receipt_time=observed, temp_c=18.0,
+        metar_type="METAR", raw="EPWA 230000Z 18/10",
+    )
+
+    with pytest.raises(fast_obs.KmaObservationConflict):
+        running_extremes_for_local_day(
+            [bad_a, bad_b, epwa], city=seoul, target_date="2026-09-23",
+            as_of=datetime(2026, 9, 23, 2, 0, tzinfo=UTC),
+        )
+    extremes = running_extremes_for_local_day(
+        [bad_a, bad_b, epwa], city=warsaw, target_date="2026-09-23",
+        as_of=datetime(2026, 9, 23, 2, 0, tzinfo=UTC),
+    )
+    assert extremes.high_so_far == 18.0
+
+    base = MetarReport(
+        station_id="RKSI", obs_time=observed, receipt_time=None, temp_c=25.0,
+        metar_type="METAR", raw="METAR RKSI 230000Z 25/20",
+        first_seen_at=first_seen, availability_basis=_availability,
+        transport_id=transport_id,
+    )
+    correction = MetarReport(
+        station_id="RKSI", obs_time=observed, receipt_time=None, temp_c=26.0,
+        metar_type="COR", raw="METAR COR RKSI 230000Z 26/20",
+        first_seen_at=first_seen, availability_basis=_availability,
+        transport_id=transport_id,
+    )
+    corrected = running_extremes_for_local_day(
+        [base, correction], city=seoul, target_date="2026-09-23",
+        as_of=datetime(2026, 9, 23, 2, 0, tzinfo=UTC),
+    )
+    assert corrected.high_so_far == 26.0
 
 
 def test_kma_conflict_station_does_not_block_other_station_emit() -> None:

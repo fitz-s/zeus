@@ -255,7 +255,7 @@ def test_source_clock_attempts_current_day0_remaining_window(
     monkeypatch.setattr(
         target_plan,
         "replacement_forecast_current_target_keys",
-        lambda _path: (),
+        lambda _path, **_kwargs: (),
     )
     monkeypatch.setattr(
         seed_discovery,
@@ -820,7 +820,7 @@ def test_source_clock_scoped_capture_prioritizes_held_families(
     monkeypatch.setattr(
         target_plan,
         "replacement_forecast_current_target_keys",
-        lambda _path: keys,
+        lambda _path, **_kwargs: keys,
     )
     monkeypatch.setattr(
         seed_discovery,
@@ -923,7 +923,7 @@ def test_source_clock_scoped_capture_drains_held_family_across_sources_before_br
     monkeypatch.setattr(
         target_plan,
         "replacement_forecast_current_target_keys",
-        lambda _path: keys,
+        lambda _path, **_kwargs: keys,
     )
     monkeypatch.setattr(
         seed_discovery,
@@ -1040,7 +1040,7 @@ def test_source_clock_scoped_capture_batches_city_dates_into_priority_request(
     monkeypatch.setattr(
         target_plan,
         "replacement_forecast_current_target_keys",
-        lambda _path: keys,
+        lambda _path, **_kwargs: keys,
     )
     monkeypatch.setattr(seed_discovery, "held_position_family_priorities", lambda: {})
     monkeypatch.setattr(
@@ -1158,7 +1158,7 @@ def test_source_clock_scoped_capture_caps_priority_location_batch(
     monkeypatch.setattr(
         target_plan,
         "replacement_forecast_current_target_keys",
-        lambda _path: keys,
+        lambda _path, **_kwargs: keys,
     )
     monkeypatch.setattr(seed_discovery, "held_position_family_priorities", lambda: {})
     monkeypatch.setattr(
@@ -1252,7 +1252,7 @@ def test_source_clock_scoped_capture_interleaves_sources_and_notifies_commits(
     monkeypatch.setattr(
         target_plan,
         "replacement_forecast_current_target_keys",
-        lambda _path: keys,
+        lambda _path, **_kwargs: keys,
     )
     monkeypatch.setattr(seed_discovery, "held_position_family_priorities", lambda: {})
     monkeypatch.setattr(
@@ -1382,7 +1382,7 @@ def test_source_clock_scoped_capture_does_not_wait_past_deadline_for_commit_call
     monkeypatch.setattr(
         target_plan,
         "replacement_forecast_current_target_keys",
-        lambda _path: (key,),
+        lambda _path, **_kwargs: (key,),
     )
     monkeypatch.setattr(seed_discovery, "held_position_family_priorities", lambda: {})
     monkeypatch.setattr(
@@ -1477,7 +1477,7 @@ def test_source_clock_scoped_capture_reuses_inflight_download_after_deadline(
     monkeypatch.setattr(
         target_plan,
         "replacement_forecast_current_target_keys",
-        lambda _path: (key,),
+        lambda _path, **_kwargs: (key,),
     )
     monkeypatch.setattr(seed_discovery, "held_position_family_priorities", lambda: {})
     monkeypatch.setattr(
@@ -1586,7 +1586,7 @@ def test_source_clock_scoped_capture_fans_out_only_exact_cycle_gaps(
     monkeypatch.setattr(
         target_plan,
         "replacement_forecast_current_target_keys",
-        lambda _path: keys,
+        lambda _path, **_kwargs: keys,
     )
     monkeypatch.setattr(seed_discovery, "held_position_family_priorities", lambda: {})
     monkeypatch.setattr(
@@ -1738,7 +1738,7 @@ def test_source_clock_coverage_probe_reads_only_current_scopes_in_batches(
     monkeypatch.setattr(
         target_plan,
         "replacement_forecast_current_target_keys",
-        lambda _path: tuple(
+        lambda _path, **_kwargs: tuple(
             target_plan.ReplacementForecastTargetKey(
                 city, "2026-07-17", "high"
             )
@@ -1787,6 +1787,82 @@ def test_source_clock_coverage_probe_reads_only_current_scopes_in_batches(
         for detail in coverage_connection.plan_details
         if "SEARCH forecast" in detail
     )
+
+
+def test_source_clock_market_root_keeps_western_day0_at_utc_midnight(
+    tmp_path, monkeypatch,
+) -> None:
+    import src.data.bayes_precision_fusion_download as downloader
+    import src.data.replacement_forecast_seed_discovery as seed_discovery
+    import src.strategy.live_inference.source_clock_city_weights as city_weights
+
+    db = _make_forecast_db(tmp_path)
+    decision_time = datetime(2026, 9, 24, 1, tzinfo=UTC)
+    cycle = datetime(2026, 9, 23, 18, tzinfo=UTC)
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "CREATE TABLE market_events(city TEXT,target_date TEXT,"
+            "temperature_metric TEXT,token_id TEXT,range_label TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO market_events VALUES(?,?,?,?,?)",
+            [(city, "2026-09-23", metric, "token", "range")
+             for city in ("Dallas", "Amsterdam")
+             for metric in ("high", "low")],
+        )
+        conn.execute("CREATE TABLE source_run(source_run_id TEXT,source_cycle_time TEXT)")
+        conn.execute(
+            "CREATE TABLE source_run_coverage(source_run_id TEXT,source_id TEXT,"
+            "city TEXT,target_local_date TEXT,temperature_metric TEXT,"
+            "data_version TEXT,computed_at TEXT)"
+        )
+
+    class _Report:
+        updated_sources = ("ecmwf_ifs",)
+        affected_cities = ("Dallas", "Amsterdam")
+
+        def as_dict(self):
+            return {
+                "updated_sources": self.updated_sources,
+                "affected_cities": self.affected_cities,
+                "source_runs": {
+                    "ecmwf_ifs": {
+                        "initialisation_time": cycle.isoformat(),
+                        "availability_time": cycle.isoformat(),
+                        "update_interval_seconds": 3600,
+                    },
+                },
+            }
+
+    monkeypatch.setitem(
+        prod.settings["edli"],
+        "replacement_0_1_bayes_precision_fusion_capture_enabled", True,
+    )
+    monkeypatch.setattr(downloader, "bayes_precision_fusion_quota_cooldown_seconds", lambda: 0)
+    monkeypatch.setattr(seed_discovery, "held_position_family_priorities", lambda: {})
+    monkeypatch.setattr(
+        city_weights, "affected_cities_for_source_updates",
+        lambda _sources: {"Dallas", "Amsterdam"},
+    )
+    captured: list[object] = []
+    monkeypatch.setattr(
+        downloader, "download_bayes_precision_fusion_extra_raw_inputs",
+        lambda **kwargs: captured.extend(kwargs["targets"]) or {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+            "target_count": len(kwargs["targets"]),
+            "written_row_count": 0,
+        },
+    )
+    prod._download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
+        {"forecast_db": str(db)},
+        source_clock_report=_Report(),
+        max_wall_clock_seconds=5.0,
+        decision_time=decision_time,
+    )
+    assert {(target.city, target.target_date, target.metric) for target in captured} == {
+        ("Dallas", "2026-09-23", "high"),
+        ("Dallas", "2026-09-23", "low"),
+    }
 
 
 def test_source_clock_scoped_capture_isolates_source_cycle_and_cities(
@@ -1842,7 +1918,7 @@ def test_source_clock_scoped_capture_isolates_source_cycle_and_cities(
     monkeypatch.setattr(
         target_plan,
         "replacement_forecast_current_target_keys",
-        lambda _path: keys,
+        lambda _path, **_kwargs: keys,
     )
     monkeypatch.setattr(seed_discovery, "held_position_family_priorities", lambda: {})
     monkeypatch.setattr(
@@ -2018,7 +2094,7 @@ def test_source_clock_scoped_capture_stops_queued_tasks_after_quota_abort(
     monkeypatch.setattr(
         target_plan,
         "replacement_forecast_current_target_keys",
-        lambda _path: keys,
+        lambda _path, **_kwargs: keys,
     )
     monkeypatch.setattr(seed_discovery, "held_position_family_priorities", lambda: {})
     monkeypatch.setattr(
@@ -2111,7 +2187,7 @@ def test_source_clock_scoped_capture_terminalizes_deterministic_client_error(
     monkeypatch.setattr(
         target_plan,
         "replacement_forecast_current_target_keys",
-        lambda _path: (
+        lambda _path, **_kwargs: (
             target_plan.ReplacementForecastTargetKey("London", "2026-07-17", "high"),
         ),
     )
@@ -2234,7 +2310,7 @@ def test_source_target_candidate_keeps_trigger_and_committed_cycles_distinct(
     monkeypatch.setattr(
         target_plan,
         "replacement_forecast_current_target_keys",
-        lambda _path: (
+        lambda _path, **_kwargs: (
             target_plan.ReplacementForecastTargetKey(
                 "Moscow", "2026-07-17", "high"
             ),
@@ -2454,7 +2530,7 @@ def test_frozen_source_clock_capture_uses_complete_target_candidates_end_to_end(
     monkeypatch.setattr(dl, "bayes_precision_fusion_quota_cooldown_seconds", lambda: 0)
     monkeypatch.setattr(discovery, "held_position_family_priorities", lambda: {})
     monkeypatch.setattr(weights, "affected_cities_for_source_updates", lambda _: ("Amsterdam",))
-    monkeypatch.setattr(target_plan, "replacement_forecast_current_target_keys", lambda _: tuple(
+    monkeypatch.setattr(target_plan, "replacement_forecast_current_target_keys", lambda _, **_kwargs: tuple(
         target_plan.ReplacementForecastTargetKey("Amsterdam", target, metric)
         for metric in ("high", "low")
     ))

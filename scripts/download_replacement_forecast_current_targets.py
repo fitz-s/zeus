@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-06-07
-# Last reused/audited: 2026-09-12
-# Lifecycle: created=2026-06-07; last_reviewed=2026-09-12; last_reused=2026-09-12
+# Last reused/audited: 2026-09-23
+# Lifecycle: created=2026-06-07; last_reviewed=2026-09-23; last_reused=2026-09-23
 # Purpose: Download current-target Open-Meteo ECMWF IFS 9km raw inputs for replacement forecast materialization.
 # Reuse: Run before live replacement materialization when dry-run reports current-target coverage gaps.
 # Authority basis: Raw artifacts are live inputs only after the replacement materializer emits
@@ -99,12 +99,16 @@ def _read_rotation_state(
             raise ValueError("rotation state must be an object")
         state_fields = set(state)
         legacy_state = state_fields == {"cycle", "next_start"}
-        if not legacy_state and state_fields != {
+        required_fields = {
             "version",
             "cycle",
             "next_start",
             "generation",
-        }:
+        }
+        if not legacy_state and state_fields not in (
+            required_fields,
+            required_fields | {"last_attempted_family"},
+        ):
             raise ValueError("rotation state fields mismatch")
         if (
             not legacy_state
@@ -124,6 +128,13 @@ def _read_rotation_state(
             or generation < 0
         ):
             raise ValueError("rotation state fields invalid")
+        last_family = state.get("last_attempted_family")
+        if "last_attempted_family" in state and (
+            not isinstance(last_family, list)
+            or len(last_family) != 3
+            or any(not isinstance(value, str) or not value for value in last_family)
+        ):
+            raise ValueError("rotation last family invalid")
         parsed_cycle = datetime.fromisoformat(state_cycle.replace("Z", "+00:00"))
         if (
             parsed_cycle.tzinfo is None
@@ -140,12 +151,25 @@ def _read_rotation_state(
         ) from exc
 
 
+def _rotation_last_attempted_family(
+    state_path: Path, *, cycle_key: str,
+) -> tuple[str, str, str] | None:
+    if not state_path.exists():
+        return None
+    state = json.loads(state_path.read_text())
+    if state["cycle"] != cycle_key or "last_attempted_family" not in state:
+        return None
+    family = state["last_attempted_family"]
+    return family[0], family[1], family[2]
+
+
 def _write_rotation_state(
     state_path: Path,
     *,
     cycle_key: str,
     next_start: int,
     generation: int,
+    last_attempted_family: tuple[str, str, str] | None = None,
 ) -> None:
     temp_path: Path | None = None
     try:
@@ -157,16 +181,15 @@ def _write_rotation_state(
             suffix=".tmp",
             delete=False,
         ) as handle:
-            json.dump(
-                {
-                    "version": _CURRENT_TARGET_ROTATION_STATE_VERSION,
-                    "cycle": cycle_key,
-                    "next_start": next_start,
-                    "generation": generation,
-                },
-                handle,
-                sort_keys=True,
-            )
+            state: dict[str, object] = {
+                "version": _CURRENT_TARGET_ROTATION_STATE_VERSION,
+                "cycle": cycle_key,
+                "next_start": next_start,
+                "generation": generation,
+            }
+            if last_attempted_family is not None:
+                state["last_attempted_family"] = last_attempted_family
+            json.dump(state, handle, sort_keys=True)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
@@ -236,6 +259,7 @@ def _rotate_current_target_rows(
     cycle: datetime,
     state_path: Path | None = None,
     pinned_prefix_count: int = 0,
+    stable_rotation_key: bool = False,
 ) -> tuple[list[object], int, int, int, _RotationStateToken]:
     ordered = list(rows)
     pinned_count = min(max(0, int(pinned_prefix_count)), len(ordered))
@@ -267,6 +291,23 @@ def _rotate_current_target_rows(
             if state_path is not None
             else _CURRENT_TARGET_ROTATION_OFFSETS.get(cycle_key, 0)
         ) % len(rotating)
+        if stable_rotation_key and state_path is not None:
+            last_family = _rotation_last_attempted_family(
+                state_path, cycle_key=cycle_key
+            )
+            if last_family is not None:
+                last_key = (last_family[1], last_family[0], last_family[2])
+                keys = [
+                    (row.target_date, row.city, row.temperature_metric)
+                    for row in rotating
+                ]
+                if last_key in keys:
+                    start = (keys.index(last_key) + 1) % len(keys)
+                else:
+                    start = next(
+                        (index for index, key in enumerate(keys) if key > last_key),
+                        0,
+                    )
         _CURRENT_TARGET_ROTATION_OFFSETS.clear()
         _CURRENT_TARGET_ROTATION_OFFSETS[cycle_key] = start
     return (
@@ -287,8 +328,12 @@ def _advance_current_target_rotation(
     state_path: Path | None = None,
     expected_generation: int = 0,
     expected_state_token: _RotationStateToken = (None, None),
+    stable_rotation_key: bool = False,
+    last_attempted_family: tuple[str, str, str] | None = None,
 ) -> tuple[int, bool]:
     cycle_key = cycle.astimezone(UTC).isoformat()
+    if stable_rotation_key and attempted_count > 0 and last_attempted_family is None:
+        raise ValueError("stable rotation requires the actual last processed family")
 
     if row_count <= 0:
         if state_path is not None:
@@ -327,11 +372,20 @@ def _advance_current_target_rotation(
         _CURRENT_TARGET_ROTATION_OFFSETS.clear()
         _CURRENT_TARGET_ROTATION_OFFSETS[cycle_key] = next_start
         if state_path is not None:
+            stable_last = None
+            if stable_rotation_key:
+                stable_last = (
+                    last_attempted_family
+                    if attempted_count > 0 else _rotation_last_attempted_family(
+                        state_path, cycle_key=cycle_key
+                    )
+                )
             _write_rotation_state(
                 state_path,
                 cycle_key=cycle_key,
                 next_start=next_start,
                 generation=expected_generation + 1,
+                last_attempted_family=stable_last,
             )
         return next_start, True
 
@@ -1577,6 +1631,9 @@ def download_current_target_raw_inputs(
     missing_manifests_only: bool = False,
     precomputed_plan: ReplacementForecastCurrentTargetPlan | None = None,
     required_scopes: Sequence[tuple[str, str, str]] | None = None,
+    expand_metric_siblings: bool = True,
+    scoped_rotation: bool = True,
+    stable_rotation_key: bool = False,
     max_wall_clock_seconds: float | None = None,
     fetch_workers: int = 4,
     bucket_reader_pool=None,
@@ -1602,10 +1659,11 @@ def download_current_target_raw_inputs(
         raise ValueError("limit must be a positive integer or None")
     plan: ReplacementForecastCurrentTargetPlan | None = None
     if required_scopes is not None:
-        required_scopes = _expand_required_metric_siblings(
-            forecast_db,
-            required_scopes,
-        )
+        if expand_metric_siblings:
+            required_scopes = _expand_required_metric_siblings(
+                forecast_db,
+                required_scopes,
+            )
         _rows = [
             ReplacementForecastTargetKey(city, target_date, metric)
             for city, target_date, metric in dict.fromkeys(
@@ -1657,7 +1715,7 @@ def download_current_target_raw_inputs(
     rotation_state_path = _current_target_rotation_state_path(
         output_dir,
         _rows,
-        scoped=required_scopes is not None,
+        scoped=required_scopes is not None and scoped_rotation,
     )
     (
         rotated_rows,
@@ -1670,6 +1728,7 @@ def download_current_target_raw_inputs(
         cycle=cycle,
         state_path=rotation_state_path,
         pinned_prefix_count=priority_row_count,
+        stable_rotation_key=stable_rotation_key,
     )
     targets = rotated_rows[:limit] if limit is not None else rotated_rows
     raw_dir = output_dir / cycle.strftime("%Y%m%dT%H%M%SZ")
@@ -1722,6 +1781,21 @@ def download_current_target_raw_inputs(
     meta_wave_failures: dict[tuple[str, str], Exception] = {}
     unavailable_targets: set[tuple[str, str]] = set()
     processed_target_count = 0
+    rotating_processed_count = 0
+    rotating_family_keys = {
+        _current_target_family_key(row) for row in rotated_rows[priority_row_count:]
+    } if stable_rotation_key else set()
+    last_processed_rotating_family: tuple[str, str, str] | None = None
+
+    def mark_processed(target: object) -> None:
+        nonlocal processed_target_count, rotating_processed_count
+        nonlocal last_processed_rotating_family
+        processed_target_count += 1
+        family = _current_target_family_key(target)
+        if family in rotating_family_keys:
+            rotating_processed_count += 1
+            last_processed_rotating_family = family
+
     timeboxed_incomplete = False
     bucket_manifests: dict | None = None
 
@@ -1904,11 +1978,11 @@ def download_current_target_raw_inputs(
             target_key = (target.city, target.target_date)
             city_config = cities_by_name.get(target.city)
             if city_config is None:
-                processed_target_count += 1
+                mark_processed(target)
                 continue
             family_key = _current_target_family_key(target)
             if family_key in canonical_reuse:
-                processed_target_count += 1
+                mark_processed(target)
                 continue
             payload_path = raw_dir / f"openmeteo_{_safe_name(target.city)}_{target.target_date}_{target.temperature_metric}_{cycle.strftime('%Y%m%dT%H%M%SZ')}.json"
             precision_path = raw_dir / f"openmeteo_precision_{_safe_name(target.city)}_{target.target_date}_{target.temperature_metric}.json"
@@ -1986,7 +2060,7 @@ def download_current_target_raw_inputs(
                             "reason": str(not_admissible)[:200],
                         }
                     )
-                    processed_target_count += 1
+                    mark_processed(target)
                     continue
                 except TimeoutError:
                     timeboxed_incomplete = True
@@ -2005,7 +2079,7 @@ def download_current_target_raw_inputs(
                             "reason": "anchor payload has no finite target-day sample",
                         }
                     )
-                    processed_target_count += 1
+                    mark_processed(target)
                     continue
             _write_json(
                 payload_path,
@@ -2063,7 +2137,7 @@ def download_current_target_raw_inputs(
                     },
                 )
             )
-            processed_target_count += 1
+            mark_processed(target)
     finally:
         if owns_bucket_pool:
             bucket_pool.close()
@@ -2115,17 +2189,20 @@ def download_current_target_raw_inputs(
         or len(manifests) + len(canonical_reuse) < len(targets)
         or unscheduled_target_count > 0
     )
+    rotating_attempted_count = (
+        rotating_processed_count if stable_rotation_key
+        else max(0, processed_target_count - min(priority_row_count, len(targets)))
+    )
     rotation_next_start, rotation_cas_applied = _advance_current_target_rotation(
         cycle=cycle,
         row_count=rotation_row_count,
-        attempted_count=max(
-            0,
-            processed_target_count - min(priority_row_count, len(targets)),
-        ),
+        attempted_count=rotating_attempted_count,
         incomplete=incomplete_target_set,
         state_path=rotation_state_path,
         expected_generation=rotation_generation,
         expected_state_token=rotation_state_token,
+        stable_rotation_key=stable_rotation_key,
+        last_attempted_family=last_processed_rotating_family,
     )
 
     return {
@@ -2178,6 +2255,9 @@ def download_current_target_openmeteo_inputs(
     missing_manifests_only: bool = False,
     precomputed_plan: ReplacementForecastCurrentTargetPlan | None = None,
     required_scopes: Sequence[tuple[str, str, str]] | None = None,
+    expand_metric_siblings: bool = True,
+    scoped_rotation: bool = True,
+    stable_rotation_key: bool = False,
     max_wall_clock_seconds: float | None = None,
     fetch_workers: int = 4,
     bucket_reader_pool=None,
@@ -2198,6 +2278,9 @@ def download_current_target_openmeteo_inputs(
         missing_manifests_only=missing_manifests_only,
         precomputed_plan=precomputed_plan,
         required_scopes=required_scopes,
+        expand_metric_siblings=expand_metric_siblings,
+        scoped_rotation=scoped_rotation,
+        stable_rotation_key=stable_rotation_key,
         max_wall_clock_seconds=max_wall_clock_seconds,
         fetch_workers=fetch_workers,
         bucket_reader_pool=bucket_reader_pool,

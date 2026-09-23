@@ -60,6 +60,63 @@ from src.data.replacement_forecast_current_target_plan import (
 )
 
 
+def test_active_bpf_capture_admits_new_market_without_baseline_coverage(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    db = tmp_path / "forecasts.db"
+    cycle = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    target_date = (cycle + timedelta(days=1)).date().isoformat()
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "CREATE TABLE market_events(city TEXT,target_date TEXT,"
+            "temperature_metric TEXT,token_id TEXT,range_label TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO market_events VALUES(?,?,?,?,?)",
+            [("Amsterdam", target_date, metric, "token", "range")
+             for metric in ("high", "low")],
+        )
+        conn.execute("CREATE TABLE source_run(source_run_id TEXT,source_cycle_time TEXT)")
+        conn.execute(
+            "CREATE TABLE source_run_coverage(source_run_id TEXT,source_id TEXT,"
+            "city TEXT,target_local_date TEXT,temperature_metric TEXT,"
+            "data_version TEXT,computed_at TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE raw_model_forecasts(city TEXT,metric TEXT,target_date TEXT,"
+            "model TEXT,source_cycle_time TEXT,endpoint TEXT)"
+        )
+    assert plan_mod.replacement_forecast_current_target_keys(db) == ()
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
+        lambda **_kw: {},
+    )
+    monkeypatch.setattr(
+        production, "_probe_resolved_bayes_precision_fusion_extras_cycle",
+        lambda **_kw: cycle,
+    )
+    monkeypatch.setattr(dl_mod, "bayes_precision_fusion_quota_cooldown_seconds", lambda: 0)
+    captured: list[object] = []
+    monkeypatch.setattr(
+        dl_mod, "download_bayes_precision_fusion_extra_raw_inputs",
+        lambda **kwargs: captured.extend(kwargs["targets"]) or {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+            "attempted_target_group_count": 1,
+            "written_row_count": 0,
+        },
+    )
+    report = production._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+        {"forecast_db": db, "bpf_extra_rotation_state_path": tmp_path / "cursor.json"},
+        max_wall_clock_seconds=5.0,
+    )
+    assert {(row.city, row.target_date, row.metric) for row in captured} == {
+        ("Amsterdam", target_date, "high"),
+        ("Amsterdam", target_date, "low"),
+    }
+    assert report["written_row_count"] == 0
+    assert report.get("committed_families", ()) == ()
+
+
 def _row(*, city: str, target_date: str, covered: bool) -> ReplacementForecastCurrentTargetPlanRow:
     # covered == (posterior_count > 0 and readiness_count > 0); flip both to toggle coverage.
     n = 1 if covered else 0

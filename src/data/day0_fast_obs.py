@@ -1913,7 +1913,10 @@ def running_extremes_for_local_day(
     station = str(getattr(city, "wu_station", "") or "").strip().upper()
     target = date.fromisoformat(str(target_date)[:10]) if not isinstance(target_date, date) else target_date
 
-    report_list = list(reports)
+    # KMA correction precedence is a same-station rule.  The fetch window is
+    # global, so a KMA report for RKSI/RKPK must not make a conflicting legacy
+    # report for an unrelated station (for example RPLL) poison this city.
+    report_list = [report for report in reports if report.station_id == station]
     if any(report.transport_id == KMA_METAR_TRANSPORT_ID for report in report_list):
         # A correction is an append-only replacement for the same physical
         # instant. Reduce the mixed NOAA/KMA window before selecting the latest
