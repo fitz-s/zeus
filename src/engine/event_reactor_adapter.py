@@ -15907,6 +15907,16 @@ def _global_preflight_candidate_receipt(
 def _global_preflight_block_status(reason: str) -> str:
     """Fall through only when current evidence proves this candidate infeasible."""
 
+    if reason == (
+        "GLOBAL_ACTUATION_PREPARE_FAILED:"
+        "SELECTION_SCOPE_EMPTY:held:input=1:"
+        "classes=RECENT_EXIT_SAME_TOKEN_COOLDOWN=1"
+    ):
+        # SCOPE: BUY of the native token just exited, across execution modes.
+        # DRAIN: exclude that BUY and re-rank the same complete economic cut.
+        # RESET: each recurring cut rechecks the existing cooldown expiry.
+        # The cooldown cannot block held SELLs or other market opportunities.
+        return "CANDIDATE_BLOCKED"
     if (
         _global_preflight_source_clock_superseded(reason)
         or _global_preflight_sell_temporal_authority_superseded(reason)

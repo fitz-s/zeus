@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-09-21
+# Last reused/audited: 2026-09-23
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -20025,6 +20025,9 @@ def test_persist_tier0_candidate_set_skips_candidates_without_city_date_context(
         ),
         ("GLOBAL_ACTUATION_BOOK_SUPERSEDED", "BATCH_BLOCKED"),
         ("UNCLASSIFIED_PREFLIGHT_FAILURE", "BATCH_BLOCKED"),
+        ("GLOBAL_ACTUATION_PREPARE_FAILED:SELECTION_SCOPE_EMPTY:held:input=2:classes=RECENT_EXIT_SAME_TOKEN_COOLDOWN=2", "BATCH_BLOCKED"),
+        ("GLOBAL_ACTUATION_PREPARE_FAILED:SELECTION_SCOPE_EMPTY:held:input=1:classes=RECENT_EXIT_TRUTH_UNAVAILABLE=1", "BATCH_BLOCKED"),
+        ("GLOBAL_ACTUATION_PREPARE_FAILED:SELECTION_SCOPE_EMPTY:held:input=1:classes=RECENT_EXIT_SAME_TOKEN_COOLDOWN=1:unknown", "BATCH_BLOCKED"),
         ("GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:GLOBAL_SELL_DAY0_STATISTICAL_AUTHORITY_SUPERSEDED:unknown", "BATCH_BLOCKED"),
         ("GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:GLOBAL_SELL_DAY0_STATISTICAL_AUTHORITY_IDENTITY_SUPERSEDED:malformed", "BATCH_BLOCKED"),
         (
@@ -37545,6 +37548,20 @@ def test_global_batch_falls_through_family_local_preflight_block(
     ("reason", "blocked_action", "sibling_action"),
     (
         (
+            "GLOBAL_ACTUATION_PREPARE_FAILED:"
+            "SELECTION_SCOPE_EMPTY:held:input=1:"
+            "classes=RECENT_EXIT_SAME_TOKEN_COOLDOWN=1",
+            "BUY",
+            "SELL",
+        ),
+        (
+            "GLOBAL_ACTUATION_PREPARE_FAILED:"
+            "SELECTION_SCOPE_EMPTY:held:input=1:"
+            "classes=RECENT_EXIT_SAME_TOKEN_COOLDOWN=1",
+            "BUY",
+            "BUY",
+        ),
+        (
             "GLOBAL_PREFLIGHT_CANDIDATE_DAY0_ADMISSION_BLOCKED:DAY0_DIURNAL_NOWCAST_VETO",
             "BUY",
             "BUY",
@@ -37691,6 +37708,7 @@ def test_global_batch_candidate_block_keeps_sibling_eligible(
         token_id="token-a",
         execution_mode=execution_mode,
     )
+    token_cooldown = "classes=RECENT_EXIT_SAME_TOKEN_COOLDOWN=1" in reason
     family_entry_block = reason.startswith(
         (
             "LIVE_ENTRY_BLOCKED:entry_readiness_family:",
@@ -37809,6 +37827,13 @@ def test_global_batch_candidate_block_keeps_sibling_eligible(
                 else None
             )
             assert policy(candidate_a) == expected_a
+            if token_cooldown:
+                for mode in ("MAKER_REST", "TAKER_LIMIT"):
+                    same_token_buy = SimpleNamespace(**(vars(candidate_a) | {"execution_mode": mode}))
+                    assert policy(same_token_buy) == expected_a
+                    assert policy(SimpleNamespace(**(vars(same_token_buy) | {"action": "SELL"}))) is None
+                    assert policy(SimpleNamespace(**(vars(same_token_buy) | {"side": "YES", "token_id": "opposite-token"}))) is None
+                    assert policy(SimpleNamespace(**(vars(same_token_buy) | {"family_key": "future-family", "bin_id": "future-bin", "token_id": "future-token"}))) is None
             if family_entry_block:
                 assert policy(candidate_b) == (
                     f"GLOBAL_PREFLIGHT_CANDIDATE_INELIGIBLE:{reason}"
