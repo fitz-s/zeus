@@ -2846,7 +2846,14 @@ def _canonical_alpha_settlement_proof(
         (condition_id,),
     ).fetchone()
     if snapshot is None:
-        return None
+        # The first ACK already checked the executable token pair. Its hashed
+        # proof survives ordinary snapshot retention; a still-pending round
+        # may never bootstrap its token identity from an unverified feedback.
+        feedback = row.get("output", {}).get("alpha_feedback")
+        if feedback is None:
+            return None
+        proof = feedback["settlement_proof"]
+        snapshot = (proof["yes_token_id"], proof["no_token_id"])
     yes_token_id, no_token_id = (str(value or "").strip() for value in snapshot[:2])
     if (not yes_token_id or not no_token_id or yes_token_id == no_token_id
             or token_id != (yes_token_id if side == "YES" else no_token_id)):
@@ -2881,6 +2888,38 @@ def _canonical_alpha_settlement_proof(
         "yes_token_id": yes_token_id, "no_token_id": no_token_id,
         "payout_rows": payout_rows,
     }
+
+
+def _alpha_feedback_chain_still_valid(
+    trade_conn: sqlite3.Connection,
+    frozen: Mapping[str, object],
+    current: Mapping[str, object] | None,
+) -> bool:
+    """Keep an immutable ACK when a newer coherent finalized pair agrees."""
+    if current is None:
+        return False
+    original = frozen["payout_rows"]
+    old_ids = [row["id"] for row in original]
+    old = trade_conn.execute(
+        "SELECT id,condition_id,outcome_index,payout_numerator,payout_denominator,"
+        "state,source,block_number,block_hash FROM payout_observations "
+        "WHERE id IN (?,?) ORDER BY outcome_index",
+        tuple(old_ids),
+    ).fetchall()
+    fields = ("id", "condition_id", "outcome_index", "payout_numerator",
+              "payout_denominator", "state", "source", "block_number", "block_hash")
+    if [dict(zip(fields, row)) for row in old] != original:
+        return False
+    identity = ("condition_id", "token_id", "side", "envelope_sha256",
+                "outcome", "yes_token_id", "no_token_id")
+    if any(current[key] != frozen[key] for key in identity):
+        return False
+    return all(
+        left["outcome_index"] == right["outcome_index"]
+        and left["payout_numerator"] * right["payout_denominator"]
+        == right["payout_numerator"] * left["payout_denominator"]
+        for left, right in zip(original, current["payout_rows"])
+    )
 
 
 def _causal_alpha_shadow_rows(
@@ -3096,7 +3135,9 @@ def _causal_alpha_shadow_rows(
                     conn, forecasts_conn, item,
                 )
                 if output["alpha_feedback"] is not None:
-                    if current != output["alpha_feedback"]["settlement_proof"]:
+                    if not _alpha_feedback_chain_still_valid(
+                        conn, output["alpha_feedback"]["settlement_proof"], current,
+                    ):
                         output["alpha_protocol_valid"] = False
                         status["blocked_reasons"]["feedback_canonical_conflict"] = (
                             status["blocked_reasons"].get("feedback_canonical_conflict", 0) + 1
@@ -3104,7 +3145,7 @@ def _causal_alpha_shadow_rows(
                     else:
                         output["alpha_feedback_verified"] = True
                         output["hypothetical_settlement_payout_usd"] = (
-                            current["outcome"]
+                            output["alpha_feedback"]["settlement_proof"]["outcome"]
                             * float(item["envelope"]["global_proof_shares"])
                         )
                         output["hypothetical_realized_pnl_usd"] = (
@@ -3197,7 +3238,9 @@ def _acknowledge_pending_alpha_shadow_feedback(
             ready.append(tail)
     if not ready:
         return 0
-    from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
+    from src.strategy.live_inference.no_trade_regret import (
+        NoTradeRegretLedger, release_alpha_connection_state,
+    )
 
     try:
         with default_runtime_write_coordinator().lease(
@@ -3238,7 +3281,15 @@ def _acknowledge_pending_alpha_shadow_feedback(
                         raise
                     return acknowledged
             finally:
-                writer.close()
+                try:
+                    if writer.in_transaction:
+                        writer.rollback()
+                finally:
+                    try:
+                        if not writer.in_transaction:
+                            release_alpha_connection_state(writer)
+                    finally:
+                        writer.close()
     except (OSError, sqlite3.Error, WriteLeaseTimeout, ValueError) as exc:
         logger.warning("causal alpha feedback deferred: %s: %s", type(exc).__name__, exc)
         return 0
