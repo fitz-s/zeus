@@ -1,6 +1,6 @@
 # Created: 2026-03-30
 # Last reused/audited: 2026-09-24
-# Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation; Wave26 verification-noise helper alignment; PR90 current-env fallback review fix; 2026-08-15 economic-settlement trailing-loss hotfix.
+# Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation; Wave26 verification-noise helper alignment; PR90 current-env fallback review fix; 2026-08-15 economic-settlement trailing-loss hotfix; 2026-09-24 finite-PnL admission regression.
 #                  2026-05-17 live lock remediation: RiskGuard trade/world DB lock degrades to fresh DATA_DEGRADED rather than stale RED.
 # Lifecycle: created=2026-03-30; last_reviewed=2026-09-24; last_reused=2026-09-24
 # Purpose: Guard RiskGuard protective metrics, policy resolution, source authority, and portfolio loader invariants.
@@ -8,10 +8,9 @@
 # 2026-08-17: Brier strategy-gate evidence is independent by target date.
 # 2026-08-22 prior contract: Day0 missing/inconclusive shadow history remained
 # telemetry and only direct revision-scoped capital rejection gated BUY.
-# 2026-08-24 supersedes that admission shape: an unproven Day0 revision is
-# limited to one sequential in-flight capital probe; nonpositive/degraded
-# capital truth gates only that revision. The same exact-revision probation
-# binds qkernel capital while its current law remains unvalidated.
+# 2026-09-24: finite settled PnL is wealth already realized, not a live
+# probability-revision admission veto; degraded or malformed capital truth
+# remains fail-closed, as do metric identity and causal-alpha rejection gates.
 """Tests for RiskGuard metrics, policy resolution, and risk levels."""
 
 import json
@@ -4773,8 +4772,9 @@ class TestStrategyBrierMinSample:
                         f"revision={revision})"
                     ),
                     (
-                        "qkernel_revision_probation_nonpositive(realized=3,"
-                        f"net_pnl_usd=-1.0,revision={revision},metric=low)"
+                        "qkernel_revision_probation_truth_degraded("
+                        f"status=capital_truth_degraded,blocked=1,revision={revision},"
+                        "metric=low)"
                     ),
                 ]
             },
@@ -6746,10 +6746,6 @@ class TestQkernelMarketRelativeAlphaEvidence:
         ("status", "open_count", "realized_count", "blocked_count", "pnl", "fragment"),
         [
             (
-                "nonpositive", 0, 3, 0, -0.25,
-                "day0_revision_probation_nonpositive(realized=3,net_pnl_usd=-0.250000",
-            ),
-            (
                 "capital_truth_degraded", 0, 0, 1, 0.0,
                 "day0_revision_probation_truth_degraded(",
             ),
@@ -6793,10 +6789,6 @@ class TestQkernelMarketRelativeAlphaEvidence:
     @pytest.mark.parametrize(
         ("status", "open_count", "realized_count", "blocked_count", "pnl", "fragment"),
         [
-            (
-                "nonpositive", 0, 3, 0, -0.25,
-                "qkernel_revision_probation_nonpositive(realized=3,net_pnl_usd=-0.250000",
-            ),
             (
                 "capital_truth_degraded", 0, 0, 1, 0.0,
                 "qkernel_revision_probation_truth_degraded(",
@@ -6858,14 +6850,10 @@ class TestQkernelMarketRelativeAlphaEvidence:
             },
         )
 
-        # Open positions never gate (concurrency is owned by the pinned sizing
-        # levers); a 15-close net-negative cohort is real statistical evidence
-        # and latches the nonpositive bound.
-        assert reason == (
-            "qkernel_revision_probation_nonpositive("
-            f"realized=15,net_pnl_usd=-31.278889,revision={revision})"
-        )
-        assert revisions == (revision,)
+        # Settled loss is already reflected in current wealth and cannot
+        # independently veto current admission, regardless of cohort size.
+        assert reason is None
+        assert revisions == ()
 
     def test_qkernel_probation_validation_is_exact_temperature_metric(self):
         revision = riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
@@ -6914,11 +6902,119 @@ class TestQkernelMarketRelativeAlphaEvidence:
                 base_curve,
             )
         )
+        mismatched_metric_reason, mismatched_revisions = (
+            riskguard_module._qkernel_revision_probation_gate_reason(
+                binding,
+                validated_high,
+                {**base_curve, "temperature_metric": "high"},
+                temperature_metric="low",
+            )
+        )
 
-        assert low_reason is not None
-        assert ",metric=low)" in low_reason
+        assert low_reason is None
         assert high_reason is None
-        assert missing_metric_reason is not None
+        assert missing_metric_reason is None
+        assert "metric_identity_missing" in mismatched_metric_reason
+        assert mismatched_revisions == (revision,)
+
+    def test_finite_settled_pnl_never_vetoes_unproven_revision_by_metric(self):
+        from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
+
+        cases = (
+            (riskguard_module._day0_revision_probation_gate_reason,
+             DAY0_PROBABILITY_SEMANTICS_REVISION),
+            (riskguard_module._qkernel_revision_probation_gate_reason,
+             riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION),
+        )
+        settled_curves = (
+            (0, 0.0),
+            (1, 0.25),
+            (3, -0.25),
+            (15, -31.278889),
+            (15, 0.0),
+            (24, 9.55237),
+        )
+
+        for gate_reason, revision in cases:
+            binding = {"status": "ok", "current_revision": revision}
+            for metric in (None, "high", "low"):
+                for realized_count, pnl in settled_curves:
+                    curve = {
+                        "status": "nonpositive" if pnl <= 0 else "positive",
+                        "probability_semantics_revision": revision,
+                        "global_selection_revision": (
+                            riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+                        ),
+                        "selection_revision_bound": True,
+                        "open_position_count": 0,
+                        "realized_position_count": realized_count,
+                        "blocked_position_count": 0,
+                        "net_realized_pnl_usd": pnl,
+                    }
+                    if metric is not None:
+                        curve["temperature_metric"] = metric
+                    reason, scopes = gate_reason(
+                        binding,
+                        {"cohorts": []},
+                        curve,
+                        temperature_metric=metric,
+                    )
+                    assert reason is None, (gate_reason.__name__, metric, curve, reason)
+                    assert scopes == (), (gate_reason.__name__, metric, curve, scopes)
+
+    def test_malformed_or_nonfinite_current_capital_truth_still_fails_closed(self):
+        from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
+
+        cases = (
+            (riskguard_module._day0_revision_probation_gate_reason,
+             DAY0_PROBABILITY_SEMANTICS_REVISION),
+            (riskguard_module._qkernel_revision_probation_gate_reason,
+             riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION),
+        )
+        for gate_reason, revision in cases:
+            binding = {"status": "ok", "current_revision": revision}
+            malformed_curves = (
+                {"net_realized_pnl_usd": float("nan")},
+                {"net_realized_pnl_usd": float("inf")},
+                {"net_realized_pnl_usd": float("-inf")},
+                {"net_realized_pnl_usd": "not-a-number"},
+                {"net_realized_pnl_usd": None},
+                {"net_realized_pnl_usd": True},
+                {"blocked_position_count": 1},
+                {"blocked_position_count": -1},
+                {"blocked_position_count": True},
+                {"status": "unknown_curve_status"},
+                {"status": None},
+                {"_missing": ("blocked_position_count",)},
+                {"_missing": ("net_realized_pnl_usd",)},
+                {"_missing": ("status",)},
+            )
+            for malformed in malformed_curves:
+                missing = malformed.get("_missing", ())
+                curve = {
+                    "status": "positive",
+                    "probability_semantics_revision": revision,
+                    "global_selection_revision": (
+                        riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+                    ),
+                    "selection_revision_bound": True,
+                    "open_position_count": 0,
+                    "realized_position_count": 3,
+                    "blocked_position_count": 0,
+                    "net_realized_pnl_usd": 0.25,
+                    **malformed,
+                }
+                for field in missing:
+                    curve.pop(field)
+                curve.pop("_missing", None)
+                reason, scopes = gate_reason(
+                    binding,
+                    {"cohorts": []},
+                    curve,
+                )
+                assert reason is not None
+                assert "truth_degraded(" in reason
+                assert scopes == (revision,)
 
     def test_unproven_day0_revision_allows_one_probe_then_positive_sequential_probe(self):
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
@@ -6972,9 +7068,8 @@ class TestQkernelMarketRelativeAlphaEvidence:
                 "net_realized_pnl_usd": 0.0,
             },
         ) == (None, ())
-        # A sub-minimum nonpositive cohort (n < _PROBATION_MIN_REALIZED_SAMPLE)
-        # is noise, not disproof — and, since the latch blocks the next probe,
-        # gating on it would lock the strategy permanently.
+        # Finite settled PnL cannot veto admission regardless of sample count;
+        # this low-count case remains covered alongside larger cohorts below.
         assert riskguard_module._day0_revision_probation_gate_reason(
             binding,
             {"cohorts": []},
@@ -7400,12 +7495,8 @@ class TestQkernelMarketRelativeAlphaEvidence:
         ) == (None, ())
         conn.close()
 
-    def test_bound_current_revision_nonpositive_cohort_gates_day0_entry(self):
-        """The 6e507819b precondition, once actually satisfied, must latch.
-
-        Regression: no producer in src/ ever set selection_revision_bound, so
-        this branch was unreachable and day0 probation was structurally dead.
-        """
+    def test_bound_current_revision_finite_loss_does_not_gate_day0_entry(self):
+        """A current-selector settled loss is sunk wealth, not an admission gate."""
 
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 
@@ -7432,20 +7523,16 @@ class TestQkernelMarketRelativeAlphaEvidence:
             },
         )
 
-        assert reason == (
-            "day0_revision_probation_nonpositive("
-            "realized=24,net_pnl_usd=-9.552370,"
-            f"revision={DAY0_PROBABILITY_SEMANTICS_REVISION})"
-        )
-        assert revisions == (DAY0_PROBABILITY_SEMANTICS_REVISION,)
+        assert reason is None
+        assert revisions == ()
 
     def test_superseded_selection_positions_are_excluded_not_gating(self):
         """Old-selector losses leave the cohort; they never gate the current one."""
 
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 
-        # The binder dropped 24 superseded-selector losses; 2 current-revision
-        # closes remain — below the minimum sample, so no latch.
+        # The binder dropped 24 superseded-selector losses; the 2 remaining
+        # closes are finite current-selector PnL and cannot gate either way.
         assert riskguard_module._day0_revision_probation_gate_reason(
             {
                 "status": "ok",
@@ -7453,7 +7540,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
             },
             {"cohorts": []},
             {
-                "status": "nonpositive",
+                "status": "positive",
                 "probability_semantics_revision": (
                     DAY0_PROBABILITY_SEMANTICS_REVISION
                 ),
@@ -8624,16 +8711,11 @@ class TestStrategyPolicyResolver:
         }
         conn.close()
 
-    def test_bound_nonpositive_cohort_emits_day0_gate_row_end_to_end(
+    def test_bound_finite_loss_does_not_emit_day0_gate_row_end_to_end(
         self,
         monkeypatch,
     ):
-        """Binder -> probation reason -> durable risk_actions gate row.
-
-        Before the selection binding was wired into the tick, this chain broke
-        at the first link: no producer set selection_revision_bound, so the
-        probation reason was always None and no row was ever emitted.
-        """
+        """A bound settled-loss curve no longer produces a durable entry gate."""
 
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 
@@ -8679,18 +8761,13 @@ class TestStrategyPolicyResolver:
         )
 
         assert bound["selection_revision_bound"] is True
-        assert reason == (
-            "day0_revision_probation_nonpositive("
-            f"realized=3,net_pnl_usd=-1.800000,revision={revision})"
-        )
+        assert reason is None
+        assert revisions == ()
 
         conn = _policy_conn()
         status = riskguard_module._sync_riskguard_strategy_gate_actions(
             conn,
-            {"day0_nowcast_entry": [reason]},
-            probability_semantics_scopes={
-                "day0_nowcast_entry": set(revisions)
-            },
+            {},
             issued_at="2026-09-06T05:50:00+00:00",
         )
         row = conn.execute(
@@ -8698,17 +8775,8 @@ class TestStrategyPolicyResolver:
             ("riskguard:gate:day0_nowcast_entry",),
         ).fetchone()
 
-        assert status["emitted_count"] == 1
-        assert json.loads(row["value"]) == {
-            "gate": True,
-            "probability_semantics_revisions": [revision],
-        }
-        assert policy_module.resolve_strategy_policy(
-            conn,
-            "day0_nowcast_entry",
-            datetime(2026, 9, 6, 6, 0, tzinfo=timezone.utc),
-            probability_semantics_revision=revision,
-        ).gated is True
+        assert status["emitted_count"] == 0
+        assert row is None
         trades.close()
         events_conn.close()
         conn.close()
@@ -8789,6 +8857,98 @@ class TestStrategyPolicyResolver:
 
         assert current.gated is True
         assert future.gated is False
+        conn.close()
+
+    def test_sync_expires_old_finite_loss_gate_and_preserves_other_gate_authority(
+        self,
+    ):
+        from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
+
+        conn = _policy_conn()
+        day0_revision = DAY0_PROBABILITY_SEMANTICS_REVISION
+        qkernel_revision = riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
+        now = datetime(2026, 9, 24, 8, tzinfo=timezone.utc)
+        old_finite_loss_reason = (
+            "day0_revision_probation_nonpositive(realized=3,"
+            f"net_pnl_usd=-1.0,revision={day0_revision})"
+        )
+
+        # Seed the legacy RiskGuard row through the real upsert path, then
+        # install a separate operator-owned gate for the same strategy.
+        riskguard_module._sync_riskguard_strategy_gate_actions(
+            conn,
+            {"day0_nowcast_entry": [old_finite_loss_reason]},
+            probability_semantics_scopes={"day0_nowcast_entry": {day0_revision}},
+            issued_at=now.isoformat(),
+        )
+        conn.execute(
+            """
+            INSERT INTO risk_actions (
+                action_id, strategy_key, action_type, value, issued_at,
+                effective_until, reason, source, precedence, status
+            ) VALUES (?, ?, 'gate', 'true', ?, NULL, ?, 'manual', 100, 'active')
+            """,
+            (
+                "operator:gate:day0_nowcast_entry",
+                "day0_nowcast_entry",
+                now.isoformat(),
+                "operator hold",
+            ),
+        )
+
+        alpha_reason = (
+            "market_relative_alpha_unproven(status=rejected,model_evalue=0.0,"
+            "required=10.0,clusters=0,law=executable_min_order_capital_gain_v2,"
+            f"revision={qkernel_revision})"
+        )
+        sync = riskguard_module._sync_riskguard_strategy_gate_actions(
+            conn,
+            {
+                "forecast_qkernel_entry": [
+                    "brier_degraded(level=YELLOW,brier=0.31,sample=12)",
+                    alpha_reason,
+                ]
+            },
+            probability_semantics_scopes={
+                "forecast_qkernel_entry": {qkernel_revision}
+            },
+            issued_at=(now + timedelta(minutes=1)).isoformat(),
+        )
+
+        old_gate = conn.execute(
+            "SELECT status, effective_until FROM risk_actions WHERE action_id = ?",
+            ("riskguard:gate:day0_nowcast_entry",),
+        ).fetchone()
+        operator_gate = conn.execute(
+            "SELECT status, source FROM risk_actions WHERE action_id = ?",
+            ("operator:gate:day0_nowcast_entry",),
+        ).fetchone()
+        alpha_gate = conn.execute(
+            "SELECT status, value FROM risk_actions WHERE action_id = ?",
+            ("riskguard:gate:forecast_qkernel_entry",),
+        ).fetchone()
+
+        assert sync["emitted_count"] == 1
+        assert sync["expired_count"] == 1
+        assert old_gate["status"] == "expired"
+        assert old_gate["effective_until"] == (now + timedelta(minutes=1)).isoformat()
+        assert operator_gate["status"] == "active"
+        assert operator_gate["source"] == "manual"
+        assert alpha_gate["status"] == "active"
+        assert json.loads(alpha_gate["value"])["gate"] is True
+        assert policy_module.resolve_strategy_policy(
+            conn,
+            "day0_nowcast_entry",
+            now + timedelta(minutes=1),
+            probability_semantics_revision=day0_revision,
+        ).gated is True
+        assert policy_module.resolve_strategy_policy(
+            conn,
+            "forecast_qkernel_entry",
+            now + timedelta(minutes=1),
+            probability_semantics_revision=qkernel_revision,
+            temperature_metric="high",
+        ).gated is True
         conn.close()
 
     def test_riskguard_emits_multi_revision_scoped_unproven_alpha_gate(self):
@@ -10170,8 +10330,8 @@ class TestStrategyPolicyResolver:
         revision = riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
         stale = riskguard_module.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
         reason_pair = (
-            "qkernel_revision_probation_nonpositive(realized=3,"
-            f"net_pnl_usd=-1.0,revision={revision},metric=low)"
+            "qkernel_revision_probation_truth_degraded("
+            f"status=capital_truth_degraded,blocked=1,revision={revision},metric=low)"
         )
         reason_broad = (
             "market_relative_alpha_unproven(status=rejected,model_evalue=0.0,"
@@ -10235,8 +10395,9 @@ class TestStrategyPolicyResolver:
                 "forecast_qkernel_entry": [
                     "brier_degraded(level=YELLOW,brier=0.31,sample=12)",
                     (
-                        "qkernel_revision_probation_nonpositive(realized=3,"
-                        f"net_pnl_usd=-1.0,revision={revision},metric=low)"
+                        "qkernel_revision_probation_truth_degraded("
+                        f"status=capital_truth_degraded,blocked=1,revision={revision},"
+                        "metric=low)"
                     ),
                 ]
             },
@@ -10268,8 +10429,9 @@ class TestStrategyPolicyResolver:
                 "forecast_qkernel_entry": [
                     "brier_degraded(level=YELLOW,brier=0.31,sample=12)",
                     (
-                        "qkernel_revision_probation_nonpositive(realized=3,"
-                        f"net_pnl_usd=-1.0,revision={revision},metric=low)"
+                        "qkernel_revision_probation_truth_degraded("
+                        f"status=capital_truth_degraded,blocked=1,revision={revision},"
+                        "metric=low)"
                     ),
                 ]
             },
@@ -10312,8 +10474,9 @@ class TestStrategyPolicyResolver:
                         f"revision={revision})"
                     ),
                     (
-                        "qkernel_revision_probation_nonpositive(realized=3,"
-                        f"net_pnl_usd=-1.0,revision={revision},metric=low)"
+                        "qkernel_revision_probation_truth_degraded("
+                        f"status=capital_truth_degraded,blocked=1,revision={revision},"
+                        "metric=low)"
                     ),
                 ]
             },

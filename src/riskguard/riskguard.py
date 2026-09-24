@@ -3388,9 +3388,9 @@ def _live_realized_capital_curve(
     canonical P&L is reduced by the frozen fee schedule because venue facts
     may omit fees.
     This retrospective curve never licenses entry for either strategy. Their
-    revision-scoped probation guards may consume it only to bound an unproven
-    revision to one sequential in-flight probe; current causal alpha and the
-    normal executable economics/risk stack remain the positive authority.
+    revision-scoped guards reject unresolved capital truth, not the sign of
+    already-settled returns. Current causal alpha and the normal executable
+    economics/risk stack remain the decision authority.
     """
 
     if strategy_key not in {"day0_nowcast_entry", "forecast_qkernel_entry"}:
@@ -5243,12 +5243,6 @@ def _market_relative_alpha_rejection_gate_entries(
     return tuple(entries)
 
 
-# Minimum realized same-revision closes before a net-nonpositive cohort may
-# latch the entry gate. Below this, one bad close is noise, and — because the
-# latch blocks the very probes that would grow the sample — a permanent lock.
-_PROBATION_MIN_REALIZED_SAMPLE = 3
-
-
 def _revision_probation_gate_reason(
     semantics_binding: Mapping[str, object],
     causal_alpha_evidence: Mapping[str, object],
@@ -5257,27 +5251,17 @@ def _revision_probation_gate_reason(
     reason_prefix: str,
     temperature_metric: str | None = None,
 ) -> tuple[str | None, tuple[str, ...]]:
-    """Bound an unproven probability revision by realized capital truth.
+    """Reject an exact current cohort with unresolved capital truth.
 
     SCOPE: only the exact current strategy probability revision under the exact
     current global selection revision. DRAIN: existing monitor/exit/settlement
-    lanes close realized positions while the no-money counterfactual lane keeps
-    accumulating exact-selector evidence. RESET: validated same-revision
-    capital evidence removes the bound; before validation, entry stays open
-    unless selection-revision-bound realized truth is degraded or a
-    minimum-sample cohort (>= _PROBATION_MIN_REALIZED_SAMPLE realized closes)
-    is net-nonpositive. A new probability or global selection revision starts
-    its own empty probation cohort.
-
-    2026-08-28 operator directive (continuous decision throughput): the former
-    in-flight arm counted every pre-existing open position as "the one
-    sequential probe", so open>0 froze entry unconditionally — a fifth
-    concurrency throttle on top of the four pinned sizing levers and the
-    drawdown kill, and one that could never drain while the strategy kept any
-    book. It is removed: concurrency is bounded by risk_policy.yaml levers,
-    not by this gate. The nonpositive latch now needs a minimum realized
-    sample — a single losing close is not statistical evidence and, because
-    the latch itself blocks the next probe, n=1 was a permanent lock.
+    lanes reconcile current capital obligations. RESET: a complete, finite,
+    exact-bound capital curve clears this truth failure on the next tick.
+    Settled gains and losses remain attribution evidence and are already
+    reflected in current wealth. Their finite sum, at any sample count, is
+    not a statistical rejection of the next order's incremental growth.
+    Predictive rejection is owned by the causal alpha test; current action
+    economics and exposure limits still govern every proposal and submission.
     """
 
     if semantics_binding.get("status") != "ok":
@@ -5314,7 +5298,7 @@ def _revision_probation_gate_reason(
     # expected-growth selector.  SCOPE: only a curve explicitly bound to the
     # current selection revision may gate this revision. DRAIN: actual fills and
     # proof receipts bind on their immutable entry certificates. RESET: the
-    # first exact-bound curve re-enables ordinary degraded/nonpositive probation
+    # first exact-bound curve re-enables ordinary degraded-truth probation
     # checks below. Explicit current-law alpha rejection remains independently
     # enforced by _market_relative_alpha_rejection_gate_reason.
     if (
@@ -5326,42 +5310,28 @@ def _revision_probation_gate_reason(
 
     status = str(capital_curve.get("status") or "").strip()
     try:
-        open_positions = int(capital_curve.get("open_position_count") or 0)
-        realized_positions = int(
-            capital_curve.get("realized_position_count") or 0
-        )
-        blocked_positions = int(
-            capital_curve.get("blocked_position_count") or 0
-        )
-        net_pnl = float(capital_curve.get("net_realized_pnl_usd") or 0.0)
-    except (TypeError, ValueError):
+        blocked_positions = capital_curve["blocked_position_count"]
+        net_value = capital_curve["net_realized_pnl_usd"]
+        if (type(blocked_positions) is not int or blocked_positions < 0
+                or type(net_value) not in (int, float)):
+            raise ValueError("capital truth fields are not numeric witnesses")
+        net_pnl = float(net_value)
+    except (KeyError, TypeError, ValueError, OverflowError):
         status = "capital_truth_degraded"
-        open_positions = realized_positions = blocked_positions = 0
+        blocked_positions = 0
         net_pnl = 0.0
 
     if (
         curve_revision != revision
         or blocked_positions > 0
-        or status in {"capital_truth_degraded", "capital_truth_unavailable"}
+        or not math.isfinite(net_pnl)
+        or status not in {
+            "awaiting_current_law_fills", "probation_in_flight", "positive", "nonpositive",
+        }
     ):
         reason = (
             f"{reason_prefix}_revision_probation_truth_degraded("
             f"status={status or 'missing'},blocked={blocked_positions},"
-            f"revision={revision}"
-            + (f",metric={metric}" if metric is not None else "")
-            + ")"
-        )
-        return reason, (revision,)
-    # open_positions intentionally does NOT gate: concurrency is owned by the
-    # pinned sizing levers (risk_policy.yaml) and the drawdown kill. This gate
-    # only answers "has this revision's realized capital truth disproven it?"
-    del open_positions
-    if realized_positions >= _PROBATION_MIN_REALIZED_SAMPLE and (
-        not math.isfinite(net_pnl) or net_pnl <= 0.0
-    ):
-        reason = (
-            f"{reason_prefix}_revision_probation_nonpositive("
-            f"realized={realized_positions},net_pnl_usd={net_pnl:.6f},"
             f"revision={revision}"
             + (f",metric={metric}" if metric is not None else "")
             + ")"
