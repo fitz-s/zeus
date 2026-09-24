@@ -1365,6 +1365,36 @@ scripts:
     required_helpers: []
     required_tests: [tests/test_worktree_doctor.py, tests/test_dispatch_session_start.py]
 
+  workspace_converge.py:
+    # Created: 2026-09-24
+    # Last reused or audited: 2026-09-24
+    # Authority basis: AGENTS.md §5 task-scoped worktrees; operator directive 2026-09-24
+    class: runtime_support
+    lifecycle: long_lived
+    status: active
+    authority_scope: operator_runtime_support
+    canonical_command: "python3 scripts/workspace_converge.py [--apply]"
+    reason: >
+      Backstop that converges abandoned agent workspace state: idle linked
+      worktrees (leftovers committed to their branch first), landed or stale
+      local/remote branches (stale ones bundled first), PRs idle 7 days,
+      detached omc tmux sessions, stray untracked files in the live checkout
+      (moved to the archive), and old /private/tmp/zeus* scratch. Run hourly
+      by deploy/launchd/com.zeus.workspace-converge.plist. Never touches live's
+      tracked tree or git state, a checked-out branch, or an open-PR head.
+    read_targets: [repo, .git/worktrees, gh pr list, tmux, /private/tmp]
+    write_targets: [git worktrees, git refs, origin branches, GitHub PRs, ~/.zeus-wt-archive/converge]
+    target_db: null
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: --apply
+    external_inputs: [git, gh, tmux, lsof]
+    delete_policy: archive_before_delete
+    reuse_when: >
+      Workspace sprawl needs to converge, or to preview what the hourly job will do.
+    do_not_use_when: >
+      A specific task's worktree or branch is being retired by its owner; the
+      owner removes it directly per AGENTS.md §5.
   migrate_backtest_runs_lane_constraint_2026_05_07.py:
     # Created: 2026-05-07
     # Authority basis: PR #87 fix — selection_coverage lane omitted from

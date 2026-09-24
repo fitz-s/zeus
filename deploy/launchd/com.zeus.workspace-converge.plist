@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Workspace convergence backstop (AGENTS.md §5). Agents clean up their own
+  tasks; this job converges whatever they abandon: idle worktrees, landed or
+  stale branches, stale PRs, detached omc tmux sessions, stray untracked files
+  in the live checkout, and old /private/tmp/zeus* scratch. Everything it
+  removes is first committed, bundled or moved under ~/.zeus-wt-archive/converge/.
+  Never touches the running daemons, live's tracked tree, or live's git state.
+
+  INSTALL (operator, run from the repo root):
+    python3 scripts/install_launchd_plist.py deploy/launchd/com.zeus.workspace-converge.plist
+    launchctl bootout gui/$(id -u)/com.zeus.workspace-converge 2>/dev/null || true
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.zeus.workspace-converge.plist
+-->
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<key>ZEUS_PRIMARY_ROOT</key>
+		<string>ZEUS_REPO_PLACEHOLDER</string>
+	</dict>
+	<key>Label</key>
+	<string>com.zeus.workspace-converge</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/python3</string>
+		<string>ZEUS_REPO_PLACEHOLDER/scripts/workspace_converge.py</string>
+		<string>--apply</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/dev/null</string>
+	<key>StandardOutPath</key>
+	<string>/dev/null</string>
+	<key>StartInterval</key>
+	<integer>3600</integer>
+	<key>WorkingDirectory</key>
+	<string>ZEUS_REPO_PLACEHOLDER</string>
+</dict>
+</plist>

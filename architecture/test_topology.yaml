@@ -579,6 +579,7 @@ test_trust_policy:
     tests/test_unsupported_edge_claim_guard.py: {created: "2026-07-08", last_used: "2026-07-28", note: "Stop-hook advisory guard antibody: unsupported positive edge/deploy claims must trigger the guard while null results, evidence-backed claims, and meta-discussion of the guard itself pass. Rewritten 2026-07-28 when no_edge_rule1_guard was inverted."}
     tests/test_citation_grep_gate.py: {created: "2026-05-18", last_used: "2026-05-18"}
     tests/test_live_tree_write_guard.py: {created: "2026-07-22", last_used: "2026-07-22", note: "Live checkout agent-write boundary: direct and malformed Codex patches deny; linked worktree edits pass; cross-tree writes deny."}
+    tests/test_workspace_converge.py: {created: "2026-09-24", last_used: "2026-09-24", note: "Workspace converger: idle worktrees, stale branches and stray live files converge; nothing removed is lost."}
     tests/test_no_synthetic_provenance_marker.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_settlements_physical_quantity_invariant.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_settlement_commands_schema.py: {created: "2026-05-04", last_used: "2026-05-04"}
@@ -1419,6 +1420,7 @@ categories:
     - tests/test_unsupported_edge_claim_guard.py
     - tests/test_citation_grep_gate.py
     - tests/test_live_tree_write_guard.py
+    - tests/test_workspace_converge.py
 
   # Midstream guardian panel — the 15 test files whose invariant-protection
   # role depends on current test-currency (dated provenance header + recent

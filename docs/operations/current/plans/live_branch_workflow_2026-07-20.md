@@ -28,6 +28,24 @@ git worktree remove .claude/worktrees/<id> && git branch -d task/<id>
 
 A task ending without landing commits its work to the branch (push it if a PR rides on it) and still removes the worktree. The only reasons to keep a worktree are an open PR under active revision or a process running in it.
 
+A PR belongs to the task that opened it; that task merges or closes it before ending. Nothing depends on a later session remembering.
+
+## Backstop
+
+`scripts/workspace_converge.py` (launchd `com.zeus.workspace-converge`, hourly) converges what an interrupted task leaves behind. Every removal is preceded by a commit, bundle or move into `~/.zeus-wt-archive/converge/`:
+
+| Leftover | Rule |
+|---|---|
+| worktree, no process inside, idle 6 h | commit leftovers to its branch, remove |
+| local branch landed on `origin/live` | delete |
+| local or remote branch unlanded, idle 7 d | bundle, delete |
+| open PR idle 7 d | close with a comment |
+| detached `omc-*` tmux session idle 24 h | kill |
+| untracked file in the live checkout idle 24 h | move to the archive |
+| `/private/tmp/zeus*` idle 48 h | delete |
+
+Checked-out branches and open-PR heads are never touched; a failed GitHub query skips every branch and PR decision.
+
 ## Multi-agent repair
 
 The main thread aligns the work-list (per item: `file:line` and a fix / refute / defer-with-rationale disposition), fans out over disjoint files at the lowest fitting model tier, and lands. Every agent verifies the defect first, makes the minimal change, ships a behavioral antibody that fails before and passes after, and proves zero new regressions by diffing failing-test names pre vs post. Two agents never own the same file.
