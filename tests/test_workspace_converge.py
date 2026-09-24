@@ -148,3 +148,28 @@ def test_dry_run_changes_nothing(repo, tmp_path):
 
     assert wt.exists()
     assert any(a["kind"] == "remove-worktree" and not a["applied"] for a in actions)
+
+
+def test_tmux_session_is_killed_only_after_its_screen_stops_changing(tmp_path, monkeypatch):
+    screens = {"omc-busy": "tick 1", "omc-dead": "done"}
+    killed: list[str] = []
+
+    def fake_run(args, cwd=None, check=True):
+        out = ""
+        if args[:2] == ["tmux", "list-sessions"]:
+            out = "omc-busy\t0\nomc-dead\t0\nomc-attached\t1\n"
+        elif args[:2] == ["tmux", "capture-pane"]:
+            out = screens[args[-1]]
+        elif args[:2] == ["tmux", "kill-session"]:
+            killed.append(args[-1])
+        return subprocess.CompletedProcess(args, 0, out, "")
+
+    monkeypatch.setattr(wc, "run", fake_run)
+    t0 = time.time()
+    for hours, busy_screen in ((0, "tick 1"), (25, "tick 2")):
+        screens["omc-busy"] = busy_screen
+        c = wc.Converger(tmp_path, tmp_path / "archive", t0 + hours * 3600, apply=True,
+                         open_prs=[], tmp_root=None)
+        c.converge_tmux()
+
+    assert killed == ["omc-dead"]
