@@ -427,9 +427,11 @@ class TestGateRuntimeAllClear:
         [
             "src/execution/executor.py",
             "config/settings.json",
-            "architecture/source_rationale.yaml",
-            "architecture/capabilities.yaml",
             "architecture/db_table_ownership.yaml",
+            "architecture/runtime_posture.yaml",
+            "architecture/strategy_profile_registry.yaml",
+            "architecture/cascade_liveness_contract.yaml",
+            "architecture/2026_04_02_architecture_kernel.sql",
         ],
     )
     def test_dirty_runtime_authority_remains_in_deployment_plane(
@@ -448,7 +450,17 @@ class TestGateRuntimeAllClear:
         assert runtime_code_plane.dirty_runtime_worktree_paths(tmp_path) == (path,)
 
     @pytest.mark.parametrize(
-        "changed_path", ["tests/test_only.py", "architecture/script_manifest.yaml"]
+        "changed_path",
+        [
+            "tests/test_only.py",
+            "architecture/script_manifest.yaml",
+            # 2026-09-24: a prose-only edit to this governance file blocked every
+            # live BUY for hours (boot 4d5de532, HEAD a2d7314f, src/ unchanged).
+            "architecture/capabilities.yaml",
+            "architecture/source_rationale.yaml",
+            "architecture/invariants.yaml",
+            "architecture/some_future_governance_note.yaml",
+        ],
     )
     def test_deployment_freshness_non_runtime_diff_allows_live_submit(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, changed_path: str
@@ -571,3 +583,44 @@ class TestGateRuntimeSettlementFreezeBlocksLiveEntry:
 
         # Should not raise
         gate_runtime.check("live_venue_submit")
+
+
+def test_every_architecture_file_loaded_by_live_code_is_in_the_runtime_plane() -> None:
+    """The allow-list must cover every architecture/ file that src/ opens.
+
+    A daemon that loads a file the classifier calls non-runtime would keep
+    trading on stale law after that file changes. Scan the live code for
+    architecture/ path literals and require each to be classified runtime.
+    """
+    import re
+
+    from src.control.runtime_code_plane import (
+        RUNTIME_ARCHITECTURE_FILES,
+        RUNTIME_SCRIPT_FILES,
+        is_runtime_code_path,
+    )
+
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    pattern = re.compile(
+        r"""["']architecture["']\s*\)?\s*/\s*["']([\w.\-]+)["']"""
+        r"""|/\s*["']architecture/([\w.\-]+)["']"""
+    )
+    offline_only = {
+        # Edit/commit-time governance gates, never imported by a daemon.
+        "src/architecture/route_function.py",
+        "src/architecture/gate_commit_time.py",
+        "src/architecture/gate_edit_time.py",
+    }
+    loaded: set[str] = set()
+    sources = [*repo.glob("src/**/*.py"), *(repo / p for p in RUNTIME_SCRIPT_FILES)]
+    for source in sources:
+        rel = source.relative_to(repo).as_posix()
+        if rel in offline_only or not source.is_file():
+            continue
+        for match in pattern.finditer(source.read_text(encoding="utf-8")):
+            loaded.add("architecture/" + (match.group(1) or match.group(2)))
+    assert loaded, "scan found no architecture/ loads; the pattern is stale"
+    missing = sorted(path for path in loaded if not is_runtime_code_path(path))
+    assert missing == [], f"live code loads non-runtime architecture files: {missing}"
+    stale = sorted(RUNTIME_ARCHITECTURE_FILES - loaded)
+    assert stale == [], f"allow-list names files no live code loads: {stale}"

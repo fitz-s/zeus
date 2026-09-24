@@ -1,5 +1,5 @@
 # Created: 2026-07-02
-# Last reused or audited: 2026-07-14
+# Last reused or audited: 2026-09-24
 # Authority basis: live-money deployment freshness false-positive after test-only HEAD drift.
 """Classify worktree drift for deployment and live-health observability."""
 
@@ -13,9 +13,23 @@ import subprocess
 RUNTIME_CODE_PREFIXES = (
     "src/",
     "config/",
-    "architecture/",
     ".github/workflows/",
     "launchd/",
+)
+# architecture/ is mostly governance prose that no daemon reads. Only these
+# files are loaded by live code (each path is opened under src/); every other
+# architecture/ edit must not revoke live submit authority. An allow-list, so a
+# new governance file never silently joins the runtime plane.
+RUNTIME_ARCHITECTURE_FILES = frozenset(
+    {
+        "architecture/2026_04_02_architecture_kernel.sql",
+        "architecture/_schema_fingerprint.txt",
+        "architecture/cascade_liveness_contract.yaml",
+        "architecture/data_sources_registry_2026_05_08.yaml",
+        "architecture/db_table_ownership.yaml",
+        "architecture/runtime_posture.yaml",
+        "architecture/strategy_profile_registry.yaml",
+    }
 )
 # Only scripts imported by a live daemon share its executable code plane.
 RUNTIME_SCRIPT_FILES = frozenset(
@@ -26,12 +40,6 @@ RUNTIME_SCRIPT_FILES = frozenset(
         "scripts/migrations/__init__.py",
         "scripts/obs_live_tick.py",
         "scripts/validate_assumptions.py",
-    }
-)
-NON_RUNTIME_CODE_FILES = frozenset(
-    {
-        "architecture/script_manifest.yaml",
-        "architecture/test_topology.yaml",
     }
 )
 RUNTIME_CODE_FILES = frozenset(
@@ -55,8 +63,6 @@ REDUCE_ONLY_EXIT_RUNTIME_PREFIXES = (
     "src/control/",
     "src/architecture/",
     "config/",
-    "architecture/capabilities.yaml",
-    "architecture/source_rationale.yaml",
 )
 
 
@@ -215,9 +221,7 @@ def is_runtime_code_path(path: str) -> bool:
     text = str(path or "").strip().replace("\\", "/")
     if not text:
         return False
-    if text in NON_RUNTIME_CODE_FILES:
-        return False
-    if text in RUNTIME_SCRIPT_FILES:
+    if text in RUNTIME_SCRIPT_FILES or text in RUNTIME_ARCHITECTURE_FILES:
         return True
     if text in RUNTIME_CODE_FILES:
         return True
@@ -234,8 +238,6 @@ def is_reduce_only_exit_runtime_path(path: str) -> bool:
     text = str(path or "").strip().replace("\\", "/")
     if not text:
         return False
-    if text in NON_RUNTIME_CODE_FILES:
-        return False
-    if text in RUNTIME_CODE_FILES:
+    if text in RUNTIME_CODE_FILES or text in RUNTIME_ARCHITECTURE_FILES:
         return True
     return any(text.startswith(prefix) for prefix in REDUCE_ONLY_EXIT_RUNTIME_PREFIXES)
