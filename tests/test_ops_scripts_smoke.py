@@ -2985,6 +2985,51 @@ def test_deploy_live_restart_world_schema_failure_rolls_back(tmp_path):
     assert "settlement_attribution_supersessions" not in tables
 
 
+@pytest.mark.parametrize("failure", [None, "rollback", "wrong_type"])
+def test_deploy_alpha_schema_prepares_sidecars_before_boot(tmp_path, monkeypatch, failure):
+    import src.state.db as db
+    import src.state.write_coordinator as coordinator
+    import src.state.schema.no_trade_regret_events_schema as schema
+
+    dl = _load("deploy_alpha_schema_preboot", "deploy_live.py")
+    path = tmp_path / "world.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute(schema.CREATE_TABLE_SQL.replace("    alpha_feedback_json TEXT,\n", ""))
+        if failure == "wrong_type":
+            conn.execute("ALTER TABLE no_trade_regret_events ADD COLUMN alpha_feedback_json INTEGER")
+    writes = []
+    monkeypatch.setattr(db, "get_world_connection_read_only", lambda: sqlite3.connect(path.as_uri()+"?mode=ro", uri=True))
+    def writer(**kwargs):
+        writes.append(kwargs)
+        return sqlite3.connect(path)
+    monkeypatch.setattr(db, "get_world_connection", writer)
+    monkeypatch.setattr(coordinator, "default_runtime_write_coordinator", lambda: types.SimpleNamespace(
+        lease=lambda *_args, **_kwargs: contextlib.nullcontext(None)))
+    monkeypatch.setattr(coordinator, "bounded_sqlite_write", lambda *_args, **_kwargs: contextlib.nullcontext())
+    if failure == "rollback":
+        original = schema.ensure_table
+        def fail_after_alter(conn):
+            original(conn)
+            raise RuntimeError("migration failed")
+        monkeypatch.setattr(schema, "ensure_table", fail_after_alter)
+    if failure:
+        with pytest.raises(RuntimeError):
+            dl._prepare_restart_alpha_schema()
+    else:
+        dl._prepare_restart_alpha_schema()
+        dl._prepare_restart_alpha_schema()
+    with sqlite3.connect(path) as conn:
+        columns = {r[1]: (r[2], r[3]) for r in conn.execute("PRAGMA table_info(no_trade_regret_events)")}
+    if failure == "rollback":
+        assert "alpha_feedback_json" not in columns
+    elif failure == "wrong_type":
+        assert columns["alpha_feedback_json"] == ("INTEGER", 0)
+        assert not writes
+    else:
+        assert columns["alpha_feedback_json"] == ("TEXT", 0)
+        assert len(writes) == 1
+
+
 def test_deploy_live_waits_for_fresh_prerequisite_code_identity(monkeypatch, tmp_path):
     dl = _load("deploy_live_prerequisite_identity", "deploy_live.py")
     launched = datetime.now(timezone.utc)
@@ -7547,10 +7592,17 @@ def test_deploy_live_command_pause_failure_keeps_loaded_main_running(
     monkeypatch.setattr(dl, "_gate", lambda *_args: (True, []))
     monkeypatch.setattr(dl, "head_sha", lambda short=False: "b" * 40)
     monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda _label: True)
+    generation = {}
+    released = []
+    def pause_failed(*_args, **kwargs):
+        generation.update(kwargs)
+        return False, "schema preparation failed after guard arm"
+    monkeypatch.setattr(dl, "_release_unused_live_restart_guard",
+                        lambda _labels, **kwargs: released.append(kwargs) or "guard CAS released")
     monkeypatch.setattr(
         dl,
         "_pause_entries_for_live_restart_if_needed",
-        lambda *_args, **_kwargs: (False, "database is locked"),
+        pause_failed,
     )
     monkeypatch.setattr(
         dl,
@@ -7572,9 +7624,10 @@ def test_deploy_live_command_pause_failure_keeps_loaded_main_running(
     )
 
     assert rc == 1
+    assert released == [generation]
     output = capsys.readouterr().out
     assert "entry pause guard is not armed" in output
-    assert "database is locked" in output
+    assert "schema preparation failed after guard arm" in output
 
 
 def test_deploy_live_paused_entry_backlog_ignores_generic_global_auction_marker(
@@ -8584,6 +8637,7 @@ def test_deploy_live_restart_pause_guard_is_indefinite_control_plane(monkeypatch
     code = calls[-1][0][2]
     assert "deploy_live_restart_guard" in code
     assert "arm_deploy_live_restart_guard" in code
+    assert code.index("_prepare_restart_alpha_schema()") > code.index("result = arm_deploy_live_restart_guard(")
     assert "entries pause guard preserved" in code
     assert "effective_until=None" in code
     assert "system_auto_pause" not in code
@@ -8741,6 +8795,9 @@ def test_deploy_live_restart_pause_preserves_existing_operator_pause(monkeypatch
         "issued_by": "control_plane",
     }
     monkeypatch.setitem(sys.modules, "src.control.control_plane", control_mod)
+    deploy_mod = types.ModuleType("scripts.deploy_live")
+    deploy_mod._prepare_restart_alpha_schema = lambda: None
+    monkeypatch.setitem(sys.modules, "scripts.deploy_live", deploy_mod)
 
     class Result:
         returncode = 0
