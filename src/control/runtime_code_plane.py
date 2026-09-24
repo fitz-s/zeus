@@ -20,6 +20,8 @@ RUNTIME_CODE_PREFIXES = (
 # files are loaded by live code (each path is opened under src/); every other
 # architecture/ edit must not revoke live submit authority. An allow-list, so a
 # new governance file never silently joins the runtime plane.
+# data_sources_registry is read by src/ingest/contract.py, whose loader no
+# daemon calls today; it stays listed so wiring it later cannot trade on stale law.
 RUNTIME_ARCHITECTURE_FILES = frozenset(
     {
         "architecture/2026_04_02_architecture_kernel.sql",
