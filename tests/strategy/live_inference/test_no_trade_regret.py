@@ -733,3 +733,75 @@ def test_v8_and_ordinary_insert_preserve_every_original_nonnull_ledger_field():
     assert v8[4] == "76-77"  # Exit shadow binds this selected bin label.
     assert v8[16] == 0.75 and v8[17] == 0.08
     conn.close()
+
+
+def test_v8_two_uncommitted_cohort_acks_on_one_connection_never_look_committed():
+    from datetime import datetime, timedelta
+
+    conn, ledger = _ledger()
+    high_id = ledger.insert_idempotent(
+        _v8_event("Chicago", "2026-09-23T12:00:00+00:00")
+    )
+    low_id = ledger.insert_idempotent(
+        _v8_event("London", "2026-09-23T12:00:00+00:00", metric="low")
+    )
+    conn.commit()
+    assert ledger.acknowledge_alpha_settlement(
+        high_id, settlement_proof=_v8_proof(conn, high_id, "Chicago")
+    )
+    assert ledger.acknowledge_alpha_settlement(
+        low_id, settlement_proof=_v8_proof(conn, low_id, "London")
+    )
+    assert len(no_trade_regret_module._PENDING_ACK_BY_CONNECTION[id(conn)]) == 2
+    observed = datetime.fromisoformat(_v8_record(conn, high_id)[1]["observed_at"])
+    candidate = _v8_event("Milan", (observed + timedelta(microseconds=1)).isoformat())
+    low_observed = datetime.fromisoformat(_v8_record(conn, low_id)[1]["observed_at"])
+    low_candidate = _v8_event(
+        "Milan", (low_observed + timedelta(microseconds=1)).isoformat(), metric="low"
+    )
+    assert ledger.insert_idempotent(candidate) is None
+    assert ledger.insert_idempotent(low_candidate) is None
+    assert ledger.insert_idempotent(candidate) is None
+    assert not no_trade_regret_module._FEEDBACK_SEEN
+    assert conn.execute("SELECT count(*) FROM no_trade_regret_events").fetchone()[0] == 2
+    conn.commit()
+    no_trade_regret_module.release_alpha_connection_state(conn)
+    assert id(conn) not in no_trade_regret_module._PENDING_ACK_BY_CONNECTION
+    assert ledger.insert_idempotent(candidate) is None
+    seen = next(reversed(no_trade_regret_module._FEEDBACK_SEEN.values()))[1]
+    fresh = _v8_event("Milan", (seen + timedelta(microseconds=1)).isoformat())
+    assert isinstance(ledger.insert_idempotent(fresh), str)
+    conn.close()
+
+
+def test_release_alpha_connection_state_requires_closed_transaction_and_cleans_ack_state():
+    conn, ledger = _ledger()
+    first_id = ledger.insert_idempotent(
+        _v8_event("Chicago", "2026-09-23T12:00:00+00:00")
+    )
+    second_id = ledger.insert_idempotent(
+        _v8_event("London", "2026-09-23T12:00:00+00:00", metric="low")
+    )
+    conn.commit()
+    assert ledger.acknowledge_alpha_settlement(
+        first_id, settlement_proof=_v8_proof(conn, first_id, "Chicago")
+    )
+    with pytest.raises(ValueError, match="completed transaction"):
+        no_trade_regret_module.release_alpha_connection_state(conn)
+    assert id(conn) in no_trade_regret_module._PENDING_ACK_BY_CONNECTION
+    conn.commit()
+    no_trade_regret_module.release_alpha_connection_state(conn)
+    assert id(conn) not in no_trade_regret_module._PENDING_ACK_BY_CONNECTION
+
+    assert ledger.acknowledge_alpha_settlement(
+        second_id, settlement_proof=_v8_proof(conn, second_id, "London")
+    )
+    assert id(conn) in no_trade_regret_module._PENDING_ACK_BY_CONNECTION
+    conn.rollback()
+    no_trade_regret_module.release_alpha_connection_state(conn)
+    assert id(conn) not in no_trade_regret_module._PENDING_ACK_BY_CONNECTION
+    assert conn.execute(
+        "SELECT alpha_feedback_json FROM no_trade_regret_events WHERE regret_event_id=?",
+        (second_id,),
+    ).fetchone()[0] is None
+    conn.close()
