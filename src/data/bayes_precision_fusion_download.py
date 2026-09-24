@@ -504,11 +504,26 @@ def _target_single_runs_request(
     The metadata end is exclusive. An older archive is not assumed complete:
     possession and the ordinary full HIGH/LOW parser must still prove its value.
     None means this exact latest target is structurally out of range and there is
-    no in-age archive candidate. The next metadata update gets a fresh decision.
+    no in-age archive candidate (models without a verified archive cadence have
+    none). The next metadata update gets a fresh decision.
     """
     end = request.data_end_time
-    if model not in _TARGET_BACKTRACK_MODELS or end is None or request.run.minute != 0:
+    if end is None:
         return request
+    if model not in _TARGET_BACKTRACK_MODELS or request.run.minute != 0:
+        from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: PLC0415
+            LOCALDAY_SPAN_LATE_HOUR,
+        )
+
+        # The local-day parser needs a target-day sample at LOCALDAY_SPAN_LATE_HOUR.
+        # A run whose metadata horizon ends at or before it can never serve this
+        # target; requesting it only buys an all-null tail, so no HTTP is sent.
+        last_needed = datetime.combine(
+            target_local_date,
+            datetime.min.time().replace(hour=LOCALDAY_SPAN_LATE_HOUR),
+            tzinfo=ZoneInfo(timezone_name),
+        )
+        return None if end <= last_needed else request
     local_end = datetime.combine(
         target_local_date + timedelta(days=1), datetime.min.time(),
         tzinfo=ZoneInfo(timezone_name),
@@ -713,9 +728,19 @@ _BATCH_EXACT_RUN_UNMATERIALIZABLE_KEY = (
 )
 _SOURCE_CLOCK_LOCATION_BATCH_SIZE = 25
 
-# Only exact matching metadata, not a currently partial API response, proves
-# structural horizon exclusion. The same archive may become complete on retry.
-_EXACT_RUN_IMMUTABLE_GAP_REASONS = ("metadata:data_end_time_before_target_end",)
+# Exact matching metadata proves structural horizon exclusion for the latest run.
+# A run strictly older than the model's current source-clock run is superseded:
+# the provider moved on, so its archived bytes are final and a horizon-shaped
+# parser gap on it is permanent (0 of 201 such scopes ever filled, 2026-09-21..24).
+_SUPERSEDED_RUN_GAP_PREFIX = "superseded_run:"
+_HORIZON_PARSER_GAP_REASONS = (
+    "ValueError:partial local-day coverage",
+    "ValueError:insufficient Open-Meteo hourly samples inside target local day",
+)
+_EXACT_RUN_IMMUTABLE_GAP_REASONS = (
+    "metadata:data_end_time_before_target_end",
+    _SUPERSEDED_RUN_GAP_PREFIX,
+)
 # (model, city, target_date, run_iso) -> structurally proven metadata reason.
 _EXACT_RUN_UNMATERIALIZABLE_MEMO: dict[tuple[str, str, str, str], str] = {}
 _EXACT_RUN_MEMO_RETENTION_DAYS = 3
@@ -3611,6 +3636,13 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                             continue
                         scope = (model, city, target_date, single_run.isoformat())
                         reason = str(raw_reason)[:220]
+                        latest = source_clock_single_runs.get(model)
+                        if (
+                            latest is not None
+                            and single_run < latest.run
+                            and reason.startswith(_HORIZON_PARSER_GAP_REASONS)
+                        ):
+                            reason = f"{_SUPERSEDED_RUN_GAP_PREFIX}{reason}"
                         exact_run_unmaterializable.append(
                             {
                                 "model": model,

@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Lifecycle: created=2026-06-08; last_reviewed=2026-09-20; last_reused=2026-09-20
+# Lifecycle: created=2026-06-08; last_reviewed=2026-09-24; last_reused=2026-09-24
 # Purpose: Regression tests for BPF raw forecast download and persistence semantics.
 # Reuse: Run when changing Bayes precision fusion raw-input capture or scheduler health.
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 (raw capture: previous_runs + single_runs ->
@@ -3970,10 +3970,16 @@ def test_out_of_age_previous_archive_is_not_requested() -> None:
         target_local_date=date(2026, 9, 25),
         timezone_name="Europe/Amsterdam", decision_time=now,
     ) is None  # 22/00 is 30h42m old; no freshness waiver
+    # Never invent archive cadence for an unverified model: its latest run cannot
+    # reach 25 Sep 20:00 local, and no older archive is substituted.
     assert dl._target_single_runs_request(
         "unverified_model", latest, target_local_date=date(2026, 9, 25),
         timezone_name="Europe/Amsterdam", decision_time=now,
-    ) == latest  # never invent archive cadence for an unverified model
+    ) is None
+    assert dl._target_single_runs_request(
+        "unverified_model", latest, target_local_date=date(2026, 9, 24),
+        timezone_name="Europe/Amsterdam", decision_time=now,
+    ) == latest
 
 
 def test_out_of_age_target_capture_keeps_trigger_retryable_without_http(
@@ -4216,7 +4222,7 @@ def test_explicit_derived_frozen_run_never_backtracks_from_metadata(
     assert report["single_runs_target_request_cycles"]["icon_eu|Amsterdam|2026-09-25"] == (run.isoformat(),)
 
 
-def test_target_aware_batched_partial_then_complete_is_retryable_without_fallback(
+def test_target_aware_superseded_partial_is_final_without_fallback(
     tmp_path, monkeypatch,
 ) -> None:
     import src.data.bayes_precision_fusion_download as dl
@@ -4274,18 +4280,138 @@ def test_target_aware_batched_partial_then_complete_is_retryable_without_fallbac
     assert first["status"] == "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
     assert first["transport_errors"]  # only the 18Z transport, not the 00Z partial
     assert len(first["exact_run_unmaterializable"]) == 1
-    assert dl._EXACT_RUN_UNMATERIALIZABLE_MEMO == {}
+    # 00Z is superseded by the 03Z source clock: its archive is final, so a
+    # horizon-shaped gap on it is proof, not a transient (0 of 201 live scopes
+    # ever filled, 2026-09-21..24). Only the latest run's partial stays retryable.
+    scope = ("icon_eu", "Amsterdam", "2026-09-25", old.isoformat())
+    assert dl._EXACT_RUN_UNMATERIALIZABLE_MEMO[scope].startswith(
+        dl._SUPERSEDED_RUN_GAP_PREFIX
+    )
     complete = True
     second = dl.download_bayes_precision_fusion_extra_raw_inputs(**kwargs)
-    assert second["written_row_count"] == _count(db) == 2
-    assert seen.count(old.strftime("%Y-%m-%dT%H:%M")) == 2
-    with sqlite3.connect(db) as conn:
-        rows = conn.execute(
-            "SELECT metric,source_cycle_time,source_available_at,captured_at "
-            "FROM raw_model_forecasts ORDER BY metric"
-        ).fetchall()
-    assert [(r[0], r[1]) for r in rows] == [
-        ("high", old.isoformat()), ("low", old.isoformat()),
-    ]
-    assert {r[2] for r in rows} == {now.isoformat()}
-    assert {r[3] for r in rows} == {now.isoformat()}
+    assert second["written_row_count"] == _count(db) == 0
+    assert seen.count(old.strftime("%Y-%m-%dT%H:%M")) == 1
+    assert second["status"] == "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
+
+
+def test_metadata_horizon_before_target_late_hour_sends_no_request(
+    tmp_path, monkeypatch,
+) -> None:
+    """Live 2026-09-24: icon_d2/arome/hrrr targets beyond their run's data_end_time
+    were re-requested every 15s poll (7,454 parser rejections, daily quota spent by
+    05:31Z). Matching metadata already proves the run cannot reach the target's
+    late-day sample, so the pass must send nothing and still stay retryable."""
+    import src.data.bayes_precision_fusion_download as dl
+
+    dl._EXACT_RUN_UNMATERIALIZABLE_MEMO.clear()
+    now = datetime(2026, 9, 24, 16, 40, tzinfo=UTC)
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz or UTC)
+
+    monkeypatch.setattr(dl, "datetime", FixedDatetime)
+    run = datetime(2026, 9, 24, 15, tzinfo=UTC)
+    monkeypatch.setattr(dl, "_read_source_clock_single_runs_requests", lambda **_: {
+        "icon_d2": dl._SourceClockSingleRunsRequest(
+            run=run, source_available_at=now.isoformat(),
+            data_end_time=datetime(2026, 9, 26, 16, tzinfo=UTC),
+        ),
+    })
+    monkeypatch.setattr(dl, "_default_live_fetch_batched", lambda **_: (
+        _ for _ in ()
+    ).throw(AssertionError("a proven out-of-horizon run must never hit the API")))
+    db = _forecast_db(tmp_path)
+    target = dl.BayesPrecisionFusionDownloadTarget(
+        city="Munich", metric="high", target_date="2026-09-26",
+        lead_days=2, latitude=48.35, longitude=11.79,
+        timezone_name="Europe/Berlin",
+    )
+    report = dl.download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=db, cycle=run, targets=[target], models=("icon_d2",),
+        include_previous_runs=False, prune_after=False,
+        allow_single_runs_fallback=False,
+    )
+    assert report["written_row_count"] == _count(db) == 0
+    assert report["single_runs_target_request_cycles"]["icon_d2|Munich|2026-09-26"] == ()
+    assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
+
+    # The same run reaching the late-day sample is still requested.
+    reached = dl._SourceClockSingleRunsRequest(
+        run=run, source_available_at=now.isoformat(),
+        data_end_time=datetime(2026, 9, 26, 19, tzinfo=UTC),
+    )
+    assert dl._target_single_runs_request(
+        "icon_d2", reached, target_local_date=date(2026, 9, 26),
+        timezone_name="Europe/Berlin", decision_time=now,
+    ) is reached
+
+
+def test_superseded_run_horizon_gap_is_memoized_after_one_request(
+    tmp_path, monkeypatch,
+) -> None:
+    """Live 2026-09-24: an older ukmo_global candidate run (06Z, superseded by 12Z)
+    lacked the lead-3 late-day hours; 7,564 identical requests followed and none ever
+    completed. A superseded run is final, so one proof must stop the retries."""
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_client as client
+
+    dl._EXACT_RUN_UNMATERIALIZABLE_MEMO.clear()
+    now = datetime(2026, 9, 24, 16, 40, tzinfo=UTC)
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz or UTC)
+
+    monkeypatch.setattr(dl, "datetime", FixedDatetime)
+    monkeypatch.setattr(dl, "_persist_exact_run_gap", lambda *_: None)
+    latest = datetime(2026, 9, 24, 12, tzinfo=UTC)
+    monkeypatch.setattr(dl, "_read_source_clock_single_runs_requests", lambda **_: {
+        "ukmo_global_deterministic_10km": dl._SourceClockSingleRunsRequest(
+            run=latest, source_available_at=now.isoformat(),
+            data_end_time=datetime(2026, 9, 27, 1, tzinfo=UTC),
+        ),
+    })
+    seen: list[str] = []
+
+    def _fetch(_url, params, **_kwargs):
+        seen.append(str(params["run"]))
+        payload = _complete_hourly_local_day_payload(date(2026, 9, 27))
+        payload["hourly"]["time"] = payload["hourly"]["time"][:11]
+        payload["hourly"]["temperature_2m"] = payload["hourly"]["temperature_2m"][:11]
+        return payload
+
+    monkeypatch.setattr(client, "fetch", _fetch)
+    db = _forecast_db(tmp_path)
+    target = dl.BayesPrecisionFusionDownloadTarget(
+        city="Tokyo", metric="high", target_date="2026-09-27",
+        lead_days=3, latitude=35.55, longitude=139.78,
+        timezone_name="Asia/Tokyo",
+    )
+    kwargs = dict(
+        forecast_db=db, cycle=latest, targets=[target],
+        models=("ukmo_global_deterministic_10km",),
+        include_previous_runs=False, prune_after=False,
+        allow_single_runs_fallback=False,
+    )
+    first = dl.download_bayes_precision_fusion_extra_raw_inputs(**kwargs)
+    requested = set(seen)
+    assert requested, "the superseded candidate is requested once"
+    seen.clear()
+    second = dl.download_bayes_precision_fusion_extra_raw_inputs(**kwargs)
+    assert seen == [], "a superseded run's horizon gap must not be re-requested"
+    assert first["written_row_count"] == second["written_row_count"] == _count(db) == 0
+    older = {
+        scope for scope in dl._EXACT_RUN_UNMATERIALIZABLE_MEMO
+        if datetime.fromisoformat(scope[3]) < latest
+    }
+    assert older and all(
+        dl._EXACT_RUN_UNMATERIALIZABLE_MEMO[scope].startswith(dl._SUPERSEDED_RUN_GAP_PREFIX)
+        for scope in older
+    )
+    # The latest run's own parser gap stays retryable: it may still complete.
+    assert all(
+        scope[3] != latest.isoformat() for scope in dl._EXACT_RUN_UNMATERIALIZABLE_MEMO
+    )
