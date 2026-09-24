@@ -72,6 +72,7 @@ from src.state.db import (
     connect_existing_trade_db_without_journal_bootstrap,
     get_connection,
     get_forecasts_connection_read_only,
+    get_world_connection,
     get_trade_connection_with_world_required,
     _zeus_trade_db_path,
     query_authoritative_settlement_rows,
@@ -2365,7 +2366,7 @@ def _bind_entry_market_benchmarks(
     return output
 
 
-def _settled_market_relative_alpha_shadow_rows(
+def _legacy_settled_market_relative_alpha_shadow_rows(
     conn: sqlite3.Connection,
     *,
     strategy_key: str,
@@ -2810,6 +2811,437 @@ def _settled_market_relative_alpha_shadow_rows(
         blocked_reasons=blocked,
     )
     return output, status
+
+
+def _canonical_alpha_settlement_proof(
+    trade_conn: sqlite3.Connection,
+    forecast_conn: sqlite3.Connection,
+    row: Mapping[str, object],
+) -> dict[str, object] | None:
+    """Require the current finalized binary payout and both token/source identities."""
+    from src.ingest.payout_observer import _coherent_finalized_pair
+
+    condition_id = str(row.get("condition_id") or "")
+    token_id = str(row.get("token_id") or "")
+    side = str(row.get("direction") or "").removeprefix("buy_").upper()
+    if not condition_id or not token_id or side not in {"YES", "NO"}:
+        return None
+    facts = forecast_conn.execute(
+        "SELECT me.city,me.target_date,me.temperature_metric,me.outcome "
+        "FROM market_events me JOIN settlement_outcomes so "
+        "ON so.city=me.city AND so.target_date=me.target_date "
+        "AND so.temperature_metric=me.temperature_metric "
+        "WHERE me.condition_id=? AND so.authority='VERIFIED' "
+        "AND me.outcome IN ('YES','NO')",
+        (condition_id,),
+    ).fetchall()
+    if len(facts) != 1 or tuple(str(x) for x in facts[0][:3]) != (
+        str(row.get("city") or ""), str(row.get("target_date") or ""),
+        str(row.get("metric") or ""),
+    ):
+        return None
+    snapshot = trade_conn.execute(
+        "SELECT yes_token_id,no_token_id FROM executable_market_snapshots "
+        "WHERE condition_id=? ORDER BY captured_at DESC LIMIT 1",
+        (condition_id,),
+    ).fetchone()
+    if snapshot is None:
+        return None
+    yes_token_id, no_token_id = (str(value or "").strip() for value in snapshot[:2])
+    if (not yes_token_id or not no_token_id or yes_token_id == no_token_id
+            or token_id != (yes_token_id if side == "YES" else no_token_id)):
+        return None
+    payout = trade_conn.execute(
+        "WITH latest AS (SELECT outcome_index,MAX(id) AS id "
+        "FROM payout_observations WHERE condition_id=? "
+        "AND outcome_index IN (0,1) GROUP BY outcome_index) "
+        "SELECT po.id,po.condition_id,po.outcome_index,po.payout_numerator,"
+        "po.payout_denominator,po.state,po.source,po.block_number,po.block_hash "
+        "FROM latest JOIN payout_observations po ON po.id=latest.id "
+        "ORDER BY po.outcome_index",
+        (condition_id,),
+    ).fetchall()
+    fields = ("id", "condition_id", "outcome_index", "payout_numerator",
+              "payout_denominator", "state", "source", "block_number", "block_hash")
+    payout_rows = [dict(zip(fields, entry)) for entry in payout]
+    if not _coherent_finalized_pair(payout_rows):
+        return None
+    outcome = int(
+        payout_rows[0 if side == "YES" else 1]["payout_numerator"]
+        == payout_rows[0 if side == "YES" else 1]["payout_denominator"]
+    )
+    if (str(facts[0][3]).upper() == side) != bool(outcome):
+        return None
+    return {
+        "condition_id": condition_id, "token_id": token_id, "side": side,
+        "envelope_sha256": hashlib.sha256(
+            str(row["envelope_json"]).encode("utf-8")
+        ).hexdigest(),
+        "outcome": outcome,
+        "yes_token_id": yes_token_id, "no_token_id": no_token_id,
+        "payout_rows": payout_rows,
+    }
+
+
+def _causal_alpha_shadow_rows(
+    conn: sqlite3.Connection,
+    *,
+    strategy_key: str,
+    evaluated_at: datetime,
+    forecasts_connection_factory,
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    """Retain the entire prospective v8 prefix, including pending/corrupt tails."""
+    from src.strategy.live_inference.no_trade_regret import (
+        ALPHA_PROTOCOL_VERSION, validated_alpha_feedback, validated_alpha_protocol,
+    )
+    from src.events.day0_authority import (
+        DAY0_PROBABILITY_SEMANTICS_REVISION, day0_probability_semantics_revision,
+    )
+
+    schemas = {str(item[1]) for item in conn.execute("PRAGMA database_list")}
+    schema = "world" if "world" in schemas else "main"
+    prefix = f"market-relative-alpha-shadow-v8-causal-brier:{strategy_key}:"
+    columns = (
+        "regret_event_id", "event_id", "condition_id", "token_id", "decision_time",
+        "city", "target_date", "metric", "family_id", "bin_label", "direction",
+        "q_live", "c_fee_adjusted", "native_quote_available", "source_status",
+        "family_complete", "hypothetical_order_type", "hypothetical_fill_status",
+        "hypothetical_fill_price", "causal_snapshot_id", "executable_snapshot_id",
+        "envelope_json", "alpha_feedback_json", "created_at",
+    )
+    raw = conn.execute(
+        f"SELECT {','.join(columns)} FROM {schema}.no_trade_regret_events "
+        "INDEXED BY idx_no_trade_regret_stage WHERE rejection_stage='RISK_GUARD' "
+        "AND rejection_reason=? AND substr(event_id,1,?)=? "
+        "ORDER BY created_at,regret_event_id",
+        (f"MARKET_RELATIVE_ALPHA_SHADOW:{strategy_key}", len(prefix), prefix),
+    ).fetchall()
+    status: dict[str, object] = {
+        "status": "no_shadow_evidence", "strategy_key": strategy_key,
+        "shadow_candidate_count": len(raw), "certificate_ready_count": 0,
+        "settlement_ready_count": 0, "blocked_reasons": {},
+    }
+    rows: list[dict[str, object]] = []
+    certificates: list[dict[str, object]] = []
+    for values in raw:
+        item = dict(zip(columns, values))
+        event_id = str(item["event_id"] or "")
+        parts = event_id.split(":", 6)
+        identity = {
+            "version": ALPHA_PROTOCOL_VERSION,
+            "strategy_key": strategy_key,
+            "global_selection_revision": parts[2] if len(parts) > 2 else "",
+            "probability_semantics_revision": parts[3] if len(parts) > 3 else "",
+            "metric": parts[4] if len(parts) > 4 else str(item["metric"] or ""),
+            "slot": None,
+        }
+        output: dict[str, object] = {
+            "trade_id": str(item["regret_event_id"]), "strategy": strategy_key,
+            "alpha_protocol": identity, "alpha_protocol_valid": False,
+            "alpha_feedback": None, "alpha_feedback_verified": False,
+            "decision_time": item["decision_time"], "created_at": item["created_at"],
+            "entry_market_benchmark_family": (
+                item["city"], item["target_date"], item["metric"]
+            ),
+        }
+        rows.append(output)
+        try:
+            envelope = validated_alpha_protocol(
+                str(item["envelope_json"] or ""),
+                event_id=event_id, regret_event_id=str(item["regret_event_id"]),
+                condition_id=str(item["condition_id"] or ""),
+                token_id=str(item["token_id"] or ""),
+                direction=str(item["direction"] or ""),
+                city=str(item["city"] or ""), target_date=str(item["target_date"] or ""),
+                metric=str(item["metric"] or ""),
+            )
+            protocol = dict(envelope["alpha_protocol"])
+            output["alpha_protocol"] = protocol
+            q = float(item["q_live"])
+            market = float(item["hypothetical_fill_price"])
+            fee = float(envelope["fee_adjusted_min_order_cost"])
+            size = float(envelope["min_order_size"])
+            proof_size = float(envelope["global_proof_shares"])
+            proof_cost = float(envelope["global_proof_cost_usd"])
+            proof_ev = float(envelope["global_proof_expected_ev_usd"])
+            proof_growth = float(envelope["global_proof_expected_delta_log_wealth"])
+            side = str(envelope.get("side") or "").upper()
+            revision = str(envelope.get("probability_semantics_revision") or "")
+            if (
+                envelope.get("schema_version") != 3
+                or envelope.get("strategy_key") != strategy_key
+                or envelope.get("decision_law_id") != "executable_min_order_capital_gain_v2"
+                or envelope.get("global_selection_revision")
+                != CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+                or envelope.get("selection_rule")
+                != "earliest_complete_global_cut_exact_global_posterior_mean_expected_growth_winner_v3"
+                or revision not in (
+                    {DAY0_PROBABILITY_SEMANTICS_REVISION}
+                    if strategy_key == "day0_nowcast_entry"
+                    else LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS
+                )
+                or not str(envelope.get("q_version") or "")
+                or (strategy_key == "day0_nowcast_entry"
+                    and day0_probability_semantics_revision(envelope["q_version"]) != revision)
+                or (strategy_key == "forecast_qkernel_entry"
+                    and not str(envelope.get("posterior_identity_hash") or ""))
+                or side not in {"YES", "NO"}
+                or str(item["direction"] or "") != f"buy_{side.lower()}"
+                or any(str(envelope.get(key) or "") != str(item[field] or "") for key, field in (
+                    ("family_key", "family_id"), ("bin_id", "bin_label"),
+                    ("condition_id", "condition_id"), ("token_id", "token_id"),
+                    ("city", "city"), ("target_date", "target_date"), ("metric", "metric"),
+                ))
+                or str(item["causal_snapshot_id"] or "")
+                != str(envelope.get("probability_witness_identity") or "")
+                or str(item["executable_snapshot_id"] or "")
+                != str(envelope.get("book_snapshot_id") or "")
+                or item["source_status"] != (
+                    "current_day0_probability_authority" if strategy_key == "day0_nowcast_entry"
+                    else "current_qkernel_probability_authority"
+                )
+                or item["native_quote_available"] != 1 or item["family_complete"] != 1
+                or item["hypothetical_order_type"] != "MARKETABLE_LIMIT"
+                or item["hypothetical_fill_status"] != "EXECUTABLE_AT_DECISION"
+                or not all(math.isfinite(value) for value in (
+                    q, market, fee, size, proof_size, proof_cost, proof_ev, proof_growth
+                ))
+                or not 0.0 <= q <= 1.0 or not 0.05 <= market <= 0.95
+                or not 0.0 < fee < 1.0 or size <= 0 or proof_size <= 0
+                or proof_cost <= 0 or proof_growth <= 0 or proof_ev <= 0
+                or envelope.get("global_proof_winner") is not True
+                or envelope.get("global_proof_execution_mode") != "TAKER_LIMIT"
+                or not str(envelope.get("global_proof_candidate_id") or "")
+                or not math.isclose(q, float(envelope["q"]), rel_tol=0, abs_tol=1e-12)
+                or not math.isclose(market, float(envelope["raw_min_order_vwap"]), rel_tol=0, abs_tol=1e-12)
+                or not math.isclose(fee, float(item["c_fee_adjusted"]), rel_tol=0, abs_tol=1e-12)
+                or not math.isclose(q-fee, float(envelope["expected_net_edge_per_share"]), rel_tol=0, abs_tol=1e-12)
+                or not math.isclose(q, (proof_ev+proof_cost)/proof_size, rel_tol=0, abs_tol=1e-12)
+                or str(envelope.get("decision_at_utc") or "") != str(item["decision_time"] or "")
+            ):
+                raise ValueError("certificate_identity_or_economics_invalid")
+            output.update(
+                alpha_protocol_valid=True, probability_semantics_ready=True,
+                probability_semantics_revisions=(revision,),
+                selection_cut_at_utc=envelope["selection_cut_at_utc"],
+                entry_market_benchmark_ready=True,
+                entry_market_benchmark=market, p_posterior=q,
+                capital_gain_proof_ready=True,
+                hypothetical_capital_committed_usd=proof_cost,
+                hypothetical_settlement_payout_usd=None,
+            )
+            certificates.append({**item, "output": output, "envelope": envelope})
+            if item["alpha_feedback_json"]:
+                output["alpha_feedback"] = validated_alpha_feedback(
+                    item["alpha_feedback_json"],
+                    regret_event_id=str(item["regret_event_id"]),
+                    envelope_json=str(item["envelope_json"]),
+                    condition_id=str(item["condition_id"]),
+                    token_id=str(item["token_id"]),
+                    direction=str(item["direction"]),
+                    city=str(item["city"]), target_date=str(item["target_date"]),
+                    metric=str(item["metric"]), event_id=event_id,
+                )
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            output["alpha_protocol_valid"] = False
+            status["blocked_reasons"][type(exc).__name__] = (
+                status["blocked_reasons"].get(type(exc).__name__, 0) + 1
+            )
+    valid = [row for row in rows if row["alpha_protocol_valid"]]
+    if valid and strategy_key == "forecast_qkernel_entry":
+        # The producer froze the posterior identity before writing this row.
+        # Recheck current semantics until ACK; an acknowledged historical
+        # round retains its hashed certificate when transient posterior rows
+        # leave the short-lived materialization table.
+        unresolved = [item for item in certificates if not item["output"]["alpha_feedback"]]
+        probes = [
+            {"trade_id": item["output"]["trade_id"], "strategy": strategy_key,
+             "entry_q_versions": (str(item["envelope"]["posterior_identity_hash"]),)}
+            for item in unresolved
+        ]
+        if probes:
+            classified, binding = _bind_qkernel_probability_semantics(
+                probes, forecasts_connection_factory=forecasts_connection_factory,
+            )
+            status["probability_semantics_binding"] = binding
+            revisions = {
+                str(item["trade_id"]): tuple(item.get("probability_semantics_revisions") or ())
+                for item in classified if item.get("probability_semantics_ready") is True
+            }
+            for item in unresolved:
+                output = item["output"]
+                if revisions.get(str(output["trade_id"])) != (
+                    str(item["envelope"]["probability_semantics_revision"]),
+                ):
+                    output["alpha_protocol_valid"] = False
+                    output["probability_semantics_ready"] = False
+                    status["blocked_reasons"]["probability_semantics_not_current"] = (
+                        status["blocked_reasons"].get("probability_semantics_not_current", 0) + 1
+                    )
+    status["certificate_ready_count"] = sum(
+        item["alpha_protocol_valid"] for item in rows
+    )
+    if certificates:
+        forecasts_conn = None
+        try:
+            forecasts_conn = forecasts_connection_factory()
+            forecasts_conn.execute("PRAGMA query_only=ON")
+            # Check every persisted ACK against the latest immutable chain
+            # observations as well as prospective pending candidates.
+            for item in certificates:
+                output = item["output"]
+                if not output["alpha_protocol_valid"]:
+                    continue
+                current = _canonical_alpha_settlement_proof(
+                    conn, forecasts_conn, item,
+                )
+                if output["alpha_feedback"] is not None:
+                    if current != output["alpha_feedback"]["settlement_proof"]:
+                        output["alpha_protocol_valid"] = False
+                        status["blocked_reasons"]["feedback_canonical_conflict"] = (
+                            status["blocked_reasons"].get("feedback_canonical_conflict", 0) + 1
+                        )
+                    else:
+                        output["alpha_feedback_verified"] = True
+                        output["hypothetical_settlement_payout_usd"] = (
+                            current["outcome"]
+                            * float(item["envelope"]["global_proof_shares"])
+                        )
+                        output["hypothetical_realized_pnl_usd"] = (
+                            output["hypothetical_settlement_payout_usd"]
+                            - float(item["envelope"]["global_proof_cost_usd"])
+                        )
+                elif current is not None:
+                    output["_alpha_ack_proof"] = current
+        except (OSError, sqlite3.Error) as exc:
+            for item in certificates:
+                item["output"]["alpha_protocol_valid"] = False
+            status["blocked_reasons"]["canonical_settlement_unavailable"] = (
+                f"{type(exc).__name__}:{len(certificates)}"
+            )
+        finally:
+            if forecasts_conn is not None:
+                forecasts_conn.close()
+    status["settlement_ready_count"] = sum(
+        row["alpha_feedback"] is not None for row in rows
+    )
+    status["status"] = "ok" if rows else "no_shadow_evidence"
+    return rows, status
+
+
+def _settled_market_relative_alpha_shadow_rows(
+    conn: sqlite3.Connection,
+    *,
+    strategy_key: str,
+    window_days: float,
+    as_of: datetime | None = None,
+    forecasts_connection_factory=get_forecasts_connection_read_only,
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    """Read causal protocol when migrated; historical rows remain telemetry."""
+    schemas = {str(item[1]) for item in conn.execute("PRAGMA database_list")}
+    schema = "world" if "world" in schemas else "main"
+    columns = {str(item[1]) for item in conn.execute(
+        f"PRAGMA {schema}.table_info(no_trade_regret_events)"
+    )}
+    if "alpha_feedback_json" not in columns:
+        return _legacy_settled_market_relative_alpha_shadow_rows(
+            conn, strategy_key=strategy_key, window_days=window_days,
+            as_of=as_of, forecasts_connection_factory=forecasts_connection_factory,
+        )
+    rows, status = _causal_alpha_shadow_rows(
+        conn, strategy_key=strategy_key,
+        evaluated_at=as_of or datetime.now(timezone.utc),
+        forecasts_connection_factory=forecasts_connection_factory,
+    )
+    if rows:
+        return rows, status
+    # Preserve legacy operator telemetry while there is no prospective round.
+    # The score verifier admits only ALPHA_PROTOCOL_VERSION, so v7 and actual
+    # fills cannot become statistical evidence through this compatibility read.
+    return _legacy_settled_market_relative_alpha_shadow_rows(
+        conn, strategy_key=strategy_key, window_days=window_days,
+        as_of=as_of, forecasts_connection_factory=forecasts_connection_factory,
+    )
+
+
+def _acknowledge_pending_alpha_shadow_feedback(
+    read_conn: sqlite3.Connection,
+    rows: list[dict[str, object]],
+) -> int:
+    """Append one chain-verified feedback per complete cohort on a WORLD-only lease."""
+    if read_conn.in_transaction:
+        # Never upgrade the attached TRADE+WORLD+FORECASTS read handle to a
+        # cross-database write transaction or compete with its own read lock.
+        return 0
+    cohorts: dict[tuple[str, str, str], list[dict[str, object]]] = {}
+    for row in rows:
+        protocol = row.get("alpha_protocol")
+        if not isinstance(protocol, Mapping):
+            continue
+        key = tuple(str(protocol.get(field) or "") for field in (
+            "global_selection_revision", "probability_semantics_revision", "metric",
+        ))
+        cohorts.setdefault(key, []).append(row)
+    ready: list[dict[str, object]] = []
+    for cohort in cohorts.values():
+        slots = [row["alpha_protocol"].get("slot") for row in cohort]
+        if (not all(row.get("alpha_protocol_valid") is True for row in cohort)
+                or not all(type(slot) is int for slot in slots)
+                or sorted(slots) != list(range(1, len(slots)+1))):
+            continue
+        ordered = sorted(cohort, key=lambda row: row["alpha_protocol"]["slot"])
+        if any(row.get("alpha_feedback_verified") is not True for row in ordered[:-1]):
+            continue
+        tail = ordered[-1]
+        if tail.get("alpha_feedback") is None and isinstance(tail.get("_alpha_ack_proof"), dict):
+            ready.append(tail)
+    if not ready:
+        return 0
+    from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
+
+    try:
+        with default_runtime_write_coordinator().lease(
+            (DBIdentity.WORLD,), owner="riskguard_alpha_feedback",
+            write_class="live", priority=WritePriority.BACKGROUND_RECOVERY,
+            deadline_ms=RISKGUARD_TRADE_WRITE_LEASE_DEADLINE_MS,
+            max_hold_ms=RISKGUARD_TRADE_WRITE_LEASE_MAX_HOLD_MS,
+        ) as lease:
+            writer = get_world_connection(write_class="live", busy_timeout_ms=250)
+            try:
+                with bounded_sqlite_write(
+                    writer, lease, max_hold_ms=RISKGUARD_TRADE_WRITE_LEASE_MAX_HOLD_MS,
+                ):
+                    writer.execute("BEGIN IMMEDIATE")
+                    acknowledged = 0
+                    try:
+                        ledger = NoTradeRegretLedger(writer)
+                        for row in ready:
+                            writer.execute("SAVEPOINT alpha_feedback_one")
+                            try:
+                                if ledger.acknowledge_alpha_settlement(
+                                    str(row["trade_id"]),
+                                    settlement_proof=row["_alpha_ack_proof"],
+                                ):
+                                    acknowledged += 1
+                                writer.execute("RELEASE alpha_feedback_one")
+                            except ValueError as exc:
+                                writer.execute("ROLLBACK TO alpha_feedback_one")
+                                writer.execute("RELEASE alpha_feedback_one")
+                                logger.warning(
+                                    "causal alpha feedback row refused: %s: %s",
+                                    row["trade_id"], exc,
+                                )
+                        writer.commit()
+                    except BaseException:
+                        if writer.in_transaction:
+                            writer.rollback()
+                        raise
+                    return acknowledged
+            finally:
+                writer.close()
+    except (OSError, sqlite3.Error, WriteLeaseTimeout, ValueError) as exc:
+        logger.warning("causal alpha feedback deferred: %s: %s", type(exc).__name__, exc)
+        return 0
 
 
 def _settled_day0_market_relative_alpha_shadow_rows(
@@ -4218,255 +4650,175 @@ def _market_relative_alpha_evidence(
     window_days: float = 7.0,
     as_of: datetime | None = None,
 ) -> dict[str, object]:
-    """Test one current probability law against its executable entry market.
+    """Compare prospective, feedback-separated forecasts with executable prices.
 
-    For one binary claim, ``market/model`` likelihood is a valid sequential
-    e-value because both probabilities were fixed before the outcome. Sibling
-    bins and HIGH/LOW observations within one city-date family are correlated,
-    so each city-date cluster contributes only its largest ex-ante claimed edge.
-    This is a
-    capital-alpha test, not a stop-loss: model/market evidence proves admission;
-    market/model evidence rejects it. Both probabilities are immutable decision-
-    time witnesses, never reconstructed after settlement.
+    For D = Brier(market) - Brier(model), the two products of
+    1 +/- D/sqrt(t+1) are e-processes under the corresponding conditional
+    no-improvement null. No independence between cities is assumed. A new
+    forecast must follow the previous immutable settlement ACK; dropping a
+    pending or corrupt round must never turn a suffix into a new experiment.
+
+    The non-summable stake schedule admits recovery after any finite loss
+    history under persistent positive conditional score improvement. Capital
+    validation below is counterfactual only; actual fill/PnL probation remains
+    a separate requirement. window_days is retained for the caller contract,
+    never used to reset the prospective experiment.
     """
+    from src.strategy.live_inference.no_trade_regret import ALPHA_PROTOCOL_VERSION
 
     if strategy_key not in {"forecast_qkernel_entry", "day0_nowcast_entry"}:
         raise ValueError("market-relative alpha strategy is not canonical")
     if not math.isfinite(rejection_evalue) or rejection_evalue <= 1.0:
         raise ValueError("market-relative alpha rejection_evalue must exceed 1")
-    if not math.isfinite(window_days) or window_days <= 0.0 or window_days > 7.0:
+    if not math.isfinite(window_days) or not 0.0 < window_days <= 7.0:
         raise ValueError("market-relative alpha window_days must be in (0, 7]")
     evaluated_at = as_of or datetime.now(timezone.utc)
     if evaluated_at.tzinfo is None:
         evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)
-    not_before = evaluated_at - timedelta(days=window_days)
-
-    def _row_temperature_metric(row: Mapping[str, object]) -> str:
-        metric = str(row.get("temperature_metric") or "").strip().lower()
-        if metric in {"high", "low"}:
-            return metric
-        family = tuple(row.get("entry_market_benchmark_family") or ())
-        if len(family) == 3:
-            metric = str(family[2]).strip().lower()
-            if metric in {"high", "low"}:
-                return metric
-        return ""
-
-    cohorts: dict[
-        tuple[str, str, tuple[str, ...], str | None],
-        dict[tuple[str, str], dict],
-    ] = {}
-    missing_benchmark_count = 0
+    cohorts: dict[tuple[str, str, str], list[dict]] = {}
     for row in rows:
-        if str(row.get("strategy") or "").strip() != strategy_key:
+        protocol = row.get("alpha_protocol")
+        if not isinstance(protocol, Mapping) or protocol.get("version") != ALPHA_PROTOCOL_VERSION:
             continue
-        decision_law_id = str(row.get("decision_law_id") or "").strip()
-        if (
-            strategy_key == "day0_nowcast_entry"
-            and decision_law_id != "executable_min_order_capital_gain_v2"
-        ):
+        if protocol.get("strategy_key") != strategy_key:
             continue
-        if row.get("probability_semantics_ready") is not True:
-            continue
-        try:
-            settled_at = datetime.fromisoformat(
-                str(row.get("settled_at") or "").replace("Z", "+00:00")
-            )
-        except ValueError:
-            continue
-        if settled_at.tzinfo is None:
-            settled_at = settled_at.replace(tzinfo=timezone.utc)
-        if settled_at < not_before or settled_at > evaluated_at:
-            continue
-        if not row.get("entry_market_benchmark_ready", False):
-            missing_benchmark_count += 1
-            continue
-        try:
-            q = float(row["p_posterior"])
-            market = float(row["entry_market_benchmark"])
-            outcome = int(row["outcome"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        family = tuple(row.get("entry_market_benchmark_family") or ())
-        if (
-            len(family) != 3
-            or not all(str(value).strip() for value in family)
-            or outcome not in {0, 1}
-            or not math.isfinite(q)
-            or not math.isfinite(market)
-            or not 0.0 <= q <= 1.0
-            or not 0.0 < market < 1.0
-        ):
-            continue
-        revisions = tuple(
-            sorted(
-                str(revision).strip()
-                for revision in (row.get("probability_semantics_revisions") or ())
-                if str(revision).strip()
-            )
-        )
-        temperature_metric = _row_temperature_metric(row)
-        global_selection_revision = str(
-            row.get("global_selection_revision") or ""
-        ).strip()
-        cohort_key = (
-            decision_law_id,
-            global_selection_revision,
-            revisions,
-            temperature_metric,
-        )
-        # Sibling bins and HIGH/LOW from one city-date share weather,
-        # observation, and market-information shocks.  Different cities are
-        # distinct settlement claims; collapsing them by calendar date alone
-        # discards executable evidence from unrelated market families.
-        evidence_cluster = (
-            str(family[0]).strip(),
-            str(family[1]).strip(),
-        )
-        try:
-            capital_committed = float(
-                row.get("hypothetical_capital_committed_usd")
-            )
-            capital_pnl = float(row.get("hypothetical_realized_pnl_usd"))
-        except (TypeError, ValueError):
-            capital_committed = 0.0
-            capital_pnl = 0.0
-        capital_gain_proof_ready = bool(
-            row.get("capital_gain_proof_ready") is True
-            and math.isfinite(capital_committed)
-            and capital_committed > 0.0
-            and math.isfinite(capital_pnl)
-        )
-        candidate = {
-            "trade_id": str(row.get("trade_id") or ""),
-            "q": q,
-            "market": market,
-            "outcome": outcome,
-            "claimed_edge": abs(q - market),
-            "capital_gain_proof_ready": capital_gain_proof_ready,
-            "hypothetical_capital_committed_usd": capital_committed,
-            "hypothetical_realized_pnl_usd": capital_pnl,
-        }
-        cluster_rows = cohorts.setdefault(cohort_key, {})
-        incumbent = cluster_rows.get(evidence_cluster)
-        if incumbent is None or (
-            candidate["claimed_edge"], candidate["trade_id"]
-        ) > (incumbent["claimed_edge"], incumbent["trade_id"]):
-            cluster_rows[evidence_cluster] = candidate
+        # The reader preserves the frozen protocol cohort even if other row
+        # metadata fails verification. Filtering those rows here erases holes.
+        key = tuple(str(protocol.get(field) or "") for field in (
+            "global_selection_revision", "probability_semantics_revision", "metric",
+        ))
+        cohorts.setdefault(key, []).append(row)
 
-    cohort_evidence: list[dict[str, object]] = []
-    for (
-        decision_law_id,
-        global_selection_revision,
-        revisions,
-        temperature_metric,
-    ), cluster_rows in sorted(cohorts.items()):
-        log_model_over_market = 0.0
-        for row in cluster_rows.values():
-            q = min(max(float(row["q"]), 1e-12), 1.0 - 1e-12)
-            market = min(max(float(row["market"]), 1e-12), 1.0 - 1e-12)
-            outcome = int(row["outcome"])
-            model_probability = q if outcome else 1.0 - q
-            market_probability = market if outcome else 1.0 - market
-            log_model_over_market += math.log(model_probability / market_probability)
-        market_over_model_evalue = math.exp(min(700.0, -log_model_over_market))
-        model_over_market_evalue = math.exp(min(700.0, log_model_over_market))
-        capital_rows = [
-            row
-            for row in cluster_rows.values()
-            if row["capital_gain_proof_ready"]
-        ]
-        capital_committed = sum(
-            float(row["hypothetical_capital_committed_usd"])
-            for row in capital_rows
+    threshold = math.log(rejection_evalue)
+    evidence: list[dict[str, object]] = []
+    for (selection, revision, metric), cohort_rows in sorted(cohorts.items()):
+        slots = [row["alpha_protocol"].get("slot") for row in cohort_rows]
+        structure_valid = bool(
+            selection == CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+            and revision and metric in {"high", "low"}
+            and all(type(slot) is int and slot > 0 for slot in slots)
+            and sorted(slots) == list(range(1, len(slots) + 1))
+            and all(row.get("alpha_protocol_valid") is True for row in cohort_rows)
         )
-        capital_pnl = sum(
-            float(row["hypothetical_realized_pnl_usd"])
-            for row in capital_rows
+        log_positive = log_negative = 0.0
+        committed = pnl = 0.0
+        completed = 0
+        capital_complete = True
+        rejected_once = False
+        previous_feedback = None
+        previous_id = None
+        pending = 0
+        if structure_valid:
+            for row in sorted(cohort_rows, key=lambda item: item["alpha_protocol"]["slot"]):
+                protocol = row["alpha_protocol"]
+                try:
+                    decision = datetime.fromisoformat(str(row["decision_time"]).replace("Z", "+00:00"))
+                    cut = datetime.fromisoformat(str(row["selection_cut_at_utc"]).replace("Z", "+00:00"))
+                    created = datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00"))
+                    if any(clock.tzinfo is None for clock in (decision, cut, created)):
+                        raise ValueError("naive decision clock")
+                    if not cut <= decision <= created <= evaluated_at:
+                        raise ValueError("noncausal decision clock")
+                    if protocol.get("previous_event_id") != previous_id:
+                        raise ValueError("broken predecessor")
+                    if previous_feedback is None:
+                        if (protocol.get("previous_feedback_hash") is not None
+                                or protocol.get("previous_feedback_seen_at") is not None):
+                            raise ValueError("genesis feedback is not empty")
+                    else:
+                        acknowledged = datetime.fromisoformat(previous_feedback["observed_at"].replace("Z", "+00:00"))
+                        seen = datetime.fromisoformat(
+                            str(protocol["previous_feedback_seen_at"]).replace("Z", "+00:00")
+                        )
+                        if (seen.tzinfo is None or seen < acknowledged
+                                or cut <= seen or decision <= seen
+                                or protocol.get("previous_feedback_hash") != previous_feedback["feedback_hash"]):
+                            raise ValueError("forecast preceded feedback")
+                    feedback = row.get("alpha_feedback")
+                    if feedback is None:
+                        pending = len(cohort_rows) - completed
+                        if pending != 1:
+                            raise ValueError("successor exists before feedback")
+                        break
+                    if row.get("alpha_feedback_verified") is not True:
+                        raise ValueError("unverified feedback")
+                    acknowledged = datetime.fromisoformat(str(feedback["observed_at"]).replace("Z", "+00:00"))
+                    if acknowledged.tzinfo is None or not created < acknowledged <= evaluated_at:
+                        raise ValueError("noncausal feedback")
+                    q = float(row["p_posterior"])
+                    market = float(row["entry_market_benchmark"])
+                    outcome = feedback["settlement_proof"]["outcome"]
+                    if (not math.isfinite(q) or not 0.0 <= q <= 1.0
+                            or not math.isfinite(market) or not 0.05 <= market <= 0.95
+                            or type(outcome) is not int or outcome not in (0, 1)
+                            or row.get("probability_semantics_ready") is not True
+                            or row.get("entry_market_benchmark_ready") is not True):
+                        raise ValueError("invalid score witness")
+                except (KeyError, TypeError, ValueError):
+                    structure_valid = False
+                    break
+                score_difference = (outcome - market) ** 2 - (outcome - q) ** 2
+                stake = 1.0 / math.sqrt(protocol["slot"] + 1.0)
+                log_positive += math.log1p(stake * score_difference)
+                log_negative += math.log1p(-stake * score_difference)
+                rejected_once = rejected_once or log_negative >= threshold
+                completed += 1
+                try:
+                    capital = float(row["hypothetical_capital_committed_usd"])
+                    gain = float(row["hypothetical_realized_pnl_usd"])
+                    if (row.get("capital_gain_proof_ready") is not True
+                            or not math.isfinite(capital) or capital <= 0.0
+                            or not math.isfinite(gain)):
+                        raise ValueError("capital proof incomplete")
+                    committed += capital
+                    pnl += gain
+                except (KeyError, TypeError, ValueError):
+                    capital_complete = False
+                previous_feedback = feedback
+                previous_id = str(row["trade_id"])
+        validated = bool(
+            structure_valid and completed and capital_complete and committed > 0.0
+            and pnl > 0.0 and log_positive >= threshold and log_negative < threshold
         )
-        capital_proof_ready = bool(capital_rows) and len(capital_rows) == len(
-            cluster_rows
-        )
-        capital_gain_validated = (
-            capital_proof_ready
-            and math.isfinite(capital_committed)
-            and math.isfinite(capital_pnl)
-            and capital_committed > 0.0
-            and capital_pnl > 0.0
-        )
-        statistical_validation = model_over_market_evalue >= rejection_evalue
-        # A probability system can beat the market on log score while still
-        # losing money at the executable prices and minimum sizes that were
-        # available at decision time.  Both entry strategies therefore require
-        # the same positive forward-capital proof; likelihood evidence alone is
-        # diagnostic, never validation for re-opening capital.
-        validated = statistical_validation and capital_gain_validated
-        cohort_evidence.append(
-            {
-                "decision_law_id": decision_law_id,
-                "global_selection_revision": global_selection_revision,
-                "temperature_metric": temperature_metric or None,
-                "probability_semantics_revisions": list(revisions),
-                "independent_cluster_count": len(cluster_rows),
-                "candidate_count": sum(
-                    1
-                    for row in rows
-                    if str(row.get("strategy") or "").strip() == strategy_key
-                    and str(row.get("decision_law_id") or "").strip()
-                    == decision_law_id
-                    and str(row.get("global_selection_revision") or "").strip()
-                    == global_selection_revision
-                    and _row_temperature_metric(row) == temperature_metric
-                    and tuple(sorted(row.get("probability_semantics_revisions") or ()))
-                    == revisions
-                    and row.get("entry_market_benchmark_ready", False)
-                ),
-                "log_model_over_market": round(log_model_over_market, 6),
-                "market_over_model_evalue": round(market_over_model_evalue, 6),
-                "model_over_market_evalue": round(model_over_market_evalue, 6),
-                "capital_gain_proof_ready": capital_proof_ready,
-                "hypothetical_capital_committed_usd": round(capital_committed, 6),
-                "hypothetical_realized_pnl_usd": round(capital_pnl, 6),
-                "hypothetical_return_on_capital": (
-                    round(capital_pnl / capital_committed, 6)
-                    if capital_committed > 0.0
-                    else None
-                ),
-                "capital_gain_validated": capital_gain_validated,
-                "rejected": market_over_model_evalue >= rejection_evalue,
-                "validated": validated,
-            }
-        )
-
-    current_cohorts = [
-        cohort
-        for cohort in cohort_evidence
-        if cohort["global_selection_revision"]
-        == CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
-    ]
-    rejected = [cohort for cohort in current_cohorts if cohort["rejected"]]
-    validated = [cohort for cohort in current_cohorts if cohort["validated"]]
+        evidence.append({
+            "decision_law_id": "executable_min_order_capital_gain_v2",
+            "global_selection_revision": selection,
+            "temperature_metric": metric,
+            "probability_semantics_revisions": [revision],
+            "test_protocol": ALPHA_PROTOCOL_VERSION,
+            "independent_cluster_count": 0,
+            "candidate_count": len(cohort_rows),
+            "completed_round_count": completed,
+            "pending_round_count": pending,
+            "alpha_protocol_slot_structure_valid": structure_valid,
+            "log_model_score_evalue": log_positive,
+            "log_market_score_evalue": log_negative,
+            # Retain the public field names; test_protocol identifies these as
+            # Brier-score e-values, not the former likelihood-ratio products.
+            "model_over_market_evalue": math.exp(min(700.0, log_positive)),
+            "market_over_model_evalue": math.exp(min(700.0, log_negative)),
+            "capital_gain_proof_ready": bool(completed and capital_complete and structure_valid),
+            "hypothetical_capital_committed_usd": committed,
+            "hypothetical_realized_pnl_usd": pnl,
+            "hypothetical_return_on_capital": pnl / committed if committed > 0.0 else None,
+            "capital_gain_validated": bool(capital_complete and pnl > 0.0),
+            "rejected": not structure_valid or (rejected_once and not validated),
+            "validated": validated,
+        })
+    rejected = any(row["rejected"] for row in evidence)
+    validated = any(row["validated"] for row in evidence) and not rejected
     return {
         "strategy_key": strategy_key,
-        "global_selection_revision": (
-            CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
-        ),
-        "status": (
-            "rejected"
-            if rejected
-            else (
-                "validated"
-                if validated
-                else ("inconclusive" if current_cohorts else "no_evidence")
-            )
-        ),
+        "global_selection_revision": CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
+        "status": "rejected" if rejected else "validated" if validated else "inconclusive" if evidence else "no_evidence",
+        "test_protocol": ALPHA_PROTOCOL_VERSION,
         "rejection_evalue": rejection_evalue,
         "window_days": window_days,
         "evaluated_at": evaluated_at.isoformat(),
-        "rejected": bool(rejected),
-        "validated": bool(validated) and not bool(rejected),
-        "missing_benchmark_count": missing_benchmark_count,
-        "cohorts": cohort_evidence,
+        "rejected": rejected,
+        "validated": validated,
+        "missing_benchmark_count": 0,
+        "cohorts": evidence,
     }
 
 
@@ -6529,6 +6881,14 @@ def _tick_once() -> RiskLevel:
             zeus_conn,
             window_days=market_relative_alpha_window_days,
             as_of=market_relative_alpha_as_of,
+        )
+        # ACKs use a separate, short WORLD-only transaction after both readers
+        # have captured current canonical payout truth. A newly committed ACK
+        # affects the next tick's causal score, never this already-read cut.
+        _acknowledge_pending_alpha_shadow_feedback(
+            zeus_conn,
+            qkernel_market_relative_alpha_shadow_rows
+            + day0_market_relative_alpha_shadow_rows,
         )
         day0_live_realized_capital_curve = (
             _bind_live_curve_to_selection_revision(

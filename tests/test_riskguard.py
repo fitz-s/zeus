@@ -480,6 +480,295 @@ def _init_empty_canonical_portfolio_schema(
     conn.close()
 
 
+def _causal_alpha_round(slot, *, outcome, q, market, strategy="day0_nowcast_entry",
+                        previous=None, previous_hash=None, feedback=True,
+                        capital_ready=True):
+    """A prevalidated prospective round; DB and hash checks have separate tests."""
+    from src.strategy.live_inference.no_trade_regret import ALPHA_PROTOCOL_VERSION
+
+    hour = slot * 3
+    event = f"causal-round-{slot}"
+    decision = f"2026-09-24T{hour:02d}:00:00+00:00"
+    created = f"2026-09-24T{hour:02d}:00:01+00:00"
+    observed = f"2026-09-24T{hour+1:02d}:00:00+00:00"
+    return {
+        "trade_id": event, "strategy": strategy,
+        "alpha_protocol": {
+            "version": ALPHA_PROTOCOL_VERSION, "strategy_key": strategy,
+            "global_selection_revision": riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
+            "probability_semantics_revision": "current-test-revision", "metric": "high",
+            "slot": slot, "previous_event_id": previous,
+            "previous_feedback_hash": previous_hash,
+            "previous_feedback_seen_at": (
+                f"2026-09-24T{(slot-1)*3+1:02d}:00:01+00:00"
+                if previous is not None else None
+            ),
+        },
+        "alpha_protocol_valid": True,
+        "decision_time": decision, "selection_cut_at_utc": decision,
+        "created_at": created, "p_posterior": q,
+        "entry_market_benchmark": market,
+        "probability_semantics_ready": True, "entry_market_benchmark_ready": True,
+        "alpha_feedback_verified": feedback,
+        "alpha_feedback": ({
+            "observed_at": observed, "feedback_hash": f"feedback-{slot}",
+            "settlement_proof": {"outcome": outcome},
+        } if feedback else None),
+        "capital_gain_proof_ready": capital_ready,
+        "hypothetical_capital_committed_usd": 1.0,
+        "hypothetical_realized_pnl_usd": (outcome - market) * 5,
+    }
+
+
+def test_causal_alpha_legacy_actual_and_posthoc_max_edge_do_not_reject():
+    """REG-ALPHA-01: the post-outcome maximum-edge selector is not a score round."""
+    evidence = riskguard_module._market_relative_alpha_evidence(
+        [{"trade_id": "actual", "strategy": "day0_nowcast_entry",
+          "p_posterior": 0.99, "entry_market_benchmark": 0.01, "outcome": 0}],
+        strategy_key="day0_nowcast_entry", rejection_evalue=10,
+    )
+    assert evidence["status"] == "no_evidence"
+    assert not evidence["rejected"] and not evidence["validated"]
+
+
+def test_causal_alpha_correlated_city_requires_feedback_between_decisions():
+    """REG-ALPHA-02: duplicate correlated Y cannot manufacture two LR factors."""
+    first = _causal_alpha_round(1, outcome=0, q=.9, market=.1)
+    second = _causal_alpha_round(
+        2, outcome=0, q=0, market=.1,
+        previous=first["trade_id"], previous_hash="feedback-1",
+    )
+    evidence = riskguard_module._market_relative_alpha_evidence(
+        [first, second], strategy_key="day0_nowcast_entry",
+        rejection_evalue=10, as_of=datetime(2026, 9, 25, tzinfo=timezone.utc),
+    )
+    assert evidence["cohorts"][0]["completed_round_count"] == 2
+    assert evidence["cohorts"][0]["market_over_model_evalue"] < 10
+    assert not evidence["rejected"]
+    # The second forecast was taken before the first ACK: preserve and freeze.
+    second["decision_time"] = first["decision_time"]
+    assert riskguard_module._market_relative_alpha_evidence(
+        [first, second], strategy_key="day0_nowcast_entry",
+        rejection_evalue=10, as_of=datetime(2026, 9, 25, tzinfo=timezone.utc),
+    )["cohorts"][0]["alpha_protocol_slot_structure_valid"] is False
+
+
+def test_causal_alpha_pending_and_corrupt_tail_keep_prefix_and_block_validation():
+    """REG-ALPHA-03: no skipped pending/duplicate slot or validation from a suffix."""
+    first = _causal_alpha_round(1, outcome=1, q=1, market=.05)
+    second = _causal_alpha_round(
+        2, outcome=1, q=1, market=.05, previous=first["trade_id"],
+        previous_hash="feedback-1", feedback=False,
+    )
+    result = riskguard_module._market_relative_alpha_evidence(
+        [first, second], strategy_key="day0_nowcast_entry", rejection_evalue=10,
+        as_of=datetime(2026, 9, 25, tzinfo=timezone.utc),
+    )["cohorts"][0]
+    assert result["completed_round_count"] == 1
+    assert result["pending_round_count"] == 1
+    assert not result["validated"]
+    third = _causal_alpha_round(3, outcome=1, q=1, market=.05,
+                                previous=second["trade_id"], previous_hash="feedback-2")
+    result = riskguard_module._market_relative_alpha_evidence(
+        [first, second, third], strategy_key="day0_nowcast_entry", rejection_evalue=10,
+        as_of=datetime(2026, 9, 25, tzinfo=timezone.utc),
+    )["cohorts"][0]
+    assert not result["alpha_protocol_slot_structure_valid"]
+    third["alpha_protocol"]["slot"] = 2
+    result = riskguard_module._market_relative_alpha_evidence(
+        [first, second, third], strategy_key="day0_nowcast_entry", rejection_evalue=10,
+        as_of=datetime(2026, 9, 25, tzinfo=timezone.utc),
+    )["cohorts"][0]
+    assert not result["alpha_protocol_slot_structure_valid"]
+
+
+def test_causal_alpha_q_extremes_recover_only_with_complete_capital():
+    """REG-ALPHA-04: finite loss does not permanently suppress positive truth."""
+    rows = []
+    for slot in range(1, 34):
+        outcome, q, market = (1, 0.0, .9) if slot == 1 else (1, 1.0, .05)
+        previous = rows[-1]["trade_id"] if rows else None
+        previous_hash = f"feedback-{slot-1}" if rows else None
+        row = _causal_alpha_round(
+            slot, outcome=outcome, q=q, market=market,
+            previous=previous, previous_hash=previous_hash,
+        )
+        # Use a monotone UTC timeline across date boundaries.
+        instant = datetime(2026, 9, 24, tzinfo=timezone.utc) + timedelta(hours=3*slot)
+        row["decision_time"] = row["selection_cut_at_utc"] = instant.isoformat()
+        row["created_at"] = (instant + timedelta(seconds=1)).isoformat()
+        row["alpha_feedback"]["observed_at"] = (instant + timedelta(hours=1)).isoformat()
+        if rows:
+            row["alpha_protocol"]["previous_feedback_seen_at"] = (
+                datetime.fromisoformat(rows[-1]["alpha_feedback"]["observed_at"])
+                + timedelta(seconds=1)
+            ).isoformat()
+        rows.append(row)
+    cut = datetime(2026, 9, 30, tzinfo=timezone.utc)
+    evidence = riskguard_module._market_relative_alpha_evidence(
+        rows, strategy_key="day0_nowcast_entry", rejection_evalue=10, as_of=cut,
+    )
+    assert evidence["validated"]
+    rows[0]["capital_gain_proof_ready"] = False
+    assert not riskguard_module._market_relative_alpha_evidence(
+        rows, strategy_key="day0_nowcast_entry", rejection_evalue=10, as_of=cut,
+    )["validated"]
+
+
+@pytest.mark.parametrize("strategy", ["day0_nowcast_entry", "forecast_qkernel_entry"])
+def test_causal_alpha_reader_acks_only_canonical_finalized_pair(tmp_path, monkeypatch, strategy):
+    """REG-ALPHA-05: a pending row survives and its verified ACK is scored next cut."""
+    import hashlib
+    from src.events.day0_authority import (
+        DAY0_PROBABILITY_SEMANTICS_REVISION, bind_day0_probability_semantics,
+    )
+    from src.state.schema.no_trade_regret_events_schema import ensure_table
+    from src.events.idempotency import stable_event_id
+    from src.strategy.live_inference.no_trade_regret import ALPHA_PROTOCOL_VERSION
+    from contextlib import nullcontext
+    revision = (DAY0_PROBABILITY_SEMANTICS_REVISION if strategy == "day0_nowcast_entry"
+                else next(iter(riskguard_module.LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS)))
+    if strategy == "forecast_qkernel_entry":
+        def bind_pending(probes, **_kwargs):
+            assert len(probes) == 1
+            return ([{"trade_id": probes[0]["trade_id"],
+                      "probability_semantics_ready": True,
+                      "probability_semantics_revisions": (revision,)}], {})
+        monkeypatch.setattr(riskguard_module, "_bind_qkernel_probability_semantics", bind_pending)
+
+    trade = sqlite3.connect(tmp_path / "trade.db")
+    ensure_table(trade)
+    trade.executescript(
+        "CREATE TABLE executable_market_snapshots (condition_id TEXT, "
+        "yes_token_id TEXT, no_token_id TEXT, captured_at TEXT);"
+        "CREATE TABLE payout_observations (id INTEGER PRIMARY KEY, condition_id TEXT, "
+        "outcome_index INTEGER, payout_numerator INTEGER, payout_denominator INTEGER, "
+        "state TEXT, source TEXT, block_number INTEGER, block_hash TEXT);"
+    )
+    forecasts_path = tmp_path / "forecasts.db"
+    forecast = sqlite3.connect(forecasts_path)
+    forecast.executescript(
+        "CREATE TABLE market_events (condition_id TEXT, city TEXT, "
+        "target_date TEXT, temperature_metric TEXT, outcome TEXT);"
+        "CREATE TABLE settlement_outcomes (city TEXT, target_date TEXT, "
+        "temperature_metric TEXT, authority TEXT);"
+    )
+    event_id = (
+        f"market-relative-alpha-shadow-v8-causal-brier:{strategy}:"
+        f"{riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION}:"
+        f"{revision}:high:NYC:2026-09-24"
+    )
+    regret_id = stable_event_id(
+        event_id, "RISK_GUARD", f"MARKET_RELATIVE_ALPHA_SHADOW:{strategy}",
+    )
+    now = datetime.now(timezone.utc)
+    cut = (now - timedelta(minutes=2)).isoformat()
+    decision = (now - timedelta(minutes=1)).isoformat()
+    created = (now - timedelta(seconds=30)).isoformat()
+    envelope = {
+        "schema_version": 3, "strategy_key": strategy,
+        "decision_law_id": "executable_min_order_capital_gain_v2",
+        "global_selection_revision": riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
+        "probability_semantics_revision": revision,
+        "selection_rule": "earliest_complete_global_cut_exact_global_posterior_mean_expected_growth_winner_v3",
+        "selection_cut_at_utc": cut, "decision_at_utc": decision,
+        "family_key": "family", "city": "NYC", "target_date": "2026-09-24",
+        "metric": "high", "bin_id": "32", "condition_id": "condition",
+        "token_id": "yes-token", "side": "YES", "q": 0.8,
+        "q_version": (bind_day0_probability_semantics("witness")
+                      if strategy == "day0_nowcast_entry" else "qkernel-witness"),
+        "posterior_identity_hash": "posterior-hash",
+        "probability_witness_identity": "witness", "book_snapshot_id": "book",
+        "raw_min_order_vwap": .18, "fee_adjusted_min_order_cost": .2,
+        "min_order_size": "5", "expected_net_edge_per_share": .6,
+        "global_proof_winner": True, "global_proof_candidate_id": "candidate",
+        "global_proof_execution_mode": "TAKER_LIMIT", "global_proof_shares": "8",
+        "global_proof_cost_usd": "1.6", "global_proof_expected_ev_usd": 4.8,
+        "global_proof_expected_delta_log_wealth": .01,
+        "alpha_protocol": {
+            "version": ALPHA_PROTOCOL_VERSION, "strategy_key": strategy,
+            "global_selection_revision": riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
+            "probability_semantics_revision": revision,
+            "metric": "high", "slot": 1, "previous_event_id": None,
+            "previous_feedback_hash": None, "previous_feedback_seen_at": None,
+        },
+    }
+    envelope_json = json.dumps(envelope, sort_keys=True, separators=(",", ":"))
+    trade.execute(
+        "INSERT INTO no_trade_regret_events (regret_event_id,event_id,rejection_stage,"
+        "rejection_reason,regret_bucket,condition_id,token_id,decision_time,city,"
+        "target_date,metric,family_id,bin_label,direction,q_live,c_fee_adjusted,"
+        "native_quote_available,source_status,family_complete,hypothetical_order_type,"
+        "hypothetical_fill_status,hypothetical_fill_price,causal_snapshot_id,"
+        "executable_snapshot_id,envelope_json,created_at,schema_version) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)",
+        (regret_id,event_id,"RISK_GUARD",f"MARKET_RELATIVE_ALPHA_SHADOW:{strategy}",
+         "RISK_CAP","condition","yes-token",decision,"NYC","2026-09-24","high",
+         "family","32","buy_yes",.8,.2,1,(
+             "current_day0_probability_authority" if strategy == "day0_nowcast_entry"
+             else "current_qkernel_probability_authority"),1,
+         "MARKETABLE_LIMIT","EXECUTABLE_AT_DECISION",.18,"witness","book",
+         envelope_json,created),
+    )
+    trade.execute("INSERT INTO executable_market_snapshots VALUES (?,?,?,?)",
+                  ("condition","yes-token","no-token",decision))
+    trade.executemany(
+        "INSERT INTO payout_observations VALUES (?,?,?,?,?,?,?,?,?)",
+        [(1,"condition",0,1,1,"RESOLVED_NONZERO","chain_rpc_finalized_v1",20,"0x"+"ab"*32),
+         (2,"condition",1,0,1,"RESOLVED_ZERO","chain_rpc_finalized_v1",20,"0x"+"ab"*32)],
+    )
+    forecast.execute("INSERT INTO market_events VALUES (?,?,?,?,?)",
+                     ("condition","NYC","2026-09-24","high","YES"))
+    forecast.execute("INSERT INTO settlement_outcomes VALUES (?,?,?,?)",
+                     ("NYC","2026-09-24","high","VERIFIED"))
+    trade.commit(); forecast.commit(); forecast.close()
+    read = lambda: riskguard_module._settled_market_relative_alpha_shadow_rows(
+        trade, strategy_key=strategy, window_days=7,
+        forecasts_connection_factory=lambda: sqlite3.connect(forecasts_path),
+    )[0]
+    pending_rows = read()
+    pending = pending_rows[0]
+    assert pending["alpha_protocol_valid"] is True
+    assert pending["alpha_feedback"] is None
+    proof = pending["_alpha_ack_proof"]
+    assert proof["envelope_sha256"] == hashlib.sha256(envelope_json.encode()).hexdigest()
+    assert proof["payout_rows"][0]["outcome_index"] == 0
+    monkeypatch.setattr(
+        riskguard_module, "get_world_connection",
+        lambda **_kwargs: sqlite3.connect(tmp_path / "trade.db"),
+    )
+    monkeypatch.setattr(
+        riskguard_module, "default_runtime_write_coordinator",
+        lambda: SimpleNamespace(lease=lambda *_args, **_kwargs: nullcontext(object())),
+    )
+    monkeypatch.setattr(
+        riskguard_module, "bounded_sqlite_write",
+        lambda *_args, **_kwargs: nullcontext(),
+    )
+    assert riskguard_module._acknowledge_pending_alpha_shadow_feedback(
+        trade, pending_rows,
+    ) == 1
+    if strategy == "forecast_qkernel_entry":
+        monkeypatch.setattr(riskguard_module, "_bind_qkernel_probability_semantics",
+                            lambda *_args, **_kwargs: pytest.fail("historical ACK reread transient posterior"))
+    settled = read()[0]
+    assert settled["alpha_feedback_verified"] is True
+    assert settled["hypothetical_capital_committed_usd"] == 1.6
+    assert settled["hypothetical_settlement_payout_usd"] == 8
+    assert settled["hypothetical_realized_pnl_usd"] == 6.4
+    # A newer contradictory chain observation invalidates the saved ACK;
+    # it cannot disappear from the frozen cohort or become positive evidence.
+    trade.execute("INSERT INTO payout_observations VALUES (?,?,?,?,?,?,?,?,?)",
+                  (3,"condition",0,0,1,"RESOLVED_ZERO","chain_rpc_finalized_v1",21,"0x"+"cd"*32))
+    trade.commit()
+    conflict = read()[0]
+    assert conflict["alpha_protocol_valid"] is False
+    assert riskguard_module._market_relative_alpha_evidence(
+        [conflict], strategy_key=strategy, rejection_evalue=10,
+    )["rejected"] is True
+    trade.close()
+
+
 def _insert_risk_action(
     conn: sqlite3.Connection,
     *,
@@ -5051,13 +5340,11 @@ class TestQkernelMarketRelativeAlphaEvidence:
             as_of=datetime(2026, 8, 11, tzinfo=timezone.utc),
         )
 
-        assert evidence["status"] == "rejected"
-        assert evidence["rejected"] is True
-        assert len(evidence["cohorts"]) == 1
-        cohort = evidence["cohorts"][0]
-        assert cohort["candidate_count"] == 4
-        assert cohort["independent_cluster_count"] == 3
-        assert cohort["market_over_model_evalue"] > 12.0
+        # Filled positions are actual capital facts, not prospectively frozen
+        # v8 forecasts, regardless of the post-hoc largest edge in a city.
+        assert evidence["status"] == "no_evidence"
+        assert evidence["rejected"] is False
+        assert evidence["cohorts"] == []
         conn.close()
 
     def test_one_loss_below_sequential_evidence_boundary_does_not_gate(self):
@@ -5078,9 +5365,9 @@ class TestQkernelMarketRelativeAlphaEvidence:
             as_of=datetime(2026, 8, 11, tzinfo=timezone.utc),
         )
 
-        assert evidence["status"] == "ok"
+        assert evidence["status"] == "no_evidence"
         assert evidence["rejected"] is False
-        assert evidence["cohorts"][0]["market_over_model_evalue"] < 10.0
+        assert evidence["cohorts"] == []
         conn.close()
 
     @pytest.mark.parametrize("terminal_status", ["filled", "confirmed", "partial"])
@@ -5144,10 +5431,9 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert bound[0]["capital_gain_proof_ready"] is True
         assert bound[0]["hypothetical_capital_committed_usd"] == pytest.approx(0.25)
         assert bound[0]["hypothetical_realized_pnl_usd"] == pytest.approx(-0.25)
-        assert evidence["rejected"] is True
-        assert evidence["cohorts"][0]["market_over_model_evalue"] == pytest.approx(19.0)
-        assert revisions == (current,)
-        assert reason is not None and "status=rejected" in reason
+        assert evidence["status"] == "no_evidence"
+        assert evidence["rejected"] is False
+        assert revisions == () and reason is None
         conn.close()
 
     def test_superseded_global_selection_cannot_name_current_capital_law(self):
@@ -5230,7 +5516,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
             "window_days": 7.0,
             "evaluated_at": "2026-08-11T00:00:00+00:00",
             "rejected": False,
-            "missing_benchmark_count": 1,
+            "missing_benchmark_count": 0,
             "cohorts": [],
         }
         conn.close()
@@ -5281,13 +5567,10 @@ class TestQkernelMarketRelativeAlphaEvidence:
             as_of=datetime(2026, 8, 11, tzinfo=timezone.utc),
         )
 
-        assert evidence["status"] == "validated"
-        assert evidence["validated"] is True
+        assert evidence["status"] == "no_evidence"
+        assert evidence["validated"] is False
         assert evidence["rejected"] is False
-        assert evidence["cohorts"][0]["independent_cluster_count"] == 2
-        assert evidence["cohorts"][0]["model_over_market_evalue"] > 20.0
-        assert evidence["cohorts"][0]["hypothetical_realized_pnl_usd"] == 8.0
-        assert evidence["cohorts"][0]["capital_gain_validated"] is True
+        assert evidence["cohorts"] == []
         binding = {
             "status": "ok",
             "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
@@ -5296,7 +5579,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
             binding,
             evidence,
             required_evalue=10.0,
-        ) is None
+        ) is not None
         conn.close()
 
     @staticmethod
@@ -6125,19 +6408,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
             as_of=datetime(2026, 8, 11, tzinfo=timezone.utc),
         )
 
-        assert len(evidence["cohorts"]) == 2
-        assert {
-            cohort["temperature_metric"] for cohort in evidence["cohorts"]
-        } == {"high", "low"}
-        assert {
-            cohort["candidate_count"] for cohort in evidence["cohorts"]
-        } == {1}
-        assert {
-            cohort["independent_cluster_count"] for cohort in evidence["cohorts"]
-        } == {1}
-        assert sorted(
-            cohort["model_over_market_evalue"] for cohort in evidence["cohorts"]
-        ) == pytest.approx([4.5, 4.75])
+        assert evidence["cohorts"] == []
         assert evidence["validated"] is False
         conn.close()
 
@@ -6179,11 +6450,10 @@ class TestQkernelMarketRelativeAlphaEvidence:
             as_of=datetime(2026, 8, 11, tzinfo=timezone.utc),
         )
 
-        cohort = evidence["cohorts"][0]
-        assert cohort["candidate_count"] == 2
-        assert cohort["independent_cluster_count"] == 2
-        assert cohort["market_over_model_evalue"] == pytest.approx(64.0)
-        assert evidence["rejected"] is True
+        # Same-day cities share weather shocks; actual fills cannot establish
+        # an independent prospective statistical cohort.
+        assert evidence["cohorts"] == []
+        assert evidence["rejected"] is False
         conn.close()
 
     def test_unvalidated_shadow_remains_visible_under_evalue_contract(self):
@@ -6237,10 +6507,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
             as_of=datetime(2026, 8, 11, tzinfo=timezone.utc),
         )
 
-        cohort = evidence["cohorts"][0]
-        assert cohort["model_over_market_evalue"] > 10.0
-        assert cohort["hypothetical_realized_pnl_usd"] == pytest.approx(-1.30)
-        assert cohort["capital_gain_validated"] is False
+        assert evidence["cohorts"] == []
         assert evidence["validated"] is False
         assert riskguard_module._market_relative_alpha_gate_reason(
             {
@@ -6301,10 +6568,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
             as_of=datetime(2026, 8, 11, tzinfo=timezone.utc),
         )
 
-        cohort = evidence["cohorts"][0]
-        assert cohort["model_over_market_evalue"] > 10.0
-        assert cohort["hypothetical_realized_pnl_usd"] == pytest.approx(-1.30)
-        assert cohort["capital_gain_validated"] is False
+        assert evidence["cohorts"] == []
         assert evidence["validated"] is False
         conn.close()
 
@@ -7353,9 +7617,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         current_probability_revision = (
             riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
         )
-        assert riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION == (
-            "global_single_order_authority_q_expected_growth_v3"
-        )
+        assert riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
         historical_rejection = {
             "cohorts": [
                 {
@@ -7611,7 +7873,8 @@ class TestQkernelMarketRelativeAlphaEvidence:
             rejection_evalue=10.0, window_days=7.0,
             as_of=datetime(2026, 8, 12, tzinfo=timezone.utc),
         )
-        assert evidence["rejected"] is True
+        assert evidence["status"] == "no_evidence"
+        assert evidence["rejected"] is False
         envelope["global_proof_expected_ev_usd"] = 3.45
         envelope["global_selection_revision"] = (
             "global_single_order_posterior_mean_expected_growth_v1"
