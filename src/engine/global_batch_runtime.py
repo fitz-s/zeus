@@ -5724,11 +5724,12 @@ _QKERNEL_ALPHA_SHADOW_REASON = (
     "MARKET_RELATIVE_ALPHA_SHADOW:forecast_qkernel_entry"
 )
 _ALPHA_SHADOW_ENTRY_EVENT_VERSION = (
-    "market-relative-alpha-shadow-v7-acting-probability"
+    "market-relative-alpha-shadow-v8-causal-brier"
 )
 _ALPHA_SHADOW_ENTRY_EVENT_PREFIXES = (
     "market-relative-alpha-shadow-v5-global-selection:",
     "market-relative-alpha-shadow-v6-city-date-cluster:",
+    "market-relative-alpha-shadow-v7-acting-probability:",
     f"{_ALPHA_SHADOW_ENTRY_EVENT_VERSION}:",
 )
 _QKERNEL_ALPHA_SHADOW_DECISION_LAW = "executable_min_order_capital_gain_v2"
@@ -5842,7 +5843,7 @@ def _market_relative_alpha_shadow_events(
         "forecast_qkernel_entry",
     ),
 ) -> tuple[object, ...]:
-    """Freeze no-money current-law evidence for gated entry strategies.
+    """Freeze prospective evidence before and after statistical re-admission.
 
     Only the exact side-effect-free global proof winner may become evidence.
     Grading locally attractive candidates that the capital allocator would not
@@ -5852,13 +5853,18 @@ def _market_relative_alpha_shadow_events(
     can authorize the capital evidence graded later.
     """
 
-    if book_epoch is None or proof_selected is None:
+    if book_epoch is None:
         return ()
+    if proof_selected is None:
+        proof_selected = selected
     from src.events.day0_authority import (
         DAY0_PROBABILITY_SEMANTICS_REVISION,
         day0_probability_semantics_revision,
     )
     from src.strategy.live_inference.no_trade_regret import NoTradeRegretEvent
+    from src.contracts.venue_submission_envelope import (
+        LIVE_ORDER_MIN_UNIT_PRICE, LIVE_ORDER_MAX_UNIT_PRICE,
+    )
 
     allowed_strategies = frozenset(str(strategy).strip() for strategy in strategy_keys)
     if not allowed_strategies or not allowed_strategies.issubset(
@@ -5882,7 +5888,7 @@ def _market_relative_alpha_shadow_events(
     proof_growth = getattr(proof_decision, "expected_growth", None)
     # SCOPE: this proof-selected taker BUY shadow only. DRAIN: the next
     # complete cut supplies its typed terminal transcript. RESET: terminal q,
-    # EV, cost and shares agree, allowing the v7 record to be frozen.
+    # EV, cost and shares agree, allowing the v8 record to be frozen.
     proof_terminal = getattr(proof_decision, "expected_terminal_wealth", None)
     if not isinstance(proof_terminal, ExpectedBuyTerminalWealthCertificate):
         return ()
@@ -5951,14 +5957,20 @@ def _market_relative_alpha_shadow_events(
             if strategy_key is not None
             else ""
         )
+        actual_candidate = getattr(decision, "candidate", None)
+        actual_winner = (
+            str(getattr(actual_candidate, "candidate_id", "") or "") == proof_candidate_id
+            and str(getattr(evaluation, "status", "") or "").upper() in {"SCORED", "SELECTED"}
+        )
+        gated_winner = (
+            strategy_key is not None
+            and str(getattr(evaluation, "status", "") or "").upper() == "REJECTED"
+            and "risk_action:gate" in reason[len(source_prefix):].split(",")
+        )
         if (
-            strategy_key is None
-            or str(getattr(evaluation, "candidate_id", "") or "")
-            != proof_candidate_id
+            str(getattr(evaluation, "candidate_id", "") or "") != proof_candidate_id
             or str(getattr(evaluation, "action", "") or "").upper() != "BUY"
-            or str(getattr(evaluation, "status", "") or "").upper()
-            != "REJECTED"
-            or "risk_action:gate" not in reason[len(source_prefix) :].split(",")
+            or not (actual_winner or gated_winner)
         ):
             continue
         family_key = str(getattr(evaluation, "family_key", "") or "")
@@ -5982,6 +5994,18 @@ def _market_relative_alpha_shadow_events(
         posterior_identity_hash = str(
             getattr(witness, "posterior_identity_hash", "") or ""
         )
+        if actual_winner and not gated_winner:
+            # Re-admission must not stop its own evidence stream. Infer the
+            # statistical law from the authenticated witness, never from a
+            # guessed strategy name or an observed settlement outcome.
+            if day0_probability_semantics_revision(q_version) == DAY0_PROBABILITY_SEMANTICS_REVISION:
+                strategy_key = "day0_nowcast_entry"
+            elif (qkernel_semantics_by_posterior or {}).get(posterior_identity_hash) in LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS:
+                strategy_key = "forecast_qkernel_entry"
+            else:
+                continue
+            if strategy_key not in allowed_strategies:
+                continue
         if strategy_key == "day0_nowcast_entry":
             revision = day0_probability_semantics_revision(q_version)
             probability_ready = revision == DAY0_PROBABILITY_SEMANTICS_REVISION
@@ -6024,6 +6048,8 @@ def _market_relative_alpha_shadow_events(
         ):
             continue
         raw_vwap, fee_adjusted = market_prices
+        if not float(LIVE_ORDER_MIN_UNIT_PRICE) <= raw_vwap <= float(LIVE_ORDER_MAX_UNIT_PRICE):
+            continue
         expected_edge = float(q) - fee_adjusted
         if not math.isfinite(expected_edge) or expected_edge <= 0.0:
             continue
@@ -6091,7 +6117,7 @@ def _market_relative_alpha_shadow_events(
                 event_id=(
                     f"{event_version}:{strategy_key}:"
                     f"{CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION}:"
-                    f"{revision}:{city}:{target_date}"
+                    f"{revision}:{metric}:{city}:{target_date}"
                 ),
                 rejection_stage="RISK_GUARD",
                 rejection_reason=shadow_reason,
@@ -6199,7 +6225,7 @@ def _market_relative_alpha_shadow_exit_events(
             "FROM no_trade_regret_events "
             "WHERE rejection_stage='RISK_GUARD' "
             "AND rejection_reason IN (?,?) "
-            "AND (event_id LIKE ? OR event_id LIKE ? OR event_id LIKE ?) "
+            "AND (event_id LIKE ? OR event_id LIKE ? OR event_id LIKE ? OR event_id LIKE ?) "
             "ORDER BY decision_time,regret_event_id",
             (
                 _DAY0_ALPHA_SHADOW_REASON,
@@ -6566,7 +6592,10 @@ def _record_market_relative_alpha_shadows(
         from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
 
         ledger = NoTradeRegretLedger(conn)
-        return tuple(ledger.insert_idempotent(event) for event in events)
+        return tuple(
+            event_id for event in events
+            if (event_id := ledger.insert_idempotent(event)) is not None
+        )
     except Exception as exc:  # noqa: BLE001 - evidence cannot mask venue outcome
         # This evidence only drains new-entry gates. A write failure keeps the
         # affected strategy blocked, but must not suppress SELL/HOLD/CASH.

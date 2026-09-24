@@ -377,6 +377,35 @@ def test_v8_bad_tail_cannot_restart_sequence():
     conn.close()
 
 
+def test_v8_prefix_read_ignores_legacy_volume_and_retains_bad_stage():
+    """Whole-prefix verification must not scan the high-volume rejection log."""
+    conn, ledger = _ledger()
+    conn.executemany(
+        "INSERT INTO no_trade_regret_events "
+        "(regret_event_id,event_id,rejection_stage,rejection_reason,regret_bucket,"
+        "created_at,schema_version) VALUES (?,?,'RISK_GUARD',?, 'RISK_CAP','old',1)",
+        [(f"legacy-{i}", f"legacy-{i}", "MARKET_RELATIVE_ALPHA_SHADOW:forecast_qkernel_entry")
+         for i in range(5000)],
+    )
+    conn.commit()
+    steps = 0
+
+    def bounded_work():
+        nonlocal steps
+        steps += 100
+        return steps > 6000
+
+    conn.set_progress_handler(bounded_work, 100)
+    first_id = ledger.insert_idempotent(_v8_event("Chicago", "2026-09-23T12:00:00+00:00"))
+    assert first_id is not None
+    conn.set_progress_handler(None, 0)
+    conn.execute("UPDATE no_trade_regret_events SET rejection_stage='BROKEN' WHERE regret_event_id=?",
+                 (first_id,))
+    with pytest.raises(ValueError, match="invalid alpha tail"):
+        ledger.insert_idempotent(_v8_event("Milan", "2026-09-23T12:01:00+00:00"))
+    conn.close()
+
+
 def test_alpha_feedback_nullable_schema_migration_preserves_old_row():
     from src.state.schema.no_trade_regret_events_schema import CREATE_TABLE_SQL, ensure_table
 

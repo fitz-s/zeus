@@ -551,16 +551,17 @@ class NoTradeRegretLedger:
                 return event_id
             prior_rows = self.conn.execute(
                 "SELECT regret_event_id,event_id,envelope_json,alpha_feedback_json,"
-                "condition_id,token_id,direction,city,target_date,metric "
-                "FROM no_trade_regret_events WHERE rejection_stage='RISK_GUARD' "
-                "AND rejection_reason=? AND event_id LIKE ?",
-                (event.rejection_reason, f"{cohort_prefix}%"),
+                "condition_id,token_id,direction,city,target_date,metric,"
+                "rejection_stage,rejection_reason "
+                "FROM no_trade_regret_events WHERE event_id>=? AND event_id<?",
+                (cohort_prefix, cohort_prefix[:-1] + ";"),
             ).fetchall()
             ordered: dict[int, tuple[str, Mapping[str, object], str, str | None]] = {}
             for (
                 prior_id, prior_event, prior_json, feedback_json,
                 prior_condition, prior_token, prior_direction,
                 prior_city, prior_date, prior_metric,
+                prior_stage, prior_reason,
             ) in prior_rows:
                 if not str(prior_event).startswith(cohort_prefix):
                     continue
@@ -575,7 +576,9 @@ class NoTradeRegretLedger:
                     protocol = prior_envelope["alpha_protocol"]
                     slot = protocol["slot"]
                     if (
-                        not isinstance(protocol, Mapping)
+                        prior_stage != "RISK_GUARD"
+                        or prior_reason != event.rejection_reason
+                        or not isinstance(protocol, Mapping)
                         or protocol.get("version") != ALPHA_PROTOCOL_VERSION
                         or any(protocol.get(key) != value for key, value in (
                             ("strategy_key", strategy),

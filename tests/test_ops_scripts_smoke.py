@@ -2925,9 +2925,25 @@ def test_deploy_live_restart_world_schemas_are_atomic_and_idempotent(tmp_path):
     dl = _load("deploy_live_restart_world_schema", "deploy_live.py")
     db_path = tmp_path / "zeus-world.db"
     conn = sqlite3.connect(db_path)
+    from src.state.schema.no_trade_regret_events_schema import CREATE_TABLE_SQL
+    conn.execute(CREATE_TABLE_SQL.replace("    alpha_feedback_json TEXT,\n", ""))
+    conn.execute(
+        "INSERT INTO no_trade_regret_events "
+        "(regret_event_id,event_id,rejection_stage,rejection_reason,regret_bucket,"
+        "created_at,schema_version,envelope_json) VALUES (?,?,?,?,?,?,?,?)",
+        ("old", "event", "RISK_GUARD", "reason", "bucket", "now", 1, '{"frozen":true}'),
+    )
+    conn.commit()
 
     dl._ensure_restart_world_schemas(conn)
     dl._ensure_restart_world_schemas(conn)
+    assert conn.execute(
+        "SELECT envelope_json,alpha_feedback_json FROM no_trade_regret_events "
+        "WHERE regret_event_id='old'"
+    ).fetchone() == ('{"frozen":true}', None)
+    column = next(row for row in conn.execute("PRAGMA table_info(no_trade_regret_events)")
+                  if row[1] == "alpha_feedback_json")
+    assert column[2] == "TEXT" and column[3] == 0
 
     tables = {
         str(row[0])
@@ -2940,6 +2956,7 @@ def test_deploy_live_restart_world_schemas_are_atomic_and_idempotent(tmp_path):
         "edli_live_order_events",
         "edli_live_profit_audit_supersessions",
         "settlement_attribution_supersessions",
+        "no_trade_regret_events",
     } <= tables
 
 
@@ -8329,7 +8346,11 @@ def test_restart_migration_ledger_uses_primary_root_not_checkout_state(
         conn.close()
 
     ok, detail = dl._restart_migration_targets_current()
-
+    assert ok is False
+    assert "causal alpha feedback schema pending" in detail
+    with sqlite3.connect(primary_root / "state" / "zeus-world.db") as conn:
+        dl._ensure_restart_world_schemas(conn)
+    ok, detail = dl._restart_migration_targets_current()
     assert ok is True
     assert str(primary_root / "state") in detail
 

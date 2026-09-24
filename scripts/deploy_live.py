@@ -3618,6 +3618,12 @@ def _restart_migration_targets_current() -> tuple[bool, str]:
                 }
                 if db_path == world_db and not execution_command_index_is_current(conn):
                     return False, f"restart command receipt index pending in {db_path}"
+                if db_path == world_db and "alpha_feedback_json" not in {
+                    str(row[1]) for row in conn.execute(
+                        "PRAGMA table_info(no_trade_regret_events)"
+                    )
+                }:
+                    return False, f"restart causal alpha feedback schema pending in {db_path}"
             finally:
                 conn.close()
             missing = [target for _key, target in targets if target not in applied]
@@ -3641,12 +3647,16 @@ def _ensure_restart_world_schemas(conn: sqlite3.Connection) -> None:
     from src.state.schema.settlement_attribution_schema import (
         ensure_table as ensure_settlement_attribution_table,
     )
+    from src.state.schema.no_trade_regret_events_schema import (
+        ensure_table as ensure_no_trade_regret_table,
+    )
 
     conn.execute("BEGIN IMMEDIATE")
     try:
         ensure_live_order_tables(conn)
         ensure_live_profit_audit_table(conn)
         ensure_settlement_attribution_table(conn)
+        ensure_no_trade_regret_table(conn)
     except Exception:
         conn.rollback()
         raise

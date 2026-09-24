@@ -1230,9 +1230,13 @@ tables:
       - {name: rejection_stage, type: TEXT, nullable: false}
       - {name: rejection_reason, type: TEXT, nullable: false}
       - {name: regret_bucket, type: TEXT, nullable: false}
+      - {name: alpha_feedback_json, type: TEXT, nullable: true}
     notes: >
       EDLI v1 event-triggered rejection ledger. Hindsight columns exist for
-      post-settlement analysis but are excluded from live readers.
+      post-settlement analysis but are excluded from decision-time probability inputs.
+      alpha_feedback_json is a once-only finalized-chain acknowledgement for the
+      prospective causal Brier protocol; it authorizes only later prediction
+      cuts and never mutates the frozen envelope or asserts an actual fill.
 
   - name: edli_no_submit_receipts
     db: world

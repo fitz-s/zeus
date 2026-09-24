@@ -16,6 +16,7 @@
 
 import json
 import logging
+import math
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -482,7 +483,7 @@ def _init_empty_canonical_portfolio_schema(
 
 def _causal_alpha_round(slot, *, outcome, q, market, strategy="day0_nowcast_entry",
                         previous=None, previous_hash=None, feedback=True,
-                        capital_ready=True):
+                        capital_ready=True, cost=None):
     """A prevalidated prospective round; DB and hash checks have separate tests."""
     from src.strategy.live_inference.no_trade_regret import ALPHA_PROTOCOL_VERSION
 
@@ -515,8 +516,9 @@ def _causal_alpha_round(slot, *, outcome, q, market, strategy="day0_nowcast_entr
             "settlement_proof": {"outcome": outcome},
         } if feedback else None),
         "capital_gain_proof_ready": capital_ready,
-        "hypothetical_capital_committed_usd": 1.0,
-        "hypothetical_realized_pnl_usd": (outcome - market) * 5,
+        "hypothetical_capital_committed_usd": (market if cost is None else cost) * 5,
+        "hypothetical_shares": 5.0,
+        "hypothetical_realized_pnl_usd": (outcome - (market if cost is None else cost)) * 5,
     }
 
 
@@ -535,7 +537,7 @@ def test_causal_alpha_correlated_city_requires_feedback_between_decisions():
     """REG-ALPHA-02: duplicate correlated Y cannot manufacture two LR factors."""
     first = _causal_alpha_round(1, outcome=0, q=.9, market=.1)
     second = _causal_alpha_round(
-        2, outcome=0, q=0, market=.1,
+        2, outcome=0, q=.9, market=.1,
         previous=first["trade_id"], previous_hash="feedback-1",
     )
     evidence = riskguard_module._market_relative_alpha_evidence(
@@ -585,8 +587,8 @@ def test_causal_alpha_pending_and_corrupt_tail_keep_prefix_and_block_validation(
 def test_causal_alpha_q_extremes_recover_only_with_complete_capital():
     """REG-ALPHA-04: finite loss does not permanently suppress positive truth."""
     rows = []
-    for slot in range(1, 34):
-        outcome, q, market = (1, 0.0, .9) if slot == 1 else (1, 1.0, .05)
+    for slot in range(1, 121):
+        outcome, q, market = (0, 1.0, .05) if slot <= 15 else (1, 1.0, .05)
         previous = rows[-1]["trade_id"] if rows else None
         previous_hash = f"feedback-{slot-1}" if rows else None
         row = _causal_alpha_round(
@@ -604,7 +606,10 @@ def test_causal_alpha_q_extremes_recover_only_with_complete_capital():
                 + timedelta(seconds=1)
             ).isoformat()
         rows.append(row)
-    cut = datetime(2026, 9, 30, tzinfo=timezone.utc)
+    cut = datetime(2026, 10, 12, tzinfo=timezone.utc)
+    assert riskguard_module._market_relative_alpha_evidence(
+        rows[:15], strategy_key="day0_nowcast_entry", rejection_evalue=10, as_of=cut,
+    )["rejected"]
     evidence = riskguard_module._market_relative_alpha_evidence(
         rows, strategy_key="day0_nowcast_entry", rejection_evalue=10, as_of=cut,
     )
@@ -613,6 +618,28 @@ def test_causal_alpha_q_extremes_recover_only_with_complete_capital():
     assert not riskguard_module._market_relative_alpha_evidence(
         rows, strategy_key="day0_nowcast_entry", rejection_evalue=10, as_of=cut,
     )["validated"]
+
+
+def test_causal_alpha_score_covers_full_proposal_fees():
+    """A forecast can beat the raw price while still losing after execution costs."""
+    q, price, cost, truth = .515, .5, .51, .508
+    raw_gain = (q - price) * (2 * truth - q - price)
+    assert raw_gain > 0 and truth < cost
+    score_gains = []
+    for outcome in (0, 1):
+        row = _causal_alpha_round(1, outcome=outcome, q=q, market=price, cost=cost)
+        evidence = riskguard_module._market_relative_alpha_evidence(
+            [row], strategy_key="day0_nowcast_entry", rejection_evalue=10,
+            as_of=datetime(2026, 9, 25, tzinfo=timezone.utc),
+        )["cohorts"][0]
+        assert evidence["alpha_protocol_slot_structure_valid"]
+        score_gains.append((evidence["model_over_market_evalue"] - 1) * math.sqrt(2))
+    assert truth * score_gains[1] + (1-truth) * score_gains[0] < 0
+    row["hypothetical_shares"] = 0
+    assert riskguard_module._market_relative_alpha_evidence(
+        [row], strategy_key="day0_nowcast_entry", rejection_evalue=10,
+        as_of=datetime(2026, 9, 25, tzinfo=timezone.utc),
+    )["rejected"]
 
 
 @pytest.mark.parametrize("strategy", ["day0_nowcast_entry", "forecast_qkernel_entry"])
