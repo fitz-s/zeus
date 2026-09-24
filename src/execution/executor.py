@@ -4930,6 +4930,7 @@ def _persist_final_submission_envelope_payload(
     try:
         from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
         from src.state.venue_command_repo import insert_submission_envelope
+        from src.state.write_coordinator import WritePriority
 
         envelope = VenueSubmissionEnvelope.from_dict(envelope_payload)
         envelope_id = hashlib.sha256(envelope.to_json().encode("utf-8")).hexdigest()
@@ -4957,8 +4958,12 @@ def _persist_final_submission_envelope_payload(
                 persist_fn=persist_receipt,
                 owner="final_sdk_receipt_persist",
                 what="final_sdk_receipt",
-                deadline_ms=250,
+                # Current canonical writers can hold this lease for ~16.6s.
+                # Four bounded 5s attempts cover that observed contention;
+                # the short SQLite hold budget still yields once admitted.
+                deadline_ms=5000,
                 max_hold_ms=500,
+                priority=WritePriority.RECOVERY_CRITICAL,
             )
         finally:
             if close_persist_conn:
@@ -5353,6 +5358,7 @@ def _run_post_submit_ack_persistence(
     what: str,
     deadline_ms: int,
     max_hold_ms: int,
+    priority="standard",
 ) -> None:
     """Persist one post-submit ACK or terminal-rejection outcome atomically.
 
@@ -5369,7 +5375,6 @@ def _run_post_submit_ack_persistence(
     """
     from src.state.write_coordinator import (
         WriteLeaseTimeout,
-        WritePriority,
         bounded_sqlite_write,
     )
 
@@ -5387,7 +5392,7 @@ def _run_post_submit_ack_persistence(
                 owner=owner,
                 deadline_ms=deadline_ms,
                 max_hold_ms=max_hold_ms,
-                priority=WritePriority.STANDARD,
+                priority=priority,
             ) as lease:
                 if lease is None:
                     conn.execute("BEGIN IMMEDIATE")

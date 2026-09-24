@@ -6358,6 +6358,88 @@ def test_final_sdk_receipt_waits_out_file_sqlite_writer_and_survives_ack_failure
         caller.close()
 
 
+@pytest.mark.parametrize("side", ["BUY", "SELL"])
+def test_final_sdk_receipt_survives_canonical_writer_lease_longer_than_ack_budget(
+    tmp_path, monkeypatch, side
+):
+    """A real canonical lease held past the old 1.6s retry window cannot lose an SDK receipt."""
+    import threading
+
+    import src.execution.executor as executor
+    import src.state.db as db
+    import src.state.write_coordinator as coordinator_module
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator, WritePriority
+
+    path = tmp_path / f"canonical-final-{side.lower()}.db"
+    caller = sqlite3.connect(path, timeout=0)
+    db.init_schema_trade_only(caller)
+    caller.commit()
+    coordinator = WriteCoordinator({DBIdentity.TRADE: path})
+    monkeypatch.setattr(db, "_zeus_trade_db_path", lambda: path)
+    monkeypatch.setattr(
+        coordinator_module, "default_runtime_write_coordinator", lambda: coordinator
+    )
+    held = threading.Event()
+    release = threading.Event()
+    writer_errors = []
+
+    def hold_canonical_writer():
+        try:
+            with coordinator.lease(
+                (DBIdentity.TRADE,), owner="slow_canonical_writer",
+                priority=WritePriority.MONITOR, deadline_ms=1000, max_hold_ms=3000,
+            ):
+                held.set()
+                release.wait(timeout=3)
+        except BaseException as exc:
+            writer_errors.append(exc)
+            held.set()
+
+    writer = threading.Thread(target=hold_canonical_writer)
+    writer.start()
+    wake = None
+    try:
+        assert held.wait(timeout=1)
+        assert not writer_errors
+        wake = threading.Timer(1.9, release.set)
+        wake.start()
+        final = _entry_submission_envelope(
+            token_id="canonical-final-token", side=side
+        ).with_updates(
+            order_id=f"ord-canonical-{side.lower()}",
+            raw_response_json='{"status":"LIVE"}',
+        )
+        reference = executor._persist_final_submission_envelope_payload(
+            caller,
+            {"_venue_submission_envelope": final.to_dict()},
+            command_id=f"cmd-canonical-{side.lower()}",
+        )
+        assert reference["final_submission_envelope_stage"] == "post_submit_result"
+        assert caller.in_transaction is False
+        observer = sqlite3.connect(path)
+        try:
+            assert observer.execute(
+                "SELECT side, order_id FROM venue_submission_envelopes WHERE envelope_id = ?",
+                (reference["final_submission_envelope_id"],),
+            ).fetchone() == (side, f"ord-canonical-{side.lower()}")
+        finally:
+            observer.close()
+    finally:
+        release.set()
+        if wake is not None:
+            wake.join(timeout=3)
+        writer.join(timeout=3)
+        caller.close()
+    assert not writer.is_alive()
+    assert not writer_errors
+    receipt_leases = [
+        lease for lease in coordinator.telemetry_snapshot()
+        if lease.owner == "final_sdk_receipt_persist" and lease.event == "release"
+    ]
+    assert receipt_leases
+    assert all(lease.priority == WritePriority.RECOVERY_CRITICAL.value for lease in receipt_leases)
+
+
 def test_final_sdk_receipt_does_not_end_caller_transaction(tmp_path):
     import src.execution.executor as executor
     from src.state.db import init_schema_trade_only
