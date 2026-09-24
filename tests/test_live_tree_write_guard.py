@@ -107,6 +107,8 @@ def test_direct_live_git_mutations_are_blocked_but_ff_sync_is_allowed():
     commit = run(f"git -C {LIVE_ROOT} commit -m forbidden")
     merge = run(f"git -C {LIVE_ROOT} merge forbidden")
     dry_clean = run(f"git -C {LIVE_ROOT} clean -nd")
+    ancestry_read = run(f"git -C {LIVE_ROOT} fetch && git -C {LIVE_ROOT} merge-base --is-ancestor a b")
+    assert ancestry_read.returncode == 0
     ff_sync = run(f"git -C {LIVE_ROOT} pull --ff-only")
     ff_sync_named = run(f"git -C {LIVE_ROOT} pull --ff-only origin live")
     other_pull = run(f"git -C {LIVE_ROOT} pull origin feature")

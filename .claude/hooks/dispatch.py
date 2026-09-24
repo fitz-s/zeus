@@ -220,8 +220,9 @@ def _git_subcmd_at_command_position(command: str, subcmds: tuple[str, ...]):
     }
     opt = r"(?:-C\s+\S+|-c\s+\S+|--git-dir=\S+|--work-tree=\S+)"
     subs = "|".join(subcmds)
-    git_head = re.compile(r"^(?:/\S*/)?git((?:\s+" + opt + r")*)\s+(" + subs + r")\b([^;&|]*)")
-    git_any = re.compile(r"(?:^|\s)(?:/\S*/)?git((?:\s+" + opt + r")*)\s+(" + subs + r")\b([^;&|]*)")
+    # `(?![\w-])` ends the subcommand: `git merge-base` is a read, not `git merge`.
+    git_head = re.compile(r"^(?:/\S*/)?git((?:\s+" + opt + r")*)\s+(" + subs + r")(?![\w-])([^;&|]*)")
+    git_any = re.compile(r"(?:^|\s)(?:/\S*/)?git((?:\s+" + opt + r")*)\s+(" + subs + r")(?![\w-])([^;&|]*)")
     for seg in segments:
         if "git" not in seg:
             continue
