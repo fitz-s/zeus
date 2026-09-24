@@ -5,6 +5,9 @@ from __future__ import annotations
 import sqlite3
 import hashlib
 import json
+import os
+import threading
+from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -19,6 +22,10 @@ _ALPHA_V8_PREFIX = "market-relative-alpha-shadow-v8-causal-brier:"
 # A new sequence can begin only from observations made after this process has
 # installed the protocol. Existing durable slots remain valid across restarts.
 _PROSPECTIVE_CAPTURE_START = datetime.now(UTC)
+_FEEDBACK_SEEN_LIMIT = 128
+_FEEDBACK_SEEN: OrderedDict[tuple[str, str, str, str, str], tuple[str, datetime]] = OrderedDict()
+_PENDING_ACK_BY_CONNECTION: OrderedDict[int, str] = OrderedDict()
+_FEEDBACK_SEEN_LOCK = threading.Lock()
 _ALPHA_SELECTION_RULE = (
     "earliest_complete_global_cut_exact_global_posterior_mean_"
     "expected_growth_winner_v3"
@@ -38,6 +45,43 @@ def _utc(value: object) -> datetime:
     if parsed.tzinfo is None:
         raise ValueError("alpha protocol clock must be timezone-aware")
     return parsed.astimezone(UTC)
+
+
+def _database_identity(conn: sqlite3.Connection) -> str:
+    main = next(
+        (str(row[2]) for row in conn.execute("PRAGMA database_list") if row[1] == "main"),
+        "",
+    )
+    return os.path.realpath(main) if main else f":memory:{id(conn)}"
+
+
+def _first_committed_feedback_seen_at(
+    conn: sqlite3.Connection,
+    *,
+    cohort: tuple[str, str, str, str],
+    feedback_hash: str,
+    outer_was_active: bool,
+) -> datetime | None:
+    """Return a prior first-read clock, never the clock of this first read."""
+
+    key = (_database_identity(conn), *cohort)
+    with _FEEDBACK_SEEN_LOCK:
+        pending = _PENDING_ACK_BY_CONNECTION.get(id(conn))
+        if pending is not None:
+            if outer_was_active and pending == feedback_hash:
+                # This connection could be reading its own uncommitted ACK.
+                return None
+            if not outer_was_active:
+                _PENDING_ACK_BY_CONNECTION.pop(id(conn), None)
+        seen = _FEEDBACK_SEEN.get(key)
+        if seen is None or seen[0] != feedback_hash:
+            _FEEDBACK_SEEN[key] = (feedback_hash, datetime.now(UTC))
+            _FEEDBACK_SEEN.move_to_end(key)
+            if len(_FEEDBACK_SEEN) > _FEEDBACK_SEEN_LIMIT:
+                _FEEDBACK_SEEN.popitem(last=False)
+            return None
+        _FEEDBACK_SEEN.move_to_end(key)
+        return seen[1]
 
 
 def _normalized_alpha_proof(proof: Mapping[str, object]) -> dict[str, object]:
@@ -175,6 +219,7 @@ def validated_alpha_protocol(
         slot = protocol["slot"]
         previous_id = protocol["previous_event_id"]
         previous_hash = protocol["previous_feedback_hash"]
+        previous_seen = protocol["previous_feedback_seen_at"]
         if (
             strategy not in {"day0_nowcast_entry", "forecast_qkernel_entry"}
             or selection != CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
@@ -200,15 +245,23 @@ def validated_alpha_protocol(
                 "strategy_key", "global_selection_revision",
                 "probability_semantics_revision", "metric",
             ))
-            or (slot == 1 and (previous_id is not None or previous_hash is not None))
+            or (slot == 1 and (
+                previous_id is not None or previous_hash is not None
+                or previous_seen is not None
+            ))
             or (slot > 1 and (
                 not isinstance(previous_id, str) or not previous_id
                 or not isinstance(previous_hash, str) or len(previous_hash) != 64
+                or not isinstance(previous_seen, str)
             ))
         ):
             raise ValueError("alpha protocol identity mismatch")
-        _utc(envelope["decision_at_utc"])
-        _utc(envelope["selection_cut_at_utc"])
+        decision_at = _utc(envelope["decision_at_utc"])
+        cut_at = _utc(envelope["selection_cut_at_utc"])
+        if previous_seen is not None and (
+            decision_at <= _utc(previous_seen) or cut_at <= _utc(previous_seen)
+        ):
+            raise ValueError("alpha cut predates feedback visibility")
         return dict(envelope)
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
         raise ValueError("invalid alpha protocol") from exc
@@ -473,6 +526,7 @@ class NoTradeRegretLedger:
             return None
 
         cohort_prefix = f"{_ALPHA_V8_PREFIX}{strategy}:{selection}:{revision}:{metric}:"
+        outer_was_active = self.conn.in_transaction
         with self._alpha_write():
             if self.conn.execute(
                 "SELECT 1 FROM no_trade_regret_events WHERE regret_event_id=?", (event_id,)
@@ -538,6 +592,10 @@ class NoTradeRegretLedger:
                     or protocol.get("previous_feedback_hash") != previous_hash
                 ):
                     raise ValueError("alpha cohort feedback chain mismatch")
+                if previous_observed_at is not None and _utc(
+                    protocol["previous_feedback_seen_at"]
+                ) < previous_observed_at:
+                    raise ValueError("alpha cut predates committed feedback visibility")
                 if feedback_json is None:
                     if slot != len(ordered):
                         raise ValueError("alpha cohort has an unacknowledged gap")
@@ -560,10 +618,22 @@ class NoTradeRegretLedger:
                 previous_id = prior_id
                 previous_hash = str(feedback["feedback_hash"])
                 previous_observed_at = _utc(feedback["observed_at"])
-            if previous_observed_at is not None and (
-                decision_at <= previous_observed_at or cut_at <= previous_observed_at
-            ):
-                return None
+            previous_seen_at: datetime | None = None
+            if previous_observed_at is not None:
+                if decision_at <= previous_observed_at or cut_at <= previous_observed_at:
+                    return None
+                previous_seen_at = _first_committed_feedback_seen_at(
+                    self.conn,
+                    cohort=(strategy, selection, revision, metric),
+                    feedback_hash=str(previous_hash),
+                    outer_was_active=outer_was_active,
+                )
+                if previous_seen_at is None:
+                    return None
+                if previous_seen_at < previous_observed_at:
+                    raise ValueError("feedback visibility predates its ACK")
+                if decision_at <= previous_seen_at or cut_at <= previous_seen_at:
+                    return None
             envelope["alpha_protocol"] = {
                 "version": ALPHA_PROTOCOL_VERSION,
                 "strategy_key": strategy,
@@ -573,6 +643,9 @@ class NoTradeRegretLedger:
                 "slot": len(ordered) + 1,
                 "previous_event_id": previous_id,
                 "previous_feedback_hash": previous_hash,
+                "previous_feedback_seen_at": (
+                    None if previous_seen_at is None else previous_seen_at.isoformat()
+                ),
             }
             self.conn.execute(
                 "INSERT OR IGNORE INTO no_trade_regret_events "
@@ -672,6 +745,11 @@ class NoTradeRegretLedger:
             )
             if result.rowcount != 1:
                 raise ValueError("concurrent alpha ACK conflict")
+            with _FEEDBACK_SEEN_LOCK:
+                _PENDING_ACK_BY_CONNECTION[id(self.conn)] = _hash(_canonical_json(body))
+                _PENDING_ACK_BY_CONNECTION.move_to_end(id(self.conn))
+                if len(_PENDING_ACK_BY_CONNECTION) > _FEEDBACK_SEEN_LIMIT:
+                    _PENDING_ACK_BY_CONNECTION.popitem(last=False)
             return True
 
     def enrich_after_settlement(

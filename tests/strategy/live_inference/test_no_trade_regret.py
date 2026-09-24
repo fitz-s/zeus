@@ -33,6 +33,8 @@ def _historic_protocol_cut_for_isolated_fixtures(monkeypatch):
         no_trade_regret_module, "_PROSPECTIVE_CAPTURE_START",
         datetime(2026, 9, 23, 0, tzinfo=timezone.utc),
     )
+    no_trade_regret_module._FEEDBACK_SEEN.clear()
+    no_trade_regret_module._PENDING_ACK_BY_CONNECTION.clear()
 
 
 def test_insert_idempotent():
@@ -260,8 +262,14 @@ def test_v8_pending_feedback_and_strict_later_cut_preserve_one_winner():
     assert first_envelope["alpha_protocol"]["previous_feedback_hash"] is None
     assert feedback["settlement_proof"] == proof
     assert ledger.insert_idempotent(_v8_event("Milan", feedback["observed_at"])) is None
+    conn.commit()
     after_feedback = (feedback_time + timedelta(microseconds=1)).isoformat()
     assert ledger.insert_idempotent(_v8_event("Milan", after_feedback, cut_at=feedback["observed_at"])) is None
+    # The first post-commit read only establishes visibility, even though
+    # the ACK's pre-commit timestamp is already in the past.
+    assert ledger.insert_idempotent(_v8_event("Milan", after_feedback)) is None
+    seen = next(reversed(no_trade_regret_module._FEEDBACK_SEEN.values()))[1]
+    after_feedback = (seen + timedelta(microseconds=1)).isoformat()
     second = _v8_event("Milan", after_feedback)
     second_id = ledger.insert_idempotent(second)
     assert isinstance(second_id, str)
@@ -270,6 +278,7 @@ def test_v8_pending_feedback_and_strict_later_cut_preserve_one_winner():
     assert second_envelope["alpha_protocol"]["slot"] == 2
     assert second_envelope["alpha_protocol"]["previous_event_id"] == first_id
     assert second_envelope["alpha_protocol"]["previous_feedback_hash"] == feedback["feedback_hash"]
+    assert second_envelope["alpha_protocol"]["previous_feedback_seen_at"] == seen.isoformat()
     assert ledger.insert_idempotent(second) == second_id
     assert _v8_record(conn, second_id)[0] == second_envelope
     conn.close()
@@ -406,9 +415,15 @@ def test_v8_two_writers_can_claim_only_one_next_slot(tmp_path):
         first_id, settlement_proof=_v8_proof(setup, first_id, "Chicago")
     )
     feedback_at = datetime.fromisoformat(_v8_record(setup, first_id)[1]["observed_at"])
-    next_at = (feedback_at + timedelta(microseconds=1)).isoformat()
     setup.commit()
     setup.close()
+    probe = sqlite3.connect(db)
+    assert NoTradeRegretLedger(probe).insert_idempotent(
+        _v8_event("Milan", (feedback_at + timedelta(microseconds=1)).isoformat())
+    ) is None
+    seen = next(reversed(no_trade_regret_module._FEEDBACK_SEEN.values()))[1]
+    next_at = (seen + timedelta(microseconds=1)).isoformat()
+    probe.close()
     barrier = threading.Barrier(2)
     results = []
     errors = []
@@ -585,3 +600,89 @@ def test_v8_empty_helper_never_ends_preexisting_outer_or_autocommit(tmp_path):
     ) is None
     assert not autocommit.in_transaction
     autocommit.close()
+
+
+def test_v8_feedback_visibility_waits_for_commit_and_a_new_cut(tmp_path):
+    from datetime import datetime, timedelta
+    from src.state.schema.no_trade_regret_events_schema import ensure_table
+
+    db = tmp_path / "alpha-commit-visibility.db"
+    ack_conn = sqlite3.connect(db, timeout=1)
+    ensure_table(ack_conn)
+    ack_ledger = NoTradeRegretLedger(ack_conn)
+    first_id = ack_ledger.insert_idempotent(
+        _v8_event("Chicago", "2026-09-23T12:00:00+00:00")
+    )
+    ack_conn.commit()
+    producer_conn = sqlite3.connect(db, timeout=0.05)
+    producer = NoTradeRegretLedger(producer_conn)
+    assert ack_ledger.acknowledge_alpha_settlement(
+        first_id, settlement_proof=_v8_proof(ack_conn, first_id, "Chicago")
+    )
+    ack_at = datetime.fromisoformat(_v8_record(ack_conn, first_id)[1]["observed_at"])
+    precommit_cut = (ack_at + timedelta(microseconds=1)).isoformat()
+    # Another connection cannot see an uncommitted ACK. No visibility cache
+    # entry is created, even though ACK.observed_at was already stamped.
+    with pytest.raises(sqlite3.OperationalError, match="locked"):
+        producer.insert_idempotent(_v8_event("Milan", precommit_cut))
+    assert not no_trade_regret_module._FEEDBACK_SEEN
+    assert not producer_conn.in_transaction
+    ack_conn.commit()
+    # The same cut predates this producer's first actual read of committed ACK.
+    assert producer.insert_idempotent(_v8_event("Milan", precommit_cut)) is None
+    seen_at = next(reversed(no_trade_regret_module._FEEDBACK_SEEN.values()))[1]
+    assert seen_at >= ack_at
+    assert not producer_conn.in_transaction
+    fresh_cut = (seen_at + timedelta(microseconds=1)).isoformat()
+    second_id = producer.insert_idempotent(_v8_event("Milan", fresh_cut))
+    assert isinstance(second_id, str)
+    second_envelope, _feedback = _v8_record(producer_conn, second_id)
+    assert second_envelope["alpha_protocol"]["previous_feedback_seen_at"] == seen_at.isoformat()
+    producer_conn.rollback()
+    producer_conn.close()
+    ack_conn.close()
+
+
+def test_v8_same_connection_uncommitted_ack_never_establishes_visibility():
+    from datetime import datetime, timedelta
+
+    conn, ledger = _ledger()
+    first_id = ledger.insert_idempotent(_v8_event("Chicago", "2026-09-23T12:00:00+00:00"))
+    conn.commit()
+    assert ledger.acknowledge_alpha_settlement(
+        first_id, settlement_proof=_v8_proof(conn, first_id, "Chicago")
+    )
+    ack_at = datetime.fromisoformat(_v8_record(conn, first_id)[1]["observed_at"])
+    after_ack = (ack_at + timedelta(microseconds=1)).isoformat()
+    assert ledger.insert_idempotent(_v8_event("Milan", after_ack)) is None
+    assert not no_trade_regret_module._FEEDBACK_SEEN
+    conn.commit()
+    assert ledger.insert_idempotent(_v8_event("Milan", after_ack)) is None
+    assert no_trade_regret_module._FEEDBACK_SEEN
+    conn.close()
+
+
+def test_v8_restart_or_cache_eviction_requires_fresh_feedback_read_again():
+    from datetime import datetime, timedelta
+
+    conn, ledger = _ledger()
+    first_id = ledger.insert_idempotent(
+        _v8_event("Chicago", "2026-09-23T12:00:00+00:00")
+    )
+    conn.commit()
+    assert ledger.acknowledge_alpha_settlement(
+        first_id, settlement_proof=_v8_proof(conn, first_id, "Chicago")
+    )
+    conn.commit()
+    observed = datetime.fromisoformat(_v8_record(conn, first_id)[1]["observed_at"])
+    candidate = _v8_event("Milan", (observed + timedelta(microseconds=1)).isoformat())
+    assert ledger.insert_idempotent(candidate) is None
+    first_seen = next(reversed(no_trade_regret_module._FEEDBACK_SEEN.values()))[1]
+    no_trade_regret_module._FEEDBACK_SEEN.clear()  # Simulate restart/eviction.
+    assert ledger.insert_idempotent(candidate) is None
+    second_seen = next(reversed(no_trade_regret_module._FEEDBACK_SEEN.values()))[1]
+    assert second_seen >= first_seen
+    fresh = _v8_event("Milan", (second_seen + timedelta(microseconds=1)).isoformat())
+    assert isinstance(ledger.insert_idempotent(fresh), str)
+    assert conn.execute("SELECT count(*) FROM no_trade_regret_events").fetchone()[0] == 2
+    conn.close()
