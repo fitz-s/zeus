@@ -19,7 +19,7 @@ def main() -> int:
     print(
         "INTEGRATION_REFUSED: multiagent_integrator.py is retired. It never "
         "mutates live or removes worktrees. Validate committed work in its "
-        "worktree, then use a verified git cherry-pick or a PR into live.",
+        "worktree, then land with a fast-forward `git push origin HEAD:live` or a PR.",
         file=sys.stderr,
     )
     return 2

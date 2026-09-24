@@ -576,10 +576,8 @@ capabilities:
     owner_module: scripts/worktree_doctor.py
     intent: >
       ADVISORY landing-closeout reminder after a successful PR merge or
-      cherry-pick. The completed Codex worker archives its own thread only
-      after landing verification and any open-PR monitoring; Codex snapshots
-      and removes its managed worktree. NEVER auto-deletes or raw-removes a
-      Codex-managed worktree. Composes with
+      push to live. The task removes its own worktree and branch; the
+      hourly workspace converger (scripts/workspace_converge.py) backstops it. Composes with
       .claude/hooks/registry.yaml::post_merge_cleanup hook; this capability
       owns the entry-point script and the hook owns the runtime trigger.
     relationships:
@@ -588,7 +586,7 @@ capabilities:
     hard_kernel_paths:
       - scripts/worktree_doctor.py
     original_intent:
-      intent_test: "task is a successful gh pr merge, cherry-pick, or explicit cleanup audit"
+      intent_test: "task is a successful gh pr merge, push to live, or explicit cleanup audit"
       does_not_fit: log_and_advisory
       scope_keywords: [cleanup, post_merge, archive, sweep, backup]
       out_of_scope_keywords: [auto-delete, force-remove]

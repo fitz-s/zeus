@@ -242,7 +242,7 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--repo-root", default=str(REPO_ROOT))
     p.add_argument("--changed-files", nargs="*", default=None)
-    p.add_argument("--base", default="origin/main")
+    p.add_argument("--base", default="origin/live")
     p.add_argument("--head", default="HEAD")
     p.add_argument("--json", action="store_true")
     args = p.parse_args(argv)

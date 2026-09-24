@@ -60,7 +60,7 @@ hooks:
       BLOCK branch-/HEAD-/working-tree-mutating Git in the MAIN live checkout,
       including direct commit, merge, reset, rebase, revert, restore, apply,
       stash, clean, and pull. Linked worktrees are exempt. Only a verified
-      `git cherry-pick` is permitted as a local landing lane; PR merging occurs
+      `git pull --ff-only` is the only live-checkout sync; landing is a fast-forward push or PR merge
       through GitHub.
     blocked_when:
       - branch_mutating_git_in_main_tree
@@ -202,7 +202,7 @@ hooks:
       (/Users/leofitz/zeus). Linked worktrees are explicitly allowed, including
       nested .claude/worktrees and .codex/worktrees. Agents make and test changes
       in their own linked worktree, commit there, then land only through a merged
-      PR or a verified git cherry-pick onto live.
+      fast-forward `git push origin HEAD:live` or a merged PR.
     blocked_when:
       - agent_write_targets_live_checkout
       - codex_apply_patch_target_unknown_from_live_checkout

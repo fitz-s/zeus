@@ -112,6 +112,8 @@ def test_direct_live_git_mutations_are_blocked_but_ff_sync_is_allowed():
     # A bare git after `cd <linked worktree>` runs in that worktree, not in live.
     in_worktree = run(f"cd {REPO_ROOT} && git commit -m ok")
     assert in_worktree.returncode == (2 if REPO_ROOT == LIVE_ROOT else 0)
+    dot_in_worktree = run(f"cd {REPO_ROOT} && git -C . commit -m ok")
+    assert dot_in_worktree.returncode == (2 if REPO_ROOT == LIVE_ROOT else 0)
     back_to_live = run(f"cd {REPO_ROOT} && cd {LIVE_ROOT} && git commit -m forbidden")
     assert back_to_live.returncode == 2
     unresolvable = run(f"cd $WT && git commit -m unknown")

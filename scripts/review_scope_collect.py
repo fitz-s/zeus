@@ -3,7 +3,7 @@
 
 Usage:
   python scripts/review_scope_collect.py path/to/file.py ...
-  python scripts/review_scope_collect.py --base origin/main
+  python scripts/review_scope_collect.py --base origin/live
   python scripts/review_scope_collect.py --base HEAD~1 --json
 
 Exit codes:

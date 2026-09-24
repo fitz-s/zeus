@@ -557,7 +557,7 @@ def _run_advisory_check_pr_create_loc_accumulation(
     )
 
     # Resolve the target branch from the (possibly already-open) PR view, falling
-    # back to origin/main. Using merge-base anchors the comparison correctly even
+    # back to origin/live. Using merge-base anchors the comparison correctly even
     # when @{u} is the topic branch itself after push (Codex P2 fix carryover).
     try:
         pr_base_result = subprocess.run(
@@ -567,9 +567,9 @@ def _run_advisory_check_pr_create_loc_accumulation(
         if pr_base_result.returncode == 0 and pr_base_result.stdout.strip():
             target_branch = f"origin/{pr_base_result.stdout.strip()}"
         else:
-            target_branch = "origin/main"
+            target_branch = "origin/live"
     except (subprocess.TimeoutExpired, OSError):
-        target_branch = "origin/main"
+        target_branch = "origin/live"
 
     try:
         merge_base = subprocess.run(
@@ -1350,11 +1350,11 @@ def _run_advisory_check_worktree_remove_advisor(
                 ).stdout.strip()
                 if branch and branch != "main":
                     ahead = int(subprocess.run(
-                        ["git", "rev-list", "--count", f"origin/main..{branch}"],
+                        ["git", "rev-list", "--count", f"origin/live..{branch}"],
                         capture_output=True, text=True, timeout=5, cwd=Path(wt_path),
                     ).stdout.strip() or "0")
                     if ahead > 0:
-                        lines.append(f"  WARNING: {ahead} commits ahead of origin/main not in a PR")
+                        lines.append(f"  WARNING: {ahead} commits ahead of origin/live, not landed")
                         lines.append("  suggest: open PR or push branch before removing worktree")
                     lines.append(f"  branch closure: after removal, `git branch -d {branch}` if merged")
             except (subprocess.TimeoutExpired, ValueError, OSError):
@@ -1766,7 +1766,7 @@ def _run_advisory_check_maintree_git_state_guard(
     if c_match:
         target = c_match.group(1).strip("'\"")
         try:
-            target_dir = Path(target).resolve()
+            target_dir = (_effective_cd_dir(command, subcmd) / Path(target).expanduser()).resolve()
         except OSError:
             target_dir = Path(target)
     else:

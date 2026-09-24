@@ -6,8 +6,8 @@
 
 This file remains so an old worker receives an explicit, safe refusal instead
 of silently changing the live checkout. It never invokes git and never removes
-a worktree. Land a verified committed change only through the named hot-pick
-(``git cherry-pick`` by the landing authority) or a PR into ``live``.
+a worktree. Land a verified committed change with a fast-forward
+``git push origin HEAD:live`` or a merged PR (AGENTS.md §5).
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ def main() -> int:
     print(
         "MERGE_REFUSED: agent_worktree_merge.py is retired. It never mutates "
         "live or removes worktrees. Report the committed SHA to the landing "
-        "authority; land only by verified git cherry-pick or merged PR into live.",
+        "authority; land with a fast-forward `git push origin HEAD:live` or a merged PR.",
         file=sys.stderr,
     )
     return 2

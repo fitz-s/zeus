@@ -70,7 +70,6 @@ tmp/
 nohup.out
 .git-commit-msg.tmp
 /k_bugs.json
-/patch_schema.py
 /equity_curve.png
 
 # ----------------------------------------------------------------------
