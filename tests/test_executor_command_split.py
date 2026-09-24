@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-09-01; last_reused=2026-09-01
+# Lifecycle: created=2026-04-26; last_reviewed=2026-09-24; last_reused=2026-09-24
 # Purpose: Lock executor command split phase ordering and ACK invariants.
 # Reuse: Run when venue command persistence, live order submission, or ACK handling changes.
 # Created: 2026-04-26
-# Last reused/audited: 2026-09-01
+# Last reused/audited: 2026-09-24
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S3
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-4 side-effect boundary.
@@ -6286,6 +6286,178 @@ def test_inv30_manifest_registered():
     )
 
 
+@pytest.mark.parametrize("side", ["BUY", "SELL"])
+def test_final_sdk_receipt_waits_out_file_sqlite_writer_and_survives_ack_failure(
+    tmp_path, monkeypatch, side
+):
+    """The SDK receipt commits independently before the fallible ACK closure."""
+    import threading
+
+    import src.execution.executor as executor
+    from src.state.db import init_schema_trade_only
+
+    path = tmp_path / f"final-{side.lower()}.db"
+    caller = sqlite3.connect(path, timeout=0)
+    caller.execute("PRAGMA journal_mode=WAL")
+    init_schema_trade_only(caller)
+    caller.execute("CREATE TABLE caller_work (value TEXT NOT NULL)")
+    caller.commit()
+    caller.execute("PRAGMA busy_timeout=0")
+    locker = sqlite3.connect(path, timeout=0, check_same_thread=False)
+    locker.execute("BEGIN IMMEDIATE")
+    locker.execute("INSERT INTO caller_work VALUES ('competing writer')")
+    release = threading.Timer(0.18, locker.commit)
+    release.start()
+    monkeypatch.setenv("ZEUS_DB_BUSY_TIMEOUT_MS", "5")
+    final = _entry_submission_envelope(token_id="final-receipt-token", side=side).with_updates(
+        order_id=f"ord-final-{side.lower()}",
+        raw_response_json='{"status":"LIVE"}',
+    )
+    try:
+        reference = executor._persist_final_submission_envelope_payload(
+            caller,
+            {"_venue_submission_envelope": final.to_dict()},
+            command_id=f"cmd-{side.lower()}",
+        )
+        assert caller.in_transaction is False
+        assert caller.execute("PRAGMA busy_timeout").fetchone()[0] == 0
+        assert reference["final_submission_envelope_stage"] == "post_submit_result"
+        assert executor._persist_final_submission_envelope_payload(
+            caller,
+            {"_venue_submission_envelope": final.to_dict()},
+            command_id=f"cmd-{side.lower()}",
+        ) == reference
+
+        def failed_ack():
+            caller.execute("INSERT INTO caller_work VALUES ('partial ACK')")
+            raise RuntimeError("late ACK failure")
+
+        with pytest.raises(RuntimeError, match="late ACK failure"):
+            executor._run_post_submit_ack_persistence(
+                caller, own_conn=False, persist_fn=failed_ack,
+                owner="final_receipt_test", what="final_receipt_ack",
+                deadline_ms=250, max_hold_ms=500,
+            )
+        observer = sqlite3.connect(path)
+        try:
+            assert observer.execute(
+                "SELECT side, order_id FROM venue_submission_envelopes WHERE envelope_id = ?",
+                (reference["final_submission_envelope_id"],),
+            ).fetchone() == (side, f"ord-final-{side.lower()}")
+            assert observer.execute(
+                "SELECT COUNT(*) FROM venue_submission_envelopes"
+            ).fetchone()[0] == 1
+            assert [row[0] for row in observer.execute("SELECT value FROM caller_work")] == [
+                "competing writer"
+            ]
+        finally:
+            observer.close()
+    finally:
+        release.join(timeout=2)
+        locker.close()
+        caller.close()
+
+
+def test_final_sdk_receipt_does_not_end_caller_transaction(tmp_path):
+    import src.execution.executor as executor
+    from src.state.db import init_schema_trade_only
+
+    path = tmp_path / "caller-owned-final.db"
+    caller = sqlite3.connect(path)
+    init_schema_trade_only(caller)
+    caller.execute("CREATE TABLE caller_work (value TEXT NOT NULL)")
+    caller.commit()
+    final = _entry_submission_envelope(token_id="caller-token").with_updates(
+        order_id="ord-caller", raw_response_json='{"status":"LIVE"}'
+    )
+    caller.execute("INSERT INTO caller_work VALUES ('caller sentinel')")
+    with pytest.raises(executor.FinalSubmissionEnvelopePersistenceError):
+        executor._persist_final_submission_envelope_payload(
+            caller, {"_venue_submission_envelope": final.to_dict()},
+            command_id="cmd-caller",
+        )
+    assert caller.in_transaction
+    assert caller.execute("SELECT value FROM caller_work").fetchone()[0] == "caller sentinel"
+    caller.rollback()
+    assert caller.execute("SELECT COUNT(*) FROM venue_submission_envelopes").fetchone()[0] == 0
+    caller.close()
+
+
+def test_malformed_final_sdk_receipt_leaves_caller_transaction_alone(tmp_path):
+    import src.execution.executor as executor
+
+    caller = sqlite3.connect(tmp_path / "malformed-final.db")
+    caller.execute("CREATE TABLE caller_work (value TEXT NOT NULL)")
+    caller.commit()
+    caller.execute("INSERT INTO caller_work VALUES ('caller sentinel')")
+    with pytest.raises(executor.FinalSubmissionEnvelopePersistenceError):
+        executor._persist_final_submission_envelope_payload(
+            caller, {"_venue_submission_envelope": {"side": "BUY"}},
+            command_id="cmd-malformed",
+        )
+    assert caller.in_transaction
+    assert caller.execute("SELECT value FROM caller_work").fetchone()[0] == "caller sentinel"
+    caller.rollback()
+    caller.close()
+
+
+@pytest.mark.parametrize("path", ["entry", "exit"])
+def test_final_receipt_failure_fallback_preserves_active_caller_transaction(
+    mem_conn, monkeypatch, path
+):
+    """Even the review fallback cannot commit an unrelated caller transaction."""
+    import src.execution.executor as executor
+
+    if path == "entry":
+        _allow_entry_submit_until_client(monkeypatch)
+        intent = _make_entry_intent(mem_conn, limit_price=0.34)
+
+        def submit():
+            return executor._live_order(
+                trade_id="caller-final-entry", intent=intent, shares=5.0,
+                conn=mem_conn, decision_id="caller-final-entry",
+            )
+    else:
+        monkeypatch.setattr(
+            executor, "_assert_risk_allocator_allows_exit_submit", lambda **_kwargs: None
+        )
+        intent = _make_exit_intent(mem_conn, trade_id="caller-final-exit")
+
+        def submit():
+            return executor.execute_exit_order(
+                intent=intent, conn=mem_conn, decision_id="caller-final-exit",
+            )
+
+    mem_conn.execute("CREATE TABLE caller_final_work (value TEXT NOT NULL)")
+    mem_conn.commit()
+
+    def fail_with_caller_transaction(*_args, **_kwargs):
+        mem_conn.execute("INSERT INTO caller_final_work VALUES ('caller sentinel')")
+        raise executor.FinalSubmissionEnvelopePersistenceError("synthetic receipt error")
+
+    monkeypatch.setattr(
+        executor, "_persist_final_submission_envelope_payload",
+        fail_with_caller_transaction,
+    )
+    with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+        client = MagicMock()
+        MockClient.return_value = client
+        client.v2_preflight.return_value = None
+        bound = _capture_bound_submission_envelope(client)
+        client.place_limit_order.side_effect = lambda **_kwargs: _final_submit_result(
+            bound, order_id=f"ord-caller-final-{path}",
+        )
+        result = submit()
+
+    assert client.place_limit_order.call_count == 1
+    assert result.status == "unknown_side_effect"
+    assert result.command_state == "SUBMITTING"
+    assert mem_conn.in_transaction
+    assert mem_conn.execute("SELECT value FROM caller_final_work").fetchone()[0] == "caller sentinel"
+    mem_conn.rollback()
+    assert mem_conn.execute("SELECT COUNT(*) FROM caller_final_work").fetchone()[0] == 0
+
+
 @pytest.mark.parametrize("path", ["entry", "exit"])
 @pytest.mark.parametrize("late_failure", [False, True])
 def test_real_post_submit_path_rolls_back_final_envelope_and_fill_closure(
@@ -6402,7 +6574,7 @@ def test_real_post_submit_path_rolls_back_final_envelope_and_fill_closure(
     else:
         assert result.command_state == ("FILLED" if path == "entry" else "PARTIAL")
     assert client.place_limit_order.call_count == 1
-    assert envelope_tx_states == [(False, False)]
+    assert envelope_tx_states == [(True, True)]
     assert ack_tx_states == [True]
     command_id = command_rows[0]
     assert mem_conn.execute(
