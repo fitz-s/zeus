@@ -61,6 +61,7 @@ from src.riskguard.metrics import (
     directional_accuracy,
     evaluate_brier,
 )
+from src.riskguard.policy import _is_active, _parse_boolish, _risk_action_gate_scope
 from src.riskguard.risk_level import RiskLevel, overall_level
 from src.runtime import bankroll_provider
 from src.runtime.bankroll_provider import BankrollOfRecord
@@ -4512,11 +4513,29 @@ def _qkernel_market_relative_alpha_evidence(
     }
 
 
+def _alpha_cohort_metric(cohort: Mapping[str, object]) -> str | None:
+    metric = str(cohort.get("temperature_metric") or "").strip().lower()
+    return metric if metric in {"high", "low"} else None
+
+
+def _alpha_cohort_matches_metric(
+    cohort: Mapping[str, object],
+    *,
+    temperature_metric: str | None,
+    require_metric_identity: bool,
+) -> bool:
+    if temperature_metric is not None:
+        return _alpha_cohort_metric(cohort) == str(temperature_metric).strip().lower()
+    return not require_metric_identity or _alpha_cohort_metric(cohort) is None
+
+
 def _market_relative_alpha_gate_reason(
     semantics_binding: Mapping[str, object],
     causal_alpha_evidence: Mapping[str, object],
     *,
     required_evalue: float,
+    temperature_metric: str | None = None,
+    require_metric_identity: bool = False,
 ) -> str | None:
     """Return the licensed revisions' missing capital-proof gate reason.
 
@@ -4530,6 +4549,11 @@ def _market_relative_alpha_gate_reason(
 
     if semantics_binding.get("status") != "ok":
         return None
+    metric = None
+    if temperature_metric is not None:
+        metric = str(temperature_metric).strip().lower()
+        if metric not in {"high", "low"}:
+            raise ValueError("temperature_metric must be high or low")
     current_revision = str(
         semantics_binding.get("current_revision") or ""
     ).strip()
@@ -4555,6 +4579,11 @@ def _market_relative_alpha_gate_reason(
         == "executable_min_order_capital_gain_v2"
         and cohort.get("global_selection_revision")
         == CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+        and _alpha_cohort_matches_metric(
+            cohort,
+            temperature_metric=metric,
+            require_metric_identity=require_metric_identity,
+        )
         and (
             not target_revisions
             or bool(
@@ -4640,7 +4669,8 @@ def _market_relative_alpha_gate_reason(
         "law=executable_min_order_capital_gain_v2,"
         f"selection_revision={CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION},"
         f"revision={revision_label}"
-        ")"
+        + (f",metric={metric}" if metric is not None else "")
+        + ")"
     )
 
 
@@ -4708,6 +4738,9 @@ def _market_relative_alpha_unproven_revisions(
 def _market_relative_alpha_rejected_revisions(
     semantics_binding: Mapping[str, object],
     causal_alpha_evidence: Mapping[str, object],
+    *,
+    temperature_metric: str | None = None,
+    require_metric_identity: bool = False,
 ) -> tuple[str, ...]:
     """Return licensed revisions with direct capital-law rejection evidence."""
 
@@ -4715,6 +4748,8 @@ def _market_relative_alpha_rejected_revisions(
         _market_relative_alpha_unproven_revisions(
             semantics_binding,
             {"cohorts": []},
+            temperature_metric=temperature_metric,
+            require_metric_identity=require_metric_identity,
         )
     )
     rejected = {
@@ -4726,6 +4761,11 @@ def _market_relative_alpha_rejected_revisions(
         and cohort.get("global_selection_revision")
         == CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
         and cohort.get("rejected") is True
+        and _alpha_cohort_matches_metric(
+            cohort,
+            temperature_metric=temperature_metric,
+            require_metric_identity=require_metric_identity,
+        )
         for revision in cohort.get("probability_semantics_revisions", [])
         if str(revision).strip()
     }
@@ -4737,12 +4777,16 @@ def _market_relative_alpha_rejection_gate_reason(
     causal_alpha_evidence: Mapping[str, object],
     *,
     required_evalue: float,
+    temperature_metric: str | None = None,
+    require_metric_identity: bool = False,
 ) -> tuple[str | None, tuple[str, ...]]:
     """Gate only an explicitly rejected capital law, never missing history."""
 
     revisions = _market_relative_alpha_rejected_revisions(
         semantics_binding,
         causal_alpha_evidence,
+        temperature_metric=temperature_metric,
+        require_metric_identity=require_metric_identity,
     )
     if not revisions:
         return None, ()
@@ -4753,8 +4797,32 @@ def _market_relative_alpha_rejection_gate_reason(
         },
         causal_alpha_evidence,
         required_evalue=required_evalue,
+        temperature_metric=temperature_metric,
+        require_metric_identity=require_metric_identity,
     )
     return reason, revisions
+
+
+def _market_relative_alpha_rejection_gate_entries(
+    semantics_binding: Mapping[str, object],
+    causal_alpha_evidence: Mapping[str, object],
+    *,
+    required_evalue: float,
+) -> tuple[tuple[str | None, str, tuple[str, ...]], ...]:
+    """Keep typed HIGH/LOW rejections separate from the legacy broad cohort."""
+
+    entries = []
+    for metric in (None, "high", "low"):
+        reason, revisions = _market_relative_alpha_rejection_gate_reason(
+            semantics_binding,
+            causal_alpha_evidence,
+            required_evalue=required_evalue,
+            temperature_metric=metric,
+            require_metric_identity=metric is None,
+        )
+        if reason is not None:
+            entries.append((metric, reason, revisions))
+    return tuple(entries)
 
 
 # Minimum realized same-revision closes before a net-nonpositive cohort may
@@ -5569,6 +5637,12 @@ def _sync_riskguard_strategy_gate_actions(
 def _confirm_active_durable_strategy_gates(
     conn: sqlite3.Connection,
     strategies: list[str],
+    *,
+    expected_scopes: Mapping[str, set[str]] | None = None,
+    expected_metric_scopes: Mapping[str, set[tuple[str, str]]] | None = None,
+    expected_broad_revisions: Mapping[str, set[str]] | None = None,
+    expected_unscoped: Mapping[str, bool] | None = None,
+    now: datetime | None = None,
 ) -> dict[str, bool]:
     """Read-after-write confirmation that each strategy holds an ACTIVE gate.
 
@@ -5578,18 +5652,26 @@ def _confirm_active_durable_strategy_gates(
     not actually land an active row for a degraded strategy must NOT be
     trusted. This queries the SAME connection the write used (uncommitted
     writes are visible to later reads on that same connection), so this is a
-    true same-cycle read-after-write check, not a check against stale/committed
-    state from a prior tick.
+    true same-cycle read-after-write check when the write succeeds. For a
+    lock-skipped write, the optional expected scope rejects an older active
+    gate that does not cover this tick's metric/revision admission boundary.
     """
     if not strategies:
         return {}
     if not _table_exists(conn, "risk_actions"):
         return {strategy: False for strategy in strategies}
+    check_scope = any(
+        mapping is not None
+        for mapping in (
+            expected_scopes, expected_metric_scopes,
+            expected_broad_revisions, expected_unscoped,
+        )
+    )
     confirmed: dict[str, bool] = {}
     for strategy in strategies:
         row = conn.execute(
             """
-            SELECT 1 FROM risk_actions
+            SELECT value, issued_at, effective_until FROM risk_actions
             WHERE source = 'riskguard'
               AND action_type = 'gate'
               AND status = 'active'
@@ -5598,7 +5680,54 @@ def _confirm_active_durable_strategy_gates(
             """,
             (strategy,),
         ).fetchone()
-        confirmed[strategy] = row is not None
+        if row is None:
+            confirmed[strategy] = False
+            continue
+        if not check_scope:
+            confirmed[strategy] = True
+            continue
+        try:
+            if not _is_active(
+                now or datetime.now(timezone.utc),
+                row["issued_at"],
+                row["effective_until"],
+            ):
+                confirmed[strategy] = False
+                continue
+            value = row["value"]
+            if not _parse_boolish(value):
+                confirmed[strategy] = False
+                continue
+            revisions, pairs, broad, has_metric_scope = _risk_action_gate_scope(value)
+        except (TypeError, ValueError):
+            confirmed[strategy] = False
+            continue
+        wanted_pairs = set((expected_metric_scopes or {}).get(strategy, set()))
+        wanted_broad = set((expected_broad_revisions or {}).get(strategy, set()))
+        wanted_revisions = (
+            set((expected_scopes or {}).get(strategy, set()))
+            | wanted_broad
+            | {revision for revision, _metric in wanted_pairs}
+        )
+        actual_unscoped = not revisions and not has_metric_scope
+        if (expected_unscoped or {}).get(strategy, False) or not wanted_revisions:
+            confirmed[strategy] = actual_unscoped
+        elif actual_unscoped:
+            confirmed[strategy] = True
+        else:
+            # The policy decoder defines broad and pair identities. A stale
+            # HIGH pair cannot certify newly required LOW, while a genuinely
+            # broader durable gate still blocks every requested cohort.
+            extra_broad = wanted_revisions - wanted_broad - {
+                revision for revision, _metric in wanted_pairs
+            }
+            confirmed[strategy] = (
+                wanted_broad.union(extra_broad).issubset(broad)
+                and all(
+                    (revision, metric) in pairs or revision in broad
+                    for revision, metric in wanted_pairs
+                )
+            )
     return confirmed
 
 
@@ -6348,14 +6477,25 @@ def _tick_once() -> RiskLevel:
                 required_evalue=market_relative_alpha_evalue,
             )
         )
-        (
-            qkernel_market_relative_alpha_gate_reason,
-            qkernel_market_relative_alpha_gate_revisions,
-        ) = _market_relative_alpha_rejection_gate_reason(
+        qkernel_alpha_gate_entries = _market_relative_alpha_rejection_gate_entries(
             probability_semantics_binding,
             qkernel_market_relative_alpha_gate_evidence,
             required_evalue=market_relative_alpha_evalue,
         )
+        qkernel_market_relative_alpha_gate_reason = next(
+            (reason for _metric, reason, _revisions in qkernel_alpha_gate_entries),
+            None,
+        )
+        qkernel_market_relative_alpha_gate_revisions = tuple(sorted({
+            revision
+            for _metric, _reason, revisions in qkernel_alpha_gate_entries
+            for revision in revisions
+        }))
+        qkernel_alpha_gate_reasons_by_metric = {
+            metric: reason
+            for metric, reason, _revisions in qkernel_alpha_gate_entries
+            if metric is not None
+        }
         qkernel_market_relative_alpha_unproven_revisions = (
             _market_relative_alpha_unproven_revisions(
                 probability_semantics_binding,
@@ -6436,16 +6576,27 @@ def _tick_once() -> RiskLevel:
                 required_evalue=market_relative_alpha_evalue,
             )
         )
-        (
-            day0_market_relative_alpha_gate_reason,
-            day0_market_relative_alpha_gate_revisions,
-        ) = _market_relative_alpha_rejection_gate_reason(
+        day0_alpha_gate_entries = _market_relative_alpha_rejection_gate_entries(
             day0_probability_semantics_binding,
             day0_market_relative_alpha_evidence,
             required_evalue=market_relative_alpha_evalue,
         )
+        day0_market_relative_alpha_gate_reason = next(
+            (reason for _metric, reason, _revisions in day0_alpha_gate_entries),
+            None,
+        )
+        day0_market_relative_alpha_gate_revisions = tuple(sorted({
+            revision
+            for _metric, _reason, revisions in day0_alpha_gate_entries
+            for revision in revisions
+        }))
+        day0_alpha_gate_reasons_by_metric = {
+            metric: reason
+            for metric, reason, _revisions in day0_alpha_gate_entries
+            if metric is not None
+        }
         day0_market_relative_alpha_gate_required = (
-            day0_market_relative_alpha_gate_reason is not None
+            bool(day0_alpha_gate_entries)
         )
         day0_revision_probation_gate_reasons_by_metric: dict[str, str] = {}
         day0_revision_probation_gate_revisions_by_metric: dict[
@@ -6634,39 +6785,33 @@ def _tick_once() -> RiskLevel:
                 "forecast_qkernel_entry",
                 "probability_semantics_authority_unavailable",
             )
-        for strategy, binding, reason, alpha_gate_revisions in (
+        for strategy, alpha_gate_entries in (
             (
                 "forecast_qkernel_entry",
-                probability_semantics_binding,
-                qkernel_market_relative_alpha_gate_reason,
-                qkernel_market_relative_alpha_gate_revisions,
+                qkernel_alpha_gate_entries,
             ),
             (
                 "day0_nowcast_entry",
-                day0_probability_semantics_binding,
-                day0_market_relative_alpha_gate_reason,
-                day0_market_relative_alpha_gate_revisions,
+                day0_alpha_gate_entries,
             ),
         ):
-            if reason is None:
-                continue
-            _append_reason(
-                recommended_strategy_gate_reasons,
-                strategy,
-                reason,
-            )
-            revisions = {
-                str(revision).strip()
-                for revision in alpha_gate_revisions
-                if str(revision).strip()
-            }
-            if revisions:
+            for metric, reason, revisions in alpha_gate_entries:
+                _append_reason(
+                    recommended_strategy_gate_reasons,
+                    strategy,
+                    reason,
+                )
                 recommended_strategy_gate_scopes.setdefault(
                     strategy, set()
                 ).update(revisions)
-                recommended_strategy_gate_broad_revisions.setdefault(
-                    strategy, set()
-                ).update(revisions)
+                if metric is None:
+                    recommended_strategy_gate_broad_revisions.setdefault(
+                        strategy, set()
+                    ).update(revisions)
+                else:
+                    recommended_strategy_gate_metric_scopes.setdefault(
+                        strategy, set()
+                    ).update((revision, metric) for revision in revisions)
         for metric, reason in qkernel_revision_probation_gate_reasons_by_metric.items():
             _append_reason(
                 recommended_strategy_gate_reasons,
@@ -6873,6 +7018,11 @@ def _tick_once() -> RiskLevel:
                 _confirm_active_durable_strategy_gates(
                     zeus_conn,
                     ["forecast_qkernel_entry"],
+                    expected_scopes=recommended_strategy_gate_scopes,
+                    expected_metric_scopes=recommended_strategy_gate_metric_scopes,
+                    expected_broad_revisions=recommended_strategy_gate_broad_revisions,
+                    expected_unscoped=recommended_strategy_gate_unscoped,
+                    now=datetime.fromisoformat(now),
                 )
             )
         if (
@@ -6883,8 +7033,16 @@ def _tick_once() -> RiskLevel:
                 _confirm_active_durable_strategy_gates(
                     zeus_conn,
                     ["day0_nowcast_entry"],
+                    expected_scopes=recommended_strategy_gate_scopes,
+                    expected_metric_scopes=recommended_strategy_gate_metric_scopes,
+                    expected_broad_revisions=recommended_strategy_gate_broad_revisions,
+                    expected_unscoped=recommended_strategy_gate_unscoped,
+                    now=datetime.fromisoformat(now),
                 )
             )
+        # SCOPE: only the strategy's current rejected alpha/probation identities.
+        # DRAIN: the next 60-second tick retries the bounded auxiliary write.
+        # RESET: the durable active gate covers every required revision/metric.
         required_alpha_gates_confirmed = all(
             confirmation.get(strategy, False)
             for strategy, confirmation, required in (
@@ -7184,6 +7342,15 @@ def _tick_once() -> RiskLevel:
                 "market_relative_alpha_gate_reason": (
                     qkernel_market_relative_alpha_gate_reason
                 ),
+                "market_relative_alpha_gate_required": bool(
+                    qkernel_alpha_gate_entries
+                ),
+                "market_relative_alpha_gate_revisions": (
+                    qkernel_market_relative_alpha_gate_revisions
+                ),
+                "market_relative_alpha_gate_reasons_by_metric": (
+                    qkernel_alpha_gate_reasons_by_metric
+                ),
                 "market_relative_alpha_observation": (
                     qkernel_market_relative_alpha_observation
                 ),
@@ -7225,6 +7392,12 @@ def _tick_once() -> RiskLevel:
                 ),
                 "day0_market_relative_alpha_gate_reason": (
                     day0_market_relative_alpha_gate_reason
+                ),
+                "day0_market_relative_alpha_gate_revisions": (
+                    day0_market_relative_alpha_gate_revisions
+                ),
+                "day0_market_relative_alpha_gate_reasons_by_metric": (
+                    day0_alpha_gate_reasons_by_metric
                 ),
                 "day0_revision_probation_gate_required": (
                     day0_revision_probation_gate_required

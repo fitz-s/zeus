@@ -1,8 +1,8 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-09-21
+# Last reused/audited: 2026-09-24
 # Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation; Wave26 verification-noise helper alignment; PR90 current-env fallback review fix; 2026-08-15 economic-settlement trailing-loss hotfix.
 #                  2026-05-17 live lock remediation: RiskGuard trade/world DB lock degrades to fresh DATA_DEGRADED rather than stale RED.
-# Lifecycle: created=2026-03-30; last_reviewed=2026-09-21; last_reused=2026-09-21
+# Lifecycle: created=2026-03-30; last_reviewed=2026-09-24; last_reused=2026-09-24
 # Purpose: Guard RiskGuard protective metrics, policy resolution, source authority, and portfolio loader invariants.
 # Reuse: Run after RiskGuard risk details, portfolio loader, settlement source, bankroll, or risk-action changes.
 # 2026-08-17: Brier strategy-gate evidence is independent by target date.
@@ -6079,7 +6079,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert "day0_market_relative_alpha_gate_required" in tick_source
         assert "day0_revision_probation_gate_required" in tick_source
         assert "_day0_revision_probation_gate_reason(" in tick_source
-        assert "_market_relative_alpha_rejection_gate_reason(" in tick_source
+        assert "_market_relative_alpha_rejection_gate_entries(" in tick_source
         assert "recommended_strategy_gate_scopes" in tick_source
         assert "live_capital_curve" not in inspect.signature(
             riskguard_module._qkernel_market_relative_alpha_evidence
@@ -10610,3 +10610,427 @@ def test_dependency_lock_attestation_has_no_resource_risk_fields(monkeypatch, tm
     assert "storage_capacity_level" not in details
     assert "host_power" not in details
     assert "storage_capacity" not in details
+
+
+def _alpha_metric_cohort(
+    revision: str,
+    *,
+    metric: object = "low",
+    validated: bool = False,
+    rejected: bool = True,
+    law: str = "executable_min_order_capital_gain_v2",
+    selector: str | None = None,
+) -> dict[str, object]:
+    return {
+        "decision_law_id": law,
+        "global_selection_revision": (
+            selector or riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+        ),
+        "probability_semantics_revisions": [revision],
+        "temperature_metric": metric,
+        "validated": validated,
+        "rejected": rejected,
+        "model_over_market_evalue": 20.0 if validated else 0.05,
+        "independent_cluster_count": 2,
+    }
+
+
+@pytest.mark.parametrize("strategy", ("forecast_qkernel_entry", "day0_nowcast_entry"))
+@pytest.mark.parametrize("rejected_metric", ("low", "high"))
+def test_alpha_metric_reason_survives_opposite_metric_validation_through_policy(
+    monkeypatch, strategy, rejected_metric,
+) -> None:
+    monkeypatch.setattr(policy_module, "is_entries_paused", lambda: False)
+    monkeypatch.setattr(policy_module, "get_edge_threshold_multiplier", lambda: 1.0)
+    revision = "metric-revision"
+    other_metric = "high" if rejected_metric == "low" else "low"
+    binding = {"status": "ok", "current_revision": revision}
+    evidence = {"cohorts": [
+        _alpha_metric_cohort(revision, metric=rejected_metric),
+        _alpha_metric_cohort(
+            revision, metric=other_metric, rejected=False, validated=True,
+        ),
+        _alpha_metric_cohort(revision, metric=rejected_metric, law="wrong-law"),
+        _alpha_metric_cohort(revision, metric=rejected_metric, selector="wrong-selector"),
+        _alpha_metric_cohort("other-revision", metric=other_metric),
+    ]}
+    entries = riskguard_module._market_relative_alpha_rejection_gate_entries(
+        binding, evidence, required_evalue=10.0,
+    )
+    assert len(entries) == 1
+    metric, reason, revisions = entries[0]
+    assert metric == rejected_metric
+    assert revisions == (revision,)
+    assert reason.endswith(f"revision={revision},metric={rejected_metric})")
+
+    conn = _policy_conn()
+    riskguard_module._sync_riskguard_strategy_gate_actions(
+        conn,
+        {strategy: [reason]},
+        probability_semantics_scopes={strategy: {revision}},
+        probability_semantics_metric_scopes={strategy: {(revision, rejected_metric)}},
+        probability_semantics_broad_revisions={strategy: set()},
+        issued_at="2026-09-24T08:00:00+00:00",
+    )
+    value = conn.execute(
+        "SELECT value FROM risk_actions WHERE action_id=?",
+        (f"riskguard:gate:{strategy}",),
+    ).fetchone()["value"]
+    assert value != "true"
+    for tested_metric, gated in ((rejected_metric, True), (other_metric, False)):
+        assert policy_module.resolve_strategy_policy(
+            conn, strategy, datetime(2026, 9, 24, 8, tzinfo=timezone.utc),
+            probability_semantics_revision=revision,
+            temperature_metric=tested_metric,
+        ).gated is gated
+    assert policy_module.resolve_strategy_policy(
+        conn, strategy, datetime(2026, 9, 24, 8, tzinfo=timezone.utc),
+        probability_semantics_revision="other-revision",
+        temperature_metric=rejected_metric,
+    ).gated is False
+    conn.close()
+
+
+@pytest.mark.parametrize("legacy_metric", (None, "", "shoulder", "missing"))
+def test_alpha_legacy_unknown_metric_remains_broad_with_typed_cohort(
+    monkeypatch, legacy_metric,
+) -> None:
+    monkeypatch.setattr(policy_module, "is_entries_paused", lambda: False)
+    monkeypatch.setattr(policy_module, "get_edge_threshold_multiplier", lambda: 1.0)
+    revision = "legacy-revision"
+    legacy = _alpha_metric_cohort(revision, metric=legacy_metric)
+    if legacy_metric == "missing":
+        legacy.pop("temperature_metric")
+    evidence = {"cohorts": [
+        legacy,
+        _alpha_metric_cohort(revision, metric="high", rejected=False, validated=True),
+    ]}
+    entries = riskguard_module._market_relative_alpha_rejection_gate_entries(
+        {"status": "ok", "current_revision": revision},
+        evidence, required_evalue=10.0,
+    )
+    assert len(entries) == 1
+    metric, reason, revisions = entries[0]
+    assert metric is None
+    assert "metric=" not in reason
+    assert revisions == (revision,)
+
+    conn = _policy_conn()
+    riskguard_module._sync_riskguard_strategy_gate_actions(
+        conn, {"forecast_qkernel_entry": [reason]},
+        probability_semantics_scopes={"forecast_qkernel_entry": {revision}},
+        probability_semantics_broad_revisions={"forecast_qkernel_entry": {revision}},
+        issued_at="2026-09-24T08:00:00+00:00",
+    )
+    for tested_metric in ("high", "low"):
+        assert policy_module.resolve_strategy_policy(
+            conn, "forecast_qkernel_entry",
+            datetime(2026, 9, 24, 8, tzinfo=timezone.utc),
+            probability_semantics_revision=revision,
+            temperature_metric=tested_metric,
+        ).gated is True
+    conn.close()
+
+
+def test_alpha_metric_selector_normalizes_and_legacy_probation_filter_is_unchanged():
+    revision = "metric-revision"
+    binding = {"status": "ok", "current_revision": revision}
+    evidence = {"cohorts": [_alpha_metric_cohort(revision, metric="low", validated=False)]}
+    reason, revisions = riskguard_module._market_relative_alpha_rejection_gate_reason(
+        binding, evidence, required_evalue=10.0, temperature_metric=" LOW ",
+    )
+    assert revisions == (revision,)
+    assert reason is not None and reason.endswith(f"revision={revision},metric=low)")
+    assert riskguard_module._market_relative_alpha_unproven_revisions(
+        binding,
+        {"cohorts": [_alpha_metric_cohort(revision, metric=None, validated=True)]},
+        require_metric_identity=True,
+    ) == (revision,)
+
+
+def test_alpha_mixed_legacy_broad_and_typed_rejection_keep_distinct_scopes(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(policy_module, "is_entries_paused", lambda: False)
+    monkeypatch.setattr(policy_module, "get_edge_threshold_multiplier", lambda: 1.0)
+    legacy_revision, typed_revision = "legacy-revision", "typed-revision"
+    evidence = {"cohorts": [
+        _alpha_metric_cohort(legacy_revision, metric=None),
+        _alpha_metric_cohort(typed_revision, metric="high"),
+    ]}
+    entries = riskguard_module._market_relative_alpha_rejection_gate_entries(
+        {"status": "ok", "licensed_revisions": (legacy_revision, typed_revision)},
+        evidence, required_evalue=10.0,
+    )
+    assert {(metric, revisions) for metric, _reason, revisions in entries} == {
+        (None, (legacy_revision,)), ("high", (typed_revision,)),
+    }
+    conn = _policy_conn()
+    riskguard_module._sync_riskguard_strategy_gate_actions(
+        conn, {"forecast_qkernel_entry": [reason for _metric, reason, _revisions in entries]},
+        probability_semantics_scopes={
+            "forecast_qkernel_entry": {legacy_revision, typed_revision},
+        },
+        probability_semantics_metric_scopes={
+            "forecast_qkernel_entry": {(typed_revision, "high")},
+        },
+        probability_semantics_broad_revisions={
+            "forecast_qkernel_entry": {legacy_revision},
+        },
+        issued_at="2026-09-24T08:00:00+00:00",
+    )
+    value = conn.execute(
+        "SELECT value FROM risk_actions WHERE action_id='riskguard:gate:forecast_qkernel_entry'"
+    ).fetchone()["value"]
+    assert value != "true"
+    payload = json.loads(value)
+    assert payload["probability_semantics_broad_revisions"] == [legacy_revision]
+    for revision, metric, expected in (
+        (legacy_revision, "high", True), (legacy_revision, "low", True),
+        (typed_revision, "high", True), (typed_revision, "low", False),
+    ):
+        assert policy_module.resolve_strategy_policy(
+            conn, "forecast_qkernel_entry",
+            datetime(2026, 9, 24, 8, tzinfo=timezone.utc),
+            probability_semantics_revision=revision,
+            temperature_metric=metric,
+        ).gated is expected
+    conn.close()
+
+
+def test_tick_persists_opposite_metric_alpha_actions_without_broadening(
+    monkeypatch, tmp_path,
+) -> None:
+    """Real tick wiring must carry each reason through durable action to policy."""
+    zeus_db = tmp_path / "zeus.db"
+    risk_db = tmp_path / "risk_state.db"
+    _init_empty_canonical_portfolio_schema(zeus_db)
+    _patch_riskguard_bankroll(monkeypatch)
+    monkeypatch.setattr(policy_module, "is_entries_paused", lambda: False)
+    monkeypatch.setattr(policy_module, "get_edge_threshold_multiplier", lambda: 1.0)
+
+    def connection(path=None, **_kwargs):
+        return get_connection(risk_db if path == riskguard_module.RISK_DB_PATH else zeus_db)
+
+    monkeypatch.setattr(riskguard_module, "get_connection", connection)
+    monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
+    monkeypatch.setattr(riskguard_module, "load_tracker", lambda: strategy_tracker_module.StrategyTracker())
+    monkeypatch.setattr(riskguard_module, "query_authoritative_settlement_rows", lambda *_a, **_k: [])
+    qrevision = riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
+    from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
+    drevision = DAY0_PROBABILITY_SEMANTICS_REVISION
+    monkeypatch.setattr(
+        riskguard_module, "_bind_qkernel_probability_semantics",
+        lambda rows: (rows, {"status": "ok", "current_revision": qrevision}),
+    )
+    monkeypatch.setattr(
+        riskguard_module, "_bind_day0_probability_semantics",
+        lambda rows: (rows, {"status": "ok", "current_revision": drevision}),
+    )
+    monkeypatch.setattr(
+        riskguard_module, "_qkernel_market_relative_alpha_evidence",
+        lambda *_a, **_k: {"cohorts": [], "status": "no_evidence", "rejected": False},
+    )
+
+    def evidence(_rows, *, strategy_key, **_kwargs):
+        revision, rejected_metric = (
+            (qrevision, "low") if strategy_key == "forecast_qkernel_entry"
+            else (drevision, "high")
+        )
+        other_metric = "high" if rejected_metric == "low" else "low"
+        return {"cohorts": [
+            _alpha_metric_cohort(revision, metric=rejected_metric),
+            _alpha_metric_cohort(
+                revision, metric=other_metric, validated=True, rejected=False,
+            ),
+        ]}
+
+    monkeypatch.setattr(riskguard_module, "_market_relative_alpha_evidence", evidence)
+    riskguard_module.tick()
+    trade_conn = get_connection(zeus_db)
+    for strategy, revision, rejected_metric, other_metric in (
+        ("forecast_qkernel_entry", qrevision, "low", "high"),
+        ("day0_nowcast_entry", drevision, "high", "low"),
+    ):
+        value = trade_conn.execute(
+            "SELECT value FROM risk_actions WHERE action_id=?",
+            (f"riskguard:gate:{strategy}",),
+        ).fetchone()
+        assert value is not None
+        value = value["value"]
+        assert value != "true"
+        payload = json.loads(value)
+        assert payload["probability_semantics_broad_revisions"] == []
+        assert payload["probability_semantics_metric_scopes"] == [{
+            "probability_semantics_revision": revision,
+            "temperature_metric": rejected_metric,
+        }]
+        assert policy_module.resolve_strategy_policy(
+            trade_conn, strategy, datetime.now(timezone.utc),
+            probability_semantics_revision=revision,
+            temperature_metric=rejected_metric,
+        ).gated is True
+        assert policy_module.resolve_strategy_policy(
+            trade_conn, strategy, datetime.now(timezone.utc),
+            probability_semantics_revision=revision,
+            temperature_metric=other_metric,
+        ).gated is False
+    trade_conn.close()
+
+    risk_conn = get_connection(risk_db)
+    row = risk_conn.execute(
+        "SELECT details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    details = json.loads(row["details_json"])
+    assert details["market_relative_alpha_gate_required"] is True
+    assert details["market_relative_alpha_gate_revisions"] == [qrevision]
+    assert details["market_relative_alpha_gate_reasons_by_metric"]["low"].endswith(
+        f"revision={qrevision},metric=low)"
+    )
+    assert details["day0_market_relative_alpha_gate_required"] is True
+    assert details["day0_market_relative_alpha_gate_revisions"] == [drevision]
+    assert details["day0_market_relative_alpha_gate_reasons_by_metric"]["high"].endswith(
+        f"revision={drevision},metric=high)"
+    )
+    risk_conn.close()
+
+
+def test_locked_alpha_refresh_does_not_confirm_stale_opposite_metric_gate(
+    monkeypatch, tmp_path,
+) -> None:
+    zeus_db = tmp_path / "zeus.db"
+    risk_db = tmp_path / "risk_state.db"
+    _init_empty_canonical_portfolio_schema(zeus_db)
+    trade_conn = get_connection(zeus_db)
+    revision = riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
+    riskguard_module._sync_riskguard_strategy_gate_actions(
+        trade_conn,
+        {"forecast_qkernel_entry": [
+            f"market_relative_alpha_unproven(law=executable_min_order_capital_gain_v2,"
+            f"selection_revision={riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION},"
+            f"revision={revision},metric=high)"
+        ]},
+        probability_semantics_scopes={"forecast_qkernel_entry": {revision}},
+        probability_semantics_metric_scopes={"forecast_qkernel_entry": {(revision, "high")}},
+        issued_at="2026-09-23T01:00:00+00:00",
+    )
+    trade_conn.commit()
+    trade_conn.close()
+
+    _patch_riskguard_bankroll(monkeypatch)
+
+    def connection(path=None, **_kwargs):
+        return get_connection(risk_db if path == riskguard_module.RISK_DB_PATH else zeus_db)
+
+    monkeypatch.setattr(riskguard_module, "get_connection", connection)
+    monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
+    monkeypatch.setattr(riskguard_module, "load_tracker", lambda: strategy_tracker_module.StrategyTracker())
+    monkeypatch.setattr(riskguard_module, "query_authoritative_settlement_rows", lambda *_a, **_k: [])
+    monkeypatch.setattr(
+        riskguard_module, "_bind_qkernel_probability_semantics",
+        lambda rows: (rows, {"status": "ok", "current_revision": revision}),
+    )
+    monkeypatch.setattr(
+        riskguard_module, "_qkernel_market_relative_alpha_evidence",
+        lambda *_a, **_k: {"cohorts": [], "status": "no_evidence", "rejected": False},
+    )
+    monkeypatch.setattr(
+        riskguard_module, "_market_relative_alpha_evidence",
+        lambda *_a, **_k: {"cohorts": [
+            _alpha_metric_cohort(revision, metric="low"),
+            _alpha_metric_cohort(revision, metric="high", rejected=False, validated=True),
+        ]} if _k.get("strategy_key") == "forecast_qkernel_entry" else {"cohorts": []},
+    )
+
+    def locked_refresh(_conn, **kwargs):
+        # The WRITE did not land; the old HIGH row is still active/readable.
+        return (
+            {"status": "skipped_dependency_lock", "emitted_count": 0, "expired_count": 0},
+            {"status": "skipped_dependency_lock"},
+            {"status": "skipped_dependency_lock"},
+        )
+
+    monkeypatch.setattr(riskguard_module, "_refresh_riskguard_auxiliary_bookkeeping", locked_refresh)
+    assert riskguard_module.tick() == RiskLevel.DATA_DEGRADED
+    risk_conn = get_connection(risk_db)
+    row = risk_conn.execute(
+        "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row["level"] == RiskLevel.DATA_DEGRADED.value
+    details = json.loads(row["details_json"])
+    assert details["market_relative_alpha_gate_confirmation"] == {
+        "forecast_qkernel_entry": False,
+    }
+    risk_conn.close()
+    trade_conn = get_connection(zeus_db)
+    row = trade_conn.execute(
+        "SELECT value FROM risk_actions WHERE action_id='riskguard:gate:forecast_qkernel_entry'"
+    ).fetchone()
+    assert json.loads(row["value"])["probability_semantics_metric_scopes"][0][
+        "temperature_metric"
+    ] == "high"
+    trade_conn.close()
+
+
+def test_alpha_durable_confirmation_checks_coverage_and_active_interval() -> None:
+    conn = _policy_conn()
+    revision = "metric-revision"
+    now = datetime(2026, 9, 24, 8, tzinfo=timezone.utc)
+    reason = (
+        "market_relative_alpha_unproven(law=executable_min_order_capital_gain_v2,"
+        f"selection_revision={riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION},"
+        f"revision={revision},metric=high)"
+    )
+    riskguard_module._sync_riskguard_strategy_gate_actions(
+        conn, {"forecast_qkernel_entry": [reason]},
+        probability_semantics_scopes={"forecast_qkernel_entry": {revision}},
+        probability_semantics_metric_scopes={"forecast_qkernel_entry": {(revision, "high")}},
+        issued_at="2026-09-24T07:00:00+00:00",
+    )
+
+    def confirmed(**expected):
+        return riskguard_module._confirm_active_durable_strategy_gates(
+            conn, ["forecast_qkernel_entry"], now=now, **expected,
+        )["forecast_qkernel_entry"]
+
+    high = {"forecast_qkernel_entry": {(revision, "high")}}
+    low = {"forecast_qkernel_entry": {(revision, "low")}}
+    broad = {"forecast_qkernel_entry": {revision}}
+    assert confirmed(expected_metric_scopes=high)
+    assert not confirmed(expected_metric_scopes=low)
+    assert not confirmed(expected_broad_revisions=broad)
+    assert not confirmed(expected_unscoped={"forecast_qkernel_entry": True})
+    conn.execute(
+        "UPDATE risk_actions SET value=? WHERE action_id='riskguard:gate:forecast_qkernel_entry'",
+        (json.dumps({"gate": True, "probability_semantics_revisions": [revision]}),),
+    )
+    assert confirmed(expected_metric_scopes=low)
+    assert confirmed(expected_broad_revisions=broad)
+    conn.execute(
+        "UPDATE risk_actions SET value='false' "
+        "WHERE action_id='riskguard:gate:forecast_qkernel_entry'"
+    )
+    assert not confirmed(expected_metric_scopes=low)
+    conn.execute(
+        "UPDATE risk_actions SET value=? "
+        "WHERE action_id='riskguard:gate:forecast_qkernel_entry'",
+        ('{"gate":true,"probability_semantics_metric_scopes":[]}',),
+    )
+    assert not confirmed(expected_metric_scopes=low)
+    conn.execute(
+        "UPDATE risk_actions SET value=? "
+        "WHERE action_id='riskguard:gate:forecast_qkernel_entry'",
+        (json.dumps({"gate": True, "probability_semantics_revisions": [revision]}),),
+    )
+    conn.execute(
+        "UPDATE risk_actions SET issued_at='2026-09-24T09:00:00+00:00' "
+        "WHERE action_id='riskguard:gate:forecast_qkernel_entry'"
+    )
+    assert not confirmed(expected_metric_scopes=low)
+    conn.execute(
+        "UPDATE risk_actions SET issued_at='2026-09-24T07:00:00+00:00', "
+        "effective_until='2026-09-24T08:00:00+00:00' "
+        "WHERE action_id='riskguard:gate:forecast_qkernel_entry'"
+    )
+    assert not confirmed(expected_metric_scopes=low)
+    conn.close()
