@@ -745,9 +745,18 @@ def test_causal_alpha_reader_acks_only_canonical_finalized_pair(tmp_path, monkey
         riskguard_module, "bounded_sqlite_write",
         lambda *_args, **_kwargs: nullcontext(),
     )
+    from src.strategy.live_inference import no_trade_regret as alpha_ledger
+    released = []
+    original_release = alpha_ledger.release_alpha_connection_state
+    def release_after_transaction(conn):
+        released.append(conn.in_transaction)
+        original_release(conn)
+    monkeypatch.setattr(alpha_ledger, "release_alpha_connection_state",
+                        release_after_transaction)
     assert riskguard_module._acknowledge_pending_alpha_shadow_feedback(
         trade, pending_rows,
     ) == 1
+    assert released == [False]
     if strategy == "forecast_qkernel_entry":
         monkeypatch.setattr(riskguard_module, "_bind_qkernel_probability_semantics",
                             lambda *_args, **_kwargs: pytest.fail("historical ACK reread transient posterior"))
@@ -756,10 +765,26 @@ def test_causal_alpha_reader_acks_only_canonical_finalized_pair(tmp_path, monkey
     assert settled["hypothetical_capital_committed_usd"] == 1.6
     assert settled["hypothetical_settlement_payout_usd"] == 8
     assert settled["hypothetical_realized_pnl_usd"] == 6.4
+    # A subsequent finalized observation with the same terminal payout does
+    # not invalidate the immutable first ACK or erase the prospective prefix.
+    trade.executemany(
+        "INSERT INTO payout_observations VALUES (?,?,?,?,?,?,?,?,?)",
+        [(3,"condition",0,1,1,"RESOLVED_NONZERO","chain_rpc_finalized_v1",21,"0x"+"cd"*32),
+         (4,"condition",1,0,1,"RESOLVED_ZERO","chain_rpc_finalized_v1",21,"0x"+"cd"*32)],
+    )
+    trade.commit()
+    agreeing = read()[0]
+    assert agreeing["alpha_feedback_verified"] is True
+    assert agreeing["alpha_protocol_valid"] is True
+    assert agreeing["alpha_feedback"]["settlement_proof"]["payout_rows"][0]["id"] == 1
+    trade.execute("DELETE FROM executable_market_snapshots")
+    trade.commit()
+    assert read()[0]["alpha_feedback_verified"] is True
     # A newer contradictory chain observation invalidates the saved ACK;
     # it cannot disappear from the frozen cohort or become positive evidence.
-    trade.execute("INSERT INTO payout_observations VALUES (?,?,?,?,?,?,?,?,?)",
-                  (3,"condition",0,0,1,"RESOLVED_ZERO","chain_rpc_finalized_v1",21,"0x"+"cd"*32))
+    trade.executemany("INSERT INTO payout_observations VALUES (?,?,?,?,?,?,?,?,?)",
+                      [(5,"condition",0,0,1,"RESOLVED_ZERO","chain_rpc_finalized_v1",22,"0x"+"ef"*32),
+                       (6,"condition",1,1,1,"RESOLVED_NONZERO","chain_rpc_finalized_v1",22,"0x"+"ef"*32)])
     trade.commit()
     conflict = read()[0]
     assert conflict["alpha_protocol_valid"] is False
@@ -767,6 +792,48 @@ def test_causal_alpha_reader_acks_only_canonical_finalized_pair(tmp_path, monkey
         [conflict], strategy_key=strategy, rejection_evalue=10,
     )["rejected"] is True
     trade.close()
+
+
+def test_causal_alpha_ack_writer_rollback_releases_connection_state(tmp_path, monkeypatch):
+    """REG-ALPHA-06: a failed WORLD batch rolls back before releasing state/handle."""
+    from contextlib import nullcontext
+    from src.strategy.live_inference import no_trade_regret as alpha_ledger
+
+    world_path = tmp_path / "world.db"
+    writer = sqlite3.connect(world_path)
+    writer.execute("CREATE TABLE marker (id INTEGER)")
+    writer.commit()
+    read = sqlite3.connect(":memory:")
+    monkeypatch.setattr(riskguard_module, "get_world_connection", lambda **_: writer)
+    monkeypatch.setattr(riskguard_module, "default_runtime_write_coordinator",
+                        lambda: SimpleNamespace(lease=lambda *_, **__: nullcontext(object())))
+    monkeypatch.setattr(riskguard_module, "bounded_sqlite_write",
+                        lambda *_args, **_kwargs: nullcontext())
+    def fail_after_write(ledger, _event_id, *, settlement_proof):
+        ledger.conn.execute("INSERT INTO marker VALUES (1)")
+        raise sqlite3.OperationalError("simulated ACK failure")
+    monkeypatch.setattr(alpha_ledger.NoTradeRegretLedger, "acknowledge_alpha_settlement",
+                        fail_after_write)
+    released = []
+    original_release = alpha_ledger.release_alpha_connection_state
+    def release_after_transaction(conn):
+        released.append(conn.in_transaction)
+        original_release(conn)
+    monkeypatch.setattr(alpha_ledger, "release_alpha_connection_state",
+                        release_after_transaction)
+    row = {
+        "trade_id": "one", "alpha_protocol": {
+            "global_selection_revision": "selection", "probability_semantics_revision": "law",
+            "metric": "high", "slot": 1,
+        },
+        "alpha_protocol_valid": True, "alpha_feedback": None,
+        "_alpha_ack_proof": {"test": "proof"},
+    }
+    assert riskguard_module._acknowledge_pending_alpha_shadow_feedback(read, [row]) == 0
+    assert released == [False]
+    with sqlite3.connect(world_path) as verification:
+        assert verification.execute("SELECT COUNT(*) FROM marker").fetchone()[0] == 0
+    read.close()
 
 
 def _insert_risk_action(
