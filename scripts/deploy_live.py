@@ -3904,6 +3904,49 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
     return True, f"live restart recovery passed: {json.dumps(summary, sort_keys=True)}"
 
 
+def _prepare_restart_alpha_schema() -> None:
+    """Make the additive column available before sidecar registry assertions."""
+    from src.state.db import get_world_connection, get_world_connection_read_only
+    from src.state.schema.no_trade_regret_events_schema import ensure_table
+    from src.state.write_coordinator import (
+        DBIdentity, WritePriority, bounded_sqlite_write,
+        default_runtime_write_coordinator,
+    )
+
+    reader = get_world_connection_read_only()
+    try:
+        column = next((row for row in reader.execute(
+            "PRAGMA table_info(no_trade_regret_events)"
+        ) if row[1] == "alpha_feedback_json"), None)
+        if column is not None:
+            if (column[2].upper(), column[3]) != ("TEXT", 0):
+                raise RuntimeError("causal alpha feedback column must be nullable TEXT")
+            return
+    finally:
+        reader.close()
+    with default_runtime_write_coordinator().lease(
+        (DBIdentity.WORLD,), owner="deploy_causal_alpha_schema", write_class="live",
+        priority=WritePriority.BACKGROUND_RECOVERY, deadline_ms=5000, max_hold_ms=5000,
+    ) as lease:
+        writer = get_world_connection(write_class="live", busy_timeout_ms=1000)
+        try:
+            with bounded_sqlite_write(writer, lease, max_hold_ms=5000):
+                writer.execute("BEGIN IMMEDIATE")
+                ensure_table(writer)
+                writer.commit()
+        finally:
+            if writer.in_transaction:
+                writer.rollback()
+            writer.close()
+    reader = get_world_connection_read_only()
+    try:
+        if not any(row[1] == "alpha_feedback_json" and (row[2].upper(), row[3]) == ("TEXT", 0)
+                   for row in reader.execute("PRAGMA table_info(no_trade_regret_events)")):
+            raise RuntimeError("causal alpha feedback migration did not commit")
+    finally:
+        reader.close()
+
+
 def _pause_entries_for_live_restart_if_needed(
     labels: list[str],
     *,
@@ -3930,6 +3973,7 @@ def _pause_entries_for_live_restart_if_needed(
     code = textwrap.dedent(
         f"""
         from src.control.control_plane import arm_deploy_live_restart_guard
+        from scripts.deploy_live import _prepare_restart_alpha_schema
 
         # Existing operator/risk/source pauses remain selected and untouched.
         # The guard is indefinite (effective_until=None), never a TTL.
@@ -3952,6 +3996,7 @@ def _pause_entries_for_live_restart_if_needed(
             )
         else:
             raise RuntimeError(f"restart guard arm refused: {{result}}")
+        _prepare_restart_alpha_schema()
         """
     ).strip()
     try:
@@ -4328,6 +4373,9 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
     if not pause_ok:
         print("REFUSING to restart — live entry pause guard is not armed:")
         print(pause_detail)
+        print(_release_unused_live_restart_guard(
+            labels, expected_sha=expected_live_sha, issued_at=restart_guard_issued_at,
+        ))
         return 1
     print(pause_detail)
 
