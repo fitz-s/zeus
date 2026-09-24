@@ -173,3 +173,17 @@ def test_tmux_session_is_killed_only_after_its_screen_stops_changing(tmp_path, m
         c.converge_tmux()
 
     assert killed == ["omc-dead"]
+
+
+def test_missing_lsof_means_unknown_idleness_so_no_worktree_is_removed(repo, tmp_path, monkeypatch):
+    wt = tmp_path / "wt"
+    git(repo, "worktree", "add", "-q", "-b", "task/x", str(wt), "origin/live")
+    age(wt, 7 * 3600)
+    monkeypatch.setenv("PATH", "/nonexistent")
+    assert wc.process_cwds() is None
+    monkeypatch.undo()
+    monkeypatch.setattr(wc, "process_cwds", lambda: None)
+
+    converger(repo, tmp_path).converge()
+
+    assert wt.exists()

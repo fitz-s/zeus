@@ -57,7 +57,12 @@ PR_CLOSE_NOTE = (
 
 
 def run(args: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
-    proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=300)
+    try:
+        proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=300)
+    except FileNotFoundError:
+        if check:
+            raise
+        return subprocess.CompletedProcess(args, 127, "", f"{args[0]}: not found")
     if check and proc.returncode != 0:
         raise RuntimeError(f"{' '.join(args)} -> {proc.returncode}: {proc.stderr.strip()}")
     return proc
