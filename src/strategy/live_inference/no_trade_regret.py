@@ -3,13 +3,249 @@
 from __future__ import annotations
 
 import sqlite3
+import hashlib
+import json
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Iterator, Literal, Mapping
 
+from src.contracts.global_auction_receipt import CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
 from src.events.idempotency import stable_event_id
 
 UTC = timezone.utc
+ALPHA_PROTOCOL_VERSION = "causal-brier-feedback-v1"
+_ALPHA_V8_PREFIX = "market-relative-alpha-shadow-v8-causal-brier:"
+# A new sequence can begin only from observations made after this process has
+# installed the protocol. Existing durable slots remain valid across restarts.
+_PROSPECTIVE_CAPTURE_START = datetime.now(UTC)
+_ALPHA_SELECTION_RULE = (
+    "earliest_complete_global_cut_exact_global_posterior_mean_"
+    "expected_growth_winner_v3"
+)
+
+
+def _canonical_json(value: Mapping[str, object]) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _utc(value: object) -> datetime:
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("alpha protocol clock must be timezone-aware")
+    return parsed.astimezone(UTC)
+
+
+def _normalized_alpha_proof(proof: Mapping[str, object]) -> dict[str, object]:
+    required = {
+        "condition_id", "token_id", "side", "envelope_sha256", "outcome",
+        "yes_token_id", "no_token_id", "payout_rows",
+    }
+    if set(proof) != required:
+        raise ValueError("alpha proof fields missing or unexpected")
+    condition = str(proof["condition_id"] or "")
+    yes_token = str(proof["yes_token_id"] or "")
+    no_token = str(proof["no_token_id"] or "")
+    side = proof["side"]
+    token = str(proof["token_id"] or "")
+    outcome = proof["outcome"]
+    envelope_hash = str(proof["envelope_sha256"] or "")
+    if (
+        not condition or not yes_token or not no_token or yes_token == no_token
+        or side not in {"YES", "NO"}
+        or token != (yes_token if side == "YES" else no_token)
+        or type(outcome) is not int or outcome not in {0, 1}
+        or len(envelope_hash) != 64
+        or any(ch not in "0123456789abcdef" for ch in envelope_hash)
+    ):
+        raise ValueError("invalid alpha proof identity")
+    source_rows = proof["payout_rows"]
+    if not isinstance(source_rows, (tuple, list)) or len(source_rows) != 2:
+        raise ValueError("alpha proof requires both finalized payout rows")
+    required_row = {
+        "id", "condition_id", "outcome_index", "payout_numerator",
+        "payout_denominator", "state", "source", "block_number", "block_hash",
+    }
+    rows: dict[int, dict[str, object]] = {}
+    for raw in source_rows:
+        if not isinstance(raw, Mapping) or set(raw) != required_row:
+            raise ValueError("invalid alpha payout row fields")
+        index = raw["outcome_index"]
+        numerator = raw["payout_numerator"]
+        denominator = raw["payout_denominator"]
+        block_number = raw["block_number"]
+        block_hash = str(raw["block_hash"] or "")
+        row_id = raw["id"]
+        if (
+            type(index) is not int or index not in {0, 1} or index in rows
+            or type(row_id) is not int or row_id <= 0
+            or raw["condition_id"] != condition
+            or type(numerator) is not int or numerator < 0
+            or type(denominator) is not int or denominator <= 0
+            or numerator > denominator
+            or raw["state"] != (
+                "RESOLVED_ZERO" if numerator == 0 else "RESOLVED_NONZERO"
+            )
+            or raw["source"] != "chain_rpc_finalized_v1"
+            or type(block_number) is not int or block_number <= 0
+            or len(block_hash) != 66 or not block_hash.startswith("0x")
+            or any(ch not in "0123456789abcdefABCDEF" for ch in block_hash[2:])
+        ):
+            raise ValueError("invalid finalized alpha payout")
+        rows[index] = {key: raw[key] for key in required_row}
+    if set(rows) != {0, 1}:
+        raise ValueError("incomplete finalized alpha payout")
+    yes, no = rows[0], rows[1]
+    denominator = yes["payout_denominator"]
+    if (
+        yes["id"] == no["id"]
+        or denominator != no["payout_denominator"]
+        or sorted((yes["payout_numerator"], no["payout_numerator"]))
+        != [0, denominator]
+        or (yes["block_number"], yes["block_hash"])
+        != (no["block_number"], no["block_hash"])
+        or outcome != int(
+            rows[0 if side == "YES" else 1]["payout_numerator"] == denominator
+        )
+    ):
+        raise ValueError("alpha payout pair contradicts selected outcome")
+    return {
+        "condition_id": condition, "token_id": token, "side": side,
+        "envelope_sha256": envelope_hash, "outcome": outcome,
+        "yes_token_id": yes_token, "no_token_id": no_token,
+        "payout_rows": [yes, no],
+    }
+
+
+def _parse_alpha_feedback(
+    raw_json: str, event_id: str, decision_at: str
+) -> dict[str, object]:
+    try:
+        feedback = json.loads(raw_json)
+        expected = {
+            "protocol_version", "regret_event_id", "observed_at",
+            "envelope_sha256", "settlement_proof", "feedback_hash",
+        }
+        if not isinstance(feedback, dict) or set(feedback) != expected:
+            raise ValueError("invalid alpha feedback fields")
+        if (
+            feedback["protocol_version"] != ALPHA_PROTOCOL_VERSION
+            or feedback["regret_event_id"] != event_id
+            or _utc(feedback["observed_at"]) <= _utc(decision_at)
+        ):
+            raise ValueError("invalid alpha feedback identity")
+        normalized = _normalized_alpha_proof(feedback["settlement_proof"])
+        if feedback["settlement_proof"] != normalized:
+            raise ValueError("alpha feedback proof is not canonical")
+        if feedback["envelope_sha256"] != normalized["envelope_sha256"]:
+            raise ValueError("alpha feedback envelope hash mismatch")
+        unsigned = {k: v for k, v in feedback.items() if k != "feedback_hash"}
+        if _hash(_canonical_json(unsigned)) != feedback["feedback_hash"]:
+            raise ValueError("alpha feedback hash mismatch")
+        return feedback
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise ValueError("invalid alpha feedback") from exc
+
+
+def validated_alpha_protocol(
+    envelope_json: str,
+    *,
+    event_id: str,
+    regret_event_id: str,
+    condition_id: str,
+    token_id: str,
+    direction: str,
+    city: str,
+    target_date: str,
+    metric: str,
+) -> dict[str, object]:
+    """Pure verifier of the frozen v8 row identity and ordered slot receipt."""
+
+    try:
+        envelope = json.loads(envelope_json)
+        protocol = envelope["alpha_protocol"]
+        strategy = str(envelope["strategy_key"])
+        selection = str(envelope["global_selection_revision"])
+        revision = str(envelope["probability_semantics_revision"])
+        side = envelope["side"]
+        slot = protocol["slot"]
+        previous_id = protocol["previous_event_id"]
+        previous_hash = protocol["previous_feedback_hash"]
+        if (
+            strategy not in {"day0_nowcast_entry", "forecast_qkernel_entry"}
+            or selection != CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+            or not revision or metric not in {"high", "low"}
+            or envelope["schema_version"] != 3
+            or envelope["selection_rule"] != _ALPHA_SELECTION_RULE
+            or envelope["decision_law_id"] != "executable_min_order_capital_gain_v2"
+            or (envelope["city"], envelope["target_date"], envelope["metric"])
+            != (city, target_date, metric)
+            or envelope["condition_id"] != condition_id
+            or envelope["token_id"] != token_id
+            or side not in {"YES", "NO"} or direction != f"buy_{side.lower()}"
+            or event_id != (
+                f"{_ALPHA_V8_PREFIX}{strategy}:{selection}:{revision}:"
+                f"{metric}:{city}:{target_date}"
+            )
+            or regret_event_id != stable_event_id(
+                event_id, "RISK_GUARD", f"MARKET_RELATIVE_ALPHA_SHADOW:{strategy}"
+            )
+            or protocol["version"] != ALPHA_PROTOCOL_VERSION
+            or type(slot) is not int or slot <= 0
+            or any(protocol.get(key) != envelope.get(key) for key in (
+                "strategy_key", "global_selection_revision",
+                "probability_semantics_revision", "metric",
+            ))
+            or (slot == 1 and (previous_id is not None or previous_hash is not None))
+            or (slot > 1 and (
+                not isinstance(previous_id, str) or not previous_id
+                or not isinstance(previous_hash, str) or len(previous_hash) != 64
+            ))
+        ):
+            raise ValueError("alpha protocol identity mismatch")
+        _utc(envelope["decision_at_utc"])
+        _utc(envelope["selection_cut_at_utc"])
+        return dict(envelope)
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise ValueError("invalid alpha protocol") from exc
+
+
+def validated_alpha_feedback(
+    raw_json: str,
+    *,
+    regret_event_id: str,
+    envelope_json: str,
+    condition_id: str,
+    token_id: str,
+    direction: str,
+    city: str,
+    target_date: str,
+    metric: str,
+    event_id: str,
+) -> dict[str, object]:
+    """Pure verifier shared by the feedback writer and RiskGuard reader."""
+
+    envelope = validated_alpha_protocol(
+        envelope_json, event_id=event_id, regret_event_id=regret_event_id,
+        condition_id=condition_id, token_id=token_id, direction=direction,
+        city=city, target_date=target_date, metric=metric,
+    )
+    feedback = _parse_alpha_feedback(
+        raw_json, regret_event_id, str(envelope["decision_at_utc"])
+    )
+    proof = feedback["settlement_proof"]
+    if (
+        feedback["envelope_sha256"] != _hash(envelope_json)
+        or proof["condition_id"] != condition_id
+        or proof["token_id"] != token_id
+        or proof["side"] != envelope["side"]
+    ):
+        raise ValueError("alpha feedback does not bind its frozen decision")
+    return feedback
 
 RejectionStage = Literal[
     "EVENT_FILTER",
@@ -98,12 +334,36 @@ class NoTradeRegretLedger:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
 
-    def insert_idempotent(self, event: NoTradeRegretEvent) -> str:
+    @contextmanager
+    def _alpha_write(self) -> Iterator[None]:
+        # sqlite3's default connection opens an implicit transaction for an
+        # INSERT, whereas a top-level SAVEPOINT would silently commit on RELEASE.
+        outer_started = not self.conn.in_transaction and self.conn.isolation_level is not None
+        if outer_started:
+            self.conn.execute("BEGIN IMMEDIATE")
+        self.conn.execute("SAVEPOINT alpha_feedback_write")
+        try:
+            # Acquire the single SQLite writer before reading the cohort tail.
+            self.conn.execute(
+                "UPDATE no_trade_regret_events SET schema_version=schema_version WHERE 0"
+            )
+            yield
+            self.conn.execute("RELEASE SAVEPOINT alpha_feedback_write")
+        except BaseException:
+            self.conn.execute("ROLLBACK TO SAVEPOINT alpha_feedback_write")
+            self.conn.execute("RELEASE SAVEPOINT alpha_feedback_write")
+            if outer_started:
+                self.conn.rollback()
+            raise
+
+    def insert_idempotent(self, event: NoTradeRegretEvent) -> str | None:
         if _has_hindsight_fields(event):
             raise NoTradeRegretHindsightError(
                 "live no-trade regret insert cannot include later_outcome/would_have_* fields"
             )
         regret_event_id = stable_event_id(event.event_id, event.rejection_stage, event.rejection_reason)
+        if event.event_id.startswith(_ALPHA_V8_PREFIX):
+            return self._insert_alpha(event, regret_event_id)
         self.conn.execute(
             """
             INSERT OR IGNORE INTO no_trade_regret_events (
@@ -158,6 +418,255 @@ class NoTradeRegretLedger:
         if _has_compatibility_natural_key(event):
             self._write_no_trade_events_compatibility(event)
         return regret_event_id
+
+    def _insert_alpha(self, event: NoTradeRegretEvent, event_id: str) -> str | None:
+        # A retry of the exact natural key never updates its frozen envelope.
+        existing = self.conn.execute(
+            "SELECT 1 FROM no_trade_regret_events WHERE regret_event_id=?", (event_id,)
+        ).fetchone()
+        if existing is not None:
+            return event_id
+        try:
+            envelope = json.loads(str(event.envelope_json or ""))
+            strategy = str(envelope["strategy_key"])
+            selection = str(envelope["global_selection_revision"])
+            revision = str(envelope["probability_semantics_revision"])
+            metric = str(envelope["metric"])
+            decision_at = _utc(envelope["decision_at_utc"])
+            cut_at = _utc(envelope["selection_cut_at_utc"])
+            if (
+                strategy not in {"forecast_qkernel_entry", "day0_nowcast_entry"}
+                or selection != CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+                or not revision or metric not in {"high", "low"}
+                or envelope["schema_version"] != 3
+                or envelope["selection_rule"] != _ALPHA_SELECTION_RULE
+                or envelope["decision_law_id"] != "executable_min_order_capital_gain_v2"
+                or envelope.get("alpha_protocol") is not None
+                or event.rejection_stage != "RISK_GUARD"
+                or event.rejection_reason != f"MARKET_RELATIVE_ALPHA_SHADOW:{strategy}"
+                or (event.city, event.target_date, event.metric)
+                != (envelope.get("city"), envelope.get("target_date"), metric)
+                or event.decision_time != envelope["decision_at_utc"]
+                or cut_at > decision_at
+                or event.event_id != (
+                    f"{_ALPHA_V8_PREFIX}{strategy}:{selection}:{revision}:"
+                    f"{metric}:{event.city}:{event.target_date}"
+                )
+            ):
+                raise ValueError("invalid v8 alpha identity")
+        except (TypeError, ValueError, KeyError, AttributeError) as exc:
+            raise ValueError("invalid v8 alpha envelope") from exc
+
+        writer_now = datetime.now(UTC)
+        if (
+            decision_at < _PROSPECTIVE_CAPTURE_START
+            or cut_at < _PROSPECTIVE_CAPTURE_START
+            or decision_at > writer_now
+            or cut_at > writer_now
+        ):
+            return None
+
+        cohort_prefix = f"{_ALPHA_V8_PREFIX}{strategy}:{selection}:{revision}:{metric}:"
+        with self._alpha_write():
+            if self.conn.execute(
+                "SELECT 1 FROM no_trade_regret_events WHERE regret_event_id=?", (event_id,)
+            ).fetchone() is not None:
+                return event_id
+            prior_rows = self.conn.execute(
+                "SELECT regret_event_id,event_id,envelope_json,alpha_feedback_json,"
+                "condition_id,token_id,direction,city,target_date,metric "
+                "FROM no_trade_regret_events WHERE rejection_stage='RISK_GUARD' "
+                "AND rejection_reason=? AND event_id LIKE ?",
+                (event.rejection_reason, f"{cohort_prefix}%"),
+            ).fetchall()
+            ordered: dict[int, tuple[str, Mapping[str, object], str, str | None]] = {}
+            for (
+                prior_id, prior_event, prior_json, feedback_json,
+                prior_condition, prior_token, prior_direction,
+                prior_city, prior_date, prior_metric,
+            ) in prior_rows:
+                if not str(prior_event).startswith(cohort_prefix):
+                    continue
+                try:
+                    prior_envelope = validated_alpha_protocol(
+                        str(prior_json), event_id=str(prior_event),
+                        regret_event_id=str(prior_id),
+                        condition_id=str(prior_condition), token_id=str(prior_token),
+                        direction=str(prior_direction), city=str(prior_city),
+                        target_date=str(prior_date), metric=str(prior_metric),
+                    )
+                    protocol = prior_envelope["alpha_protocol"]
+                    slot = protocol["slot"]
+                    if (
+                        not isinstance(protocol, Mapping)
+                        or protocol.get("version") != ALPHA_PROTOCOL_VERSION
+                        or any(protocol.get(key) != value for key, value in (
+                            ("strategy_key", strategy),
+                            ("global_selection_revision", selection),
+                            ("probability_semantics_revision", revision),
+                            ("metric", metric),
+                        ))
+                        or type(slot) is not int or slot <= 0 or slot in ordered
+                        or prior_envelope.get("decision_at_utc") is None
+                        or str(prior_event) != (
+                            f"{cohort_prefix}{prior_envelope['city']}:"
+                            f"{prior_envelope['target_date']}"
+                        )
+                    ):
+                        raise ValueError("invalid alpha tail")
+                    ordered[slot] = (
+                        str(prior_id), prior_envelope, str(prior_json), feedback_json
+                    )
+                except (KeyError, TypeError, ValueError, AttributeError) as exc:
+                    raise ValueError("invalid alpha tail") from exc
+            if sorted(ordered) != list(range(1, len(ordered) + 1)):
+                raise ValueError("alpha cohort has a missing slot")
+            previous_id: str | None = None
+            previous_hash: str | None = None
+            previous_observed_at: datetime | None = None
+            for slot in sorted(ordered):
+                prior_id, prior_envelope, prior_json, feedback_json = ordered[slot]
+                protocol = prior_envelope["alpha_protocol"]
+                if (
+                    protocol.get("previous_event_id") != previous_id
+                    or protocol.get("previous_feedback_hash") != previous_hash
+                ):
+                    raise ValueError("alpha cohort feedback chain mismatch")
+                if feedback_json is None:
+                    if slot != len(ordered):
+                        raise ValueError("alpha cohort has an unacknowledged gap")
+                    return None
+                prior_event = (
+                    f"{cohort_prefix}{prior_envelope['city']}:"
+                    f"{prior_envelope['target_date']}"
+                )
+                feedback = validated_alpha_feedback(
+                    str(feedback_json), regret_event_id=prior_id,
+                    envelope_json=prior_json,
+                    event_id=prior_event,
+                    condition_id=str(prior_envelope["condition_id"]),
+                    token_id=str(prior_envelope["token_id"]),
+                    direction=f"buy_{str(prior_envelope['side']).lower()}",
+                    city=str(prior_envelope["city"]),
+                    target_date=str(prior_envelope["target_date"]),
+                    metric=str(prior_envelope["metric"]),
+                )
+                previous_id = prior_id
+                previous_hash = str(feedback["feedback_hash"])
+                previous_observed_at = _utc(feedback["observed_at"])
+            if previous_observed_at is not None and (
+                decision_at <= previous_observed_at or cut_at <= previous_observed_at
+            ):
+                return None
+            envelope["alpha_protocol"] = {
+                "version": ALPHA_PROTOCOL_VERSION,
+                "strategy_key": strategy,
+                "global_selection_revision": selection,
+                "probability_semantics_revision": revision,
+                "metric": metric,
+                "slot": len(ordered) + 1,
+                "previous_event_id": previous_id,
+                "previous_feedback_hash": previous_hash,
+            }
+            self.conn.execute(
+                "INSERT OR IGNORE INTO no_trade_regret_events "
+                "(regret_event_id,event_id,rejection_stage,rejection_reason,regret_bucket,"
+                "condition_id,token_id,decision_time,city,target_date,metric,family_id,"
+                "bin_label,direction,q_live,c_fee_adjusted,native_quote_available,"
+                "source_status,family_complete,hypothetical_order_type,"
+                "hypothetical_fill_status,hypothetical_fill_price,causal_snapshot_id,"
+                "executable_snapshot_id,envelope_json,created_at,schema_version) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)",
+                (event_id, event.event_id, event.rejection_stage, event.rejection_reason,
+                 event.regret_bucket, event.condition_id, event.token_id,
+                 event.decision_time, event.city, event.target_date, event.metric,
+                 event.family_id, event.bin_label, event.direction, event.q_live,
+                 event.c_fee_adjusted, None if event.native_quote_available is None
+                 else int(event.native_quote_available), event.source_status,
+                 None if event.family_complete is None else int(event.family_complete),
+                 event.hypothetical_order_type, event.hypothetical_fill_status,
+                 event.hypothetical_fill_price, event.causal_snapshot_id,
+                 event.executable_snapshot_id, _canonical_json(envelope),
+                 datetime.now(UTC).isoformat()),
+            )
+        return event_id
+
+    def acknowledge_alpha_settlement(
+        self, regret_event_id: str, *, settlement_proof: Mapping[str, object]
+    ) -> bool:
+        """Append verified chain feedback once; the caller owns the transaction.
+
+        SCOPE: this exact v8 cohort tail only. DRAIN: finalized payout pair
+        arrives and the caller ACKs under its WORLD writer lease. RESET: a
+        later decision/cut after the durable ACK may claim the next slot.
+        """
+
+        with self._alpha_write():
+            row = self.conn.execute(
+                "SELECT event_id,rejection_stage,rejection_reason,condition_id,"
+                "token_id,direction,city,target_date,metric,envelope_json,"
+                "alpha_feedback_json "
+                "FROM no_trade_regret_events WHERE regret_event_id=?",
+                (regret_event_id,),
+            ).fetchone()
+            if row is None or not str(row[0]).startswith(_ALPHA_V8_PREFIX):
+                raise ValueError("alpha ACK requires a v8 protocol row")
+            (event_id, stage, reason, condition, token, direction,
+             city, target_date, metric, envelope_json, old) = row
+            envelope = validated_alpha_protocol(
+                str(envelope_json), event_id=str(event_id),
+                regret_event_id=regret_event_id, condition_id=str(condition),
+                token_id=str(token), direction=str(direction), city=str(city),
+                target_date=str(target_date), metric=str(metric),
+            )
+            if (
+                stage != "RISK_GUARD"
+                or reason != f"MARKET_RELATIVE_ALPHA_SHADOW:{envelope['strategy_key']}"
+            ):
+                raise ValueError("alpha ACK row identity mismatch")
+            side = str(envelope["side"])
+            decision_at = _utc(envelope["decision_at_utc"])
+            proof = _normalized_alpha_proof(settlement_proof)
+            envelope_hash = _hash(str(envelope_json))
+            if (
+                proof["condition_id"] != condition
+                or proof["token_id"] != token
+                or proof["side"] != side
+                or proof["envelope_sha256"] != envelope_hash
+            ):
+                raise ValueError("alpha ACK proof does not match frozen decision")
+            if old is not None:
+                feedback = validated_alpha_feedback(
+                    str(old), regret_event_id=regret_event_id,
+                    envelope_json=str(envelope_json), event_id=str(event_id),
+                    condition_id=str(condition), token_id=str(token),
+                    direction=str(direction), city=str(city),
+                    target_date=str(target_date), metric=str(metric),
+                )
+                if feedback["settlement_proof"] == proof:
+                    return False
+                raise ValueError("conflicting alpha settlement feedback")
+            observed_at = datetime.now(UTC)
+            if observed_at <= decision_at:
+                raise ValueError("alpha ACK precedes decision")
+            body: dict[str, object] = {
+                "protocol_version": ALPHA_PROTOCOL_VERSION,
+                "regret_event_id": regret_event_id,
+                "observed_at": observed_at.isoformat(),
+                "envelope_sha256": envelope_hash,
+                "settlement_proof": proof,
+            }
+            feedback_json = _canonical_json({
+                **body, "feedback_hash": _hash(_canonical_json(body))
+            })
+            result = self.conn.execute(
+                "UPDATE no_trade_regret_events SET alpha_feedback_json=? "
+                "WHERE regret_event_id=? AND alpha_feedback_json IS NULL",
+                (feedback_json, regret_event_id),
+            )
+            if result.rowcount != 1:
+                raise ValueError("concurrent alpha ACK conflict")
+            return True
 
     def enrich_after_settlement(
         self,
