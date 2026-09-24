@@ -40,7 +40,7 @@ A PR belongs to the task that opened it; that task merges or closes it before en
 | local branch landed on `origin/live` | delete |
 | local or remote branch unlanded, idle 7 d | bundle, delete |
 | open PR idle 7 d | close with a comment |
-| detached `omc-*` tmux session idle 24 h | kill |
+| detached `omc-*` tmux session: screen frozen 24 h, or no human input 72 h | kill |
 | untracked file in the live checkout idle 24 h | move to the archive |
 | `/private/tmp/zeus*` idle 48 h | delete |
 

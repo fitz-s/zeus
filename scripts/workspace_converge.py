@@ -15,7 +15,7 @@ whatever they abandon, and nothing it removes is lost:
   open PR idle >= 7d                       close with a comment
   remote branch landed                     delete
   remote branch unlanded, idle >= 7d       bundle, delete
-  omc-* tmux session detached, screen unchanged >= 24h   kill
+  omc-* tmux session detached, screen frozen 24h or no human input 72h   kill
   untracked file in live, idle >= 24h      move to the archive
   /private/tmp/zeus*, idle >= 48h          delete
 
@@ -43,6 +43,7 @@ WORKTREE_IDLE = 6 * HOUR
 BRANCH_IDLE = 7 * 24 * HOUR
 PR_IDLE = 7 * 24 * HOUR
 TMUX_IDLE = 24 * HOUR
+TMUX_UNATTENDED = 72 * HOUR
 UNTRACKED_IDLE = 24 * HOUR
 TMP_IDLE = 48 * HOUR
 LARGE_FILE = 20 * 1024 * 1024
@@ -293,14 +294,16 @@ class Converger:
     # -- sessions and stray files ---------------------------------------
 
     def converge_tmux(self) -> None:
-        """Kill detached omc-* sessions whose screen has not changed for TMUX_IDLE.
+        """Kill detached omc-* sessions that are frozen or that nobody drives any more.
 
-        tmux's own activity clock counts only keyboard input, so a detached
-        agent that is busy printing output looks idle to it. The screen is the
-        evidence: its hash is recorded each run, and a session counts as idle
-        only once the same screen has persisted since the first sighting.
+        A session is kept while a human still types into it (tmux's own
+        activity clock counts only input) and its screen still moves. It is
+        killed once its screen has not changed for TMUX_IDLE, or once no human
+        input has reached it for TMUX_UNATTENDED even if an agent inside keeps
+        printing: an unattended detached agent is abandoned work.
         """
-        proc = run(["tmux", "list-sessions", "-F", "#{session_name}\t#{session_attached}"], check=False)
+        proc = run(["tmux", "list-sessions", "-F",
+                    "#{session_name}\t#{session_attached}\t#{session_activity}"], check=False)
         if proc.returncode != 0:
             return
         seen_path = self.archive / "tmux-screens.json"
@@ -310,17 +313,23 @@ class Converger:
             seen = {}
         current = {}
         for line in proc.stdout.splitlines():
-            name, attached = line.split("\t")
+            name, attached, activity = line.split("\t")
             if not name.startswith("omc-") or attached != "0":
                 continue
             screen = run(["tmux", "capture-pane", "-p", "-t", name], check=False).stdout
             digest = hashlib.sha256(screen.encode()).hexdigest()
-            since = seen.get(name, {}).get("since", self.now) if seen.get(name, {}).get("hash") == digest else self.now
+            prior = seen.get(name, {})
+            since = prior.get("since", self.now) if prior.get("hash") == digest else self.now
             current[name] = {"hash": digest, "since": since}
-            idle = self.now - since
-            if idle >= TMUX_IDLE:
-                self.act("kill-tmux", name, f"detached, screen unchanged {idle / 3600:.0f}h",
-                         lambda n=name: run(["tmux", "kill-session", "-t", n]))
+            frozen = self.now - since
+            unattended = self.now - float(activity)
+            if frozen >= TMUX_IDLE:
+                why = f"detached, screen unchanged {frozen / 3600:.0f}h"
+            elif unattended >= TMUX_UNATTENDED:
+                why = f"detached, no human input for {unattended / 86400:.0f}d"
+            else:
+                continue
+            self.act("kill-tmux", name, why, lambda n=name: run(["tmux", "kill-session", "-t", n]))
         if self.apply:
             seen_path.parent.mkdir(parents=True, exist_ok=True)
             seen_path.write_text(json.dumps(current))
