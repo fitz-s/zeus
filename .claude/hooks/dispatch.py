@@ -178,6 +178,30 @@ def _command_from_payload(payload: dict[str, Any]) -> str:
     return payload.get("tool_input", {}).get("command", "")
 
 
+def _effective_cd_dir(command: str, subcmd: str) -> Path:
+    """Directory a bare `git <subcmd>` in ``command`` runs in.
+
+    `cd <wt> && git commit` runs in <wt>, not in the hook's own cwd. Follow the
+    literal `cd` steps that precede the first `git ... <subcmd>`; a target with
+    `$` or backticks cannot be resolved statically, so the walk stops there and
+    keeps the last provable directory (block-biased, never guessed).
+    """
+    import re
+
+    cwd = Path.cwd().resolve()
+    git_at = re.search(r"\bgit\b[^;&|\n]*?\s" + re.escape(subcmd) + r"(?![\w-])", command)
+    prefix = command[: git_at.start()] if git_at else command
+    for m in re.finditer(r"(?:^|[;&|\n(])\s*cd\s+(\"[^\"]*\"|'[^']*'|[^\s;&|)]+)", prefix):
+        raw = m.group(1).strip("'\"")
+        if "$" in raw or "`" in raw:
+            break
+        try:
+            cwd = (cwd / Path(raw).expanduser()).resolve()
+        except OSError:
+            break
+    return cwd
+
+
 def _git_subcmd_at_command_position(command: str, subcmds: tuple[str, ...]):
     """Return the re.Match for `git <subcmd> <args>` when git RUNS as a command
     (not when it is an ARGUMENT to echo/grep/printf or sits inside a string),
@@ -1746,7 +1770,7 @@ def _run_advisory_check_maintree_git_state_guard(
         except OSError:
             target_dir = Path(target)
     else:
-        target_dir = Path.cwd().resolve()
+        target_dir = _effective_cd_dir(command, subcmd)
 
     # Exempt linked worktrees (path-based fast check + git-dir confirmation).
     target_str = str(target_dir)

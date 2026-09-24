@@ -109,6 +109,13 @@ def test_direct_live_git_mutations_are_blocked_but_ff_sync_is_allowed():
     dry_clean = run(f"git -C {LIVE_ROOT} clean -nd")
     ancestry_read = run(f"git -C {LIVE_ROOT} fetch && git -C {LIVE_ROOT} merge-base --is-ancestor a b")
     assert ancestry_read.returncode == 0
+    # A bare git after `cd <linked worktree>` runs in that worktree, not in live.
+    in_worktree = run(f"cd {REPO_ROOT} && git commit -m ok")
+    assert in_worktree.returncode == (2 if REPO_ROOT == LIVE_ROOT else 0)
+    back_to_live = run(f"cd {REPO_ROOT} && cd {LIVE_ROOT} && git commit -m forbidden")
+    assert back_to_live.returncode == 2
+    unresolvable = run(f"cd $WT && git commit -m unknown")
+    assert unresolvable.returncode == (2 if Path.cwd().resolve() == LIVE_ROOT else 0)
     ff_sync = run(f"git -C {LIVE_ROOT} pull --ff-only")
     ff_sync_named = run(f"git -C {LIVE_ROOT} pull --ff-only origin live")
     other_pull = run(f"git -C {LIVE_ROOT} pull origin feature")
