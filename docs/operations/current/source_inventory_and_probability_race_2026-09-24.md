@@ -244,3 +244,24 @@ said 0.68. `forecast_qkernel_entry` over the same period was near-calibrated
   (12–20 h: 32 trades, 5 won, −110 USD).
 - Action: `day0_nowcast_entry` disabled by operator strategy gate (precedence max,
   2026-09-24 20:12Z) until a settlement-graded fix. Forecast entries continue.
+
+### 8.1 Day0 root cause (measured 2026-09-24, 45 surviving HIGH trades 09-22..23)
+
+The Day0 remaining-day q (`_day0_remaining_p_raw_vector`, `src/engine/event_reactor_adapter.py`)
+integrates `max(observed boundary, member path max + N(0, σ))` over the remaining-hour
+member paths from `day0_hourly_vectors`, with `σ = hypot(σ_instrument, extra process σ)`.
+Reconstructed from the stored vectors at each entry time:
+- The remaining-day max comes from **3–4 deterministic model paths** (54–55 only where
+  ENS members exist). Their spread was 0.2–0.7 °C in most cases.
+- The settled high sat on average **+1.9 member-spreads above the member mean**, and
+  36 % of cases were more than 2 spreads out. Taipei 09-22: three members 30.0 ± 0.2 °C,
+  settled 33 → q(NO on 33 °C) = 1.000.
+- σ is the instrument σ (~0.28 °C) plus a staleness margin. No term carries the
+  models' own error for the remaining-day max at a station, which is ~1–2 °C with a
+  warm residual. So a clustered, cold member set becomes near-certainty.
+
+Required fix before re-enabling Day0, settlement-graded rather than tuned to these cases:
+1. Add a per-city remaining-day-max forecast-error term, walk-forward fit on settled
+   outcomes of the remaining-day max versus the member mean, by local hour remaining.
+2. Add the matching bias correction.
+3. Validate calibration (PIT / reliability) on held-out settled days before arming.
