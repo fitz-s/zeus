@@ -7,7 +7,7 @@
 
 Subcommands (positional):
   status                  — JSON summary of all active worktrees + sentinels
-                            + ahead/behind vs origin/main + PR state
+                            + ahead/behind vs origin/live + PR state
   advisory                — additionalContext-formatted cross-worktree map for SessionStart
   branch-keepup           — recommend ff/rebase/merge/close for current branch
   hygiene                 — list workspace clutter (NEVER deletes)
@@ -41,10 +41,6 @@ except ImportError:
         return decorator
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-CODEX_MANAGED_WORKTREE_ROOT = (
-    Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
-    / "worktrees"
-).resolve()
 
 SENTINEL_FILENAME = "zeus_worktree.yaml"
 
@@ -125,14 +121,6 @@ def _parse_worktree_list(porcelain: str) -> list[dict[str, Any]]:
     return worktrees
 
 
-def _is_codex_managed_worktree(path: str) -> bool:
-    """Whether ``path`` is owned by Codex's snapshot-aware worktree lifecycle."""
-    try:
-        return Path(path).resolve().is_relative_to(CODEX_MANAGED_WORKTREE_ROOT)
-    except (OSError, ValueError):
-        return False
-
-
 def _read_sentinel(worktree_path: str) -> dict[str, Any] | None:
     """Read zeus_worktree.yaml sentinel from worktree root or .git/worktrees/ sibling."""
     try:
@@ -207,10 +195,10 @@ def _write_worktree_sentinel(worktree_path: str, payload: dict[str, Any]) -> Non
 
 
 def _ahead_behind(branch: str) -> tuple[int, int]:
-    """Return (ahead, behind) vs origin/main."""
+    """Return (ahead, behind) vs origin/live."""
     try:
-        ahead = int(_git("rev-list", "--count", f"origin/main..{branch}").strip() or "0")
-        behind = int(_git("rev-list", "--count", f"{branch}..origin/main").strip() or "0")
+        ahead = int(_git("rev-list", "--count", f"origin/live..{branch}").strip() or "0")
+        behind = int(_git("rev-list", "--count", f"{branch}..origin/live").strip() or "0")
     except (ValueError, TypeError):
         ahead, behind = 0, 0
     return ahead, behind
@@ -399,9 +387,9 @@ def _decision_matrix(*, ahead: int, behind: int, merged: bool, dirty: bool) -> s
 
 @capability("worktree_branch_keepup", lease=False)
 def cmd_branch_keepup(_args: argparse.Namespace) -> int:
-    """Decision matrix recommendation for current branch vs origin/main."""
+    """Decision matrix recommendation for current branch vs origin/live."""
     current = _git("branch", "--show-current").strip()
-    if not current or current == "main":
+    if not current or current == "live":
         print(json.dumps({
             "recommendation": "no-action",
             "reason": "on main or detached HEAD",
@@ -410,7 +398,7 @@ def cmd_branch_keepup(_args: argparse.Namespace) -> int:
         return 0
 
     ahead, behind = _ahead_behind(current)
-    merged_output = _git("branch", "--merged", "origin/main")
+    merged_output = _git("branch", "--merged", "origin/live")
     merged = any(b.strip().lstrip("* ") == current for b in merged_output.splitlines())
     dirty = _dirty_state(str(REPO_ROOT))
     rec = _decision_matrix(ahead=ahead, behind=behind, merged=merged, dirty=dirty)
@@ -501,17 +489,11 @@ def _collect_clutter() -> list[dict[str, Any]]:
                 if (age_days > 7 or absorbed_by_live) and not has_pr and not dirty:
                     path = wt.get("path", "")
                     advisory = (
-                        "Codex-managed worktree: its branch is patch-equivalent to live; only "
-                        "its owning completed clean worker may archive its own thread with "
-                        "set_thread_archived; never raw-remove it"
-                        if _is_codex_managed_worktree(path) and absorbed_by_live
-                        else "Codex-managed worktree: only its owning completed clean worker may "
-                        "archive its own thread with set_thread_archived; never raw-remove it"
-                        if _is_codex_managed_worktree(path)
-                        else "worktree branch is patch-equivalent to live; archive or remove only "
-                        "after verifying the owner and branch policy"
+                        "worktree branch is patch-equivalent to live; its task should remove "
+                        "it (the hourly workspace converger does after 6 h idle)"
                         if absorbed_by_live
-                        else "stale worktree (>7d no commits, no open PR); consider `git worktree remove` after verifying"
+                        else "stale worktree (>7d no commits, no open PR); its task should remove "
+                        "it (the hourly workspace converger does after 6 h idle)"
                     )
                     clutter.append({
                         "path": path,
@@ -524,16 +506,16 @@ def _collect_clutter() -> list[dict[str, Any]]:
             except (ValueError, TypeError):
                 pass
 
-    # Stale branches: PR merged (branch merged into origin/main)
-    merged_output = _git("branch", "--merged", "origin/main")
+    # Stale branches: PR merged (branch merged into origin/live)
+    merged_output = _git("branch", "--merged", "origin/live")
     for line in merged_output.splitlines():
         b = line.strip().lstrip("* ")
-        if b and b not in ("main", "HEAD"):
+        if b and b not in ("live", "HEAD"):
             clutter.append({
                 "path": f"branch:{b}",
                 "type": "branch",
                 "severity": "advisory",
-                "advisory": "branch merged into origin/main; consider `git branch -d` after confirming",
+                "advisory": "branch merged into origin/live; consider `git branch -d` after confirming",
             })
 
     return clutter
@@ -562,10 +544,9 @@ def cmd_post_merge_cleanup(_args: argparse.Namespace) -> int:
     """Post-landing advisory checklist. NEVER deletes.
 
     worktree_post_merge_cleanup capability owner.
-    Emits the same clutter advisory as workspace_hygiene_audit. For a
-    Codex-managed path, the owning completed clean worker archives its own
-    thread; Codex snapshots and reclaims the path. This script never bypasses
-    that lifecycle with a raw worktree removal.
+    Emits the same clutter advisory as workspace_hygiene_audit. Removal is
+    the task's own closeout (AGENTS.md §5), backstopped by
+    scripts/workspace_converge.py; this script only reports.
     Composes with .claude/hooks/registry.yaml::post_merge_cleanup hook.
     """
     clutter = _collect_clutter()

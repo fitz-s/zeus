@@ -339,18 +339,18 @@ def test_hygiene_clutter_entries_have_severity() -> None:
         )
 
 
-def test_codex_managed_stale_worktree_requires_owner_archive(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Codex paths are never advised to use raw git worktree removal."""
-    monkeypatch.setattr(_wt_mod, "CODEX_MANAGED_WORKTREE_ROOT", Path("/fake/worktrees"))
+def test_stale_worktree_advice_names_the_task_and_the_converger() -> None:
+    """Every worktree follows one lifecycle: its task removes it, the converger backstops."""
     with (
         patch.object(_wt_mod, "_git", side_effect=_fake_git),
         patch.object(_wt_mod, "_gh", side_effect=_fake_gh),
     ):
         clutter = _wt_mod._collect_clutter()
 
-    codex_entry = next(entry for entry in clutter if entry["path"] == "/fake/worktrees/zeus-cleanup-debt")
-    assert "set_thread_archived" in codex_entry["advisory"]
-    assert "git worktree remove" not in codex_entry["advisory"]
+    entry = next(entry for entry in clutter if entry["path"] == "/fake/worktrees/zeus-cleanup-debt")
+    assert "its task should remove it" in entry["advisory"]
+    assert "converger" in entry["advisory"]
+    assert "set_thread_archived" not in entry["advisory"]
 
 
 def test_hot_pick_patch_equivalence_counts_as_absorbed() -> None:

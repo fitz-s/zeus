@@ -185,10 +185,9 @@ hooks:
     event: PostToolUse
     matcher: Bash
     intent: >
-      After a successful PR merge or cherry-pick, direct the owning completed
-      Codex worker to archive its own thread after landing verification and
-      any open-PR monitoring. Codex owns snapshot/removal of its managed
-      worktree; the hook never calls `git worktree remove`.
+      After a successful PR merge or fast-forward push to live, remind the
+      task to sync the live checkout, remove its own worktree and branch, and
+      close any other PR it opened (AGENTS.md §5). Advisory only.
     blocked_when: []
     severity: ADVISORY
     sunset_date: 2026-08-06

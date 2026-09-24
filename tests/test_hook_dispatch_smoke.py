@@ -507,38 +507,37 @@ def test_post_merge_cleanup_gh_pr_merge_emits_advisory() -> None:
         assert "cleanup" in ctx.lower() or "worktree" in ctx.lower() or "merge" in ctx.lower()
 
 
-def test_post_merge_cleanup_cherry_pick_emits_codex_closeout() -> None:
-    """A successful hot-pick prompts only the owning worker to archive itself."""
+def test_post_merge_cleanup_live_push_emits_closeout() -> None:
+    """A successful fast-forward push to live prompts the task to clean up."""
     payload = {
         "hook_event_name": "PostToolUse",
         "tool_name": "Bash",
-        "tool_input": {"command": "git cherry-pick deadbeef"},
+        "tool_input": {"command": "git -C /tmp/wt push origin HEAD:live"},
         "tool_response": {"exit_code": 0},
         "session_id": "realistic-test",
         "agent_id": "test-agent",
     }
     result = _run_dispatch("post_merge_cleanup", payload)
     assert result.returncode == 0
-    parsed = json.loads(result.stdout)
-    context = parsed["hookSpecificOutput"]["additionalContext"]
-    assert "set_thread_archived" in context
-    assert "Do not archive the integration thread" in context
+    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "pull --ff-only" in context
+    assert "git worktree remove" in context
 
 
-def test_post_merge_cleanup_cherry_pick_abort_is_silent() -> None:
-    """Aborting a conflict is not a landing and must not trigger closeout."""
-    payload = {
-        "hook_event_name": "PostToolUse",
-        "tool_name": "Bash",
-        "tool_input": {"command": "git cherry-pick --abort"},
-        "tool_response": {"exit_code": 0},
-        "session_id": "realistic-test",
-        "agent_id": "test-agent",
-    }
-    result = _run_dispatch("post_merge_cleanup", payload)
-    assert result.returncode == 0
-    assert not result.stdout.strip()
-
+def test_post_merge_cleanup_ignores_non_landing_commands() -> None:
+    """Cherry-picks and pushes to other branches are not landings."""
+    for command in ("git cherry-pick deadbeef", "git push origin HEAD:task/x"):
+        payload = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "tool_response": {"exit_code": 0},
+            "session_id": "realistic-test",
+            "agent_id": "test-agent",
+        }
+        result = _run_dispatch("post_merge_cleanup", payload)
+        assert result.returncode == 0
+        assert not result.stdout.strip(), command
 
 def test_post_merge_cleanup_non_merge_command_silent() -> None:
     """Non-merge PostToolUse emits nothing."""

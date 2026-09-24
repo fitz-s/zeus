@@ -1167,16 +1167,18 @@ def _run_advisory_check_pre_merge_contamination(
 def _run_advisory_check_post_merge_cleanup(
     payload: dict[str, Any],
 ) -> str | None:
-    """Codex-safe closeout reminder after a successful landing command."""
+    """Closeout reminder after a successful landing (AGENTS.md §5)."""
     import re as _re
 
     tool_input = payload.get("tool_input", {})
     command = tool_input.get("command", "") if isinstance(tool_input, dict) else ""
     command_position = r"(?:^|[;&|]\s*)(?:[A-Za-z_]\w*=\S+\s+)*(?:/\S*/)?"
     is_pr_merge = _re.search(command_position + r"gh\s+pr\s+merge(?:\s|$)", command)
-    is_cherry_pick = _re.search(command_position + r"git\s+cherry-pick(?:\s|$)", command)
-    is_cherry_pick_abort = _re.search(r"\bgit\s+cherry-pick\s+--(?:abort|quit|skip)(?:\s|$)", command)
-    if not is_pr_merge and (not is_cherry_pick or is_cherry_pick_abort):
+    is_live_push = _re.search(
+        command_position + r"git(?:\s+-C\s+\S+)?\s+push\s+\S+\s+\S*:(?:refs/heads/)?live(?:\s|$)",
+        command,
+    )
+    if not is_pr_merge and not is_live_push:
         return None
 
     tool_response = payload.get("tool_response", {})
@@ -1185,13 +1187,12 @@ def _run_advisory_check_post_merge_cleanup(
         return None
 
     return (
-        "\n-- Landing closeout (Codex-managed worktree) --\n"
-        "  Do not run `git worktree remove` on $CODEX_HOME/worktrees.\n"
-        "  The worker that owns the completed Codex worktree must, after its\n"
-        "  landing is verified and no open-PR monitoring remains, archive its own\n"
-        "  thread with `set_thread_archived`. Codex snapshots then reclaims it.\n"
-        "  Do not archive the integration thread unless it owns that completed\n"
-        "  worktree. Active, pinned, permanent, dirty, and open-PR work stay.\n"
+        "\n-- Landing closeout (AGENTS.md §5) --\n"
+        "  1. Sync the live checkout: `git -C <live> pull --ff-only`; restart only\n"
+        "     if runtime code changed.\n"
+        "  2. End the task: `git worktree remove <task tree>` and delete its branch\n"
+        "     (and the remote branch after a PR merge).\n"
+        "  3. Close or merge any other PR this task opened.\n"
         "------------------------------\n"
     )
 
@@ -1648,7 +1649,7 @@ def _run_advisory_check_live_tree_write_guard(
     print(
         "BLOCKED [live_tree_write_guard]: agent file write targets the live "
         f"checkout ({target_list}). Work only in a linked worktree; commit and "
-        "land through a merged PR or verified git cherry-pick onto live.",
+        "land with a fast-forward `git push origin HEAD:live` or a merged PR.",
         file=sys.stderr,
     )
     return _BLOCK_SENTINEL

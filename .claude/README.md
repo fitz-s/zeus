@@ -50,7 +50,7 @@ motivated it, not just its trigger condition. Three representative examples:
 - **`live_tree_write_guard`** (BLOCKING) — blocks any agent file write
   (Edit/Write/MultiEdit/NotebookEdit/apply_patch) whose target resolves
   inside the main checkout. Agents write in their own linked worktree and
-  land through a merged PR or a verified `git cherry-pick`.
+  land with a fast-forward `git push origin HEAD:live` or a merged PR.
 - **`cotenant_staging_guard`** — re-promoted from advisory to BLOCKING on
   2026-06-12 after commit `30ba237ef5` swept two test deletions staged by a
   concurrent sibling agent; broad `git add` (`-A`/`-u`/`git add .`) is
