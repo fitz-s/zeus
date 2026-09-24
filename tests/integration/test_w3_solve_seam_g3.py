@@ -43746,11 +43746,13 @@ def test_global_auction_receipt_delta_component_uses_byte_minimal_exact_encoding
     )
 
 
-def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
+def test_alpha_shadow_freezes_exact_global_proof_winner_without_money(monkeypatch):
     from src.events.day0_authority import bind_day0_probability_semantics
     from src.state.schema.no_trade_regret_events_schema import ensure_table
 
     at = _dt.datetime(2026, 8, 11, 16, 0, tzinfo=_dt.timezone.utc)
+    from src.strategy.live_inference import no_trade_regret as regret_ledger
+    monkeypatch.setattr(regret_ledger, "_PROSPECTIVE_CAPTURE_START", at - _dt.timedelta(seconds=1))
 
     def curve(token_id: str, price: str) -> ExecutableCostCurve:
         return ExecutableCostCurve(
@@ -43897,6 +43899,25 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
     )
 
     events = global_batch_runtime._day0_market_relative_alpha_shadow_events(**writer_kwargs)
+    # A re-admitted actual winner must continue the same prospective test.
+    # Its recording remains side-effect-free and never fabricates a fill.
+    admitted_evaluation = SimpleNamespace(**{
+        **vars(evaluations[0]), "status": "SELECTED", "rejection_reason": None,
+    })
+    admitted = proof_for(admitted_evaluation)
+    admitted.decision.candidate_evaluations = (admitted_evaluation,)
+    admitted_events = global_batch_runtime._day0_market_relative_alpha_shadow_events(
+        **{**writer_kwargs, "selected": admitted, "proof_selected": None}
+    )
+    assert len(admitted_events) == 1
+    assert admitted_events[0].event_id == events[0].event_id
+    assert admitted_events[0].q_live == events[0].q_live
+    unselected = SimpleNamespace(decision=SimpleNamespace(
+        candidate=None, candidate_evaluations=(admitted_evaluation,),
+    ))
+    assert global_batch_runtime._day0_market_relative_alpha_shadow_events(
+        **{**writer_kwargs, "selected": unselected, "proof_selected": None}
+    ) == ()
     for field, bad_value in (("expected_terminal_wealth", None), ("cost_usd", Decimal("2"))):
         bad_proof = proof_for(evaluations[0])
         setattr(bad_proof.decision, field, bad_value)
@@ -44085,7 +44106,7 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
         event.rejection_reason
         == "MARKET_RELATIVE_ALPHA_SHADOW:forecast_qkernel_entry"
         and event.event_id.startswith(
-            "market-relative-alpha-shadow-v7-acting-probability:"
+            "market-relative-alpha-shadow-v8-causal-brier:"
         )
         and global_batch_runtime.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
         in event.event_id
@@ -44226,7 +44247,7 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
     ).fetchone()[0] == 3
 
     legacy_event = replace(events[0], event_id=events[0].event_id.replace(
-        "market-relative-alpha-shadow-v7-acting-probability:",
+        "market-relative-alpha-shadow-v8-causal-brier:",
         "market-relative-alpha-shadow-v6-city-date-cluster:",
     ))
     legacy_envelope = json.loads(legacy_event.envelope_json)

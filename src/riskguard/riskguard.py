@@ -2947,13 +2947,13 @@ def _causal_alpha_shadow_rows(
         "family_complete", "hypothetical_order_type", "hypothetical_fill_status",
         "hypothetical_fill_price", "causal_snapshot_id", "executable_snapshot_id",
         "envelope_json", "alpha_feedback_json", "created_at",
+        "rejection_stage", "rejection_reason",
     )
     raw = conn.execute(
         f"SELECT {','.join(columns)} FROM {schema}.no_trade_regret_events "
-        "INDEXED BY idx_no_trade_regret_stage WHERE rejection_stage='RISK_GUARD' "
-        "AND rejection_reason=? AND substr(event_id,1,?)=? "
+        "WHERE event_id>=? AND event_id<? "
         "ORDER BY created_at,regret_event_id",
-        (f"MARKET_RELATIVE_ALPHA_SHADOW:{strategy_key}", len(prefix), prefix),
+        (prefix, prefix[:-1] + ";"),
     ).fetchall()
     status: dict[str, object] = {
         "status": "no_shadow_evidence", "strategy_key": strategy_key,
@@ -3008,6 +3008,8 @@ def _causal_alpha_shadow_rows(
             revision = str(envelope.get("probability_semantics_revision") or "")
             if (
                 envelope.get("schema_version") != 3
+                or item["rejection_stage"] != "RISK_GUARD"
+                or item["rejection_reason"] != f"MARKET_RELATIVE_ALPHA_SHADOW:{strategy_key}"
                 or envelope.get("strategy_key") != strategy_key
                 or envelope.get("decision_law_id") != "executable_min_order_capital_gain_v2"
                 or envelope.get("global_selection_revision")
@@ -3067,6 +3069,7 @@ def _causal_alpha_shadow_rows(
                 entry_market_benchmark=market, p_posterior=q,
                 capital_gain_proof_ready=True,
                 hypothetical_capital_committed_usd=proof_cost,
+                hypothetical_shares=proof_size,
                 hypothetical_settlement_payout_usd=None,
             )
             certificates.append({**item, "output": output, "envelope": envelope})
@@ -4703,7 +4706,7 @@ def _market_relative_alpha_evidence(
 ) -> dict[str, object]:
     """Compare prospective, feedback-separated forecasts with executable prices.
 
-    For D = Brier(market) - Brier(model), the two products of
+    For D = Brier(fee-inclusive proposal unit cost) - Brier(model), the products of
     1 +/- D/sqrt(t+1) are e-processes under the corresponding conditional
     no-improvement null. No independence between cities is assumed. A new
     forecast must follow the previous immutable settlement ACK; dropping a
@@ -4714,6 +4717,11 @@ def _market_relative_alpha_evidence(
     validation below is counterfactual only; actual fill/PnL probation remains
     a separate requirement. window_days is retained for the caller contract,
     never used to reset the prospective experiment.
+
+    With cost c < q, positive conditional score improvement implies
+    P(Y=1) > (q+c)/2 > c. Raw-price superiority alone would not cover fees.
+    Reverse evidence means overconfidence against this cost benchmark, not
+    proof that actual fills lost money.
     """
     from src.strategy.live_inference.no_trade_regret import ALPHA_PROTOCOL_VERSION
 
@@ -4798,8 +4806,14 @@ def _market_relative_alpha_evidence(
                         raise ValueError("noncausal feedback")
                     q = float(row["p_posterior"])
                     market = float(row["entry_market_benchmark"])
+                    capital = float(row["hypothetical_capital_committed_usd"])
+                    shares = float(row["hypothetical_shares"])
+                    if (not math.isfinite(capital) or capital <= 0.0
+                            or not math.isfinite(shares) or shares <= 0.0):
+                        raise ValueError("invalid executable cost witness")
+                    cost = capital / shares
                     outcome = feedback["settlement_proof"]["outcome"]
-                    if (not math.isfinite(q) or not 0.0 <= q <= 1.0
+                    if (not math.isfinite(q) or not 0.0 < cost < q <= 1.0
                             or not math.isfinite(market) or not 0.05 <= market <= 0.95
                             or type(outcome) is not int or outcome not in (0, 1)
                             or row.get("probability_semantics_ready") is not True
@@ -4808,7 +4822,7 @@ def _market_relative_alpha_evidence(
                 except (KeyError, TypeError, ValueError):
                     structure_valid = False
                     break
-                score_difference = (outcome - market) ** 2 - (outcome - q) ** 2
+                score_difference = (outcome - cost) ** 2 - (outcome - q) ** 2
                 stake = 1.0 / math.sqrt(protocol["slot"] + 1.0)
                 log_positive += math.log1p(stake * score_difference)
                 log_negative += math.log1p(-stake * score_difference)
@@ -4837,6 +4851,7 @@ def _market_relative_alpha_evidence(
             "temperature_metric": metric,
             "probability_semantics_revisions": [revision],
             "test_protocol": ALPHA_PROTOCOL_VERSION,
+            "score_benchmark": "frozen_proposal_fee_inclusive_unit_cost",
             "independent_cluster_count": 0,
             "candidate_count": len(cohort_rows),
             "completed_round_count": completed,
