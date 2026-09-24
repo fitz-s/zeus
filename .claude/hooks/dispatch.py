@@ -359,7 +359,8 @@ def _run_advisory_check_cotenant_staging_guard(
         return None
     # Evaluate the worktree the add actually targets: honor `git -C <path>`.
     c_match = re.search(r"-C\s+(\S+)", git_opts)
-    target_cwd = c_match.group(1).strip("'\"") if c_match else REPO_ROOT
+    base = _effective_cd_dir(command, "add")
+    target_cwd = str(base / c_match.group(1).strip("'\"")) if c_match else str(base)
     try:
         gd = subprocess.run(
             ["git", "rev-parse", "--git-dir"],

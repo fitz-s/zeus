@@ -130,6 +130,9 @@ def test_linked_worktree_exempt_via_dash_C(dispatch, tmp_path):
     )
     out = _run(dispatch, f"git -C {wt} " + "add -A")
     assert out is None  # isolated index — safe
+    # `cd <linked worktree> && git add -A` stages in that worktree, not the main tree.
+    out = _run(dispatch, f"cd {wt} && git " + "add -A")
+    assert out is None
 
 
 # ===========================================================================
