@@ -265,3 +265,37 @@ Required fix before re-enabling Day0, settlement-graded rather than tuned to the
    outcomes of the remaining-day max versus the member mean, by local hour remaining.
 2. Add the matching bias correction.
 3. Validate calibration (PIT / reliability) on held-out settled days before arming.
+
+### 8.2 Corrections and next actions (2026-09-24 23:15Z)
+
+Correction to 8.1: the losing-trade subsample overstated the width problem. Across 27,513
+settled last-in-hour Day0 posteriors (2026-08-24..09-23):
+- HIGH local 00–12 h: width is right (sd of settled − member mean 1.05–1.13 °C vs served
+  ≈1.12) but the **center is cold by +0.27…+0.50 °C**. A walk-forward center shift cut
+  held-out log loss of the settled bin 1.744 → 1.658 (HIGH early) and 0.942 → 0.888
+  (LOW early). It did not help mid/late HIGH.
+- Afternoon bin containing the running extreme: q 0.90 → realized 0.95 where
+  boundary-survival history exists. Where the survival estimator fell back to its Jeffreys
+  prior (US °F cities before `6d8f02411`, Taipei always), q was 0.57 but realized 0.89:
+  underconfident, which forgoes edge.
+- Resolver-graded survival (settled value vs running extreme, same unit and rule):
+  AWC high 0/14,200 violations; AWC low 11/11,184 (3 city-days); HKO high respects
+  floor(running max) in 438/438 cases. The boundary itself is sound. The AWC→Ogimet
+  mirror-agreement estimator (3,918/3,918 agree) measures nothing about the resolver.
+
+**Systemic finding (consult BLOCKER 1, confirmed):** every payoff-q correction in the
+last 8,000 decision logs took `SourceIdentityBaseline`: 1,557 of 1,557, across both
+strategies and both execution modes. No trade is sized by a settlement-calibrated q.
+Cause: `CanonicalMarketAnchoredFitProvider` fits per exact
+`probability_semantics_revision`, with `MIN_TRAIN_ROWS = 20`. Day0 revisions changed
+7 times in 3 weeks (settled positions per revision: 12, 54, 39, 29, 26, 3, 43), so
+the corpus resets before it fills.
+
+In flight:
+1. Day0 remaining-extreme center-bias artifact, walk-forward and fail-open, active only
+   in cells that win out of sample.
+2. Source-clock cursor fix (the remaining quota-burn driver).
+3. Consult follow-up on a revision-robust calibration corpus and a resolver-graded
+   survival estimator.
+
+The consult's first answer: `/tmp/cgc/answer_REQ-20260924-154114-47cdbb.txt`.
