@@ -423,6 +423,15 @@ class NoTradeRegretLedger:
         regret_event_id = stable_event_id(event.event_id, event.rejection_stage, event.rejection_reason)
         if event.event_id.startswith(_ALPHA_V8_PREFIX):
             return self._insert_alpha(event, regret_event_id)
+        self._insert_row(event, regret_event_id, event.envelope_json)
+        if _has_compatibility_natural_key(event):
+            self._write_no_trade_events_compatibility(event)
+        return regret_event_id
+
+    def _insert_row(
+        self, event: NoTradeRegretEvent, regret_event_id: str,
+        envelope_json: str | None,
+    ) -> None:
         self.conn.execute(
             """
             INSERT OR IGNORE INTO no_trade_regret_events (
@@ -467,16 +476,13 @@ class NoTradeRegretLedger:
                 event.hypothetical_fill_price,
                 event.causal_snapshot_id,
                 event.executable_snapshot_id,
-                event.envelope_json,
+                envelope_json,
                 event.later_outcome,
                 None if event.would_have_won is None else int(event.would_have_won),
                 None if event.would_have_filled is None else int(event.would_have_filled),
                 datetime.now(UTC).isoformat(),
             ),
         )
-        if _has_compatibility_natural_key(event):
-            self._write_no_trade_events_compatibility(event)
-        return regret_event_id
 
     def _insert_alpha(self, event: NoTradeRegretEvent, event_id: str) -> str | None:
         # A retry of the exact natural key never updates its frozen envelope.
@@ -647,27 +653,9 @@ class NoTradeRegretLedger:
                     None if previous_seen_at is None else previous_seen_at.isoformat()
                 ),
             }
-            self.conn.execute(
-                "INSERT OR IGNORE INTO no_trade_regret_events "
-                "(regret_event_id,event_id,rejection_stage,rejection_reason,regret_bucket,"
-                "condition_id,token_id,decision_time,city,target_date,metric,family_id,"
-                "bin_label,direction,q_live,c_fee_adjusted,native_quote_available,"
-                "source_status,family_complete,hypothetical_order_type,"
-                "hypothetical_fill_status,hypothetical_fill_price,causal_snapshot_id,"
-                "executable_snapshot_id,envelope_json,created_at,schema_version) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)",
-                (event_id, event.event_id, event.rejection_stage, event.rejection_reason,
-                 event.regret_bucket, event.condition_id, event.token_id,
-                 event.decision_time, event.city, event.target_date, event.metric,
-                 event.family_id, event.bin_label, event.direction, event.q_live,
-                 event.c_fee_adjusted, None if event.native_quote_available is None
-                 else int(event.native_quote_available), event.source_status,
-                 None if event.family_complete is None else int(event.family_complete),
-                 event.hypothetical_order_type, event.hypothetical_fill_status,
-                 event.hypothetical_fill_price, event.causal_snapshot_id,
-                 event.executable_snapshot_id, _canonical_json(envelope),
-                 datetime.now(UTC).isoformat()),
-            )
+            self._insert_row(event, event_id, _canonical_json(envelope))
+            if _has_compatibility_natural_key(event):
+                self._write_no_trade_events_compatibility(event)
         return event_id
 
     def acknowledge_alpha_settlement(

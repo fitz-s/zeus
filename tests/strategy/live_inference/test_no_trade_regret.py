@@ -686,3 +686,50 @@ def test_v8_restart_or_cache_eviction_requires_fresh_feedback_read_again():
     assert isinstance(ledger.insert_idempotent(fresh), str)
     assert conn.execute("SELECT count(*) FROM no_trade_regret_events").fetchone()[0] == 2
     conn.close()
+
+
+def test_v8_and_ordinary_insert_preserve_every_original_nonnull_ledger_field():
+    from dataclasses import replace
+
+    conn, ledger = _ledger()
+    chosen = replace(
+        _v8_event("Chicago", "2026-09-23T12:00:00+00:00"),
+        market_slug="market-chicago", outcome_label="76-77", family_id="family",
+        bin_label="76-77", observation_time="2026-09-23T11:55:00+00:00",
+        decision_seq=7, q_live=0.87, q_lcb_5pct=0.81,
+        c_fee_adjusted=0.37, c_cost_95pct=0.39,
+        p_fill_lcb=0.75, trade_score=0.08,
+        native_quote_available=True, source_status="current_day0_probability_authority",
+        family_complete=True, hypothetical_order_type="MARKETABLE_LIMIT",
+        hypothetical_fill_status="EXECUTABLE_AT_DECISION",
+        hypothetical_fill_price=0.35, causal_snapshot_id="posterior",
+        executable_snapshot_id="book",
+    )
+    chosen_id = ledger.insert_idempotent(chosen)
+    assert conn.execute("SELECT count(*) FROM no_trade_events").fetchone()[0] == 1
+    ordinary = replace(
+        chosen, event_id="ordinary-event", rejection_stage="TRADE_SCORE",
+        rejection_reason="ordinary", decision_seq=8,
+    )
+    ordinary_id = ledger.insert_idempotent(ordinary)
+    assert conn.execute("SELECT count(*) FROM no_trade_events").fetchone()[0] == 2
+    columns = (
+        "regret_bucket,market_slug,condition_id,token_id,outcome_label,decision_time,"
+        "city,target_date,metric,family_id,bin_label,direction,q_live,q_lcb_5pct,"
+        "c_fee_adjusted,c_cost_95pct,p_fill_lcb,trade_score,native_quote_available,"
+        "source_status,family_complete,hypothetical_order_type,"
+        "hypothetical_fill_status,hypothetical_fill_price,causal_snapshot_id,"
+        "executable_snapshot_id,later_outcome,would_have_won,would_have_filled,schema_version"
+    )
+    v8 = conn.execute(
+        f"SELECT {columns} FROM no_trade_regret_events WHERE regret_event_id=?",
+        (chosen_id,),
+    ).fetchone()
+    legacy = conn.execute(
+        f"SELECT {columns} FROM no_trade_regret_events WHERE regret_event_id=?",
+        (ordinary_id,),
+    ).fetchone()
+    assert v8 == legacy
+    assert v8[4] == "76-77"  # Exit shadow binds this selected bin label.
+    assert v8[16] == 0.75 and v8[17] == 0.08
+    conn.close()
