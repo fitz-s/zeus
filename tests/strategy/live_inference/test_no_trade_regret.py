@@ -516,3 +516,72 @@ def test_v8_historical_v7_relabel_cannot_start_prospective_sequence(monkeypatch)
     assert ledger.insert_idempotent(event) == event_id
     assert conn.execute("SELECT count(*) FROM no_trade_regret_events").fetchone()[0] == 1
     conn.close()
+
+
+def test_v8_empty_helper_transaction_releases_world_writer_but_real_append_remains_caller_owned(tmp_path):
+    from src.state.schema.no_trade_regret_events_schema import ensure_table
+
+    db = tmp_path / "alpha-empty-lock.db"
+    conn = sqlite3.connect(db, timeout=1)
+    ensure_table(conn)
+    conn.commit()
+    ledger = NoTradeRegretLedger(conn)
+    first_id = ledger.insert_idempotent(_v8_event("Chicago", "2026-09-23T12:00:00+00:00"))
+    assert conn.in_transaction
+    conn.commit()
+    pending = _v8_event("Milan", "2026-09-23T12:01:00+00:00")
+    assert ledger.insert_idempotent(pending) is None
+    assert not conn.in_transaction
+    competing = sqlite3.connect(db, timeout=1)
+    competing.execute("BEGIN IMMEDIATE")
+    competing.rollback()
+    proof = _v8_proof(conn, first_id, "Chicago")
+    assert ledger.acknowledge_alpha_settlement(first_id, settlement_proof=proof)
+    assert conn.in_transaction
+    conn.rollback()
+    assert _v8_record(conn, first_id)[1] is None
+    assert ledger.acknowledge_alpha_settlement(first_id, settlement_proof=proof)
+    conn.commit()
+    assert ledger.acknowledge_alpha_settlement(first_id, settlement_proof=proof) is False
+    assert not conn.in_transaction
+    competing.execute("BEGIN IMMEDIATE")
+    competing.rollback()
+    competing.close()
+    conn.close()
+
+
+def test_v8_empty_helper_never_ends_preexisting_outer_or_autocommit(tmp_path):
+    from src.state.schema.no_trade_regret_events_schema import ensure_table
+
+    db = tmp_path / "alpha-outer-lock.db"
+    setup = sqlite3.connect(db)
+    ensure_table(setup)
+    setup.commit()
+    setup.close()
+    conn = sqlite3.connect(db)
+    ledger = NoTradeRegretLedger(conn)
+    first_id = ledger.insert_idempotent(_v8_event("Chicago", "2026-09-23T12:00:00+00:00"))
+    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    assert ledger.insert_idempotent(_v8_event("Milan", "2026-09-23T12:01:00+00:00")) is None
+    assert conn.in_transaction
+    conn.rollback()
+    proof = _v8_proof(conn, first_id, "Chicago")
+    assert ledger.acknowledge_alpha_settlement(first_id, settlement_proof=proof)
+    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    assert ledger.acknowledge_alpha_settlement(first_id, settlement_proof=proof) is False
+    assert conn.in_transaction
+    conn.rollback()
+    conn.close()
+    autocommit = sqlite3.connect(db, isolation_level=None)
+    autocommit_ledger = NoTradeRegretLedger(autocommit)
+    assert autocommit_ledger.acknowledge_alpha_settlement(
+        first_id, settlement_proof=proof
+    ) is False
+    assert not autocommit.in_transaction
+    assert autocommit_ledger.insert_idempotent(
+        _v8_event("Milan", "2026-09-23T12:01:00+00:00")
+    ) is None
+    assert not autocommit.in_transaction
+    autocommit.close()
