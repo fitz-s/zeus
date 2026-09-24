@@ -24,8 +24,10 @@ _ALPHA_V8_PREFIX = "market-relative-alpha-shadow-v8-causal-brier:"
 _PROSPECTIVE_CAPTURE_START = datetime.now(UTC)
 _FEEDBACK_SEEN_LIMIT = 128
 _FEEDBACK_SEEN: OrderedDict[tuple[str, str, str, str, str], tuple[str, datetime]] = OrderedDict()
-_PENDING_ACK_BY_CONNECTION: OrderedDict[int, str] = OrderedDict()
+_PENDING_ACK_BY_CONNECTION: dict[int, set[str]] = {}
 _FEEDBACK_SEEN_LOCK = threading.Lock()
+
+
 _ALPHA_SELECTION_RULE = (
     "earliest_complete_global_cut_exact_global_posterior_mean_"
     "expected_growth_winner_v3"
@@ -55,6 +57,15 @@ def _database_identity(conn: sqlite3.Connection) -> str:
     return os.path.realpath(main) if main else f":memory:{id(conn)}"
 
 
+def release_alpha_connection_state(conn: sqlite3.Connection) -> None:
+    """Release uncommitted ACK identities after caller COMMIT/ROLLBACK, before close."""
+
+    with _FEEDBACK_SEEN_LOCK:
+        if conn.in_transaction:
+            raise ValueError("alpha connection state requires completed transaction")
+        _PENDING_ACK_BY_CONNECTION.pop(id(conn), None)
+
+
 def _first_committed_feedback_seen_at(
     conn: sqlite3.Connection,
     *,
@@ -66,13 +77,13 @@ def _first_committed_feedback_seen_at(
 
     key = (_database_identity(conn), *cohort)
     with _FEEDBACK_SEEN_LOCK:
-        pending = _PENDING_ACK_BY_CONNECTION.get(id(conn))
-        if pending is not None:
-            if outer_was_active and pending == feedback_hash:
-                # This connection could be reading its own uncommitted ACK.
-                return None
-            if not outer_was_active:
-                _PENDING_ACK_BY_CONNECTION.pop(id(conn), None)
+        connection_id = id(conn)
+        if outer_was_active and feedback_hash in _PENDING_ACK_BY_CONNECTION.get(connection_id, ()):
+            # This connection could be reading its own uncommitted ACK. A
+            # later cut must wait for a read after the caller commits.
+            return None
+        if not outer_was_active:
+            _PENDING_ACK_BY_CONNECTION.pop(connection_id, None)
         seen = _FEEDBACK_SEEN.get(key)
         if seen is None or seen[0] != feedback_hash:
             _FEEDBACK_SEEN[key] = (feedback_hash, datetime.now(UTC))
@@ -734,10 +745,9 @@ class NoTradeRegretLedger:
             if result.rowcount != 1:
                 raise ValueError("concurrent alpha ACK conflict")
             with _FEEDBACK_SEEN_LOCK:
-                _PENDING_ACK_BY_CONNECTION[id(self.conn)] = _hash(_canonical_json(body))
-                _PENDING_ACK_BY_CONNECTION.move_to_end(id(self.conn))
-                if len(_PENDING_ACK_BY_CONNECTION) > _FEEDBACK_SEEN_LIMIT:
-                    _PENDING_ACK_BY_CONNECTION.popitem(last=False)
+                _PENDING_ACK_BY_CONNECTION.setdefault(id(self.conn), set()).add(
+                    _hash(_canonical_json(body))
+                )
             return True
 
     def enrich_after_settlement(
