@@ -17941,6 +17941,22 @@ def _bind_global_current_state_economics_to_proof(
     )
 
 
+def _global_current_book_may_rebind_rejection(
+    reason: str | None, *, allow_empty_ask: bool = False,
+) -> bool:
+    """Defer an old local quote only to the exact global BUY's current book."""
+
+    # SCOPE: the selected BUY's old quote, never market/source/token validity.
+    # DRAIN: bind its sealed global curve, then require fresh Gamma/CLOB/raw-book
+    # JIT before submission. RESET: only a current executable curve may replace
+    # the old empty ask; the ordinary family route still rejects it.
+    text = str(reason or "").strip()
+    return text.startswith("LIVE_UNIT_PRICE_OUT_OF_BOUNDS:") or (
+        allow_empty_ask
+        and text == "EDLI executable snapshot marked non-executable: clob_no_ask_illiquid"
+    )
+
+
 def _global_current_state_may_rebind_scalar_rejection(reason: str | None) -> bool:
     """Let the sealed global objective replace only obsolete local scalars."""
 
@@ -17951,11 +17967,10 @@ def _global_current_state_may_rebind_scalar_rejection(reason: str | None) -> boo
         _qkernel_may_clear_legacy_missing_reason,
     )
 
-    return _qkernel_may_clear_legacy_missing_reason(text) or text.startswith(
-        (
-            "ADMISSION_NEAR_SETTLED_PRICE",
-            "LIVE_UNIT_PRICE_OUT_OF_BOUNDS:",
-        )
+    return (
+        _qkernel_may_clear_legacy_missing_reason(text)
+        or text.startswith("ADMISSION_NEAR_SETTLED_PRICE")
+        or _global_current_book_may_rebind_rejection(text, allow_empty_ask=True)
     )
 
 
@@ -20213,6 +20228,7 @@ def _build_event_bound_no_submit_receipt_core(
             honor_admission_rejections=False,
             allow_global_near_settled_rebind=True,
             allow_global_current_state_rebind=True,
+            allow_global_empty_ask_rebind=True,
             enforce_win_rate_floor=False,
             telemetry_out=_selection_scope_telemetry,
             rejection_reason_by_candidate=_selection_scope_rejections,
@@ -31375,6 +31391,7 @@ def _selection_scoped_proofs(
     honor_admission_rejections: bool = True,
     allow_global_near_settled_rebind: bool = False,
     allow_global_current_state_rebind: bool = False,
+    allow_global_empty_ask_rebind: bool = False,
     enforce_win_rate_floor: bool = True,
     telemetry_out: dict[str, object] | None = None,
     rejection_reason_by_candidate: dict[str, str] | None = None,
@@ -31476,20 +31493,6 @@ def _selection_scoped_proofs(
             )
         )
 
-    def _global_current_book_may_rebind_rejection(
-        missing_reason: str | None,
-    ) -> bool:
-        """Defer only a stale local quote rejection to the selected BUY JIT."""
-
-        # SCOPE: the exact globally selected BUY proof only; callers must also
-        # set allow_global_current_state_rebind. DRAIN: winner preflight fetches
-        # the selected native token's raw CLOB book and reconstructs its full
-        # curve before any venue side effect. RESET: that JIT curve must preserve
-        # the selected in-band limit/cost or the candidate is superseded.
-        return str(missing_reason or "").startswith(
-            "LIVE_UNIT_PRICE_OUT_OF_BOUNDS:"
-        )
-
     if honor_admission_rejections:
         admission_input = executable
         executable = []
@@ -31513,7 +31516,8 @@ def _selection_scoped_proofs(
                 or (
                     allow_global_current_state_rebind
                     and _global_current_book_may_rebind_rejection(
-                        proof.missing_reason
+                        proof.missing_reason,
+                        allow_empty_ask=allow_global_empty_ask_rebind,
                     )
                 )
                 or (
