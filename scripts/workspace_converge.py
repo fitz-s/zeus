@@ -18,6 +18,7 @@ whatever they abandon, and nothing it removes is lost:
   omc-* tmux session detached, screen frozen 24h or no human input 72h   kill
   untracked file in live, idle >= 24h      move to the archive
   /private/tmp/zeus*, idle >= 48h          delete
+  archive entry older than 30d              delete
 
 Branches that are checked out or head an open PR are never touched, and a
 failed GitHub query skips every branch and PR decision. Bundles and moved files
@@ -46,6 +47,7 @@ TMUX_IDLE = 24 * HOUR
 TMUX_UNATTENDED = 72 * HOUR
 UNTRACKED_IDLE = 24 * HOUR
 TMP_IDLE = 48 * HOUR
+ARCHIVE_KEEP = 30 * 24 * HOUR
 LARGE_FILE = 20 * 1024 * 1024
 SKIP_DIRS = frozenset(
     {".git", "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", "node_modules", ".venv"}
@@ -363,6 +365,20 @@ class Converger:
 
     # -- run -------------------------------------------------------------
 
+    def converge_archive(self) -> None:
+        """Expire archive entries after ARCHIVE_KEEP so the archive cannot become the next pile."""
+        keep = {"converge.log", "converge.log.1", "tmux-screens.json", ".lock"}
+        if not self.archive.is_dir():
+            return
+        for entry in sorted(self.archive.iterdir()):
+            if entry.name in keep:
+                continue
+            age = self.now - entry.lstat().st_mtime
+            if age < ARCHIVE_KEEP:
+                continue
+            self.act("expire-archive", str(entry), f"archived {age / 86400:.0f}d ago",
+                     lambda e=entry: shutil.rmtree(e) if e.is_dir() and not e.is_symlink() else e.unlink())
+
     def converge(self) -> list[dict]:
         fetched = run(["git", "fetch", "-q", "--prune", "origin"], cwd=self.repo, check=False).returncode == 0
         cwds = process_cwds()
@@ -376,6 +392,7 @@ class Converger:
             self.converge_tmux()
         self.converge_live_untracked()
         self.converge_tmp(cwds)
+        self.converge_archive()
         return self.actions
 
 

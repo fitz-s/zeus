@@ -43,6 +43,7 @@ A PR belongs to the task that opened it; that task merges or closes it before en
 | detached `omc-*` tmux session: screen frozen 24 h, or no human input 72 h | kill |
 | untracked file in the live checkout idle 24 h | move to the archive |
 | `/private/tmp/zeus*` idle 48 h | delete |
+| archive entry older than 30 d | delete |
 
 Checked-out branches and open-PR heads are never touched; a failed GitHub query skips every branch and PR decision.
 

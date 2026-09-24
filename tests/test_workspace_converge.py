@@ -191,3 +191,18 @@ def test_missing_lsof_means_unknown_idleness_so_no_worktree_is_removed(repo, tmp
     converger(repo, tmp_path).converge()
 
     assert wt.exists()
+
+
+def test_archive_entries_expire_after_30_days_but_the_log_stays(tmp_path):
+    archive = tmp_path / "archive"
+    old, fresh = archive / "old.bundle", archive / "fresh.bundle"
+    archive.mkdir()
+    for f in (old, fresh, archive / "converge.log"):
+        f.write_text("x")
+    age(old, 31 * DAY)
+    age(archive / "converge.log", 31 * DAY)
+
+    wc.Converger(tmp_path, archive, time.time(), apply=True, open_prs=[], tmp_root=None,
+                 use_tmux=False).converge_archive()
+
+    assert not old.exists() and fresh.exists() and (archive / "converge.log").exists()
