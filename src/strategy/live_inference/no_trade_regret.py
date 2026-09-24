@@ -342,6 +342,7 @@ class NoTradeRegretLedger:
         if outer_started:
             self.conn.execute("BEGIN IMMEDIATE")
         self.conn.execute("SAVEPOINT alpha_feedback_write")
+        changes_before = self.conn.total_changes
         try:
             # Acquire the single SQLite writer before reading the cohort tail.
             self.conn.execute(
@@ -349,6 +350,11 @@ class NoTradeRegretLedger:
             )
             yield
             self.conn.execute("RELEASE SAVEPOINT alpha_feedback_write")
+            if outer_started and self.conn.total_changes == changes_before:
+                # A deferred cut or identical ACK did not write evidence.
+                # Release only our own empty BEGIN IMMEDIATE, never a caller's
+                # pre-existing transaction or a real append awaiting commit.
+                self.conn.rollback()
         except BaseException:
             self.conn.execute("ROLLBACK TO SAVEPOINT alpha_feedback_write")
             self.conn.execute("RELEASE SAVEPOINT alpha_feedback_write")
