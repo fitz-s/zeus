@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS no_trade_regret_events (
     would_have_won INTEGER CHECK (would_have_won IN (0, 1) OR would_have_won IS NULL),
     would_have_filled INTEGER CHECK (would_have_filled IN (0, 1) OR would_have_filled IS NULL),
     envelope_json TEXT,
+    alpha_feedback_json TEXT,
     created_at TEXT NOT NULL,
     schema_version INTEGER NOT NULL CHECK (schema_version >= 1),
     UNIQUE(event_id, rejection_stage, rejection_reason)
@@ -94,6 +95,7 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         # rejection reason) as one queryable JSON blob. Additive / append-only; legacy rows
         # stay NULL. Authority: docs/evidence/settlement_guard/2026-06-11_decision_provenance_plan.md.
         "envelope_json": "TEXT",
+        "alpha_feedback_json": "TEXT",
     }
     for column, ddl in column_sql.items():
         if column not in existing:
