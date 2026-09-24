@@ -1681,9 +1681,9 @@ def _run_advisory_check_maintree_git_state_guard(
     Non-mutating reads (`git branch` with no create/delete/force/move flag,
     `git branch --show-current`, `git status`, ...) never match.
 
-    `git cherry-pick <verified-commit>` remains the one local landing lane.
-    A human operator outside agent tooling remains able to act directly; agents
-    have no bypass for direct live-tree mutation.
+    `git pull --ff-only` is the one sync lane: the checkout mirrors origin/live
+    and moves only by fast-forward to it. Agents have no bypass for any other
+    live-tree mutation.
     """
     command = _command_from_payload(payload)
     if not command:
@@ -1727,6 +1727,11 @@ def _run_advisory_check_maintree_git_state_guard(
             arg == "--dry-run" or (arg.startswith("-") and not arg.startswith("--") and "n" in arg[1:])
             for arg in sub_args.split()
         )
+    # The one sync lane: fast-forward the checkout to origin/live. The git
+    # reference-transaction guard independently refuses any new live tip that
+    # is not the fetched origin/live.
+    if subcmd == "pull" and sub_args.split() in (["--ff-only"], ["--ff-only", "origin", "live"]):
+        mutating = False
     if not mutating:
         return None
 
@@ -1768,9 +1773,9 @@ def _run_advisory_check_maintree_git_state_guard(
 
     print(
         f"BLOCKED [maintree_git_state_guard]: `git {subcmd}` would mutate the "
-        f"MAIN tree's branch/HEAD/working state ({_MAIN_TREE}). Agents work in "
-        f"their own linked worktree and never mutate live directly. Commit there, "
-        f"then land through a merged PR or `git cherry-pick <verified-commit>`.",
+        f"MAIN tree's branch/HEAD/working state ({_MAIN_TREE}). Work in a task "
+        f"worktree, land with `git push origin HEAD:live` (fast-forward) or a PR, "
+        f"then sync the checkout with `git pull --ff-only`.",
         file=sys.stderr,
     )
     return _BLOCK_SENTINEL

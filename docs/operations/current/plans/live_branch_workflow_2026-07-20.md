@@ -1,50 +1,37 @@
 # Live-branch workflow (`live`)
 
-Status: ACTIVE — established 2026-07-20. Promote the binding clauses into `AGENTS.md` §5 (Change control) at the operator's discretion; until then this doc is the workflow of record.
+Status: ACTIVE — established 2026-07-20; rewritten 2026-09-24 to one truth and task-scoped worktrees. `AGENTS.md` §5 is the binding summary.
 
-## What `live` is now
+## What `live` is
 
-`live` is the **live** branch: the exact tree the running Zeus engine trades from continuously. It is not a staging or integration branch. A commit reaching `live` is a commit the live daemons will act on.
+`origin/live` is the live branch: the exact tree the running Zeus engine trades from. The live checkout (`/Users/leofitz/zeus`) is a read-only mirror of it. A commit reaching `origin/live` is a commit the live daemons will act on after the next restart.
 
 ## The law
 
-1. **`live` accepts commits by exactly two lanes — hot-fix `git cherry-pick` or merged PR — and no third lane. A direct commit, amend, or in-place edit to the live checkout is forbidden.** The live daemons run from `<local>/zeus` on the live branch; directly committing to it or force-moving that checkout out from under them is the 2026-06-12 hijack incident. `maintree_git_state_guard` has no agent bypass; a verified cherry-pick is the only local landing command.
-2. **All work happens in its role worktree.** A role worktree persists across tasks and is reused for that role until operator retirement. Make and prove the change there.
-3. **Landing on live is cherry-pick or PR only.**
-   - Small, isolated, reviewed change → the landing authority runs verified `git cherry-pick` onto live.
-   - Anything larger, or anything that wants review → open a **PR into `live`** and merge after review.
-   - Nothing reaches live without passing review. Opening a PR fires paid auto-reviewers; bundle related work into one PR (≥300 self-authored LOC) per `architecture/agent_pr_discipline_2026_05_09.md`.
-4. **Freshness and fail-closed gates are never weakened to land faster.** The alpha-clock and failure-isolation invariants in `docs/operations/current/GOAL.md` bind every change that touches the money path.
+1. **One truth.** Only `origin/live` accepts commits. The live checkout moves by fast-forward to `origin/live` and nothing else; then the daemons restart (`scripts/deploy_live.py restart`, which refuses a checkout that differs from `origin/live`). Nobody edits, commits, amends, resets or switches the checkout.
+2. **One task, one worktree.** A task creates its worktree from `origin/live`, works and proves there, lands, then removes the worktree and deletes the branch. Sub-agents share the parent's worktree unless they must edit in parallel; then the parent creates a child worktree, merges the child branch back, and removes it. No worktree is kept per role or across tasks.
+3. **The push is the queue.** Landing is `git push origin HEAD:live`, fast-forward only. Two tasks that finish minutes apart cannot collide: the second push is rejected, so that task rebases onto the new tip, re-runs its proof, and pushes again. A milestone that deserves review goes through a PR into `live` instead; the merge on GitHub is the same fast-forward point.
+4. **Landed has one meaning:** `git merge-base --is-ancestor <sha> origin/live`. Patch-equivalence, cherry-pick subjects and local-only commits do not count.
+5. **Freshness and fail-closed gates are never weakened to land faster.** The alpha-clock and failure-isolation invariants in `docs/operations/current/GOAL.md` bind every money-path change.
+
+## Task lifecycle
+
+```
+git fetch origin
+git worktree add -b task/<id> .claude/worktrees/<id> origin/live
+# work, commit, prove
+git fetch origin && git rebase origin/live      # re-prove if the base moved
+git push origin HEAD:live                       # rejected -> rebase, re-prove, retry
+# live checkout: fast-forward to origin/live, then restart
+git worktree remove .claude/worktrees/<id> && git branch -d task/<id>
+```
+
+A task ending without landing commits its work to the branch (push it if a PR rides on it) and still removes the worktree. The only reasons to keep a worktree are an open PR under active revision or a process running in it.
+
+## Multi-agent repair
+
+The main thread aligns the work-list (per item: `file:line` and a fix / refute / defer-with-rationale disposition), fans out over disjoint files at the lowest fitting model tier, and lands. Every agent verifies the defect first, makes the minimal change, ships a behavioral antibody that fails before and passes after, and proves zero new regressions by diffing failing-test names pre vs post. Two agents never own the same file.
 
 ## Branch hygiene
 
-A branch is absorbed only when its commits are ancestors of `live` **or** its
-patches are demonstrably equivalent to `live` after a hot-pick (`git cherry
-live <branch>` has no `+` entries). A branch with unreconciled patches is kept;
-never delete a branch that backs an open PR. The Codex worktree can be reclaimed
-without deleting its branch. Remote pruning of absorbed branches is
-operator-directed:
-
-```
-git push origin --delete <absorbed-branch>   # only if merged into live and no open PR
-```
-
-## Multi-agent live-repair protocol
-
-`live` runs 24/7 as a mesh of scheduled jobs; a mechanism (the improvement loop, a failing gate, a code review, a monitor alert, or an operator ask) wakes work. Many agents may repair concurrently. The **main thread is the integrator and landing authority** — it holds full context and owns alignment, integration, final verification, and the landing decision; agents own bounded slices and prove them in isolation.
-
-1. **Wake → align.** Reconcile the trigger into a precise work-list: per item, the exact `file:line` and the disposition to prove — *fix* / *refute* / *defer-with-rationale*. Alignment precedes fan-out; a vague brief buys well-argued irrelevance.
-
-2. **Fan out — one owner per file/slice.** Dispatch worktree-isolated agents over **disjoint** files, at the lowest model tier that fits the slice (reserve the top tier for outcome-deciding money-path logic). Every agent, without exception:
-   - **verifies the defect is real first** — locate by symbol, not the reported line (review line numbers drift); refute false positives with evidence rather than fabricating a fix;
-   - makes the **minimal** correct change — no architecture rewrite for a case the runtime already covers (Occam; the scheduler's separate pools + separate processes already isolate across jobs);
-   - ships a **behavioral antibody** that fails on the pre-fix tree and passes after;
-   - proves **zero new regressions** by diffing the failing-test-name set pre-vs-post, not by trusting a count.
-
-3. **Adversarially disposition the rest.** Before anything lands, read-only investigators verify every remaining or uncertain finding to a verdict — SATISFIED / MITIGATED / REFUTED / DEFERRED-with-rationale — each backed by `file:line`. Completeness without over-fixing; a deferred item carries the reasoning for *why the obvious fix doesn't hold here*, written down.
-
-4. **Integrate by disjoint cherry-pick.** Cherry-pick each agent's commit onto the **current** live tip in one integration branch (disjoint files → clean). Prove the composite adds zero failures with a **base-vs-integrated failing-set diff**, not by trust. Verify antibodies pass on the integrated branch together.
-
-5. **Land by lane; never clobber live-ops.** Hot-fix (a live money-path defect) → `cherry-pick` onto live + reload. PR (functional/milestone) → gates + review. The live branch moves under you as other agents/operators commit — rebase onto its current tip before landing; a **dirty live checkout is a coordination point, never a force** (preserve unrelated uncommitted work; overlapping governance files merge, they do not overwrite).
-
-**Balance point:** the main thread integrates and verifies; agents prove bounded slices in isolation; land small and often. Two agents never own the same file; parallel editors are worktree-isolated; the low tiers enumerate and build, the top tier only untangles the genuinely complex.
+A branch whose tip is an ancestor of `origin/live` is deleted with its worktree. A branch that never landed is either pushed behind a PR or deleted; stale local branches are not an archive. Deleting the remote branch after a PR merge is part of landing.

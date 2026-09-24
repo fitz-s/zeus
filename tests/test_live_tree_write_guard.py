@@ -87,7 +87,7 @@ def test_unknown_codex_patch_from_live_is_blocked():
     assert result.returncode == 2
 
 
-def test_direct_live_git_mutations_are_blocked_but_cherry_pick_is_allowed():
+def test_direct_live_git_mutations_are_blocked_but_ff_sync_is_allowed():
     def run(command: str) -> subprocess.CompletedProcess:
         return subprocess.run(
             [sys.executable, str(DISPATCH_PATH), "maintree_git_state_guard"],
@@ -107,12 +107,16 @@ def test_direct_live_git_mutations_are_blocked_but_cherry_pick_is_allowed():
     commit = run(f"git -C {LIVE_ROOT} commit -m forbidden")
     merge = run(f"git -C {LIVE_ROOT} merge forbidden")
     dry_clean = run(f"git -C {LIVE_ROOT} clean -nd")
-    hot_pick = run(f"git -C {LIVE_ROOT} cherry-pick deadbeef")
+    ff_sync = run(f"git -C {LIVE_ROOT} pull --ff-only")
+    ff_sync_named = run(f"git -C {LIVE_ROOT} pull --ff-only origin live")
+    other_pull = run(f"git -C {LIVE_ROOT} pull origin feature")
 
     assert commit.returncode == 2
     assert merge.returncode == 2
     assert dry_clean.returncode == 0
-    assert hot_pick.returncode == 0
+    assert ff_sync.returncode == 0
+    assert ff_sync_named.returncode == 0
+    assert other_pull.returncode == 2
 
 
 def test_codex_router_denies_live_target_but_allows_worktree_target():
@@ -142,7 +146,7 @@ def test_codex_router_denies_live_target_but_allows_worktree_target():
     assert not allowed.stdout.strip()
 
 
-def test_codex_router_denies_direct_live_commit_but_allows_cherry_pick():
+def test_codex_router_denies_direct_live_commit_but_allows_ff_sync():
     def invoke(command: str) -> subprocess.CompletedProcess:
         return subprocess.run(
             ["node", str(ROUTER_PATH), "maintree_git_state_guard"],
@@ -161,7 +165,7 @@ def test_codex_router_denies_direct_live_commit_but_allows_cherry_pick():
         )
 
     denied = invoke(f"git -C {LIVE_ROOT} commit -m forbidden")
-    allowed = invoke(f"git -C {LIVE_ROOT} cherry-pick deadbeef")
+    allowed = invoke(f"git -C {LIVE_ROOT} pull --ff-only")
 
     assert denied.returncode == 0
     assert json.loads(denied.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"

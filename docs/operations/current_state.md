@@ -33,6 +33,6 @@ Closed packet bodies: `docs/archive_registry.md` (bodies untracked under `docs/a
 
 - `docs/operations/AGENTS.md` — packet/package routing and closeout rules
 - `architecture/history_lore.yaml` — durable lessons
-- `docs/operations/current/plans/live_branch_workflow_2026-07-20.md` — the `live`-branch workflow (worktree → cherry-pick/PR → live); AGENTS §5 is the summary
+- `docs/operations/current/plans/live_branch_workflow_2026-07-20.md` — the `live`-branch workflow (task worktree → fast-forward push/PR → live); AGENTS §5 is the summary
 
 (2026-07-20: the five 2026-07-10/11 landed packets — runtime_open_exposure_snapshot, runtime_claim_contention, chain_absence_livelock, quarantine_chain_freshness, pending_exit_restart_redecision — archived to `docs/archive/2026-Q3/`; `.archived` stubs carry the restore path.)
