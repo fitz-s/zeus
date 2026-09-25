@@ -7,7 +7,10 @@
 
 from __future__ import annotations
 
+import json
+import sqlite3
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -119,6 +122,63 @@ def test_served_cell_needs_both_the_rule_and_its_outer_fold_record() -> None:
     assert served["rule_active"] and served["active"]
     assert served["oos_gain"] >= fit.MIN_GAIN_NATS and served["oos_ub_new_minus_old"] < 0.0
     assert not unshifted["active"]
+
+
+def test_fast_residual_posteriors_are_excluded_from_records(tmp_path, monkeypatch) -> None:
+    """A fast-residual posterior served the carrier AFTER a further likelihood
+    transport, so the carrier likelihood does not describe it: it must never become
+    a record, neither by winning its hour nor as the only posterior of an hour."""
+
+    provenance = json.dumps(
+        {
+            "day0_remaining_carrier_future_extremes_c": [29.5, 30.1, 30.4],
+            "day0_remaining_carrier_final_extremes_c": [30.0],
+            "day0_remaining_carrier_path_error_sigma_c": 0.8,
+            "day0_preliminary_report_survival_likelihood": {
+                "boundary_survival_probability": 0.95
+            },
+            "day0_provisional_observation": {"observed_extreme_c": 28.3},
+        }
+    )
+    db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE forecast_posteriors (posterior_id INTEGER PRIMARY KEY, city TEXT, "
+        "target_date TEXT, temperature_metric TEXT, computed_at TEXT, q_shape TEXT, "
+        "runtime_layer TEXT, provenance_json TEXT)"
+    )
+    # Hong Kong is UTC+8: 18:10Z / 18:40Z on 09-19 are local 02:10 / 02:40 on 09-20,
+    # 20:10Z is local 04:10.
+    rows = (
+        (1, "2026-09-19T18:10:00+00:00", "day0_remaining_shared_carrier_v3"),
+        (2, "2026-09-19T18:40:00+00:00", "fused_day0_fast_residual_likelihood"),
+        (3, "2026-09-19T20:10:00+00:00", "fused_day0_fast_residual_likelihood"),
+    )
+    conn.executemany(
+        "INSERT INTO forecast_posteriors VALUES (?, 'Hong Kong', '2026-09-20', 'high', ?, ?, "
+        "'live', ?)",
+        [(pid, computed, shape, provenance) for pid, computed, shape in rows],
+    )
+    conn.commit()
+    conn.close()
+    label = SimpleNamespace(
+        city="Hong Kong",
+        target_date="2026-09-20",
+        metric="high",
+        settlement_value=30.0,
+        label_known_at=datetime(2026, 9, 21, tzinfo=UTC),
+    )
+    monkeypatch.setattr(
+        fit,
+        "read_current_settlement_history",
+        lambda *_args, **_kwargs: SimpleNamespace(rows=(label,)),
+    )
+
+    records, counts = fit.build_records(str(db), fit_date="2026-09-25")
+
+    assert counts["hours"] == 1
+    assert [r.decided_at for r in records] == [datetime(2026, 9, 19, 18, 10, tzinfo=UTC)]
+    assert records[0].cell == "high|2"
 
 
 def test_clustered_gain_averages_hours_within_a_city_day_first() -> None:

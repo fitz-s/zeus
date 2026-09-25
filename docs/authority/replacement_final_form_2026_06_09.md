@@ -210,7 +210,8 @@ merely because no sample reached it. Full-day forecast distributions are unchang
 
 The remaining-hourly member centers of the shared carrier take one
 settlement-graded additive shift per (metric, 2-hour local band), fitted
-walk-forward by the terminal-bin likelihood of this same operator
+walk-forward by the terminal-bin likelihood of this same operator on posteriors
+whose served q is the carrier itself (fast-residual-transported rows excluded)
 (`scripts/fit_day0_remaining_center_bias.py`, served by
 `src/calibration/day0_remaining_bias.py`). The shift enters before the
 max/min and the settlement integration, identically in the point q and the

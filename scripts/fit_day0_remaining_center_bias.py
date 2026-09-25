@@ -8,8 +8,10 @@
 of the Day0 remaining-day carrier, per (metric, 2-hour local band).
 
 RECORDS. One per (city, target_date, metric, local hour on the target day): the last
-Day0-shaped live posterior of that hour, kept only when it carries the shared
-remaining-day carrier (a posterior served by another mechanism describes no carrier).
+live posterior of that hour whose served q is the shared remaining-day carrier
+(``CARRIER_SHAPES``). Fast-residual posteriors are excluded from fitting and from
+every evaluation: their served q is the carrier after a further fast-residual
+transport, which the carrier likelihood below does not describe.
 Each record keeps the carrier's UNSHIFTED remaining-hourly members, typed final-daily
 centers, path sigma, observed boundary and report-survival weight exactly as
 persisted, plus the settled integer from ``read_current_settlement_history`` (current
@@ -82,11 +84,14 @@ from src.signal.ensemble_signal import sigma_instrument_for_city  # noqa: E402
 DEFAULT_FORECAST_DB = os.path.join(REPO, "state", "zeus-forecasts.db")
 DEFAULT_OUT = os.path.join(REPO, "state", "day0_remaining_center_bias.json")
 
+# Only posteriors whose served q IS the shared carrier. The materializer rewrites
+# q_shape to "fused_day0_fast_residual_likelihood" whenever it transports the carrier
+# q and draws through the fast-residual likelihood, so that shape served a different
+# distribution than the carrier likelihood scored here and is excluded.
 CARRIER_SHAPES = (
     "day0_remaining_shared_carrier_v1",
     "day0_remaining_shared_carrier_v2",
     "day0_remaining_shared_carrier_v3",
-    "fused_day0_fast_residual_likelihood",
 )
 GRID_C = np.round(np.arange(-1.5, 1.5 + 1e-9, 0.1), 10)
 ZERO = int(np.argmin(np.abs(GRID_C)))
