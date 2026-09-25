@@ -3513,6 +3513,19 @@ class GlobalSingleOrderCandidateEvaluation:
     # never a gate input here.
     decision_p0: Decimal | None = None
     decision_p0_source: str | None = None
+    # candidate-set q provenance (tier0_candidate_set_provenance q columns):
+    # the raw payoff q for THIS candidate's own side (pre-correction, same
+    # semantics as raw_calibration_input.raw_q_held on the actuation
+    # certificate) and the q actually used for scoring after any
+    # market-anchored correction, plus the correction's own identity. Sourced
+    # from this candidate's own sealed ``payoff_q_correction`` at solve time
+    # (never re-derived) -- None whenever no correction was sealed for this
+    # leg (e.g. a proven exact/settlement-locked payoff, or a bare rejection
+    # that was never scored), matching decision_p0's own "never guess" law.
+    q_raw: float | None = None
+    q_served: float | None = None
+    probability_semantics_revision: str | None = None
+    probability_witness_identity: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -4391,6 +4404,30 @@ def _global_candidate_decision_p0(
     return curve.levels[0].price, candidate.book_snapshot_id
 
 
+def _global_candidate_q_provenance(
+    score: GlobalSingleOrderDecision | None,
+) -> tuple[float | None, float | None, str | None]:
+    """(q_raw, q_served, probability_semantics_revision) from a scored
+    candidate's own sealed correction. Never recomputes q: reads only the
+    ``PayoffQCorrection``/``SourceIdentityBaseline`` record this exact
+    candidate leg was already sized with. All-None when the candidate was
+    never scored or no correction was sealed for it (proven exact/
+    settlement-locked payoff) -- fail-closed, matching decision_p0's law.
+    """
+
+    correction = score.payoff_q_correction if score is not None else None
+    if isinstance(correction, SourceIdentityBaseline):
+        return correction.raw_q, correction.corrected_q, correction.raw_probability_revision
+    if isinstance(correction, PayoffQCorrection):
+        revision = (
+            correction.fit_scope.raw_probability_revision
+            if correction.fit_scope is not None
+            else None
+        )
+        return correction.raw_q, correction.corrected_q, revision
+    return None, None, None
+
+
 def _global_candidate_evaluations(
     candidates: Sequence[GlobalSingleOrderAnyCandidate],
     *,
@@ -4469,10 +4506,16 @@ def _global_candidate_evaluations(
                     ),
                     decision_p0=candidate_decision_p0,
                     decision_p0_source=candidate_decision_p0_source,
+                    probability_witness_identity=(
+                        candidate.probability_witness_identity
+                    ),
                 )
             )
             continue
         rejection_reason = rejections.get(candidate.candidate_id)
+        q_raw, q_served, probability_semantics_revision = (
+            _global_candidate_q_provenance(score)
+        )
         evaluations.append(
             GlobalSingleOrderCandidateEvaluation(
                 candidate_id=candidate.candidate_id,
@@ -4545,6 +4588,12 @@ def _global_candidate_evaluations(
                 ),
                 decision_p0=candidate_decision_p0,
                 decision_p0_source=candidate_decision_p0_source,
+                q_raw=q_raw,
+                q_served=q_served,
+                probability_semantics_revision=probability_semantics_revision,
+                probability_witness_identity=(
+                    candidate.probability_witness_identity
+                ),
             )
         )
     return tuple(evaluations)

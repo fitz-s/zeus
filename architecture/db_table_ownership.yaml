@@ -858,6 +858,12 @@ tables:
       Sole consumer: scripts/selection_lift_report.py (preregistered
       selection-lift test, tier0_selection_lift_preregistration_2026-08-24.md).
       Idempotent via UNIQUE(selection_epoch_identity, candidate_id).
+      2026-09-25: gained q_raw REAL, q_served REAL,
+      probability_semantics_revision TEXT, probability_witness_identity TEXT
+      (nullable, forward-only ADD COLUMN via ensure_table's
+      _COLUMN_MIGRATIONS) so the market-anchored q correction can train on
+      every evaluated candidate, not only settled fills. Existing rows stay
+      NULL; no backfill.
 
   - name: forecasts
     db: world

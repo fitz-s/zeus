@@ -3843,6 +3843,13 @@ def _persist_tier0_candidate_set(
     resolvable (city, target_date) in ``family_context_by_key`` is skipped
     entirely rather than written with a fabricated/empty grouping key --
     fail-closed, matching decision_p0's own "never guess" law.
+
+    2026-09-25: also carries each candidate's own q_raw/q_served/
+    probability_semantics_revision/probability_witness_identity, read
+    straight off the evaluation object (never recomputed here) so the
+    market-anchored q correction can train on every evaluated candidate, not
+    only settled fills. NULL wherever the evaluation itself carries no
+    sealed correction for that leg.
     """
 
     if not evaluations:
@@ -3874,6 +3881,14 @@ def _persist_tier0_candidate_set(
                 bucket = lead_bucket(lead_hours)
         decision_p0 = getattr(evaluation, "decision_p0", None)
         status = str(getattr(evaluation, "status", "") or "")
+        q_raw = getattr(evaluation, "q_raw", None)
+        q_served = getattr(evaluation, "q_served", None)
+        probability_semantics_revision = getattr(
+            evaluation, "probability_semantics_revision", None
+        )
+        probability_witness_identity = getattr(
+            evaluation, "probability_witness_identity", None
+        )
         rows.append(
             (
                 selection_epoch_identity,
@@ -3895,6 +3910,18 @@ def _persist_tier0_candidate_set(
                 1 if status == "SELECTED" else 0,
                 str(evaluation.condition_id),
                 created_at,
+                float(q_raw) if q_raw is not None else None,
+                float(q_served) if q_served is not None else None,
+                (
+                    str(probability_semantics_revision)
+                    if probability_semantics_revision is not None
+                    else None
+                ),
+                (
+                    str(probability_witness_identity)
+                    if probability_witness_identity is not None
+                    else None
+                ),
             )
         )
     if not rows:
@@ -3905,8 +3932,10 @@ def _persist_tier0_candidate_set(
             selection_epoch_identity, decision_at_utc, city_date_group_id,
             city, target_date, candidate_id, family_key, bin_id, side,
             token_id, action, p0, p0_source, lead_bucket, eligible,
-            rejection_reason, selected, market_key, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            rejection_reason, selected, market_key, created_at,
+            q_raw, q_served, probability_semantics_revision,
+            probability_witness_identity
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         rows,
     )
