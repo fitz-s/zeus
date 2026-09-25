@@ -892,3 +892,58 @@ def test_precision_class_at_cutoff_ignores_reports_possessed_after_it():
     assert fitted["station_channel"] == {"RJTT": "metar_whole"}
     assert any(key.startswith("L1|noaa_wrh|metar_whole|") for key in fitted["nodes"])
     assert not any("metar_tenth" in key for key in fitted["nodes"])
+
+
+def test_fitter_reads_canonical_settlement_outcomes_not_legacy_settlements(tmp_path):
+    """Labels come from forecasts.settlement_outcomes (canonical), never the
+    legacy_archived settlements shell; unit is settlement_unit and a label is
+    known at max(settled_at, recorded_at)."""
+    from scripts import fit_day0_resolver_terminal_residual as fit
+    from src.state.schema.v2_schema import _create_settlement_outcomes
+
+    db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db)
+    _create_settlement_outcomes(conn)
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS settlements (
+            city TEXT, target_date TEXT, temperature_metric TEXT, settlement_value REAL,
+            unit TEXT, settlement_source TEXT, settled_at TEXT, authority TEXT)"""
+    )
+    wrh = "https://www.weather.gov/wrh/timeseries?site=RJTT"
+    conn.execute(
+        "INSERT INTO settlements VALUES (?,?,?,?,?,?,?,?)",
+        ("Tokyo", "2026-09-10", "high", 99.0, "C", wrh, "2026-09-11T05:00:00+00:00", "VERIFIED"),
+    )
+    rows = [
+        # canonical, learning-final
+        ("Tokyo", "2026-09-10", "high", "30C", 31.0, wrh, "2026-09-11T05:00:00+00:00", "VERIFIED",
+         "2026-09-11 06:00:00", "C", "VENUE_RESOLVED"),
+        # not learning-final: censored
+        ("Tokyo", "2026-09-11", "high", "30C", 30.0, wrh, "2026-09-12T05:00:00+00:00", "VERIFIED",
+         "2026-09-12T06:00:00+00:00", "C", "UNRESOLVED"),
+        # disputed authority: censored
+        ("Tokyo", "2026-09-12", "high", "30C", 30.0, wrh, "2026-09-13T05:00:00+00:00", "DISPUTED",
+         "2026-09-13T06:00:00+00:00", "C", "VENUE_RESOLVED"),
+    ]
+    conn.executemany(
+        """INSERT INTO settlement_outcomes (city, target_date, temperature_metric, winning_bin,
+               settlement_value, settlement_source, settled_at, authority, recorded_at,
+               settlement_unit, resolution_state)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+        rows,
+    )
+    conn.commit()
+    conn.close()
+
+    labels = fit.read_settlements(str(db), "2026-09-01")
+    assert labels == [
+        {
+            "city": "Tokyo",
+            "target_date": "2026-09-10",
+            "metric": "high",
+            "value": 31.0,
+            "unit": "C",
+            "resolver": "noaa_wrh",
+            "available_at": datetime(2026, 9, 11, 6, tzinfo=UTC),
+        }
+    ]

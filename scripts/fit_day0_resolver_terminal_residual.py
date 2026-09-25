@@ -6,8 +6,10 @@
 """Fit and evaluate the resolver-graded Day0 terminal residual artifact.
 
 LABELS (``src.calibration.day0_resolver_terminal_residual``):
-- NOAA WRH, WU-history and HKO-daily settlements (VERIFIED, value present,
-  ``settled_at`` present); anything else is censored.
+- NOAA WRH, WU-history and HKO-daily settlements from canonical
+  ``settlement_outcomes`` (VERIFIED, value present, learning-final A8 resolution
+  state, unit from ``settlement_unit``); a label is available at
+  ``max(settled_at, recorded_at)``.  Anything else is censored.
 - METAR stations: running extreme from AWC and Ogimet renderings in
   ``observation_prints``.  One report identity (observation time) counts once;
   the latest rendering possessed (``fetched_at_utc``) by the checkpoint is
@@ -80,6 +82,10 @@ from src.calibration.day0_resolver_terminal_residual import (  # noqa: E402
     to_contract_unit,
 )
 from src.config import cities_by_name, settlement_source_type_for_city  # noqa: E402
+from src.contracts.settlement_axes import (  # noqa: E402
+    is_learning_eligible_resolution_state,
+    settlement_resolution_state_from_row,
+)
 from src.contracts.settlement_semantics import SettlementSemantics  # noqa: E402
 from src.data.day0_fast_obs import metar_observation_time_from_raw  # noqa: E402
 from src.data.day0_hourly_vectors import build_day0_remaining_probability_carrier  # noqa: E402
@@ -111,12 +117,15 @@ def _ro(path: str) -> sqlite3.Connection:
     return conn
 
 
-def _utc(raw: object) -> datetime | None:
+def _utc(raw: object, *, naive_is_utc: bool = False) -> datetime | None:
+    """Aware UTC instant; a naive value is UTC only where SQLite stamped it."""
     try:
-        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(str(raw).strip().replace("Z", "+00:00"))
     except (TypeError, ValueError):
         return None
-    return parsed.astimezone(timezone.utc) if parsed.tzinfo else None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc) if naive_is_utc else None
+    return parsed.astimezone(timezone.utc)
 
 
 def _native(value: float, from_unit: str, to_unit: str) -> float:
@@ -135,13 +144,22 @@ def _native(value: float, from_unit: str, to_unit: str) -> float:
 
 
 def read_settlements(forecasts_db: str, start: str) -> list[dict]:
+    """VERIFIED, learning-final labels from canonical ``settlement_outcomes``.
+
+    Semantics follow ``src.data.current_settlement_history``: unit from
+    ``settlement_unit``, eligibility from the A8 resolution state, and a label is
+    known only once both ``settled_at`` and ``recorded_at`` have passed.
+    """
+
     conn = _ro(forecasts_db)
+    conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
             """
-            SELECT city, target_date, temperature_metric, settlement_value, unit,
-                   settlement_source, settled_at
-              FROM settlements
+            SELECT city, target_date, temperature_metric, winning_bin, settlement_value,
+                   settlement_source, settled_at, recorded_at, authority,
+                   settlement_unit, outcome_type, resolution_state
+              FROM settlement_outcomes
              WHERE authority = 'VERIFIED' AND settlement_value IS NOT NULL
                AND temperature_metric IN ('high', 'low') AND target_date >= ?
             """,
@@ -150,11 +168,22 @@ def read_settlements(forecasts_db: str, start: str) -> list[dict]:
     finally:
         conn.close()
     out = []
-    for city, target, metric, value, unit, source, settled_at in rows:
-        resolver = resolver_product_from_settlement_source(source)
-        available = _utc(settled_at)
-        if resolver is None or available is None:
+    for row in rows:
+        try:
+            state = settlement_resolution_state_from_row(dict(row))
+        except (TypeError, ValueError):
             continue
+        settled, recorded = _utc(row["settled_at"]), _utc(row["recorded_at"], naive_is_utc=True)
+        resolver = resolver_product_from_settlement_source(row["settlement_source"])
+        if (
+            not is_learning_eligible_resolution_state(state)
+            or resolver is None
+            or settled is None
+            or recorded is None
+        ):
+            continue
+        city, target, metric = row["city"], row["target_date"], row["temperature_metric"]
+        value, unit, available = row["settlement_value"], row["settlement_unit"], max(settled, recorded)
         out.append(
             {
                 "city": city,
