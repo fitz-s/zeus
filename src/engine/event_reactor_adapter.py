@@ -488,6 +488,15 @@ _GLOBAL_PROBABILITY_FAMILY_UNAVAILABLE_PREFIXES = (
     "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:",
     "GLOBAL_DAY0_SOURCE_CLOCK_BOUND_BLOCKED:",
 )
+# SCOPE: the one family whose executable forecast the canonical reader refused.
+# The reader's verdict is an upper-case reason code; its exception text (a
+# lower-case message) is a code or schema fault and still stops the cut.
+# DRAIN/RESET: the next source run re-serves an eligible contributor.
+_FORECAST_READER_FAMILY_VERDICT = re.compile(
+    r"FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:[A-Z][A-Z0-9_]*"
+    r"|FORECAST_READER_SCOPE_CONSTRUCTION_MISSING:"
+    r"(?:source_run_id_missing|source_run_missing|coverage_missing|scope_incomplete)"
+)
 _FAMILY_AUTHORITY_UNAVAILABLE = "FamilyAuthorityUnavailable"
 _TRANSIENT_FAMILY_AUTHORITY_UNAVAILABLE = "TransientFamilyAuthorityUnavailable"
 
@@ -12666,8 +12675,10 @@ def _is_global_probability_family_unavailable(exc: Exception) -> bool:
     if not isinstance(exc, ValueError):
         return False
     reason = str(exc)
-    return reason in _GLOBAL_PROBABILITY_FAMILY_UNAVAILABLE_REASONS or reason.startswith(
-        _GLOBAL_PROBABILITY_FAMILY_UNAVAILABLE_PREFIXES
+    return (
+        reason in _GLOBAL_PROBABILITY_FAMILY_UNAVAILABLE_REASONS
+        or reason.startswith(_GLOBAL_PROBABILITY_FAMILY_UNAVAILABLE_PREFIXES)
+        or _FORECAST_READER_FAMILY_VERDICT.fullmatch(reason) is not None
     )
 
 

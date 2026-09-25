@@ -35436,6 +35436,23 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
             ),
             True,
         ),
+        (
+            (
+                "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+                "FamilyAuthorityUnavailable:"
+                "FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:"
+                "TARGET_LOCAL_DAY_BOUNDARY_AMBIGUOUS"
+            ),
+            True,
+        ),
+        (
+            (
+                "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+                "FamilyAuthorityUnavailable:"
+                "FORECAST_READER_SCOPE_CONSTRUCTION_MISSING:source_run_missing"
+            ),
+            True,
+        ),
     ),
 )
 def test_global_batch_excludes_typed_current_q_ineligible_family(
@@ -35578,6 +35595,10 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
                     raise ValueError("GLOBAL_DAY0_REPLACEMENT_CONDITIONING_MISSING")
                 if "DAY0_NOAA_PRELIMINARY_CARRIER_" in ineligible_reason:
                     raise ValueError(ineligible_reason.rsplit(":", 1)[-1])
+                if "FORECAST_READER_" in ineligible_reason:
+                    raise ValueError(
+                        ineligible_reason.split("FamilyAuthorityUnavailable:", 1)[1]
+                    )
                 raise ValueError(
                     "GLOBAL_DAY0_SOURCE_CLOCK_BOUND_BLOCKED:"
                     "REPLACEMENT_RAW_INPUT_HWM:"
@@ -35669,6 +35690,25 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
         else 1
     )
     assert calls["ineligible_prepare"] == expected_prepare_calls
+
+
+@pytest.mark.parametrize(
+    ("message", "family_scoped"),
+    (
+        ("FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:TARGET_LOCAL_DAY_BOUNDARY_AMBIGUOUS", True),
+        ("FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:SOURCE_RUN_HORIZON_OUT_OF_RANGE", True),
+        ("FORECAST_READER_SCOPE_CONSTRUCTION_MISSING:coverage_missing", True),
+        # Exception text from inside the reader is a code/schema fault, not a
+        # verdict about this family's forecast: it still stops the whole cut.
+        ("FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:no such table: source_run", False),
+        ("FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:unsupported executable forecast authority table", False),
+        ("FORECAST_READER_SCOPE_CONSTRUCTION_MISSING:source_run_authority_missing", False),
+    ),
+)
+def test_forecast_reader_verdict_is_family_scoped_but_reader_fault_is_not(
+    message, family_scoped,
+):
+    assert era._is_global_probability_family_unavailable(ValueError(message)) is family_scoped
 
 
 def test_global_batch_rejects_when_all_families_lack_current_q(monkeypatch):
