@@ -208,6 +208,20 @@ confidence sampling retains its existing law. Monte Carlo sample count must
 not change this point expectation or erase representable Gaussian tail mass
 merely because no sample reached it. Full-day forecast distributions are unchanged.
 
+The remaining-hourly member centers of the shared carrier take one
+settlement-graded additive shift per (metric, 2-hour local band), fitted
+walk-forward by the terminal-bin likelihood of this same operator
+(`scripts/fit_day0_remaining_center_bias.py`, served by
+`src/calibration/day0_remaining_bias.py`). The shift enters before the
+max/min and the settlement integration, identically in the point q and the
+confidence draws. It never moves the observed extreme or the typed final-daily
+provider centers. A cell serves only when two tests both beat the unshifted
+carrier by at least 0.02 nats per city-day, each with a one-sided 95% upper
+bound below zero. The first is the rule's inner chronological validation. The
+second is the chronological outer-fold score of that same rule. Otherwise, or
+when the artifact is absent or stale, the unshifted carrier serves and
+provenance names the reason.
+
 The shared-carrier V1 is retained only for explicit, immutable historical replay. Current ENTRY and
 held-position belief require a complete V2 or typed V3 carrier declaration; ordinary
 non-carrier forecasts are unaffected. Old, partial or unknown carrier versions

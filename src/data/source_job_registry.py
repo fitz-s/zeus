@@ -251,6 +251,13 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
                         "writes only that one artifact (atomic tmp+replace); defuses the "
                         "loader's MAX_ARTIFACT_AGE_DAYS=14 staleness gate that otherwise goes "
                         "silently inert with no scheduled producer"),
+    SourceJobSpec("ingest_day0_remaining_center_bias_refit", "ingest_main", "derived", "default", False,
+                  callable_ref="_day0_remaining_center_bias_refit_tick", file_only=True,
+                  notes="daily 06:40 UTC (+ immediate at boot) refit of "
+                        "state/day0_remaining_center_bias.json; the fitter subprocess is "
+                        "read-only over zeus-forecasts.db (explicit STATE_DIR path) and writes "
+                        "only that one artifact (atomic tmp+replace); the loader serves the "
+                        "unshifted Day0 carrier past MAX_ARTIFACT_AGE_DAYS=7"),
     SourceJobSpec("ingest_settlement_sigma_floor_refit", "ingest_main", "derived", "default", False,
                   callable_ref="_settlement_sigma_floor_refit_tick", file_only=True,
                   notes="daily 06:35 UTC (+ immediate at boot) refit of "

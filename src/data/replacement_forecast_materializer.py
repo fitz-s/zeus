@@ -69,6 +69,7 @@ from src.data.replacement_input_hwm import (
 )
 from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
 from src.calibration import center_debias_live_fit
+from src.calibration.day0_remaining_bias import day0_remaining_bias
 from src.contracts.availability_time import proof_of_possession_available_at
 from src.contracts.replacement_pipeline_files import (
     DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS,
@@ -1313,6 +1314,7 @@ def _day0_noaa_preliminary_carrier(
     bins: Sequence[object],
     path_error_sigma_c: float,
     final_extreme_centers_c: Sequence[float] = (),
+    remaining_center_bias_c: float = 0.0,
 ) -> tuple[dict[str, object], dict[str, object]]:
     """Build a source-specific provisional shared remaining-day carrier.
 
@@ -1320,7 +1322,8 @@ def _day0_noaa_preliminary_carrier(
     Their source-specific revision models supply the survival weight; the
     no-survival branch leaves the future path unclamped. Missing evidence or
     future members is a family-scoped failure, never permission to use a
-    full-day Normal.
+    full-day Normal. ``remaining_center_bias_c`` is the degC shift from
+    ``src.calibration.day0_remaining_bias`` for the remaining-hourly members.
     """
     source = str(request.day0_observed_extreme_source or "").strip().lower()
     noaa_preliminary = _is_noaa_preliminary_source(source)
@@ -1498,6 +1501,7 @@ def _day0_noaa_preliminary_carrier(
         n_samples=500,
         identity_inputs=identity_inputs,
         settlement_semantics=SettlementSemantics.for_city(city),
+        remaining_center_bias_native=float(remaining_center_bias_c) * native_scale,
     )
     return carrier, likelihood
 
@@ -6270,6 +6274,7 @@ def _compute_posterior_payload(
     _day0_shared_carrier: dict[str, object] | None = None
     _day0_shared_carrier_likelihood: dict[str, object] | None = None
     _day0_shared_carrier_station_extremes: tuple[dict[str, object], ...] = ()
+    _day0_remaining_bias_provenance: dict[str, object] = {}
     _day0_shared_carrier_error: str | None = None
     _provisional_extreme_c: float | None = None
     if (
@@ -6388,6 +6393,13 @@ def _compute_posterior_payload(
                         fusion=bayes_precision_fusion_override,
                     )
                 )
+                _day0_remaining_bias = day0_remaining_bias(
+                    city=request.city,
+                    metric=metric,
+                    decision_time=_to_utc(request.computed_at, field_name="computed_at"),
+                    timezone_name=request.city_timezone,
+                )
+                _day0_remaining_bias_provenance = _day0_remaining_bias.provenance()
                 _day0_shared_carrier, _day0_shared_carrier_likelihood = (
                     _day0_noaa_preliminary_carrier(
                         conn,
@@ -6400,6 +6412,7 @@ def _compute_posterior_payload(
                             float(evidence["forecast_value_c"])
                             for evidence in _day0_shared_carrier_station_extremes
                         ),
+                        remaining_center_bias_c=_day0_remaining_bias.shift_c,
                     )
                 )
                 if not str(
@@ -7278,6 +7291,9 @@ def _compute_posterior_payload(
                 "day0_remaining_carrier_path_error_sigma_c": float(
                     _carrier_path_sigma
                 ),
+                # The persisted future extremes stay UNSHIFTED (the bias fitter's
+                # residual basis); the shift and its artifact ride beside them.
+                **_day0_remaining_bias_provenance,
                 "day0_remaining_carrier_probability_cutoff_utc": _carrier_cutoff,
                 "day0_preliminary_report_survival_likelihood": dict(
                     _day0_shared_carrier_likelihood or {}

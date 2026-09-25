@@ -1508,6 +1508,7 @@ def build_day0_remaining_probability_carrier(
     n_samples: int, identity_inputs: Mapping[str, object],
     settlement_semantics: SettlementSemantics,
     operator: str | None = None,
+    remaining_center_bias_native: float = 0.0,
 ) -> dict[str, object]:
     """Pure ``extreme(boundary, noisy future)`` carrier for both Day0 readers.
 
@@ -1516,6 +1517,13 @@ def build_day0_remaining_probability_carrier(
     Despite the historical ``*_c`` parameter names, all vector, boundary,
     sigma, and bin values are in the settlement-native unit selected by
     ``identity_inputs['unit']``.  This preserves the pre-change V1 contract.
+
+    ``remaining_center_bias_native`` (src/calibration/day0_remaining_bias.py)
+    moves only the remaining-hourly member centers, before the boundary and
+    settlement integration, so the point q and every confidence draw see one
+    shifted distribution and the content identity binds it.  The boundary and
+    the typed final-extreme centers are never shifted; zero is the unshifted
+    carrier, byte for byte.
 
     V1 is the historical Monte Carlo operator and is intentionally byte-stable.
     V2 keeps its confidence draw matrix from that same legacy stream while
@@ -1527,6 +1535,10 @@ def build_day0_remaining_probability_carrier(
     values = np.sort(
         np.asarray(tuple(float(v) for v in future_extremes_c), dtype=float)
     )
+    if not math.isfinite(remaining_center_bias_native):
+        raise ValueError("DAY0_REMAINING_CARRIER_CENTER_BIAS_INVALID")
+    if remaining_center_bias_native:
+        values = values + float(remaining_center_bias_native)
     final_centers = np.sort(
         np.asarray(tuple(float(v) for v in final_extreme_centers_c), dtype=float)
     )

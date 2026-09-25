@@ -2398,6 +2398,13 @@ files:
     zone: K3_extension
     authority_role: calibration_offset_loader
     why: Read-only fail-soft loader for the fitted per-city anchor representativeness de-bias δ_city (state/anchor_representativeness_debias.json, produced by scripts/fit_anchor_representativeness_debias.py). get_city_debias_c returns δ_city ONLY for an activated, do-no-harm-gated HIGH cell (else None → family-level fallback). Consumed at src/data/replacement_forecast_materializer.py:1455 as bias_shift_c (law-8 foundation fix, cold_bias_metadata_root.md). No DB writes; no live I/O at call time (module-cached artifact read).
+  src/calibration/day0_remaining_bias.py:
+    zone: K3_extension
+    authority_role: calibration_offset_loader
+    why: "Read-only loader for the fitted Day0 remaining-carrier center shift (state/day0_remaining_center_bias.json, produced daily by scripts/fit_day0_remaining_center_bias.py). One lookup day0_remaining_bias() serves the materializer and every adapter carrier rebuild; missing/stale/malformed artifact or inactive cell serves shift 0 with an explicit day0_remaining_bias_status. No DB reads; never raises into the decision path."
+    downstream:
+    - src/data/replacement_forecast_materializer.py
+    - src/engine/event_reactor_adapter.py
   src/calibration/day0_horizon_calibration.py:
     zone: K3_extension
     authority_role: day0_horizon_platt_calibration

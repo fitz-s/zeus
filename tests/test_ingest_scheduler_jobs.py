@@ -1058,6 +1058,99 @@ class TestDay0DiurnalResidualRefitScheduled:
         assert len(run_calls) == 1, "a prior-day incumbent must not be skipped"
 
 
+class TestDay0RemainingCenterBiasRefitScheduled:
+    """The Day0 remaining-carrier center shift goes unshifted past MAX_ARTIFACT_AGE_DAYS
+    (src/calibration/day0_remaining_bias.py); this job is its only producer."""
+
+    def test_job_registered_daily_after_the_sibling_refits_and_at_boot(self) -> None:
+        import src.ingest_main as im
+
+        specs = [
+            (trigger, kwargs)
+            for func, trigger, kwargs in im._ingest_main_job_specs()
+            if func is im._day0_remaining_center_bias_refit_tick
+        ]
+        assert len(specs) == 1
+        trigger, kwargs = specs[0]
+        assert trigger == "cron"
+        assert (kwargs["hour"], kwargs["minute"]) == (6, 40)
+        assert kwargs["id"] == "ingest_day0_remaining_center_bias_refit"
+        assert kwargs["max_instances"] == 1
+        assert "next_run_time" in kwargs
+
+    def test_invokes_fitter_with_explicit_paths_and_fit_date(self, tmp_path) -> None:
+        import datetime as _dt
+
+        import src.ingest_main as im
+
+        captured = {}
+
+        def _fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["timeout"] = kwargs.get("timeout")
+            return type("R", (), {"returncode": 0, "stdout": "wrote ok", "stderr": ""})()
+
+        with (
+            patch("src.config.STATE_DIR", tmp_path),
+            patch("subprocess.run", side_effect=_fake_run),
+        ):
+            im._day0_remaining_center_bias_refit_tick.__wrapped__()
+
+        cmd = captured["cmd"]
+        assert cmd[1].endswith("fit_day0_remaining_center_bias.py")
+        assert cmd[cmd.index("--forecast-db") + 1] == str(tmp_path / "zeus-forecasts.db")
+        assert cmd[cmd.index("--out") + 1] == str(tmp_path / "day0_remaining_center_bias.json")
+        assert cmd[cmd.index("--fit-date") + 1] == (
+            _dt.datetime.now(_dt.timezone.utc).date().isoformat()
+        )
+        assert captured["timeout"] == 1800
+
+    def test_fitter_failure_is_recorded_as_failed(self, tmp_path) -> None:
+        import src.ingest_main as im
+        import src.observability.scheduler_health  # noqa: F401 -- import before patching STATE_DIR
+
+        health_calls = []
+        with (
+            patch("src.config.STATE_DIR", tmp_path),
+            patch(
+                "subprocess.run",
+                side_effect=lambda cmd, **kw: type(
+                    "R", (), {"returncode": 1, "stdout": "", "stderr": "boom"}
+                )(),
+            ),
+            patch(
+                "src.observability.scheduler_health._write_scheduler_health",
+                side_effect=lambda job_name, **kw: health_calls.append((job_name, kw)),
+            ),
+        ):
+            im._day0_remaining_center_bias_refit_tick()
+
+        job_name, kwargs = health_calls[-1]
+        assert job_name == "ingest_day0_remaining_center_bias_refit"
+        assert kwargs["failed"] is True
+        assert "boom" in kwargs["reason"]
+
+    def test_same_day_incumbent_skips_the_fitter(self, tmp_path) -> None:
+        import datetime as _dt
+        import json as _json
+
+        import src.ingest_main as im
+
+        today = _dt.datetime.now(_dt.timezone.utc).date().isoformat()
+        (tmp_path / "day0_remaining_center_bias.json").write_text(
+            _json.dumps({"schema_version": 1, "fit_date": today, "cells": {}}),
+            encoding="utf-8",
+        )
+        run_calls = []
+        with (
+            patch("src.config.STATE_DIR", tmp_path),
+            patch("subprocess.run", side_effect=lambda cmd, **kw: run_calls.append(cmd)),
+        ):
+            im._day0_remaining_center_bias_refit_tick.__wrapped__()
+
+        assert run_calls == []
+
+
 class TestSettlementSigmaFloorMergeGate:
     """Unit coverage for _settlement_sigma_floor_merge_gate — the promotion gate the daily
     refit tick applies before ever touching the live artifact (T-refitter design §b items 2-3):

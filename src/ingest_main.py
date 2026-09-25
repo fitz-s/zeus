@@ -4868,6 +4868,54 @@ def _day0_diurnal_residual_refit_tick():
     logger.info("[DAY0_DIURNAL_RESIDUAL_REFIT] %s", (r.stdout or "").strip()[-300:])
 
 
+@_scheduler_job("ingest_day0_remaining_center_bias_refit")
+def _day0_remaining_center_bias_refit_tick():
+    """Daily refit of state/day0_remaining_center_bias.json (Day0 carrier center shift).
+
+    The loader (src/calibration/day0_remaining_bias.py) serves the unshifted carrier
+    once ``fit_date`` is more than MAX_ARTIFACT_AGE_DAYS old, so this job is the only
+    thing keeping a fitted shift current. Same contract as
+    ``_day0_diurnal_residual_refit_tick``: bounded child process with explicit
+    STATE_DIR paths, a same-day incumbent skips (boot catch-up), a non-zero exit or
+    timeout raises so ``_scheduler_job`` records FAILED, and the fitter's
+    tmp+``os.replace`` write never corrupts the incumbent.
+    """
+    import subprocess
+
+    from src.config import STATE_DIR
+
+    script_path = Path(__file__).parent.parent / "scripts" / "fit_day0_remaining_center_bias.py"
+    out_path = STATE_DIR / "day0_remaining_center_bias.json"
+    fit_date = datetime.now(timezone.utc).date().isoformat()
+    if out_path.exists():
+        try:
+            incumbent_fit_date = json.loads(out_path.read_text(encoding="utf-8")).get("fit_date")
+        except Exception:
+            incumbent_fit_date = None
+        if incumbent_fit_date == fit_date:
+            logger.info(
+                "[DAY0_REMAINING_CENTER_BIAS_REFIT] skipping -- incumbent already fit through %s",
+                fit_date,
+            )
+            return
+
+    r = subprocess.run(
+        [
+            _etl_subprocess_python(), str(script_path),
+            "--forecast-db", str(STATE_DIR / "zeus-forecasts.db"),
+            "--out", str(out_path),
+            "--fit-date", fit_date,
+        ],
+        capture_output=True, text=True, timeout=1800,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"fit_day0_remaining_center_bias.py exit={r.returncode}: "
+            f"{(r.stderr or '').strip()[-1000:]}"
+        )
+    logger.info("[DAY0_REMAINING_CENTER_BIAS_REFIT] %s", (r.stdout or "").strip()[-600:])
+
+
 # ---------------------------------------------------------------------------
 # Daily settlement sigma-floor refit
 # ---------------------------------------------------------------------------
@@ -5297,6 +5345,11 @@ def _ingest_main_job_specs() -> list[tuple]:
         # docstring. Also fires immediately at boot (next_run_time=now).
         (_settlement_sigma_floor_refit_tick, "cron", dict(hour=6, minute=35,
             id="ingest_settlement_sigma_floor_refit", max_instances=1, coalesce=True,
+            misfire_grace_time=3600, next_run_time=now)),
+        # Daily 06:40 UTC (same post-hole-scanner settlement window, after the two
+        # refits above). Also fires at boot: the loader goes unshifted past 7 days.
+        (_day0_remaining_center_bias_refit_tick, "cron", dict(hour=6, minute=40,
+            id="ingest_day0_remaining_center_bias_refit", max_instances=1, coalesce=True,
             misfire_grace_time=3600, next_run_time=now)),
         (_ingest_status_rollup_tick, "interval", dict(minutes=5, id="ingest_status_rollup",
             max_instances=1, coalesce=True, executor="fast")),

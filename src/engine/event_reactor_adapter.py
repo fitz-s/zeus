@@ -37550,6 +37550,9 @@ def _day0_replacement_conditioning(
                 "day0_remaining_carrier_future_extremes_c",
                 "day0_remaining_carrier_final_extremes_c",
                 "day0_remaining_carrier_path_error_sigma_c",
+                "day0_remaining_center_bias_c",
+                "day0_remaining_bias_status",
+                "day0_remaining_bias_artifact",
                 "day0_remaining_carrier_probability_cutoff_utc",
                 "day0_remaining_vector_witness",
                 "day0_causal_evidence_bundle",
@@ -38881,6 +38884,9 @@ def _global_day0_execution_payload(
             "day0_remaining_carrier_future_extremes_c": "_edli_day0_remaining_carrier_future_extremes_c",
             "day0_remaining_carrier_final_extremes_c": "_edli_day0_remaining_carrier_final_extremes_c",
             "day0_remaining_carrier_path_error_sigma_c": "_edli_day0_remaining_carrier_path_error_sigma_c",
+            "day0_remaining_center_bias_c": "_edli_day0_remaining_center_bias_c",
+            "day0_remaining_bias_status": "_edli_day0_remaining_bias_status",
+            "day0_remaining_bias_artifact": "_edli_day0_remaining_bias_artifact",
             "day0_remaining_carrier_probability_cutoff_utc": "_edli_day0_remaining_carrier_probability_cutoff_utc",
             "day0_remaining_carrier_likelihood": "_edli_day0_provisional_revision_likelihood",
             "day0_remaining_vector_witness": "_edli_day0_remaining_vector_witness",
@@ -39055,6 +39061,9 @@ def _global_day0_probability_authority_payload(
                 "remaining_carrier_path_error_sigma_c",
                 "_edli_day0_remaining_carrier_path_error_sigma_c",
             ),
+            ("remaining_center_bias_c", "_edli_day0_remaining_center_bias_c"),
+            ("remaining_bias_status", "_edli_day0_remaining_bias_status"),
+            ("remaining_bias_artifact", "_edli_day0_remaining_bias_artifact"),
             (
                 "remaining_carrier_probability_cutoff_utc",
                 "_edli_day0_remaining_carrier_probability_cutoff_utc",
@@ -42847,6 +42856,9 @@ def _prepare_current_global_probability_family(
             "_edli_day0_remaining_carrier_future_extremes_c",
             "_edli_day0_remaining_carrier_final_extremes_c",
             "_edli_day0_remaining_carrier_path_error_sigma_c",
+            "_edli_day0_remaining_center_bias_c",
+            "_edli_day0_remaining_bias_status",
+            "_edli_day0_remaining_bias_artifact",
             "_edli_day0_remaining_carrier_probability_cutoff_utc",
             "_edli_day0_remaining_vector_witness",
             "_edli_day0_causal_evidence_bundle",
@@ -46868,6 +46880,11 @@ def _day0_remaining_p_raw_vector(
             survival = float(likelihood["boundary_survival_probability"])
             sample_count = int(payload["_edli_day0_remaining_probability_sample_count"])
             path_sigma_c = float(payload["_edli_day0_remaining_carrier_path_error_sigma_c"])
+            # Replay reproduces the persisted certificate: the shift it was built
+            # with, never a fresh artifact lookup. Pre-bias rows carry none (0.0).
+            remaining_bias_c = float(
+                payload.get("_edli_day0_remaining_center_bias_c") or 0.0
+            )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_PERSISTED_FIELDS_INVALID") from exc
         if not likelihood_identity or not 0.0 < survival < 1.0:
@@ -47035,6 +47052,7 @@ def _day0_remaining_p_raw_vector(
             # byte-for-byte (V1 remains valid only on this path).  The builder
             # rejects unknown operators; current rebuilds below pass V2.
             operator=str(payload["_edli_day0_probability_operator"]),
+            remaining_center_bias_native=remaining_bias_c * native_scale,
         )
         expected_identity = str(payload["_edli_day0_remaining_content_identity"]).strip()
         if expected_identity != str(carrier["content_identity"]):
@@ -48333,6 +48351,9 @@ def _snapshot_day0_source_clock_carrier_provenance(
         "_edli_day0_remaining_carrier_future_extremes_c",
         "_edli_day0_remaining_carrier_final_extremes_c",
         "_edli_day0_remaining_carrier_path_error_sigma_c",
+        "_edli_day0_remaining_center_bias_c",
+        "_edli_day0_remaining_bias_status",
+        "_edli_day0_remaining_bias_artifact",
         "_edli_day0_remaining_carrier_probability_cutoff_utc",
         "_edli_day0_remaining_vector_witness",
     )
@@ -48524,6 +48545,16 @@ def _rebuild_decision_time_day0_carrier(
             "observed_at_utc": str(current_observed_at),
             "source": str(current_source),
         }
+    from src.calibration.day0_remaining_bias import day0_remaining_bias
+
+    # The same lookup the materializer used: ENTRY and every held rebuild shift
+    # the remaining members by one fitted cell, never two recipes.
+    remaining_bias = day0_remaining_bias(
+        city=str(family.city),
+        metric=str(family.metric),
+        decision_time=decision_time,
+        timezone_name=str(city.timezone),
+    )
     carrier = build_day0_remaining_probability_carrier(
         future_extremes_c=values_native,
         final_extreme_centers_c=final_values_native,
@@ -48544,6 +48575,7 @@ def _rebuild_decision_time_day0_carrier(
             if final_values_native
             else DAY0_REMAINING_CARRIER_OPERATOR_V2
         ),
+        remaining_center_bias_native=remaining_bias.shift_c * native_scale,
     )
     payload.update(
         {
@@ -48555,6 +48587,10 @@ def _rebuild_decision_time_day0_carrier(
             "_edli_day0_remaining_carrier_future_extremes_c": list(values_c),
             "_edli_day0_remaining_carrier_final_extremes_c": list(final_values_c),
             "_edli_day0_remaining_carrier_path_error_sigma_c": path_error_sigma_c,
+            **{
+                f"_edli_{key}": value
+                for key, value in remaining_bias.provenance().items()
+            },
             "_edli_day0_remaining_carrier_probability_cutoff_utc": cutoff,
             "_edli_day0_decision_carrier_rebuild_basis": rebuild_basis,
             "_edli_day0_remaining_path_center_sigma_native": float(
