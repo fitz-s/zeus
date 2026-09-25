@@ -762,6 +762,283 @@ def test_source_clock_cursor_advances_while_broad_reseeds_stay_busy(
     assert report().updated_sources == ("gfs_hrrr",)
 
 
+def _late_callback_poll_harness(monkeypatch, tmp_path, *, polls, inline=()):
+    """Real probe payload and cursor file; only the provider and triggers are fake.
+
+    Live 2026-09-25 shape: a raw-writing poll leaves its commit callbacks
+    running past the fanout deadline (pending > 0), and the next polls
+    re-detect the same unadvanced runs. ``polls`` scripts each poll's
+    per-source verdict and which sources get a callback that outlives it.
+    """
+    import json
+    import threading
+
+    import src.data.replacement_forecast_production as prod
+    import src.data.source_clock_update_probe as probe
+
+    route = "a" * 64
+    run = "2026-09-25T06:00:00+00:00"
+    old = f"v4:2026-09-25T00:00:00+00:00:{route}"
+    new = f"v4:{run}:{route}"
+    sources = ("icon_eu", "icon_global", "ncep_nbm_conus")
+    cursor = tmp_path / "cursor.json"
+    cursor.write_text(json.dumps({s: old for s in sources}), encoding="utf-8")
+
+    def report(**_kwargs):
+        now = json.loads(cursor.read_text(encoding="utf-8"))
+        changed = tuple(s for s in sources if now[s] != new)
+        return probe.SourceClockUpdateProbeReport(
+            status="SOURCE_CLOCK_UPDATES_CHANGED", model_count=len(changed),
+            updated_sources=changed, affected_cities=("Madrid",),
+            model_updates_path=str(tmp_path / "updates.jsonl"),
+            cursor_path=str(cursor),
+            cursor_values=tuple((s, new) for s in changed),
+            cursor_preimage=tuple((s, now[s]) for s in changed),
+            source_runs=tuple((s, run, run, 3600) for s in changed),
+        )
+
+    gates: dict[str, threading.Event] = {}
+    callbacks: list[threading.Thread] = []
+    callback_errors: list[BaseException] = []
+    script = iter(polls)
+
+    def download(_cfg, *, source_clock_report, on_source_commit, **_kwargs):
+        verdicts, late = next(script)
+        results = {
+            s: {"status": f"SOURCE_CLOCK_SOURCE_{verdicts[s][0]}", "cycle": run,
+                "written_row_count": verdicts[s][1]}
+            for s in source_clock_report.updated_sources
+        }
+        notified, failed = 0, []
+        for source in inline:  # finishes inside the fanout deadline
+            try:
+                on_source_commit(source, {
+                    "written_row_count": results[source]["written_row_count"],
+                    "committed_families": (),
+                })
+                notified += 1
+            except Exception as exc:  # noqa: BLE001 - the report carries it
+                failed.append(f"{source}:{type(exc).__name__}: {exc}")
+        for source in late:
+            gate = gates.setdefault(source, threading.Event())
+
+            def late_callback(source=source, gate=gate):
+                assert gate.wait(timeout=5)
+                try:
+                    on_source_commit(source, {
+                        "written_row_count": results[source]["written_row_count"],
+                        "committed_families": (),
+                    })
+                except BaseException as exc:  # noqa: BLE001 - asserted by the test
+                    callback_errors.append(exc)
+
+            callbacks.append(threading.Thread(
+                target=late_callback, name=f"late-{source}", daemon=True,
+            ))
+            callbacks[-1].start()
+        return {
+            "status": "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+            "source_results": results,
+            "written_row_count": sum(r["written_row_count"] for r in results.values()),
+            "committed_families": (),
+            "source_commit_notifications": notified,
+            "source_commit_notifications_pending": len(late),
+            "source_commit_notification_errors": tuple(failed),
+        }
+
+    monkeypatch.setattr(prod, "_replacement_forecast_live_materialization_queue_config", lambda: {"test": 1})
+    monkeypatch.setattr(prod, "_recover_held_common_cycle_anchors_if_needed", lambda *_a, **_k: None)
+    monkeypatch.setattr(probe, "probe_openmeteo_source_clock_updates", report)
+    monkeypatch.setattr(prod, "_download_bayes_precision_fusion_source_clock_raw_inputs_if_needed", download)
+    return cursor, new, old, gates, callbacks, callback_errors
+
+
+def _cursor_state(cursor):
+    import json
+
+    return json.loads(cursor.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("redetect", [False, True])
+def test_late_commit_callback_proves_its_receipt_after_completion(
+    monkeypatch, tmp_path, broad_reseed_join, redetect,
+) -> None:
+    """Live 2026-09-25 04:48-07:14 local: all 9 raw-writing receipts ended pending > 0.
+
+    The poll forced cursor_sources=() whenever a callback outlived the fanout,
+    so a productive source was never proven; the late completion was only
+    logged. A late callback is a completed publication: it must prove its own
+    receipt's sources once it finishes, and never before. The next poll
+    re-detects the same run meanwhile; that re-detection must not void it.
+    """
+    import src.data.replacement_forecast_production as prod
+    import src.ingest_main as ingest_main
+
+    raw = {"icon_eu": ("RAW_INPUTS_DOWNLOADED", 12),
+           "icon_global": ("RAW_INPUTS_DOWNLOADED", 216),
+           "ncep_nbm_conus": ("TRANSPORT_RETRYABLE", 0)}
+    same_run = {"icon_eu": ("NO_TARGETS", 0), "icon_global": ("NO_TARGETS", 0),
+                "ncep_nbm_conus": ("TRANSPORT_RETRYABLE", 0)}
+    cursor, new, old, gates, callbacks, errors = _late_callback_poll_harness(
+        monkeypatch, tmp_path,
+        polls=[(raw, ("icon_eu", "icon_global")), (same_run, ())][: 1 + redetect],
+    )
+    published: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        prod, "_enqueue_fusion_upgrade_reseeds_if_needed",
+        lambda _cfg, **kw: published.append(tuple(kw.get("changed_sources") or ()))
+        or {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 0},
+    )
+    monkeypatch.setattr(
+        prod, "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda *_a, **_k: {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 0},
+    )
+    poll = ingest_main._replacement_availability_poll_tick.__wrapped__
+    try:
+        first = poll()
+        assert first["source_commit_notifications_pending"] == 2
+        assert first["source_clock_cursor_advanced_sources"] == ()
+        broad_reseed_join()
+        assert set(_cursor_state(cursor).values()) == {old}, (
+            "cursor must not pass raw whose commit callback has not published"
+        )
+        if redetect:  # the same unadvanced run, before the callbacks finish
+            second = poll()
+            broad_reseed_join()
+            assert second["source_clock_cursor_advanced_sources"] == ()
+            assert set(_cursor_state(cursor).values()) == {old}
+        gates["icon_eu"].set()
+        callbacks[0].join(timeout=5)
+        assert _cursor_state(cursor)["icon_eu"] == old, (
+            "one finished callback cannot release a receipt another still holds"
+        )
+        gates["icon_global"].set()
+        callbacks[1].join(timeout=5)
+    finally:
+        for gate in gates.values():
+            gate.set()
+        for thread in callbacks:
+            thread.join(timeout=5)
+        broad_reseed_join()
+    assert errors == []
+    state = _cursor_state(cursor)
+    assert state["icon_eu"] == new and state["icon_global"] == new
+    assert state["ncep_nbm_conus"] == old, "a TRANSPORT_RETRYABLE sibling stays unproven"
+    assert ingest_main._BROAD_RESEED_OPEN == {}
+
+
+@pytest.mark.parametrize("late", [True, False])
+def test_late_commit_callback_failure_proves_nothing(
+    monkeypatch, tmp_path, broad_reseed_join, late,
+) -> None:
+    """A commit callback whose scoped publication raises leaves its source unproven.
+
+    Its raw is unconsumed by any published reseed. The receipt is numbered
+    before its raw lands, so the block lands above that receipt's own proof
+    whether the callback fails late or inside the fanout deadline.
+    """
+    import src.data.replacement_forecast_production as prod
+    import src.ingest_main as ingest_main
+
+    raw = {"icon_eu": ("RAW_INPUTS_DOWNLOADED", 12),
+           "icon_global": ("RAW_INPUTS_DOWNLOADED", 216),
+           "ncep_nbm_conus": ("RAW_INPUTS_DOWNLOADED", 3)}
+    cursor, new, old, gates, callbacks, errors = _late_callback_poll_harness(
+        monkeypatch, tmp_path, polls=[(raw, ("icon_global",) if late else ())],
+        inline=() if late else ("icon_global",),
+    )
+    failing = [not late]  # an inline callback runs on the poll thread
+
+    import threading
+
+    def fusion(_cfg, **_kw):
+        if failing[0] or threading.current_thread().name == "late-icon_global":
+            failing[0] = False
+            return {"status": "FUSION_UPGRADE_TRIGGER_FAILSOFT_SKIPPED"}
+        return {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 0}
+
+    monkeypatch.setattr(prod, "_enqueue_fusion_upgrade_reseeds_if_needed", fusion)
+    monkeypatch.setattr(
+        prod, "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda *_a, **_k: {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 0},
+    )
+    try:
+        first = ingest_main._replacement_availability_poll_tick.__wrapped__()
+        broad_reseed_join()
+        if late:
+            assert first["source_clock_cursor_advanced_sources"] == ()
+            gates["icon_global"].set()
+            callbacks[0].join(timeout=5)
+        else:
+            assert first["source_commit_notification_errors"]
+    finally:
+        for gate in gates.values():
+            gate.set()
+        for thread in callbacks:
+            thread.join(timeout=5)
+        broad_reseed_join()
+    assert len(errors) == int(late)
+    assert all("source commit reseed unproven" in str(exc) for exc in errors)
+    state = _cursor_state(cursor)
+    assert state["icon_global"] == old, "a failed late callback must not prove"
+    # Siblings the broad scan published are not held hostage by the failure.
+    assert state["icon_eu"] == new and state["ncep_nbm_conus"] == new
+    assert ingest_main._BROAD_RESEED_OPEN == {}
+
+
+def test_same_run_redetection_does_not_void_earlier_proof(
+    monkeypatch, tmp_path, broad_reseed_join,
+) -> None:
+    """Live 2026-09-25 06:58 local: advanced_sources=() with the productive sources
+    deferred. The next poll re-detected the same unadvanced runs, found nothing
+    new (NO_TARGETS, or still retryable), and blocked every source it could not
+    prove, voiding the earlier proof of that exact cursor value. A re-detection
+    that writes no raw is not new unconsumed raw and must leave the proof intact.
+    """
+    import threading
+
+    import src.data.replacement_forecast_production as prod
+    import src.ingest_main as ingest_main
+
+    raw = {"icon_eu": ("RAW_INPUTS_DOWNLOADED", 12),
+           "icon_global": ("RAW_INPUTS_DOWNLOADED", 216),
+           "ncep_nbm_conus": ("TRANSPORT_RETRYABLE", 0)}
+    same_run = {"icon_eu": ("TRANSPORT_RETRYABLE", 0), "icon_global": ("NO_TARGETS", 0),
+                "ncep_nbm_conus": ("TRANSPORT_RETRYABLE", 0)}
+    cursor, new, old, _gates, _callbacks, _errors = _late_callback_poll_harness(
+        monkeypatch, tmp_path, polls=[(raw, ()), (same_run, ())],
+    )
+    scan_started = threading.Event()
+    release_scan = threading.Event()
+    scans = [0]
+
+    def fusion(_cfg, **_kw):
+        scans[0] += 1
+        if scans[0] == 1:  # the first receipt's scan is still consuming its raw
+            scan_started.set()
+            assert release_scan.wait(timeout=5)
+        return {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 0}
+
+    monkeypatch.setattr(prod, "_enqueue_fusion_upgrade_reseeds_if_needed", fusion)
+    monkeypatch.setattr(
+        prod, "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda *_a, **_k: {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 0},
+    )
+    poll = ingest_main._replacement_availability_poll_tick.__wrapped__
+    try:
+        poll()
+        assert scan_started.wait(timeout=2)
+        again = poll()  # the same runs, while the first scan still runs
+        assert again["source_clock_cursor_advanced_sources"] == ()
+        assert set(_cursor_state(cursor).values()) == {old}
+    finally:
+        release_scan.set()
+        broad_reseed_join()
+    state = _cursor_state(cursor)
+    assert state["icon_eu"] == new and state["icon_global"] == new
+    assert state["ncep_nbm_conus"] == old
+
+
 def test_legacy_scheduler_mode_flags_deleted() -> None:
     """R3 (2026-07-08): the legacy hand-coded add_job() scheduler mode and its mode-selection
     flags were deleted (zero-caller-verified — no deploy/launchd plist ever set them). The
@@ -2036,6 +2313,7 @@ def test_pending_callback_broad_trigger_persists_missed_revision_before_cursor(
     try:
         result = ingest_main._replacement_availability_poll_tick.__wrapped__()
         broad_reseed_join()
+        assert cursor_evidence == [], "the pending callback still holds the cursor"
     finally:
         release_callback.set()
         if callback_thread is not None:
@@ -2045,7 +2323,9 @@ def test_pending_callback_broad_trigger_persists_missed_revision_before_cursor(
     assert "broad_fusion_upgrade_seeds_enqueued" not in result
     assert result["source_clock_cursor_advanced_sources"] == ()
     assert result["source_clock_cursor_deferred_sources"] == ("icon_global",)
-    assert cursor_evidence == []
+    # The late completion proves its receipt; _advance_cursor has asserted the
+    # missed revision was durably queued before this single advance.
+    assert len(cursor_evidence) == 1
     assert callback_thread is not None and not callback_thread.is_alive()
 
 

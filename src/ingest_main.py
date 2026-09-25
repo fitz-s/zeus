@@ -92,9 +92,11 @@ _BROAD_RESEED_THREAD: threading.Thread | None = None
 # Orders every source-clock receipt; a cursor proof counts only above its blocks.
 _BROAD_RESEED_SEQUENCE = itertools.count(1)
 _BROAD_RESEED_POLLS_IN_FLIGHT = 0
-# SCOPE: (cursor path, source) -> latest receipt number whose proof for that
-# source is incomplete: an unproven verdict, or raw whose broad scan failed or
-# was dropped. DRAIN: the unchanged cursor re-probes; a later receipt proves it.
+# SCOPE: (cursor path, source) -> latest receipt number after which raw of that
+# source may stay unconsumed: its broad scan failed or was dropped, a commit
+# callback failed, or an abandoned fanout task may still write. A verdict with
+# no such raw (retryable, or a re-detection of the same run) blocks nothing.
+# DRAIN: the unchanged cursor re-probes; a later receipt proves it.
 # RESET: none needed; a proof numbered above the block commits, older ones die.
 _BROAD_RESEED_BLOCKED_SOURCES: dict[tuple[str, str], int] = {}
 # Same high-water for a poll that raised after possibly committing raw of
@@ -104,6 +106,13 @@ _BROAD_RESEED_BLOCKED_ALL = 0
 # payload) whose own reseed publication succeeded; it waits while queued raw
 # for that source is unscanned. Re-detections of one run share one entry.
 _BROAD_RESEED_PROVEN: dict[tuple[str, str, str], tuple[int, dict[str, object]]] = {}
+# SCOPE: receipt number -> a receipt with a commit callback still running; its
+# raw sources and the anchor those callbacks write count as queued. DRAIN: each
+# callback's own completion. RESET: the last completion removes it; a failed
+# callback first blocks its source and the anchor.
+_BROAD_RESEED_OPEN: dict[int, dict[str, Any]] = {}
+# A commit callback also writes the current-target ECMWF IFS anchor.
+_BROAD_RESEED_ANCHOR_SOURCE = "ecmwf_ifs"
 # Receipt statuses returned before any provider write: the scoped source-clock
 # capture before its fanout, the current-target anchor before its downloader.
 _BROAD_RESEED_NO_WRITE_STATUSES = frozenset({
@@ -3405,6 +3414,44 @@ def _prove_broad_reseed_sources(
             _BROAD_RESEED_PROVEN[key] = (seq, payload)
 
 
+def _hold_open_broad_reseed_receipt(receipt: dict[str, Any]) -> None:
+    """Hold a receipt's raw while any commit callback runs; caller holds the lock."""
+    if receipt["finished"] < max(receipt["total"], receipt["entered"]):
+        _BROAD_RESEED_OPEN[receipt["seq"]] = receipt
+    else:
+        _BROAD_RESEED_OPEN.pop(receipt["seq"], None)
+
+
+def _broad_reseed_callback(receipt: dict[str, Any], publish):
+    """Settle a commit callback against its own receipt, however late it ends.
+
+    Success releases the receipt's raw, so its proof, numbered at receipt
+    time, commits. Failure leaves the scoped publication unproven: the source
+    and the anchor it writes are blocked above that receipt number.
+    """
+
+    def run(source: str, task_report: object) -> None:
+        with _BROAD_RESEED_CONDITION:
+            receipt["entered"] += 1
+            _hold_open_broad_reseed_receipt(receipt)
+        published = False
+        try:
+            publish(source, task_report)
+            published = True
+        finally:
+            with _BROAD_RESEED_CONDITION:
+                receipt["finished"] += 1
+                if not published:
+                    _block_broad_reseed_sources(
+                        receipt["path"], (source, _BROAD_RESEED_ANCHOR_SOURCE),
+                    )
+                _hold_open_broad_reseed_receipt(receipt)
+                _commit_proven_broad_reseed_cursors(polls_allowed=0)
+                _BROAD_RESEED_CONDITION.notify_all()
+
+    return run
+
+
 def _commit_proven_broad_reseed_cursors(*, polls_allowed: int) -> tuple[str, ...]:
     """Advance each proven source no raw still waits behind; caller holds the lock.
 
@@ -3423,6 +3470,10 @@ def _commit_proven_broad_reseed_cursors(*, polls_allowed: int) -> tuple[str, ...
         if batch is not None
         for request in batch["requests"].values()
         for source in request["raw_sources"]
+    } | {
+        (receipt["path"], str(source))
+        for receipt in _BROAD_RESEED_OPEN.values()
+        for source in receipt["held"]
     }
     advanced: set[str] = set()
     deferred: set[str] = set()
@@ -3502,12 +3553,12 @@ def _broad_reseed_raw_sources(
     report: dict[str, object],
     updated_sources: tuple[str, ...],
 ) -> tuple[str, ...]:
-    """Sources whose raw this receipt may have committed; an unknown write counts."""
-    if (
-        report.get("source_commit_notifications_pending")
-        or report.get("source_commit_notification_errors")
-        or report.get("reseed_errors")
-    ):
+    """Sources whose raw this receipt may have committed; an unknown write counts.
+
+    Commit callbacks are accounted by their receipt, and a callback writes only
+    the anchor source, so neither widens a per-source verdict to every source.
+    """
+    if report.get("reseed_errors"):
         return updated_sources
     results = report.get("source_results")
     if str(report.get("status") or "") in _BROAD_RESEED_NO_WRITE_STATUSES:
@@ -3554,8 +3605,12 @@ def _enqueue_broad_reseed_batch(
     source_clock_payload: dict[str, object],
     cursor_sources: tuple[str, ...],
     download_report: dict[str, object],
+    seq: int | None = None,
 ) -> str:
-    """Keep active work isolated and bound the later one-scan pending batch."""
+    """Keep active work isolated and bound the later one-scan pending batch.
+
+    ``seq`` is the poll's receipt number, taken before its raw landed.
+    """
     global _BROAD_RESEED_ACTIVE, _BROAD_RESEED_PENDING, _BROAD_RESEED_THREAD
 
     frozen_cfg = deepcopy(cfg)
@@ -3569,7 +3624,8 @@ def _enqueue_broad_reseed_batch(
     # receipt has no immutable raw-revision ID, so its ordered receipt number
     # keeps otherwise identical cursor identities distinct. At most 64 receipts
     # share a single later scan.
-    seq = next(_BROAD_RESEED_SEQUENCE)
+    if seq is None:
+        seq = next(_BROAD_RESEED_SEQUENCE)
     request = {
         "seq": seq,
         "payload": frozen_payload,
@@ -3620,9 +3676,12 @@ def _enqueue_broad_reseed_batch(
         "requests": {identity: request},
     }
     with _BROAD_RESEED_CONDITION:
-        # An unproven verdict (a callback still running or failed, or retryable
-        # capture) invalidates older proofs of the same source.
-        _block_broad_reseed_sources(cursor_path, set(updated) - set(cursor_sources))
+        # A verdict that wrote no raw (retryable, or a re-detection of the same
+        # run) leaves older proofs intact. Only a fanout task abandoned at the
+        # deadline may still write unscanned raw of its source.
+        _block_broad_reseed_sources(
+            cursor_path, download_report.get("fanout_deadline_pending_sources") or (),
+        )
         if _BROAD_RESEED_ACTIVE is None:
             _BROAD_RESEED_ACTIVE = batch
             worker = threading.Thread(
@@ -3643,8 +3702,8 @@ def _enqueue_broad_reseed_batch(
             _BROAD_RESEED_PENDING is not None
             and _BROAD_RESEED_PENDING["cfg"] != frozen_cfg
         ):
-            # The cursor stays unchanged, so the next poll re-probes this config.
-            _block_broad_reseed_sources(cursor_path, updated)
+            # Its raw stays unscanned; the next poll re-probes this config.
+            _block_broad_reseed_sources(cursor_path, request["raw_sources"])
             return "SOURCE_BROAD_RESEEDS_DEFERRED_CONFIG"
         if _BROAD_RESEED_PENDING is None:
             _BROAD_RESEED_PENDING = batch
@@ -3653,7 +3712,7 @@ def _enqueue_broad_reseed_batch(
                 return "SOURCE_BROAD_RESEEDS_ASYNC_PENDING"
             if len(_BROAD_RESEED_PENDING["requests"]) >= 64:
                 # Dropped raw stays unscanned until a later receipt carries it.
-                _block_broad_reseed_sources(cursor_path, updated)
+                _block_broad_reseed_sources(cursor_path, request["raw_sources"])
                 return "SOURCE_BROAD_RESEEDS_ASYNC_CAPACITY_DEFERRED"
             _BROAD_RESEED_PENDING["include_cycle_advance"] |= include_cycle_advance
             _BROAD_RESEED_PENDING["requests"].update(batch["requests"])
@@ -4015,6 +4074,14 @@ def _replacement_availability_poll_tick():
     # tick immediately eligible to heal residual scopes for the new cycle.
     _reset_replacement_bpf_no_progress_backoff()
     logger.info("replacement source-clock update detected; running download path: %s", source_clock_payload)
+    # Numbered before any raw lands, so a later failure always blocks above it.
+    with _BROAD_RESEED_CONDITION:
+        receipt: dict[str, Any] = {
+            "seq": next(_BROAD_RESEED_SEQUENCE),
+            "path": str(source_clock_payload.get("cursor_path") or ""),
+            "total": 0, "entered": 0, "finished": 0,
+            "held": (_BROAD_RESEED_ANCHOR_SOURCE,),
+        }
     source_clock_anchor_report = None
     source_clock_held_anchor_report = None
     anchor_reseed_published = False
@@ -4281,7 +4348,7 @@ def _replacement_availability_poll_tick():
         max_wall_clock_seconds=_replacement_source_clock_download_budget_seconds(
             _replacement_availability_poll_seconds()
         ),
-        on_source_commit=_publish_committed_source,
+        on_source_commit=_broad_reseed_callback(receipt, _publish_committed_source),
     )
     if report is None:
         report = {
@@ -4324,6 +4391,7 @@ def _replacement_availability_poll_tick():
                 source_clock_payload=source_clock_payload,
                 cursor_sources=(),
                 download_report=report,
+                seq=receipt["seq"],
             )
         else:
             report["reseed_maintenance_status"] = (
@@ -4343,11 +4411,13 @@ def _replacement_availability_poll_tick():
             # catch-up. The trigger's durable transition marker makes the overlap
             # idempotent per (scope, raw revision); do not duplicate the unrelated
             # cycle-advance scan here.
+            # A callback still running holds this receipt's raw open; it proves
+            # under this receipt's number only once the last one completes.
             cursor_sources = (
                 source_clock_scoped_download_cursor_sources(
                     report, source_clock_report=source_clock_report,
                 )
-                if pending_notifications == 0 and not report.get("reseed_errors")
+                if not report.get("reseed_errors")
                 else ()
             )
             async_status = _enqueue_broad_reseed_batch(
@@ -4356,6 +4426,7 @@ def _replacement_availability_poll_tick():
                 source_clock_payload=source_clock_payload,
                 cursor_sources=cursor_sources,
                 download_report=report,
+                seq=receipt["seq"],
             )
             if pending_notifications > 0:
                 report["reseed_maintenance_status"] = (
@@ -4375,13 +4446,13 @@ def _replacement_availability_poll_tick():
             )
         else:
             # No committed callback completed, or at least one callback failed.
-            # Preserve the broad scan as the authoritative catch-up path.
+            # Preserve the broad scan as the authoritative catch-up path. A
+            # failed callback blocks only its own source and the anchor.
             cursor_sources = (
                 source_clock_scoped_download_cursor_sources(
                     report, source_clock_report=source_clock_report,
                 )
-                if not notification_errors and pending_notifications == 0
-                and not report.get("reseed_errors")
+                if not report.get("reseed_errors")
                 else ()
             )
             report["reseed_maintenance_status"] = _enqueue_broad_reseed_batch(
@@ -4390,6 +4461,7 @@ def _replacement_availability_poll_tick():
                 source_clock_payload=source_clock_payload,
                 cursor_sources=cursor_sources,
                 download_report=report,
+                seq=receipt["seq"],
             )
     reseed_publication_proven = (
         not notification_errors
@@ -4415,12 +4487,36 @@ def _replacement_availability_poll_tick():
                 if reseed_publication_proven
                 else ()
             )
-            seq = next(_BROAD_RESEED_SEQUENCE)
+            # Raw this receipt wrote with no proven publication stays
+            # unconsumed; a receipt that wrote nothing voids no older proof.
             _block_broad_reseed_sources(
                 source_clock_payload.get("cursor_path"),
-                set(source_clock_report.updated_sources) - set(cursor_sources),
+                {
+                    *(report.get("fanout_deadline_pending_sources") or ()),
+                    *(
+                        ()
+                        if reseed_publication_proven
+                        else _broad_reseed_raw_sources(
+                            report, source_clock_report.updated_sources,
+                        )
+                    ),
+                },
             )
-            _prove_broad_reseed_sources(seq, source_clock_payload, cursor_sources)
+            _prove_broad_reseed_sources(
+                receipt["seq"], source_clock_payload, cursor_sources,
+            )
+        # Callbacks still running hold this receipt's raw; the last one to
+        # finish releases it and commits the proof numbered above.
+        receipt["total"] = (
+            int(report.get("source_commit_notifications") or 0)
+            + pending_notifications
+            + len(notification_errors)
+        )
+        receipt["held"] = (
+            *_broad_reseed_raw_sources(report, source_clock_report.updated_sources),
+            _BROAD_RESEED_ANCHOR_SOURCE,
+        )
+        _hold_open_broad_reseed_receipt(receipt)
         advanced_sources = _commit_proven_broad_reseed_cursors(polls_allowed=1)
     report["source_clock_cursor_advanced_sources"] = advanced_sources
     report["source_clock_cursor_deferred_sources"] = tuple(
