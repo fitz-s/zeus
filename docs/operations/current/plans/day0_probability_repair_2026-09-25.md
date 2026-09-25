@@ -27,11 +27,24 @@ never disable a market.
 5. **Maker entries** require an execution-conditioned bound
    P(W|F) ≥ (qL + fL − 1)/fL, or a qualified fill/payoff model.
 
+## Landed 2026-09-25
+- `dbe1b38b3` + `800300db1` Day0 center shift (live, v20).
+- `9097550c2` capture `correction_applied` bound to the correction's own `applied` bit. Before this, 5,607 baseline certificates were excluded from the market-anchored fit corpus.
+- `23749250b` replay corpus, validation certificate and VALIDATED_IDENTITY policy. Inert: no live consumer. Replay coverage is 3.2% (54/1697). Blockers: `FORECAST_REMATERIALIZATION_NOT_IMPLEMENTED` (forecast lane) and `CARRIER_INPUTS_NOT_ARCHIVED` (Day0; certificates do not carry carrier extremes).
+- `14244e742` executable-forecast reader verdict made family-scoped. Previously one dark family, Jinan LOW 09-25, rejected every auction cut from 00:30Z to 06:40Z.
+
 ## In flight
-- Center-bias artifact (`src/calibration/day0_remaining_bias.py`).
-- Replay corpus, validation certificate and VALIDATED_IDENTITY policy.
-- Resolver terminal residual and composition operator (switch off).
-- Source-clock cursor fix (quota burn).
+- Resolver terminal operator `203912a84` (branch `claude/agent-abb535b220f9757df`), switch OFF. It is in review. The US °F LOW non-violation UB95 of +0.0033 must be decided before ON.
+- Source-clock cursor fix (branch `claude/agent-a273d8c92070f3b88`). Review verdict: NO-GO. A structural-gap source still reports `global_models_unavailable`, so it stays retryable. Rework is in progress.
+- ENS local-day boundary interval evidence (new agent worktree). 27 venue families for 09-25..27 have no posterior because every ENS cycle is excluded:
+  - LOW: `REJECTED_BOUNDARY_AMBIGUOUS`.
+  - HIGH: certificate `native_interval_gap` or `boundary_can_exceed_inner`.
+  - Seed discovery never admits them, so this is a one-way door.
+  - The authority's preferred fix is interval widening (`statistical_calibration_addendum_2026-06-13.md` D2).
+- Provisional-revision likelihood unavailable for NOAA-settled Tel Aviv, Istanbul and Moscow Day0. The routing trace is in progress.
+
+## Host fault (operator-owned)
+`webfilterproxyd` (the macOS content filter) is at 43 GB compressed. The venue heartbeat goes LOST repeatedly (4 times in 23 min), and Polymarket cancels resting maker orders 3–4 min after posting. Zeus does not tune timeouts around it. The operator must restart or exempt the filter.
 
 ## Release test (predeclared; freeze before the next untouched evaluation)
 - Chronological outer folds; hourly rows averaged within city-day before pooling.
@@ -48,5 +61,10 @@ back selects the previously qualified bundle. It never rewrites attribution on
 historical receipts.
 
 ## Next action
-Integrate the agents' commits after independent review. Run the release test on
-outer folds. Enable the per-scope license once the table passes.
+1. Land the cursor fix after rework and re-review. Then restart, and verify that
+   `replacement broad reseed cursor commit` appears and the quota rate drops.
+2. Land the resolver operator with the switch OFF once review says GO.
+3. Land the boundary interval path after validation.
+4. Archive Day0 carrier inputs on certificates so replay coverage can grow. Then run
+   the release test on outer folds and enable the per-scope license once the table
+   passes.
