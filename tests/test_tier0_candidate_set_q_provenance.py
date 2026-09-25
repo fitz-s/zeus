@@ -133,6 +133,28 @@ def test_q_provenance_source_identity_baseline_reads_raw_and_revision():
     assert revision == "day0_v3"
 
 
+def test_q_provenance_source_identity_baseline_does_not_swap_raw_and_served(monkeypatch):
+    """SourceIdentityBaseline.corrected_q is a @property that always returns
+    self.raw_q (a baseline makes no corrective claim), so in production
+    raw_q == corrected_q for every real instance and a (raw, served) swap in
+    the extractor is numerically invisible on any fixture built from real
+    field values alone. Monkeypatch corrected_q to diverge from raw_q for
+    this test only, so the two positions are independently observable, and
+    assert each lands in its own column -- a swap mutation must fail this.
+    """
+
+    baseline = _source_identity_baseline(raw_q=0.42)
+    monkeypatch.setattr(type(baseline), "corrected_q", property(lambda self: 0.99))
+    assert baseline.raw_q == pytest.approx(0.42)
+    assert baseline.corrected_q == pytest.approx(0.99)
+
+    score = SimpleNamespace(payoff_q_correction=baseline)
+    raw, served, revision = _global_candidate_q_provenance(score)
+    assert raw == pytest.approx(0.42)
+    assert served == pytest.approx(0.99)
+    assert revision == baseline.raw_probability_revision
+
+
 def test_q_provenance_payoff_q_correction_without_fit_scope_has_no_revision():
     correction = _payoff_q_correction(fit_scope=None)
     score = SimpleNamespace(payoff_q_correction=correction)
