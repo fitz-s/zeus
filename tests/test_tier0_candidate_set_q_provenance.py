@@ -45,7 +45,10 @@ from src.solve.solver import (
     _global_candidate_q_provenance,
     executable_curve_identity,
 )
-from src.state.schema.tier0_candidate_set_provenance_schema import ensure_table
+from src.state.schema.tier0_candidate_set_provenance_schema import (
+    _add_column_if_missing,
+    ensure_table,
+)
 from src.engine.global_batch_runtime import _persist_tier0_candidate_set
 
 
@@ -508,3 +511,35 @@ def test_ensure_table_is_idempotent_on_a_fresh_table():
         ).fetchall()
     }
     assert _new_column_names() <= columns
+
+
+def test_add_column_if_missing_survives_a_lost_presence_check_race():
+    """ensure_table runs on every winner-producing cut against a trade-DB
+    table other writers can touch concurrently: another writer's ALTER can
+    land between this process's presence check and its own ALTER attempt.
+    Calling _add_column_if_missing directly against an ALREADY-PRESENT
+    column reproduces exactly that race deterministically (no threading
+    needed) -- sqlite raises OperationalError: duplicate column name, and
+    the helper must swallow it rather than propagate."""
+
+    conn = _trade_conn()
+    conn.execute("CREATE TABLE race_target (id INTEGER PRIMARY KEY, q_raw REAL)")
+    # Column already exists -- this is what "another writer's ALTER already
+    # landed" looks like from this connection's point of view.
+    _add_column_if_missing(conn, "ALTER TABLE race_target ADD COLUMN q_raw REAL")
+    columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_xinfo(race_target)").fetchall()
+    }
+    assert columns == {"id", "q_raw"}  # unchanged: no duplicate, no crash
+
+
+def test_add_column_if_missing_reraises_unrelated_operational_errors():
+    """A genuine defect (e.g. malformed DDL) must still surface -- only the
+    exact lost-race duplicate-column-name message is swallowed."""
+
+    conn = _trade_conn()
+    conn.execute("CREATE TABLE race_target (id INTEGER PRIMARY KEY)")
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        _add_column_if_missing(
+            conn, "ALTER TABLE nonexistent_table ADD COLUMN q_raw REAL"
+        )

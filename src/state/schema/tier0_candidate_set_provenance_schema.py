@@ -108,13 +108,39 @@ _COLUMN_MIGRATIONS: dict[str, str] = {
 }
 
 
+def _add_column_if_missing(conn: sqlite3.Connection, ddl: str) -> None:
+    """Run one ALTER ADD COLUMN, tolerating a lost presence-check race.
+
+    ``ensure_table`` is called from ``_persist_tier0_candidate_set`` on every
+    winner-producing cut, inside the live receipt transaction, against a
+    trade-DB table other writers can touch concurrently. Between this
+    process's presence check and this statement, another writer's ALTER for
+    the same column may have already landed -- sqlite then raises
+    ``OperationalError: duplicate column name: ...`` rather than silently
+    no-oping. That specific message means the column is present either way
+    (this call's goal), so it is swallowed; any other OperationalError is a
+    real defect and re-raised.
+    """
+
+    try:
+        conn.execute(ddl)
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc):
+            raise
+
+
 def ensure_table(conn: sqlite3.Connection) -> None:
     """Create the table + indexes, then ALTER-ADD any migration column absent
     from an existing live table (idempotent). Uses ``table_xinfo`` rather than
     ``table_info`` because the latter hides generated/virtual columns on some
     SQLite builds; none of these columns are virtual, but xinfo is the repo's
     standing column-presence check so a future virtual column added here stays
-    detectable by the same call.
+    detectable by the same call. Boot-time schema init
+    (``src/state/db.py::init_schema_trade_only``) already runs this same
+    migration once per process start, so in steady state every per-cycle call
+    here finds every column already present and the ALTER branch is dead
+    weight; ``_add_column_if_missing`` covers the remaining case (a DB that
+    reached this code before any boot-time init ran, or two writers racing).
     """
     conn.execute(CREATE_TABLE_SQL)
     existing = {
@@ -125,6 +151,6 @@ def ensure_table(conn: sqlite3.Connection) -> None:
     }
     for column, ddl in _COLUMN_MIGRATIONS.items():
         if column not in existing:
-            conn.execute(ddl)
+            _add_column_if_missing(conn, ddl)
     conn.execute(CREATE_GROUP_INDEX_SQL)
     conn.execute(CREATE_EPOCH_INDEX_SQL)
