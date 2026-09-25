@@ -1,4 +1,4 @@
-# Last reused/audited: 2026-08-27
+# Last reused/audited: 2026-09-25
 #   Global predictive-mean NO redecision preserves the immutable replacement
 #   certificate's same-bin YES parent while carrying its distinct action q in
 #   qkernel_execution_economics; otherwise every valid point/action divergence
@@ -2583,11 +2583,59 @@ def _effective_global_book_refresh_family_keys(
     )
 
 
+def _wake_family_keys(wake: object) -> frozenset[str] | None:
+    """Return a wake's family keys, or None when absent or malformed."""
+
+    raw_families = tuple(getattr(wake, "forecast_families", ()) or ())
+    if not raw_families:
+        return None
+    family_keys: set[str] = set()
+    for raw_family in raw_families:
+        if not isinstance(raw_family, (tuple, list)) or len(raw_family) != 3:
+            return None
+        city, target_date, metric = (
+            str(value or "").strip() for value in raw_family
+        )
+        metric = metric.lower()
+        if not city or not target_date or metric not in {"high", "low"}:
+            return None
+        family_keys.add(
+            weather_family_id(
+                city=city,
+                target_date=target_date,
+                metric=metric,
+            )
+        )
+    return frozenset(family_keys)
+
+
+def _day0_wake_outside_scope(
+    wake: object,
+    day0_scope_family_keys: frozenset[str] | None,
+) -> bool:
+    """Whether a Day0 wake names only families outside a known cut scope.
+
+    An unknown scope (None) or a wake without well-formed families is never
+    outside: both keep the fail-closed hard-fact veto.
+    """
+
+    if (
+        day0_scope_family_keys is None
+        or str(getattr(wake, "reason", "") or "") != "day0_extreme_event_committed"
+    ):
+        return False
+    wake_family_keys = _wake_family_keys(wake)
+    return wake_family_keys is not None and not (
+        wake_family_keys & day0_scope_family_keys
+    )
+
+
 def _global_batch_wakes_supersede(
     wakes: Iterable[object],
     *,
     day0_urgent_batch: bool,
     delta_scope_family_keys: frozenset[str] | None,
+    day0_scope_family_keys: frozenset[str] | None = None,
 ) -> bool:
     """Return whether queued producer facts invalidate this auction scope."""
 
@@ -2605,32 +2653,16 @@ def _global_batch_wakes_supersede(
         if day0_urgent_batch and reason == "forecast_posterior_advanced":
             # Current-day physical authority dominates a forecast refresh.
             continue
+        if _day0_wake_outside_scope(wake, day0_scope_family_keys):
+            # A hard fact for a family this cut does not value belongs to the
+            # next cut, which re-reads it; the wake stays queued until then.
+            continue
         if reason != "forecast_posterior_advanced":
             return True
         if delta_scope_family_keys is None:
             return True
-
-        raw_families = tuple(getattr(wake, "forecast_families", ()) or ())
-        if not raw_families:
-            return True
-        wake_family_keys: set[str] = set()
-        for raw_family in raw_families:
-            if not isinstance(raw_family, (tuple, list)) or len(raw_family) != 3:
-                return True
-            city, target_date, metric = (
-                str(value or "").strip() for value in raw_family
-            )
-            metric = metric.lower()
-            if not city or not target_date or metric not in {"high", "low"}:
-                return True
-            wake_family_keys.add(
-                weather_family_id(
-                    city=city,
-                    target_date=target_date,
-                    metric=metric,
-                )
-            )
-        if wake_family_keys & delta_scope_family_keys:
+        wake_family_keys = _wake_family_keys(wake)
+        if wake_family_keys is None or wake_family_keys & delta_scope_family_keys:
             return True
     return False
 
@@ -8310,6 +8342,28 @@ def event_bound_live_adapter_from_trade_conn(
             return
         _dependency_scope_family_keys = family_keys
 
+    # INV-47 — Day0 hard-fact cancellation scope. SCOPE: families whose
+    # probability the running cut still consumes, as published by the runtime:
+    # None until its scope scan (every Day0 wake cancels), then the scanned
+    # families plus holdings, then the selected winner's family plus holdings
+    # once selection is frozen. DRAIN: a Day0 wake outside that scope stays
+    # queued and the next cut, which re-reads committed truth, values it.
+    # RESET: each cut republishes None at entry. The verdict is a function of
+    # the queued Day0 wakes and the current scope only, so any scope change
+    # re-judges every Day0 wake published during this cut.
+    _day0_scope_family_keys: frozenset[str] | None = None
+    _day0_initial_revision = reactor_urgent_wake_revision()
+    _day0_clear_at: list[tuple[object, frozenset[str] | None] | None] = [None]
+
+    def _observe_day0_scope(family_keys: frozenset[str] | None) -> None:
+        nonlocal _day0_scope_family_keys
+        if not isinstance(family_keys, frozenset) or any(
+            not isinstance(family_key, str) or not family_key.strip()
+            for family_key in family_keys
+        ):
+            family_keys = None
+        _day0_scope_family_keys = family_keys
+
     # INV-K7 reservation ledger: closure-held, fresh per reactor cycle. FIX B
     # (2026-06-05): rollback-aware so a candidate rejected downstream of Kelly is
     # rolled back by the reactor before the next sequential event reads it.
@@ -9346,11 +9400,15 @@ def event_bound_live_adapter_from_trade_conn(
                 # DRAIN: complete selection publishes the globally comparable
                 # BUY/SELL/HOLD/CASH result; newer ordinary facts stay queued.
                 # RESET: reactor fairness clears the reservation only for a
-                # completed economic cut. A new Day0 physical fact still
-                # supersedes immediately and keeps the reservation armed.
+                # completed economic cut. A new Day0 physical fact inside this
+                # cut's scope still supersedes immediately and keeps the
+                # reservation armed.
                 if any(
                     str(getattr(wake, "reason", "") or "")
                     == "day0_extreme_event_committed"
+                    and not _day0_wake_outside_scope(
+                        wake, _day0_scope_family_keys
+                    )
                     for wake in pending_wakes
                 ):
                     return True
@@ -9389,11 +9447,14 @@ def event_bound_live_adapter_from_trade_conn(
                 pending_wakes,
                 day0_urgent_batch=day0_urgent_batch,
                 delta_scope_family_keys=delta_scope_family_keys,
+                day0_scope_family_keys=_day0_scope_family_keys,
             ):
                 _global_batch_urgent_wake_revision[0] = current
                 return False
             pending_wake_reasons = tuple(
-                str(getattr(wake, "reason", "") or "") for wake in pending_wakes
+                str(getattr(wake, "reason", "") or "")
+                for wake in pending_wakes
+                if not _day0_wake_outside_scope(wake, _day0_scope_family_keys)
             )
             if _consult_preemption_grace(reasons=pending_wake_reasons):
                 _global_batch_urgent_wake_revision[0] = current
@@ -9403,13 +9464,40 @@ def event_bound_live_adapter_from_trade_conn(
         _stable_preflight_monitor_handoff = [False]
 
         def _hard_day0_authority_cancelled() -> bool:
+            # Called from every WorkContext checkpoint; the full queue read
+            # runs only when the urgent revision or the scope changed.
             current = reactor_urgent_wake_revision()
-            return bool(
-                current is not None
-                and current != _global_batch_urgent_wake_revision[0]
-                and reactor_urgent_wake_reason()
+            if (
+                current is None
+                or current == _day0_initial_revision
+                or (current, _day0_scope_family_keys) == _day0_clear_at[0]
+            ):
+                return False
+            day0_wakes = tuple(
+                wake
+                for wake in reactor_wakes_since(
+                    _global_batch_wake_cutoff,
+                    exclude_wake_ids=_global_batch_owned_wake_ids,
+                )
+                if str(getattr(wake, "reason", "") or "")
                 == "day0_extreme_event_committed"
             )
+            if any(
+                not _day0_wake_outside_scope(wake, _day0_scope_family_keys)
+                for wake in day0_wakes
+            ):
+                return True
+            if (
+                not day0_wakes
+                and reactor_urgent_wake_reason()
+                == "day0_extreme_event_committed"
+            ):
+                # publish_reactor_wake writes the queue record before the
+                # marker, so a new Day0 marker with no queued record names no
+                # family; it keeps the hard veto.
+                return True
+            _day0_clear_at[0] = (current, _day0_scope_family_keys)
+            return False
 
         def _generic_final_actuation_cancelled() -> bool:
             """Keep the generic 30-second/fresh-fact fence through venue I/O."""
@@ -12452,6 +12540,7 @@ def event_bound_live_adapter_from_trade_conn(
                     if family_scoped_held_completion
                     else None
                 ),
+                day0_scope_observer=_observe_day0_scope,
                 held_sell_reauction_requests=held_sell_reauction_requests,
                 required_held_family_keys=required_held_family_keys,
                 selection_telemetry_observer=(

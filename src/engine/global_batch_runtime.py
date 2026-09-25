@@ -7884,6 +7884,7 @@ def process_current_global_batch(
     final_actuation_cancelled: Callable[[], bool] | None = None,
     dependency_scope_observer: Callable[[frozenset[str] | None], None]
     | None = None,
+    day0_scope_observer: Callable[[frozenset[str] | None], None] | None = None,
     held_sell_reauction_requests: tuple[object, ...] = (),
     required_held_family_keys: frozenset[str] = frozenset(),
     restrict_to_family_keys: frozenset[str] | None = None,
@@ -7907,9 +7908,14 @@ def process_current_global_batch(
         # prior scope can never remain actionable.
         dependency_scope_observer(family_keys)
 
+    def _observe_day0_scope(family_keys: frozenset[str] | None) -> None:
+        if day0_scope_observer is not None:
+            day0_scope_observer(family_keys)
+
     # Each recursive/reauction cut owns a fresh scope witness.  Reset before
     # any work so a prior cut can never authorize an unrelated wake.
     _observe_dependency_scope(None)
+    _observe_day0_scope(None)
 
     if decision_time.tzinfo is None:
         raise ValueError("GLOBAL_AUCTION_DECISION_TIME_NAIVE")
@@ -8876,6 +8882,13 @@ def process_current_global_batch(
                     wealth_witness=selection_wealth,
                 )
             )
+        # Day0 facts reach this cut only through the families it prepares
+        # and the holdings its wealth values.
+        _observe_day0_scope(
+            frozenset(decision_scope.family_keys)
+            | held_family_keys
+            | held_obligation_family_keys
+        )
         full_scope_event_by_family = dict(decision_scope.events_by_family)
         ineligible_by_family: dict[str, str] = {
             weather_family_id(
@@ -9796,6 +9809,18 @@ def process_current_global_batch(
                     or {}
                 ),
             }
+            winner_family_key = str(
+                getattr(selected.decision.candidate, "family_key", "") or ""
+            )
+            if winner_family_key:
+                # Selection is frozen. From here the cut consumes only the
+                # winner's q (rebuilt again at JIT preflight) and holdings;
+                # a Day0 fact for any other family belongs to the next cut.
+                _observe_day0_scope(
+                    frozenset({winner_family_key})
+                    | held_family_keys
+                    | {obligation.family_key for obligation in holding_obligations}
+                )
             receipt_store_started = time.monotonic()
             if held_completion_expired():
                 return reject("HELD_SELL_DEADLINE_EXPIRED")
@@ -10563,6 +10588,7 @@ def process_current_global_batch(
                         selection_cancelled=selection_cancelled,
                         final_actuation_cancelled=final_actuation_cancelled,
                         dependency_scope_observer=dependency_scope_observer,
+                        day0_scope_observer=day0_scope_observer,
                         work_context=work_context,
                         required_held_family_keys=required_held_family_keys,
                         restrict_to_family_keys=restrict_to_family_keys,
