@@ -3952,6 +3952,64 @@ def _real_global_capture_case(*, side: str, corrected: bool):
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
+def test_source_identity_baseline_capture_reports_no_applied_correction(side):
+    """A source-identity baseline is a non-None record that applies nothing.
+
+    The canonical fitter admits a certificate only when the capture's
+    ``correction_applied`` equals the correction payload's ``applied`` bit.
+    Stamping ``True`` for a baseline (live 2026-09-25: 5,607 of 5,607 baseline
+    certificates) excluded every baseline decision from calibration evidence, so
+    the fit never reached support and every decision stayed on the baseline.
+    """
+    from tests.solve.test_solver_properties import (
+        _global_candidate,
+        _global_probability_witness,
+        _global_select,
+        _source_identity_for,
+    )
+
+    candidate = _global_candidate(
+        candidate_id=f"baseline-capture-{side}",
+        family=f"baseline-capture-{side}",
+        side=side,
+        q=0.70,
+        levels=(("0.35", "1000"),),
+        fee="0.02",
+    )
+    candidate = dataclass_replace(
+        candidate,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.06"), size=Decimal("1000")),
+        ),
+    )
+    witness = _global_probability_witness(candidate)
+    baseline = _source_identity_for(candidate, raw_q=0.70, p0=0.35)
+    decision = _global_select(
+        (candidate,),
+        cap="60",
+        payoff_q_correction_resolver=lambda *_args, **_kwargs: baseline,
+    )
+    assert decision.payoff_q_correction is baseline
+    cert = _current_qkernel_cert(side=side)
+    all_in_unit_cost = float(decision.cost_usd / decision.shares)
+    cert.update(
+        payoff_q_point=0.70,
+        payoff_q_lcb=0.70,
+        pre_qkernel_q_lcb_5pct=0.70,
+        cost=all_in_unit_cost,
+        edge_lcb=0.70 - all_in_unit_cost,
+    )
+    current = era._global_current_state_execution_economics(
+        cert,
+        decision=decision,
+        witness=witness,
+    )
+    capture = current["raw_calibration_input"]
+    assert capture["correction_applied"] is False
+    assert capture["correction_applied"] is baseline.as_cert_fields()["applied"]
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
 @pytest.mark.parametrize("corrected", (False, True))
 def test_global_producer_captures_real_buy_raw_calibration_input(side, corrected):
     from src.solve.solver import GlobalSingleOrderCandidate

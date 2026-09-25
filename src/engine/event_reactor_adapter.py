@@ -17594,7 +17594,12 @@ def _global_current_state_execution_economics(
             "raw_q_held": raw_calibration_q_held,
             "p0_held": float(curve.levels[0].price),
             "p0_basis": "GROSS_NATIVE_TOKEN_PRICE",
-            "correction_applied": q_correction is not None,
+            # The correction's own ``applied`` bit: a source-identity baseline is a
+            # non-None record that applies nothing, and the fitter joins on this bit.
+            "correction_applied": (
+                q_correction is not None
+                and q_correction.as_cert_fields()["applied"] is True
+            ),
             "execution_mode": candidate.execution_mode,
             "candidate_id": candidate.candidate_id,
             "family_key": candidate.family_key,
