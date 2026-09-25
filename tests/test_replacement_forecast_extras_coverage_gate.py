@@ -2,7 +2,10 @@
 # Last reused or audited: 2026-09-25
 # Lifecycle: created=2026-06-16; last_reviewed=2026-09-25; last_reused=2026-09-25
 # Authority basis: docs/evidence/timing_audit/capture_reactor_stall_rootcause_2026-06-16.md
-#   (PRIMARY/CODE fix) + docs/evidence/timing_audit/impl_flat_threshold_capture_fix_2026-06-16.md.
+#   (PRIMARY/CODE fix) + docs/evidence/timing_audit/impl_flat_threshold_capture_fix_2026-06-16.md;
+#   8979df299 (proven-final exact-run gaps remain incomplete when the model has any real miss).
+# Audit verdict: CURRENT_REUSABLE — downloader, source-clock wrapper/cursor, and fixpoint contracts
+#   checked against current code and the 2026-09-25 end-to-end coverage regression.
 #   BAYES_PRECISION_FUSION_SPEC §6 F1 (the q-path consumes the persisted single_runs capture).
 # Purpose: Relationship tests for causal BPF capture coverage and retry admission.
 # Reuse: Run when replacement_forecast_production BPF extras capture, coverage, or cycle selection changes.
@@ -2849,8 +2852,11 @@ def test_source_clock_scoped_capture_terminalizes_deterministic_client_error(
     assert result["permanent_outcomes"] == result["transport_outcomes"]
 
 
-@pytest.mark.parametrize("shape", ["metadata_only", "superseded_fetched", "real_miss"])
-def test_structural_only_source_completes_end_to_end(
+@pytest.mark.parametrize("shape", [
+    "metadata_only", "superseded_fetched", "real_miss",
+    "mixed_final_and_real_miss", "mixed_final_and_transport_error",
+])
+def test_source_clock_cursor_and_fixpoint_follow_downloader_completeness(
     tmp_path, monkeypatch, shape,
 ) -> None:
     """Live 2026-09-25: sources whose only gaps were metadata-proven or superseded
@@ -2861,7 +2867,9 @@ def test_structural_only_source_completes_end_to_end(
 
     metadata_only: the latest run cannot reach the target; no HTTP is sent.
     superseded_fetched: a fetched older run returns a horizon-shaped partial, a
-    final gap. real_miss: the latest run's own partial can still fill (control).
+    final gap. real_miss: the latest run's partial is retryable. Mixed cases
+    combine a metadata-final far scope with a retryable parser or fetch miss on
+    a near scope for the same global model.
     """
     import src.data.bayes_precision_fusion_download as dl
     import src.data.openmeteo_client as client
@@ -2883,8 +2891,13 @@ def test_structural_only_source_completes_end_to_end(
     elif shape == "metadata_only":
         # Global, no archive backtrack: the horizon proof needs no request.
         model, target, data_end = "icon_global", far, datetime(2026, 9, 27, 12, tzinfo=UTC)
+    elif shape in {"mixed_final_and_real_miss", "mixed_final_and_transport_error"}:
+        # The far scope is final from metadata; the near scope is still
+        # requestable and must keep this same global model unavailable.
+        model, target, data_end = "icon_global", near, datetime(2026, 9, 27, 12, tzinfo=UTC)
     else:
         model, target, data_end = "icon_global", near, datetime(2026, 9, 30, tzinfo=UTC)
+    targets = (near, far) if shape.startswith("mixed_final_and_") else (target,)
 
     class FixedDatetime(datetime):
         @classmethod
@@ -2908,15 +2921,21 @@ def test_structural_only_source_completes_end_to_end(
     monkeypatch.setattr(dl, "bayes_precision_fusion_quota_cooldown_seconds", lambda: 0)
     monkeypatch.setattr(discovery, "held_position_family_priorities", lambda: {})
     monkeypatch.setattr(weights, "affected_cities_for_source_updates", lambda _: ("Amsterdam",))
-    monkeypatch.setattr(target_plan, "replacement_forecast_current_target_keys", lambda _, **_k: (
-        target_plan.ReplacementForecastTargetKey("Amsterdam", target, "high"),
+    monkeypatch.setattr(target_plan, "replacement_forecast_current_target_keys", lambda _, **_k: tuple(
+        target_plan.ReplacementForecastTargetKey("Amsterdam", scope, "high")
+        for scope in targets
     ))
     seen: list[str] = []
 
     def fetch(_url, params, **_kwargs):
         seen.append(params["run"])
+        if shape == "mixed_final_and_transport_error":
+            raise RuntimeError("temporary fetch failure")
         # Truncated before the late-day sample: a horizon-shaped parser gap.
-        return {"hourly": {"time": [f"{target}T{hour:02d}:00" for hour in range(11)],
+        # Mixed targets fetch only the requestable near scope; the far scope
+        # is excluded before HTTP by its metadata-proven horizon gap.
+        response_target = near if shape.startswith("mixed_final_and_") else target
+        return {"hourly": {"time": [f"{response_target}T{hour:02d}:00" for hour in range(11)],
                            "temperature_2m": [10.0] * 11},
                 "hourly_units": {"temperature_2m": "C"}}
 
@@ -2950,13 +2969,22 @@ def test_structural_only_source_completes_end_to_end(
         "metadata_only": {"metadata"},
         "superseded_fetched": {"superseded_run"},
         "real_miss": {"ValueError"},
+        "mixed_final_and_real_miss": {"metadata", "ValueError"},
+        "mixed_final_and_transport_error": {"metadata"},
     }[shape]
-    assert sorted(seen) == sorted(
-        (latest - timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M")
-        for h in {"metadata_only": (), "superseded_fetched": (6, 12), "real_miss": (0,)}[shape]
-    )
+    expected_runs = {
+        "metadata_only": (),
+        "superseded_fetched": (latest - timedelta(hours=6), latest - timedelta(hours=12)),
+        "real_miss": (latest,),
+        "mixed_final_and_real_miss": (latest,),
+        "mixed_final_and_transport_error": (latest,),
+    }[shape]
+    assert sorted(seen) == sorted(run.strftime("%Y-%m-%dT%H:%M") for run in expected_runs)
+    if shape == "mixed_final_and_transport_error":
+        assert downloaded["transport_errors"]
+        assert any("temporary fetch failure" in error for error in downloaded["transport_errors"])
     assert downloaded["written_row_count"] == 0
-    complete = shape != "real_miss"
+    complete = shape in {"metadata_only", "superseded_fetched"}
     assert downloaded["global_models_unavailable"] == ([] if complete else [model])
     # 2. The wrapper verdict and the cursor predicate read that report.
     result = report["source_results"][model]
