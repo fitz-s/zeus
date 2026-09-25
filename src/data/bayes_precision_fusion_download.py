@@ -3243,8 +3243,9 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     ) -> bool:
         """A prior pass proved this (model, city, target_date) unmaterializable from THIS run.
 
-        The scope still enters the report, but no exact request is issued. A
-        missing target remains retryable until fresh metadata or a valid row drains it.
+        The scope still enters the report, but no exact request is issued. The
+        proof is final for this run, so it never makes the pass retryable; a new
+        run is a new cursor value and gets a fresh decision.
         """
         scope = (model, city, target_date, source_cycle_time)
         reason = _EXACT_RUN_UNMATERIALIZABLE_MEMO.get(scope)
@@ -3264,22 +3265,21 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                     "reason": reason,
                 }
             )
-        retryable_single_run_gap_scopes.add(scope)
         return True
 
     def _structural_target_gap(model: str, city: str, target_date: str) -> None:
         latest = source_clock_single_runs[model]
         scope = (model, city, target_date, latest.run.isoformat())
         reason = _EXACT_RUN_IMMUTABLE_GAP_REASONS[0]
-        # Re-evaluate the matching metadata on every pass: its horizon can be
-        # corrected while the latest run identity remains the same.
+        # Re-evaluated from the matching metadata on every pass, so a corrected
+        # horizon for the same run identity is requested again. It is a proven
+        # exclusion, not a retry: the advertised trigger cycle is complete.
         if scope not in exact_run_unmaterializable_scopes:
             exact_run_unmaterializable_scopes.add(scope)
             exact_run_unmaterializable.append({
                 "model": model, "city": city, "target_date": target_date,
                 "source_cycle_time": latest.run.isoformat(), "reason": reason,
             })
-        retryable_single_run_gap_scopes.add(scope)
 
     # De-duplicate targets by (city, target_date, lead_days) for the batched fetch path.
     # The metric dimension is NOT a fetch axis — both high and low come from one payload.

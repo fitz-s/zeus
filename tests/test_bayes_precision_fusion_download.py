@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Lifecycle: created=2026-06-08; last_reviewed=2026-09-24; last_reused=2026-09-24
+# Lifecycle: created=2026-06-08; last_reviewed=2026-09-25; last_reused=2026-09-25
 # Purpose: Regression tests for BPF raw forecast download and persistence semantics.
 # Reuse: Run when changing Bayes precision fusion raw-input capture or scheduler health.
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 (raw capture: previous_runs + single_runs ->
@@ -2288,7 +2288,8 @@ def test_memoized_exact_run_gap_is_not_refetched_for_the_same_run(
             "reason": _MEMO_GAP_REASON,
         },
     )
-    assert second["status"] == "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
+    # A proven-final gap for this run is complete, not a retry (2026-09-25 live).
+    assert second["status"] == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
 
 
 def test_memoized_exact_run_gap_is_scoped_to_the_run_not_the_target(
@@ -3982,9 +3983,11 @@ def test_out_of_age_previous_archive_is_not_requested() -> None:
     ) == latest
 
 
-def test_out_of_age_target_capture_keeps_trigger_retryable_without_http(
+def test_out_of_age_target_capture_completes_trigger_without_http(
     tmp_path, monkeypatch,
 ) -> None:
+    """The latest run's metadata cannot reach the target and no in-age archive
+    exists: that proof completes the trigger. A new run is a new cursor value."""
     import src.data.bayes_precision_fusion_download as dl
 
     now = datetime(2026, 9, 23, 6, 42, tzinfo=UTC)
@@ -4015,7 +4018,7 @@ def test_out_of_age_target_capture_keeps_trigger_retryable_without_http(
         models=("ukmo_global_deterministic_10km",),
         include_previous_runs=False, prune_after=False,
     )
-    assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
+    assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
     assert report["written_row_count"] == _count(db) == 0
     assert report["single_runs_target_request_cycles"]["ukmo_global_deterministic_10km|Amsterdam|2026-09-25"] == ()
     assert report["single_runs_written_cycles"] == {}
@@ -4335,7 +4338,12 @@ def test_metadata_horizon_before_target_late_hour_sends_no_request(
     )
     assert report["written_row_count"] == _count(db) == 0
     assert report["single_runs_target_request_cycles"]["icon_d2|Munich|2026-09-26"] == ()
-    assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
+    # The metadata proof completes this run's trigger; retrying it re-woke the
+    # source every poll and spent 691 quota units/hour on 2026-09-25.
+    assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
+    assert report["exact_run_unmaterializable"][0]["reason"] == (
+        "metadata:data_end_time_before_target_end"
+    )
 
     # The same run reaching the late-day sample is still requested.
     reached = dl._SourceClockSingleRunsRequest(

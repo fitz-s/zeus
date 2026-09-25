@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-05-24; last_reviewed=2026-09-23; last_reused=2026-09-23
+# Lifecycle: created=2026-05-24; last_reviewed=2026-09-25; last_reused=2026-09-25
 # Purpose: Current single-live scheduler set and causal executor-class assignment.
 # Reuse: Inspect docs/operations/current/plans/data_temporal_kernel/PLAN.md + the target module before relying on it.
 # Created: 2026-05-24
-# Last reused or audited: 2026-09-23
+# Last reused or audited: 2026-09-25
 # Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md (PR6);
 #   operator spec §7 (Scheduler adapter / executor classes).
 """PR6: registry -> scheduler executor-class assignment (pure planner, daemon wiring deferred)."""
@@ -375,9 +375,10 @@ def test_broad_reseed_coalesces_only_non_authorizing_pending_retries(
         broad_reseed_join()
     assert len(scans) == 3
     assert scans[0] is not scans[1] and scans[1] is scans[2]
-    # The zero-write report never grants cursor authority, including when a
-    # later same-source report is eligible; the next clean poll must prove it.
-    assert advances == []
+    # The zero-write reports never grant cursor authority themselves. The later
+    # eligible receipt re-measured the source, so its published scan proves it;
+    # an earlier retry must not veto that proof (the 2026-09-23 livelock).
+    assert advances == ([] if batch_fails else [("icon_global",)])
 
 
 @pytest.mark.parametrize("change", [
@@ -599,7 +600,8 @@ def test_pending_distinct_raw_receipts_each_keep_their_trigger_limit(
         release.set()
         broad_reseed_join()
     assert seeds == ["scope-A", "scope-B"]
-    assert len(advances) == 2
+    # One cursor value, one CAS, and only after both receipts were scanned.
+    assert advances == [("icon_global",)]
 
 
 def test_broad_reseed_cursor_cas_cannot_rewind_later_provider_run(
@@ -640,6 +642,124 @@ def test_broad_reseed_cursor_cas_cannot_rewind_later_provider_run(
     assert json.loads(cursor_path.read_text(encoding="utf-8"))["icon_global"] == (
         f"v4:{later}:{route_hash}"
     )
+
+
+def test_source_clock_cursor_advances_while_broad_reseeds_stay_busy(
+    monkeypatch, tmp_path, broad_reseed_join,
+) -> None:
+    """Live 2026-09-23 shape: a proven source's cursor must commit under constant churn.
+
+    Polls every 15 s kept a pending batch behind every broad scan, so proofs
+    only accumulated. A later chained scan then failed on an unrelated family's
+    CYCLE_ADVANCE_RETRY_PENDING and discarded every earlier proof: 1082 of 1577
+    eligible receipts died that way and no cursor committed for 36 h. The real
+    probe payload and real cursor file are used here; only the provider is fake.
+    """
+    import json
+    import threading
+
+    import src.data.replacement_forecast_production as prod
+    import src.data.source_clock_update_probe as probe
+    import src.ingest_main as ingest_main
+
+    route = "a" * 64
+    run = "2026-09-23T18:00:00+00:00"
+    cursor = tmp_path / "cursor.json"
+    cursor.write_text(json.dumps({
+        "icon_eu": f"v4:2026-09-23T12:00:00+00:00:{route}",
+        "gfs_hrrr": f"v4:2026-09-23T12:00:00+00:00:{route}",
+    }), encoding="utf-8")
+
+    def report(**_kwargs):
+        cursor_now = json.loads(cursor.read_text(encoding="utf-8"))
+        changed = tuple(
+            source for source in ("gfs_hrrr", "icon_eu")
+            if cursor_now[source] != f"v4:{run}:{route}"
+        )
+        return probe.SourceClockUpdateProbeReport(
+            status="SOURCE_CLOCK_UPDATES_CHANGED", model_count=2,
+            updated_sources=changed, affected_cities=("Madrid",),
+            model_updates_path=str(tmp_path / "updates.jsonl"),
+            cursor_path=str(cursor),
+            cursor_values=tuple((s, f"v4:{run}:{route}") for s in changed),
+            cursor_preimage=tuple((s, cursor_now[s]) for s in changed),
+            source_runs=tuple((s, run, run, 3600) for s in changed),
+        )
+
+    downloads = [0]
+
+    def download(_cfg, *, source_clock_report, **_kwargs):
+        downloads[0] += 1
+        results = {
+            "gfs_hrrr": {  # never materializable: stays retryable every poll
+                "status": "SOURCE_CLOCK_SOURCE_TRANSPORT_RETRYABLE",
+                "cycle": run, "written_row_count": 0,
+            },
+            "icon_eu": {  # first poll captured raw; later polls find it covered
+                "status": (
+                    "SOURCE_CLOCK_SOURCE_RAW_INPUTS_DOWNLOADED"
+                    if downloads[0] == 1 else "SOURCE_CLOCK_SOURCE_NO_TARGETS"
+                ),
+                "cycle": run, "written_row_count": 18 if downloads[0] == 1 else 0,
+            },
+        }
+        return {
+            "status": "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+            "source_results": {
+                s: results[s] for s in source_clock_report.updated_sources
+            },
+            "written_row_count": sum(
+                results[s]["written_row_count"]
+                for s in source_clock_report.updated_sources
+            ),
+            "committed_families": (),
+            "source_commit_notifications": 0,
+            "source_commit_notifications_pending": 0,
+        }
+
+    scan_started = threading.Event()
+    release_scan = threading.Event()
+    scans = [0]
+
+    def fusion(_cfg, **_kwargs):
+        scans[0] += 1
+        if scans[0] == 1:
+            scan_started.set()
+            assert release_scan.wait(timeout=5)
+        return {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 0}
+
+    monkeypatch.setattr(prod, "_replacement_forecast_live_materialization_queue_config", lambda: {"test": 1})
+    monkeypatch.setattr(prod, "_recover_held_common_cycle_anchors_if_needed", lambda *_a, **_k: None)
+    monkeypatch.setattr(probe, "probe_openmeteo_source_clock_updates", report)
+    monkeypatch.setattr(prod, "_download_bayes_precision_fusion_source_clock_raw_inputs_if_needed", download)
+    monkeypatch.setattr(prod, "_enqueue_fusion_upgrade_reseeds_if_needed", fusion)
+
+    def cycle_trigger(*_a, **_k):
+        # The first scan publishes; every later one meets an unrelated family's
+        # owner still in flight, as in the live .err log.
+        return {"status": "CYCLE_ADVANCE_TRIGGER" if scans[0] == 1 else "CYCLE_ADVANCE_RETRY_PENDING"}
+
+    monkeypatch.setattr(prod, "_enqueue_cycle_advance_reseeds_if_needed", cycle_trigger)
+    poll = ingest_main._replacement_availability_poll_tick.__wrapped__
+
+    try:
+        first = poll()  # icon_eu raw lands; its broad scan starts and blocks
+        assert scan_started.wait(timeout=2)
+        assert first["source_clock_cursor_advanced_sources"] == ()
+        busy = [poll() for _ in range(3)]  # re-detections while the scan is active
+        assert all(r["source_clock_cursor_advanced_sources"] == () for r in busy)
+        assert json.loads(cursor.read_text(encoding="utf-8"))["icon_eu"].startswith(
+            "v4:2026-09-23T12:00"
+        ), "cursor must not pass raw the running scan has not consumed"
+    finally:
+        release_scan.set()
+        broad_reseed_join()
+
+    state = json.loads(cursor.read_text(encoding="utf-8"))
+    assert state["icon_eu"] == f"v4:{run}:{route}"
+    assert state["gfs_hrrr"] == f"v4:2026-09-23T12:00:00+00:00:{route}"
+    # The probe stops re-detecting the proven model; only the unproven one repeats.
+    assert report().updated_sources == ("gfs_hrrr",)
 
 
 def test_legacy_scheduler_mode_flags_deleted() -> None:
@@ -2056,7 +2176,7 @@ def test_pending_broad_receipts_preserve_real_producer_limit_one_per_scan(
         assert f"|input_revision=icon_global:{raw_ids[city]}" in marker
         assert Path(seed_file).is_file()
         assert json.loads(Path(seed_file).read_text(encoding="utf-8"))["city"] == city
-    assert len(advanced) == 2
+    assert advanced == ["icon_global"]
 
 
 def test_ecmwf_source_clock_captures_anchor_before_single_runs_fanout(monkeypatch) -> None:

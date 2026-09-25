@@ -2178,6 +2178,7 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
 
         from src.config import cities_by_name  # noqa: PLC0415
         from src.data.bayes_precision_fusion_download import (  # noqa: PLC0415
+            _EXACT_RUN_IMMUTABLE_GAP_REASONS,
             BayesPrecisionFusionDownloadTarget,
             bayes_precision_fusion_quota_cooldown_seconds,
             bayes_precision_fusion_held_quota_cooldown_seconds,
@@ -2949,6 +2950,15 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                 for value in (item.get("exact_run_unmaterializable") or ())
                 if isinstance(value, Mapping)
             )
+            # A metadata-proven horizon gap or a superseded run's final bytes can
+            # never fill; only a retryable parser gap keeps the trigger open.
+            source_retryable_gaps = tuple(
+                value
+                for value in source_exact_run_unmaterializable
+                if not str(value.get("reason") or "").startswith(
+                    _EXACT_RUN_IMMUTABLE_GAP_REASONS
+                )
+            )
             source_incomplete = any(
                 item.get("global_models_dropped_scoped")
                 or item.get("global_models_unavailable")
@@ -2992,7 +3002,7 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             elif (
                 "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE" in statuses
                 or source_incomplete
-                or source_exact_run_unmaterializable
+                or source_retryable_gaps
             ):
                 status = "SOURCE_CLOCK_SOURCE_TRANSPORT_RETRYABLE"
             elif statuses == {
