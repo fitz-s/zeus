@@ -741,6 +741,13 @@ _EXACT_RUN_IMMUTABLE_GAP_REASONS = (
     "metadata:data_end_time_before_target_end",
     _SUPERSEDED_RUN_GAP_PREFIX,
 )
+
+
+def exact_run_gap_is_final(reason: object) -> bool:
+    """The one test of a gap no retry of its run can fill."""
+    return str(reason or "").startswith(_EXACT_RUN_IMMUTABLE_GAP_REASONS)
+
+
 # (model, city, target_date, run_iso) -> structurally proven metadata reason.
 _EXACT_RUN_UNMATERIALIZABLE_MEMO: dict[tuple[str, str, str, str], str] = {}
 _EXACT_RUN_MEMO_RETENTION_DAYS = 3
@@ -819,7 +826,7 @@ def _load_persisted_exact_run_memo(*, force: bool = False) -> None:
         if len(parts) != 4:
             continue
         reason = entry.get("reason")
-        if not isinstance(reason, str) or not reason.startswith(_EXACT_RUN_IMMUTABLE_GAP_REASONS):
+        if not isinstance(reason, str) or not exact_run_gap_is_final(reason):
             continue
         scope = (parts[0], parts[1], parts[2], parts[3])
         _EXACT_RUN_UNMATERIALIZABLE_MEMO.setdefault(scope, reason)
@@ -881,7 +888,7 @@ def _memoize_exact_run_gap(
     reason: str,
 ) -> None:
     """Record a RUN-immutable parser gap. Transport-shaped reasons are never memoized."""
-    if not reason.startswith(_EXACT_RUN_IMMUTABLE_GAP_REASONS):
+    if not exact_run_gap_is_final(reason):
         return
     if scope not in _EXACT_RUN_UNMATERIALIZABLE_MEMO:
         _LOG.debug(
@@ -3251,7 +3258,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         reason = _EXACT_RUN_UNMATERIALIZABLE_MEMO.get(scope)
         if reason is None:
             return False
-        if not reason.startswith(_EXACT_RUN_IMMUTABLE_GAP_REASONS):
+        if not exact_run_gap_is_final(reason):
             del _EXACT_RUN_UNMATERIALIZABLE_MEMO[scope]
             return False
         if scope not in exact_run_unmaterializable_scopes:
@@ -3652,7 +3659,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                                 "reason": reason,
                             }
                         )
-                        if reason.startswith(_EXACT_RUN_IMMUTABLE_GAP_REASONS):
+                        if exact_run_gap_is_final(reason):
                             exact_run_unmaterializable_scopes.add(scope)
                             _memoize_exact_run_gap(scope, reason)
                         else:
@@ -3680,7 +3687,12 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                 for model in single_models:
                     hilo = sv_map.get(model)
                     if hilo is None:
-                        dropped.append(f"{model}:single_runs")
+                        # A proven-final gap for this run is recorded above; only
+                        # a real miss (transport, retryable parse) is a drop.
+                        if (
+                            model, city, target_date, single_run.isoformat()
+                        ) not in exact_run_unmaterializable_scopes:
+                            dropped.append(f"{model}:single_runs")
                         continue
                     high_c, low_c = hilo
                     request = single_request_by_model[(model, single_run.isoformat())]
@@ -3917,7 +3929,15 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     global_single_dropped_scoped = {
         d.split(":")[0] for d in dropped if d.endswith(":single_runs")
     } & global_models_expected
-    global_single_unavailable = global_models_expected - single_success_models
+    # The one definition of "structurally complete": a model that wrote no row
+    # is still complete when it holds a proven-final gap for its run and no real
+    # miss (a drop). Status, wrapper verdict and fixpoint all read this report.
+    structurally_complete_models = {
+        scope[0] for scope in exact_run_unmaterializable_scopes
+    } - {d.split(":")[0] for d in dropped}
+    global_single_unavailable = (
+        global_models_expected - single_success_models - structurally_complete_models
+    )
     if global_single_dropped_scoped:
         _LOG.warning(
             "BAYES_PRECISION_FUSION download: GLOBAL model(s) had scoped single_runs drops "
