@@ -440,9 +440,13 @@ def test_semantics_revision_is_bumped_and_stamped() -> None:
         day0_probability_semantics_revision,
     )
 
-    assert DAY0_PROBABILITY_SEMANTICS_REVISION == "day0_remaining_center_bias_v20"
+    assert DAY0_PROBABILITY_SEMANTICS_REVISION == (
+        "day0_settlement_channel_revision_model_v22"
+    )
     stamped = bind_day0_probability_semantics("q-hash")
-    assert day0_probability_semantics_revision(stamped) == "day0_remaining_center_bias_v20"
+    assert day0_probability_semantics_revision(stamped) == (
+        "day0_settlement_channel_revision_model_v22"
+    )
     assert day0_probability_semantics_revision(
-        "day0-semrev:day0_analytic_remaining_point_v19:q-hash"
+        "day0-semrev:day0_remaining_center_bias_v20:q-hash"
     ) != DAY0_PROBABILITY_SEMANTICS_REVISION

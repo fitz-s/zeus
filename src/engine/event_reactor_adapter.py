@@ -37169,26 +37169,55 @@ def _day0_probability_conditioning_source(
     former remains settlement authority and is never overwritten.
     """
 
+    conditioning = _day0_statistical_probability_conditioning(payload)
+    if conditioning is not None:
+        return str(conditioning["source"]).strip()
+    return str(
+        payload.get("settlement_source")
+        or payload.get("observation_source")
+        or ""
+    ).strip()
+
+
+def _day0_statistical_probability_conditioning(
+    payload: Mapping[str, object],
+) -> Mapping[str, object] | None:
+    """Return the sourced statistical conditioning block, top level first."""
+
     binding = payload.get("_edli_global_day0_binding")
-    candidates = (
+    for candidate in (
         payload.get("statistical_probability_conditioning"),
         (
             binding.get("statistical_probability_conditioning")
             if isinstance(binding, Mapping)
             else None
         ),
+    ):
+        if isinstance(candidate, Mapping) and str(
+            candidate.get("source") or ""
+        ).strip():
+            return candidate
+    return None
+
+
+def _day0_revision_model_source(payload: Mapping[str, object]) -> str:
+    """Return the source whose revision process the boundary survival models.
+
+    The fast-residual composite is one mechanism shared by WU- and NOAA-settled
+    cities; its label's ``wu`` prefix does not say who revises the boundary.
+    The hash-bound ``settlement_channel`` does: a NOAA station page is fed by
+    the same-station preliminary report, so its survival is the fast channel's
+    report-confirmation model, while ``wu_icao_history`` keeps the WU model.
+    """
+
+    conditioning = _validated_fast_residual_day0_conditioning(
+        _day0_statistical_probability_conditioning(payload)
     )
-    for candidate in candidates:
-        if not isinstance(candidate, Mapping):
-            continue
-        source = str(candidate.get("source") or "").strip()
-        if source:
-            return source
-    return str(
-        payload.get("settlement_source")
-        or payload.get("observation_source")
-        or ""
-    ).strip()
+    if conditioning is not None:
+        likelihood = conditioning["fast_residual_likelihood"]
+        if str(likelihood["settlement_channel"]).startswith("noaa_wrh_"):
+            return str(likelihood["fast_channel"])
+    return _day0_probability_conditioning_source(payload)
 
 
 def _day0_is_shared_provisional_carrier_source(source: object) -> bool:
@@ -37422,7 +37451,7 @@ def _carried_day0_revision_likelihood(
 
     from src.events.day0_authority import day0_is_noaa_preliminary_source
 
-    source = _day0_probability_conditioning_source(payload).lower()
+    source = _day0_revision_model_source(payload).lower()
     if day0_is_noaa_preliminary_source(source):
         binding = payload.get("_edli_global_day0_binding")
         configured_station = (
@@ -42021,7 +42050,7 @@ def _prepare_current_global_probability_family(
                     current_day0_payload
                 )
                 if revision_likelihood is None:
-                    provisional_source = _day0_probability_conditioning_source(
+                    provisional_source = _day0_revision_model_source(
                         current_day0_payload
                     ).lower()
                     revision_likelihood = _provisional_day0_revision_likelihood(

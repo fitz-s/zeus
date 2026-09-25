@@ -42,7 +42,9 @@ DAY0_HELD_PINNED_RECOMPUTE_GLOBAL_AUTHORITY = (
 # config switch is on, every Day0 q in the process carries the resolver
 # revision (a provisional carrier that cannot compose fails closed rather than
 # fall back).
-DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL = "day0_remaining_center_bias_v20"
+DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL = (
+    "day0_settlement_channel_revision_model_v22"
+)
 DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER = (
     "day0_resolver_terminal_composition_v21"
 )

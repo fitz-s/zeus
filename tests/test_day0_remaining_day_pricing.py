@@ -3509,6 +3509,178 @@ def test_noaa_revision_fallback_uses_probability_station_not_settlement_type():
     conn.close()
 
 
+def _fast_residual_composite_payload(*, station: str, settlement_channel: str):
+    """A binding shaped like the live fast-residual composite posterior."""
+    from src.data.day0_fast_obs import (
+        FAST_OBS_SOURCE_ID,
+        FAST_RESIDUAL_CONDITIONING_SOURCE_ID,
+        FAST_RESIDUAL_LIKELIHOOD_REVISION,
+    )
+
+    observed_at = "2026-09-25T08:23:34+00:00"
+    identity = {
+        "semantics_revision": FAST_RESIDUAL_LIKELIHOOD_REVISION,
+        "station_id": station,
+        "settlement_channel": settlement_channel,
+        "fast_channel": FAST_OBS_SOURCE_ID,
+        "unit": "C",
+        "as_of": observed_at,
+        "window_start": "2026-09-18T08:23:34+00:00",
+        "matched_pairs": 252,
+        "residual_weights_c": ((0.0, 0.99),),
+        "unknown_weight": 0.01,
+        "settlement_extreme_c": None,
+    }
+    identity_hash = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    conditioning = {
+        "active": True,
+        "metric": "high",
+        "observation_time": observed_at,
+        "observed_extreme_c": 29.0,
+        "sample_count": 23,
+        "source": FAST_RESIDUAL_CONDITIONING_SOURCE_ID,
+        "support_truncation": False,
+        "unit": "C",
+        "fast_residual_likelihood": {
+            **identity,
+            "identity_hash": identity_hash,
+            "residual_weights_c": [{"residual_c": 0.0, "weight": 0.99}],
+            "scenario_weights": [
+                {"observed_bound_c": 29.0, "weight": 0.99},
+                {"observed_bound_c": None, "weight": 0.01},
+            ],
+        },
+    }
+    return {
+        "settlement_source": "aviationweather_metar",
+        "_edli_global_day0_binding": {
+            "configured_station_id": station,
+            "statistical_probability_conditioning": conditioning,
+        },
+    }
+
+
+def _noaa_confirmation_prints(station: str) -> sqlite3.Connection:
+    """Three AWC reports each confirmed by a later same-station OGIMET mirror."""
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """CREATE TABLE observation_prints (
+            id INTEGER PRIMARY KEY, city TEXT, station_id TEXT,
+            source_channel TEXT, publish_ts_utc TEXT, value_native REAL,
+            unit TEXT, fetched_at_utc TEXT, raw_report TEXT
+        )"""
+    )
+    rows = []
+    for index, (hour, value) in enumerate(((9, 24.0), (10, 25.0), (11, 26.0))):
+        observed = f"2026-09-23T{hour:02d}:00:00+00:00"
+        raw = f"METAR {station} 23{hour:02d}00Z 27005KT CAVOK {int(value):02d}/15 Q1012"
+        rows.append(
+            (2 * index + 1, "Tel Aviv", station, "aviationweather_metar",
+             observed, value, "C", f"2026-09-23T{hour:02d}:05:00+00:00", raw)
+        )
+        rows.append(
+            (2 * index + 2, "Tel Aviv", station, f"ogimet_metar_{station.lower()}",
+             observed, value, "C", f"2026-09-23T{hour:02d}:40:00+00:00", None)
+        )
+    conn.executemany(
+        "INSERT INTO observation_prints VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", rows
+    )
+    return conn
+
+
+def test_noaa_settled_fast_residual_reaches_same_station_revision_model(monkeypatch):
+    """Tel Aviv 2026-09-25: the composite's ``wu`` prefix sent a NOAA-settled
+    city to the WU revision model, which has no history for it."""
+    import src.data.day0_observation_reader as reader
+    import src.engine.event_reactor_adapter as era
+
+    payload = _fast_residual_composite_payload(
+        station="LLBG", settlement_channel="noaa_wrh_llbg"
+    )
+    assert era._day0_probability_conditioning_source(payload) == (
+        "wu_api+same_station_fast_tail"
+    )
+    source = era._day0_revision_model_source(payload)
+    assert source == "aviationweather_metar"
+
+    def wu_model_forbidden(*_args, **_kwargs):
+        raise AssertionError("a NOAA station page is not revised by WU")
+
+    monkeypatch.setattr(
+        reader, "wu_provisional_revision_likelihood", wu_model_forbidden
+    )
+    conn = _noaa_confirmation_prints("LLBG")
+    likelihood = era._provisional_day0_revision_likelihood(
+        conn,
+        source=source,
+        city="Tel Aviv",
+        city_timezone="Asia/Jerusalem",
+        target_date="2026-09-25",
+        temperature_metric="high",
+        decision_time=datetime(2026, 9, 25, 9, 0, tzinfo=UTC),
+        entry_authority=True,
+    )
+    assert likelihood["semantics"] == (
+        "same_station_preliminary_report_survival_likelihood_v2"
+    )
+    assert likelihood["station_id"] == "LLBG"
+    assert likelihood["boundary_survival_probability"] == pytest.approx(3.5 / 4.0)
+    conn.close()
+
+
+def test_wu_settled_fast_residual_keeps_the_wu_revision_model():
+    import src.engine.event_reactor_adapter as era
+
+    payload = _fast_residual_composite_payload(
+        station="RCSS", settlement_channel="wu_icao_history"
+    )
+    assert era._day0_revision_model_source(payload) == (
+        "wu_api+same_station_fast_tail"
+    )
+
+
+def test_carried_likelihood_on_noaa_composite_binds_the_configured_station():
+    """A carried NOAA likelihood is station-checked under the composite label."""
+    import src.engine.event_reactor_adapter as era
+
+    payload = _fast_residual_composite_payload(
+        station="LLBG", settlement_channel="noaa_wrh_llbg"
+    )
+    payload["_edli_day0_provisional_revision_likelihood"] = {
+        "identity_hash": "carried",
+        "boundary_survival_probability": 0.9,
+        "station_id": "LTFM",
+        "source_channel_pair": {
+            "awc": "aviationweather_metar",
+            "ogimet": "ogimet_metar_ltfm",
+        },
+    }
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_PROVISIONAL_REVISION_SOURCE_IDENTITY_INVALID",
+    ):
+        era._carried_day0_revision_likelihood(payload)
+
+
+def test_unverifiable_fast_residual_composite_fails_closed():
+    """A persisted composite whose identity no longer verifies is never rerouted."""
+    import src.engine.event_reactor_adapter as era
+
+    payload = _fast_residual_composite_payload(
+        station="LLBG", settlement_channel="noaa_wrh_llbg"
+    )
+    likelihood = payload["_edli_global_day0_binding"][
+        "statistical_probability_conditioning"
+    ]["fast_residual_likelihood"]
+    likelihood["settlement_channel"] = "noaa_wrh_ltfm"
+    with pytest.raises(
+        ValueError, match="GLOBAL_DAY0_FAST_RESIDUAL_POSTERIOR_IDENTITY_INVALID"
+    ):
+        era._day0_revision_model_source(payload)
+
+
 def test_noaa_probability_conditioning_keeps_survival_scenarios_with_wu_settlement():
     import src.engine.event_reactor_adapter as era
 
