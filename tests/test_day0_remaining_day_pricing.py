@@ -3681,6 +3681,44 @@ def test_unverifiable_fast_residual_composite_fails_closed():
         era._day0_revision_model_source(payload)
 
 
+@pytest.mark.parametrize("absent", ["missing", "null"])
+def test_composite_without_settlement_channel_fails_closed_for_its_family(
+    monkeypatch, absent
+):
+    """No hash-bound channel means no revision process; never the label prefix."""
+    import src.data.day0_observation_reader as reader
+    import src.engine.event_reactor_adapter as era
+
+    def wu_model_forbidden(*_args, **_kwargs):
+        raise AssertionError("an unbound composite must not reach the WU model")
+
+    monkeypatch.setattr(
+        reader, "wu_provisional_revision_likelihood", wu_model_forbidden
+    )
+    payload = _fast_residual_composite_payload(
+        station="LLBG", settlement_channel="noaa_wrh_llbg"
+    )
+    conditioning = payload["_edli_global_day0_binding"][
+        "statistical_probability_conditioning"
+    ]
+    if absent == "missing":
+        del conditioning["fast_residual_likelihood"]
+    else:
+        conditioning["fast_residual_likelihood"] = None
+
+    reason = "GLOBAL_DAY0_FAST_RESIDUAL_POSTERIOR_IDENTITY_INVALID"
+    with pytest.raises(ValueError, match=reason) as fresh:
+        era._day0_revision_model_source(payload)
+    assert era._is_global_probability_family_unavailable(fresh.value)
+
+    payload["_edli_day0_provisional_revision_likelihood"] = {
+        "identity_hash": "carried",
+        "boundary_survival_probability": 0.9,
+    }
+    with pytest.raises(ValueError, match=reason):
+        era._carried_day0_revision_likelihood(payload)
+
+
 def test_noaa_probability_conditioning_keeps_survival_scenarios_with_wu_settlement():
     import src.engine.event_reactor_adapter as era
 

@@ -37208,16 +37208,26 @@ def _day0_revision_model_source(payload: Mapping[str, object]) -> str:
     The hash-bound ``settlement_channel`` does: a NOAA station page is fed by
     the same-station preliminary report, so its survival is the fast channel's
     report-confirmation model, while ``wu_icao_history`` keeps the WU model.
+    A composite without that channel names no revision process and fails
+    closed for its family.
     """
 
-    conditioning = _validated_fast_residual_day0_conditioning(
-        _day0_statistical_probability_conditioning(payload)
-    )
-    if conditioning is not None:
-        likelihood = conditioning["fast_residual_likelihood"]
-        if str(likelihood["settlement_channel"]).startswith("noaa_wrh_"):
-            return str(likelihood["fast_channel"])
-    return _day0_probability_conditioning_source(payload)
+    from src.data.day0_fast_obs import FAST_RESIDUAL_CONDITIONING_SOURCE_ID
+
+    selected = _day0_statistical_probability_conditioning(payload)
+    conditioning = _validated_fast_residual_day0_conditioning(selected)
+    if conditioning is None:
+        if (
+            selected is not None
+            and str(selected["source"]).strip()
+            == FAST_RESIDUAL_CONDITIONING_SOURCE_ID
+        ):
+            raise ValueError("GLOBAL_DAY0_FAST_RESIDUAL_POSTERIOR_IDENTITY_INVALID")
+        return _day0_probability_conditioning_source(payload)
+    likelihood = conditioning["fast_residual_likelihood"]
+    if str(likelihood["settlement_channel"]).startswith("noaa_wrh_"):
+        return str(likelihood["fast_channel"])
+    return str(conditioning["source"]).strip()
 
 
 def _day0_is_shared_provisional_carrier_source(source: object) -> bool:
