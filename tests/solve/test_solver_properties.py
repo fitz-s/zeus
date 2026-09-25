@@ -9056,6 +9056,32 @@ def test_calibration_anchor_above_entry_band_does_not_block_legal_sell(side):
     assert decision.expected_terminal_wealth.held_probability_mean == .4
 
 
+def _without_q_provenance(decision):
+    """Strip the per-candidate q-provenance fields (q_raw/q_served/
+    probability_semantics_revision) tier0_candidate_set_provenance's writer
+    reads off each evaluation, mirroring ``replace(decision,
+    payoff_q_correction=None)`` at the top level. A raw-preserving
+    SourceIdentityBaseline is sealed identity, not sizing: it legitimately
+    changes these three provenance fields (they are read straight off
+    whichever correction -- if any -- was sealed for that leg) without
+    changing any sizing/economics field this helper leaves untouched.
+    probability_witness_identity is NOT stripped: it comes from the
+    candidate object itself, never from the correction, so it is identical
+    with or without a sealed policy.
+    """
+
+    return replace(
+        decision,
+        candidate_evaluations=tuple(
+            replace(
+                evaluation,
+                q_raw=None, q_served=None, probability_semantics_revision=None,
+            )
+            for evaluation in decision.candidate_evaluations
+        ),
+    )
+
+
 def _source_identity_for(candidate, raw_q, p0):
     from src.contracts.payoff_q_correction import SourceIdentityBaseline
 
@@ -9089,7 +9115,7 @@ def test_source_identity_preserves_source_sizing_and_joint_family_law(side, fami
     actual = _global_select((candidate,), payoff_q_correction_resolver=lambda *_: policy, **kwargs)
     assert actual.candidate is candidate
     assert actual.payoff_q_correction is policy
-    assert replace(actual, payoff_q_correction=None) == baseline
+    assert _without_q_provenance(replace(actual, payoff_q_correction=None)) == baseline
     assert policy.as_cert_fields()["applied"] is False
 
 
@@ -9119,4 +9145,4 @@ def test_source_identity_sell_redecides_on_current_source(side):
     policy = _source_identity_for(candidate, 0.2, 0.6)
     actual = _global_select((candidate,), payoff_q_correction_resolver=lambda *_: policy)
     assert actual.candidate is candidate
-    assert replace(actual, payoff_q_correction=None) == baseline
+    assert _without_q_provenance(replace(actual, payoff_q_correction=None)) == baseline
