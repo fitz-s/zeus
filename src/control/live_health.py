@@ -6457,6 +6457,7 @@ def _latest_global_auction_candidate_counts(
             "zlib+base64+canonical-json-v11",
             "zlib+base64+canonical-json-v12",
             "zlib+base64+canonical-json-v13",
+            "zlib+base64+canonical-json-v14",
         }:
             return invalid("ENCODING")
         holding_payload = None
@@ -6464,17 +6465,27 @@ def _latest_global_auction_candidate_counts(
             "zlib+base64+canonical-json-v11",
             "zlib+base64+canonical-json-v12",
             "zlib+base64+canonical-json-v13",
+            "zlib+base64+canonical-json-v14",
         }
         if candidate_encoding in current_candidate_encodings:
             expected_schema_versions = {
                 "zlib+base64+canonical-json-v11": {17, 18},
                 "zlib+base64+canonical-json-v12": {19, 20},
+                # v14 adds only optional per-candidate q-provenance fields
+                # (tier0_candidate_set_provenance backfill) inside the same
+                # v13 payload shape; the receipt's own schema_version literal
+                # was not bumped for this change, so v14 shares v13's pool.
                 "zlib+base64+canonical-json-v13": {21, 22},
+                "zlib+base64+canonical-json-v14": {21, 22},
             }[candidate_encoding]
             if schema_version not in expected_schema_versions:
                 return invalid("SCHEMA_VERSION_CONTRACT")
             if (
-                candidate_encoding == "zlib+base64+canonical-json-v13"
+                candidate_encoding
+                in {
+                    "zlib+base64+canonical-json-v13",
+                    "zlib+base64+canonical-json-v14",
+                }
                 and not _global_auction_strategy_allocation_valid(summary)
             ):
                 return invalid("STRATEGY_CAPITAL_ALLOCATION")
@@ -6508,6 +6519,7 @@ def _latest_global_auction_candidate_counts(
         if candidate_encoding in {
             "zlib+base64+canonical-json-v12",
             "zlib+base64+canonical-json-v13",
+            "zlib+base64+canonical-json-v14",
         }:
             buy_index = payload["buy_candidate_index"]
             expected_buy_index_size = 7 if schema_version >= 20 else 6
@@ -6532,6 +6544,7 @@ def _latest_global_auction_candidate_counts(
             if candidate_encoding in {
                 "zlib+base64+canonical-json-v12",
                 "zlib+base64+canonical-json-v13",
+                "zlib+base64+canonical-json-v14",
             }:
                 candidate_indexes = [
                     int(value) for value in group["candidate_indexes"]
@@ -6558,10 +6571,17 @@ def _latest_global_auction_candidate_counts(
                 candidate_ids = group["candidate_ids"]
                 covered += len(candidate_ids)
         detailed_buy_ids: set[str] = set()
+        # Invariants introduced at v13 (expected_growth ruin coherence, sell
+        # point counterfactual ruin bounds) still hold verbatim at v14 -- v14
+        # only adds optional q-provenance keys elsewhere in the same payload.
+        v13_or_later = candidate_encoding in {
+            "zlib+base64+canonical-json-v13",
+            "zlib+base64+canonical-json-v14",
+        }
         for evaluation in payload["detailed"]:
             covered += 1
             if (
-                candidate_encoding == "zlib+base64+canonical-json-v13"
+                v13_or_later
                 and evaluation.get("status") in {"SCORED", "SELECTED"}
             ):
                 expected_growth = evaluation.get("expected_growth")
@@ -6584,7 +6604,7 @@ def _latest_global_auction_candidate_counts(
                     or ruin_reduction != evaluation_ruin_reduction
                 ):
                     return invalid("EXPECTED_GROWTH_RUIN_INVALID")
-            if candidate_encoding == "zlib+base64+canonical-json-v13":
+            if v13_or_later:
                 point_counterfactual = evaluation.get(
                     "sell_point_counterfactual"
                 )
@@ -6609,6 +6629,7 @@ def _latest_global_auction_candidate_counts(
                 in {
                     "zlib+base64+canonical-json-v12",
                     "zlib+base64+canonical-json-v13",
+                    "zlib+base64+canonical-json-v14",
                 }
                 and evaluation.get("action") == "BUY"
             ):
@@ -6673,6 +6694,7 @@ def _latest_global_auction_candidate_counts(
         if candidate_encoding in {
             "zlib+base64+canonical-json-v12",
             "zlib+base64+canonical-json-v13",
+            "zlib+base64+canonical-json-v14",
         }:
             rejected_ids = {
                 buy_candidate_ids[index] for index in rejected_indexes

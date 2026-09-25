@@ -4545,7 +4545,13 @@ def _store_global_auction_receipt(
         "buy_condition_membership_count": sum(
             1 + (mask == 3) for mask in buy_condition_masks.values()
         ),
-        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v13",
+        # v14 (2026-09-25): each evaluation dict gains four optional
+        # q-provenance keys (q_raw, q_served, probability_semantics_revision,
+        # probability_witness_identity) -- see
+        # tests/test_tier0_candidate_set_q_provenance.py. Same v13 payload
+        # shape otherwise; readers/validators of the v13 literal (rg it)
+        # accept v14 identically. schema_version below is unchanged.
+        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v14",
         "candidate_evaluations_sha256": hashlib.sha256(
             evaluation_json
         ).hexdigest(),

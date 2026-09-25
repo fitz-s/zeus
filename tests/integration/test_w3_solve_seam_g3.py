@@ -1121,7 +1121,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         summary["candidate_evaluations_sha256"]
     )
     assert summary["candidate_evaluation_encoding"] == (
-        "zlib+base64+canonical-json-v13"
+        "zlib+base64+canonical-json-v14"
     )
     assert summary["sell_point_counterfactual_count"] == 2
     assert summary["sell_point_counterfactual_positive_count"] == 2

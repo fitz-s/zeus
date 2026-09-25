@@ -553,8 +553,13 @@ def _write_high_yes_edge_dbs(
             v12 = global_auction_encoding == (
                 "zlib+base64+canonical-json-v12"
             )
-            v13 = global_auction_encoding == (
-                "zlib+base64+canonical-json-v13"
+            # v14 (2026-09-25) keeps the exact v13 indexed payload shape and
+            # schema_version pool -- only adds optional per-candidate
+            # q-provenance keys the production reader does not read here --
+            # so this fixture treats it identically to v13.
+            v13 = global_auction_encoding in (
+                "zlib+base64+canonical-json-v13",
+                "zlib+base64+canonical-json-v14",
             )
             indexed = v12 or v13
             rejection_identity = (
@@ -5776,6 +5781,7 @@ def test_high_yes_edge_accepts_canonical_global_entry_pause(
         "zlib+base64+canonical-json-v11",
         "zlib+base64+canonical-json-v12",
         "zlib+base64+canonical-json-v13",
+        "zlib+base64+canonical-json-v14",
     ),
 )
 def test_high_yes_edge_accepts_current_global_auction_candidate(
@@ -5865,6 +5871,61 @@ def test_v13_global_auction_rejects_tampered_strategy_allocation(
         sd,
         with_global_auction_candidate=True,
         global_auction_encoding="zlib+base64+canonical-json-v13",
+    )
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        artifact = json.loads(
+            conn.execute(
+                "SELECT artifact_json FROM decision_log WHERE id = 1"
+            ).fetchone()[0]
+        )
+        artifact["summary"]["strategy_capital_allocation"][
+            "utility_liquid_cash_usd"
+        ] = "2"
+        artifact["summary"]["artifact_summary_hash"] = (
+            global_auction_artifact_summary_hash(artifact["summary"])
+        )
+        conn.execute(
+            "UPDATE decision_log SET artifact_json = ? WHERE id = 1",
+            (json.dumps(artifact),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    conn.row_factory = sqlite3.Row
+    try:
+        yes, no, evidence = live_health._latest_global_auction_candidate_counts(
+            conn,
+            cutoff=_now_iso(-48 * 3600),
+        )
+    finally:
+        conn.close()
+
+    assert yes == {}
+    assert no == {}
+    assert evidence["issue"] == (
+        "GLOBAL_AUCTION_CANDIDATE_EVIDENCE_INVALID:"
+        "STRATEGY_CAPITAL_ALLOCATION"
+    )
+
+
+def test_v14_global_auction_rejects_tampered_strategy_allocation(
+    tmp_path: Path,
+) -> None:
+    """v14 (q-provenance columns, 2026-09-25) keeps the exact v13 payload
+    shape and every v13 gate, including STRATEGY_CAPITAL_ALLOCATION
+    tamper-rejection -- mirrors
+    test_v13_global_auction_rejects_tampered_strategy_allocation above with
+    only the encoding literal changed."""
+
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _write_high_yes_edge_dbs(
+        sd,
+        with_global_auction_candidate=True,
+        global_auction_encoding="zlib+base64+canonical-json-v14",
     )
     conn = sqlite3.connect(sd / "zeus_trades.db")
     try:
