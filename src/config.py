@@ -831,6 +831,16 @@ def hold_value_exit_costs_enabled() -> bool:
     return bool(settings["feature_flags"].get("HOLD_VALUE_EXIT_COSTS", False))
 
 
+def day0_resolver_terminal_residual_enabled() -> bool:
+    """Default OFF. When True and a validated state/day0_resolver_terminal_residual.json
+    is present, provisional Day0 carriers compose the resolver-graded terminal
+    non-violation probability instead of the AWC->Ogimet report-survival mixture
+    (src.calibration.day0_resolver_terminal_residual). Absent key = OFF."""
+    return bool(
+        settings["feature_flags"].get("DAY0_RESOLVER_TERMINAL_RESIDUAL", False)
+    )
+
+
 def tier0_research_mode_enabled() -> bool:
     """reversal_plan_tier0_2026-08-24 item 6: default OFF. When True, every
     new ENTRY admission must clear src.strategy.tier0_policy's cheap-only /

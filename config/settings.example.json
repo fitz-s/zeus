@@ -189,6 +189,8 @@
     "cancel_if_not_filled": true
   },
   "feature_flags": {
+    "DAY0_RESOLVER_TERMINAL_RESIDUAL": false,
+    "_DAY0_RESOLVER_TERMINAL_RESIDUAL_note": "Default OFF (byte-identical Day0 carriers). When true, provisional Day0 carriers compose the resolver-graded terminal non-violation probability from state/day0_resolver_terminal_residual.json (scripts/fit_day0_resolver_terminal_residual.py) and every Day0 q carries revision day0_resolver_terminal_composition_v21 (OFF keeps day0_remaining_center_bias_v20); the live remaining-center shift still moves the remaining members before the boundary; a missing, stale or non-causal artifact fails that Day0 family closed. Requires a daemon restart to take effect.",
     "TIER0_RESEARCH_MODE": false,
     "_TIER0_RESEARCH_MODE_note": "reversal_plan_tier0_2026-08-24 item 6: default OFF (identical to pre-Tier-0 behavior). When true, src.strategy.tier0_policy gates every new ENTRY to price<0.25, taker-only, one-per-(city,target_date)-cluster, flat smallest-venue-legal stake; the global entries_paused override still supersedes this unconditionally. Activation additionally requires plan item 3 (true p0 certificate provenance) per the release checklist in the plan doc -- not enforced in code."
   },

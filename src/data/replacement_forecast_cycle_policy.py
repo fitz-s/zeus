@@ -276,8 +276,10 @@ def tradeable_grade_coverage_sql(
     convention (for example, ``"p."``).
     """
     from src.data.day0_hourly_vectors import (
+        DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER,
         DAY0_REMAINING_CARRIER_OPERATOR_V2, DAY0_REMAINING_CARRIER_OPERATOR_V3,
     )
+    from src.config import day0_resolver_terminal_residual_enabled
 
     cols = set(posterior_columns)
     fragments: list[str] = []
@@ -403,7 +405,16 @@ def tradeable_grade_coverage_sql(
         "OR ABS(CAST(final_center.value AS REAL)) > 1.7976931348623157e308 "
         "OR CAST(CASE WHEN provider.type = 'object' THEN json_extract(provider.value, '$.forecast_value_c') ELSE 0 END AS REAL) "
         "!= CAST(final_center.value AS REAL)))"
-        ")))"
+        + (
+            # The resolver-graded carrier is admitted only while its switch is
+            # on; with it off the fragment is byte-identical to before.
+            f") OR ({carrier_operator_value} = '{DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER}' AND "
+            f"{carrier_shape_value} = 'day0_remaining_shared_carrier_resolver_v1' AND "
+            f"json_type({provenance_expr}, '$.day0_resolver_terminal_input') = 'object'"
+            if day0_resolver_terminal_residual_enabled()
+            else ""
+        )
+        + ")))"
     )
     return "\n              ".join(fragments)
 

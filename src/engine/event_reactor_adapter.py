@@ -37572,6 +37572,7 @@ def _day0_replacement_conditioning(
                 "day0_remaining_carrier_probability_cutoff_utc",
                 "day0_remaining_vector_witness",
                 "day0_causal_evidence_bundle",
+                "day0_resolver_terminal_input",
             )
             if key in provenance
         },
@@ -38906,6 +38907,7 @@ def _global_day0_execution_payload(
             "day0_remaining_carrier_probability_cutoff_utc": "_edli_day0_remaining_carrier_probability_cutoff_utc",
             "day0_remaining_carrier_likelihood": "_edli_day0_provisional_revision_likelihood",
             "day0_remaining_vector_witness": "_edli_day0_remaining_vector_witness",
+            "day0_resolver_terminal_input": "_edli_day0_resolver_terminal_input",
         }
         for source_key, payload_key in carrier_fields.items():
             if source_key in conditioning:
@@ -42911,6 +42913,7 @@ def _prepare_current_global_probability_family(
             "_edli_day0_post_local_vector_cutoff_utc",
             "_edli_day0_provisional_revision_likelihood",
             "_edli_day0_provisional_boundary_survival_probability",
+            "_edli_day0_resolver_terminal_input",
             "_edli_day0_post_peak_confidence_source",
             "_edli_day0_peak_set_probability",
             "_edli_day0_peak_set_sample_count",
@@ -45469,6 +45472,50 @@ class _Day0BootstrapSampler:
         return probabilities
 
 
+def _day0_resolver_terminal_carrier(payload: Mapping[str, object]) -> bool:
+    """Whether this payload's Day0 q is the resolver-graded terminal composition."""
+    from src.data.day0_hourly_vectors import DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER
+
+    return (
+        payload.get("_edli_day0_probability_operator")
+        == DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER
+    )
+
+
+@dataclass(frozen=True)
+class _Day0CarrierRowSampler:
+    """Bootstrap from the carrier's own composed rows.
+
+    The resolver-graded composition is terminal: its rows already carry
+    ``s``/``G-`` uncertainty.  Re-sampling members and applying a boundary here
+    would apply the boundary a second time.
+    """
+
+    rows: np.ndarray
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, object]) -> "_Day0CarrierRowSampler":
+        rows = np.asarray(
+            payload.get("_edli_day0_remaining_probability_samples"), dtype=np.float64
+        )
+        if (
+            rows.ndim != 2
+            or rows.shape[0] < 2
+            or not np.isfinite(rows).all()
+            or np.any(rows < 0.0)
+            or not np.allclose(rows.sum(axis=1), 1.0, rtol=0.0, atol=1e-9)
+        ):
+            raise ValueError("DAY0_RESOLVER_TERMINAL_CARRIER_SAMPLES_INVALID")
+        return cls(rows=rows)
+
+    def __call__(self, analysis, n_members):
+        return self.rows[int(analysis._rng.integers(0, self.rows.shape[0]))]
+
+    def sample_matrix(self, analysis, n_samples: int, n_members: int) -> np.ndarray:
+        index = analysis._rng.integers(0, self.rows.shape[0], max(0, int(n_samples)))
+        return self.rows[index]
+
+
 def _make_day0_bootstrap_sampler(
     *,
     members_native,
@@ -46000,12 +46047,16 @@ def _market_analysis_from_event_snapshot(
         # it widens honestly when the running extreme is stale. Any
         # construction failure degrades LOUDLY to the legacy static sampler
         # (no regression vs the pre-fix behavior).
-        _day0_sampler = _make_day0_bootstrap_sampler(
-            members_native=members,
-            payload=payload,
-            family=family,
-            unit=unit,
-            decision_time=day0_probability_time,
+        _day0_sampler = (
+            _Day0CarrierRowSampler.from_payload(payload)
+            if _day0_resolver_terminal_carrier(payload)
+            else _make_day0_bootstrap_sampler(
+                members_native=members,
+                payload=payload,
+                family=family,
+                unit=unit,
+                decision_time=day0_probability_time,
+            )
         )
         if _day0_sampler is not None:
             sampler = _day0_sampler
@@ -47050,6 +47101,26 @@ def _day0_remaining_p_raw_vector(
                 "observed_at_utc": str(current_observed_at),
                 "source": str(current_source),
             }
+        from src.data.day0_hourly_vectors import (
+            DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER,
+        )
+
+        resolver_terminal = None
+        if (
+            str(payload["_edli_day0_probability_operator"])
+            == DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER
+        ):
+            from src.calibration.day0_resolver_terminal_residual import (
+                Day0ResolverTerminalInput,
+            )
+            from src.config import day0_resolver_terminal_residual_enabled
+
+            if not day0_resolver_terminal_residual_enabled():
+                raise ValueError("DAY0_RESOLVER_TERMINAL_CARRIER_SWITCH_OFF")
+            resolver_terminal = Day0ResolverTerminalInput.from_payload(
+                payload.get("_edli_day0_resolver_terminal_input")
+            )
+            boundary_scenarios = ((float(probability_boundary), 1.0),)
         carrier = build_day0_remaining_probability_carrier(
             future_extremes_c=future_native,
             final_extreme_centers_c=tuple(
@@ -47069,6 +47140,7 @@ def _day0_remaining_p_raw_vector(
             # rejects unknown operators; current rebuilds below pass V2.
             operator=str(payload["_edli_day0_probability_operator"]),
             remaining_center_bias_native=remaining_bias_c * native_scale,
+            resolver_terminal=resolver_terminal,
         )
         expected_identity = str(payload["_edli_day0_remaining_content_identity"]).strip()
         if expected_identity != str(carrier["content_identity"]):
@@ -47433,7 +47505,11 @@ def _day0_absorbing_mask(*, payload: dict[str, object], family) -> "np.ndarray":
         day0_evidence_finality,
     )
 
-    if day0_evidence_finality(payload) not in DAY0_ABSORBING_FINALITIES:
+    # A resolver-graded composition is terminal: no impossible-bin mask after it.
+    if (
+        day0_evidence_finality(payload) not in DAY0_ABSORBING_FINALITIES
+        or _day0_resolver_terminal_carrier(payload)
+    ):
         return mask
     for index, candidate in enumerate(family.candidates):
         bin_value = candidate.bin
@@ -48372,6 +48448,7 @@ def _snapshot_day0_source_clock_carrier_provenance(
         "_edli_day0_remaining_bias_artifact",
         "_edli_day0_remaining_carrier_probability_cutoff_utc",
         "_edli_day0_remaining_vector_witness",
+        "_edli_day0_resolver_terminal_input",
     )
     provenance = {
         field.removeprefix("_edli_day0_"): deepcopy(payload[field])
@@ -48571,6 +48648,32 @@ def _rebuild_decision_time_day0_carrier(
         decision_time=decision_time,
         timezone_name=str(city.timezone),
     )
+    semantics = SettlementSemantics.for_city(city)
+    from src.calibration.day0_resolver_terminal_residual import (
+        resolve_day0_resolver_terminal_input,
+    )
+    from src.config import day0_resolver_terminal_residual_enabled
+
+    resolver_terminal = None
+    if day0_resolver_terminal_residual_enabled():
+        # The resolver-graded composition conditions on the single possessed
+        # boundary; the survival/fast-residual scenario mixture is not applied.
+        boundary = _day0_probability_boundary_native(
+            payload, str(family.metric).strip().lower()
+        )
+        if boundary is None:
+            raise ValueError("DAY0_HELD_SHARED_CARRIER_BOUNDARY_MISSING")
+        boundary_scenarios = ((float(boundary), 1.0),)
+        resolver_terminal = resolve_day0_resolver_terminal_input(
+            city=city,
+            target_date=getattr(family, "target_date", None),
+            metric=str(family.metric).strip().lower(),
+            source=source,
+            decision_time=decision_time,
+            boundary_native=boundary,
+            members_native=(*values_native, *final_values_native),
+            settlement_semantics=semantics,
+        )
     carrier = build_day0_remaining_probability_carrier(
         future_extremes_c=values_native,
         final_extreme_centers_c=final_values_native,
@@ -48585,14 +48688,23 @@ def _rebuild_decision_time_day0_carrier(
         n_point=ensemble_n_mc(),
         n_samples=500,
         identity_inputs=identity_inputs,
-        settlement_semantics=SettlementSemantics.for_city(city),
+        settlement_semantics=semantics,
         operator=(
-            DAY0_REMAINING_CARRIER_OPERATOR_V3
+            None
+            if resolver_terminal is not None
+            else DAY0_REMAINING_CARRIER_OPERATOR_V3
             if final_values_native
             else DAY0_REMAINING_CARRIER_OPERATOR_V2
         ),
         remaining_center_bias_native=remaining_bias.shift_c * native_scale,
+        resolver_terminal=resolver_terminal,
     )
+    if resolver_terminal is not None:
+        payload["_edli_day0_resolver_terminal_input"] = carrier[
+            "resolver_terminal_input"
+        ]
+    else:
+        payload.pop("_edli_day0_resolver_terminal_input", None)
     payload.update(
         {
             "_edli_day0_remaining_content_identity": carrier["content_identity"],
@@ -50269,6 +50381,7 @@ def _apply_day0_mask_to_generated_probabilities(
 
     is_absorbing_evidence = (
         day0_evidence_finality(payload) in DAY0_ABSORBING_FINALITIES
+        and not _day0_resolver_terminal_carrier(payload)
     )
     mask: list[float] = []
     absorbing_yes: list[bool] = []

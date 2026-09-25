@@ -1486,13 +1486,35 @@ def _day0_noaa_preliminary_carrier(
         preliminary_survival_identity=str(likelihood["identity_hash"]),
     )
     identity_inputs["current_path_state"] = current_state.identity()
+    semantics = SettlementSemantics.for_city(city)
+    final_centers_native = tuple(
+        float(value) * native_scale + native_offset
+        for value in final_extreme_centers_c
+    )
+    from src.calibration.day0_resolver_terminal_residual import (
+        resolve_day0_resolver_terminal_input,
+    )
+
+    # The AWC->OGIMET likelihood above stays telemetry under its own name; the
+    # resolver-graded input is separately typed and replaces only the mixture.
+    resolver_terminal = resolve_day0_resolver_terminal_input(
+        city=city,
+        target_date=_date_text(request.target_date),
+        metric=metric,
+        source=source,
+        decision_time=computed_at,
+        boundary_native=float(observed) * native_scale + native_offset,
+        members_native=(*future_members_native, *final_centers_native),
+        settlement_semantics=semantics,
+    )
     carrier = build_day0_remaining_probability_carrier(
         future_extremes_c=future_members_native,
-        final_extreme_centers_c=tuple(
-            float(value) * native_scale + native_offset
-            for value in final_extreme_centers_c
+        final_extreme_centers_c=final_centers_native,
+        boundary_scenarios=(
+            native_boundary_scenarios
+            if resolver_terminal is None
+            else ((float(observed) * native_scale + native_offset, 1.0),)
         ),
-        boundary_scenarios=native_boundary_scenarios,
         metric=metric,
         path_error_sigma_c=float(path_error_sigma_c) * native_scale,
         instrument_sigma_c=instrument_sigma_native,
@@ -1500,10 +1522,26 @@ def _day0_noaa_preliminary_carrier(
         n_point=ensemble_n_mc(),
         n_samples=500,
         identity_inputs=identity_inputs,
-        settlement_semantics=SettlementSemantics.for_city(city),
+        settlement_semantics=semantics,
+        resolver_terminal=resolver_terminal,
         remaining_center_bias_native=float(remaining_center_bias_c) * native_scale,
     )
     return carrier, likelihood
+
+
+def _day0_shared_carrier_q_shape(
+    carrier: Mapping[str, object], station_extremes: Sequence[object]
+) -> str:
+    """Name the shared carrier by the operator that built it."""
+    from src.data.day0_hourly_vectors import DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER
+
+    if carrier["operator"] == DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER:
+        return "day0_remaining_shared_carrier_resolver_v1"
+    return (
+        "day0_remaining_shared_carrier_v3"
+        if station_extremes
+        else "day0_remaining_shared_carrier_v2"
+    )
 
 
 def _day0_noaa_future_vector_members(
@@ -6648,10 +6686,8 @@ def _compute_posterior_payload(
                     for index, item in enumerate(request.bins)
                 }
                 q = q_global
-                q_shape = (
-                    "day0_remaining_shared_carrier_v3"
-                    if _day0_shared_carrier_station_extremes
-                    else "day0_remaining_shared_carrier_v2"
+                q_shape = _day0_shared_carrier_q_shape(
+                    _day0_shared_carrier, _day0_shared_carrier_station_extremes
                 )
                 # 2026-09-13: the shared Day0 carrier derives its width from instrument sigma +
                 # path error (_day0_noaa_carrier_future_members / _day0_noaa_preliminary_carrier),
@@ -6863,10 +6899,8 @@ def _compute_posterior_payload(
                 except Exception:
                     pass
             if _day0_shared_carrier is not None:
-                q_shape = (
-                    "day0_remaining_shared_carrier_v3"
-                    if _day0_shared_carrier_station_extremes
-                    else "day0_remaining_shared_carrier_v2"
+                q_shape = _day0_shared_carrier_q_shape(
+                    _day0_shared_carrier, _day0_shared_carrier_station_extremes
                 )
                 carrier_q = {
                     str(item.bin_id): float(_day0_shared_carrier["q"][index])
@@ -6916,6 +6950,10 @@ def _compute_posterior_payload(
                 and q_bootstrap_samples_by_bin is not None
                 and q_lcb_map is not None
                 and q_ucb_map is not None
+                # A resolver-graded composition is terminal: transporting its
+                # mass to fast-residual boundaries would apply max(observed, .)
+                # a second time.
+                and q_shape != "day0_remaining_shared_carrier_resolver_v1"
             ):
                 (
                     q,
@@ -7297,6 +7335,15 @@ def _compute_posterior_payload(
                 "day0_remaining_carrier_probability_cutoff_utc": _carrier_cutoff,
                 "day0_preliminary_report_survival_likelihood": dict(
                     _day0_shared_carrier_likelihood or {}
+                ),
+                **(
+                    {
+                        "day0_resolver_terminal_input": dict(
+                            _day0_shared_carrier["resolver_terminal_input"]
+                        )
+                    }
+                    if "resolver_terminal_input" in _day0_shared_carrier
+                    else {}
                 ),
             }
             if _day0_shared_carrier is not None

@@ -75,6 +75,7 @@ DAY0_REMAINING_CARRIER_OPERATOR_V2 = (
 DAY0_REMAINING_CARRIER_OPERATOR_V3 = (
     "typed_remaining_and_final_extreme_gaussian_v3"
 )
+DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER = "resolver_graded_terminal_composition_v1"
 DAY0_REMAINING_CARRIER_OPERATOR = DAY0_REMAINING_CARRIER_OPERATOR_V2
 
 
@@ -1500,6 +1501,101 @@ def _build_day0_remaining_probability_carrier_v3(
     }
 
 
+def _build_day0_resolver_terminal_carrier(
+    *, future_extremes_c: Iterable[float], boundary_scenarios: Iterable[tuple[float | None, float]],
+    final_extreme_centers_c: Iterable[float], metric: str, path_error_sigma_c: float,
+    instrument_sigma_c: float, bin_bounds_c: Iterable[tuple[float | None, float | None]],
+    n_point: int, n_samples: int, identity_inputs: Mapping[str, object],
+    settlement_semantics: SettlementSemantics, resolver_terminal: Any,
+    remaining_center_bias_native: float,
+) -> dict[str, object]:
+    """Compose the exact remaining-extreme template with resolver-graded ``s``/``G-``.
+
+    The template is this module's own carrier: the remaining-hourly members are
+    shifted by ``remaining_center_bias_native`` first, then censored at the
+    observed boundary and integrated on a unit settlement grid, so the
+    composition can split family bins exactly at ``A``.  Its samples are
+    composed row by row with hierarchical ``(s, G-)`` draws.
+    """
+    from src.forecast.day0_terminal_distribution import (
+        compose_resolver_terminal_distribution,
+        unit_settlement_grid,
+    )
+
+    scenarios = tuple(boundary_scenarios)
+    if len(scenarios) != 1 or scenarios[0][0] is None or float(scenarios[0][1]) != 1.0:
+        raise ValueError("DAY0_RESOLVER_TERMINAL_BOUNDARY_SCENARIO_INVALID")
+    boundary = float(scenarios[0][0])
+    observed = float(settlement_semantics.round_values([boundary])[0])
+    bounds = []
+    for low, high in bin_bounds_c:
+        for edge in (low, high):
+            if edge is not None and not math.isclose(float(edge), round(float(edge)), abs_tol=1e-9):
+                raise ValueError("DAY0_REMAINING_CARRIER_BIN_BOUNDS_INVALID")
+        bounds.append(
+            (
+                None if low is None else float(round(float(low))),
+                None if high is None else float(round(float(high))),
+            )
+        )
+    fine = unit_settlement_grid(
+        bounds, observed=observed, steps=len(resolver_terminal.g_root_prior) - 1
+    )
+    template = build_day0_remaining_probability_carrier(
+        future_extremes_c=future_extremes_c,
+        final_extreme_centers_c=final_extreme_centers_c,
+        boundary_scenarios=((boundary, 1.0),),
+        metric=metric,
+        path_error_sigma_c=path_error_sigma_c,
+        instrument_sigma_c=instrument_sigma_c,
+        bin_bounds_c=fine,
+        n_point=n_point,
+        n_samples=n_samples,
+        identity_inputs=identity_inputs,
+        settlement_semantics=settlement_semantics,
+        remaining_center_bias_native=remaining_center_bias_native,
+    )
+    terminal = resolver_terminal.to_payload()
+    content = {
+        "v": 6,
+        "operator": DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER,
+        "template_identity": template["content_identity"],
+        "template_operator": template["operator"],
+        "resolver_terminal": terminal,
+        "bins": bounds,
+        "n_samples": n_samples,
+    }
+    identity = hashlib.sha256(
+        json.dumps(content, sort_keys=True, separators=(",", ":"), default=str).encode()
+    ).hexdigest()
+    compose = dict(
+        template_bins=fine, observed=observed, metric=metric, bins=bounds,
+    )
+    point = compose_resolver_terminal_distribution(
+        template=template["q"],
+        nonviolation_probability=resolver_terminal.nonviolation_probability,
+        failure_magnitude=resolver_terminal.failure_magnitude(),
+        **compose,
+    )
+    s_draws, g_draws = resolver_terminal.draw(
+        np.random.default_rng(int(identity[:16], 16)), n_samples
+    )
+    samples = compose_resolver_terminal_distribution(
+        template=np.asarray(template["samples"], dtype=float),
+        nonviolation_probability=s_draws,
+        failure_magnitude=g_draws,
+        **compose,
+    )
+    return {
+        "q": [float(x) for x in point],
+        "samples": [[float(x) for x in row] for row in samples],
+        "content_identity": identity,
+        "operator": DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER,
+        "sample_count": n_samples,
+        "resolver_terminal_input": terminal,
+    }
+
+
 def build_day0_remaining_probability_carrier(
     *, future_extremes_c: Iterable[float], boundary_scenarios: Iterable[tuple[float | None, float]],
     final_extreme_centers_c: Iterable[float] = (),
@@ -1509,6 +1605,7 @@ def build_day0_remaining_probability_carrier(
     settlement_semantics: SettlementSemantics,
     operator: str | None = None,
     remaining_center_bias_native: float = 0.0,
+    resolver_terminal: Any = None,
 ) -> dict[str, object]:
     """Pure ``extreme(boundary, noisy future)`` carrier for both Day0 readers.
 
@@ -1531,7 +1628,30 @@ def build_day0_remaining_probability_carrier(
     physical Gaussian-mixture distribution.  V3 keeps the remaining future
     components censored, while typed final-extreme centers are conditioned on
     the same boundary scenario as continuous one-sided truncated normals.
+    ``resolver_terminal`` (a ``Day0ResolverTerminalInput``) selects the
+    resolver-graded composition instead of the survival mixture.
     """
+    if resolver_terminal is not None or operator == DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER:
+        if resolver_terminal is None or operator not in {
+            None,
+            DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER,
+        }:
+            raise ValueError("DAY0_RESOLVER_TERMINAL_OPERATOR_INPUT_MISMATCH")
+        return _build_day0_resolver_terminal_carrier(
+            future_extremes_c=future_extremes_c,
+            boundary_scenarios=boundary_scenarios,
+            final_extreme_centers_c=final_extreme_centers_c,
+            metric=metric,
+            path_error_sigma_c=path_error_sigma_c,
+            instrument_sigma_c=instrument_sigma_c,
+            bin_bounds_c=bin_bounds_c,
+            n_point=n_point,
+            n_samples=n_samples,
+            identity_inputs=identity_inputs,
+            settlement_semantics=settlement_semantics,
+            resolver_terminal=resolver_terminal,
+            remaining_center_bias_native=remaining_center_bias_native,
+        )
     values = np.sort(
         np.asarray(tuple(float(v) for v in future_extremes_c), dtype=float)
     )

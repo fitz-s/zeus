@@ -37,10 +37,28 @@ DAY0_HELD_PINNED_RECOMPUTE_GLOBAL_AUTHORITY = (
 )
 # Settlement learning must grade the probability mechanism that actually
 # authorized a fill.  Increment this when the Day0 probability construction
-# changes; the value is stamped into every live Day0 q_version.
-DAY0_PROBABILITY_SEMANTICS_REVISION = (
-    "day0_remaining_center_bias_v20"
+# changes; the value is stamped into every live Day0 q_version.  The
+# resolver-graded terminal composition is its own mechanism; while its
+# config switch is on, every Day0 q in the process carries the resolver
+# revision (a provisional carrier that cannot compose fails closed rather than
+# fall back).
+DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL = "day0_remaining_center_bias_v20"
+DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER = (
+    "day0_resolver_terminal_composition_v21"
 )
+
+
+def _current_day0_probability_semantics_revision() -> str:
+    from src.config import day0_resolver_terminal_residual_enabled
+
+    return (
+        DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER
+        if day0_resolver_terminal_residual_enabled()
+        else DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL
+    )
+
+
+DAY0_PROBABILITY_SEMANTICS_REVISION = _current_day0_probability_semantics_revision()
 _DAY0_SEMANTIC_Q_VERSION_PREFIX = "day0-semrev:"
 DAY0_DETERMINISTIC_BIN_PAYOFF_Q_SOURCE = "day0_deterministic_bin_payoff"
 DAY0_DETERMINISTIC_BIN_PAYOFF_Q_MODE = "deterministic_bin_payoff"

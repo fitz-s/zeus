@@ -2409,6 +2409,15 @@ files:
     downstream:
     - src/data/replacement_forecast_materializer.py
     - src/engine/event_reactor_adapter.py
+  src/calibration/day0_resolver_terminal_residual.py:
+    zone: K3_extension
+    authority_role: day0_resolver_terminal_residual
+    why: "Resolver-graded Day0 terminal non-violation probability s and failure magnitude G-: label law (A = contract-rounded possessed running extreme, D = v(Y - A)), hierarchical Beta-binomial/Dirichlet fit over resolver x channel x unit x metric x phase x gap -> station, typed replayable serving input and hash-validated artifact loader. Separate from the AWC->OGIMET report-survival telemetry. Serving is inert while the DAY0_RESOLVER_TERMINAL_RESIDUAL flag is off; with it on, a missing/stale/non-causal artifact fails that Day0 family closed. Fitted by scripts/fit_day0_resolver_terminal_residual.py."
+    hazards: [CALIBRATION_FAMILY_MIXING]
+    downstream:
+    - src/data/day0_hourly_vectors.py
+    - src/data/replacement_forecast_materializer.py
+    - src/engine/event_reactor_adapter.py
   src/calibration/day0_horizon_calibration.py:
     zone: K3_extension
     authority_role: day0_horizon_platt_calibration
@@ -3510,6 +3519,11 @@ files:
     authority_role: current_resolver_history_reader
     why: Read-only exact settlement-to-observation binding; excludes prior source/resolver regimes and labels unavailable at the fit cutoff.
     hazards: [SOURCE_TRUTH_PLANE_COLLAPSE, NO_WRITE_PATH]
+  src/forecast/day0_terminal_distribution.py:
+    zone: K3_extension
+    authority_role: day0_resolver_terminal_operator
+    why: "Pure resolver-graded Day0 terminal operator: Q(y) = s * Q+(y) on the non-violation side of the contract-rounded running extreme A, (1 - s) * G-(-v(y - A)) on the violation side. Terminal non-violation mass is exactly s; nothing may be applied after it. Consumed only when DAY0_RESOLVER_TERMINAL_RESIDUAL is on."
+    hazards: [NO_WRITE_PATH]
   src/forecast/probability_validation.py:
     zone: K3_extension
     authority_role: chronological_probability_validation

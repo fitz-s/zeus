@@ -20,6 +20,7 @@ from src.contracts.ensemble_snapshot_provenance import (
 )
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.data.day0_hourly_vectors import (
+    DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER,
     DAY0_REMAINING_CARRIER_OPERATOR_V2,
     DAY0_REMAINING_CARRIER_OPERATOR_V3,
     day0_remaining_carrier_samples_row_major,
@@ -112,6 +113,7 @@ def _day0_carrier_identity_reason(provenance: Mapping[str, Any]) -> str | None:
             "day0_remaining_shared_carrier_v1",
             "day0_remaining_shared_carrier_v2",
             "day0_remaining_shared_carrier_v3",
+            "day0_remaining_shared_carrier_resolver_v1",
         )
     ):
         return None
@@ -125,15 +127,43 @@ def _day0_carrier_identity_reason(provenance: Mapping[str, Any]) -> str | None:
         "day0_remaining_shared_carrier_v1": "extreme_observed_then_noisy_future_v1",
         "day0_remaining_shared_carrier_v2": DAY0_REMAINING_CARRIER_OPERATOR_V2,
         "day0_remaining_shared_carrier_v3": DAY0_REMAINING_CARRIER_OPERATOR_V3,
+        "day0_remaining_shared_carrier_resolver_v1": (
+            DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER
+        ),
     }
     q_shape = provenance.get("q_shape")
     expected_operator = shared_shape_operators.get(q_shape)
     if expected_operator is not None and operator != expected_operator:
         return "REPLACEMENT_DAY0_CARRIER_SHAPE_OPERATOR_MISMATCH"
-    if operator not in {DAY0_REMAINING_CARRIER_OPERATOR_V2, DAY0_REMAINING_CARRIER_OPERATOR_V3}:
+    if operator not in {
+        DAY0_REMAINING_CARRIER_OPERATOR_V2,
+        DAY0_REMAINING_CARRIER_OPERATOR_V3,
+        DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER,
+    }:
         return "REPLACEMENT_DAY0_CARRIER_OPERATOR_NOT_CURRENT"
     providers = provenance.get("day0_remaining_carrier_station_extreme_providers", ())
     final = provenance.get("day0_remaining_carrier_final_extremes_c", ())
+    if operator == DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER:
+        from src.calibration.day0_resolver_terminal_residual import (
+            Day0ResolverTerminalInput,
+        )
+        from src.config import day0_resolver_terminal_residual_enabled
+
+        # A resolver-built row carries the resolver semantics revision only
+        # while its switch is on; after a switch-off it is no longer current.
+        if not day0_resolver_terminal_residual_enabled():
+            return "REPLACEMENT_DAY0_CARRIER_OPERATOR_NOT_CURRENT"
+        try:
+            Day0ResolverTerminalInput.from_payload(
+                provenance.get("day0_resolver_terminal_input")
+            )
+        except ValueError:
+            return "REPLACEMENT_DAY0_RESOLVER_TERMINAL_INPUT_INVALID"
+        if not isinstance(providers, (list, tuple)) or not isinstance(final, (list, tuple)):
+            return "REPLACEMENT_DAY0_FINAL_EXTREME_CENTERS_INVALID"
+        if len(providers) != len(final):
+            return "REPLACEMENT_DAY0_FINAL_EXTREME_CENTERS_INVALID"
+        return None
     if operator == DAY0_REMAINING_CARRIER_OPERATOR_V2:
         if providers not in (None, (), []) or final not in (None, (), []):
             return "REPLACEMENT_DAY0_FINAL_EXTREME_OPERATOR_MISMATCH"
@@ -492,7 +522,11 @@ def _held_pinned_provenance_reason(
         return "REPLACEMENT_PINNED_DAY0_CARRIER_FIELDS_MISSING"
     if (
         str(provenance.get("day0_remaining_carrier_operator"))
-        not in {DAY0_REMAINING_CARRIER_OPERATOR_V2, DAY0_REMAINING_CARRIER_OPERATOR_V3}
+        not in {
+            DAY0_REMAINING_CARRIER_OPERATOR_V2,
+            DAY0_REMAINING_CARRIER_OPERATOR_V3,
+            DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER,
+        }
         or int(provenance.get("day0_remaining_carrier_sample_count") or 0) != 500
     ):
         return "REPLACEMENT_PINNED_DAY0_CARRIER_SHAPE_INVALID"
