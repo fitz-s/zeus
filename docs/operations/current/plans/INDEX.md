@@ -4,6 +4,7 @@ Plans under `docs/operations/current/plans/`. Rewritten 2026-07-07 against disk 
 
 | Plan | Status | Purpose |
 |------|--------|---------|
+| [`edge_program_2026-09-25.md`](edge_program_2026-09-25.md) | ACTIVE | Plan of record after compaction: operator goals, first-principles order, four-number scoreboard, workstreams. Read first. |
 | [`reversal_plan_tier0_2026-08-24.md`](reversal_plan_tier0_2026-08-24.md) | EXECUTING | Full-book investigation verdicts → Tier-0 research mode: entry pause (DONE), measurement repair, decision-price certificates, two-gate promotion; Item 6 blocked on operator venue-min fork. |
 | [`hourly_capital_gains_improvement_loop.md`](hourly_capital_gains_improvement_loop.md) | ACTIVE | Forward journal — the single work-state surface. Read this first. |
 | [`live_branch_workflow_2026-07-20.md`](live_branch_workflow_2026-07-20.md) | ACTIVE | `live` branch; task worktree → fast-forward push/PR → live; branch hygiene; converger backstop. AGENTS §5 is the binding summary. |
