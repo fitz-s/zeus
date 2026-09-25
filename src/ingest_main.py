@@ -3772,6 +3772,15 @@ def _replacement_availability_poll_tick():
 
     cfg = _replacement_forecast_live_materialization_queue_config()
 
+    # Anchor-path stage timing: one INFO line per stage, only when it exceeds
+    # 5 s, so a normal tick stays quiet and a stall names its own stage.
+    def _log_slow_stage(name: str, started: float) -> None:
+        elapsed = time.monotonic() - started
+        if elapsed > 5.0:
+            logger.info(
+                "replacement availability poll stage %s took %.1fs", name, elapsed,
+            )
+
     def _committed_anchor_scopes(
         report: dict[str, object],
     ) -> tuple[tuple[str, str, str], ...]:
@@ -3893,6 +3902,7 @@ def _replacement_availability_poll_tick():
         # Cap held common-cycle repair at ten seconds so the source-clock probe
         # and ordinary residual-anchor drain below still run in this scheduler
         # invocation. A slow old-cycle recovery must never monopolize it.
+        _stage_started = time.monotonic()
         common_cycle_recovery = _recover_held_common_cycle_anchors_if_needed(
             cfg,
             max_wall_clock_seconds=min(
@@ -3902,6 +3912,7 @@ def _replacement_availability_poll_tick():
                 ),
             ),
         )
+        _log_slow_stage("common_cycle_recovery", _stage_started)
         if common_cycle_recovery:
             committed_families = tuple(
                 dict.fromkeys(
@@ -3931,6 +3942,7 @@ def _replacement_availability_poll_tick():
                     common_cycle_recovery,
                 )
     except Exception as exc:  # noqa: BLE001 - next source-clock tick retries.
+        _log_slow_stage("common_cycle_recovery", _stage_started)
         logger.warning("held common-cycle anchor recovery failed: %s", exc)
 
     def _download_current_targets(
@@ -4091,6 +4103,7 @@ def _replacement_availability_poll_tick():
         # slower Single Runs archive used by the multimodel BPF inputs.
         held_anchor_scopes = _all_held_current_target_scopes()
         if held_anchor_scopes:
+            _stage_started = time.monotonic()
             source_clock_held_anchor_report = _download_current_targets(
                 max_wall_clock_seconds=min(
                     10.0,
@@ -4101,6 +4114,7 @@ def _replacement_availability_poll_tick():
                 required_scopes=held_anchor_scopes,
                 quota_critical=True,
             )
+            _log_slow_stage("held_anchor_download", _stage_started)
             held_anchor_status = (
                 str(source_clock_held_anchor_report.get("status") or "")
                 if isinstance(source_clock_held_anchor_report, dict)
@@ -4119,6 +4133,16 @@ def _replacement_availability_poll_tick():
                     )
                     if str(path).strip()
                 )
+                # SCOPE identity: held_anchor_scopes is exact, so an empty
+                # held_manifests set means CRITICAL_SCOPES_ALREADY_COVERED, not
+                # "manifests unknown". Passing None (not {}) keeps the reseed
+                # triggers on their per-family DB lookup (_family_manifests_from_db)
+                # instead of _prepared_reseed_manifests's full raw_manifest_dir
+                # scan, which the callee's own comment reserves for the untargeted
+                # (scopes=None) global catch-up plan. A non-None {} here forced a
+                # 60k+ file tree walk on every already-covered poll (VERIFIED:
+                # src/data/replacement_forecast_production.py _prepared_reseed_manifests).
+                _stage_started = time.monotonic()
                 _attach_reseed_reports(
                     source_clock_held_anchor_report,
                     scopes=held_anchor_scopes,
@@ -4126,12 +4150,14 @@ def _replacement_availability_poll_tick():
                     prepared_manifest_snapshot=(
                         {"manifest_paths": held_manifests}
                         if held_manifests
-                        else {}
+                        else None
                     ),
                 )
+                _log_slow_stage("held_anchor_reseed_attach", _stage_started)
                 anchor_reseed_published = not bool(
                     source_clock_held_anchor_report.get("reseed_errors")
                 )
+        _stage_started = time.monotonic()
         source_clock_anchor_report = _download_current_targets(
             max_wall_clock_seconds=min(
                 10.0,
@@ -4141,17 +4167,20 @@ def _replacement_availability_poll_tick():
             ),
             quota_priority=True,
         )
+        _log_slow_stage("anchor_download", _stage_started)
         committed_scopes = (
             _committed_anchor_scopes(source_clock_anchor_report)
             if isinstance(source_clock_anchor_report, dict)
             else ()
         )
         if committed_scopes:
+            _stage_started = time.monotonic()
             _attach_reseed_reports(
                 source_clock_anchor_report,
                 scopes=committed_scopes,
                 changed_sources=("ecmwf_ifs",),
             )
+            _log_slow_stage("anchor_reseed_attach", _stage_started)
             anchor_reseed_published = not bool(
                 source_clock_anchor_report.get("reseed_errors")
             )

@@ -2600,6 +2600,112 @@ def test_ecmwf_source_clock_captures_anchor_before_single_runs_fanout(monkeypatc
     ]
 
 
+def test_held_anchor_already_covered_defers_to_db_lookup_not_full_scan(
+    monkeypatch,
+) -> None:
+    """Regression: CRITICAL_SCOPES_ALREADY_COVERED with no held manifests must pass
+    manifest_snapshot=None (per-family DB lookup), not {} (forces a full raw_manifest_dir
+    tree scan via _prepared_reseed_manifests -- the exact anti-pattern
+    src/data/replacement_cycle_advance_trigger.py's own comment reserves for the
+    untargeted scopes=None global catch-up plan). A held-anchor receipt with zero
+    written manifests has nothing new to reseed from; scanning tens of thousands of
+    manifest files to learn that is pure waste on the source-clock's critical path."""
+    import src.data.replacement_forecast_production as prod
+    import src.data.source_clock_update_probe as source_clock_probe
+    import src.ingest_main as ingest_main
+
+    class _Changed:
+        updated_sources = ("ecmwf_ifs",)
+
+        def as_dict(self):
+            return {
+                "status": "SOURCE_CLOCK_UPDATES_CHANGED",
+                "updated_sources": ["ecmwf_ifs"],
+                "affected_cities": ["Shanghai"],
+                "error": None,
+            }
+
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {"download_current_targets_enabled": True},
+    )
+    monkeypatch.setattr(
+        source_clock_probe,
+        "probe_openmeteo_source_clock_updates",
+        lambda **_kwargs: _Changed(),
+    )
+    held_scope = ("Dallas", "2026-08-17", "high")
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
+        lambda: {held_scope: 0},
+    )
+
+    def _anchor(_cfg, **kwargs):
+        if kwargs.get("quota_critical"):
+            # No written_manifests key: an already-covered receipt with nothing new.
+            return {
+                "status": "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED",
+                "written_manifest_count": 0,
+            }
+        return {
+            "status": "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED",
+            "written_manifest_count": 2,
+        }
+
+    monkeypatch.setattr(
+        prod,
+        "_download_replacement_forecast_current_targets_if_needed",
+        _anchor,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_download_bayes_precision_fusion_source_clock_raw_inputs_if_needed",
+        lambda _cfg, **_kwargs: {
+            "status": "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+            "written_row_count": 0,
+        },
+    )
+    held_calls: list[dict[str, object]] = []
+
+    def _fusion_reseed(_cfg, **kwargs):
+        if kwargs.get("scopes") == (held_scope,):
+            held_calls.append(dict(kwargs))
+        return {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 1}
+
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_fusion_upgrade_reseeds_if_needed",
+        _fusion_reseed,
+    )
+
+    def _cycle_reseed(_cfg, **kwargs):
+        if kwargs.get("scopes") == (held_scope,):
+            held_calls.append(dict(kwargs))
+        return {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 1}
+
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_cycle_advance_reseeds_if_needed",
+        _cycle_reseed,
+    )
+    monkeypatch.setattr(
+        source_clock_probe,
+        "source_clock_scoped_download_cursor_sources",
+        lambda _report, **_kwargs: (),
+    )
+
+    ingest_main._replacement_availability_poll_tick.__wrapped__()
+
+    assert len(held_calls) == 2, "expected one fusion-upgrade and one cycle-advance call"
+    for kwargs in held_calls:
+        assert kwargs.get("manifest_snapshot") is None, (
+            "held-anchor call with zero written manifests must omit manifest_snapshot "
+            "(or pass None), never {} -- {} is not None and forces "
+            "_prepared_reseed_manifests to run the full raw_manifest_dir tree scan"
+        )
+
+
 def test_source_commit_reseed_triggers_share_one_manifest_snapshot(
     monkeypatch,
     tmp_path,
