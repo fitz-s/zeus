@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-08-28
+# Last reused or audited: 2026-09-25
 # Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.3 (Post-Trade Capital Lifecycle), §6 (P4 row + co-location decision),
 #   §7 (I3 commit-before-HTTP no-back-coupling; I4 ingest->P4),
@@ -291,32 +291,34 @@ def _shutdown_scheduler_if_running(scheduler: Any | None, *, wait: bool = True) 
 
 
 def _scheduler_job(job_name: str):
-    """Uniform error-swallowing + health-write wrapper for APScheduler targets.
+    """Health-write wrapper for APScheduler targets.
 
-    Mirrors src/ingest_main.py:_scheduler_job. On success writes a
-    scheduler_jobs_health.json OK entry; on exception logs + writes FAILED. The redeem/wrap
-    pollers intentionally RAISE on partial failure (so the operator sees FAILED); this wrapper
-    records that failure to scheduler_health without crashing the scheduler — the next tick
-    retries the durable state-machine rows.
+    On success writes a scheduler_jobs_health.json OK entry; on exception logs + writes
+    FAILED, then re-raises. The redeem/wrap pollers intentionally RAISE on partial failure
+    (so the operator sees FAILED). Re-raising lets APScheduler record the run as
+    "raised an exception" (EVENT_JOB_ERROR, traceback) instead of "executed successfully";
+    APScheduler's run_job catches every exception, so the scheduler keeps running and the
+    next tick retries the durable state-machine rows.
     """
     def _decorator(fn):
         @functools.wraps(fn)
         def _wrapper(*args, **kwargs):
             try:
                 result = fn(*args, **kwargs)
-                try:
-                    from src.observability.scheduler_health import _write_scheduler_health
-                    _write_scheduler_health(job_name, failed=False, reason=None)
-                except Exception:  # noqa: BLE001 — health write must never break the job
-                    pass
-                return result
-            except Exception as exc:  # noqa: BLE001
-                logger.error("%s failed: %s", job_name, exc, exc_info=True)
+            except Exception as exc:
+                logger.error("%s failed: %s", job_name, exc)
                 try:
                     from src.observability.scheduler_health import _write_scheduler_health
                     _write_scheduler_health(job_name, failed=True, reason=str(exc))
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: BLE001 — health write must not mask the failure
                     pass
+                raise
+            try:
+                from src.observability.scheduler_health import _write_scheduler_health
+                _write_scheduler_health(job_name, failed=False, reason=None)
+            except Exception:  # noqa: BLE001 — health write must never break the job
+                pass
+            return result
         return _wrapper
     return _decorator
 

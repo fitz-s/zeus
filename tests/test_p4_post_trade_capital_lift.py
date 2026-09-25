@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-08-28
+# Last reused or audited: 2026-09-25
 # Reuse: Run when post-trade-capital process recovery, poller ownership, or launchd liveness changes.
 # Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.3 (Post-Trade Capital Lifecycle), §6 (P4 row + co-location decision),
@@ -313,10 +313,12 @@ def test_realized_fee_evidence_refit_failure_is_scheduler_health_failure_not_a_c
         lambda job_name, *, failed, reason: trace.append((job_name, failed, reason)),
     )
 
-    # _scheduler_job wraps and swallows; must not raise.
-    daemon._scheduler_job("realized_fee_evidence_refit")(
-        daemon._realized_fee_evidence_refit_cycle
-    )()
+    # _scheduler_job records FAILED, then re-raises to APScheduler (whose run_job
+    # catches it and keeps scheduling).
+    with pytest.raises(RuntimeError, match="db locked"):
+        daemon._scheduler_job("realized_fee_evidence_refit")(
+            daemon._realized_fee_evidence_refit_cycle
+        )()
 
     assert trace == [("realized_fee_evidence_refit", True, "db locked")]
 
@@ -1015,9 +1017,10 @@ def test_collateral_child_failure_is_health_failure_without_parent_exit(monkeypa
         _write_health,
     )
 
-    daemon._scheduler_job("collateral_snapshot_refresh")(
-        daemon._collateral_snapshot_refresh_isolated
-    )()
+    with pytest.raises(RuntimeError, match="was killed"):
+        daemon._scheduler_job("collateral_snapshot_refresh")(
+            daemon._collateral_snapshot_refresh_isolated
+        )()
 
     assert trace == [
         (
@@ -1029,6 +1032,62 @@ def test_collateral_child_failure_is_health_failure_without_parent_exit(monkeypa
             ),
         )
     ]
+
+
+def test_collateral_child_failure_is_an_apscheduler_job_error(monkeypatch, caplog):
+    """A failed collateral child must not log "executed successfully".
+
+    APScheduler's own run_job is the scheduler boundary: it must record
+    EVENT_JOB_ERROR, and it must return rather than raise, so the scheduler
+    keeps running and the next 30-second tick retries.
+    """
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from apscheduler.events import EVENT_JOB_ERROR
+    from apscheduler.executors.base import run_job
+
+    from src.ingest import post_trade_capital_daemon as daemon
+
+    health = []
+    monkeypatch.setattr(
+        daemon.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=1),
+    )
+    monkeypatch.setattr(
+        "src.execution.post_trade_capital._post_trade_collateral_deadline_seconds",
+        lambda: 25.0,
+    )
+    monkeypatch.setattr(
+        "src.observability.scheduler_health._write_scheduler_health",
+        lambda job_name, *, failed, reason: health.append((job_name, failed, reason)),
+    )
+    job = SimpleNamespace(
+        id="collateral_snapshot_refresh",
+        misfire_grace_time=None,
+        func=daemon._scheduler_job("collateral_snapshot_refresh")(
+            daemon._collateral_snapshot_refresh_isolated
+        ),
+        args=(),
+        kwargs={},
+    )
+
+    with caplog.at_level("INFO", logger="apscheduler.test"):
+        events = run_job(
+            job, "default", [datetime.now(timezone.utc)], "apscheduler.test"
+        )
+
+    assert [event.code for event in events] == [EVENT_JOB_ERROR]
+    assert "exit_code=1" in str(events[0].exception)
+    assert health == [
+        (
+            "collateral_snapshot_refresh",
+            True,
+            "collateral refresh child failed with exit_code=1",
+        )
+    ]
+    assert not any("executed successfully" in m for m in caplog.messages)
 
 
 def test_collateral_child_nonzero_exit_is_scheduler_failure(monkeypatch):
@@ -1105,7 +1164,8 @@ def test_chain_sync_child_timeout_is_scheduler_failure(monkeypatch):
         lambda job_name, *, failed, reason: trace.append((job_name, failed, reason)),
     )
 
-    daemon._scheduler_job("chain_sync_read")(daemon._chain_sync_read_isolated)()
+    with pytest.raises(RuntimeError, match="was killed"):
+        daemon._scheduler_job("chain_sync_read")(daemon._chain_sync_read_isolated)()
 
     assert trace == [
         ("chain_sync_read", True, "chain sync child exceeded 77.0s and was killed")
@@ -1764,7 +1824,8 @@ def test_payout_observer_timeout_is_scheduler_failure(monkeypatch):
         lambda job_name, *, failed, reason: trace.append((job_name, failed, reason)),
     )
 
-    daemon._scheduler_job("payout_observer")(daemon._payout_observer_isolated)()
+    with pytest.raises(RuntimeError, match="was killed"):
+        daemon._scheduler_job("payout_observer")(daemon._payout_observer_isolated)()
 
     assert trace == [
         (
@@ -1989,9 +2050,10 @@ def test_capital_evidence_timeout_is_scheduler_failure(monkeypatch):
         lambda job_name, *, failed, reason: trace.append((job_name, failed, reason)),
     )
 
-    daemon._scheduler_job("current_regime_capital_evidence")(
-        daemon._current_regime_capital_evidence_isolated
-    )()
+    with pytest.raises(RuntimeError, match="was killed"):
+        daemon._scheduler_job("current_regime_capital_evidence")(
+            daemon._current_regime_capital_evidence_isolated
+        )()
 
     assert trace == [
         (

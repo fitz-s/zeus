@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-08
+# Last reused or audited: 2026-09-25
 # Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.3 (Post-Trade Capital Lifecycle), §6 (P4 row + co-location decision),
 #   §7 (I3 P4->riskguard/P1 commit-before-HTTP no-back-coupling; I4 ingest->P4),
@@ -74,6 +74,7 @@ from src.config import get_mode
 logger = logging.getLogger("zeus.post_trade_capital")
 
 _TIER0_CANDIDATE_QUERY_CHUNK = 400
+_TIER0_LABEL_WRITE_CHUNK = 200
 
 
 def _load_tier0_candidate_rows(
@@ -213,82 +214,97 @@ def _tier0_candidate_settlement_labels(
     }
 
 
-def _apply_tier0_candidate_settlement_labels(
-    trade_conn: sqlite3.Connection,
+def _tier0_candidate_label_changes(
+    candidates: Sequence[Mapping[str, Any]],
     labels: Sequence[tuple[int, int]],
-) -> dict[str, int]:
-    """Fold current canonical labels into their derived trade-DB cache."""
+) -> list[tuple[int, int | None, int]]:
+    """Return ``(row_id, prior, label)`` for labels that differ from the snapshot.
 
-    if not labels:
-        return {"filled": 0, "corrected": 0, "unchanged": 0, "missing": 0}
-    row_ids = tuple(row_id for row_id, _ in labels)
-    filled = corrected = unchanged = missing = 0
-    try:
-        trade_conn.execute("BEGIN IMMEDIATE")
-        current: dict[int, int | None] = {}
-        for offset in range(0, len(row_ids), _TIER0_CANDIDATE_QUERY_CHUNK):
-            chunk = row_ids[offset : offset + _TIER0_CANDIDATE_QUERY_CHUNK]
-            current.update(
-                {
-                    int(row["row_id"]): (
-                        None
-                        if row["settled_y"] is None
-                        else int(row["settled_y"])
-                    )
-                    for row in trade_conn.execute(
-                        """
-                        SELECT row_id, settled_y
-                          FROM tier0_candidate_set_provenance
-                         WHERE row_id IN (SELECT value FROM json_each(?))
-                        """,
-                        (json.dumps(chunk),),
-                    ).fetchall()
-                }
-            )
-        for row_id, settled_y in labels:
-            prior = current.get(row_id, "missing")
-            if prior == "missing":
-                missing += 1
-                continue
-            if prior == settled_y:
-                unchanged += 1
-                continue
-            trade_conn.execute(
-                """
-                UPDATE tier0_candidate_set_provenance
-                   SET settled_y = ?
-                 WHERE row_id = ?
-                """,
-                (settled_y, row_id),
-            )
-            if prior is None:
-                filled += 1
-            else:
-                corrected += 1
-        trade_conn.commit()
-    except Exception:
-        trade_conn.rollback()
-        raise
-    return {
-        "filled": filled,
-        "corrected": corrected,
-        "unchanged": unchanged,
-        "missing": missing,
+    ``candidates`` is the read-only snapshot the labels were derived from, so
+    every label row_id is present in it.
+    """
+
+    prior_by_row = {
+        int(candidate["row_id"]): (
+            None
+            if candidate.get("settled_y") is None
+            else int(candidate["settled_y"])
+        )
+        for candidate in candidates
     }
+    return [
+        (row_id, prior_by_row[row_id], settled_y)
+        for row_id, settled_y in labels
+        if prior_by_row[row_id] != settled_y
+    ]
+
+
+def _apply_tier0_candidate_label_changes(
+    changes: Sequence[tuple[int, int | None, int]],
+) -> dict[str, int]:
+    """Compare-and-set changed labels in short coordinated write transactions.
+
+    A row whose ``settled_y`` moved since the read-only snapshot is left alone
+    and counted ``cas_lost``; the next tick re-diffs it against current truth.
+    """
+
+    from src.state.db import connect_existing_trade_db_without_journal_bootstrap
+    from src.state.write_coordinator import (
+        DBIdentity,
+        WritePriority,
+        default_runtime_write_coordinator,
+    )
+
+    filled = corrected = cas_lost = 0
+    coordinator = default_runtime_write_coordinator()
+    for offset in range(0, len(changes), _TIER0_LABEL_WRITE_CHUNK):
+        # STANDARD priority / deadline_ms=1_500 / max_hold_ms=500 mirror
+        # chain_sync_read's coordinated TRADE write in this module.
+        with coordinator.transaction(
+            (DBIdentity.TRADE,),
+            owner="tier0_candidate_settlement_fold",
+            write_class="live",
+            priority=WritePriority.STANDARD,
+            deadline_ms=1_500,
+            max_hold_ms=500,
+            connection_factory=connect_existing_trade_db_without_journal_bootstrap,
+        ) as tx:
+            for row_id, prior, settled_y in changes[
+                offset : offset + _TIER0_LABEL_WRITE_CHUNK
+            ]:
+                if not tx.connection.execute(
+                    """
+                    UPDATE tier0_candidate_set_provenance
+                       SET settled_y = ?
+                     WHERE row_id = ? AND settled_y IS ?
+                    """,
+                    (settled_y, row_id, prior),
+                ).rowcount:
+                    cas_lost += 1
+                elif prior is None:
+                    filled += 1
+                else:
+                    corrected += 1
+    return {"filled": filled, "corrected": corrected, "cas_lost": cas_lost}
 
 
 def run_tier0_candidate_settlement_fold() -> dict[str, int]:
-    """Sequential read/read/write fold; no transaction spans two DBs.
+    """Read-only diff, then compare-and-set writes of changed rows only.
+
+    No transaction spans two DBs, and no read runs inside a write transaction:
+    an unchanged fold never takes the trade-DB write lock.
 
     SCOPE: only ``tier0_candidate_set_provenance.settled_y`` rows whose exact
-    condition has a VERIFIED canonical settlement. DRAIN: the post-trade
-    five-minute job revisits every candidate row. RESET: a later canonical
-    correction deterministically replaces the derived label on the next tick.
+    condition has a VERIFIED canonical settlement and whose cached label
+    differs from it. DRAIN: the post-trade five-minute job re-diffs every
+    candidate row and writes the changes in coordinated transactions of at
+    most ``_TIER0_LABEL_WRITE_CHUNK`` rows; a lost lease or lost CAS retries on
+    the next tick. RESET: a later canonical correction deterministically
+    replaces the derived label on the next tick.
     """
 
     from src.state.db import (
         get_forecasts_connection_read_only,
-        get_trade_connection,
         get_trade_connection_read_only,
     )
 
@@ -306,10 +322,10 @@ def run_tier0_candidate_settlement_fold() -> dict[str, int]:
             "ambiguous_markets": 0,
             "invalid_truth_rows": 0,
             "invalid_candidate_rows": 0,
+            "unchanged": 0,
             "filled": 0,
             "corrected": 0,
-            "unchanged": 0,
-            "missing": 0,
+            "cas_lost": 0,
         }
 
     forecast_read = get_forecasts_connection_read_only()
@@ -320,21 +336,12 @@ def run_tier0_candidate_settlement_fold() -> dict[str, int]:
         )
     finally:
         forecast_read.close()
-    if not labels:
-        return {
-            **stats,
-            "filled": 0,
-            "corrected": 0,
-            "unchanged": 0,
-            "missing": 0,
-        }
-
-    trade_write = get_trade_connection(write_class="live")
-    try:
-        applied = _apply_tier0_candidate_settlement_labels(trade_write, labels)
-    finally:
-        trade_write.close()
-    return {**stats, **applied}
+    changes = _tier0_candidate_label_changes(candidates, labels)
+    return {
+        **stats,
+        "unchanged": len(labels) - len(changes),
+        **_apply_tier0_candidate_label_changes(changes),
+    }
 
 
 class CollateralSnapshotDegraded(RuntimeError):
