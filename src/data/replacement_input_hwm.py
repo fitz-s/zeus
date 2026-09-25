@@ -2009,17 +2009,34 @@ def _latest_eligible_ensemble_input_mark(
     ]
     if "authority" in columns:
         predicates.append("authority = 'VERIFIED'")
-    if "causality_status" in columns:
-        predicates.append("causality_status = 'OK'")
-    if "boundary_ambiguous" in columns:
-        predicates.append("boundary_ambiguous = 0")
-    if "contributes_to_target_extrema" in columns:
-        predicates.append("COALESCE(contributes_to_target_extrema, 0) = 1")
     # Match the materializer's source/product, coordinate and target-window law.
+    eligibility_columns = {
+        "causality_status",
+        "boundary_ambiguous",
+        "contributes_to_target_extrema",
+        "forecast_window_attribution_status",
+    }
+    window_law: tuple[tuple[str, str], ...] = ()
+    if eligibility_columns.issubset(columns):
+        from src.data.forecast_extrema_authority import (  # noqa: PLC0415
+            current_evidence_ensemble_eligibility_sql,
+        )
+
+        predicates.append(current_evidence_ensemble_eligibility_sql())
+    else:
+        if "causality_status" in columns:
+            predicates.append("causality_status = 'OK'")
+        if "boundary_ambiguous" in columns:
+            predicates.append("boundary_ambiguous = 0")
+        if "contributes_to_target_extrema" in columns:
+            predicates.append("COALESCE(contributes_to_target_extrema, 0) = 1")
+        window_law = (
+            ("forecast_window_attribution_status", "FULLY_INSIDE_TARGET_LOCAL_DAY"),
+        )
     for column, expected_value in (
         ("source_id", "ecmwf_open_data"),
         ("model_version", "ecmwf_ens"),
-        ("forecast_window_attribution_status", "FULLY_INSIDE_TARGET_LOCAL_DAY"),
+        *window_law,
     ):
         if column in columns:
             predicates.append(f"{column} = ?")

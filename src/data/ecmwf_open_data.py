@@ -83,7 +83,10 @@ from src.data.forecast_target_contract import (
     evaluate_horizon_coverage,
     evaluate_producer_coverage,
 )
-from src.data.forecast_extrema_authority import POSITIVE_ATTRIBUTION_STATUSES
+from src.data.forecast_extrema_authority import (
+    POSITIVE_ATTRIBUTION_STATUSES,
+    member_interval_bounds_from_row,
+)
 from src.data.producer_readiness import build_producer_readiness_for_scope
 from src.data.forecast_source_registry import gate_source, gate_source_role
 from src.data.release_calendar import FetchDecision, get_entry, select_source_run_for_target_horizon
@@ -1938,6 +1941,9 @@ def _run_level_observed_members(
 ) -> int:
     """Normalize lawful member exclusions onto the source-run's fixed scale."""
 
+    interval_bounds = member_interval_bounds_from_row(row)
+    if interval_bounds is not None:
+        return min(full_ensemble, len(interval_bounds))
     usable = _usable_member_count(row.get("members_json"))
     lawful_exclusions = full_ensemble - _effective_expected_members(
         row,
@@ -2502,8 +2508,15 @@ def _write_source_authority_chain(
             step_horizon_hours=row.get("step_horizon_hours"),
             downloaded_steps=download_observed_steps,
         )
-        observed_members_for_scope = _usable_member_count(row.get("members_json"))
-        expected_members_for_scope = _effective_expected_members(row)
+        interval_bounds = member_interval_bounds_from_row(row)
+        if interval_bounds is None:
+            observed_members_for_scope = _usable_member_count(row.get("members_json"))
+            expected_members_for_scope = _effective_expected_members(row)
+        else:
+            # Interval-censored members are observed through their bounds; their
+            # point values are lawfully null (leakage law), never missing.
+            observed_members_for_scope = len(interval_bounds)
+            expected_members_for_scope = 51
         horizon_decision = evaluate_horizon_coverage(
             required_steps=scope.required_step_hours,
             live_max_step_hours=int(float(row.get("step_horizon_hours") or 0)),
@@ -2544,9 +2557,14 @@ def _write_source_authority_chain(
         snapshot_window_start = _parse_utc(row.get("local_day_start_utc"))
         if snapshot_window_start != scope.target_window_start_utc:
             reason_codes.append("SNAPSHOT_LOCAL_DAY_WINDOW_MISMATCH")
-        contributes_to_target_extrema = int(row.get("contributes_to_target_extrema") or 0) == 1
         attribution_status = str(row.get("forecast_window_attribution_status") or "")
-        positive_attribution = attribution_status in POSITIVE_ATTRIBUTION_STATUSES
+        # An interval row contributes current-evidence shape, never a point extreme.
+        contributes_to_target_extrema = interval_bounds is not None or (
+            int(row.get("contributes_to_target_extrema") or 0) == 1
+        )
+        positive_attribution = interval_bounds is not None or (
+            attribution_status in POSITIVE_ATTRIBUTION_STATUSES
+        )
         if not (contributes_to_target_extrema and positive_attribution):
             if (
                 attribution_status == "AMBIGUOUS_CROSSES_LOCAL_DAY_BOUNDARY"

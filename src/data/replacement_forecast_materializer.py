@@ -63,6 +63,12 @@ from src.data.replacement_forecast_readiness import (
     ReplacementForecastDependency,
     build_replacement_forecast_readiness,
 )
+from src.data.forecast_extrema_authority import (
+    INTERVAL_CENSORED_ATTRIBUTION_STATUS,
+    exact_ensemble_eligibility_sql,
+    interval_ensemble_eligibility_sql,
+    member_interval_bounds_from_row,
+)
 from src.data.replacement_input_hwm import (
     ensemble_source_authority_sql,
     retired_low_uncertified_incumbent_yields_to_current_ensemble,
@@ -544,12 +550,13 @@ def _ensure_replacement_frontier_indexes(conn: sqlite3.Connection) -> None:
                     'idx_raw_model_forecasts_target_model_frontier',
                     'idx_raw_model_forecasts_target_frontier',
                     'idx_ensemble_snapshots_replacement_exact_frontier',
-                    'idx_ensemble_snapshots_replacement_casefold_frontier'
+                    'idx_ensemble_snapshots_replacement_casefold_frontier',
+                    'idx_ensemble_snapshots_replacement_interval_frontier'
                )
             """
         ).fetchall()
     }
-    if len(existing_indexes) == 5:
+    if len(existing_indexes) == 6:
         return
     posterior_columns = _table_columns(conn, "forecast_posteriors")
     if {
@@ -656,6 +663,24 @@ def _ensure_replacement_frontier_indexes(conn: sqlite3.Connection) -> None:
                     snapshot_id DESC
                 )
                 {eligibility}
+            """
+        )
+        # Interval-censored rows: the second class of the shared admission predicate.
+        conn.execute(
+            f"""
+            CREATE INDEX IF NOT EXISTS idx_ensemble_snapshots_replacement_interval_frontier
+                ON ensemble_snapshots(
+                    city,
+                    target_date,
+                    temperature_metric,
+                    COALESCE(source_cycle_time, issue_time) DESC,
+                    COALESCE(source_available_at, available_at) DESC,
+                    snapshot_id DESC
+                )
+                WHERE source_id = 'ecmwf_open_data'
+                  AND model_version = 'ecmwf_ens'
+                  AND authority = 'VERIFIED'
+                  AND {interval_ensemble_eligibility_sql()}
             """
         )
 
@@ -3096,6 +3121,7 @@ class _BayesPrecisionFusionFusionOverride:
     # hits for the executable ambiguity band. The persisted shape carries their
     # hash, not a duplicated 51-value payload.
     current_evidence_members_c: tuple[float, ...] | None = None
+    current_evidence_member_bounds_c: tuple[tuple[float, float], ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -3140,10 +3166,19 @@ class _CurrentEvidenceShape:
     # discipline as the cohort fields: never in the identity dict — the widened
     # predictive_sigma_c inside `identity` already distinguishes the shape.
     shape_age_sigma_term_c2: float | None = None
+    # Interval-censored ENS rows only (None on exact rows): each member's local-day
+    # extreme lies in member_bounds_c[i] (degC). members_c is then the consistent
+    # assignment attaining the supremum predictive sigma, a variance witness only;
+    # finite-evidence hit counts use the bounds, never those values as points.
+    member_bounds_c: tuple[tuple[float, float], ...] | None = None
+    interval_censored_member_count: int | None = None
 
     def as_payload(self) -> dict[str, object]:
         payload = asdict(self)
         payload.pop("members_c")
+        payload.pop("member_bounds_c")
+        if payload.get("interval_censored_member_count") is None:
+            payload.pop("interval_censored_member_count", None)
         if payload.get("stale_shape_reused") is False:
             payload.pop("stale_shape_reused", None)
         if payload.get("between_cohort_models") is None:
@@ -3475,6 +3510,71 @@ def _current_evidence_shape_from_values(
     )
 
 
+def _interval_censored_evidence_shape(
+    *,
+    member_bounds_c: Sequence[tuple[float, float]],
+    center_c: float,
+    **kwargs: object,
+) -> _CurrentEvidenceShape:
+    """Current-evidence shape whose predictive sigma is the supremum over consistent members.
+
+    Each member's extreme x_i is only known to lie in [l_i, u_i]. With provider
+    center mu, within^2 + delta^2 = mean_i (x_i - mu)^2, which is separable in the
+    members, so sup sigma^2 = between^2 + mean_i max((l_i - mu)^2, (u_i - mu)^2),
+    attained by the consistent assignment x*_i = the endpoint farther from mu. The
+    shape of x* therefore never understates predictive sigma for any consistent
+    assignment (addendum D2: the widening is the interval width, no knob). Its
+    center_sigma is replaced by the bound
+    S_max/n + (1 - 1/n) max((m_l - mu)^2, (m_u - mu)^2) + between^2/n_eff,
+    with m the mean of the lower/upper bounds; it dominates every assignment's value.
+    """
+
+    bounds = tuple((float(lower), float(upper)) for lower, upper in member_bounds_c)
+    center = float(center_c)
+    if (
+        len(bounds) < 20
+        or not math.isfinite(center)
+        or any(
+            not (math.isfinite(lower) and math.isfinite(upper) and lower <= upper)
+            for lower, upper in bounds
+        )
+    ):
+        raise ValueError("interval evidence requires >=20 finite ordered member bounds")
+    farthest = tuple(
+        lower if abs(lower - center) >= abs(upper - center) else upper
+        for lower, upper in bounds
+    )
+    shape = _current_evidence_shape_from_values(
+        members_c=farthest, center_c=center, **kwargs  # type: ignore[arg-type]
+    )
+    n = len(bounds)
+    s_max = sum((value - center) ** 2 for value in farthest) / n
+    delta_bound = max(
+        abs(sum(lower for lower, _ in bounds) / n - center),
+        abs(sum(upper for _, upper in bounds) / n - center),
+    )
+    center_sigma = math.sqrt(
+        s_max / n
+        + (1.0 - 1.0 / n) * delta_bound**2
+        + shape.provider_between_sigma_c**2 / shape.effective_provider_count
+    )
+    interval_count = sum(lower < upper for lower, upper in bounds)
+    return replace(
+        shape,
+        center_sigma_c=center_sigma,
+        member_values_hash=_json_hash([list(bound) for bound in bounds]),
+        shape_hash=_json_hash(
+            {
+                "base_shape_hash": shape.shape_hash,
+                "member_bounds_c": [list(bound) for bound in bounds],
+                "center_sigma_c": center_sigma,
+            }
+        ),
+        member_bounds_c=bounds,
+        interval_censored_member_count=interval_count,
+    )
+
+
 @dataclass(frozen=True)
 class CurrentEvidenceSnapshotIdentity:
     """The exact ENS row selected by the live current-evidence authority."""
@@ -3485,6 +3585,8 @@ class CurrentEvidenceSnapshotIdentity:
     source_cycle_time: str
     source_available_at: str
     members_unit: str
+    # Native-unit per-member bounds when the row is interval-censored, else None.
+    member_bounds: tuple[tuple[float, float], ...] | None = None
 
 
 def _current_evidence_snapshot_row(
@@ -3542,7 +3644,7 @@ def _current_evidence_snapshot_row(
         *source_params,
     )
     query = f"""
-        SELECT {select_sql}
+        SELECT {{select_sql}}
           FROM ensemble_snapshots AS ensemble_snapshot
          WHERE {{city_predicate}}
            AND target_date = ?
@@ -3551,10 +3653,7 @@ def _current_evidence_snapshot_row(
            AND source_id = 'ecmwf_open_data'
            AND model_version = 'ecmwf_ens'
            AND authority = 'VERIFIED'
-           AND causality_status = 'OK'
-           AND boundary_ambiguous = 0
-           AND forecast_window_attribution_status = 'FULLY_INSIDE_TARGET_LOCAL_DAY'
-           AND contributes_to_target_extrema = 1
+           AND {{eligibility}}
            AND COALESCE(source_cycle_time, issue_time) <= ?
            AND COALESCE(source_cycle_time, issue_time) >= ?
            AND COALESCE(source_available_at, available_at) <= ?
@@ -3564,19 +3663,43 @@ def _current_evidence_snapshot_row(
                   snapshot_id DESC
          LIMIT 1
     """
+    # The shared predicate is exact OR interval. Each class has its own partial
+    # frontier index, so each is one logarithmic seek; the newer row by the same
+    # ORDER BY key wins. The key leads the projection and is stripped on return.
+    keyed_sql = (
+        "COALESCE(source_cycle_time, issue_time),"
+        " COALESCE(source_available_at, available_at), snapshot_id, " + select_sql
+    )
+    exact = exact_ensemble_eligibility_sql()
     row = conn.execute(
-        query.format(city_predicate="city = ?", select_sql=select_sql), params
+        query.format(city_predicate="city = ?", select_sql=keyed_sql, eligibility=exact),
+        params,
     ).fetchone()
     if row is None and allow_casefold_fallback:
         # Exact city preserves the live composite-index seek. The compatibility
         # fallback is still bounded to one row and runs only after an exact miss.
         row = conn.execute(
             query.format(
-                city_predicate="lower(city) = lower(?)", select_sql=select_sql
+                city_predicate="lower(city) = lower(?)",
+                select_sql=keyed_sql,
+                eligibility=exact,
             ),
             params,
         ).fetchone()
-    return row
+    # Interval rows are exact-city only, like the HWM admission mark.
+    interval = conn.execute(
+        query.format(
+            city_predicate="city = ?",
+            select_sql=keyed_sql,
+            eligibility=interval_ensemble_eligibility_sql(),
+        ),
+        params,
+    ).fetchone()
+    candidates = [tuple(item) for item in (row, interval) if item is not None]
+    if not candidates:
+        return None
+    newest = max(candidates, key=lambda item: (str(item[0]), str(item[1]), int(item[2])))
+    return newest[3:]
 
 
 def read_current_evidence_snapshot_identity(
@@ -3593,10 +3716,27 @@ def read_current_evidence_snapshot_identity(
         metric=metric,
         select_sql="""snapshot_id, city, members_json,
                       COALESCE(source_cycle_time, issue_time),
-                      COALESCE(source_available_at, available_at), members_unit""",
+                      COALESCE(source_available_at, available_at), members_unit,
+                      forecast_window_attribution_status""",
     )
     if row is None:
         return None
+    member_bounds = None
+    if row[6] == INTERVAL_CENSORED_ATTRIBUTION_STATUS:
+        provenance = conn.execute(
+            "SELECT provenance_json FROM ensemble_snapshots WHERE snapshot_id = ?",
+            (int(row[0]),),
+        ).fetchone()
+        member_bounds = member_interval_bounds_from_row(
+            {
+                "forecast_window_attribution_status": row[6],
+                "provenance_json": None if provenance is None else provenance[0],
+            }
+        )
+        if member_bounds is None:
+            # SCOPE: this row. DRAIN: the next ingest writes valid bounds.
+            # RESET: a row whose persisted bounds parse. Never a point fallback.
+            return None
     return CurrentEvidenceSnapshotIdentity(
         snapshot_id=int(row[0]),
         city=str(row[1]),
@@ -3604,6 +3744,7 @@ def read_current_evidence_snapshot_identity(
         source_cycle_time=str(row[3]),
         source_available_at=str(row[4]),
         members_unit=str(row[5]),
+        member_bounds=member_bounds,
     )
 
 
@@ -3651,24 +3792,35 @@ def _read_current_evidence_shape(
         )
         if snapshot is None:
             return None
-        # Boundary-quarantined members are persisted as null (leakage law: their boundary
-        # value must never enter extrema) even on snapshots where the majority rule already
-        # allows contributes_to_target_extrema=1. Skip nulls rather than let float(None)
-        # raise — the existing `len(members) < 20` floor in
-        # _current_evidence_shape_from_values is the correct fail-closed gate on the
-        # resulting (possibly reduced) member count, not a blanket exception swallow.
-        values = tuple(
-            float(value)
-            for value in json.loads(snapshot.members_json)
-            if value is not None
-        )
-        if metric == "high" and (len(values) != 51 or not all(math.isfinite(v) for v in values)):
-            return None
         members_unit = str(snapshot.members_unit or "").strip().lower()
         if members_unit in {"degf", "f", "°f"}:
-            values = tuple((value - 32.0) * 5.0 / 9.0 for value in values)
-        elif members_unit not in {"degc", "c", "°c"}:
+            def to_c(value: float) -> float:
+                return (value - 32.0) * 5.0 / 9.0
+        elif members_unit in {"degc", "c", "°c"}:
+            def to_c(value: float) -> float:
+                return value
+        else:
             return None
+        if snapshot.member_bounds is not None:
+            member_bounds_c = tuple(
+                (to_c(lower), to_c(upper)) for lower, upper in snapshot.member_bounds
+            )
+        else:
+            member_bounds_c = None
+            # Boundary-quarantined members are persisted as null (leakage law: their
+            # boundary value must never enter extrema) even on snapshots where the
+            # majority rule already allows contributes_to_target_extrema=1. Skip nulls
+            # rather than let float(None) raise — the `len(members) < 20` floor in
+            # _current_evidence_shape_from_values is the fail-closed gate on the
+            # resulting (possibly reduced) member count.
+            values = tuple(
+                float(value)
+                for value in json.loads(snapshot.members_json)
+                if value is not None
+            )
+            if metric == "high" and (len(values) != 51 or not all(math.isfinite(v) for v in values)):
+                return None
+            values = tuple(to_c(value) for value in values)
         # Fitted shape-age variance slope: only applies on the bounded stale
         # branch inside _current_evidence_shape_from_values. FAIL-OPEN: artifact absent
         # / import failure -> 0.0 -> byte-identical serving.
@@ -3678,11 +3830,10 @@ def _read_current_evidence_shape(
             shape_age_gamma = float(_shape_age_gamma_for(metric))
         except Exception:
             shape_age_gamma = 0.0
-        return _current_evidence_shape_from_values(
+        shape_inputs = dict(
             snapshot_id=snapshot.snapshot_id,
             source_cycle_time=snapshot.source_cycle_time,
             source_available_at=snapshot.source_available_at,
-            members_c=values,
             provider_values_c=provider_values_c,
             provider_weights=provider_weights,
             center_c=center_c,
@@ -3690,6 +3841,11 @@ def _read_current_evidence_shape(
             provider_cycles=provider_cycles,
             shape_age_gamma_c2_per_6h=shape_age_gamma,
         )
+        if member_bounds_c is not None:
+            return _interval_censored_evidence_shape(
+                member_bounds_c=member_bounds_c, **shape_inputs
+            )
+        return _current_evidence_shape_from_values(members_c=values, **shape_inputs)
     except (json.JSONDecodeError, sqlite3.Error, TypeError, ValueError):
         return None
 
@@ -4898,6 +5054,9 @@ def _replacement_bayes_precision_fusion_override(
                 if _source_clock_current_shape is None
                 else _source_clock_current_shape.members_c
             ),
+            current_evidence_member_bounds_c=getattr(
+                _source_clock_current_shape, "member_bounds_c", None
+            ),
         )
     except Exception as exc:  # fail-soft: never break blocked-candidate materialization
         try:
@@ -5112,8 +5271,15 @@ def _current_evidence_tail_ucb_floors(
     metric: str | None = None,
     day0_observed_extreme_c: float | None = None,
     day0_metric: str | None = None,
+    member_bounds_c: Sequence[tuple[float, float]] | None = None,
 ) -> dict[str, float]:
     """Per-bin UCB floors from members, moments, and evidenced center scenarios.
+
+    ``member_bounds_c`` (interval-censored ENS): member i's extreme lies in
+    member_bounds_c[i] and ``members_c`` is the supremum-sigma witness assignment
+    (a consistent scenario, so its mean is a feasible ENS center). The sample term
+    counts plausible hits (interval meets preimage), dominating every consistent
+    assignment's count. None keeps exact point members.
 
     ``metric`` selects the fitted member-dependence rho for the CP term (see
     ``_finite_evidence_binomial_ucb``); the Cantelli moment term is untouched.
@@ -5148,11 +5314,17 @@ def _current_evidence_tail_ucb_floors(
     members = tuple(float(value) for value in members_c)
     if len(members) < 1 or any(not math.isfinite(value) for value in members):
         raise ValueError("current-evidence tail bound requires finite members")
+    bounds = None if member_bounds_c is None else tuple(
+        (float(lower), float(upper)) for lower, upper in member_bounds_c
+    )
+    if bounds is not None and len(bounds) != len(members):
+        raise ValueError("current-evidence member bounds do not match members")
     hit_counts = _current_evidence_member_hit_counts(
         bins=bins,
         half_step=half_step,
         rounding_rule=rounding_rule,
-        members_c=members,
+        members_c=members if bounds is None else tuple(lower for lower, _ in bounds),
+        member_upper_c=None if bounds is None else tuple(upper for _, upper in bounds),
     )
     member_mean = sum(members) / len(members)
     within_sigma = math.sqrt(
@@ -5244,13 +5416,26 @@ def _current_evidence_member_hit_counts(
     half_step: float,
     rounding_rule: str,
     members_c: Sequence[float],
+    member_upper_c: Sequence[float] | None = None,
 ) -> dict[str, int]:
-    """Count current members inside each exact settlement preimage."""
+    """Count current members inside each exact settlement preimage.
+
+    ``member_upper_c`` makes member i the interval [members_c[i], member_upper_c[i]];
+    it then counts wherever that interval meets the preimage (plausibility). Every
+    consistent point assignment's count is <= this, so the Clopper-Pearson UCB built
+    on it dominates all of them. None keeps exact point members.
+    """
 
     from src.contracts.settlement_semantics import settlement_preimage_offsets  # noqa: PLC0415
 
     members = tuple(float(value) for value in members_c)
-    if len(members) < 1 or any(not math.isfinite(value) for value in members):
+    uppers = members if member_upper_c is None else tuple(float(v) for v in member_upper_c)
+    if (
+        len(members) < 1
+        or len(uppers) != len(members)
+        or any(not math.isfinite(value) for value in (*members, *uppers))
+        or any(upper < lower for lower, upper in zip(members, uppers))
+    ):
         raise ValueError("current-evidence hit counts require finite members")
     low_off, high_off = settlement_preimage_offsets(
         rounding_rule,
@@ -5262,8 +5447,8 @@ def _current_evidence_member_hit_counts(
         high = None if bin_.upper_c is None else float(bin_.upper_c) + high_off
         hits[str(bin_.bin_id)] = sum(
             1
-            for value in members
-            if (low is None or value >= low) and (high is None or value < high)
+            for lower, upper in zip(members, uppers)
+            if (low is None or upper >= low) and (high is None or lower < high)
         )
     return hits
 
@@ -5965,6 +6150,7 @@ def _build_fused_q_bounds(
     day0_metric: str | None = None,
     evidence_members_c: Sequence[float] | None = None,
     return_samples: bool = False,
+    evidence_member_bounds_c: Sequence[tuple[float, float]] | None = None,
 ) -> tuple[dict[str, float], dict[str, float]] | tuple[
     dict[str, float], dict[str, float], dict[str, list[float]]
 ]:
@@ -6106,6 +6292,7 @@ def _build_fused_q_bounds(
             metric=day0_metric,
             day0_observed_extreme_c=day0_obs,
             day0_metric=day0_metric,
+            member_bounds_c=evidence_member_bounds_c,
         )
         required_ucb = np.array([finite_floors[bin_id] for bin_id in bin_ids])
         probs = _stress_coherent_samples_to_marginal_ucb_floors(
@@ -6284,6 +6471,7 @@ def _compute_posterior_payload(
     # not fire (identity). Stamped in provenance_payload as a plain fact of the live value.
     _far_tail_honesty_count: int = 0
     _finite_evidence_members_c: tuple[float, ...] | None = None
+    _finite_evidence_member_bounds_c: tuple[tuple[float, float], ...] | None = None
     _finite_evidence_member_count: int | None = None
     _finite_evidence_ucb_floor: float | None = None
     _finite_evidence_member_hits_by_bin: dict[str, int] | None = None
@@ -6384,8 +6572,14 @@ def _compute_posterior_payload(
                         bayes_precision_fusion_override.current_evidence_members_c or ()
                     )
                 )
+                _finite_evidence_member_bounds_c = (
+                    bayes_precision_fusion_override.current_evidence_member_bounds_c
+                )
                 _finite_evidence_member_count = int(_current_shape["member_count"])
-                if len(_finite_evidence_members_c) != _finite_evidence_member_count:
+                if len(_finite_evidence_members_c) != _finite_evidence_member_count or (
+                    _finite_evidence_member_bounds_c is not None
+                    and len(_finite_evidence_member_bounds_c) != _finite_evidence_member_count
+                ):
                     raise ValueError(
                         "source-clock current member values do not match member_count"
                     )
@@ -6624,7 +6818,16 @@ def _compute_posterior_payload(
                     bins=request.bins,
                     half_step=_half_step,
                     rounding_rule=_rounding_rule,
-                    members_c=_finite_evidence_members_c or (),
+                    members_c=(
+                        _finite_evidence_members_c or ()
+                        if _finite_evidence_member_bounds_c is None
+                        else tuple(lower for lower, _ in _finite_evidence_member_bounds_c)
+                    ),
+                    member_upper_c=(
+                        None
+                        if _finite_evidence_member_bounds_c is None
+                        else tuple(upper for _, upper in _finite_evidence_member_bounds_c)
+                    ),
                 )
                 _finite_evidence_ucb_floor_by_bin = _current_evidence_tail_ucb_floors(
                     mu_star=_mu_anchor,
@@ -6636,6 +6839,7 @@ def _compute_posterior_payload(
                     metric=metric,
                     day0_observed_extreme_c=_day0_obs_extreme_c,
                     day0_metric=metric,
+                    member_bounds_c=_finite_evidence_member_bounds_c,
                 )
             # k provenance: stamped iff the scale fired (k != 1.0, k > 0.0) — the k=1 no-op stays None.
             _sigma_after_k = _sigma_pred_raw * _k if (_k != 1.0 and _k > 0.0) else _sigma_pred_raw
@@ -6815,6 +7019,7 @@ def _compute_posterior_payload(
                         day0_metric=metric,
                         evidence_members_c=_finite_evidence_members_c,
                         return_samples=True,
+                        evidence_member_bounds_c=_finite_evidence_member_bounds_c,
                     )
                 if _city_sigma_used is not None and _city_rho > 0.0:
                     _lcb_c, _ucb_c, _samples_c = _build_fused_q_bounds(
@@ -6829,6 +7034,7 @@ def _compute_posterior_payload(
                         day0_metric=metric,
                         evidence_members_c=_finite_evidence_members_c,
                         return_samples=True,
+                        evidence_member_bounds_c=_finite_evidence_member_bounds_c,
                     )
                     _lcb_map = _mix_q_by_rho(_lcb_g, _lcb_c, _city_rho, renormalize=False)
                     _ucb_map = _mix_q_by_rho(_ucb_g, _ucb_c, _city_rho, renormalize=False)

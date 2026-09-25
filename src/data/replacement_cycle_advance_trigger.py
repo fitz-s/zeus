@@ -1394,8 +1394,12 @@ def _superseded_baseline_seed_file(
     if not required:
         return None
     try:
+        from src.data.forecast_extrema_authority import (  # noqa: PLC0415
+            current_evidence_ensemble_eligibility_sql,
+        )
+
         run = conn.execute(
-            """
+            f"""
             SELECT sr.source_cycle_time
               FROM source_run sr
              WHERE sr.source_run_id = ?
@@ -1409,11 +1413,7 @@ def _superseded_baseline_seed_file(
                       AND ens.source_id = 'ecmwf_open_data'
                       AND ens.model_version = 'ecmwf_ens'
                       AND ens.authority = 'VERIFIED'
-                      AND ens.causality_status = 'OK'
-                      AND ens.boundary_ambiguous = 0
-                      AND ens.forecast_window_attribution_status =
-                          'FULLY_INSIDE_TARGET_LOCAL_DAY'
-                      AND ens.contributes_to_target_extrema = 1
+                      AND {current_evidence_ensemble_eligibility_sql("ens")}
                )
              LIMIT 1
             """,

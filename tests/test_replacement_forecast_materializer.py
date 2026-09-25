@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-09-23
-# Lifecycle: created=2026-06-06; last_reviewed=2026-09-23; last_reused=2026-09-23
+# Last reused/audited: 2026-09-25
+# Lifecycle: created=2026-06-06; last_reviewed=2026-09-25; last_reused=2026-09-25
 # Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + Bayes-fusion replacement live layer.
 # Reuse: Run before changing replacement forecast live/experiment write path.
 # Authority basis: Operator-directed replacement forecast simple-switch readiness.
@@ -4511,9 +4511,13 @@ def test_final_ens_frontier_preserves_production_casefold_fallback() -> None:
         and "FROM ENSEMBLE_SNAPSHOTS" in sql.upper()
     ]
     assert final_sql
-    assert len(final_sql) == 2
+    # exact-city exact row, casefold exact row, exact-city interval-censored row
+    # (docs/operations/current/plans/ens_boundary_interval_2026-09-25.md D-3).
+    assert len(final_sql) == 3
     assert "CITY = 'SHANGHAI'" in final_sql[0].upper()
     assert "LOWER(CITY) = LOWER('SHANGHAI')" in final_sql[1].upper()
+    assert "CITY = 'SHANGHAI'" in final_sql[2].upper()
+    assert "INTERVAL_CENSORED_TARGET_LOCAL_DAY" in final_sql[2].upper()
 
 
 def test_final_ens_frontier_detects_absent_to_present() -> None:

@@ -1,6 +1,9 @@
 # Created: 2026-03-26
-# Last reused/audited: 2026-09-09
+# Last reused/audited: 2026-09-25
 # Authority basis: Phase 4B audited GRIB ingest + PLAN_v4 Phase 6 SourceRunContext linkage.
+#   2026-09-25: interval-censored boundary rows (statistical_calibration_addendum D2;
+#   docs/operations/current/plans/ens_boundary_interval_2026-09-25.md) persist per-member
+#   bounds and stay non-contributing; exact-row classification unchanged.
 #   2026-06-04: replaced inline ecmwf_opendata `_v1` strip with the shared
 #   ensemble_snapshot_provenance.normalize_opendata_data_version() helper so the
 #   producer→gate reconciliation lives in one tested place (producer⊆gate antibody,
@@ -10,7 +13,7 @@
 #   WAL=0 bytes — wedge is somewhere between rglob and first INSERT or in
 #   the per-file loop). Observation; not a fix. Expected to pinpoint the
 #   wedge on the next ingest cycle.
-# Lifecycle: created=2026-03-26; last_reviewed=2026-09-09; last_reused=2026-09-09
+# Lifecycle: created=2026-03-26; last_reviewed=2026-09-25; last_reused=2026-09-25
 # Purpose: Audited GRIB→ensemble_snapshots ingestor (Phase 4B / task #53);
 #          applies INV-14 identity spine and Law 5 causality gate before INSERT.
 # Reuse: Requires extracted local-calendar-day JSON files under FIFTY_ONE_ROOT
@@ -80,6 +83,7 @@ from src.state.canonical_write import commit_then_export
 from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection  # K1-batch2 fix 2026-05-17: ensemble_snapshots + source_run are forecast_class
 from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 from src.state.schema.v2_schema import apply_canonical_schema
+from src.data.forecast_extrema_authority import INTERVAL_CENSORED_ATTRIBUTION_STATUS
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity
 
 logger = logging.getLogger(__name__)
@@ -483,6 +487,75 @@ def _high_local_day_max_boundary_certificate(payload: dict) -> dict[str, Any] | 
     return certificate
 
 
+def _member_interval_bounds(payload: dict, *, city_timezone: str) -> dict[str, Any] | None:
+    """Per-member [lower, upper] local-day extreme bounds of an interval-censored row.
+
+    Admissible only when the ambiguity set is fully recoverable (addendum D2): every
+    one of the 51 members has finite ordered bounds over native windows covering the
+    whole local day, and the run was issued before local-day start.
+    HIGH: the boundary certificate fails ONLY on ``boundary_can_exceed_inner``, so each
+    member's max lies in [inner_max, boundary_max]. LOW (Open Data window identity):
+    a majority-ambiguous row whose members are all EXACT or INTERVAL, each min in
+    [boundary_min, inner_min]. Native unit. None otherwise; exact rows never get one.
+    """
+    from src.contracts.ensemble_snapshot_provenance import (  # noqa: PLC0415
+        ECMWF_OPENDATA_LOW_DATA_VERSION,
+        split_coordinate_bound_data_version,
+    )
+    from src.data.forecast_extrema_authority import (  # noqa: PLC0415
+        MEMBER_INTERVAL_BOUNDS_REVISION,
+    )
+
+    if (payload.get("causality") or {}).get("status") != "OK":
+        return None
+    high_certificate = _high_local_day_max_boundary_certificate(payload)
+    if high_certificate is not None:
+        if (
+            high_certificate["reasons"] != ["boundary_can_exceed_inner"]
+            or len(high_certificate["members"]) != 51
+        ):
+            return None
+        bounds = []
+        for record in sorted(high_certificate["members"], key=lambda item: item["member"]):
+            lower = float(record["inner_max_native_unit"])
+            boundary = record["boundary_max_native_unit"]
+            upper = lower if boundary is None else max(lower, float(boundary))
+            bounds.append([lower, upper])
+    else:
+        version = str(payload.get("data_version") or "")
+        bound = split_coordinate_bound_data_version(version)
+        if (
+            (bound[0] if bound else version) != ECMWF_OPENDATA_LOW_DATA_VERSION
+            or not _boundary_policy(payload).get("boundary_ambiguous")
+            or not _low_native_windows_cover_day(
+                payload,
+                city_timezone=city_timezone,
+                target_date=str(payload.get("target_date_local") or ""),
+            )
+        ):
+            return None
+        evidence = _low_local_day_min_interval_evidence(payload, temperature_metric="low")
+        records = [] if evidence is None else evidence["member_records"]
+        if len(records) != 51 or any(
+            record["status"] not in {"EXACT", "INTERVAL"} for record in records
+        ):
+            return None
+        bounds = [
+            [float(record["lower_native_unit"]), float(record["upper_native_unit"])]
+            for record in records
+        ]
+    if any(
+        not (math.isfinite(lower) and math.isfinite(upper) and lower <= upper)
+        for lower, upper in bounds
+    ) or all(lower == upper for lower, upper in bounds):
+        return None
+    return {
+        "revision": MEMBER_INTERVAL_BOUNDS_REVISION,
+        "unit": payload.get("unit"),
+        "bounds": bounds,
+    }
+
+
 def _provenance_json(
     payload: dict,
     metric: MetricIdentity,
@@ -558,6 +631,10 @@ def _provenance_json(
     high_certificate = _high_local_day_max_boundary_certificate(payload)
     if high_certificate is not None:
         prov["high_local_day_max_boundary_certificate"] = high_certificate
+    if evidence.get("forecast_window_attribution_status") == INTERVAL_CENSORED_ATTRIBUTION_STATUS:
+        prov["member_interval_bounds"] = _member_interval_bounds(
+            payload, city_timezone=str(evidence["city_timezone"])
+        )
     return json.dumps(prov, ensure_ascii=False)
 
 
@@ -1009,6 +1086,22 @@ def _contract_evidence_fields(
             # SCOPE: this city/date/cycle HIGH row. DRAIN: next native extraction
             # retains every boundary window; RESET: a complete exact certificate.
             block_reasons.append("high_boundary_certificate_not_exact")
+    if _member_interval_bounds(payload, city_timezone=str(city.timezone)) is not None:
+        # Every member's extreme is bounded over the whole local day, so the row is
+        # current-evidence shape; contributes stays 0: no point extreme exists.
+        start = _parse_iso_datetime(payload["local_day_start_utc"])
+        end = _parse_iso_datetime(payload["local_day_end_utc"])
+        zone = ZoneInfo(city_timezone)
+        window_fields = {
+            "forecast_window_start_utc": start.isoformat(),
+            "forecast_window_end_utc": end.isoformat(),
+            "forecast_window_start_local": start.astimezone(zone).isoformat(),
+            "forecast_window_end_local": end.astimezone(zone).isoformat(),
+        }
+        block_reasons = ["boundary_interval_censored_members"]
+        interval_status = INTERVAL_CENSORED_ATTRIBUTION_STATUS
+    else:
+        interval_status = None
 
     base = {
         "city_timezone": city_timezone,
@@ -1027,6 +1120,9 @@ def _contract_evidence_fields(
         "contributes_to_target_extrema": 0,
         "forecast_window_block_reasons_json": json.dumps(block_reasons),
     }
+    if interval_status is not None:
+        base["forecast_window_attribution_status"] = interval_status
+        return base
     if block_reasons:
         if bool(_boundary_policy(payload).get("boundary_ambiguous", False)):
             block_reasons.append("boundary_ambiguous")

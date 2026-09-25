@@ -1184,10 +1184,14 @@ def _enqueue_committed_opendata_cycle_advance_reseeds(
         return None
 
     try:
+        from src.data.forecast_extrema_authority import (  # noqa: PLC0415
+            current_evidence_ensemble_eligibility_sql,
+        )
+
         scopes = tuple(
             (str(row[0]), str(row[1]), str(row[2]))
             for row in conn.execute(
-                """
+                f"""
                 SELECT ens.city, ens.target_date, ens.temperature_metric
                   FROM ensemble_snapshots ens
                   JOIN source_run_coverage coverage
@@ -1199,10 +1203,7 @@ def _enqueue_committed_opendata_cycle_advance_reseeds(
                    AND ens.source_id = 'ecmwf_open_data'
                    AND ens.model_version = 'ecmwf_ens'
                    AND ens.authority = 'VERIFIED'
-                   AND ens.causality_status = 'OK'
-                   AND ens.boundary_ambiguous = 0
-                   AND ens.forecast_window_attribution_status = 'FULLY_INSIDE_TARGET_LOCAL_DAY'
-                   AND ens.contributes_to_target_extrema = 1
+                   AND {current_evidence_ensemble_eligibility_sql("ens")}
                    AND coverage.completeness_status = 'COMPLETE'
                    AND coverage.readiness_status = 'LIVE_ELIGIBLE'
                    AND coverage.expires_at IS NOT NULL

@@ -78,13 +78,22 @@ one consumer, the current-evidence shape reader.
 
 ### D-3. One shared admission predicate (`src/data/forecast_extrema_authority.py`)
 
-`current_evidence_ensemble_eligibility_sql(alias)` = exact point row
-(contributes=1, boundary_ambiguous=0, causality OK, FULLY_INSIDE) OR interval row
-(INTERVAL_CENSORED status, payload causality OK: `causality_status IN ('OK',
-'REJECTED_BOUNDARY_AMBIGUOUS')`, the latter being Law 1's training label on a
-causally-OK LOW row). The replacement chain calls it at every site:
+`current_evidence_ensemble_eligibility_sql(alias)` = `exact_ensemble_eligibility_sql`
+(contributes=1, boundary_ambiguous=0, causality OK, FULLY_INSIDE) OR
+`interval_ensemble_eligibility_sql` (INTERVAL_CENSORED status, payload causality OK:
+`causality_status IN ('OK', 'REJECTED_BOUNDARY_AMBIGUOUS')`, the latter being Law 1's
+training label on a causally-OK LOW row). The status is the admission key because
+its single writer sets it and persists the bounds from one condition. The shape
+reader re-validates the bounds (revision, 51 finite ordered pairs) and returns no
+shape, never a point fallback, on anything else. A bounds-revision bump must
+re-classify old rows. The replacement chain calls the predicate at every site:
 
-1. materializer current-evidence selector (`_current_evidence_snapshot_row`);
+1. materializer current-evidence selector (`_current_evidence_snapshot_row`): one
+   seek per class, each on its own partial frontier index (exact: the existing
+   `..._exact_frontier`/`..._casefold_frontier`; interval: new
+   `..._interval_frontier`), then the newer row by the same ORDER BY key. Interval
+   rows are exact-city only, like the HWM. The new index's one-time build scans the
+   table: 13 s measured read-only on the live DB, 0 matching rows today.
 2. HWM `_latest_eligible_ensemble_input_mark` (seed discovery, cycle trigger, lag reason);
 3. cycle-advance `_superseded_baseline_seed_file`;
 4. forecast-live ENS-commit wake `_enqueue_committed_opendata_cycle_advance_reseeds`.
@@ -132,31 +141,76 @@ Interval shapes add `interval_censored_member_count` and hash the bounds in
 
 ### D-5. Finite-evidence consumers (materializer, ~5066-5230, ~6340-6800)
 
-These are the per-bin UCB floors that keep q_ucb honest. The lower bounds travel as
-`members_c` and the upper bounds as `member_upper_c` (None = exact points, which
-keeps today's path):
+These are the per-bin UCB floors that keep q_ucb honest. The shape carries
+`member_bounds_c` beside the witness `members_c`. The override and posterior compute
+thread both, and None keeps today's exact path:
 
-- Member hit counts → plausibility counts: #members whose interval intersects the bin
-  preimage. For any consistent x, `hits(x) ≤ plausibility`, and the Clopper-Pearson UCB is
-  increasing in k, so the sample floor dominates every assignment.
-- Cantelli moment term uses the served σ (the supremum above), and it is increasing in σ.
-- ENS-center component term: sup over the feasible ENS center `[m_l, m_u]` (exact: the
-  bin mass is unimodal in the center, so candidates {m_l, m_u, clamp(bin midpoint)}
-  suffice), at the spread `w` of the assignment farthest from the served center.
-  This is a supremum over centers, not over every (center, spread) pair. The
-  plausibility term is the rigorous finite-sample floor.
-- n, zero-hit floor and n_eff depend only on n = 51 and are unchanged.
+- Member hit counts become plausibility counts: #members whose interval meets the bin
+  preimage. For any consistent x, `hits(x) ≤ plausibility`, and the Clopper-Pearson
+  UCB is increasing in k, so the sample floor dominates every assignment. Persisted
+  `finite_evidence_member_hits_by_bin` reports these plausibility counts.
+- The Cantelli moment term uses the served σ, the supremum above, and it is
+  increasing in σ.
+- The ENS-center component term is evaluated at the witness mean, which is a
+  consistent scenario, with the witness within-spread. This is NOT a supremum over
+  all feasible ENS centers. A range version was tried and dropped: on the cases
+  constructed here, the sample and moment floors dominated it, so a mutation test
+  could not distinguish it. It was not proven redundant in general, so the machinery
+  was cut rather than kept on hope. The plausibility term is the rigorous
+  finite-sample floor.
+- n, the zero-hit floor and n_eff depend only on n = 51, so they are unchanged.
 
 ## Validation (read-only, before wiring)
 
-See §Validation results below (filled after the run). The data limits are:
+The data has these limits:
 
-- LOW endpoints are hash-only in the DB, and the raw extraction JSON (retention) exists
-  only for issue 09-25T00Z, whose targets are not settled yet. LOW therefore cannot
-  be validated on settled history now.
-- HIGH certificates (issue ≥ 09-21T12Z) persist every member's inner/boundary maxima,
-  so HIGH interval σ is reconstructable on settled targets 09-21..09-24:
-  20 families have ≥ 1 boundary-only cycle.
+- LOW endpoints are hash-only in the DB. The raw extraction JSON that survived
+  retention covers only issue 09-25T00Z, whose targets are not settled yet. LOW
+  therefore cannot be validated on settled history now.
+- HIGH certificates (issue ≥ 09-21T12Z) persist every member's inner and boundary
+  maxima, so HIGH interval σ is reconstructable on settled targets 09-21..09-24.
+
+HIGH results, settled VERIFIED outcomes 09-21..09-24, graded on the served
+`N(μ + center_debias, σ)`. Wilson 95% intervals are in brackets. Rows are cycles, so
+rows within a family are correlated.
+
+- Pipeline check: σ reconstructed from certificate members equals the served σ on 505
+  served EXACT snapshots, max |diff| = 8.9e-16.
+- Served exact rows (baseline), n=505: 90%-coverage 486/505 [0.94, 0.98];
+  50%-coverage 339/505 [0.63, 0.71]; mean z² 0.80. One row per family (n=115):
+  cov90 113/115 [0.94, 1.00]; cov50 68/115 [0.50, 0.68]; mean z² 0.64.
+- Interval-class rows (reason `boundary_can_exceed_inner` only): 59 rows, 20 families,
+  scored with center and between taken from the nearest served cycle of the same family.
+  - σ_sup (this design): cov90 57/59 [0.88, 0.99]; cov50 37/59 [0.50, 0.74]; mean z² 0.64.
+  - σ from inner maxima only (the leaky alternative): identical to 2 decimals.
+  - Why they match: the median interval-member count per row is 3/51, the median mean
+    width is 0.018 °C, and the median σ_sup/σ_inner is 1.000 (max 1.208).
+  - One row per family (n=20): cov90 19/20 [0.76, 0.99].
+  - By UTC offset: E(>+3) n=41, cov90 41/41 [0.91, 1.00], mean z² 0.23; W(<−3) n=14,
+    cov90 12/14 [0.60, 0.96], mean z² 1.66; C n=4, uninformative.
+- Verdict: on settled HIGH the interval rows are indistinguishable from exact rows, and
+  the design neither understates nor visibly overstates. The numbers are too few to
+  resolve W-band under-coverage from chance (n=14; the interval spans 0.80).
+
+Sizing on currently dark rows (not graded). The center proxy is the mean of interval
+midpoints, so these ratios measure sizing only, not calibration.
+
+- HIGH targets 09-25..27 (DB certificates, 234 rows): spread ratio σ_sup/σ_min median
+  1.025, p90 1.119. Jinan/Qingdao/Zhengzhou 09-25 have 5–35 interval members with max
+  widths of 0.4–1.2 °C.
+- LOW admissible rows from the 09-25T00Z raw snapshot (13 rows, e.g. Seattle, SF,
+  Chicago, Miami 09-25, Beijing 09-27, Warsaw 09-26): median width 0.1–1.5 °C. The
+  ensemble spread about the midpoint center rises from 0.3–0.6 °C (inner-only std) to
+  0.5–1.3 °C. This widening is material: LOW interval families get visibly wider q,
+  which is the honest price of the unseen boundary hours.
+- Excluded as intended: SF/Seattle 09-28 (issue after local-day start would need
+  steps beyond the horizon; `_low_native_windows_cover_day` false, width up to 7 °C).
+  Every 09-25T00Z lead-0 HIGH row has `native_interval_gap`.
+
+Dry run of the new classifier over all 478 snapshotted raw payloads (no DB): HIGH has
+117 exact, 7 interval and 115 unknown rows; LOW has 111 exact, 13 interval, 17
+ambiguous and 98 unknown. Every interval row has contributes=0 and 51 persisted
+bounds, and no exact row changed class.
 
 ## Predeclared live check (for what the data cannot support now)
 
@@ -169,6 +223,36 @@ and the operator gets a report, not an automatic knob.
 
 ## Files, tests, rollback
 
-Recorded at the end of the implementation. Rollback = revert the branch commits. Rows
-already written with the new status stay inert under the old code, because every old
-reader requires FULLY_INSIDE/contributes=1.
+- `src/data/forecast_extrema_authority.py`: status and revision constants,
+  `exact_ensemble_eligibility_sql`, `current_evidence_ensemble_eligibility_sql`,
+  `member_interval_bounds_from_row`.
+- `scripts/ingest_grib_to_snapshots.py`: `_member_interval_bounds`, interval
+  classification in `_contract_evidence_fields`, and `member_interval_bounds` in
+  `_provenance_json`.
+- `src/data/ecmwf_open_data.py`: coverage readiness and the run-level member count for
+  interval rows.
+- `src/data/replacement_forecast_materializer.py`: selector (exact city: shared
+  predicate; casefold fallback and partial index: exact-only), bounds on
+  `CurrentEvidenceSnapshotIdentity`, `_interval_censored_evidence_shape`, and bounds
+  threaded to the hit counts, tail floors and bootstrap stress.
+- `src/data/replacement_input_hwm.py`, `src/data/replacement_cycle_advance_trigger.py`,
+  `src/ingest/forecast_live_daemon.py`: call the shared predicate.
+- `tests/test_ens_boundary_interval_admission.py` (registered in
+  `architecture/test_topology.yaml`).
+
+Out of the replacement chain and deliberately unchanged: the executable reader,
+OpenData ingest selector, event-reactor canonical path, evaluator DT7, fact
+revocation, calibration and bias repos. They are point-extrema readers, and interval
+rows are invisible to them through contributes=0. The live FSR lane is
+posterior-backed, so ENS coverage only gates admission.
+
+Rollback: revert the branch commits. Rows already written with the new status stay
+inert under the old code, because every old reader requires FULLY_INSIDE/contributes=1.
+Existing old rows are never rewritten, so there is no migration to undo.
+
+Next actions:
+1. Deploy (operator).
+2. Watch the first interval posteriors: `interval_censored_member_count > 0` in
+   `current_evidence_shape`.
+3. Run the predeclared check once n ≥ 30 per metric.
+4. Decide separately whether LOW minority rows move to the interval law.

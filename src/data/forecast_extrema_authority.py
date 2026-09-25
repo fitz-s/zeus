@@ -1,6 +1,8 @@
 # Created: 2026-05-22
-# Last reused/audited: 2026-05-23
+# Last reused/audited: 2026-09-25
 # Authority basis: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-A;
+#   2026-09-25 interval-censored ENS admission: statistical_calibration_addendum_2026-06-13 D2,
+#   docs/operations/current/plans/ens_boundary_interval_2026-09-25.md;
 #   PR #309 bundle-layer follow-up §2 (NULL fail-closed);
 #   p0-2-hardening-20260523: missing/unknown data_version now fail-closed (UNKNOWN), not legacy-passthrough.
 """Forecast extrema authority classifier.
@@ -13,6 +15,9 @@ later non-contributing ones (e.g. post-peak 12Z).
 
 from __future__ import annotations
 
+import json
+import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -120,6 +125,84 @@ POSITIVE_ATTRIBUTION_STATUS_SQL_IN_LIST: str = (
 
 # Private alias kept for internal use within this module.
 _POSITIVE_ATTRIBUTION_STATUSES = POSITIVE_ATTRIBUTION_STATUSES
+
+# Boundary-window members are interval-censored: each member's local-day extreme is
+# only known to lie in [lower, upper] (LOW: [boundary_min, inner_min]; HIGH:
+# [inner_max, max(inner_max, boundary_max)]). Such a row is never a point extrema
+# contributor (contributes_to_target_extrema stays 0, so no point reader sees it);
+# its bounds live in provenance_json.member_interval_bounds and are consumed only by
+# the current-evidence second-moment shape (statistical_calibration_addendum D2).
+# The single writer (scripts/ingest_grib_to_snapshots._contract_evidence_fields and
+# _provenance_json) sets this status and persists the bounds from ONE condition, so
+# the status is the admission key; the shape reader re-validates the bounds (revision,
+# 51 finite ordered pairs) and fails closed on anything else. A revision bump must
+# re-classify rows written under the old revision.
+INTERVAL_CENSORED_ATTRIBUTION_STATUS = "INTERVAL_CENSORED_TARGET_LOCAL_DAY"
+MEMBER_INTERVAL_BOUNDS_REVISION = "ens_member_interval_bounds_v1"
+
+
+def member_interval_bounds_from_row(
+    row: Mapping[str, Any],
+) -> tuple[tuple[float, float], ...] | None:
+    """The 51 native-unit member bounds of an interval-censored row, else None.
+
+    None means "not an admissible interval row": wrong status, legacy row without
+    persisted bounds, wrong revision, or any malformed bound. Callers then apply
+    exact-row law, so old rows fail closed exactly as before.
+    """
+    if row.get("forecast_window_attribution_status") != INTERVAL_CENSORED_ATTRIBUTION_STATUS:
+        return None
+    try:
+        provenance = json.loads(row.get("provenance_json") or "{}")
+        evidence = provenance["member_interval_bounds"]
+        if evidence["revision"] != MEMBER_INTERVAL_BOUNDS_REVISION:
+            return None
+        bounds = tuple(
+            (float(lower), float(upper)) for lower, upper in evidence["bounds"]
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if len(bounds) != 51 or any(
+        not (math.isfinite(lower) and math.isfinite(upper) and lower <= upper)
+        for lower, upper in bounds
+    ):
+        return None
+    return bounds
+
+
+def exact_ensemble_eligibility_sql(alias: str = "") -> str:
+    """Point-extrema ENS row: every member is a proven local-day extreme."""
+    p = f"{alias}." if alias else ""
+    return (
+        f"({p}causality_status = 'OK'"
+        f" AND {p}boundary_ambiguous = 0"
+        f" AND {p}forecast_window_attribution_status = 'FULLY_INSIDE_TARGET_LOCAL_DAY'"
+        f" AND {p}contributes_to_target_extrema = 1)"
+    )
+
+
+def interval_ensemble_eligibility_sql(alias: str = "") -> str:
+    """Interval-censored ENS row with payload causality OK.
+
+    ``REJECTED_BOUNDARY_AMBIGUOUS`` is Law 1's training label on a causally-OK LOW
+    row, not a causal defect.
+    """
+    p = f"{alias}." if alias else ""
+    return (
+        f"({p}forecast_window_attribution_status = '{INTERVAL_CENSORED_ATTRIBUTION_STATUS}'"
+        f" AND {p}causality_status IN ('OK', 'REJECTED_BOUNDARY_AMBIGUOUS'))"
+    )
+
+
+def current_evidence_ensemble_eligibility_sql(alias: str = "") -> str:
+    """The one ENS current-evidence admission predicate: exact OR interval row.
+
+    ``alias`` is a table alias without the dot.
+    """
+    return (
+        f"({exact_ensemble_eligibility_sql(alias)}"
+        f" OR {interval_ensemble_eligibility_sql(alias)})"
+    )
 
 
 @dataclass(frozen=True)
