@@ -64,6 +64,7 @@ file_naming:
 
         data_completeness_audit.py: legacy word-order exception; keep until renamed
         deep_heartbeat.py: established runtime heartbeat helper
+        report_probability_replay_corpus.py: operator-named read-only replay-corpus report (directive 2026-09-24); report_ mirrors its stdout-only evidence role
         reconcile_realized_fees.py: established reconciliation verb-form (mirrors exchange_reconcile/reconcile_pending_redeems runtime surfaces); fee-evidence artifact writer (2026-06-12)
         deploy_live.py: operator-facing deploy gate command; verb-first name retained because 'deploy' is the operator action (restart-safety gate, PR #407)
         digest_profiles_export.py: derived digest profile mirror exporter; name retained because it mirrors the generated artifact module name

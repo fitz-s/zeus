@@ -2913,6 +2913,33 @@ scripts:
     unguarded_write_rationale: "No writes; opens zeus-world.db strictly read-only via file:...?mode=ro&immutable=0 URI (scoreboard_panels.open_ro); SELECT-only; prints markdown to stdout."
 
   # --- reversal-plan tier0 item 10 (2026-08-24): two-gate capital promotion evaluator ---
+  report_probability_replay_corpus.py:
+    class: read_only_evidence
+    lifecycle: long_lived
+    status: active
+    authority_scope: offline_no_promotion
+    read_targets: [state/zeus-world.db, state/zeus_trades.db, state/zeus-forecasts.db]
+    write_targets: [stdout]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: []
+    dangerous_if_run: false
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Read how much current-recipe replay evidence exists per (metric,
+      execution_mode, evaluation_recipe_id): rows and unique city-days after
+      each fit filter, rows with market features, executed-position replay
+      coverage and replay_unavailable reasons.
+    do_not_use_when: >
+      Any task needs calibration quality, a validation verdict or live
+      admission; this counts evidence and fits nothing.
+    canonical_command: "python3 scripts/report_probability_replay_corpus.py [--state DIR] [--as-of ISO8601]"
+    promotion_barrier: "Read-only DB access; cannot authorize live strategy, sizing, or DB truth changes."
+    required_helpers: []
+    required_tests: [tests/calibration/test_probability_replay_corpus.py]
+    unguarded_write_rationale: "No writes; opens the three canonical DBs via file:...?mode=ro URIs; SELECT-only; stdout only."
+
   promotion_gates_report.py:
     class: read_only_evidence
     lifecycle: long_lived

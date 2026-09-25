@@ -614,6 +614,10 @@ files:
     zone: K0_frozen_kernel
     authority_role: uncertainty_contract
     why: Carries uncertainty context so raw confidence is not treated as certainty.
+  src/contracts/probability_validation.py:
+    zone: K0_frozen_kernel
+    authority_role: probability_validation_deployment_contract
+    why: "ProbabilityValidationCertificate binds one probability recipe to its settlement contracts, execution population, feature ranges, training policy/manifest and validation results; ValidatedIdentity is the correction policy it authorizes, distinct from SourceIdentityBaseline (which claims no evidence). Pure contract; not consumed by the live entry seam yet."
   src/contracts/payoff_q_correction.py:
     zone: K0_frozen_kernel
     authority_role: acting_probability_correction_contract
@@ -2434,6 +2438,12 @@ files:
     hazards:
     - CALIBRATION_FAMILY_MIXING
     why: "DB-agnostic market-anchored residual math and immutable artifact identity. Offline callers retain the UNBOUND calendar revision, while live artifacts bind the city-local target-date revision and sorted timezone snapshot into the parameter hash without changing the calibration formula or day0/day1/day2 policy."
+  src/calibration/probability_replay_corpus.py:
+    zone: K3_extension
+    authority_role: current_recipe_replay_corpus
+    hazards:
+    - CALIBRATION_FAMILY_MIXING
+    why: "Offline current-recipe replay: re-scores archived Day0 ENTRY carrier states (decision-time inputs sealed in ActionableTradeCertificate) with the current probability recipe via the live rebuild helper, appending replay rows beside the untouched live prediction. Rows carry origin evidence/revision, evaluation_recipe_id, information-set hash, settlement contract and label; SETTLEMENT_STATE and EXECUTED_ORDER populations stay distinct; future-available evidence and unreproducible archives are refused with a named replay_unavailable reason. ReplayMarketAnchoredFitProvider fits by evaluation_recipe_id on a private cache and a replay input revision. Not wired into live entry."
   src/calibration/market_anchored_live_fit.py:
     zone: K3_extension
     authority_role: market_anchored_live_fit_provider
