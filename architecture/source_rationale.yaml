@@ -2466,6 +2466,12 @@ files:
     hazards:
     - CALIBRATION_FAMILY_MIXING
     why: "Offline current-recipe replay: re-scores archived Day0 ENTRY carrier states (decision-time inputs sealed in ActionableTradeCertificate) with the current probability recipe via the live rebuild helper, appending replay rows beside the untouched live prediction. Rows carry origin evidence/revision, evaluation_recipe_id, information-set hash, settlement contract and label; SETTLEMENT_STATE and EXECUTED_ORDER populations stay distinct; future-available evidence and unreproducible archives are refused with a named replay_unavailable reason. ReplayMarketAnchoredFitProvider fits by evaluation_recipe_id on a private cache and a replay input revision. Not wired into live entry."
+  src/calibration/market_anchored_family.py:
+    zone: K3_extension
+    authority_role: market_anchored_family_cdf_correction
+    hazards:
+    - CALIBRATION_FAMILY_MIXING
+    why: "Offline ordered-family CDF correction (design review REQ-20260925-223704 §3): beta-transformed linear pool H = w F_Q + (1-w) F_P, R = diff(Beta_{alpha,beta}(H)), with nested candidates market null / arithmetic / price-only / full BLP. Tail-stable CDF-difference numerics, simplex-preserving outputs, NO legs complement prediction and label together. Hierarchical MAP fit of (logit w, log alpha, log beta) over metric, lane, lead, resolution class, station and era under city-day weights (log loss, RPS challenger). No live solve, certificate or submit caller."
   src/calibration/market_anchored_live_fit.py:
     zone: K3_extension
     authority_role: market_anchored_live_fit_provider
