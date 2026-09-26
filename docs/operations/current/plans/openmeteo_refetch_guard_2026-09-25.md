@@ -65,8 +65,14 @@ no new caller can reopen the class.
 - Run state: pinned by run identity per meta slug, forward-only (max init, and per
   run max modification and availability). Replicas disagree
   (memory `provider-metadata-replicas-disagree-pin-by-run-identity`), so a reading
-  refreshes the freshness confirmation only when it shows the pinned maximum; a
-  lagging replica neither regresses the pin nor vouches for it. An answer is
+  refreshes the freshness confirmation only when it equals the pinned maximum on
+  every stamp (init, modification AND availability); a lagging replica neither
+  regresses the pin nor vouches for it.
+- Per-model proof: an answer for N models stores N proofs. Each model's part holds
+  only on its own evidence: its requested run superseded by its own newer run, or
+  its (run, modification) unchanged and confirmed within 60 s. One model's
+  supersession never covers another's part (review 2026-09-26; antibody
+  `test_one_models_supersession_never_covers_another`). An answer is
   provable only if modification <= availability and now >= availability + 10 min
   (`SOURCE_AVAILABILITY_CONSISTENCY_WAIT_MINUTES`). A latest-run answer is served
   only while its state was confirmed within 60 s; superseded runs need no re-read.
@@ -76,8 +82,9 @@ no new caller can reopen the class.
 - Medium: one SQLite file `state/openmeteo_response_store.db`, WAL, autocommit
   statements, 2 s busy timeout; shared by ingest, forecast-live and live daemons.
   Not a canonical DB (no truth, no `db_table_ownership.yaml` row); allowlisted in
-  `SQLITE_CONNECT_ALLOWLIST` with that reason. Any store error falls back to the
-  network path and logs at most every 5 min.
+  `SQLITE_CONNECT_ALLOWLIST` with that reason. Every public store entry point is
+  wrapped fail-soft: a SQLite/OS/codec error returns the network-path default and
+  logs at most every 5 min; no store error reaches a fetch caller.
 - Codec: compact JSON, zstd-3, BLOB (5.6x on the 400 live cache payloads, mean
   3.2 KB -> 0.57 KB). Law: memory `zlib9-base64-text-is-slower-and-bigger-than-zstd3-blob`.
 - Retention by reachability: `expires_at` = run + forecast window + 2 days (the last
