@@ -530,9 +530,8 @@ class OpenMeteoResponseStore:
         this_hour, last_hour = _hour_key(now), _hour_key(now - 3600.0)
         jobs: dict[str, list[float]] = {}
         for hour, job, metered, served, reissued in self._db().execute(
-            "SELECT hour, job, metered, served, reissued FROM unit_ledger "
-            "WHERE substr(hour, 1, 10) = ? OR hour = ?",
-            (_day_key(now), last_hour),
+            "SELECT hour, job, metered, served, reissued FROM unit_ledger WHERE hour >= ?",
+            (min(last_hour, f"{_day_key(now)}T00"),),
         ):
             row = jobs.setdefault(str(job), [0.0, 0, 0, 0])
             if hour == this_hour:

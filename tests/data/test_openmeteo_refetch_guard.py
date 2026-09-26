@@ -280,6 +280,19 @@ def test_replica_lag_never_regresses_the_pinned_run(world) -> None:
     assert proc[1].run_state("dwd_icon_eu").init == _utc(0)
 
 
+def test_replica_lag_never_regresses_a_runs_modification(world) -> None:
+    proc = world.process()
+    world.fetch(proc)
+    init, modification, availability = world.provider.meta["dwd_icon_eu"]
+    world.provider.meta["dwd_icon_eu"] = [init, modification - 600, availability - 600]
+    world.now["t"] += 90.0  # past META_FRESH_SECONDS: the lagging replica is re-read
+
+    world.fetch(proc)
+
+    assert world.provider.data_calls == 1
+    assert proc[1].run_state("dwd_icon_eu").modification == modification
+
+
 def test_f_alarm_names_the_looping_job_within_the_hour(world, caplog) -> None:
     """A new instance of the class surfaces within an hour, naming its job."""
 
