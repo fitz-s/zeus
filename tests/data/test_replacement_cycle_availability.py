@@ -361,6 +361,73 @@ class TestProbeResolvedSelection:
         assert 0 < requests[0] <= 1.0
 
 
+class TestBucketDeclarationCache:
+    """A declared bucket run is never re-fetched; an undeclared one at most once per poll floor."""
+
+    @staticmethod
+    def _bucket(monkeypatch, declared_runs: set[datetime]):
+        import src.data.openmeteo_ecmwf_ifs9_bucket_transport as bucket
+        import src.data.replacement_cycle_availability as rca
+
+        clock = [1000.0]
+        fetches: list[int] = []
+        monkeypatch.setattr(rca.time, "monotonic", lambda: clock[0])
+
+        def _fetch(**_kwargs):
+            fetches.append(1)
+            return {"latest": set(declared_runs)}
+
+        monkeypatch.setattr(bucket, "fetch_bucket_run_manifest", _fetch)
+        monkeypatch.setattr(
+            bucket,
+            "select_declaring_manifest",
+            lambda manifests, *, wanted_run: (
+                wanted_run if wanted_run in manifests["latest"] else None
+            ),
+        )
+        return rca, clock, fetches
+
+    def test_declared_run_is_fetched_once_per_process(self, monkeypatch):
+        cycle = _dt("2026-09-26T00:00:00")
+        rca, clock, fetches = self._bucket(monkeypatch, {cycle})
+
+        assert rca.probe_bucket_run_declared(cycle) is True
+        for _ in range(20):
+            clock[0] += 15.0
+            assert rca.probe_bucket_run_declared(cycle) is True
+        assert len(fetches) == 1
+
+    def test_undeclared_run_is_detected_within_one_poll_floor(self, monkeypatch):
+        cycle = _dt("2026-09-26T06:00:00")
+        declared: set[datetime] = set()
+        rca, clock, fetches = self._bucket(monkeypatch, declared)
+
+        assert rca.probe_bucket_run_declared(cycle) is False
+        clock[0] += 5.0
+        assert rca.probe_bucket_run_declared(cycle) is False
+        assert len(fetches) == 1  # re-read suppressed inside the floor
+        declared.add(cycle)  # the provider publishes the run now
+        clock[0] += rca.BUCKET_UNDECLARED_REPROBE_SECONDS - 5.0
+        assert rca.probe_bucket_run_declared(cycle) is True
+        assert len(fetches) == 2
+
+    def test_probe_error_is_not_cached(self, monkeypatch):
+        import src.data.openmeteo_ecmwf_ifs9_bucket_transport as bucket
+
+        cycle = _dt("2026-09-26T12:00:00")
+        rca, _clock, fetches = self._bucket(monkeypatch, {cycle})
+        good_fetch = bucket.fetch_bucket_run_manifest
+        monkeypatch.setattr(
+            bucket,
+            "fetch_bucket_run_manifest",
+            lambda **_kwargs: (_ for _ in ()).throw(OSError("s3 reset")),
+        )
+        assert rca.probe_bucket_run_declared(cycle) is False
+        monkeypatch.setattr(bucket, "fetch_bucket_run_manifest", good_fetch)
+        assert rca.probe_bucket_run_declared(cycle) is True
+        assert len(fetches) == 1
+
+
 class TestPollFetchDecision:
     """The production poll layer: anchor high-water vs probed publication."""
 

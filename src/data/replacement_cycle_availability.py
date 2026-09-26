@@ -31,6 +31,7 @@ registry references that derivation instead of declaring a number.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 import urllib.error
 from dataclasses import dataclass
@@ -123,6 +124,17 @@ def probe_openmeteo_single_run_available(
         return False
 
 
+# A run the bucket has declared stays published, so a declaration is kept for the
+# process lifetime. An undeclared answer is re-read at most once per this interval:
+# 15 s is the source-clock poll floor (_replacement_availability_poll_seconds), so a
+# newly declared run is seen no later than one poll after the uncached probe would
+# have seen it.
+BUCKET_UNDECLARED_REPROBE_SECONDS = 15.0
+_BUCKET_DECLARED_RUNS: set[datetime] = set()
+_BUCKET_UNDECLARED_AT: dict[datetime, float] = {}
+_BUCKET_DECLARATION_LOCK = threading.Lock()
+
+
 def probe_bucket_run_declared(
     cycle: datetime, *, deadline_monotonic: float | None = None
 ) -> bool:
@@ -131,8 +143,18 @@ def probe_bucket_run_declared(
     Declaration (a latest/in-progress manifest with reference_time == cycle) is the
     necessary condition for the bucket transport; per-city timestep admission and the
     cross-check whitelist gate at FETCH time (per-city fail-soft skip in the downloader),
-    so declaration alone marks the leg fetchable for the poll. Any probe error → False
-    (treated not-yet-available; the poll retries next tick)."""
+    so declaration alone marks the leg fetchable for the poll. Any probe error → False,
+    uncached (treated not-yet-available; the poll retries next tick)."""
+    wanted = cycle.astimezone(UTC)
+    with _BUCKET_DECLARATION_LOCK:
+        if wanted in _BUCKET_DECLARED_RUNS:
+            return True
+        read_at = _BUCKET_UNDECLARED_AT.get(wanted)
+        if (
+            read_at is not None
+            and time.monotonic() - read_at < BUCKET_UNDECLARED_REPROBE_SECONDS
+        ):
+            return False
     try:
         from src.data.openmeteo_ecmwf_ifs9_bucket_transport import (
             fetch_bucket_run_manifest,
@@ -140,14 +162,27 @@ def probe_bucket_run_declared(
         )
 
         manifests = fetch_bucket_run_manifest(deadline_monotonic=deadline_monotonic)
-        return (
-            select_declaring_manifest(manifests, wanted_run=cycle.astimezone(UTC))
-            is not None
+        declared = (
+            select_declaring_manifest(manifests, wanted_run=wanted) is not None
         )
     except Exception as exc:  # noqa: BLE001 — probe noise = not available yet
         _check_probe_deadline(deadline_monotonic)
         logger.debug("bucket run probe error (treated unavailable): %s", exc)
         return False
+    now = time.monotonic()
+    with _BUCKET_DECLARATION_LOCK:
+        if declared:
+            _BUCKET_DECLARED_RUNS.add(wanted)
+            _BUCKET_UNDECLARED_AT.pop(wanted, None)
+        else:
+            for stale in [
+                run
+                for run, at in _BUCKET_UNDECLARED_AT.items()
+                if now - at >= BUCKET_UNDECLARED_REPROBE_SECONDS
+            ]:
+                del _BUCKET_UNDECLARED_AT[stale]
+            _BUCKET_UNDECLARED_AT[wanted] = now
+    return declared
 
 
 def _check_probe_deadline(deadline_monotonic: float | None) -> float:

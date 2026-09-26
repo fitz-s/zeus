@@ -136,6 +136,23 @@ def _staleness_variance_test_isolation(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _bucket_declaration_cache_test_isolation():
+    """Isolate the process-lifetime S3 bucket run-declaration cache.
+
+    ``probe_bucket_run_declared`` keeps every declared run and rate-limits
+    undeclared re-reads. Left uncleared, one test's declared or undeclared
+    answer for a cycle would stand in for another test's mocked manifest fetch.
+    """
+    from src.data import replacement_cycle_availability as rca
+
+    rca._BUCKET_DECLARED_RUNS.clear()
+    rca._BUCKET_UNDECLARED_AT.clear()
+    yield
+    rca._BUCKET_DECLARED_RUNS.clear()
+    rca._BUCKET_UNDECLARED_AT.clear()
+
+
+@pytest.fixture(autouse=True)
 def _single_runs_payload_cache_test_isolation():
     """Isolate the BPF single-runs payload cache (quota root-cause, round 3).
 
