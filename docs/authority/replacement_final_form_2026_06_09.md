@@ -3,7 +3,7 @@
 **Status:** Live replacement probability law. Runtime rows use `forecast_posteriors.runtime_layer='live'`; no second row-authority label or alternate runtime layer exists.
 **Supersedes:** `BAYES_PRECISION_FUSION_SPEC.md` (deleted).  
 **Created:** 2026-06-09  
-**Last audited:** 2026-08-24 (Day0 remaining paths are possession-bound to coherent provider runs; the provider-run-bound operator starts v10 capital attribution and does not pool older v9 fills)
+**Last audited:** 2026-09-25 (§1d-bis admits interval-censored ENS boundary members under the supremum spread; operator-approved)
 **Authority basis:** Commits 140d75ff6d · 6860f00a21 · edc598b440 · 94b584cc3f · 49492f1528 · 2b6936d3b5 · 9c594c9fc3 · df8199ef8e · e80c101c4c · 8541bc93cd · 8f20d39863 · a70436d478 · a1c2163e46 plus June 18 live-runtime cleanup. Historical experiment reports remain evidence only; they do not define the live execution layer.
 
 ---
@@ -68,7 +68,8 @@ When anchor history `n < MIN_TRAIN`, the anchor has no trusted τ₀. Prior to t
 
 For the live source-clock route, both components are facts available at the same
 decision instant and target. The ENS row must be `VERIFIED`, causal, unambiguous,
-fully inside the target local day, contribute to the target extrema, have at least
+fully inside the target local day, contribute to the target extrema (or be an
+interval-censored row admitted under §1d-bis), have at least
 20 finite °C members, and have `source_available_at <= computed_at` and
 `source_cycle_time <= carrier source_cycle_time`. Two positively weighted current
 providers are the minimum. Missing or invalid current shape blocks the live
@@ -169,6 +170,126 @@ SELL/HOLD decision, no-money admission evidence, or suppress rematerialization
 of the missing same-cycle shape. Missing same-cycle ENS is DATA_DEGRADED for the
 family and fails closed until the normal materialization loop writes current
 evidence.
+
+### 1d-bis. Interval-censored ENS members (ADDENDUM 2026-09-25 — operator-approved)
+
+ECMWF Open Data mn2t3/mx2t3 are 3-hour aggregates on a 3-hour step grid. A
+city's local day rarely aligns with it, so the first and last windows straddle
+local midnight. For such a member, the local-day extreme is only known to lie in
+an interval `[l_i, u_i]`:
+
+- LOW: `[boundary_min, inner_min]` when the boundary window is strictly colder,
+  else the exact `inner_min`.
+- HIGH: `[inner_max, max(inner_max, boundary_max)]`.
+
+Excluding the whole row when every member's interval is recoverable is the
+biased fallback. It dropped 27 venue families across 2026-09-25..27 into
+DATA_DEGRADED, and expired others. This addendum extends
+`statistical_calibration_addendum_2026-06-13.md` **D2** (preferred treatment of
+an ambiguity set A_i = CAR interval-widening to `[min A_i, max A_i]`; exclusion
+only when A_i is unrecoverable or directional) **from observations to forecast
+members**: the ambiguity set of each member is its interval, and conservatism
+comes from the interval width, with no tuning knob.
+
+**Admission (the single writer is `scripts/ingest_grib_to_snapshots.py`).** A row
+is interval-censored, with `forecast_window_attribution_status =
+'INTERVAL_CENSORED_TARGET_LOCAL_DAY'`, only if its payload causality is OK and:
+
+- HIGH: the native boundary certificate's only failure reason is
+  `boundary_can_exceed_inner`. All 51 members then have validated native windows
+  whose clipped union covers the whole local day.
+- LOW (Open Data window identity): the row is majority-ambiguous; every member's
+  interval evidence is EXACT or INTERVAL, never INVALID; and every member's
+  native windows cover the whole local day.
+
+Rows failing with `native_interval_gap` (issued after local-day start: the
+elapsed part of the day is invisible, so the upper bound is unbounded) stay
+excluded. Unbounded is D2's "unrecoverable" case. The family serves the newest
+cycle issued before local-day start. The row persists 51 native-unit bounds in
+`provenance_json.member_interval_bounds` (revision
+`ens_member_interval_bounds_v1`). Older rows without bounds keep their prior
+status and fail closed exactly as before.
+
+**Leakage law.** An interval row keeps `contributes_to_target_extrema = 0`. Every
+point-extreme reader requires contributes = 1, so no endpoint, midpoint or
+boundary value is ever read as a point daily extreme. The bounds are read only
+by the current-evidence shape. The admission predicate is one shared function
+(`src/data/forecast_extrema_authority.py`): exact row OR interval row. Every
+replacement-chain admission site calls it. The interval class is a new status,
+not a relaxation of `FULLY_INSIDE` for point rows.
+
+**Spread.** With members `x_i ∈ [l_i, u_i]` and provider center `μ*`,
+`σ_within² + δ_ens² = mean_i (x_i − μ*)²` is separable. Therefore
+
+```
+sup_x σ_pred² = σ_between² + mean_i max((l_i − μ*)², (u_i − μ*)²)
+```
+
+This is attained by the consistent assignment `x*_i` = the endpoint farther from
+`μ*`. The served shape is the shape of `x*`, so `σ_pred = sup σ_pred` exactly.
+
+`σ_center` is replaced by the upper bound
+
+```
+S_max/n + (1 − 1/n)·max((m_l − μ*)², (m_u − μ*)²) + σ_between²/n_eff
+```
+
+where m are the means of the lower/upper bounds. This bound dominates every
+consistent assignment's value.
+
+The served σ after the live ladder is `max(k(τ)·σ, floor_steps·step,
+settlement_floor)`, with:
+
+- k from (unit, metric, lead bucket, city) only;
+- w = floor_steps = 0;
+- no per-city ρ-mix on this route;
+- the catch-all cap a function of σ alone.
+
+This ladder is monotone in σ and independent of member values, so
+`sup_x served(σ(x)) = served(σ_sup)`, including k < 1.
+
+Point rows never enter this branch, and their shape output is byte-identical to
+before. `CURRENT_EVIDENCE_SEMANTICS_REVISION` is unchanged: the law `N(μ*, σ)` over
+a consistent member assignment is unchanged. Interval shapes carry
+`interval_censored_member_count` and a bounds-derived `member_values_hash`.
+
+**Bounds (non-Day0 route).** The served interval `q_ucb` of each bin dominates the
+served `q_ucb` of every consistent point assignment, each served through its own
+shape. The mechanisms are:
+
+- **plausibility hit counts:** #members whose interval meets the settlement
+  preimage. This is ≥ every assignment's hits, and Clopper-Pearson is increasing;
+- **the Cantelli term** at `σ_sup`;
+- **the ENS scenario term:** a supremum over the feasible ENS-center range and a
+  certified spread range, with the center at the clamped bin midpoint and the
+  closed-form spread optimum;
+- **bootstrap center draws:** each seeded draw's mass is bounded over its
+  feasible center segment and spread range, and its 95th percentile joins the
+  floor;
+- **the stress step:** it gives every positive floor its own rows on interval
+  evidence, and refuses the band if any floor fails to hold.
+
+**Not claimed.**
+
+- Dominance of the Day0 (observation-absorbed) bootstrap-draw term.
+- Conservativeness of `q_lcb`.
+- Predictive coverage: `q_ucb` is a band edge, not a coverage guarantee.
+- LOW minority-ambiguous rows (1..25 interval members) keep the §1d drop-member
+  treatment.
+
+**Predeclared live check and rollback.**
+
+- Interval-backed posteriors are those with
+  `current_evidence_shape.interval_censored_member_count > 0`.
+- Grade them on settled outcomes, per metric, under the served `N(μ*, σ)`.
+- Once n ≥ 30 families per metric, the check passes if the Wilson 95% lower bound
+  of 90%-central coverage is ≥ 0.80.
+- Failure → report to the operator; no automatic knob.
+- Rollback: revert the admission commits. Rows already written with the interval
+  status are inert under the prior code, because every prior reader requires
+  `FULLY_INSIDE`/contributes = 1.
+- Design, derivations and validation:
+  `docs/operations/current/plans/ens_boundary_interval_2026-09-25.md`.
 
 ### 1e. q construction — fused-N-direct (commit 8541bc93cd)
 
