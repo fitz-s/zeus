@@ -1051,6 +1051,20 @@ class OpenMeteoQuotaTracker:
         with self._lock:
             return record({"requests": self._request_states}, datetime.now(timezone.utc))[0]
 
+    def request_in_flight(self, request_id: str) -> bool:
+        """Whether another caller holds this exact request's live lease (quiet read)."""
+
+        def read(state: dict[str, object], now: datetime) -> tuple[bool, bool]:
+            return self._request_in_flight_until(state, request_id, now) is not None, False
+
+        if self._shared_enabled():
+            try:
+                return self._shared(read)
+            except RuntimeError:
+                return False
+        with self._lock:
+            return read({"requests": self._request_states}, datetime.now(timezone.utc))[0]
+
     def request_terminal_outcome(self, request_id: str) -> dict[str, object] | None:
         """Return the redacted terminal outcome persisted for one exact request."""
 

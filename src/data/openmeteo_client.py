@@ -28,6 +28,14 @@ from src.data.openmeteo_quota import (
     OpenMeteoQuotaTracker,
     quota_tracker,
 )
+from src.data.openmeteo_response_store import (
+    ExactRequest,
+    OpenMeteoResponseStore,
+    exact_request,
+    meta_slug,
+    meta_url,
+    runtime_response_store,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +70,13 @@ _SHARED_HTTP_CLIENT = httpx.Client(
     ),
 )
 atexit.register(_SHARED_HTTP_CLIENT.close)
+
+# One durable answer store per process (None under test). ``fetch()`` serves an
+# exact-run answer from it whenever that answer provably equals the provider's.
+response_store: OpenMeteoResponseStore | None = runtime_response_store()
+# How long a caller waits for another process's in-flight twin before paying itself.
+IN_FLIGHT_WAIT_SECONDS = 20.0
+IN_FLIGHT_POLL_SECONDS = 0.25
 
 
 class OpenMeteoRetryClass(str, Enum):
@@ -381,6 +396,57 @@ def http_outcome_payload(error: object) -> dict[str, object] | None:
     return outcome.persisted() if isinstance(outcome, OpenMeteoHTTPOutcome) else None
 
 
+def _refresh_run_state(
+    store: OpenMeteoResponseStore,
+    req: ExactRequest,
+    *,
+    tracker: OpenMeteoQuotaTracker,
+    client: httpx.Client | None,
+    timeout: float,
+) -> None:
+    """Re-read, unmetered and within the caller's timeout, the run state ``req`` needs."""
+
+    stop = time.monotonic() + float(timeout)
+    for slug in store.stale_slugs(req):
+        remaining = stop - time.monotonic()
+        if remaining <= 0.05:
+            return
+        try:
+            fetch(
+                meta_url(slug),
+                {},
+                timeout=min(remaining, 10.0),
+                max_retries=1,
+                endpoint_label=f"response_store_meta_{slug}",
+                fast_fail_429=True,
+                quota=tracker,
+                client=client,
+                count_toward_quota=False,
+                store=store,
+            )
+        except Exception as exc:  # noqa: BLE001 -- unproven state takes the network path.
+            logger.debug("Open-Meteo run state for %s unavailable: %s", slug, exc)
+
+
+def _await_twin(
+    store: OpenMeteoResponseStore,
+    tracker: OpenMeteoQuotaTracker,
+    request_id: str,
+    req: ExactRequest,
+    deadline: float,
+) -> object | None:
+    """Wait for a provable answer another caller is fetching for this exact request."""
+
+    if store.proofs(req) is None:
+        return None
+    while time.monotonic() < deadline:
+        time.sleep(IN_FLIGHT_POLL_SECONDS)
+        held = store.lookup(request_id, req)
+        if held is not None or not tracker.request_in_flight(request_id):
+            return held
+    return None
+
+
 def fetch(
     url: str,
     params: dict,
@@ -394,6 +460,7 @@ def fetch(
     client: httpx.Client | None = None,
     count_toward_quota: bool = True,
     conditional_status_codes: frozenset[int] = frozenset(),
+    store: OpenMeteoResponseStore | None = None,
 ) -> dict:
     """GET an Open-Meteo endpoint with retries, 429 handling, and quota tracking.
 
@@ -406,8 +473,15 @@ def fetch(
     ``fast_fail_429`` is for callers with an independent transport fallback. They still mark
     the quota cooldown, but they receive the 429 immediately instead of sleeping inside this
     shared client and blocking the fallback ladder.
+
+    LAW: a metered request is sent only when its answer can differ from one already held.
+    An exact-run request (see ``openmeteo_response_store``) is answered from the durable
+    store at zero quota cost until its provider run state changes, and a caller whose
+    identical twin is in flight in another process waits for that answer instead of
+    paying again.
     """
     tracker = quota or quota_tracker
+    answers = store or response_store
     request_id = request_identity(
         url,
         params,
@@ -416,16 +490,39 @@ def fetch(
     quota_cost = _provider_quota_cost(params) if count_toward_quota else 1
     endpoint = _endpoint_for_url(url)
     job = endpoint_label or endpoint
+    req = exact_request(url, params) if answers is not None else None
+    if req is not None:
+        _refresh_run_state(answers, req, tracker=tracker, client=client, timeout=timeout)
+        held = answers.lookup(request_id, req)
+        if held is not None:
+            answers.note_served(job, quota_cost)
+            return held
+    twin_deadline = time.monotonic() + min(IN_FLIGHT_WAIT_SECONDS, float(timeout))
     last_exc: Exception | None = None
     for attempt in range(max_retries):
-        allowed, reason, lease_id = tracker.acquire_request(
-            request_id,
-            endpoint=endpoint,
-            job=job,
-            lease_seconds=max(float(timeout) + 5.0, DEFAULT_TIMEOUT),
-            count_toward_quota=count_toward_quota,
-            quota_cost=quota_cost,
-        )
+        while True:
+            allowed, reason, lease_id = tracker.acquire_request(
+                request_id,
+                endpoint=endpoint,
+                job=job,
+                lease_seconds=max(float(timeout) + 5.0, DEFAULT_TIMEOUT),
+                count_toward_quota=count_toward_quota,
+                quota_cost=quota_cost,
+            )
+            if (
+                allowed
+                or req is None
+                or _preflight_denial_reason(reason)
+                is not OpenMeteoPreflightDenialReason.REQUEST_IN_FLIGHT
+            ):
+                break
+            # Another caller is paying for this exact answer; wait for it instead.
+            held = _await_twin(answers, tracker, request_id, req, twin_deadline)
+            if held is not None:
+                answers.note_served(job, quota_cost)
+                return held
+            if time.monotonic() >= twin_deadline or tracker.request_in_flight(request_id):
+                break
         if not allowed:
             if reason and reason.startswith("request_terminal="):
                 persisted = tracker.request_terminal_outcome(request_id)
@@ -437,6 +534,10 @@ def fetch(
                 _preflight_denial_reason(reason),
                 detail=reason,
             )
+        if answers is not None and count_toward_quota:
+            answers.note_metered(request_id, job, quota_cost)
+        # Proven before the send: an answer carries the state it was fetched under.
+        proofs = answers.proofs(req) if req is not None else None
         try:
             get = client.get if client is not None else _SHARED_HTTP_CLIENT.get
             resp = get(url, params=params, timeout=timeout)
@@ -482,6 +583,14 @@ def fetch(
                 raise error
 
             payload = resp.json()
+            if answers is not None:
+                slug = meta_slug(url)
+                if slug is not None:
+                    answers.record_meta(slug, payload)
+                if proofs is not None:
+                    answers.put(request_id, req, proofs, payload)
+                if count_toward_quota:
+                    answers.note_success(request_id)
             recorded = tracker.record_request_success(
                 request_id,
                 endpoint=endpoint,
