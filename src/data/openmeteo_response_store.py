@@ -75,6 +75,7 @@ PROVIDER_RUN_RETENTION_DAYS = 10
 EVICT_INTERVAL_SECONDS = 600.0
 ALARM_CHECK_SECONDS = 60.0
 ALARM_DAILY_LIMIT = PRIORITY_DAILY_LIMIT
+RATE_WINDOW_HOURS = 2.0
 ERROR_LOG_INTERVAL_SECONDS = 300.0
 
 SUPERSEDED = "superseded"
@@ -537,30 +538,32 @@ class OpenMeteoResponseStore:
             self._failed(exc)
 
     def burn(self, now: float | None = None) -> dict[str, object]:
-        """Today's units by job and the end-of-day projection at the trailing-hour rate.
+        """Today's units by job and the end-of-day projection at the current rate.
 
-        The rate is the current hour's units plus the elapsed-complement share of the
-        previous hour's, so it spans exactly the last 60 minutes at hour granularity.
-        Jobs are ranked by that rate, the burn the projection extrapolates.
+        The current rate is the mean over the trailing ``RATE_WINDOW_HOURS`` (hour
+        buckets, the oldest one weighted by its share inside the window). Jobs are
+        ranked by that rate, the burn the projection extrapolates.
         """
 
         now = time.time() if now is None else now
-        weight = 1.0 - (now % 3600.0) / 3600.0
-        this_hour, last_hour = _hour_key(now), _hour_key(now - 3600.0)
+        start = now - RATE_WINDOW_HOURS * 3600.0
+        first = start - start % 3600.0
+        today = _day_key(now)
         jobs: dict[str, list[float]] = {}
         for hour, job, metered, served, reissued in self._db().execute(
             "SELECT hour, job, metered, served, reissued FROM unit_ledger WHERE hour >= ?",
-            (min(last_hour, f"{_day_key(now)}T00"),),
+            (min(_hour_key(first), f"{today}T00"),),
         ):
             row = jobs.setdefault(str(job), [0.0, 0, 0, 0])
-            if hour == this_hour:
-                row[0] += metered
-            elif hour == last_hour:
-                row[0] += metered * weight
-            if hour[:10] == _day_key(now):
+            bucket = datetime.strptime(hour, "%Y-%m-%dT%H").replace(tzinfo=timezone.utc).timestamp()
+            if bucket >= first:
+                row[0] += metered * (1.0 if bucket > first else (first + 3600.0 - start) / 3600.0)
+            if hour[:10] == today:
                 row[1] += metered
                 row[2] += served
                 row[3] += reissued
+        for row in jobs.values():
+            row[0] /= RATE_WINDOW_HOURS
         ranked = sorted(jobs.items(), key=lambda item: (-item[1][0], -item[1][1], item[0]))
         metered_today = int(sum(row[1] for row in jobs.values()))
         rate = sum(row[0] for row in jobs.values())

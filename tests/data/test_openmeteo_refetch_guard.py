@@ -397,6 +397,19 @@ def test_f_alarm_names_the_looping_job_within_the_hour(world, caplog) -> None:
     assert burn["jobs"][0][3] == 25 * 59  # every send after the first was a same-day repeat
 
 
+def test_f_alarm_ignores_a_single_hour_burst(world, caplog) -> None:
+    """A boot burst (one busy hour, then quiet) is not a loop: the 2 h rate absorbs it."""
+
+    _tracker, store = world.process()
+    caplog.set_level(logging.WARNING, logger=om_store.__name__)
+    start = float(_utc(6))  # 00:00Z
+    for minute in range(120):
+        world.now["t"] = start + 60.0 * minute
+        units = 8 if minute < 60 else 1
+        store.note_metered(f"boot-{minute}", "archive_hourly", units, now=world.now["t"])
+    assert not [r for r in caplog.records if "burn alarm" in r.getMessage()]
+
+
 def test_f_alarm_silent_under_budget(world, caplog) -> None:
     _tracker, store = world.process()
     caplog.set_level(logging.WARNING, logger=om_store.__name__)
