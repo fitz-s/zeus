@@ -1039,6 +1039,58 @@ def test_held_recovery_scan_reads_schema_once_per_scan_not_per_family(
     assert handlers == []
 
 
+def test_held_recovery_scan_skips_baseline_read_for_family_current_at_ens_hwm(
+    monkeypatch, tmp_path
+) -> None:
+    import sqlite3
+
+    import src.data.replacement_forecast_materialization_seed_builder as seed_builder
+    import src.data.replacement_forecast_production as prod
+    import src.data.replacement_forecast_seed_discovery as discovery
+    import src.data.replacement_input_hwm as input_hwm
+    from src.data.replacement_forecast_current_target_plan import SOURCE_ID
+
+    ens_cycle = _dt("2026-06-10T06:00:00")
+    scope = ("Moscow", "2026-06-11", "high")
+    db = _held_recovery_forecast_db(tmp_path)
+    conn = sqlite3.connect(db)
+    values: dict[str, object] = {
+        "source_id": SOURCE_ID,
+        "city": scope[0],
+        "target_date": scope[1],
+        "temperature_metric": scope[2],
+        "source_cycle_time": ens_cycle.isoformat(),
+        "computed_at": "2026-06-10T09:00:00+00:00",
+        "runtime_layer": "live",
+    }
+    for _cid, name, decl, notnull, default, pk in conn.execute(
+        "PRAGMA table_info(forecast_posteriors)"
+    ):
+        if notnull and default is None and not pk and name not in values:
+            values[name] = 0 if "INT" in str(decl).upper() or "REAL" in str(decl).upper() else "x"
+    conn.execute(
+        f"INSERT INTO forecast_posteriors({', '.join(values)})"
+        f" VALUES ({', '.join('?' for _ in values)})",
+        tuple(values.values()),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(discovery, "held_position_family_priorities", lambda **_k: {scope: 0})
+    monkeypatch.setattr(
+        input_hwm, "latest_eligible_ensemble_input_cycle", lambda *_a, **_k: ens_cycle
+    )
+    monkeypatch.setattr(
+        seed_builder,
+        "latest_baseline_coverage_for_replacement_seed",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("baseline read for a family already current at the ENS HWM")
+        ),
+    )
+    assert prod._held_common_cycle_recovery_targets(
+        db, decision_time=_dt("2026-06-10T22:30:00")
+    ) == ()
+
+
 def test_held_recovery_scan_stops_between_families_at_deadline(
     monkeypatch, tmp_path
 ) -> None:

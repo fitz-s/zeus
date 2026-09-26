@@ -3826,24 +3826,6 @@ def _held_common_cycle_recovery_targets(
             if ensemble_hwm is None:
                 continue
             ensemble_hwm = ensemble_hwm.astimezone(timezone.utc)
-            baseline = latest_baseline_coverage_for_replacement_seed(
-                conn,
-                city=city,
-                target_date=target_date,
-                temperature_metric=metric,
-                not_after_source_cycle_time=ensemble_hwm,
-                as_of_time=decision_time,
-            )
-            if baseline is None:
-                continue
-            baseline_cycle = datetime.fromisoformat(
-                str(baseline["source_cycle_time"]).replace("Z", "+00:00")
-            ).astimezone(timezone.utc)
-            # Both high-water marks are authority-filtered as of the same
-            # decision clock. Their minimum is the newest cycle neither leg
-            # outruns; the materializer still performs exact same-cycle
-            # identity validation before publishing q.
-            common_cycle = min(baseline_cycle, ensemble_hwm)
             row = conn.execute(
                 """
                 SELECT source_cycle_time
@@ -3863,6 +3845,28 @@ def _held_common_cycle_recovery_targets(
                 posterior_cycle = datetime.fromisoformat(
                     str(row[0]).replace("Z", "+00:00")
                 ).astimezone(timezone.utc)
+            # common_cycle <= ensemble_hwm, so a posterior at the ENS HWM is
+            # current whatever the baseline says; skip that read.
+            if posterior_cycle is not None and posterior_cycle >= ensemble_hwm:
+                continue
+            baseline = latest_baseline_coverage_for_replacement_seed(
+                conn,
+                city=city,
+                target_date=target_date,
+                temperature_metric=metric,
+                not_after_source_cycle_time=ensemble_hwm,
+                as_of_time=decision_time,
+            )
+            if baseline is None:
+                continue
+            baseline_cycle = datetime.fromisoformat(
+                str(baseline["source_cycle_time"]).replace("Z", "+00:00")
+            ).astimezone(timezone.utc)
+            # Both high-water marks are authority-filtered as of the same
+            # decision clock. Their minimum is the newest cycle neither leg
+            # outruns; the materializer still performs exact same-cycle
+            # identity validation before publishing q.
+            common_cycle = min(baseline_cycle, ensemble_hwm)
             if posterior_cycle is not None and posterior_cycle >= common_cycle:
                 continue
             scopes_by_cycle.setdefault(common_cycle, []).append(
