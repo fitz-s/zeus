@@ -555,6 +555,71 @@ def test_interval_q_ucb_covers_bootstrap_center_draws_of_every_assignment() -> N
         assert interval_ucb[b.bin_id] >= float(np.percentile(draw_sups, 95.0)) - 1e-9, b.bin_id
 
 
+@pytest.mark.parametrize(
+    "k,floor_c",
+    [(1.0, None), (0.6, None), (0.6, 1.9), (1.4, 0.4), (0.25, 3.0)],
+)
+def test_served_interval_sigma_dominates_every_assignment_through_the_ladder(k, floor_c) -> None:
+    """HIGH 2: k(tau) and the floors act on sigma alone, monotone non-decreasing.
+
+    k(tau) depends on (unit, metric, lead bucket, city), never on the member values, and
+    the step/settlement floors are max(); so served(sigma) = max(k*sigma, floors) is
+    monotone and sup_x served(sigma(x)) = served(sup_x sigma(x)) = served(sigma_sup).
+    Checked through the production q builder: the served q of the interval shape is the
+    q of the max served sigma over enumerated consistent assignments.
+    """
+    import random
+
+    from src.calibration.emos import bin_probability_settlement
+
+    bounds = tuple([(-2.0, -0.51)] * 26 + [(0.51, 2.0)] * 25)
+    mu = 0.0
+    bins = _band_bins(mu)
+
+    def served_sigma(sigma_pred: float) -> float:
+        sigma = sigma_pred * k if (k != 1.0 and k > 0.0) else sigma_pred
+        return max(sigma, floor_c) if floor_c is not None else sigma
+
+    def served_q(sigma_pred: float) -> dict[str, float]:
+        q, _, _ = materializer._build_scaled_normal_uniform_q(
+            mu=mu, sigma_pred=sigma_pred, k=k, uniform_w=0.0, floor_steps=0.0,
+            bins=bins, half_step=0.5, rounding_rule="wmo_half_up", day0_obs_extreme_c=None,
+            settlement_step_c=1.0, settlement_sigma_floor_c=floor_c, city_unit="C",
+            metric="low",
+        )
+        return q
+
+    interval = materializer._interval_censored_evidence_shape(
+        member_bounds_c=bounds, center_c=mu, **_shape_kw(mu)
+    )
+    rng = random.Random(0)
+    worst = 0.0
+    for _ in range(200):
+        xs = [lo + (hi - lo) * rng.choice((0.0, 1.0, rng.random())) for lo, hi in bounds]
+        point = materializer._current_evidence_shape_from_values(
+            members_c=xs, center_c=mu, **_shape_kw(mu)
+        )
+        worst = max(worst, served_sigma(point.predictive_sigma_c))
+    assert served_sigma(interval.predictive_sigma_c) >= worst - 1e-12
+    # The production builder serves exactly the ladder's sigma. Open-ended bins may be
+    # capped at their un-floored mass, so compare interior bins' relative shape.
+    q_interval = served_q(interval.predictive_sigma_c)
+    interior = [b for b in bins if b.lower_c is not None and b.upper_c is not None]
+    reference = {
+        b.bin_id: bin_probability_settlement(
+            mu, served_sigma(interval.predictive_sigma_c), b.lower_c, b.upper_c,
+            half_step=0.5, rounding_rule="wmo_half_up",
+        )
+        for b in interior
+    }
+    ref_total = sum(reference.values())
+    served_total = sum(q_interval[b.bin_id] for b in interior)
+    for b in interior:
+        assert q_interval[b.bin_id] / served_total == pytest.approx(
+            reference[b.bin_id] / ref_total, abs=1e-9
+        )
+
+
 def test_sup_normal_bin_mass_bounds_the_grid() -> None:
     """The closed-form (center, spread) sup is >= a dense grid over both ranges."""
     from src.calibration.emos import bin_probability_settlement

@@ -189,6 +189,27 @@ a point value, and none adds a knob.
      1,785 would violate an all-bin check. That is a pre-existing property of the
      point path, recorded here and not changed by this work.
 
+**Served σ after the ladder (review HIGH 2).** The comparison is served-vs-served:
+a consistent assignment x would itself be served `served(σ(x))`. On the
+current-evidence route (`_current_shape is not None`) the ladder is fixed:
+
+- `σ_used = max(k·σ, floor_steps·step, settlement_floor)`;
+- `k = k_bucket(τ)·c_city` from `_sigma_tau_calibration_lookup`. It reads only
+  (unit, metric, τ-bucket, city), where τ is issue cycle → city-local target end
+  (`_lead_target_h`). It never reads the members, and k ∈ [0.25, 4] or neutral 1.0;
+- `w = floor_steps = 0` (the artifact is k-only);
+- `settlement_floor` depends only on (city, season, metric);
+- the per-city ρ-mix is disabled for current shapes (`_city_cand = None`);
+- the open-ended catch-all cap uses min(floored mass, mass at k·σ). Both are
+  functions of σ alone.
+
+So `served` is a monotone non-decreasing function of σ with no member dependence,
+and `sup_x served(σ(x)) = served(σ_sup)`. k < 1 shrinks both sides equally; it never
+lets a point assignment out-serve the interval shape. Today the live artifact
+`state/sigma_tau_calibration.json` is absent, so k = 1 (checked 2026-09-25). A test
+drives the production `_build_scaled_normal_uniform_q` with k ∈ {1, 0.6, 1.4, 0.25}
+and settlement floors, and checks the dominance against 200 assignments.
+
 Scope limits (stated, not hidden):
 
 - **Day0 conditioning** (observation absorbed): component term 3 handles
