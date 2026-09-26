@@ -44,6 +44,7 @@ and never serves an answer it cannot prove.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -248,6 +249,26 @@ def meta_url(slug: str) -> str:
     return f"https://{META_HOST}/data/{slug}/static/meta.json"
 
 
+_STORE_ERRORS = (sqlite3.Error, OSError, ValueError, TypeError, OverflowError, zstandard.ZstdError)
+
+
+def _fail_soft(default: object):
+    """Every store entry point: a store fault returns ``default`` (the network path)."""
+
+    def wrap(method):
+        @functools.wraps(method)
+        def guarded(self, *args, **kwargs):
+            try:
+                return method(self, *args, **kwargs)
+            except _STORE_ERRORS as exc:
+                self._failed(exc)
+                return default
+
+        return guarded
+
+    return wrap
+
+
 def _hour_key(now: float) -> str:
     return datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%dT%H")
 
@@ -292,6 +313,7 @@ class OpenMeteoResponseStore:
 
     # -- provider run state ----------------------------------------------
 
+    @_fail_soft(None)
     def record_meta(self, slug: str, payload: object, now: float | None = None) -> None:
         """Pin one meta.json reading by run identity; its stamps only move forward."""
 
@@ -308,33 +330,34 @@ class OpenMeteoResponseStore:
         if any(stamp is None for stamp in stamps):
             return
         init, modification, availability = (int(stamp) for stamp in stamps)  # type: ignore[arg-type]
-        try:
-            db = self._db()
+        db = self._db()
+        db.execute(
+            """
+            INSERT INTO provider_runs VALUES (?, ?, ?, ?)
+            ON CONFLICT(slug, run_init) DO UPDATE SET
+                modification = MAX(provider_runs.modification, excluded.modification),
+                availability = MAX(provider_runs.availability, excluded.availability)
+            """,
+            (slug, init, modification, availability),
+        )
+        # Only a reading at the pinned maximum on every stamp confirms it is
+        # current; a lagging replica neither regresses the pin nor vouches for it.
+        latest = self._run_state(slug)
+        if latest is not None and (init, modification, availability) == (
+            latest.init,
+            latest.modification,
+            latest.availability,
+        ):
             db.execute(
-                """
-                INSERT INTO provider_runs VALUES (?, ?, ?, ?)
-                ON CONFLICT(slug, run_init) DO UPDATE SET
-                    modification = MAX(provider_runs.modification, excluded.modification),
-                    availability = MAX(provider_runs.availability, excluded.availability)
-                """,
-                (slug, init, modification, availability),
+                "INSERT OR REPLACE INTO provider_asked VALUES (?, ?)",
+                (slug, time.time() if now is None else now),
             )
-            # Only a reading at the pinned maximum on every stamp confirms it is
-            # current; a lagging replica neither regresses the pin nor vouches for it.
-            latest = self.run_state(slug)
-            if latest is not None and (init, modification, availability) == (
-                latest.init,
-                latest.modification,
-                latest.availability,
-            ):
-                db.execute(
-                    "INSERT OR REPLACE INTO provider_asked VALUES (?, ?)",
-                    (slug, time.time() if now is None else now),
-                )
-        except (sqlite3.Error, OSError) as exc:
-            self._failed(exc)
 
+    @_fail_soft(None)
     def run_state(self, slug: str, init: int | None = None) -> RunState | None:
+        return self._run_state(slug, init)
+
+    def _run_state(self, slug: str, init: int | None = None) -> RunState | None:
         """The latest pinned run of ``slug``, or its run ``init`` when given."""
 
         select = (
@@ -350,31 +373,27 @@ class OpenMeteoResponseStore:
             row = self._db().execute(select + "AND r.run_init = ?", (slug, init)).fetchone()
         return RunState(*row) if row else None
 
+    @_fail_soft(())
     def stale_slugs(self, req: ExactRequest, now: float | None = None) -> tuple[str, ...]:
         """Slugs whose run state must be re-read before this request can be proven."""
 
         now = time.time() if now is None else now
-        try:
-            stale = []
-            for slug in req.slugs:
-                state = self.run_state(slug)
-                superseded = state is not None and req.run is not None and req.run < state.init
-                if state is None or (
-                    not superseded and now - state.observed_at > META_FRESH_SECONDS
-                ):
-                    stale.append(slug)
-            return tuple(stale)
-        except (sqlite3.Error, OSError) as exc:
-            self._failed(exc)
-            return ()
+        stale = []
+        for slug in req.slugs:
+            state = self._run_state(slug)
+            superseded = state is not None and req.run is not None and req.run < state.init
+            if state is None or (not superseded and now - state.observed_at > META_FRESH_SECONDS):
+                stale.append(slug)
+        return tuple(stale)
 
     @staticmethod
     def _proof(req: ExactRequest, state: RunState | None, now: float) -> str | None:
-        """The run state an answer fetched now provably reflects, or None."""
+        """The run state of ONE model that an answer fetched now provably reflects."""
 
         if state is None:
             return None
         if req.run is not None and req.run < state.init:
+            # This model's own requested run is superseded by its own newer run.
             return SUPERSEDED
         if req.run is not None and req.run > state.init:
             return None
@@ -386,14 +405,17 @@ class OpenMeteoResponseStore:
         return f"{state.init}:{state.modification}"
 
     def _holds(self, req: ExactRequest, slug: str, proof: object, now: float) -> bool:
-        """Whether an answer proven at ``proof`` is still the provider's answer."""
+        """Whether ONE model's part of a held answer is still the provider's.
+
+        Each model proves its own part; one model's supersession never covers another.
+        """
 
         if proof == SUPERSEDED:
             return True
         init, _, modification = str(proof).partition(":")
         if not (init.isdigit() and modification.isdigit()):
             return False
-        state = self.run_state(slug)
+        state = self._run_state(slug)
         if state is None:
             return False
         if state.init == int(init):
@@ -406,47 +428,45 @@ class OpenMeteoResponseStore:
             return False
         # The run was superseded after this fetch: the answer holds only if it
         # already reflected that run's final modification.
-        final = self.run_state(slug, int(init))
+        final = self._run_state(slug, int(init))
         return final is not None and final.modification == int(modification)
 
+    @_fail_soft(None)
     def proofs(self, req: ExactRequest, now: float | None = None) -> dict[str, str] | None:
+        """Per-model proofs for an answer fetched now, or None if any model is unproven."""
+
         now = time.time() if now is None else now
-        try:
-            out: dict[str, str] = {}
-            for slug in req.slugs:
-                proof = self._proof(req, self.run_state(slug), now)
-                if proof is None:
-                    return None
-                out[slug] = proof
-            return out
-        except (sqlite3.Error, OSError) as exc:
-            self._failed(exc)
-            return None
+        out: dict[str, str] = {}
+        for slug in req.slugs:
+            proof = self._proof(req, self._run_state(slug), now)
+            if proof is None:
+                return None
+            out[slug] = proof
+        return out
 
     # -- answers ----------------------------------------------------------
 
+    @_fail_soft(None)
     def lookup(
         self, request_id: str, req: ExactRequest, now: float | None = None
     ) -> tuple[int, object] | None:
-        """The held (HTTP status, body) for this request, if it is still the provider's."""
+        """The held (HTTP status, body), if every model's part of it still holds."""
 
         now = time.time() if now is None else now
-        try:
-            row = self._db().execute(
-                "SELECT proofs, status, payload FROM responses "
-                "WHERE request_id = ? AND expires_at > ?",
-                (request_id, now),
-            ).fetchone()
-            if row is None:
-                return None
-            proofs = json.loads(row[0])
-            if not all(self._holds(req, slug, proofs.get(slug), now) for slug in req.slugs):
-                return None
-            return int(row[1]), json.loads(zstandard.ZstdDecompressor().decompress(row[2]))
-        except (sqlite3.Error, OSError, ValueError, zstandard.ZstdError) as exc:
-            self._failed(exc)
+        row = self._db().execute(
+            "SELECT proofs, status, payload FROM responses WHERE request_id = ? AND expires_at > ?",
+            (request_id, now),
+        ).fetchone()
+        if row is None:
             return None
+        proofs = json.loads(row[0])
+        if not isinstance(proofs, dict) or set(proofs) != set(req.slugs):
+            return None
+        if not all(self._holds(req, slug, proofs[slug], now) for slug in req.slugs):
+            return None
+        return int(row[1]), json.loads(zstandard.ZstdDecompressor().decompress(row[2]))
 
+    @_fail_soft(None)
     def put(
         self,
         request_id: str,
@@ -459,27 +479,29 @@ class OpenMeteoResponseStore:
         """Hold a 200 body, or a provider's typed "run not published" refusal."""
 
         now = time.time() if now is None else now
-        try:
-            blob = zstandard.ZstdCompressor(level=3).compress(
-                json.dumps(payload, separators=(",", ":")).encode("utf-8")
-            )
-            self._db().execute(
-                "INSERT OR REPLACE INTO responses VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    request_id,
-                    json.dumps(dict(proofs), sort_keys=True),
-                    int(status),
-                    blob,
-                    now,
-                    req.expires_at,
-                ),
-            )
-            self._evict(now)
-        except (sqlite3.Error, OSError, TypeError, ValueError, zstandard.ZstdError) as exc:
-            self._failed(exc)
+        blob = zstandard.ZstdCompressor(level=3).compress(
+            json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        )
+        self._db().execute(
+            "INSERT OR REPLACE INTO responses VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                request_id,
+                json.dumps(dict(proofs), sort_keys=True),
+                int(status),
+                blob,
+                now,
+                req.expires_at,
+            ),
+        )
+        self._evict(now)
 
     def _evict(self, now: float) -> None:
-        """Drop what no live target date can read; bounded deletes on indexes."""
+        """Drop what no live target date can read.
+
+        Runs from ``put`` at most once per EVICT_INTERVAL_SECONDS per process. Every
+        DELETE walks an index (expires_at, the day/hour primary keys, slug), so one
+        pass touches only expired rows.
+        """
 
         if now - self._last_evicted < EVICT_INTERVAL_SECONDS:
             return
@@ -510,38 +532,33 @@ class OpenMeteoResponseStore:
             (_hour_key(now), job[:160], metered, served, reissued),
         )
 
+    @_fail_soft(None)
     def note_metered(
         self, request_id: str, job: str, units: int, now: float | None = None
     ) -> None:
         """Account one metered send; a same-day repeat of a success is a reissue."""
 
         now = time.time() if now is None else now
-        try:
-            repeat = self._db().execute(
-                "SELECT 1 FROM day_successes WHERE day = ? AND request_id = ?",
-                (_day_key(now), request_id),
-            ).fetchone()
-            self._ledger_add(job, now, units, 0, units if repeat else 0)
-            self._maybe_alarm(now)
-        except (sqlite3.Error, OSError) as exc:
-            self._failed(exc)
+        repeat = self._db().execute(
+            "SELECT 1 FROM day_successes WHERE day = ? AND request_id = ?",
+            (_day_key(now), request_id),
+        ).fetchone()
+        self._ledger_add(job, now, units, 0, units if repeat else 0)
+        self._maybe_alarm(now)
 
+    @_fail_soft(None)
     def note_served(self, job: str, units: int, now: float | None = None) -> None:
-        try:
-            self._ledger_add(job, time.time() if now is None else now, 0, units, 0)
-        except (sqlite3.Error, OSError) as exc:
-            self._failed(exc)
+        self._ledger_add(job, time.time() if now is None else now, 0, units, 0)
 
+    @_fail_soft(None)
     def note_success(self, request_id: str, now: float | None = None) -> None:
-        try:
-            self._db().execute(
-                "INSERT OR IGNORE INTO day_successes VALUES (?, ?)",
-                (_day_key(time.time() if now is None else now), request_id),
-            )
-        except (sqlite3.Error, OSError) as exc:
-            self._failed(exc)
+        self._db().execute(
+            "INSERT OR IGNORE INTO day_successes VALUES (?, ?)",
+            (_day_key(time.time() if now is None else now), request_id),
+        )
 
-    def burn(self, now: float | None = None) -> dict[str, object]:
+    @_fail_soft(None)
+    def burn(self, now: float | None = None) -> dict[str, object] | None:
         """Today's units by job and the end-of-day projection at the current rate.
 
         The current rate is the mean over the trailing ``RATE_WINDOW_HOURS`` (hour
@@ -587,7 +604,7 @@ class OpenMeteoResponseStore:
             return
         self._last_alarm_check = now
         burn = self.burn(now)
-        if burn["projected"] <= ALARM_DAILY_LIMIT:  # type: ignore[operator]
+        if burn is None or burn["projected"] <= ALARM_DAILY_LIMIT:  # type: ignore[operator]
             return
         claimed = self._db().execute(
             "INSERT OR IGNORE INTO alarms VALUES (?)", (_hour_key(now),)

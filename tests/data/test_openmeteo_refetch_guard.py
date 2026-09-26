@@ -473,6 +473,37 @@ def test_f_alarm_silent_under_budget(world, caplog) -> None:
     assert not [r for r in caplog.records if "burn alarm" in r.getMessage()]
 
 
+def test_store_faults_never_reach_a_fetch_caller(world, monkeypatch) -> None:
+    """Every store entry point fails soft: a broken store is the old network path."""
+
+    tracker, store = world.process()
+
+    def broken(self):
+        raise om_store.sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(OpenMeteoResponseStore, "_db", broken)
+    req = om_store.exact_request(SINGLE_RUNS, _madrid())
+    meta = {
+        "last_run_initialisation_time": _utc(0),
+        "last_run_modification_time": _utc(3),
+        "last_run_availability_time": _utc(3.2),
+    }
+    assert store.record_meta("dwd_icon_eu", meta) is None
+    assert store.run_state("dwd_icon_eu") is None
+    assert store.stale_slugs(req) == ()
+    assert store.proofs(req) is None
+    assert store.lookup("rid", req) is None
+    assert store.put("rid", req, {"dwd_icon": "1:2"}, {"x": 1}) is None
+    assert store.note_metered("rid", "job", 1) is None
+    assert store.note_served("job", 1) is None
+    assert store.note_success("rid") is None
+    assert store.burn() is None
+
+    world.fetch((tracker, store))
+    world.fetch((tracker, store))
+    assert world.provider.data_calls == 2  # the plain network path, no exception
+
+
 def test_store_retention_evicts_unreachable_answers(world) -> None:
     proc = world.process()
     world.fetch(proc)
