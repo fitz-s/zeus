@@ -1,4 +1,6 @@
-# Lifecycle: created=2026-06-15; last_reviewed=2026-08-12; last_reused=2026-08-12
+# Created: 2026-06-15
+# Last reused/audited: 2026-09-24
+# Lifecycle: created=2026-06-15; last_reviewed=2026-09-24; last_reused=2026-09-24
 # Purpose: Prove the live q-kernel bridge preserves probability and execution invariants.
 # Reuse: Re-audit overlay probability authority and live blockers before q-kernel changes.
 # Authority basis: docs/rebuild/consult_review_pr409.md §5/§7 + the round-2
@@ -14,7 +16,6 @@
 #     3. day0 observation lane: _DAY0_LANE_EVENT_TYPES feed live observed-boundary
 #        state into the same qkernel family optimizer.
 #     4. current exposure in SELECTION (per-bin family exposure into argmax ΔU).
-# Last reused/audited: 2026-08-12
 """Integration tests for the four PR #409 live-path blockers (RED-on-revert)."""
 from __future__ import annotations
 
@@ -4731,3 +4732,73 @@ def test_qkernel_belief_rehydration_uses_full_family_not_selection_scoped_subset
     assert res.decision is not None
     assert list(res.decision.joint_q.q) == pytest.approx(served_yes_q)
     assert "SERVED_BELIEF_Q_MISSING" not in str(res.no_trade_reason or "")
+
+
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+@pytest.mark.parametrize("reason,allowed", [
+    ("EDLI executable snapshot marked non-executable: clob_no_ask_illiquid", True),
+    ("EDLI executable snapshot marked non-executable: clob_archived", False),
+    ("EDLI executable snapshot marked non-executable: accepting_orders_not_true", False),
+    ("EDLI executable snapshot selected token mismatch", False),
+    ("BUY_NO_CONSERVATIVE_EVIDENCE_MISSING", False),
+])
+def test_global_selected_buy_defers_only_old_quote_to_current_book(direction, reason, allowed):
+    """An old empty ask cannot veto a sealed current BUY before its JIT recapture."""
+    from dataclasses import replace
+
+    proof = _overlay_proof(
+        direction=direction,
+        q_posterior=0.652, q_lcb_5pct=0.617,
+        economics=_selected_economics(
+            edge_lcb=0.28, cost=0.32, q_dot_payoff=0.652, point_ev=0.332,
+            side=direction.removeprefix("buy_").upper(),
+        ),
+    )
+    if allowed:
+        # Real single-token cache shape: no native ask and no complementary bid.
+        old_row = {
+            **proof.row,
+            "orderbook_top_ask": "ABSENT",
+            "orderbook_depth_json": json.dumps({
+                "YES": {"asks": [], "bids": []},
+                "NO": {"asks": [], "bids": []},
+            }),
+            "tradeability_status_json": json.dumps({
+                "executable_allowed": False, "reason": "clob_no_ask_illiquid",
+            }),
+        }
+        with pytest.raises(ValueError) as rejected:
+            era._execution_price_from_snapshot(
+                old_row, selected_token_id=proof.token_id, direction=direction,
+            )
+        assert str(rejected.value) == reason
+        proof = replace(proof, row=old_row)
+    proof = replace(proof, execution_price=None, missing_reason=reason)
+    assert era._selection_scoped_proofs(
+        proofs=(proof,), honor_admission_rejections=False,
+        enforce_win_rate_floor=False,
+    ) == ()
+    assert era._selection_scoped_proofs(
+        proofs=(proof,), honor_admission_rejections=False,
+        allow_global_current_state_rebind=True, enforce_win_rate_floor=False,
+    ) == ()
+    scoped = era._selection_scoped_proofs(
+        proofs=(proof,), honor_admission_rejections=False,
+        allow_global_current_state_rebind=True, allow_global_empty_ask_rebind=True,
+        enforce_win_rate_floor=False,
+    )
+    assert scoped == ((proof,) if allowed else ())
+    cert = {
+        **proof.qkernel_execution_economics,
+        "payoff_q_action": 0.652, "payoff_q_lcb": 0.61,
+        "global_probability_functional": "POSTERIOR_PREDICTIVE_MEAN",
+        "edge_expected": 0.29, "edge_lcb": 0.29,
+    }
+    if allowed:
+        rebound = era._bind_global_current_state_economics_to_proof(proof, cert)
+        assert rebound.missing_reason is None
+        # Admission never fabricates the missing executable price.
+        assert rebound.execution_price is None
+    else:
+        with pytest.raises(ValueError, match="GLOBAL_CURRENT_STATE_PROOF_REJECTION_NOT_REBINDABLE"):
+            era._bind_global_current_state_economics_to_proof(proof, cert)

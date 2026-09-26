@@ -4865,15 +4865,16 @@ class PreSubmitIdentityBindingError(RuntimeError):
 def _signed_identity_persistence_connection(
     conn: sqlite3.Connection,
 ) -> tuple[sqlite3.Connection, bool]:
-    """Return a fresh file-backed connection for the final pre-POST write.
+    """Return a fresh file-backed connection for independent envelope writes.
 
     Reactor connections are long-lived and temporarily change connection-local
     SQLite handlers.  Reusing one here can inherit a stale WAL snapshot or a
     shortened busy handler, turning an executable order into an immediate
     ``database is locked`` rejection.  A file-backed command is already committed
-    before this boundary, so a fresh connection sees the same canonical row while
-    starting with neither condition.  In-memory and test-double connections stay
-    on the caller connection because they have no separately addressable DB.
+    before these pre-POST and final SDK receipt boundaries, so a fresh connection
+    sees the same canonical row while starting with neither condition. In-memory
+    and test-double connections stay on the caller connection because they have
+    no separately addressable DB.
     """
 
     if not isinstance(conn, sqlite3.Connection) or conn.in_transaction:
@@ -4903,9 +4904,13 @@ def _persist_final_submission_envelope_payload(
     """Persist the SDK-returned submission envelope as a second append-only row.
 
     The command row keeps pointing at the pre-side-effect envelope.  This helper
-    pins the post-submit SDK response/signature facts and returns a compact
-    event payload reference so ACK/REJECTED events can prove which final
-    envelope row they observed.
+    independently commits the post-submit SDK response/signature facts before
+    ACK/fill writes, then returns a compact event payload reference so
+    ACK/REJECTED events can prove which final envelope row they observed.
+
+    An active caller transaction cannot safely make this receipt durable:
+    scope is only that connection, drain is the caller ending its transaction
+    and normal venue recovery, and reset is the next submit on an idle connection.
     """
 
     if not isinstance(result, dict):
@@ -4925,17 +4930,44 @@ def _persist_final_submission_envelope_payload(
     try:
         from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
         from src.state.venue_command_repo import insert_submission_envelope
+        from src.state.write_coordinator import WritePriority
 
         envelope = VenueSubmissionEnvelope.from_dict(envelope_payload)
         envelope_id = hashlib.sha256(envelope.to_json().encode("utf-8")).hexdigest()
+        if conn.in_transaction:
+            raise _PostSubmitCallerTransactionError(
+                "final SDK receipt requires a separate committed transaction"
+            )
+        persist_conn, close_persist_conn = _signed_identity_persistence_connection(conn)
+
+        def persist_receipt() -> None:
+            nonlocal envelope_id
+            try:
+                envelope_id = insert_submission_envelope(persist_conn, envelope)
+            except sqlite3.IntegrityError:
+                if persist_conn.execute(
+                    "SELECT 1 FROM venue_submission_envelopes WHERE envelope_id = ?",
+                    (envelope_id,),
+                ).fetchone() is None:
+                    raise
+
         try:
-            envelope_id = insert_submission_envelope(conn, envelope)
-        except sqlite3.IntegrityError:
-            if conn.execute(
-                "SELECT 1 FROM venue_submission_envelopes WHERE envelope_id = ?",
-                (envelope_id,),
-            ).fetchone() is None:
-                raise
+            _run_post_submit_ack_persistence(
+                persist_conn,
+                own_conn=close_persist_conn,
+                persist_fn=persist_receipt,
+                owner="final_sdk_receipt_persist",
+                what="final_sdk_receipt",
+                # Current canonical writers can hold this lease for ~16.6s.
+                # Four bounded 5s attempts cover that observed contention;
+                # the short SQLite hold budget still yields once admitted.
+                deadline_ms=5000,
+                max_hold_ms=500,
+                priority=WritePriority.RECOVERY_CRITICAL,
+            )
+        finally:
+            if close_persist_conn:
+                persist_conn.close()
         return {
             "final_submission_envelope_stage": "post_submit_result",
             "final_submission_envelope_id": envelope_id,
@@ -5326,6 +5358,7 @@ def _run_post_submit_ack_persistence(
     what: str,
     deadline_ms: int,
     max_hold_ms: int,
+    priority="standard",
 ) -> None:
     """Persist one post-submit ACK or terminal-rejection outcome atomically.
 
@@ -5342,7 +5375,6 @@ def _run_post_submit_ack_persistence(
     """
     from src.state.write_coordinator import (
         WriteLeaseTimeout,
-        WritePriority,
         bounded_sqlite_write,
     )
 
@@ -5360,7 +5392,7 @@ def _run_post_submit_ack_persistence(
                 owner=owner,
                 deadline_ms=deadline_ms,
                 max_hold_ms=max_hold_ms,
-                priority=WritePriority.STANDARD,
+                priority=priority,
             ) as lease:
                 if lease is None:
                     conn.execute("BEGIN IMMEDIATE")
@@ -8164,26 +8196,28 @@ def execute_exit_order(
                 command_id=command_id,
             )
         except FinalSubmissionEnvelopePersistenceError as exc:
-            try:
-                append_event(
-                    conn,
-                    command_id=command_id,
-                    event_type="REVIEW_REQUIRED",
-                    occurred_at=ack_time,
-                    payload=_submit_result_review_required_payload(
-                        result,
-                        reason="final_submission_envelope_persistence_failed",
-                        detail=str(exc),
-                        idempotency_key=idem.value,
-                    ),
-                )
-                conn.commit()
-            except Exception as inner:
-                logger.error(
-                    "execute_exit_order: REVIEW_REQUIRED append_event failed after final "
-                    "submission envelope persistence failure (command_id=%s): inner=%s original=%s",
-                    command_id, inner, exc,
-                )
+            caller_txn_active = not _own_conn and conn.in_transaction
+            if not caller_txn_active:
+                try:
+                    append_event(
+                        conn,
+                        command_id=command_id,
+                        event_type="REVIEW_REQUIRED",
+                        occurred_at=ack_time,
+                        payload=_submit_result_review_required_payload(
+                            result,
+                            reason="final_submission_envelope_persistence_failed",
+                            detail=str(exc),
+                            idempotency_key=idem.value,
+                        ),
+                    )
+                    conn.commit()
+                except Exception as inner:
+                    logger.error(
+                        "execute_exit_order: REVIEW_REQUIRED append_event failed after final "
+                        "submission envelope persistence failure (command_id=%s): inner=%s original=%s",
+                        command_id, inner, exc,
+                    )
             return _with_venue_boundary(OrderResult(
                 trade_id=intent.trade_id,
                 status="unknown_side_effect",
@@ -8197,7 +8231,7 @@ def execute_exit_order(
                 venue_status=str(result.get("status") or "") if isinstance(result, dict) else "",
                 idempotency_key=idem.value,
                 command_id=command_id,
-                command_state="REVIEW_REQUIRED",
+                command_state="SUBMITTING" if caller_txn_active else "REVIEW_REQUIRED",
             ), order_type=order_type, ack_received=True)
         order_id = _submit_result_order_id(result)
         if result.get("success") is False:
@@ -10135,27 +10169,29 @@ def _live_order(
                 command_id=command_id,
             )
         except FinalSubmissionEnvelopePersistenceError as exc:
-            try:
-                append_event(
-                    conn,
-                    command_id=command_id,
-                    event_type="REVIEW_REQUIRED",
-                    occurred_at=ack_time,
-                    payload=_submit_result_review_required_payload(
-                        result,
-                        reason="final_submission_envelope_persistence_failed",
-                        detail=str(exc),
-                        idempotency_key=idem.value,
-                    ),
-                )
-                if _own_conn:
-                    conn.commit()
-            except Exception as inner:
-                logger.error(
-                    "_live_order: REVIEW_REQUIRED append_event failed after final "
-                    "submission envelope persistence failure (command_id=%s): inner=%s original=%s",
-                    command_id, inner, exc,
-                )
+            caller_txn_active = not _own_conn and conn.in_transaction
+            if not caller_txn_active:
+                try:
+                    append_event(
+                        conn,
+                        command_id=command_id,
+                        event_type="REVIEW_REQUIRED",
+                        occurred_at=ack_time,
+                        payload=_submit_result_review_required_payload(
+                            result,
+                            reason="final_submission_envelope_persistence_failed",
+                            detail=str(exc),
+                            idempotency_key=idem.value,
+                        ),
+                    )
+                    if _own_conn:
+                        conn.commit()
+                except Exception as inner:
+                    logger.error(
+                        "_live_order: REVIEW_REQUIRED append_event failed after final "
+                        "submission envelope persistence failure (command_id=%s): inner=%s original=%s",
+                        command_id, inner, exc,
+                    )
             return OrderResult(
                 trade_id=trade_id,
                 status="unknown_side_effect",
@@ -10167,7 +10203,7 @@ def _live_order(
                 venue_status=str(result.get("status") or "") if isinstance(result, dict) else "",
                 idempotency_key=idem.value,
                 command_id=command_id,
-                command_state="REVIEW_REQUIRED",
+                command_state="SUBMITTING" if caller_txn_active else "REVIEW_REQUIRED",
                 zeus_submit_intent_time=zeus_submit_intent_time,
                 venue_ack_time=ack_time,
             )

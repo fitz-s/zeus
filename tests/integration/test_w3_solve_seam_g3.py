@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-09-23
+# Last reused/audited: 2026-09-24
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -21702,7 +21702,8 @@ def test_global_jit_snapshot_persist_avoids_stale_shared_wal_snapshot(
     writer.close()
 
 
-def test_global_winner_persists_jit_curve_as_executor_depth_authority(monkeypatch):
+@pytest.mark.parametrize("old_empty_ask", [False, True])
+def test_global_winner_persists_jit_curve_as_executor_depth_authority(monkeypatch, old_empty_ask):
     conn = sqlite3.connect(":memory:")
     init_snapshot_schema(conn)
     captured = _dt.datetime(2026, 7, 14, 20, 5, tzinfo=_dt.timezone.utc)
@@ -21750,6 +21751,17 @@ def test_global_winner_persists_jit_curve_as_executor_depth_authority(monkeypatc
         captured_at=captured - _dt.timedelta(seconds=5),
         freshness_deadline=captured + _dt.timedelta(seconds=25),
     )
+    if old_empty_ask:
+        old = replace(
+            old,
+            orderbook_top_ask=None,
+            orderbook_depth_jsonb=json.dumps({
+                "bids": [{"price": "0.39", "size": "100"}], "asks": [],
+            }),
+            tradeability_status={
+                "executable_allowed": False, "reason": "clob_no_ask_illiquid",
+            },
+        )
     insert_snapshot(conn, old)
     conn.commit()
     selected_curve = ExecutableCostCurve(
@@ -21842,6 +21854,9 @@ def test_global_winner_persists_jit_curve_as_executor_depth_authority(monkeypatc
     )
 
     assert row["snapshot_id"] == curve.snapshot_id
+    assert snapshot.snapshot_id != old.snapshot_id
+    assert snapshot.tradeability_status.executable_allowed is True
+    assert get_snapshot(conn, old.snapshot_id) == old
     assert curve.book_hash == stable_hash(raw_book)
     assert len(curve.book_hash) == 64
     assert snapshot.orderbook_top_ask == Decimal("0.37")
@@ -47422,3 +47437,25 @@ def test_sep23_exit_regressions_use_current_bid_and_held_probability(side, held_
         ),
     )
     assert (score.candidate is not None and not score.rejection_reasons) is admitted
+
+
+@pytest.mark.parametrize("side", ["YES", "NO"])
+@pytest.mark.parametrize("fault,error", [
+    ("empty_ask", "GLOBAL_BUY_JIT_ASKS_MISSING"),
+    ("wrong_token", "GLOBAL_BUY_JIT_TOKEN_MISMATCH"),
+])
+def test_current_buy_jit_still_rejects_missing_ask_or_wrong_token(side, fault, error):
+    """Deferring a cache rejection never licenses an invalid current raw book."""
+    selected = _current_maker_buy_candidate(side=side)
+    authority = _jit_market_authority(selected, tick="0.001", min_order_size="5")
+    raw_book = {
+        "asset_id": selected.token_id if fault != "wrong_token" else "different-token",
+        "tick_size": "0.001", "min_order_size": "5",
+        "bids": [{"price": "0.40", "size": "100"}],
+        "asks": [] if fault == "empty_ask" else [{"price": "0.59", "size": "80"}],
+    }
+    with pytest.raises(ValueError, match=error):
+        era._global_buy_candidate_from_raw_book(
+            selected, raw_book, captured_at_utc=authority.snapshot.captured_at,
+            market_authority=authority,
+        )
