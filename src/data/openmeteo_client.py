@@ -399,6 +399,7 @@ def http_outcome_payload(error: object) -> dict[str, object] | None:
 def _refresh_run_state(
     store: OpenMeteoResponseStore,
     req: ExactRequest,
+    request_id: str,
     *,
     tracker: OpenMeteoQuotaTracker,
     client: httpx.Client | None,
@@ -407,7 +408,7 @@ def _refresh_run_state(
     """Re-read, unmetered and within the caller's timeout, the run state ``req`` needs."""
 
     stop = time.monotonic() + float(timeout)
-    for slug in store.stale_slugs(req):
+    for slug in store.stale_slugs(req, request_id=request_id):
         remaining = stop - time.monotonic()
         if remaining <= 0.05:
             return
@@ -509,7 +510,9 @@ def fetch(
     job = endpoint_label or endpoint
     req = exact_request(url, params) if answers is not None else None
     if req is not None:
-        _refresh_run_state(answers, req, tracker=tracker, client=client, timeout=timeout)
+        _refresh_run_state(
+            answers, req, request_id, tracker=tracker, client=client, timeout=timeout
+        )
         held = answers.lookup(request_id, req)
         if held is not None:
             answers.note_served(job, quota_cost)

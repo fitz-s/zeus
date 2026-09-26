@@ -10,8 +10,11 @@ until that state changes:
 - single-runs ``run=R``: forever once R is superseded (if the held answer already
   reflected R's final modification); while R is the latest run, until R's
   ``last_run_modification_time`` advances;
-- previous-runs with explicit dates: until any requested model publishes a new
-  run or modifies its latest one.
+- previous-runs with explicit dates: only while every requested model's latest
+  run remains unchanged and confirmed within ``META_FRESH_SECONDS``. A cache entry
+  is reusable for at most ``CONSISTENCY_WAIT_SECONDS`` after its own fetch; at
+  that bound it must be re-fetched. A repeated replica cannot extend the answer's
+  age.
 
 A gap in an answer (nulls past a horizon, a model without a series) is part of
 the answer and can only fill when the provider modifies the run, so it is never
@@ -374,15 +377,44 @@ class OpenMeteoResponseStore:
         return RunState(*row) if row else None
 
     @_fail_soft(())
-    def stale_slugs(self, req: ExactRequest, now: float | None = None) -> tuple[str, ...]:
+    def stale_slugs(
+        self,
+        req: ExactRequest,
+        now: float | None = None,
+        *,
+        request_id: str | None = None,
+    ) -> tuple[str, ...]:
         """Slugs whose run state must be re-read before this request can be proven."""
 
         now = time.time() if now is None else now
+        expired_proofs: dict[str, object] = {}
+        if req.run is None and request_id is not None:
+            answer = self._db().execute(
+                "SELECT proofs, fetched_at FROM responses "
+                "WHERE request_id = ? AND expires_at > ?",
+                (request_id, now),
+            ).fetchone()
+            if answer is not None and now - float(answer[1]) > CONSISTENCY_WAIT_SECONDS:
+                proofs = json.loads(answer[0])
+                if isinstance(proofs, dict):
+                    expired_proofs = proofs
         stale = []
         for slug in req.slugs:
             state = self._run_state(slug)
-            superseded = state is not None and req.run is not None and req.run < state.init
-            if state is None or (not superseded and now - state.observed_at > META_FRESH_SECONDS):
+            if req.run is not None:
+                superseded = state is not None and req.run < state.init
+                if state is None or (not superseded and now - state.observed_at > META_FRESH_SECONDS):
+                    stale.append(slug)
+                continue
+
+            prior = str(expired_proofs.get(slug, ""))
+            init, separator, _modification = prior.partition(":")
+            has_prior = separator and init.isdigit()
+            if has_prior:
+                if state is None or state.init <= int(init):
+                    stale.append(slug)
+                continue
+            if state is None or now - state.observed_at > META_FRESH_SECONDS:
                 stale.append(slug)
         return tuple(stale)
 
@@ -391,6 +423,8 @@ class OpenMeteoResponseStore:
         """The run state of ONE model that an answer fetched now provably reflects."""
 
         if state is None:
+            return None
+        if req.run is None and now - state.observed_at > META_FRESH_SECONDS:
             return None
         if req.run is not None and req.run < state.init:
             # This model's own requested run is superseded by its own newer run.
@@ -404,12 +438,23 @@ class OpenMeteoResponseStore:
             return None
         return f"{state.init}:{state.modification}"
 
-    def _holds(self, req: ExactRequest, slug: str, proof: object, now: float) -> bool:
+    def _holds(
+        self,
+        req: ExactRequest,
+        slug: str,
+        proof: object,
+        now: float,
+        fetched_at: float,
+    ) -> bool:
         """Whether ONE model's part of a held answer is still the provider's.
 
         Each model proves its own part; one model's supersession never covers another.
+        Previous-runs answers also expire after one consistency wait: repeating a
+        pinned replica cannot keep an answer alive by refreshing its observation time.
         """
 
+        if req.run is None and now - fetched_at > CONSISTENCY_WAIT_SECONDS:
+            return False
         if proof == SUPERSEDED:
             return True
         init, _, modification = str(proof).partition(":")
@@ -454,7 +499,8 @@ class OpenMeteoResponseStore:
 
         now = time.time() if now is None else now
         row = self._db().execute(
-            "SELECT proofs, status, payload FROM responses WHERE request_id = ? AND expires_at > ?",
+            "SELECT proofs, status, payload, fetched_at FROM responses "
+            "WHERE request_id = ? AND expires_at > ?",
             (request_id, now),
         ).fetchone()
         if row is None:
@@ -462,7 +508,9 @@ class OpenMeteoResponseStore:
         proofs = json.loads(row[0])
         if not isinstance(proofs, dict) or set(proofs) != set(req.slugs):
             return None
-        if not all(self._holds(req, slug, proofs[slug], now) for slug in req.slugs):
+        if not all(
+            self._holds(req, slug, proofs[slug], now, float(row[3])) for slug in req.slugs
+        ):
             return None
         return int(row[1]), json.loads(zstandard.ZstdDecompressor().decompress(row[2]))
 

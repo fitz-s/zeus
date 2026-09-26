@@ -48,6 +48,7 @@ class Provider:
         }
         self.data_calls = 0
         self.meta_calls = 0
+        self.replicas: dict[str, list[int]] = {}
         self.unpublished = False
         self.release: threading.Event | None = None
         self.started = threading.Event()
@@ -58,7 +59,7 @@ class Provider:
         parts = urlsplit(url)
         if parts.path.endswith("/static/meta.json"):
             slug = parts.path.split("/")[2]
-            init, modification, availability = self.meta[slug]
+            init, modification, availability = self.replicas.get(slug, self.meta[slug])
             with self.lock:
                 self.meta_calls += 1
             return httpx.Response(
@@ -335,6 +336,57 @@ def test_previous_runs_answer_follows_every_models_latest_run(world) -> None:
     world.now["t"] = float(_utc(7))
     world.fetch(proc, PREVIOUS_RUNS, params)
     assert world.provider.data_calls == 2
+
+
+def test_previous_runs_answer_expires_after_consistency_wait_despite_stale_replica(world) -> None:
+    proc = world.process()
+    params = {
+        "latitude": 40.4719,
+        "longitude": -3.5626,
+        "start_date": "2026-09-27",
+        "end_date": "2026-09-27",
+        "hourly": "temperature_2m_previous_day1",
+        "models": "icon_eu",
+        "timezone": "Europe/Madrid",
+    }
+    first = world.fetch(proc, PREVIOUS_RUNS, params)
+    r1 = list(world.provider.meta["dwd_icon_eu"])
+
+    # R2 exists at the provider, but this replica continues returning R1's exact
+    # init/modification/availability triple and refreshes provider_asked.asked_at.
+    world.provider.meta["dwd_icon_eu"] = [_utc(6), _utc(9), _utc(9.2)]
+    world.provider.replicas["dwd_icon_eu"] = r1
+    world.now["t"] += om_store.CONSISTENCY_WAIT_SECONDS + 1
+    meta_calls = world.provider.meta_calls
+
+    second = world.fetch(proc, PREVIOUS_RUNS, params)
+
+    assert world.provider.meta_calls == meta_calls + 1
+    assert world.provider.data_calls == 2
+    assert second["call"] == 2
+    assert first["call"] == 1
+    assert proc[1].run_state("dwd_icon_eu").init == r1[0]
+
+    # A later exact-R1 read cannot extend the second answer's age. Once R2
+    # becomes visible, refresh the answer under R2 rather than serving R1.
+    world.provider.replicas.pop("dwd_icon_eu")
+    world.now["t"] += om_store.CONSISTENCY_WAIT_SECONDS + 1
+    world.fetch(proc, PREVIOUS_RUNS, params)
+    assert world.provider.data_calls == 3
+    assert proc[1].run_state("dwd_icon_eu").init == _utc(6)
+
+
+def test_single_runs_exact_request_still_holds_after_consistency_wait(world) -> None:
+    proc = world.process()
+    params = _madrid(models="icon_eu")
+    first = world.fetch(proc, SINGLE_RUNS, params)
+    world.now["t"] += om_store.CONSISTENCY_WAIT_SECONDS + 1
+
+    second = world.fetch(proc, SINGLE_RUNS, params)
+
+    assert world.provider.data_calls == 1
+    assert world.provider.meta_calls == 2  # initial meta plus same-run freshness read
+    assert second == first
 
 
 def test_unpropagated_or_unconfirmed_state_is_never_proof(world) -> None:
