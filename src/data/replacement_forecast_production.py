@@ -3719,11 +3719,11 @@ def _per_leg_downloaded_cycle(forecast_db: Path, source_id: str) -> datetime | N
     """Per-source high-water mark of downloaded raw-input cycles (None = unknown → fetch).
 
     Same fail-open contract as _max_downloaded_current_target_cycle, but scoped to the
-    live OpenMeteo anchor source."""
-    from src.state.db import _connect  # noqa: PLC0415
+    live OpenMeteo anchor source. A read needs no write-capable connection."""
+    from src.state.db import _connect_read_only  # noqa: PLC0415
 
     try:
-        conn = _connect(Path(forecast_db))
+        conn = _connect_read_only(Path(forecast_db))
         try:
             row = conn.execute(
                 "SELECT MAX(source_cycle_time) FROM raw_forecast_artifacts"
@@ -3765,6 +3765,7 @@ def _held_common_cycle_recovery_targets(
     forecast_db: Path,
     *,
     decision_time: datetime,
+    deadline_monotonic: float | None = None,
 ) -> tuple[tuple[datetime, tuple[tuple[str, str, str], ...]], ...] | None:
     """Return held scopes whose posterior trails their newest common input cycle.
 
@@ -3773,9 +3774,16 @@ def _held_common_cycle_recovery_targets(
     posterior: same-cycle probability law rejects ``new anchor + older ENS``.
     Recovery includes both missing anchors and already-committed anchors whose
     reseed was lost across a crash/restart boundary. ``None`` means the evidence
-    was unreadable and must be retried.
+    was unreadable and must be retried; a spent deadline raises TimeoutError.
+
+    All families are read in one read transaction, so the schema cannot change
+    underneath it; its table/column/index lookups are read once, not once per
+    family (they were 221 of the scan's 293 statements).
     """
 
+    from src.data.market_topology_rows import (  # noqa: PLC0415
+        prime_frozen_schema_reads,
+    )
     from src.data.replacement_forecast_seed_discovery import (  # noqa: PLC0415
         held_position_family_priorities,
     )
@@ -3790,15 +3798,24 @@ def _held_common_cycle_recovery_targets(
     )
     from src.state.db import _connect_read_only  # noqa: PLC0415
 
+    # The deadline is checked between statements, never through a SQLite progress
+    # handler: a Python handler re-takes the GIL every 1000 VM steps, and behind one
+    # CPU-bound sibling thread that turned this 2.3 s scan into 12-13 s. Each
+    # statement here is an indexed seek, so the overrun is at most one statement.
     held_scopes = tuple(sorted(held_position_family_priorities()))
+    _check_source_preflight_deadline(deadline_monotonic)
     if not held_scopes:
         return ()
     conn = None
+    release_schema_reads = None
     try:
         conn = _connect_read_only(forecast_db)
         conn.execute("PRAGMA query_only=ON")
+        conn.execute("BEGIN")
+        release_schema_reads = prime_frozen_schema_reads((conn,))
         scopes_by_cycle: dict[datetime, list[tuple[str, str, str]]] = {}
         for city, target_date, metric in held_scopes:
+            _check_source_preflight_deadline(deadline_monotonic)
             ensemble_hwm = latest_eligible_ensemble_input_cycle(
                 conn,
                 city=city,
@@ -3851,9 +3868,14 @@ def _held_common_cycle_recovery_targets(
             scopes_by_cycle.setdefault(common_cycle, []).append(
                 (city, target_date, metric)
             )
+    except TimeoutError:
+        raise
     except Exception:
+        _check_source_preflight_deadline(deadline_monotonic)
         return None
     finally:
+        if release_schema_reads is not None:
+            release_schema_reads()
         if conn is not None:
             conn.close()
 
@@ -3899,8 +3921,12 @@ def _recover_held_common_cycle_anchors_if_needed(
     """Capture exact missing anchor legs for held scopes' common input cycle.
 
     A source-clock caller may bound this recovery. The deadline covers every
-    held common-cycle batch so one stale held family cannot suppress the
-    independent current-cycle residual-anchor drain.
+    step (held-gap scan, anchor HWM, coverage reads, downloads) so one stale
+    held family cannot suppress the independent current-cycle residual-anchor
+    drain. SCOPE: this invocation. DRAIN: an expired deadline returns
+    ``HELD_COMMON_CYCLE_RECOVERY_TIMEBOXED_INCOMPLETE`` with nothing marked
+    done, so the next poll re-derives the same held gaps from canonical rows.
+    RESET: each invocation starts a fresh clock.
     """
 
     forecast_db = cfg.get("forecast_db")
@@ -3917,11 +3943,26 @@ def _recover_held_common_cycle_anchors_if_needed(
         if max_wall_clock_seconds is not None
         else None
     )
-    forecast_db_path = Path(str(forecast_db))
-    batches = _held_common_cycle_recovery_targets(
-        forecast_db_path,
-        decision_time=now,
+    deadline_kwargs: dict[str, object] = (
+        {} if deadline_monotonic is None
+        else {"deadline_monotonic": deadline_monotonic}
     )
+    forecast_db_path = Path(str(forecast_db))
+    try:
+        batches = _held_common_cycle_recovery_targets(
+            forecast_db_path,
+            decision_time=now,
+            **deadline_kwargs,
+        )
+    except TimeoutError:
+        return {
+            "status": "HELD_COMMON_CYCLE_RECOVERY_TIMEBOXED_INCOMPLETE",
+            "decision_time": now.isoformat(),
+            "timeboxed_incomplete": True,
+            "max_wall_clock_seconds": max_wall_clock_seconds,
+            "recoveries": [],
+            "committed_families": (),
+        }
     if batches is None:
         return {
             "status": "HELD_COMMON_CYCLE_EVIDENCE_UNREADABLE_RETRY",
@@ -3939,12 +3980,30 @@ def _recover_held_common_cycle_anchors_if_needed(
         "recoveries": [],
         "committed_families": (),
     }
+    if not batches:
+        return report
+    rolled_past = 0
+    committed_families: list[tuple[str, str, str]] = []
+
+    def timeboxed(batch_index: int) -> None:
+        report["status"] = "HELD_COMMON_CYCLE_RECOVERY_TIMEBOXED_INCOMPLETE"
+        report["timeboxed_incomplete"] = True
+        report["max_wall_clock_seconds"] = max_wall_clock_seconds
+        report["unattempted_cycle_count"] = len(batches) - batch_index
+        report["unattempted_scope_count"] = sum(
+            len(unattempted_scopes)
+            for _unattempted_cycle, unattempted_scopes in batches[batch_index:]
+        )
+
+    try:
+        _check_source_preflight_deadline(deadline_monotonic)
+    except TimeoutError:
+        timeboxed(0)
+        return report
     anchor_hwm = _per_leg_downloaded_cycle(
         forecast_db_path,
         "openmeteo_ecmwf_ifs_9km",
     )
-    rolled_past = 0
-    committed_families: list[tuple[str, str, str]] = []
     for batch_index, (cycle, scopes) in enumerate(batches):
         remaining = (
             max(0.0, deadline_monotonic - time.monotonic())
@@ -3952,20 +4011,18 @@ def _recover_held_common_cycle_anchors_if_needed(
             else None
         )
         if remaining is not None and remaining <= 0.0:
-            report["status"] = "HELD_COMMON_CYCLE_RECOVERY_TIMEBOXED_INCOMPLETE"
-            report["timeboxed_incomplete"] = True
-            report["max_wall_clock_seconds"] = max_wall_clock_seconds
-            report["unattempted_cycle_count"] = len(batches) - batch_index
-            report["unattempted_scope_count"] = sum(
-                len(unattempted_scopes)
-                for _unattempted_cycle, unattempted_scopes in batches[batch_index:]
-            )
+            timeboxed(batch_index)
             break
-        missing_before = _critical_scopes_missing_current_anchor(
-            forecast_db_path,
-            scopes,
-            cycle,
-        )
+        try:
+            missing_before = _critical_scopes_missing_current_anchor(
+                forecast_db_path,
+                scopes,
+                cycle,
+                **deadline_kwargs,
+            )
+        except TimeoutError:
+            timeboxed(batch_index)
+            break
         if missing_before is None:
             report["status"] = "HELD_COMMON_CYCLE_RECOVERY_PARTIAL"
             report["recoveries"].append(  # type: ignore[union-attr]
@@ -3998,8 +4055,10 @@ def _recover_held_common_cycle_anchors_if_needed(
             recovered: tuple[tuple[str, str, str], ...] = ready_before
             if missing_before:
                 download_kwargs: dict[str, object] = {}
-                if remaining is not None:
-                    download_kwargs["max_wall_clock_seconds"] = remaining
+                if deadline_monotonic is not None:
+                    download_kwargs["max_wall_clock_seconds"] = max(
+                        0.0, deadline_monotonic - time.monotonic()
+                    )
                 result = download_current_target_openmeteo_inputs(
                     forecast_db=forecast_db_path,
                     output_dir=Path(str(output_dir)),
@@ -4031,12 +4090,19 @@ def _recover_held_common_cycle_anchors_if_needed(
                 # DRAIN: re-read canonical exact-cycle coverage after the downloader
                 # commits; a count or sibling manifest is never family evidence.
                 # RESET: only families absent from the post-commit missing set may
-                # publish a reseed; unreadable evidence remains retryable.
-                missing_after = _critical_scopes_missing_current_anchor(
-                    forecast_db_path,
-                    missing_before,
-                    cycle,
-                )
+                # publish a reseed; unreadable evidence remains retryable. A spent
+                # deadline leaves the committed rows for the next poll's scan, which
+                # finds them present and reseeds them as already-current anchors.
+                try:
+                    missing_after = _critical_scopes_missing_current_anchor(
+                        forecast_db_path,
+                        missing_before,
+                        cycle,
+                        **deadline_kwargs,
+                    )
+                except TimeoutError:
+                    timeboxed(batch_index + 1)
+                    break
                 if missing_after is None:
                     report["status"] = "HELD_COMMON_CYCLE_RECOVERY_PARTIAL"
                 else:
@@ -4062,6 +4128,17 @@ def _recover_held_common_cycle_anchors_if_needed(
                 "written_manifests": list(result.get("written_manifests") or ()),
                 "committed_families": [list(scope) for scope in recovered],
             }
+            if (
+                recovered
+                and deadline_monotonic is not None
+                and time.monotonic() >= deadline_monotonic
+            ):
+                # Recovered families stay in committed_families for the caller's
+                # scoped reseed, and the next poll re-derives them from canonical
+                # rows until their posterior reaches the common cycle.
+                report["recoveries"].append(recovery)  # type: ignore[union-attr]
+                timeboxed(batch_index + 1)
+                break
             if recovered:
                 manifest_paths = tuple(
                     str(path)

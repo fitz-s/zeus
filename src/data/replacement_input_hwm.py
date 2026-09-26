@@ -39,6 +39,7 @@ from src.data.market_topology_rows import (
     _database_names,
     _table_ref_columns,
     _table_ref_exists,
+    _table_ref_indexes,
 )
 from src.data.openmeteo_ecmwf_ifs9_anchor import (
     PRODUCT_ID as OPENMETEO_ANCHOR_PRODUCT_ID,
@@ -477,21 +478,16 @@ def ensemble_source_authority_predicate(
                 else ("main", coverage_ref)
             )
             if all(part.replace("_", "").isalnum() for part in (schema, table)):
-                for index_row in conn.execute(
-                    f"PRAGMA {schema}.index_list({table})"
-                ).fetchall():
-                    index_name = str(index_row[1] or "")
-                    if not index_name.replace("_", "").isalnum():
-                        continue
-                    columns = tuple(
-                        str(column[2] or "")
-                        for column in conn.execute(
-                            f"PRAGMA {schema}.index_info({index_name})"
-                        ).fetchall()
-                    )
-                    if columns[:2] == ("source_run_id", "source_id"):
-                        coverage_identity_index = index_name
-                        break
+                coverage_identity_index = next(
+                    (
+                        index_name
+                        for index_name, columns in _table_ref_indexes(
+                            conn, f"{schema}.{table}"
+                        )
+                        if columns[:2] == ("source_run_id", "source_id")
+                    ),
+                    None,
+                )
     return ensemble_source_authority_sql(
         ensemble_alias=ensemble_alias,
         source_run_ref=source_run_ref,

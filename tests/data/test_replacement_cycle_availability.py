@@ -754,7 +754,7 @@ def test_held_common_cycle_recovery_shares_its_deadline_across_batches(
     monkeypatch.setattr(
         prod,
         "_critical_scopes_missing_current_anchor",
-        lambda _db, scopes, _cycle: tuple(scopes),
+        lambda _db, scopes, _cycle, **_kwargs: tuple(scopes),
     )
 
     def _download(**kwargs):
@@ -961,6 +961,212 @@ def test_held_common_cycle_gap_uses_ensemble_hwm_not_newest_anchor(
         (ensemble_cycle, (("Moscow", "2026-06-11", "high"),)),
     )
     assert checked == [(('Moscow', '2026-06-11', 'high'),)]
+
+
+def _held_recovery_forecast_db(tmp_path):
+    """Real forecast schema: ENS, source_run, coverage and posterior tables."""
+    import sqlite3
+
+    from src.state.db import init_schema_forecasts
+    from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
+
+    db = tmp_path / "zeus-forecasts.db"
+    conn = sqlite3.connect(db)
+    init_schema_forecasts(conn)
+    ensure_replacement_forecast_live_schema(conn)
+    conn.commit()
+    conn.close()
+    return db
+
+
+def _trace_read_only_opens(monkeypatch):
+    """Record every statement and progress handler on read-only opens."""
+    import sqlite3
+
+    import src.state.db as state_db
+
+    statements: list[str] = []
+    handlers: list[object] = []
+
+    class _Traced(sqlite3.Connection):
+        def set_progress_handler(self, handler, n):
+            handlers.append(handler)
+            return super().set_progress_handler(handler, n)
+
+    def traced_open(path, **_kwargs):
+        conn = sqlite3.connect(
+            f"file:{path}?mode=ro", uri=True, timeout=1.0, factory=_Traced
+        )
+        conn.row_factory = sqlite3.Row
+        conn.set_trace_callback(lambda sql: statements.append(" ".join(sql.split())))
+        return conn
+
+    monkeypatch.setattr(state_db, "_connect_read_only", traced_open)
+    return statements, handlers
+
+
+def test_held_recovery_scan_reads_schema_once_per_scan_not_per_family(
+    monkeypatch, tmp_path
+) -> None:
+    import src.data.replacement_forecast_production as prod
+    import src.data.replacement_forecast_seed_discovery as discovery
+
+    few = {("Moscow", "2026-06-11", "high"): 0}
+    many = {
+        (city, "2026-06-11", metric): 0
+        for city in ("Moscow", "Tel Aviv", "London", "Paris", "Seoul", "Tokyo")
+        for metric in ("high", "low")
+    }
+    db = _held_recovery_forecast_db(tmp_path)
+    statements, handlers = _trace_read_only_opens(monkeypatch)
+
+    def introspection_count(held):
+        monkeypatch.setattr(discovery, "held_position_family_priorities", lambda **_k: held)
+        statements.clear()
+        assert prod._held_common_cycle_recovery_targets(
+            db, decision_time=_dt("2026-06-10T22:30:00")
+        ) == ()
+        return sum(
+            1
+            for sql in statements
+            if sql.startswith(("PRAGMA", "SELECT 1 FROM main.sqlite_master"))
+            and not sql.startswith(("PRAGMA query_only", "PRAGMA busy_timeout"))
+        )
+
+    assert introspection_count(many) == introspection_count(few)
+    # A Python progress handler re-takes the GIL every 1000 VM steps; behind one
+    # CPU-bound sibling thread it turned a 2.3 s scan into 12-13 s.
+    assert handlers == []
+
+
+def test_held_recovery_scan_stops_between_families_at_deadline(
+    monkeypatch, tmp_path
+) -> None:
+    import src.data.replacement_forecast_production as prod
+    import src.data.replacement_forecast_seed_discovery as discovery
+    import src.data.replacement_input_hwm as input_hwm
+
+    held = {
+        (city, "2026-06-11", "high"): 0 for city in ("London", "Moscow", "Paris")
+    }
+    monkeypatch.setattr(discovery, "held_position_family_priorities", lambda **_k: held)
+    db = _held_recovery_forecast_db(tmp_path)
+    clock = [100.0]
+    monkeypatch.setattr(prod.time, "monotonic", lambda: clock[0])
+    reads: list[str] = []
+
+    def slow_family_read(_conn, *, city, **_kwargs):
+        reads.append(city)
+        clock[0] += 6.0
+        return None
+
+    monkeypatch.setattr(
+        input_hwm, "latest_eligible_ensemble_input_cycle", slow_family_read
+    )
+    with pytest.raises(TimeoutError):
+        prod._held_common_cycle_recovery_targets(
+            db, decision_time=_dt("2026-06-10T22:30:00"), deadline_monotonic=110.0
+        )
+    assert reads == ["London", "Moscow"]
+
+
+def test_held_recovery_expired_deadline_is_timeboxed_and_gap_is_retained(
+    monkeypatch, tmp_path
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as downloader
+    import src.data.replacement_forecast_production as prod
+    import src.data.replacement_forecast_seed_discovery as discovery
+
+    cycle = _dt("2026-06-10T06:00:00")
+    scope = ("Moscow", "2026-06-11", "high")
+    clock = [100.0]
+    monkeypatch.setattr(prod.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(prod, "_per_leg_downloaded_cycle", lambda *_a, **_k: cycle)
+    scans: list[tuple[datetime, tuple]] = []
+
+    scan_deadlines: list[object] = []
+
+    def held_scan(_db, *, decision_time, deadline_monotonic=None):
+        # The scan itself consumes the whole budget: a slow read must end the
+        # stage at its cap instead of running the coverage read and download.
+        scan_deadlines.append(deadline_monotonic)
+        clock[0] += 11.0
+        if deadline_monotonic is not None and clock[0] >= deadline_monotonic:
+            raise TimeoutError("scan deadline")
+        scans.append((decision_time, (scope,)))
+        return ((cycle, (scope,)),)
+
+    monkeypatch.setattr(prod, "_held_common_cycle_recovery_targets", held_scan)
+    monkeypatch.setattr(
+        prod,
+        "_critical_scopes_missing_current_anchor",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("ran past deadline")),
+    )
+    monkeypatch.setattr(
+        downloader,
+        "download_current_target_openmeteo_inputs",
+        lambda **_k: (_ for _ in ()).throw(AssertionError("downloaded past deadline")),
+    )
+    cfg = {"forecast_db": tmp_path / "f.db", "download_output_dir": tmp_path / "raw"}
+
+    report = prod._recover_held_common_cycle_anchors_if_needed(
+        cfg, decision_time=_dt("2026-06-10T22:30:00"), max_wall_clock_seconds=10.0
+    )
+    assert scan_deadlines == [110.0]  # the scan itself runs under the stage cap
+    assert report["status"] == "HELD_COMMON_CYCLE_RECOVERY_TIMEBOXED_INCOMPLETE"
+    assert report["committed_families"] == ()
+    assert clock[0] - 100.0 <= 11.0  # stopped at the first step past the cap
+
+    # Nothing was marked done: an unbounded later call re-derives the same gap.
+    monkeypatch.setattr(
+        prod, "_critical_scopes_missing_current_anchor", lambda *_a, **_k: ()
+    )
+    reseeds: list[dict] = []
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda _cfg, **kwargs: reseeds.append(kwargs)
+        or {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 1},
+    )
+    report = prod._recover_held_common_cycle_anchors_if_needed(
+        cfg, decision_time=_dt("2026-06-10T22:30:00")
+    )
+    assert report["committed_families"] == (scope,)
+    assert reseeds == [{"scopes": (scope,)}]
+
+
+def test_held_recovery_coverage_read_honours_deadline(monkeypatch, tmp_path) -> None:
+    import scripts.download_replacement_forecast_current_targets as downloader
+    import src.data.replacement_forecast_production as prod
+
+    cycle = _dt("2026-06-10T06:00:00")
+    scope = ("Moscow", "2026-06-11", "high")
+    monkeypatch.setattr(
+        prod,
+        "_held_common_cycle_recovery_targets",
+        lambda *_a, **_k: ((cycle, (scope,)),),
+    )
+    monkeypatch.setattr(prod, "_per_leg_downloaded_cycle", lambda *_a, **_k: cycle)
+    seen: list[object] = []
+
+    def coverage(_db, scopes, _cycle, **kwargs):
+        seen.append(kwargs.get("deadline_monotonic"))
+        raise TimeoutError("coverage read deadline")
+
+    monkeypatch.setattr(prod, "_critical_scopes_missing_current_anchor", coverage)
+    monkeypatch.setattr(
+        downloader,
+        "download_current_target_openmeteo_inputs",
+        lambda **_k: (_ for _ in ()).throw(AssertionError("downloaded past deadline")),
+    )
+    report = prod._recover_held_common_cycle_anchors_if_needed(
+        {"forecast_db": tmp_path / "f.db", "download_output_dir": tmp_path / "raw"},
+        decision_time=_dt("2026-06-10T22:30:00"),
+        max_wall_clock_seconds=10.0,
+    )
+    assert seen and seen[0] is not None
+    assert report["status"] == "HELD_COMMON_CYCLE_RECOVERY_TIMEBOXED_INCOMPLETE"
+    assert report["unattempted_scope_count"] == 1
 
 
 def test_common_cycle_recovery_reseeds_exact_scope_and_isolates_trigger_failure(

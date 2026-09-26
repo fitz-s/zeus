@@ -30,6 +30,9 @@ class _SchemaReadState:
     database_names: frozenset[str] | None = None
     table_exists: dict[str, bool] = field(default_factory=dict)
     table_columns: dict[str, frozenset[str]] = field(default_factory=dict)
+    table_indexes: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = field(
+        default_factory=dict
+    )
 
 
 _SCHEMA_READ_STATES: ContextVar[tuple[_SchemaReadState, ...]] = ContextVar(
@@ -127,6 +130,39 @@ def _table_ref_columns(conn: sqlite3.Connection, table_ref: str) -> set[str]:
     if state is not None:
         state.table_columns[table_ref] = columns
     return set(columns)
+
+
+def _table_ref_indexes(
+    conn: sqlite3.Connection, table_ref: str
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """``(index name, indexed columns)`` per index, in ``index_list`` order.
+
+    ``table_ref`` is ``schema.table`` with identifier-safe parts; names that are
+    not identifier-safe are omitted because they cannot be spliced into SQL.
+    """
+    state = _schema_read_state(conn)
+    if state is not None and table_ref in state.table_indexes:
+        return state.table_indexes[table_ref]
+    schema, table = table_ref.split(".", 1)
+    indexes = tuple(
+        (
+            name,
+            tuple(
+                str(column[2] or "")
+                for column in conn.execute(
+                    f"PRAGMA {schema}.index_info({name})"
+                ).fetchall()
+            ),
+        )
+        for name in (
+            str(row[1] or "")
+            for row in conn.execute(f"PRAGMA {schema}.index_list({table})").fetchall()
+        )
+        if name.replace("_", "").isalnum()
+    )
+    if state is not None:
+        state.table_indexes[table_ref] = indexes
+    return indexes
 
 
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
