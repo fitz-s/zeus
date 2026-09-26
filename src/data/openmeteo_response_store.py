@@ -319,10 +319,14 @@ class OpenMeteoResponseStore:
                 """,
                 (slug, init, modification, availability),
             )
-            # Only a reading that shows the pinned maximum confirms it is current; a
-            # lagging replica neither regresses the pin nor vouches for it.
+            # Only a reading at the pinned maximum on every stamp confirms it is
+            # current; a lagging replica neither regresses the pin nor vouches for it.
             latest = self.run_state(slug)
-            if latest is not None and (init, modification) == (latest.init, latest.modification):
+            if latest is not None and (init, modification, availability) == (
+                latest.init,
+                latest.modification,
+                latest.availability,
+            ):
                 db.execute(
                     "INSERT OR REPLACE INTO provider_asked VALUES (?, ?)",
                     (slug, time.time() if now is None else now),

@@ -407,6 +407,22 @@ def test_lagging_replica_cannot_vouch_that_a_latest_run_is_unchanged(world) -> N
     assert world.provider.data_calls == 2  # a current replica confirms the held answer
 
 
+def test_replica_with_older_availability_cannot_confirm(world) -> None:
+    """Review 2026-09-26: same (init, modification), older availability = lagging replica."""
+
+    proc = world.process()
+    world.fetch(proc)
+    init, modification, availability = world.provider.meta["dwd_icon_eu"]
+    world.provider.meta["dwd_icon_eu"] = [init, modification, availability - 300]
+    world.now["t"] += 90.0  # past META_FRESH_SECONDS: only the lagging replica answers
+    asked = proc[1].run_state("dwd_icon_eu").observed_at
+
+    world.fetch(proc)
+
+    assert proc[1].run_state("dwd_icon_eu").observed_at == asked
+    assert world.provider.data_calls == 2  # unconfirmed, so paid, never served stale
+
+
 def test_f_alarm_names_the_looping_job_within_the_hour(world, caplog) -> None:
     """A new instance of the class surfaces within an hour, naming its job."""
 
