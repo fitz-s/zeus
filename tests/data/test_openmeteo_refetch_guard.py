@@ -10,6 +10,7 @@ endpoints) and counts the metered sends the provider actually receives.
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -278,6 +279,41 @@ def test_unpublished_future_run_refusal_is_never_held(world) -> None:
         proc[0]._shared(lambda state, _now: (state["requests"].clear(), True))
 
     assert world.provider.data_calls == 3
+
+
+def test_one_models_supersession_never_covers_another(world) -> None:
+    """Review 2026-09-26: icon_global's newer run must not freeze icon_eu's part."""
+
+    proc = world.process()
+    # icon_global already published R2; icon_eu is still at R.
+    world.provider.meta["dwd_icon"] = [_utc(6), _utc(9), _utc(9.2)]
+    world.now["t"] = float(_utc(10))
+    world.fetch(proc)
+    world.fetch(proc)
+    assert world.provider.data_calls == 1
+    proofs = json.loads(proc[1]._db().execute("SELECT proofs FROM responses").fetchone()[0])
+    assert proofs == {"dwd_icon": om_store.SUPERSEDED, "dwd_icon_eu": f"{_utc(0)}:{_utc(3)}"}
+
+    # icon_eu modifies R before its own next run: the mixed answer must be re-fetched.
+    world.provider.meta["dwd_icon_eu"] = [_utc(0), _utc(10.1), _utc(10.2)]
+    world.now["t"] = float(_utc(10.2)) + om_store.CONSISTENCY_WAIT_SECONDS + 1
+    payload = world.fetch(proc)
+    assert world.provider.data_calls == 2
+    assert payload["call"] == 2
+
+    # Same class on previous-runs: each model's own state gates its part.
+    params = {
+        "latitude": 40.4719, "longitude": -3.5626, "start_date": "2026-09-27",
+        "end_date": "2026-09-27", "hourly": "temperature_2m_previous_day1",
+        "models": "icon_global,icon_eu", "timezone": "Europe/Madrid",
+    }
+    world.fetch(proc, PREVIOUS_RUNS, params)
+    world.fetch(proc, PREVIOUS_RUNS, params)
+    assert world.provider.data_calls == 3
+    world.provider.meta["dwd_icon_eu"] = [_utc(0), _utc(11), _utc(11.1)]
+    world.now["t"] = float(_utc(11.1)) + om_store.CONSISTENCY_WAIT_SECONDS + 1
+    world.fetch(proc, PREVIOUS_RUNS, params)
+    assert world.provider.data_calls == 4
 
 
 def test_previous_runs_answer_follows_every_models_latest_run(world) -> None:
