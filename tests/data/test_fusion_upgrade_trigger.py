@@ -692,6 +692,34 @@ def test_scoped_reseed_uses_db_family_manifests_without_global_tree_scan(
     assert observed["manifests"] is family_manifests
 
 
+def test_scoped_reseed_reads_family_manifests_only_for_a_reserved_upgrade(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A no-upgrade verdict (the usual held poll) must not load 96 manifest rows."""
+    _db, kwargs = _revision_upgrade_kwargs(tmp_path)
+    kwargs.pop("manifests")
+    from src.data import replacement_cycle_advance_trigger as cycle_advance
+
+    loads: list[str] = []
+    monkeypatch.setattr(
+        cycle_advance,
+        "_family_manifests_from_db",
+        lambda *_args, city, **_kwargs: loads.append(city) or (),
+    )
+    monkeypatch.setattr(
+        trigger,
+        "scope_capture_offers_larger_provider_set",
+        lambda *_args, **_kwargs: {**_revision_upgrade_verdict(), "is_upgrade": False},
+    )
+
+    report = trigger.enqueue_fusion_upgrade_reseeds(**kwargs)
+
+    assert report["scopes_checked"] == 1
+    assert report["seeds_enqueued"] == 0
+    assert loads == []
+
+
 def test_upgrade_seed_uses_ens_carrier_and_newest_independent_manifest(
     tmp_path: Path,
 ) -> None:

@@ -1546,20 +1546,6 @@ def enqueue_fusion_upgrade_reseeds(
         ):
             if enqueued >= max(1, int(limit)):
                 break
-            scope_manifests = default_manifests
-            if scope_manifests is None:
-                from src.data.replacement_cycle_advance_trigger import (  # noqa: PLC0415
-                    _family_manifests_from_db,
-                )
-
-                scope_manifests = _family_manifests_from_db(
-                    conn,
-                    city=city,
-                    identity=expected_replacement_dependency_identity_by_role(metric)[
-                        "openmeteo_ifs9_anchor"
-                    ],
-                    computed_at=now,
-                )
             day0_payload: dict[str, object] = {}
             # A Day0 input revision still changes q, but its re-materialization must
             # preserve the canonical observed-extreme conditioning.  Skipping Day0
@@ -1685,6 +1671,22 @@ def enqueue_fusion_upgrade_reseeds(
             # atomically write it into this owner's hidden staging path. Only a durable,
             # all-transition ownership finalize may expose it to the existing queue.
             try:
+                # Only a reserved upgrade reads its family manifests; a verdict of
+                # no upgrade (the usual case) no longer pays up to 96 rows of JSON.
+                scope_manifests = default_manifests
+                if scope_manifests is None:
+                    from src.data.replacement_cycle_advance_trigger import (  # noqa: PLC0415
+                        _family_manifests_from_db,
+                    )
+
+                    scope_manifests = _family_manifests_from_db(
+                        conn,
+                        city=city,
+                        identity=expected_replacement_dependency_identity_by_role(
+                            metric
+                        )["openmeteo_ifs9_anchor"],
+                        computed_at=now,
+                    )
                 staging_file = _build_and_write_upgrade_seed(
                     conn,
                     city=city,
