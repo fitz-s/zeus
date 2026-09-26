@@ -5205,13 +5205,140 @@ def _finite_evidence_zero_hit_ucb_floor(
     return _finite_evidence_binomial_ucb(0, member_count, alpha=alpha, metric=metric)
 
 
+def _interval_member_scenario_ranges(
+    bounds: Sequence[tuple[float, float]],
+) -> tuple[float, float, float, float]:
+    """Feasible ENS-mean range and within-spread bounds over consistent assignments.
+
+    Returns ``(mean_lo, mean_hi, sd_lo, sd_hi)`` with every consistent assignment x
+    (x_i in [l_i, u_i]) satisfying mean_lo <= mean(x) <= mean_hi (exact, linear)
+    and sd_lo <= sd(x) <= sd_hi (population sd). Both sd bounds use
+    var(x) = min_c mean_i (x_i - c)^2:
+
+    - min_x var = min_c D(c) with D(c) = mean_i dist(c, [l_i, u_i])^2 (swap the
+      two minimizations). D is convex; bisection on its non-decreasing derivative
+      brackets the minimizer in [a, b], and convexity gives the certified lower
+      bound D(a) + D'(a) (b - a) <= min D.
+    - max_x var <= min_c max_x mean_i (x_i - c)^2 = min_c mean_i far_i(c)^2 with
+      far_i(c) the endpoint distance farther from c; any c gives an upper bound
+      (here the mean of the interval midpoints).
+    """
+
+    n = len(bounds)
+    mean_lo = sum(lower for lower, _ in bounds) / n
+    mean_hi = sum(upper for _, upper in bounds) / n
+
+    def gap_sq_mean(c: float) -> float:
+        return sum((c - min(max(c, lower), upper)) ** 2 for lower, upper in bounds) / n
+
+    def gap_slope(c: float) -> float:
+        return 2.0 * sum(c - min(max(c, lower), upper) for lower, upper in bounds) / n
+
+    a = min(lower for lower, _ in bounds)
+    b = max(upper for _, upper in bounds)
+    for _ in range(200):
+        c = 0.5 * (a + b)
+        if gap_slope(c) <= 0.0:
+            a = c
+        else:
+            b = c
+    var_lo = max(0.0, gap_sq_mean(a) + gap_slope(a) * (b - a))
+    center = sum(0.5 * (lower + upper) for lower, upper in bounds) / n
+    var_hi = sum(
+        max((lower - center) ** 2, (upper - center) ** 2) for lower, upper in bounds
+    ) / n
+    return mean_lo, mean_hi, math.sqrt(var_lo), math.sqrt(var_hi)
+
+
+def _sup_normal_bin_mass(
+    low: float,
+    high: float,
+    *,
+    center_lo: float,
+    center_hi: float,
+    sd_lo: float,
+    sd_hi: float,
+) -> float:
+    """Upper bound of P(low <= N(c, s) < high) over c in a range and s in a range.
+
+    For fixed s the mass is unimodal in c with its maximum at the preimage
+    midpoint, so over the range it peaks at ``c* = clamp(midpoint)``. At that c*:
+    if c* lies inside the preimage the mass falls as s grows (use ``sd_lo``);
+    otherwise the mass as a function of s is maximized where d/ds = 0, i.e.
+    (high-c) phi((high-c)/s) = (low-c) phi((low-c)/s), which has the closed form
+    s* = sqrt((b^2 - a^2) / (2 ln(b/a))) with a, b the near/far distances; clamp
+    s* to the range. ``sd_lo = 0`` inside the preimage is a point mass (1.0).
+    """
+
+    if not math.isfinite(low) and not math.isfinite(high):
+        return 1.0
+    if not math.isfinite(low):
+        midpoint = -math.inf
+    elif not math.isfinite(high):
+        midpoint = math.inf
+    else:
+        midpoint = 0.5 * (low + high)
+    center = min(max(midpoint, center_lo), center_hi)
+
+    def mass(sd: float) -> float:
+        if sd <= 0.0:
+            return float(low <= center < high)
+        return _normal_cdf(mu=center, sigma=sd, x=high) - _normal_cdf(
+            mu=center, sigma=sd, x=low
+        )
+
+    if low <= center < high:
+        return mass(sd_lo)
+    near, far = (low - center, high - center) if center < low else (center - high, center - low)
+    if not math.isfinite(far):
+        # One-sided tail: mass grows monotonically with s.
+        return mass(sd_hi)
+    if near <= 0.0:
+        return mass(sd_lo)
+    sd_star = math.sqrt((far * far - near * near) / (2.0 * math.log(far / near)))
+    return mass(min(max(sd_star, sd_lo), sd_hi))
+
+
+def _sup_center_draw_mass(
+    low: float,
+    high: float,
+    *,
+    mu_star: float,
+    draw_z: float,
+    center_sigma_hi: float,
+    sd_lo: float,
+    sd_hi: float,
+) -> float:
+    """Upper bound of one bootstrap draw's bin mass over every consistent assignment.
+
+    The bootstrap draws centers ``mu* + center_sigma * z`` with a fixed seeded z,
+    and every consistent assignment has center_sigma in [0, center_sigma_hi] and
+    predictive sigma in [sd_lo, sd_hi]. The draw's center therefore lies in the
+    segment between mu* and ``mu* + center_sigma_hi * z``, and the bin mass sup
+    over (center, sigma) is ``_sup_normal_bin_mass`` over that segment.
+    """
+
+    end = mu_star + center_sigma_hi * draw_z
+    return _sup_normal_bin_mass(
+        low, high, center_lo=min(mu_star, end), center_hi=max(mu_star, end),
+        sd_lo=sd_lo, sd_hi=sd_hi,
+    )
+
+
 def _stress_coherent_samples_to_marginal_ucb_floors(
     samples: object,
     required_ucb: Sequence[float],
     *,
     alpha: float = _FINITE_EVIDENCE_BAND_ALPHA,
+    hold_every_floor: bool = False,
 ):
-    """Encode finite-evidence marginal UCB floors in one coherent simplex."""
+    """Encode finite-evidence marginal UCB floors in one coherent simplex.
+
+    ``hold_every_floor`` (interval-censored evidence): every bin with a positive
+    floor gets its own disjoint stress rows, not only bins whose raw UCB is short.
+    A bin's (1-alpha) quantile is then held by its own rows, which no other
+    target rescales, so every floor holds; otherwise refuse.
+    """
 
     import numpy as np  # noqa: PLC0415
 
@@ -5233,7 +5360,7 @@ def _stress_coherent_samples_to_marginal_ucb_floors(
     ):
         raise ValueError("finite-evidence stress requires a coherent simplex and valid UCB floors")
     raw_ucb = np.percentile(probs, 100.0 * (1.0 - float(alpha)), axis=0)
-    targets = np.flatnonzero(raw_ucb < floors)
+    targets = np.flatnonzero(floors > 0.0) if hold_every_floor else np.flatnonzero(raw_ucb < floors)
     stress_rows = int(math.floor(float(alpha) * probs.shape[0])) + 1
     if int(targets.size) * stress_rows > probs.shape[0]:
         raise ValueError("finite-evidence tail stress exceeds coherent bootstrap carrier")
@@ -5257,6 +5384,10 @@ def _stress_coherent_samples_to_marginal_ucb_floors(
         probs.sum(axis=1), 1.0, atol=1e-12
     ):
         raise ValueError("finite-evidence tail stress broke simplex coherence")
+    if hold_every_floor:
+        stressed_ucb = np.percentile(probs, 100.0 * (1.0 - float(alpha)), axis=0)
+        if bool((stressed_ucb < floors - 1e-9).any()):
+            raise ValueError("finite-evidence tail stress could not hold every UCB floor")
     return np.ascontiguousarray(probs, dtype=np.float64)
 
 
@@ -5337,6 +5468,44 @@ def _current_evidence_tail_ucb_floors(
         else float(day0_observed_extreme_c)
     )
     day0_dir = str(day0_metric or "").lower() if day0_obs is not None else None
+    scenario_ranges = None if bounds is None else _interval_member_scenario_ranges(bounds)
+
+    def _sup_component_mass(
+        low_edge: float, high_edge: float, *, center_lo: float, center_hi: float
+    ) -> float:
+        """Sup of the (Day0-conditioned) component mass over the feasible ranges."""
+        assert scenario_ranges is not None
+        _, _, sd_lo, sd_hi = scenario_ranges
+        if day0_obs is None or not (
+            (day0_dir == "high" and low_edge <= day0_obs < high_edge)
+            or (day0_dir == "low" and low_edge < day0_obs <= high_edge)
+        ):
+            # No observation, or an ordinary bin the observation leaves intact
+            # (impossible bins were zeroed before this call).
+            return _sup_normal_bin_mass(
+                low_edge, high_edge, center_lo=center_lo, center_hi=center_hi,
+                sd_lo=sd_lo, sd_hi=sd_hi,
+            )
+        # Straddling bin: HIGH mass is P(X < high) (falls with the center),
+        # LOW mass is P(X >= low) (rises with the center). The extreme center is
+        # the matching range end; in the spread, the mass falls with s when the
+        # edge is on the far side of the center and rises otherwise.
+        if day0_dir == "high":
+            center, edge = center_lo, high_edge
+            gap = edge - center
+        else:
+            center, edge = center_hi, low_edge
+            gap = center - edge
+        if gap > 0.0:
+            sd = sd_lo
+        elif gap < 0.0:
+            sd = sd_hi
+        else:
+            return 0.5
+        if sd <= 0.0:
+            return float(gap > 0.0)
+        tail = _normal_cdf(mu=center, sigma=sd, x=edge)
+        return tail if day0_dir == "high" else 1.0 - tail
 
     def _component_mass(bin_: object, *, center: float) -> float:
         if within_sigma > 0.0:
@@ -5402,10 +5571,25 @@ def _current_evidence_tail_ucb_floors(
             len(members),
             metric=metric,
         )
-        component = max(
-            _component_mass(bin_, center=mu),
-            _component_mass(bin_, center=member_mean),
-        )
+        if scenario_ranges is None:
+            component = max(
+                _component_mass(bin_, center=mu),
+                _component_mass(bin_, center=member_mean),
+            )
+        else:
+            # Interval members: every consistent assignment has its own ENS
+            # center and spread, so the scenario mass is bounded over the whole
+            # feasible (center, spread) range, with the provider center at the
+            # same spread range. It dominates every assignment's component term.
+            mean_lo, mean_hi, _, _ = scenario_ranges
+            preimage = (
+                -math.inf if low is None else low,
+                math.inf if high is None else high,
+            )
+            component = max(
+                _sup_component_mass(*preimage, center_lo=mean_lo, center_hi=mean_hi),
+                _sup_component_mass(*preimage, center_lo=mu, center_hi=mu),
+            )
         floors[str(bin_.bin_id)] = max(sample_ucb, moment, component)
     return floors
 
@@ -6295,9 +6479,34 @@ def _build_fused_q_bounds(
             member_bounds_c=evidence_member_bounds_c,
         )
         required_ucb = np.array([finite_floors[bin_id] for bin_id in bin_ids])
+        if evidence_member_bounds_c is not None:
+            # Interval members: a consistent point assignment would be served its own
+            # (center_sigma, sigma) inside [0, center_sigma_c] x [sd_lo, sd_hi]
+            # (predictive_sigma_c is the served sup). The center draws share this
+            # seeded z, so each draw's mass is bounded by its sup over those ranges,
+            # and the 95th percentile of those per-draw sups bounds every assignment's
+            # bootstrap q_ucb (order statistics are monotone in each draw).
+            assignment_sd_lo = _interval_member_scenario_ranges(
+                evidence_member_bounds_c
+            )[2]
+            draw_z = (mu_draws - float(mu_star)) / float(center_sigma_c) if center_sigma_c > 0.0 else np.zeros_like(mu_draws)
+            for idx in range(len(bin_ids)):
+                draw_sups = [
+                    _sup_center_draw_mass(
+                        float(lows[idx]), float(highs[idx]), mu_star=float(mu_star),
+                        draw_z=float(z_value), center_sigma_hi=float(center_sigma_c),
+                        sd_lo=assignment_sd_lo, sd_hi=sigma,
+                    )
+                    for z_value in draw_z
+                ]
+                required_ucb[idx] = max(
+                    float(required_ucb[idx]),
+                    float(np.percentile(draw_sups, 95.0)),
+                )
         probs = _stress_coherent_samples_to_marginal_ucb_floors(
             probs,
             required_ucb,
+            hold_every_floor=evidence_member_bounds_c is not None,
         )
 
     q_lcb_vec = np.percentile(probs, 5.0, axis=0)  # (M,) marginal quantile of coherent rows

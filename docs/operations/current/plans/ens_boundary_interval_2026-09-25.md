@@ -139,26 +139,71 @@ revision (`ensemble_center_scenarios_v4`) is unchanged, because the probability 
 Interval shapes add `interval_censored_member_count` and hash the bounds in
 `member_values_hash`, so their identity differs from any point shape.
 
-### D-5. Finite-evidence consumers (materializer, ~5066-5230, ~6340-6800)
+### D-5. Finite-evidence consumers and the q_ucb guarantee (revised after review)
 
-These are the per-bin UCB floors that keep q_ucb honest. The shape carries
-`member_bounds_c` beside the witness `members_c`. The override and posterior compute
-thread both, and None keeps today's exact path:
+What the interval path guarantees (for bins with finite settlement preimages, the
+non-Day0 route): **served interval q_ucb ≥ the served q_ucb of every consistent
+point assignment**, where each assignment is served through its own shape
+(σ(x), center_sigma(x)). The mechanisms are listed below. None uses a midpoint as
+a point value, and none adds a knob.
 
-- Member hit counts become plausibility counts: #members whose interval meets the bin
-  preimage. For any consistent x, `hits(x) ≤ plausibility`, and the Clopper-Pearson
-  UCB is increasing in k, so the sample floor dominates every assignment. Persisted
-  `finite_evidence_member_hits_by_bin` reports these plausibility counts.
-- The Cantelli moment term uses the served σ, the supremum above, and it is
-  increasing in σ.
-- The ENS-center component term is evaluated at the witness mean, which is a
-  consistent scenario, with the witness within-spread. This is NOT a supremum over
-  all feasible ENS centers. A range version was tried and dropped: on the cases
-  constructed here, the sample and moment floors dominated it, so a mutation test
-  could not distinguish it. It was not proven redundant in general, so the machinery
-  was cut rather than kept on hope. The plausibility term is the rigorous
-  finite-sample floor.
-- n, the zero-hit floor and n_eff depend only on n = 51, so they are unchanged.
+1. **Sample floor.** Member hit counts become plausibility counts: #members whose
+   interval meets the preimage. hits(x) ≤ plausibility for every x, and the
+   Clopper-Pearson UCB is increasing in k.
+2. **Cantelli moment term.** It is evaluated at the served σ_sup (§D-4) and is
+   increasing in σ.
+3. **Scenario component, a supremum over the feasible set.** The first cut
+   evaluated it at the witness mean only, and the reviewer's counterexample (26×[−2,
+   −0.51] + 25×[0.51, 2], μ=0) broke it: the interval gave 0.197 for the center bin,
+   below the 0.673 a feasible assignment gets. It is now
+   sup over c ∈ [m_l, m_u] (and c = μ) and s ∈ [s_lo, s_hi] of P(bin | N(c, s))
+   (`_sup_normal_bin_mass`):
+   - for fixed s, the mass is unimodal in c, with its peak at c* = clamp(bin midpoint);
+   - if c* is inside the bin, use s_lo;
+   - otherwise use s* = √((b²−a²)/(2 ln(b/a))), the root of
+     (b−c)φ((b−c)/s) = (a−c)φ((a−c)/s), clamped to [s_lo, s_hi];
+   - one-sided tails use s_hi.
+
+   The ranges come from `_interval_member_scenario_ranges`:
+   - m_l and m_u are exact;
+   - s_lo is certified by convexity: min_x var = min_c mean dist(c, I_i)², and
+     bisection brackets the minimizer, giving D(a) + D'(a)(b−a) ≤ min D;
+   - s_hi = √(mean_i max endpoint distance² to the mean of the midpoints), valid
+     because max_x var ≤ min_c max_x mean (x_i−c)².
+4. **Bootstrap center draws.** The seeded bootstrap draws mu* + center_sigma·z with
+   a fixed z. A point assignment with a smaller center_sigma or σ can therefore put
+   a draw's mass where the interval shape's own draws do not. This is the
+   `tight_ens_wide_center` case, where it bound on 9 bins. For each draw, the bin
+   mass is bounded over the center segment [mu*, mu* + center_sigma_sup·z] and
+   s ∈ [s_lo, σ_sup] (`_sup_center_draw_mass`). The 95th percentile of those
+   per-draw sups is added to the bin's required UCB. This is valid because every
+   per-draw mass is dominated, and order statistics are monotone.
+5. **Stress holds every floor.** `_stress_coherent_samples_to_marginal_ucb_floors`
+   used to stress only bins whose raw UCB was short. Raising a target by rescaling
+   its rows lowered other bins, so a non-target bin could fall below its floor
+   (observed: open tail 0.189 vs floor 0.368). With `hold_every_floor` (interval
+   evidence only), every bin with a positive floor gets its own disjoint rows, and
+   a final check refuses the band if any floor is not held. The refusal lands on
+   the fail-soft q_ucb path.
+   - Exact rows keep today's behaviour: replaying 2,831 live point posteriors showed
+     1,785 would violate an all-bin check. That is a pre-existing property of the
+     point path, recorded here and not changed by this work.
+
+Scope limits (stated, not hidden):
+
+- **Day0 conditioning** (observation absorbed): component term 3 handles
+  straddling bins by the matching range end.
+  - HIGH: P(X < hi) is maximized at the lowest center.
+  - LOW: P(X ≥ lo) is maximized at the highest center.
+  - The spread is chosen by the side of the edge.
+  - The bootstrap draw bound (4) uses the plain Normal mass, which does not dominate
+    the Day0-absorbed straddle mass. Day0 interval dominance is therefore
+    UNVERIFIED. A Day0 posterior from an interval row is possible only when the
+    same-day lane reads an interval-backed current shape.
+- **q_lcb** is not claimed conservative on the interval path: widening σ lowers
+  far-bin q_lcb less than some point assignments would.
+- **q_ucb** is a band edge, not a coverage guarantee.
+- **Exact rows** are byte-identical (pinned). No path above runs for them.
 
 ## Validation (read-only, before wiring)
 

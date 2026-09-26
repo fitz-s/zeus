@@ -362,6 +362,230 @@ def test_interval_tail_floors_dominate_point_floors_of_the_witness() -> None:
     assert any(interval[k] > point[k] + 1e-9 for k in point)
 
 
+def _band_bins(center: float) -> tuple:
+    lo = round(center) - 4
+    edges = [SimpleNamespace(bin_id="L", lower_c=None, upper_c=float(lo - 1), center_c=float(lo - 1))]
+    edges += [
+        SimpleNamespace(bin_id=f"b{k}", lower_c=float(k), upper_c=float(k), center_c=float(k))
+        for k in range(lo, lo + 9)
+    ]
+    edges.append(SimpleNamespace(bin_id="R", lower_c=float(lo + 9), upper_c=None, center_c=float(lo + 9)))
+    return tuple(edges)
+
+
+def _served_band(shape, *, mu: float, bins: tuple, bounds=None) -> dict[str, float]:
+    """q_ucb through the production bootstrap + finite-evidence stress, at the shape's sigma."""
+    from src.calibration.emos import bin_probability_settlement
+
+    raw = {
+        b.bin_id: bin_probability_settlement(
+            mu, shape.predictive_sigma_c, b.lower_c, b.upper_c,
+            half_step=0.5, rounding_rule="wmo_half_up",
+        )
+        for b in bins
+    }
+    total = sum(raw.values())
+    kwargs = dict(
+        mu_star=mu, center_sigma_c=shape.center_sigma_c,
+        predictive_sigma_c=shape.predictive_sigma_c, bins=bins, half_step=0.5,
+        q_point={k: v / total for k, v in raw.items()}, rounding_rule="wmo_half_up",
+        day0_metric="low", evidence_members_c=shape.members_c,
+    )
+    if bounds is not None:
+        kwargs["evidence_member_bounds_c"] = bounds
+    return materializer._build_fused_q_bounds(**kwargs)[1]
+
+
+def _shape_kw(mu: float) -> dict:
+    cycle = "2026-09-27T00:00:00+00:00"
+    return dict(
+        snapshot_id=7, source_cycle_time=cycle, source_available_at="2026-09-27T08:00:00+00:00",
+        provider_values_c={"ecmwf_ifs": mu + 0.2, "icon_global": mu - 0.2},
+        provider_weights={"ecmwf_ifs": 0.5, "icon_global": 0.5},
+        provider_cycles={"ecmwf_ifs": cycle, "icon_global": cycle},
+    )
+
+
+@pytest.mark.parametrize(
+    "bounds,mu",
+    [
+        # Reviewer counterexample (2026-09-25): two separated clusters around mu.
+        (tuple([(-2.0, -0.51)] * 26 + [(0.51, 2.0)] * 25), 0.0),
+        # Wide shared intervals: the feasible ENS mean spans 4 degC.
+        (tuple((19.75 + 0.002 * i, 23.75 + 0.002 * i) for i in range(51)), 19.6),
+    ],
+)
+def test_interval_q_ucb_dominates_every_feasible_point_assignment(bounds, mu) -> None:
+    """Served interval q_ucb >= the served q_ucb of every enumerated consistent assignment."""
+    import random
+
+    bins = _band_bins(mu)
+    interval_shape = materializer._interval_censored_evidence_shape(
+        member_bounds_c=bounds, center_c=mu, **_shape_kw(mu)
+    )
+    interval_ucb = _served_band(interval_shape, mu=mu, bins=bins, bounds=bounds)
+    rng = random.Random(0)
+    split = sorted(v for bound in bounds for v in bound)[len(bounds)]
+    assignments = [
+        [lo for lo, _ in bounds],
+        [hi for _, hi in bounds],
+        [min(max(split, lo), hi) for lo, hi in bounds],
+        [hi if lo < 0 else lo for lo, hi in bounds],
+    ]
+    assignments += [
+        [lo + (hi - lo) * rng.choice((0.0, 1.0, rng.random())) for lo, hi in bounds]
+        for _ in range(80)
+    ]
+    for xs in assignments:
+        point_shape = materializer._current_evidence_shape_from_values(
+            members_c=xs, center_c=mu, **_shape_kw(mu)
+        )
+        point_ucb = _served_band(point_shape, mu=mu, bins=bins)
+        for bin_id, value in point_ucb.items():
+            assert interval_ucb[bin_id] >= value - 1e-9, (bin_id, interval_ucb[bin_id], value)
+
+
+def test_interval_floor_terms_each_bound_their_scenario() -> None:
+    """Each sup term covers the scenario it claims: feasible ENS centers, then center draws."""
+    import numpy as np
+
+    bounds = tuple([(-2.0, -0.51)] * 26 + [(0.51, 2.0)] * 25)
+    mu = 0.0
+    bins = _band_bins(mu)
+    shape = materializer._interval_censored_evidence_shape(
+        member_bounds_c=bounds, center_c=mu, **_shape_kw(mu)
+    )
+    mean_lo, mean_hi, sd_lo, sd_hi = materializer._interval_member_scenario_ranges(bounds)
+    floors = materializer._current_evidence_tail_ucb_floors(
+        mu_star=mu, predictive_sigma_c=shape.predictive_sigma_c, bins=bins, half_step=0.5,
+        rounding_rule="wmo_half_up", members_c=shape.members_c, metric="low",
+        member_bounds_c=bounds,
+    )
+    # b0 = [-0.5, 0.5): an ENS center at 0 (feasible: mean range spans it) at the
+    # smallest feasible spread puts far more mass there than the witness center does.
+    at_zero = materializer._sup_normal_bin_mass(
+        -0.5, 0.5, center_lo=0.0, center_hi=0.0, sd_lo=sd_lo, sd_hi=sd_lo
+    )
+    assert mean_lo < 0.0 < mean_hi
+    assert floors["b0"] >= at_zero - 1e-12 > 0.6
+
+    # Far one-sided intervals: the witness sits at the upper ends, but a consistent
+    # assignment puts the ENS mean (and, with every member equal, a zero spread) at
+    # the lower ends; that point scenario is certain for its bin.
+    far = tuple((22.0 + 0.01 * i, 25.0 + 0.01 * i) for i in range(51))
+    far_shape = materializer._interval_censored_evidence_shape(
+        member_bounds_c=far, center_c=19.0, **_shape_kw(19.0)
+    )
+    far_floors = materializer._current_evidence_tail_ucb_floors(
+        mu_star=19.0, predictive_sigma_c=far_shape.predictive_sigma_c, bins=_band_bins(19.0),
+        half_step=0.5, rounding_rule="wmo_half_up", members_c=far_shape.members_c,
+        metric="low", member_bounds_c=far,
+    )
+    witness_mean = sum(far_shape.members_c) / len(far_shape.members_c)
+    assert witness_mean > 25.0
+    assert far_floors["b22"] == pytest.approx(1.0)
+
+    # Bootstrap: a draw's center may sit anywhere between mu* and mu* + center_sigma z.
+    z = np.random.default_rng(materializer._QLCB_SEED).standard_normal(
+        materializer._QLCB_BOOTSTRAP_DRAWS
+    )
+    lcb, ucb = materializer._build_fused_q_bounds(
+        mu_star=mu, center_sigma_c=shape.center_sigma_c,
+        predictive_sigma_c=shape.predictive_sigma_c, bins=bins, half_step=0.5,
+        q_point={b.bin_id: 0.0 for b in bins}, rounding_rule="wmo_half_up",
+        day0_metric="low", evidence_members_c=shape.members_c,
+        evidence_member_bounds_c=bounds,
+    )
+    draw_sups = [
+        materializer._sup_center_draw_mass(
+            -0.5, 0.5, mu_star=mu, draw_z=float(zz), center_sigma_hi=shape.center_sigma_c,
+            sd_lo=sd_lo, sd_hi=shape.predictive_sigma_c,
+        )
+        for zz in z
+    ]
+    assert ucb["b0"] >= float(np.percentile(draw_sups, 95.0)) - 1e-9
+
+
+def test_interval_q_ucb_covers_bootstrap_center_draws_of_every_assignment() -> None:
+    """Tight ENS intervals far from mu*: a point assignment's bootstrap moves the center.
+
+    Its center draws sweep toward the ENS mean with the assignment's own center sigma, so
+    a bin near the ENS cluster gets bootstrap mass that no finite-evidence floor carries.
+    """
+
+    bounds = tuple((20.0 + 0.004 * i, 20.2 + 0.004 * i) for i in range(51))
+    mu = 18.0
+    bins = _band_bins(mu)
+    interval_shape = materializer._interval_censored_evidence_shape(
+        member_bounds_c=bounds, center_c=mu, **_shape_kw(mu)
+    )
+    interval_ucb = _served_band(interval_shape, mu=mu, bins=bins, bounds=bounds)
+    floors = materializer._current_evidence_tail_ucb_floors(
+        mu_star=mu, predictive_sigma_c=interval_shape.predictive_sigma_c, bins=bins,
+        half_step=0.5, rounding_rule="wmo_half_up", members_c=interval_shape.members_c,
+        metric="low", member_bounds_c=bounds,
+    )
+    for xs in ([lo for lo, _ in bounds], [hi for _, hi in bounds]):
+        point_shape = materializer._current_evidence_shape_from_values(
+            members_c=xs, center_c=mu, **_shape_kw(mu)
+        )
+        point_ucb = _served_band(point_shape, mu=mu, bins=bins)
+        for bin_id, value in point_ucb.items():
+            assert interval_ucb[bin_id] >= value - 1e-9, (bin_id, interval_ucb[bin_id], value)
+    # The draw-sup term is what carries it: at least one bin exceeds every finite floor,
+    # and each bin's q_ucb covers the 95th percentile of its per-draw sup.
+    import numpy as np
+
+    assert any(interval_ucb[b.bin_id] > floors[b.bin_id] + 0.05 for b in bins)
+    z = np.random.default_rng(materializer._QLCB_SEED).standard_normal(
+        materializer._QLCB_BOOTSTRAP_DRAWS
+    )
+    sd_lo = materializer._interval_member_scenario_ranges(bounds)[2]
+    for b in bins:
+        low = -math.inf if b.lower_c is None else b.lower_c - 0.5
+        high = math.inf if b.upper_c is None else b.upper_c + 0.5
+        draw_sups = [
+            materializer._sup_center_draw_mass(
+                low, high, mu_star=mu, draw_z=float(zz),
+                center_sigma_hi=interval_shape.center_sigma_c, sd_lo=sd_lo,
+                sd_hi=interval_shape.predictive_sigma_c,
+            )
+            for zz in z
+        ]
+        assert interval_ucb[b.bin_id] >= float(np.percentile(draw_sups, 95.0)) - 1e-9, b.bin_id
+
+
+def test_sup_normal_bin_mass_bounds_the_grid() -> None:
+    """The closed-form (center, spread) sup is >= a dense grid over both ranges."""
+    from src.calibration.emos import bin_probability_settlement
+
+    # The last case pins the interior spread optimum s* (not either range end):
+    # bin [2.5, 3.5) seen from c=0 peaks at s* = sqrt((b^2-a^2)/(2 ln(b/a))) ~ 2.99.
+    cases = [(-0.5, 0.5, -1.2, 0.8, 0.3, 2.0), (1.5, 2.5, -1.0, 0.5, 0.2, 1.4),
+             (-math.inf, -2.5, -1.0, 1.0, 0.1, 3.0), (3.5, math.inf, 0.0, 0.0, 0.0, 1.0),
+             (2.5, 3.5, 0.0, 0.0, 0.5, 8.0)]
+    for low, high, c_lo, c_hi, s_lo, s_hi in cases:
+        sup = materializer._sup_normal_bin_mass(
+            low, high, center_lo=c_lo, center_hi=c_hi, sd_lo=s_lo, sd_hi=s_hi
+        )
+        for i in range(41):
+            c = c_lo + (c_hi - c_lo) * i / 40
+            for j in range(41):
+                s = max(s_lo + (s_hi - s_lo) * j / 40, 1e-9)
+                lo_c = None if not math.isfinite(low) else low + 0.5
+                hi_c = None if not math.isfinite(high) else high - 0.5
+                mass = bin_probability_settlement(c, s, lo_c, hi_c, half_step=0.5)
+                assert sup >= mass - 1e-12, (low, high, c, s, sup, mass)
+    # Interior optimum is attained, and strictly above both range ends.
+    interior = materializer._sup_normal_bin_mass(
+        2.5, 3.5, center_lo=0.0, center_hi=0.0, sd_lo=0.5, sd_hi=8.0
+    )
+    ends = [
+        bin_probability_settlement(0.0, s, 3.0, 3.0, half_step=0.5) for s in (0.5, 8.0)
+    ]
+    assert interior > max(ends) + 0.02
+
+
 
 # --- reader: persisted bounds reach the shape, legacy rows fail closed -------------------
 
