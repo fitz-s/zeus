@@ -16,6 +16,7 @@ import math
 import re
 import sqlite3
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -618,6 +619,88 @@ def test_served_interval_sigma_dominates_every_assignment_through_the_ladder(k, 
         assert q_interval[b.bin_id] / served_total == pytest.approx(
             reference[b.bin_id] / ref_total, abs=1e-9
         )
+
+
+@pytest.mark.parametrize(
+    "error,deferred",
+    [("database is locked", True), ("database table is locked", True), ("no such table: x", False)],
+)
+def test_frontier_index_bootstrap_contention_defers_instead_of_failing(
+    tmp_path, monkeypatch, error: str, deferred: bool
+) -> None:
+    """First-time partial-index DDL runs outside the LIVE lock; BUSY/LOCKED must retry."""
+    import scripts.materialize_replacement_forecast_live as cli
+    from tests.test_replacement_forecast_materializer import (
+        _anchor,
+        _bins,
+        _current_baseline_data_version,
+        _precision_guard,
+    )
+
+    payload = {
+        "city": "Shanghai",
+        "city_id": "Shanghai",
+        "city_timezone": "Asia/Shanghai",
+        "target_date": "2026-06-07",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-06-06T00:00:00+00:00",
+        "computed_at": "2026-06-06T04:00:00+00:00",
+        "expires_at": "2026-06-06T06:00:00+00:00",
+        "baseline_source_run_id": "b0-run",
+        "baseline_data_version": _current_baseline_data_version("high"),
+        "baseline_source_available_at": "2026-06-06T02:00:00+00:00",
+        "openmeteo_source_run_id": "om9-run",
+        "openmeteo_source_available_at": "2026-06-06T03:00:00+00:00",
+        "openmeteo_payload_json": "anchor.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "warm", "lower_c": 20.0, "upper_c": 30.0}],
+    }
+    input_json = tmp_path / "request.json"
+    input_json.write_text(json.dumps(payload), encoding="utf-8")
+    (tmp_path / "anchor.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "precision.json").write_text("{}", encoding="utf-8")
+    conn = sqlite3.connect(":memory:")
+    committed: list[bool] = []
+
+    def contended_bootstrap(_connection: sqlite3.Connection) -> None:
+        raise sqlite3.OperationalError(error)
+
+    monkeypatch.setattr(
+        cli, "extract_openmeteo_ecmwf_ifs9_localday_anchor", lambda *_a, **_k: _anchor()
+    )
+    monkeypatch.setattr(cli, "OpenMeteoIfs9PrecisionMetadata", lambda **_k: object())
+    monkeypatch.setattr(
+        cli, "evaluate_openmeteo_ecmwf_ifs9_precision_guard", lambda _m: _precision_guard()
+    )
+    monkeypatch.setattr(cli, "_bins", lambda _payload: _bins())
+    monkeypatch.setattr(cli, "_ensure_replacement_frontier_indexes", contended_bootstrap)
+    monkeypatch.setattr(
+        cli,
+        "_prepare_live_schema_and_manifest",
+        lambda *_a, **_k: cli._DurablePreparationReceipt(
+            schema_ready=True, anchor_artifact_id=None, manifest_committed=False
+        ),
+    )
+    monkeypatch.setattr(
+        cli, "_commit_from_read_snapshot", lambda *_a, **_k: committed.append(True)
+    )
+
+    @contextmanager
+    def writer_lock():
+        yield
+
+    returncode, response = cli._materialize(
+        input_json, commit=True, init_schema=False, conn=conn, writer_lock=writer_lock
+    )
+    conn.close()
+
+    assert committed == []
+    assert returncode == 2
+    if deferred:
+        assert response["reason_codes"] == ["REPLACEMENT_FORECAST_WRITE_DEFERRED"]
+        assert response["retry_safe"] is True
+    else:
+        assert "reason_codes" not in response
 
 
 def test_sup_normal_bin_mass_bounds_the_grid() -> None:

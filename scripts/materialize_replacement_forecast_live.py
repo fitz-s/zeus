@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-06; last_reviewed=2026-08-29; last_reused=2026-08-29
+# Lifecycle: created=2026-06-06; last_reviewed=2026-09-25; last_reused=2026-09-25
 # Purpose: Materialize replacement live forecast posteriors and publish commit wakes.
 # Reuse: Inspect forecast materialization and reactor-wake contracts before changing.
 """Materialize Open-Meteo ECMWF IFS 9km + Bayes fusion posterior."""
@@ -1203,7 +1203,21 @@ def _materialize(
                 anchor_artifact_id=anchor_artifact_id,
                 writer_lock=effective_writer_lock,
             )
-            _ensure_replacement_frontier_indexes(conn)
+            try:
+                _ensure_replacement_frontier_indexes(conn)
+            except sqlite3.OperationalError as exc:
+                # The one-time index DDL runs outside the LIVE writer lock (it may
+                # scan a large table). A concurrent writer makes it BUSY/LOCKED; that
+                # is contention, not a request defect, so the queue retries the
+                # request instead of moving it to failed/. SCOPE: this request.
+                # DRAIN: the next retry. RESET: the indexes exist.
+                if conn.in_transaction:
+                    conn.rollback()
+                if _is_sqlite_writer_contention(exc):
+                    raise ReplacementForecastWriteDeferred(
+                        _WRITE_DEFERRED_REASON
+                    ) from exc
+                raise
             conn.commit()
             anchor_artifact_id = receipt.anchor_artifact_id
             if anchor_artifact_id is not None:
