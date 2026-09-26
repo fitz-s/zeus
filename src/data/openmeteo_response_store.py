@@ -15,7 +15,10 @@ until that state changes:
 
 A gap in an answer (nulls past a horizon, a model without a series) is part of
 the answer and can only fill when the provider modifies the run, so it is never
-re-requested before then. This one rule replaces the caller-side "does a row
+re-requested before then. The same holds for the provider's typed refusal
+"the requested model run is not available" (HTTP 400, ``run_not_published``)
+once the run's availability plus the consistency wait has passed: the run is
+not on the single-runs archive grid, and only a run change can alter that. This one rule replaces the caller-side "does a row
 exist?" checks whose missing artifact (a 200 with nulls, a failed persist, a
 restart, a replica flip) turned into an unbounded metered re-request.
 
@@ -110,6 +113,7 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS responses (
     request_id TEXT PRIMARY KEY,
     proofs TEXT NOT NULL,
+    status INTEGER NOT NULL,
     payload BLOB NOT NULL,
     fetched_at REAL NOT NULL,
     expires_at REAL NOT NULL
@@ -314,12 +318,14 @@ class OpenMeteoResponseStore:
                 """,
                 (slug, init, modification, availability),
             )
-            # Any replica's answer, even a lagging one, is a fresh confirmation that the
-            # provider has shown nothing newer than the pinned maximum.
-            db.execute(
-                "INSERT OR REPLACE INTO provider_asked VALUES (?, ?)",
-                (slug, time.time() if now is None else now),
-            )
+            # Only a reading that shows the pinned maximum confirms it is current; a
+            # lagging replica neither regresses the pin nor vouches for it.
+            latest = self.run_state(slug)
+            if latest is not None and (init, modification) == (latest.init, latest.modification):
+                db.execute(
+                    "INSERT OR REPLACE INTO provider_asked VALUES (?, ?)",
+                    (slug, time.time() if now is None else now),
+                )
         except (sqlite3.Error, OSError) as exc:
             self._failed(exc)
 
@@ -416,11 +422,14 @@ class OpenMeteoResponseStore:
 
     def lookup(
         self, request_id: str, req: ExactRequest, now: float | None = None
-    ) -> object | None:
+    ) -> tuple[int, object] | None:
+        """The held (HTTP status, body) for this request, if it is still the provider's."""
+
         now = time.time() if now is None else now
         try:
             row = self._db().execute(
-                "SELECT proofs, payload FROM responses WHERE request_id = ? AND expires_at > ?",
+                "SELECT proofs, status, payload FROM responses "
+                "WHERE request_id = ? AND expires_at > ?",
                 (request_id, now),
             ).fetchone()
             if row is None:
@@ -428,7 +437,7 @@ class OpenMeteoResponseStore:
             proofs = json.loads(row[0])
             if not all(self._holds(req, slug, proofs.get(slug), now) for slug in req.slugs):
                 return None
-            return json.loads(zstandard.ZstdDecompressor().decompress(row[1]))
+            return int(row[1]), json.loads(zstandard.ZstdDecompressor().decompress(row[2]))
         except (sqlite3.Error, OSError, ValueError, zstandard.ZstdError) as exc:
             self._failed(exc)
             return None
@@ -439,16 +448,26 @@ class OpenMeteoResponseStore:
         req: ExactRequest,
         proofs: Mapping[str, str],
         payload: object,
+        status: int = 200,
         now: float | None = None,
     ) -> None:
+        """Hold a 200 body, or a provider's typed "run not published" refusal."""
+
         now = time.time() if now is None else now
         try:
             blob = zstandard.ZstdCompressor(level=3).compress(
                 json.dumps(payload, separators=(",", ":")).encode("utf-8")
             )
             self._db().execute(
-                "INSERT OR REPLACE INTO responses VALUES (?, ?, ?, ?, ?)",
-                (request_id, json.dumps(dict(proofs), sort_keys=True), blob, now, req.expires_at),
+                "INSERT OR REPLACE INTO responses VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    request_id,
+                    json.dumps(dict(proofs), sort_keys=True),
+                    int(status),
+                    blob,
+                    now,
+                    req.expires_at,
+                ),
             )
             self._evict(now)
         except (sqlite3.Error, OSError, TypeError, ValueError, zstandard.ZstdError) as exc:

@@ -47,6 +47,7 @@ class Provider:
         }
         self.data_calls = 0
         self.meta_calls = 0
+        self.unpublished = False
         self.release: threading.Event | None = None
         self.started = threading.Event()
         self.lock = threading.Lock()
@@ -74,6 +75,12 @@ class Provider:
         self.started.set()
         if self.release is not None:
             assert self.release.wait(5.0)
+        if self.unpublished:
+            return httpx.Response(
+                400,
+                json={"error": True, "reason": "The requested model run is not available."},
+                request=request,
+            )
         # The Madrid/Tel Aviv/Warsaw repro: a successful answer whose target-day
         # tail is null (past the run's current horizon) and therefore writes 0 rows.
         return httpx.Response(
@@ -223,6 +230,56 @@ def test_e_two_concurrent_callers_meter_one_send(world) -> None:
     assert first[0].calls_today() == 1
 
 
+def test_d_off_grid_run_refusal_is_held_like_any_other_answer(world) -> None:
+    """knmi 02Z, 09-26: the same "run not available" 400 re-requested every poll."""
+
+    world.provider.unpublished = True
+    proc = world.process()
+    for poll in range(40):
+        world.now["t"] = float(_utc(5)) + 15.0 * poll
+        with pytest.raises(om.OpenMeteoHTTPStatusError) as caught:
+            world.fetch(proc, conditional_status_codes=frozenset({400}))
+        assert caught.value.outcome.reason == "run_not_published"
+        assert caught.value.outcome.retry_class is om.OpenMeteoRetryClass.CONDITIONAL
+
+    assert world.provider.data_calls == 1
+
+
+def test_untyped_client_error_is_never_held(world, monkeypatch) -> None:
+    """Only the provider's typed run refusal is an answer; any other 4xx is not held."""
+
+    def bad_request(url, *, params=None, timeout=None):  # noqa: ARG001
+        world.provider.data_calls += 1
+        return httpx.Response(400, json={"error": True, "reason": "Parameter x invalid"},
+                              request=httpx.Request("GET", url))
+
+    proc = world.process()
+    monkeypatch.setattr(world.provider, "get", lambda url, **kw: (
+        Provider.get(world.provider, url, **kw) if url.endswith("meta.json") else bad_request(url, **kw)
+    ))
+    for _ in range(3):
+        with pytest.raises(om.OpenMeteoHTTPStatusError):
+            world.fetch(proc, conditional_status_codes=frozenset({400}))
+        proc[0]._shared(lambda state, _now: (state["requests"].clear(), True))
+
+    assert world.provider.data_calls == 3
+    assert proc[1]._db().execute("SELECT COUNT(*) FROM responses").fetchone()[0] == 0
+
+
+def test_unpublished_future_run_refusal_is_never_held(world) -> None:
+    world.provider.unpublished = True
+    world.provider.meta["dwd_icon"] = [_utc(-6), _utc(-2), _utc(-1.9)]
+    world.provider.meta["dwd_icon_eu"] = [_utc(-3), _utc(-1), _utc(-0.9)]
+    proc = world.process()
+    for _ in range(3):
+        with pytest.raises(om.OpenMeteoHTTPStatusError):
+            world.fetch(proc)
+        world.now["t"] += 30.0
+        proc[0]._shared(lambda state, _now: (state["requests"].clear(), True))
+
+    assert world.provider.data_calls == 3
+
+
 def test_previous_runs_answer_follows_every_models_latest_run(world) -> None:
     proc = world.process()
     params = {
@@ -284,13 +341,34 @@ def test_replica_lag_never_regresses_a_runs_modification(world) -> None:
     proc = world.process()
     world.fetch(proc)
     init, modification, availability = world.provider.meta["dwd_icon_eu"]
-    world.provider.meta["dwd_icon_eu"] = [init, modification - 600, availability - 600]
-    world.now["t"] += 90.0  # past META_FRESH_SECONDS: the lagging replica is re-read
+    proc[1].record_meta("dwd_icon_eu", {
+        "last_run_initialisation_time": init,
+        "last_run_modification_time": modification - 600,
+        "last_run_availability_time": availability - 600,
+    })
+    world.now["t"] += 20.0
 
     world.fetch(proc)
 
     assert world.provider.data_calls == 1
     assert proc[1].run_state("dwd_icon_eu").modification == modification
+
+
+def test_lagging_replica_cannot_vouch_that_a_latest_run_is_unchanged(world) -> None:
+    proc = world.process()
+    world.fetch(proc)
+    current = list(world.provider.meta["dwd_icon_eu"])
+    world.provider.meta["dwd_icon_eu"] = [current[0], current[1] - 600, current[2] - 600]
+    world.now["t"] += 90.0  # past META_FRESH_SECONDS: only the lagging replica answers
+
+    world.fetch(proc)
+    assert world.provider.data_calls == 2  # unprovable, so paid
+
+    world.provider.meta["dwd_icon_eu"] = current
+    world.now["t"] += 90.0
+    world.fetch(proc)
+    world.fetch(proc)
+    assert world.provider.data_calls == 2  # a current replica confirms the held answer
 
 
 def test_f_alarm_names_the_looping_job_within_the_hour(world, caplog) -> None:

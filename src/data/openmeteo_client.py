@@ -428,13 +428,30 @@ def _refresh_run_state(
             logger.debug("Open-Meteo run state for %s unavailable: %s", slug, exc)
 
 
+def _serve(
+    held: tuple[int, object],
+    url: str,
+    params: dict,
+    conditional_status_codes: frozenset[int],
+) -> object:
+    """Replay a held answer exactly as the provider gave it: a body, or its typed refusal."""
+
+    status, body = held
+    if status < 400:
+        return body
+    resp = httpx.Response(status, json=body, request=httpx.Request("GET", url, params=params))
+    raise OpenMeteoHTTPStatusError(
+        resp, _http_outcome(resp, conditional_status_codes=conditional_status_codes)
+    )
+
+
 def _await_twin(
     store: OpenMeteoResponseStore,
     tracker: OpenMeteoQuotaTracker,
     request_id: str,
     req: ExactRequest,
     deadline: float,
-) -> object | None:
+) -> tuple[int, object] | None:
     """Wait for a provable answer another caller is fetching for this exact request."""
 
     if store.proofs(req) is None:
@@ -496,7 +513,7 @@ def fetch(
         held = answers.lookup(request_id, req)
         if held is not None:
             answers.note_served(job, quota_cost)
-            return held
+            return _serve(held, url, params, conditional_status_codes)
     twin_deadline = time.monotonic() + min(IN_FLIGHT_WAIT_SECONDS, float(timeout))
     last_exc: Exception | None = None
     for attempt in range(max_retries):
@@ -520,7 +537,7 @@ def fetch(
             held = _await_twin(answers, tracker, request_id, req, twin_deadline)
             if held is not None:
                 answers.note_served(job, quota_cost)
-                return held
+                return _serve(held, url, params, conditional_status_codes)
             if time.monotonic() >= twin_deadline or tracker.request_in_flight(request_id):
                 break
         if not allowed:
@@ -548,6 +565,13 @@ def fetch(
                     conditional_status_codes=conditional_status_codes,
                 )
                 error = OpenMeteoHTTPStatusError(resp, outcome)
+                if proofs is not None and outcome.reason == "run_not_published":
+                    # The provider's typed refusal is an answer about this run: only a
+                    # run change can alter it (never observed flipping, 09-23..09-26).
+                    answers.put(
+                        request_id, req, proofs, {"error": True, "reason": outcome.reason},
+                        status=outcome.status_code,
+                    )
                 if outcome.retry_class is OpenMeteoRetryClass.RATE_LIMITED:
                     wait = _rate_limit_wait(outcome, attempt)
                     tracker.note_rate_limited(int(wait), endpoint=endpoint)
@@ -588,7 +612,7 @@ def fetch(
                 if slug is not None:
                     answers.record_meta(slug, payload)
                 if proofs is not None:
-                    answers.put(request_id, req, proofs, payload)
+                    answers.put(request_id, req, proofs, payload, status=resp.status_code)
                 if count_toward_quota:
                     answers.note_success(request_id)
             recorded = tracker.record_request_success(
