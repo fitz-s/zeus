@@ -130,3 +130,20 @@ LIVE means landed plus a live metric proving it runs.
 Land the ENS boundary interval branch on a GO review. Land the cursor and cut-throughput
 slices as they commit. Then start the accuracy gate once census A1 says what share of
 trades used a corrected q.
+
+## Diagnostic verdict 2026-09-27 (offline, `scripts/fit_candidate_calibration.py`)
+Artifacts are in the session scratchpad: `release_price_only_fde1cd8a9b0a00d1.json`, `release_proxy_q_c5c7ebf7f91fd16a.json`, and `release_proxy_q_overround_le_1.3_6cccb3967e314ea3.json`. Scope: 817 city-days, 6,583 decision instants, target dates 08-26..09-23. Uncertainty is 3-date-block with simultaneous bounds.
+
+**Findings:**
+- **Weather q adds nothing beyond a coherent market price.**
+  - Pooled blend weight w ≈ 0.01 [0.005, 0.045] in every metric×lane on coherent books. Unpooled w is 0 in most cells.
+  - The upper bound of the loss slope at w = 0 is positive everywhere.
+  - Out of sample the blend is +0.0006 nats worse than the market, and every |q−p| band fails.
+- **LOW markets are not probabilities.** The median YES-ask sum is 3.5 and only 8% of books are coherent. E[y − ask] is −0.17 (Day0) and −0.22 (forecast). The positive w in LOW only reflects incoherent asks.
+- **No price-only edge after cost.** E[y − held_ask − fee] ≤ 0 in every metric × lane × P band. Nine HIGH cells are significantly negative. The flat-normalized-P anomaly (+0.048 at P 0.30–0.50) does not survive the executable ask.
+- **No fresh-evidence window.** In HIGH, the blend is significantly harmful less than 5 minutes after a q change (+0.025) and at 12–24 h to local day end (+0.020). Every other window is null.
+- **Nothing licensed.** Every release verdict is INSUFFICIENT_EVIDENCE: only 13 testable dates, below the floor of 14. The reason is that 09-19 and 09-22 have no rows, because only winner-producing cuts are persisted.
+
+**Limits.** q is a proxy: the latest prior posterior. On rows where the decision's own q_raw exists, |proxy − own| exceeds 0.15 for 12%. The population is winner-only cuts, and P is the ask vector because a mid vector is unavailable.
+
+**Implication.** As it currently behaves, the acting q carries no information that the market price lacks, and taking the ask loses spread plus fee. Latency work alone cannot create edge. Edge requires either information the market does not have, or execution below fair value (maker), each proven on untouched outcomes. The next evidence comes from exact decision-time q_raw on all candidates and all cuts, which is being captured now.
