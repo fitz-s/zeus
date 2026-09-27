@@ -2877,6 +2877,38 @@ def _ws_review_confirmed_entry_candidates_read_only(
         conn.close()
 
 
+def _terminal_entry_obligation_candidates_read_only(
+    *, limit: int, after_command_id: str | None = None, probe: bool = False,
+) -> tuple[tuple[str, str], ...]:
+    """Reuse the existing bounded terminal obligation proof hints."""
+    from src.execution import command_recovery as recovery
+    from src.state.db import get_trade_connection_read_only
+
+    conn = get_trade_connection_read_only()
+    try:
+        choices = []
+        for kind, selector, cursor_name in (
+            ("voided", recovery._terminal_voided_entry_obligation_command_ids,
+             "_terminal_voided_entry_obligation_cursor"),
+            ("partial", recovery._terminal_partial_entry_obligation_command_ids,
+             "_terminal_partial_entry_obligation_cursor"),
+        ):
+            if probe:
+                ids = selector(conn, limit=limit, **({"probe": True} if kind == "voided" else {}))
+            else:
+                after = getattr(recovery, cursor_name) or after_command_id
+                previous = getattr(recovery, cursor_name)
+                ids = selector(
+                    conn, limit=limit, after_command_id=after, advance_cursor=True,
+                )
+                if not ids and after and getattr(recovery, cursor_name) == previous:
+                    ids = selector(conn, limit=limit, advance_cursor=True)
+            choices.extend((command_id, kind) for command_id in ids)
+        return tuple(sorted(choices)[:limit])
+    finally:
+        conn.close()
+
+
 def _edli_repair_orphaned_command_link(
     conn, *, aggregate_id: str, command_id: str, position_id: str, now: datetime,
 ) -> bool:
@@ -2925,6 +2957,7 @@ def _edli_durable_fill_bridge_work_exists_read_only() -> bool:
         or _edli_orphaned_command_link_candidates_read_only(limit=1)
         or _genuine_cancel_reassert_candidates_read_only(limit=1)
         or _ws_review_confirmed_entry_candidates_read_only(limit=1, probe=True)
+        or _terminal_entry_obligation_candidates_read_only(limit=1, probe=True)
     )
 
 
@@ -3923,9 +3956,18 @@ def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
         review_candidates = ()
         canonical_failure_reasons.append(FILL_BRIDGE_POSITION_MATERIALIZATION_FAILED)
         logger.error("EDLI WS-review confirmed-fill debt discovery failed: %s", exc, exc_info=True)
+    try:
+        obligation_candidates = _terminal_entry_obligation_candidates_read_only(
+            limit=1, after_command_id=_edli_orphaned_command_link_cursor,
+        )
+    except Exception as exc:  # noqa: BLE001 - exact debt retries next cycle
+        obligation_candidates = ()
+        canonical_failure_reasons.append(FILL_BRIDGE_POSITION_MATERIALIZATION_FAILED)
+        logger.error("EDLI terminal entry obligation discovery failed: %s", exc, exc_info=True)
     choices = [(row[1], "link", row) for row in link_candidates]
     choices.extend((command_id, "cancel", command_id) for command_id in cancel_candidates)
     choices.extend((command_id, "review", command_id) for command_id in review_candidates)
+    choices.extend((row[0], "obligation", row) for row in obligation_candidates)
     selected = min(
         choices,
         key=lambda row: (
@@ -3936,6 +3978,7 @@ def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
     link_candidates = (selected[2],) if selected and selected[1] == "link" else ()
     cancel_candidates = (selected[2],) if selected and selected[1] == "cancel" else ()
     review_candidates = (selected[2],) if selected and selected[1] == "review" else ()
+    obligation_candidates = (selected[2],) if selected and selected[1] == "obligation" else ()
     try:
         durable_bridge_candidate_ids = (
             _edli_durable_fill_bridge_candidate_ids_read_only(
@@ -4025,10 +4068,15 @@ def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
             *(("link", row) for row in link_candidates),
             *(("cancel", command_id) for command_id in cancel_candidates),
             *(("review", command_id) for command_id in review_candidates),
+            *(("obligation", row) for row in obligation_candidates),
         ):
-            aggregate_id, command_id, position_id = (
-                evidence if repair_kind == "link" else ("", evidence, "")
-            )
+            if repair_kind == "link":
+                aggregate_id, command_id, position_id = evidence
+            elif repair_kind == "obligation":
+                command_id, obligation_kind = evidence
+                aggregate_id, position_id = "", ""
+            else:
+                aggregate_id, command_id, position_id = "", evidence, ""
             bridge_conn = None
             deadline_monotonic = _fill_bridge_write_deadline()
             try:
@@ -4071,7 +4119,7 @@ def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
                                 bridge_conn, command_id=command_id,
                                 observed_at=now.isoformat(),
                             )
-                        else:
+                        elif repair_kind == "review":
                             from src.execution.command_recovery import (
                                 reconcile_authenticated_entry_trade_facts,
                             )
@@ -4097,6 +4145,50 @@ def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
                             if not repaired and not outcome["errors"] and not outcome["advanced"]:
                                 bridge_conn.rollback()
                                 logger.info("EDLI WS-review REST proof incomplete: command_id=%s", command_id)
+                                continue
+                        else:
+                            from src.execution import command_recovery as recovery
+
+                            selector = (
+                                recovery._terminal_voided_entry_obligation_command_ids
+                                if obligation_kind == "voided"
+                                else recovery._terminal_partial_entry_obligation_command_ids
+                            )
+                            if command_id not in selector(
+                                bridge_conn, limit=1, command_id=command_id,
+                            ):
+                                bridge_conn.rollback()
+                                logger.info("EDLI terminal obligation proof changed: command_id=%s", command_id)
+                                continue
+                            position_before = bridge_conn.execute(
+                                "SELECT * FROM position_current WHERE position_id = "
+                                "(SELECT position_id FROM venue_commands WHERE command_id = ?)",
+                                (command_id,),
+                            ).fetchone()
+                            outcome = recovery.reconcile_terminal_entry_exposure_obligations(
+                                bridge_conn, command_id=command_id,
+                            )
+                            position_after = bridge_conn.execute(
+                                "SELECT * FROM position_current WHERE position_id = "
+                                "(SELECT position_id FROM venue_commands WHERE command_id = ?)",
+                                (command_id,),
+                            ).fetchone()
+                            status = bridge_conn.execute(
+                                "SELECT status FROM entry_exposure_obligations WHERE command_id = ?",
+                                (command_id,),
+                            ).fetchone()
+                            repaired = (
+                                outcome["scanned"] == 1 and outcome["advanced"] == 1
+                                and not outcome["errors"]
+                                and not outcome.get("terminal_late_fill_corrections", {}).get("advanced")
+                                and status is not None and str(_row_get(status, "status")) == "RESOLVED"
+                                and position_before is not None
+                                and position_after is not None
+                                and tuple(position_before) == tuple(position_after)
+                            )
+                            if not repaired and not outcome["errors"] and not outcome["advanced"]:
+                                bridge_conn.rollback()
+                                logger.info("EDLI terminal obligation proof incomplete: command_id=%s", command_id)
                                 continue
                         if not repaired:
                             raise RuntimeError(f"EDLI exact repair proof did not converge: {command_id}")
