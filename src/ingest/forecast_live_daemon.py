@@ -174,6 +174,7 @@ FORECAST_LIVE_SOURCE_HEALTH_SECONDS = 10 * 60
 FORECAST_LIVE_SOURCE_HEALTH_SOURCE_IDS = frozenset({"ecmwf_open_data"})
 _CURRENT_SOURCE_CYCLE_STATUSES = frozenset({"SUCCESS"})
 _OPENDATA_WAKE_ACKED_SOURCE_RUN_IDS: set[str] = set()
+_OPENDATA_HELD_WAKE_LAST_SCOPE: dict[str, tuple[datetime, str, str]] = {}
 _OPENDATA_SAFE_CYCLE_EXECUTOR: ThreadPoolExecutor | None = None
 _OPENDATA_SAFE_CYCLE_FUTURES: dict[str, Any] = {}
 _OPENDATA_WAKE_TERMINAL_STATUSES = frozenset(
@@ -1564,6 +1565,184 @@ def _commit_opendata_result_and_wake(conn, result: dict) -> dict:
     return {**result, "cycle_advance_reseed": report}
 
 
+def _committed_held_opendata_wake(
+    conn,
+    *,
+    track: str,
+    now_utc: datetime,
+    deadline_monotonic: float | None = None,
+    _held_families: set[tuple[str, str, str]] | None = None,
+    _enqueue: Callable[..., dict[str, object] | None] | None = None,
+) -> dict[str, object] | None:
+    """Replay one unconsumed, exact committed source for an ended held family.
+
+    This is a wake only: source retrieval and ENTRY calendar admission do not run.
+    A failed enqueue remains eligible at the next normal poll; a certified
+    current posterior is the durable completion witness, not process ACK state.
+    """
+    from src.config import runtime_cities_by_name, runtime_coordinate_manifest_json
+    from src.data.ecmwf_open_data import _forecast_track_for_profile
+    from src.data.executable_forecast_reader import read_executable_forecast_snapshot
+    from src.data.forecast_fetch_plan import data_version_for_track, metric_for_track
+    from src.data.forecast_target_contract import build_forecast_target_scope
+    from src.data.replacement_cycle_advance_trigger import (
+        _held_position_families,
+        _latest_posterior_consumes_causal_baseline,
+    )
+    from src.state.db import get_trade_connection_read_only
+
+    now = now_utc.astimezone(timezone.utc)
+    metric = metric_for_track(track)
+    if _held_families is None:
+        held_conn = get_trade_connection_read_only()
+        try:
+            _held_families = _held_position_families(held_conn)
+        finally:
+            held_conn.close()
+    cities = runtime_cities_by_name()
+    version = data_version_for_track(track, runtime_coordinate_manifest_json())
+    candidates: list[tuple[datetime, str, str, object]] = []
+    for city_name, target_date, held_metric in _held_families:
+        city = cities.get(city_name)
+        if held_metric != metric or city is None:
+            continue
+        try:
+            from src.data.forecast_target_contract import compute_target_local_day_window_utc
+
+            window = compute_target_local_day_window_utc(
+                city_timezone=city.timezone,
+                target_local_date=datetime.fromisoformat(target_date).date(),
+            )
+        except (TypeError, ValueError, KeyError):
+            continue
+        if window.end_utc <= now:
+            candidates.append((window.end_utc, city_name, target_date, city))
+
+    ordered = sorted(candidates)
+    last = _OPENDATA_HELD_WAKE_LAST_SCOPE.get(track)
+    if last is not None:
+        for index, (target_end, city_name, target_date, _) in enumerate(ordered):
+            if (target_end, city_name, target_date) == last:
+                ordered = ordered[index + 1:] + ordered[:index + 1]
+                break
+    for target_end, city_name, target_date, city in ordered:
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            return None
+        # Even an invalid/consumed family advances the bounded scan. If the
+        # selector reaches its existing poll budget before later families,
+        # the next poll resumes after this scope instead of rescanning an
+        # unbounded invalid prefix forever.
+        _OPENDATA_HELD_WAKE_LAST_SCOPE[track] = (target_end, city_name, target_date)
+        city_id = city.name.upper().replace(" ", "_")
+        rows = conn.execute(
+            """
+            SELECT coverage.source_run_id, coverage.track, coverage.release_calendar_key,
+                   coverage.target_window_start_utc, coverage.target_window_end_utc,
+                   coverage.snapshot_ids_json, source.source_cycle_time,
+                   source.source_available_at
+              FROM source_run_coverage coverage INDEXED BY idx_source_run_coverage_scope
+              JOIN source_run source ON source.source_run_id = coverage.source_run_id
+             WHERE coverage.city_id = ? AND coverage.city_timezone = ?
+               AND coverage.target_local_date = ? AND coverage.temperature_metric = ?
+               AND coverage.source_id = 'ecmwf_open_data'
+               AND coverage.source_transport = 'ensemble_snapshots_db_reader'
+               AND coverage.data_version = ? AND coverage.city = ?
+               AND coverage.completeness_status = 'COMPLETE'
+               AND coverage.readiness_status = 'LIVE_ELIGIBLE'
+               AND coverage.expires_at IS NOT NULL
+               AND julianday(coverage.expires_at) > julianday(?)
+               AND source.source_id = coverage.source_id
+               AND source.track = coverage.track
+               AND source.release_calendar_key = coverage.release_calendar_key
+               AND source.status IN ('SUCCESS', 'PARTIAL')
+               AND source.completeness_status IN ('COMPLETE', 'PARTIAL')
+             ORDER BY source.source_cycle_time DESC LIMIT 8
+            """,
+            (city_id, city.timezone, target_date, metric, version, city_name,
+             now.isoformat()),
+        ).fetchall()
+        for row in rows:
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                return None
+            cycle = _parse_utc_timestamp(row["source_cycle_time"])
+            available = _parse_utc_timestamp(row["source_available_at"])
+            if cycle is None or available is None or available > now:
+                continue
+            identity = _forecast_work_identity_for_cycle(
+                track, cycle_time=cycle, now_utc=now,
+            )
+            profile = str(identity["release_calendar_key"]).rsplit(":", 1)[-1]
+            expected_track = _forecast_track_for_profile(
+                ingest_track=track, horizon_profile=profile,
+            )
+            source_run_id = str(row["source_run_id"])
+            if (
+                row["track"] != expected_track
+                or row["release_calendar_key"] != identity["release_calendar_key"]
+                or source_run_id != _expected_source_run_id(identity)
+            ):
+                continue
+            scope = build_forecast_target_scope(
+                city_id=city_id, city_name=city_name,
+                city_timezone=city.timezone,
+                target_local_date=datetime.fromisoformat(target_date).date(),
+                temperature_metric=metric, source_cycle_time=cycle,
+                data_version=version,
+            )
+            if (
+                cycle > scope.target_window_start_utc
+                or row["target_window_start_utc"] != scope.target_window_start_utc.isoformat()
+                or row["target_window_end_utc"] != scope.target_window_end_utc.isoformat()
+                or not scope.required_step_hours
+            ):
+                continue
+            executable = read_executable_forecast_snapshot(
+                conn, scope=scope, source_id="ecmwf_open_data",
+                source_run_id=source_run_id, now_utc=now,
+            )
+            if executable.status != "LIVE_ELIGIBLE" or executable.snapshot is None:
+                continue
+            try:
+                snapshot_ids = json.loads(str(row["snapshot_ids_json"]))
+            except (TypeError, ValueError):
+                continue
+            if (not isinstance(snapshot_ids, list)
+                    or executable.snapshot.snapshot_id not in snapshot_ids):
+                continue
+            if _latest_posterior_consumes_causal_baseline(
+                conn, city=city_name, target_date=target_date, metric=metric,
+                target_cycle_iso=cycle.isoformat(),
+                required_baseline_source_run_id=source_run_id,
+                decision_time=now,
+            ):
+                continue
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                return None
+            if _enqueue is None:
+                from src.data.replacement_forecast_production import (
+                    _enqueue_cycle_advance_reseeds_if_needed,
+                    _replacement_forecast_live_materialization_queue_config,
+                )
+
+                report = _enqueue_cycle_advance_reseeds_if_needed(
+                    _replacement_forecast_live_materialization_queue_config(),
+                    scopes=((city_name, target_date, metric),), limit=1,
+                    causal_baseline_source_run_id=source_run_id,
+                )
+            else:
+                report = _enqueue(
+                    scopes=((city_name, target_date, metric),), limit=1,
+                    causal_baseline_source_run_id=source_run_id,
+                )
+            return {
+                "status": "OPENDATA_COMMITTED_HELD_WAKE_REPLAYED",
+                "source_run_id": source_run_id,
+                "scope": (city_name, target_date, metric),
+                "reseed": report,
+            }
+    return None
+
+
 def _run_journaled_opendata_track(track: str) -> dict:
     from src.state.db import get_forecasts_connection
 
@@ -1587,12 +1766,27 @@ def _run_journaled_opendata_track_if_due(
 
     conn = get_forecasts_connection(write_class="bulk")
     try:
+        # Republish an already-committed held input before a potentially long
+        # new-cycle collector monopolizes this track. This only enqueues a
+        # proven source; the collector remains governed by its own calendar.
+        poll_deadline = time.monotonic() + max(
+            0, FORECAST_LIVE_SAFE_CYCLE_POLL_SECONDS - FORECAST_LIVE_SAFE_CYCLE_HANDOFF_SECONDS
+        )
+        try:
+            replay = _committed_held_opendata_wake(
+                conn, track=track, now_utc=_utcnow(), deadline_monotonic=poll_deadline,
+            )
+        except Exception as exc:  # noqa: BLE001 - source collection remains durable
+            logger.warning("forecast-live committed held wake replay failed track=%s: %s", track, exc)
+            replay = {"status": "OPENDATA_COMMITTED_HELD_WAKE_REPLAY_FAILED", "error": str(exc)}
         result = _run_opendata_track_if_due(
             track,
             _job_conn=conn,
+            _poll_deadline_monotonic=poll_deadline,
             _use_availability_probe=_use_availability_probe,
         )
-        return _commit_opendata_result_and_wake(conn, result)
+        committed = _commit_opendata_result_and_wake(conn, result)
+        return {**committed, "committed_held_wake": replay} if replay is not None else committed
     except Exception:
         conn.commit()
         raise

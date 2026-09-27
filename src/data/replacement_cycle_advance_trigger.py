@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import queue
 import sqlite3
@@ -70,11 +71,10 @@ _LOG = logging.getLogger("zeus.replacement_cycle_advance_trigger")
 
 UTC = timezone.utc
 
-# A city-local target day that has already ended is no longer a live scope: the market has
-# stopped trading it and no posterior committed after local-day-end is ever consumed (see
-# `has_city_local_day_ended` and `build_replacement_forecast_current_target_plan`'s row filter,
-# the sibling gate on the poll-lane batch variant below). Single spelling shared by every
-# single-family enqueue path that reaches `enqueue_single_family_cycle_advance_reseed`.
+# A city-local target day that has ended leaves the new-entry/current-target
+# universe. Exact committed-source wakes for a chain-confirmed held family are
+# a separate reduce-only redecision scope; they retain their causal source and
+# observation requirements. Single spelling for the ordinary ended skip.
 RESEED_SKIPPED_TARGET_LOCAL_DAY_ENDED = "RESEED_SKIPPED_TARGET_LOCAL_DAY_ENDED"
 
 _ANCHOR_LEG_SOURCE_ID = "openmeteo_ecmwf_ifs_9km"
@@ -755,6 +755,7 @@ def _latest_posterior_consumes_causal_baseline(
     metric: str,
     target_cycle_iso: str,
     required_baseline_source_run_id: str | None,
+    decision_time: datetime,
 ) -> bool:
     """Whether current q already consumed this exact committed ENS wake."""
 
@@ -763,35 +764,46 @@ def _latest_posterior_consumes_causal_baseline(
     if not required or target_cycle is None:
         return False
     try:
-        row = conn.execute(
-            """
-            SELECT source_cycle_time, dependency_source_run_ids_json
-              FROM forecast_posteriors
-             WHERE source_id = ?
-               AND runtime_layer = 'live'
-               AND city = ?
-               AND target_date = ?
-               AND temperature_metric = ?
-             ORDER BY computed_at DESC, posterior_id DESC
-             LIMIT 1
-            """,
-            (SOURCE_ID, city, target_date, metric),
-        ).fetchone()
-    except sqlite3.Error:
-        return False
-    if row is None:
-        return False
-    consumed_cycle = _parse_cycle(
-        row["source_cycle_time"] if hasattr(row, "keys") else row[0]
-    )
-    try:
-        dependencies = json.loads(
-            str(
-                row["dependency_source_run_ids_json"]
-                if hasattr(row, "keys")
-                else row[1]
-            )
+        from src.data.replacement_forecast_bundle_reader import (
+            ReplacementForecastAuthorityPurpose,
+            _live_grade_provenance,
         )
+        from src.engine.position_belief import _certified_replacement_posterior_row
+
+        columns = {str(item[1]) for item in conn.execute("PRAGMA table_info(forecast_posteriors)")}
+        row = _certified_replacement_posterior_row(
+            conn, city=city, target_date=target_date,
+            temperature_metric=metric, decision_time=decision_time,
+            posterior_columns=columns,
+        )
+        if row is None or _live_grade_provenance(
+            {**dict(row), "city": city, "target_date": target_date},
+            authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+        ) is None:
+            return False
+        q, lcb, ucb = (
+            json.loads(str(row[key]))
+            for key in ("q_json", "q_lcb_json", "q_ucb_json")
+        )
+        if (
+            not isinstance(q, Mapping) or not q
+            or not isinstance(lcb, Mapping) or not isinstance(ucb, Mapping)
+            or set(q) != set(lcb) or set(q) != set(ucb)
+            or any(
+                type(q[key]) not in (int, float)
+                or type(lcb[key]) not in (int, float)
+                or type(ucb[key]) not in (int, float)
+                or not all(math.isfinite(float(v)) for v in (q[key], lcb[key], ucb[key]))
+                or not (0 <= lcb[key] <= q[key] <= ucb[key] <= 1)
+                for key in q
+            )
+        ):
+            return False
+    except (ImportError, KeyError, sqlite3.Error, TypeError, ValueError):
+        return False
+    consumed_cycle = _parse_cycle(row["source_cycle_time"])
+    try:
+        dependencies = json.loads(str(row["dependency_source_run_ids_json"]))
     except (TypeError, ValueError, json.JSONDecodeError):
         return False
     return (
@@ -1802,6 +1814,20 @@ def enqueue_cycle_advance_reseeds(
         report["status"] = "CYCLE_ADVANCE_FORECAST_DB_MISSING"
         return report
 
+    # Read chain-confirmed economic exposure before filtering explicit source
+    # wakes. A completed ENS source can arrive just after the local day ends;
+    # that held family's redecision still needs the committed causal baseline.
+    held: set[tuple[str, str, str]] = set()
+    if trades_db is not None and Path(trades_db).exists():
+        try:
+            conn_t = sqlite3.connect(f"file:{Path(trades_db)}?mode=ro", uri=True, timeout=5.0)
+            try:
+                held = _held_position_families(conn_t)
+            finally:
+                conn_t.close()
+        except Exception as exc:  # noqa: BLE001 — prioritization is best-effort, never fatal
+            _LOG.debug("cycle-advance HELD-position read failed (no prioritization): %s", exc)
+
     if scopes is None:
         # No explicit min_target_date: the plan derives its own floor as the earliest
         # city-local date still open across the roster (_default_min_target_date), not a
@@ -1866,7 +1892,10 @@ def enqueue_cycle_advance_reseeds(
                         target_date,
                         type(exc).__name__,
                     )
-            if target_local_day_ended:
+            if target_local_day_ended and not (
+                causal_baseline_source_run_id
+                and (city, target_date, metric) in held
+            ):
                 report[RESEED_SKIPPED_TARGET_LOCAL_DAY_ENDED] = (
                     int(report[RESEED_SKIPPED_TARGET_LOCAL_DAY_ENDED]) + 1
                 )
@@ -1900,17 +1929,6 @@ def enqueue_cycle_advance_reseeds(
 
     # HELD-position families (priority tier i). Read-only on the trades DB (mode=ro — the trigger
     # NEVER writes zeus_trades; K1 DB split). Fail-soft to empty: prioritization is best-effort.
-    held: set[tuple[str, str, str]] = set()
-    if trades_db is not None and Path(trades_db).exists():
-        try:
-            conn_t = sqlite3.connect(f"file:{Path(trades_db)}?mode=ro", uri=True, timeout=5.0)
-            try:
-                held = _held_position_families(conn_t)
-            finally:
-                conn_t.close()
-        except Exception as exc:  # noqa: BLE001 — prioritization is best-effort, never fatal
-            _LOG.debug("cycle-advance held-position read failed (no prioritization): %s", exc)
-
     conn = _connect(forecast_db, write_class="live")
     conn.row_factory = sqlite3.Row
     try:
@@ -2197,6 +2215,7 @@ def enqueue_cycle_advance_reseeds(
                 metric=metric,
                 target_cycle_iso=target_cycle_iso,
                 required_baseline_source_run_id=causal_baseline_source_run_id,
+                decision_time=now,
             ):
                 # SCOPE: this exact family/cycle/committed ENS run. DRAIN: the
                 # source wake is complete when current q names that run as its

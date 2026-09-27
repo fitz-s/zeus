@@ -791,11 +791,11 @@ def test_batch_cycle_advance_enqueues_day0_with_observed_extreme(
     assert marker["day0_observed_extreme_observation_time"] == "2026-07-03T22:00:00+00:00"
 
 
-def test_committed_ens_wake_is_complete_when_current_q_consumed_exact_run(
+def test_committed_ens_wake_is_not_complete_on_placeholder_dependency(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A moved old marker cannot republish an ENS run already present in current q."""
+    """A matching string in a non-certified posterior cannot end held replay."""
 
     db_path = tmp_path / "forecast.db"
     conn = sqlite3.connect(db_path)
@@ -848,12 +848,11 @@ def test_committed_ens_wake_is_complete_when_current_q_consumed_exact_run(
         "_newer_eligible_ensemble_cycle",
         lambda *_args, **_kwargs: None,
     )
+    inspected = []
     monkeypatch.setattr(
         cycle_advance,
         "_superseded_baseline_seed_file",
-        lambda *_args, **_kwargs: pytest.fail(
-            "an already-consumed ENS wake must not inspect or replace its old marker"
-        ),
+        lambda *_args, **_kwargs: inspected.append(True) or None,
     )
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
@@ -870,9 +869,60 @@ def test_committed_ens_wake_is_complete_when_current_q_consumed_exact_run(
     )
 
     assert report["seeds_enqueued"] == 0
-    assert report["causal_baseline_scope_failed"] == 0
-    assert report["causal_baseline_already_consumed"] == 1
+    assert inspected
+    assert report["causal_baseline_already_consumed"] == 0
     assert not (tmp_path / "seeds").exists()
+
+
+def test_committed_ens_reset_requires_certified_held_grade_at_decision_clock(monkeypatch) -> None:
+    from src.data import replacement_forecast_bundle_reader
+    from src.engine import position_belief
+
+    conn = _conn()
+    decision = datetime(2026, 9, 27, 16, 25, tzinfo=UTC)
+    required = "ecmwf_open_data:mn2t6_low:2026-09-26T12Z:current-v3"
+    candidate = {
+        "source_cycle_time": "2026-09-26T12:00:00+00:00",
+        "dependency_source_run_ids_json": json.dumps({"baseline_b0": required}),
+        "runtime_layer": "live",
+        "q_json": '{"bin":0.5}', "q_lcb_json": '{"bin":0.2}',
+        "q_ucb_json": '{"bin":0.8}',
+        "provenance_json": "{}",
+    }
+    certified = []
+
+    def certificate(_conn, **kwargs):
+        assert kwargs["decision_time"] == decision
+        certified.append(kwargs)
+        return candidate
+
+    monkeypatch.setattr(position_belief, "_certified_replacement_posterior_row", certificate)
+    grade = []
+
+    def held_grade(row, *, authority_purpose):
+        assert authority_purpose is replacement_forecast_bundle_reader.ReplacementForecastAuthorityPurpose.HELD_REDECISION
+        assert row["city"] == "Hong Kong" and row["target_date"] == "2026-09-27"
+        return {"current_v5": True} if grade else None
+
+    monkeypatch.setattr(replacement_forecast_bundle_reader, "_live_grade_provenance", held_grade)
+
+    def consumed():
+        return cycle_advance._latest_posterior_consumes_causal_baseline(
+            conn, city="Hong Kong", target_date="2026-09-27", metric="low",
+            target_cycle_iso="2026-09-26T12:00:00+00:00",
+            required_baseline_source_run_id=required, decision_time=decision,
+        )
+
+    assert consumed() is False  # certified row without current held shape is not RESET
+    grade.append(True)
+    assert consumed() is True
+    candidate["q_json"] = '{"bin":0.9}'
+    assert consumed() is False  # impossible posterior/bounds never complete the wake
+    candidate["q_json"] = '{"bin":0.5}'
+    candidate["dependency_source_run_ids_json"] = json.dumps({"baseline_b0": "old-v2"})
+    assert consumed() is False
+    assert len(certified) == 4
+    conn.close()
 
 
 @pytest.mark.parametrize(
@@ -886,12 +936,14 @@ def test_committed_ens_wake_is_complete_when_current_q_consumed_exact_run(
         ),
     ),
 )
+@pytest.mark.parametrize("after_local_day_end", (False, True))
 def test_committed_ens_run_replaces_same_cycle_seed_with_older_baseline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     owner_state: cycle_advance._Day0EnqueueOwnerRequestState,
     expected_enqueued: int,
     expected_status: str,
+    after_local_day_end: bool,
 ) -> None:
     """A late exact ENS shape must not be deduped by an anchor-first cycle marker."""
 
@@ -1002,6 +1054,14 @@ def test_committed_ens_run_replaces_same_cycle_seed_with_older_baseline(
         "family_materializable_cycle",
         lambda *args, **kwargs: (target_cycle, ()),
     )
+    if after_local_day_end:
+        # Cape Town's 08-23 local day ends at 22:00Z. A chain-held family
+        # remains a reduce-only redecision after that boundary, but only for
+        # an exact committed source and same-date Day0 observation witness.
+        monkeypatch.setattr(
+            cycle_advance, "_held_position_families",
+            lambda _conn: {("Cape Town", "2026-08-23", "high")},
+        )
     monkeypatch.setattr(
         "src.data.replacement_forecast_seed_discovery._day0_observed_extreme_seed_payload",
         lambda **kwargs: day0_payload,
@@ -1039,7 +1099,9 @@ def test_committed_ens_run_replaces_same_cycle_seed_with_older_baseline(
         forecast_db=db_path,
         seed_dir=seed_dir,
         raw_manifest_dir=raw_dir,
-        computed_at=datetime(2026, 8, 23, 7, 53, tzinfo=UTC),
+        trades_db=(db_path if after_local_day_end else None),
+        computed_at=datetime(2026, 8, 23, 22, 3, tzinfo=UTC)
+        if after_local_day_end else datetime(2026, 8, 23, 7, 53, tzinfo=UTC),
         limit=1,
         scopes=(("Cape Town", "2026-08-23", "high"),),
         manifests=(),

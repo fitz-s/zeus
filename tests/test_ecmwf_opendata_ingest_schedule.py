@@ -164,6 +164,302 @@ def _held_revision_coverage(
     return {"source_run_id": old_run_id, "metric": metric, "forecast_track": forecast_track}
 
 
+def _committed_held_replay_fixture(track: str, *, now: datetime):
+    """Exact current-revision source row, not a v2 job or an invented wake id."""
+    from src.config import runtime_cities_by_name
+    from src.data.forecast_target_contract import build_forecast_target_scope
+    from src.ingest import forecast_live_daemon as daemon
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE source_run (
+            source_run_id TEXT PRIMARY KEY, source_id TEXT, track TEXT,
+            release_calendar_key TEXT, source_cycle_time TEXT,
+            source_available_at TEXT, status TEXT, completeness_status TEXT
+        );
+        CREATE TABLE source_run_coverage (
+            source_run_id TEXT, city_id TEXT, city TEXT, city_timezone TEXT,
+            target_local_date TEXT, temperature_metric TEXT, source_id TEXT,
+            source_transport TEXT, data_version TEXT, track TEXT,
+            release_calendar_key TEXT, completeness_status TEXT,
+            readiness_status TEXT, expires_at TEXT, snapshot_ids_json TEXT,
+            target_window_start_utc TEXT, target_window_end_utc TEXT
+        );
+        CREATE INDEX idx_source_run_coverage_scope ON source_run_coverage (
+            city_id, city_timezone, target_local_date, temperature_metric,
+            source_id, source_transport, data_version
+        );
+        """
+    )
+    cycle = datetime(2026, 9, 26, 12, tzinfo=timezone.utc)
+    identity = daemon._forecast_work_identity_for_cycle(track, cycle_time=cycle, now_utc=now)
+    source_id = daemon._expected_source_run_id(identity)
+    city = runtime_cities_by_name()["Hong Kong"]
+    metric = "high" if track == "mx2t6_high" else "low"
+    target = "2026-09-27"
+    scope = build_forecast_target_scope(
+        city_id="HONG_KONG", city_name=city.name, city_timezone=city.timezone,
+        target_local_date=datetime.fromisoformat(target).date(),
+        temperature_metric=metric, source_cycle_time=cycle,
+        data_version=identity["data_version"],
+    )
+    forecast_track = _forecast_track_for_profile(
+        ingest_track=track,
+        horizon_profile=identity["release_calendar_key"].rsplit(":", 1)[-1],
+    )
+    conn.execute(
+        "INSERT INTO source_run VALUES (?, 'ecmwf_open_data', ?, ?, ?, ?, 'SUCCESS', 'COMPLETE')",
+        (source_id, forecast_track, identity["release_calendar_key"],
+         cycle.isoformat(), (now - timedelta(minutes=2)).isoformat()),
+    )
+    conn.execute(
+        """INSERT INTO source_run_coverage VALUES
+        (?, 'HONG_KONG', 'Hong Kong', ?, ?, ?, 'ecmwf_open_data',
+         'ensemble_snapshots_db_reader', ?, ?, ?, 'COMPLETE', 'LIVE_ELIGIBLE',
+         ?, '[17]', ?, ?)""",
+        (source_id, city.timezone, target, metric, identity["data_version"],
+         forecast_track, identity["release_calendar_key"],
+         (now + timedelta(hours=1)).isoformat(),
+         scope.target_window_start_utc.isoformat(), scope.target_window_end_utc.isoformat()),
+    )
+    return conn, source_id, scope
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+def test_postend_held_replay_uses_exact_committed_proof_and_retries_wake(
+    monkeypatch, track,
+):
+    from src.ingest import forecast_live_daemon as daemon
+    from src.data import executable_forecast_reader, replacement_cycle_advance_trigger
+
+    now = datetime(2026, 9, 27, 16, 20, tzinfo=timezone.utc)
+    conn, source_id, scope = _committed_held_replay_fixture(track, now=now)
+    metric = scope.temperature_metric
+    family = ("Hong Kong", "2026-09-27", metric)
+    verified = []
+    def read_proof(_conn, **kwargs):
+        assert kwargs["source_run_id"] == source_id
+        assert kwargs["scope"] == scope
+        verified.append(kwargs)
+        return SimpleNamespace(status="LIVE_ELIGIBLE", snapshot=SimpleNamespace(snapshot_id=17))
+    monkeypatch.setattr(executable_forecast_reader, "read_executable_forecast_snapshot", read_proof)
+    monkeypatch.setattr(replacement_cycle_advance_trigger, "_latest_posterior_consumes_causal_baseline", lambda *_args, **_kwargs: False)
+    calls = []
+    def enqueue(**kwargs):
+        calls.append(kwargs)
+        return {"status": "CYCLE_ADVANCE_CAUSAL_BASELINE_INCOMPLETE" if len(calls) == 1 else "CYCLE_ADVANCE_TRIGGER"}
+    try:
+        assert daemon._committed_held_opendata_wake(
+            conn, track=track, now_utc=now, _held_families=set(), _enqueue=enqueue,
+        ) is None
+        first = daemon._committed_held_opendata_wake(
+            conn, track=track, now_utc=now, _held_families={family}, _enqueue=enqueue,
+        )
+        assert first["source_run_id"] == source_id
+        assert first["reseed"]["status"] == "CYCLE_ADVANCE_CAUSAL_BASELINE_INCOMPLETE"
+        second = daemon._committed_held_opendata_wake(
+            conn, track=track, now_utc=now + timedelta(seconds=60),
+            _held_families={family}, _enqueue=enqueue,
+        )
+        assert second["source_run_id"] == source_id
+        assert second["reseed"]["status"] == "CYCLE_ADVANCE_TRIGGER"
+        assert len(verified) == len(calls) == 2
+        assert calls[0] == calls[1] == {
+            "scopes": (family,), "limit": 1,
+            "causal_baseline_source_run_id": source_id,
+        }
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+@pytest.mark.parametrize("defect", ("expired", "future", "wrong_run", "partial", "unproven", "consumed"))
+def test_postend_held_replay_refuses_non_authoritative_source(monkeypatch, track, defect):
+    from src.ingest import forecast_live_daemon as daemon
+    from src.data import executable_forecast_reader, replacement_cycle_advance_trigger
+
+    now = datetime(2026, 9, 27, 16, 20, tzinfo=timezone.utc)
+    conn, source_id, scope = _committed_held_replay_fixture(track, now=now)
+    family = ("Hong Kong", "2026-09-27", scope.temperature_metric)
+    if defect == "expired":
+        conn.execute("UPDATE source_run_coverage SET expires_at = ?", ((now - timedelta(seconds=1)).isoformat(),))
+    elif defect == "future":
+        conn.execute("UPDATE source_run SET source_available_at = ?", ((now + timedelta(seconds=1)).isoformat(),))
+    elif defect == "wrong_run":
+        conn.execute("UPDATE source_run SET source_run_id = 'invented' WHERE source_run_id = ?", (source_id,))
+        conn.execute("UPDATE source_run_coverage SET source_run_id = 'invented'")
+    elif defect == "partial":
+        conn.execute("UPDATE source_run_coverage SET completeness_status = 'PARTIAL'")
+    monkeypatch.setattr(
+        executable_forecast_reader, "read_executable_forecast_snapshot",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            status="BLOCKED" if defect == "unproven" else "LIVE_ELIGIBLE",
+            snapshot=SimpleNamespace(snapshot_id=17),
+        ),
+    )
+    monkeypatch.setattr(replacement_cycle_advance_trigger, "_latest_posterior_consumes_causal_baseline", lambda *_args, **_kwargs: defect == "consumed")
+    try:
+        assert daemon._committed_held_opendata_wake(
+            conn, track=track, now_utc=now, _held_families={family},
+            _enqueue=lambda **_: pytest.fail("invalid source must not enqueue"),
+        ) is None
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+def test_postend_held_replay_accepts_global_partial_with_complete_target(monkeypatch, track):
+    from src.ingest import forecast_live_daemon as daemon
+    from src.data import executable_forecast_reader, replacement_cycle_advance_trigger
+
+    now = datetime(2026, 9, 27, 16, 20, tzinfo=timezone.utc)
+    conn, source_id, scope = _committed_held_replay_fixture(track, now=now)
+    conn.execute("UPDATE source_run SET status = 'PARTIAL', completeness_status = 'PARTIAL'")
+    monkeypatch.setattr(
+        executable_forecast_reader, "read_executable_forecast_snapshot",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            status="LIVE_ELIGIBLE", snapshot=SimpleNamespace(snapshot_id=17),
+        ),
+    )
+    monkeypatch.setattr(replacement_cycle_advance_trigger, "_latest_posterior_consumes_causal_baseline", lambda *_args, **_kwargs: False)
+    try:
+        wake = daemon._committed_held_opendata_wake(
+            conn, track=track, now_utc=now,
+            _held_families={("Hong Kong", "2026-09-27", scope.temperature_metric)},
+            _enqueue=lambda **_: {"status": "CYCLE_ADVANCE_TRIGGER"},
+        )
+        assert wake["source_run_id"] == source_id
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+def test_postend_held_replay_rotates_blocked_scope_and_bounds_selector(monkeypatch, track):
+    from src.config import runtime_cities_by_name
+    from src.data.forecast_target_contract import build_forecast_target_scope
+    from src.ingest import forecast_live_daemon as daemon
+    from src.data import executable_forecast_reader, replacement_cycle_advance_trigger
+
+    now = datetime(2026, 9, 27, 16, 20, tzinfo=timezone.utc)
+    conn, source_id, hk_scope = _committed_held_replay_fixture(track, now=now)
+    tokyo = runtime_cities_by_name()["Tokyo"]
+    tokyo_scope = build_forecast_target_scope(
+        city_id="TOKYO", city_name="Tokyo", city_timezone=tokyo.timezone,
+        target_local_date=hk_scope.target_local_date,
+        temperature_metric=hk_scope.temperature_metric,
+        source_cycle_time=hk_scope.source_cycle_time,
+        data_version=hk_scope.data_version,
+    )
+    conn.execute(
+        """INSERT INTO source_run_coverage
+        SELECT source_run_id, 'TOKYO', 'Tokyo', ?, target_local_date,
+               temperature_metric, source_id, source_transport, data_version,
+               track, release_calendar_key, completeness_status, readiness_status,
+               expires_at, '[18]', ?, ?
+          FROM source_run_coverage WHERE city = 'Hong Kong'""",
+        (tokyo.timezone, tokyo_scope.target_window_start_utc.isoformat(),
+         tokyo_scope.target_window_end_utc.isoformat()),
+    )
+    monkeypatch.setattr(
+        executable_forecast_reader, "read_executable_forecast_snapshot",
+        lambda _conn, **kw: SimpleNamespace(
+            status="LIVE_ELIGIBLE", snapshot=SimpleNamespace(
+                snapshot_id=18 if kw["scope"].city_name == "Tokyo" else 17,
+            ),
+        ),
+    )
+    monkeypatch.setattr(replacement_cycle_advance_trigger, "_latest_posterior_consumes_causal_baseline", lambda *_args, **_kwargs: False)
+    daemon._OPENDATA_HELD_WAKE_LAST_SCOPE.pop(track, None)
+    families = {
+        ("Tokyo", "2026-09-27", hk_scope.temperature_metric),
+        ("Hong Kong", "2026-09-27", hk_scope.temperature_metric),
+    }
+    calls = []
+    try:
+        for _ in range(2):
+            wake = daemon._committed_held_opendata_wake(
+                conn, track=track, now_utc=now, _held_families=families,
+                _enqueue=lambda **kw: calls.append(kw["scopes"][0]) or {
+                    "status": "CYCLE_ADVANCE_CAUSAL_BASELINE_INCOMPLETE"
+                },
+            )
+            assert wake["source_run_id"] == source_id
+        assert calls == [
+            ("Tokyo", "2026-09-27", hk_scope.temperature_metric),
+            ("Hong Kong", "2026-09-27", hk_scope.temperature_metric),
+        ]
+        assert daemon._committed_held_opendata_wake(
+            conn, track=track, now_utc=now, _held_families=families,
+            deadline_monotonic=time.monotonic() - 0.001,
+            _enqueue=lambda **_: pytest.fail("expired selector cannot wake"),
+        ) is None
+    finally:
+        daemon._OPENDATA_HELD_WAKE_LAST_SCOPE.pop(track, None)
+        conn.close()
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+def test_postend_held_replay_resumes_after_invalid_prefix_when_budget_expires(monkeypatch, track):
+    from src.config import runtime_cities_by_name
+    from src.data.forecast_target_contract import build_forecast_target_scope
+    from src.ingest import forecast_live_daemon as daemon
+    from src.data import executable_forecast_reader, replacement_cycle_advance_trigger
+
+    now = datetime(2026, 9, 27, 16, 20, tzinfo=timezone.utc)
+    conn, source_id, hk = _committed_held_replay_fixture(track, now=now)
+    tokyo = runtime_cities_by_name()["Tokyo"]
+    tokyo_scope = build_forecast_target_scope(
+        city_id="TOKYO", city_name="Tokyo", city_timezone=tokyo.timezone,
+        target_local_date=hk.target_local_date, temperature_metric=hk.temperature_metric,
+        source_cycle_time=hk.source_cycle_time, data_version=hk.data_version,
+    )
+    # Tokyo is the earliest ended family but lacks current proof. That row may
+    # remain invalid across polls; it must not monopolize the bounded scan.
+    conn.execute(
+        """INSERT INTO source_run_coverage
+        SELECT source_run_id, 'TOKYO', 'Tokyo', ?, target_local_date,
+               temperature_metric, source_id, source_transport, data_version,
+               track, release_calendar_key, completeness_status, readiness_status,
+               expires_at, '[18]', ?, ?
+          FROM source_run_coverage WHERE city = 'Hong Kong'""",
+        (tokyo.timezone, tokyo_scope.target_window_start_utc.isoformat(),
+         tokyo_scope.target_window_end_utc.isoformat()),
+    )
+    monkeypatch.setattr(
+        executable_forecast_reader, "read_executable_forecast_snapshot",
+        lambda _conn, **kw: SimpleNamespace(
+            status="BLOCKED" if kw["scope"].city_name == "Tokyo" else "LIVE_ELIGIBLE",
+            snapshot=SimpleNamespace(snapshot_id=17),
+        ),
+    )
+    monkeypatch.setattr(replacement_cycle_advance_trigger, "_latest_posterior_consumes_causal_baseline", lambda *_args, **_kwargs: False)
+    families = {
+        ("Tokyo", "2026-09-27", hk.temperature_metric),
+        ("Hong Kong", "2026-09-27", hk.temperature_metric),
+    }
+    daemon._OPENDATA_HELD_WAKE_LAST_SCOPE.pop(track, None)
+    try:
+        with monkeypatch.context() as clock_patch:
+            ticks = iter((0.0, 0.0, 2.0))
+            clock_patch.setattr(daemon.time, "monotonic", lambda: next(ticks))
+            assert daemon._committed_held_opendata_wake(
+                conn, track=track, now_utc=now, _held_families=families,
+                deadline_monotonic=1.0,
+                _enqueue=lambda **_: pytest.fail("selector budget expired before Hong Kong"),
+            ) is None
+        selected = daemon._committed_held_opendata_wake(
+            conn, track=track, now_utc=now, _held_families=families,
+            _enqueue=lambda **_: {"status": "CYCLE_ADVANCE_TRIGGER"},
+        )
+        assert selected["scope"] == ("Hong Kong", "2026-09-27", hk.temperature_metric)
+        assert selected["source_run_id"] == source_id
+    finally:
+        daemon._OPENDATA_HELD_WAKE_LAST_SCOPE.pop(track, None)
+        conn.close()
+
+
 @pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
 def test_held_revision_migration_refetches_exact_old_complete_cycle(monkeypatch, track):
     """Old v2 SUCCESS is a cycle hint, not a replacement for fresh v3 proof."""
