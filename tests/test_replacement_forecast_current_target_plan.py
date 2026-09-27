@@ -29,6 +29,16 @@ from src.data.replacement_forecast_current_target_plan import (
 from src.data.replacement_forecast_cycle_policy import (
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
 )
+from src.data.replacement_forecast_source_run_identity import (
+    expected_replacement_dependency_identity_by_role,
+)
+from src.contracts.ensemble_snapshot_provenance import GRID_SURFACE_EVIDENCE_REVISION
+
+
+def _baseline_high_data_version() -> str:
+    version = expected_replacement_dependency_identity_by_role("high")["baseline_b0"].data_version
+    assert version is not None
+    return version
 
 
 def test_day0_observation_hwm_invalidates_older_conditioning() -> None:
@@ -1547,7 +1557,13 @@ def test_day0_ledger_deduplicates_same_metar_report_across_writer_prefixes(
     )
 
     assert fact is not None
-    assert fact["observed_extreme_native"] == 7.0
+    # The report says 7C; the independent city divergence certificate imposes
+    # a 2C conservative high-side margin. Dedup must preserve the *first*
+    # report clock while exposing the authorized 5C physical lower bound.
+    from src.data.day0_oracle_anomaly import metar_margin_units_for_city
+
+    assert metar_margin_units_for_city("Wellington", "C") == 2.0
+    assert fact["observed_extreme_native"] == 5.0
     assert fact["observation_source"] == "aviationweather_metar"
     assert fact["observation_time"] == "2026-07-28T19:34:12+00:00"
     assert fact["observation_available_at"] == "2026-07-28T19:34:20+00:00"
@@ -1610,8 +1626,13 @@ def _insert_paris_day0_event(
     )
 
 
-def test_day0_event_fact_lookup_uses_family_index_when_available() -> None:
+def test_day0_event_fact_lookup_uses_family_index_when_available(monkeypatch) -> None:
     conn = _day0_source_switch_conn()
+    city = SimpleNamespace(
+        name="Sao Paulo", timezone="America/Sao_Paulo", settlement_unit="C",
+        settlement_source_type="noaa", wu_station="SBGR",
+    )
+    monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {city.name: city})
     conn.execute(
         """
         CREATE INDEX idx_opportunity_events_day0_family_extreme
@@ -1624,24 +1645,35 @@ def test_day0_event_fact_lookup_uses_family_index_when_available() -> None:
             )
         """
     )
-    _insert_paris_day0_event(
-        conn,
-        event_id="wu-api-34-indexed",
-        settlement_source="wu_api",
-        metric="high",
-        observation_time="2026-07-14T14:00:00+00:00",
-        available_at="2026-07-14T14:15:00+00:00",
-        raw_value=34.0,
+    conn.execute(
+        "INSERT INTO opportunity_events VALUES (?,?,?,?,?,?)",
+        (
+            "noaa-page-34-indexed", "DAY0_EXTREME_UPDATED",
+            "2026-09-03T14:15:00+00:00", "2026-09-03T14:15:00+00:00",
+            "2026-09-03T14:15:00+00:00",
+            json.dumps({
+                "city": "Sao Paulo", "target_date": "2026-09-03", "metric": "high",
+                "settlement_source": "noaa_wrh_sbgr", "station_id": "SBGR",
+                "observation_time": "2026-09-03T14:00:00+00:00",
+                "observation_available_at": "2026-09-03T14:15:00+00:00",
+                "raw_value": 34.0, "rounded_value": 34, "high_so_far": 34.0,
+                "settlement_unit": "C", "source_match_status": "MATCH",
+                "local_date_status": "MATCH", "station_match_status": "MATCH",
+                "dst_status": "UNAMBIGUOUS", "metric_match_status": "MATCH",
+                "rounding_status": "MATCH", "source_authorized_status": "AUTHORIZED",
+                "live_authority_status": "live",
+            }),
+        ),
     )
     statements: list[str] = []
     conn.set_trace_callback(statements.append)
 
     fact = _latest_authorized_day0_fact(
         conn,
-        city="Paris",
-        target_date="2026-07-14",
+        city="Sao Paulo",
+        target_date="2026-09-03",
         temperature_metric="high",
-        decision_time=datetime(2026, 7, 14, 15, 0, tzinfo=timezone.utc),
+        decision_time=datetime(2026, 9, 3, 15, 0, tzinfo=timezone.utc),
     )
 
     assert fact is not None
@@ -2357,12 +2389,12 @@ def _create_db(path) -> None:
                     temperature_metric, data_version, completeness_status,
                     readiness_status, computed_at, recorded_at
                 ) VALUES (?, ?, 'ecmwf_open_data', ?, '2026-06-09',
-                    'high', 'ecmwf_opendata_mx2t3_local_calendar_day_max',
+                    'high', ?,
                     'COMPLETE', 'LIVE_ELIGIBLE',
                     '2026-06-07T08:00:00+00:00',
                     '2026-06-07T08:00:00+00:00')
                 """,
-                (f"coverage-{city}", f"baseline-current-{city}", city),
+                (f"coverage-{city}", f"baseline-current-{city}", city, _baseline_high_data_version()),
             )
         conn.execute(
             """
@@ -2382,6 +2414,21 @@ def _create_db(path) -> None:
                 '2026-06-07T06:00:00+00:00', '2026-06-07T10:00:00+00:00'
             )
             """
+        )
+        # This row is the current certified counterpart to the stale Madrid
+        # dependency; coverage tests must first reach the dependency choice.
+        provenance = json.loads(conn.execute(
+            "SELECT provenance_json FROM forecast_posteriors WHERE city='Paris'"
+        ).fetchone()[0])
+        shape = provenance["bayes_precision_fusion"]["current_evidence_shape"]
+        shape["semantics_revision"] = CURRENT_EVIDENCE_SEMANTICS_REVISION
+        shape["grid_surface_evidence_revision"] = GRID_SURFACE_EVIDENCE_REVISION
+        shape["grid_surface_evidence_identity_hash"] = hashlib.sha256(
+            b"paris-unit-fixture-grid-surface-identity"
+        ).hexdigest()
+        conn.execute(
+            "UPDATE forecast_posteriors SET provenance_json=? WHERE city='Paris'",
+            (json.dumps(provenance),),
         )
         conn.execute(
             """
@@ -2761,6 +2808,10 @@ def test_current_target_plan_reseeds_old_probability_semantics(tmp_path) -> None
     _create_db(db)
     conn = sqlite3.connect(db)
     try:
+        provenance = json.loads(conn.execute(
+            "SELECT provenance_json FROM forecast_posteriors WHERE city='Paris'"
+        ).fetchone()[0])
+        provenance["bayes_precision_fusion"]["current_evidence_shape"]["semantics_revision"] = "older-law"
         conn.execute(
             """
             UPDATE forecast_posteriors
@@ -2771,20 +2822,7 @@ def test_current_target_plan_reseeds_old_probability_semantics(tmp_path) -> None
              WHERE city='Paris'
             """,
             (
-                json.dumps(
-                    {
-                        "q_lcb_basis": "fused_center_bootstrap_p05",
-                        "bayes_precision_fusion": {
-                            "current_evidence_shape": {
-                                "semantics_revision": "older-law",
-                                "shape_lag_hours": 0.0,
-                                "source_cycle_time": "2026-06-07T06:00:00+00:00",
-                                "stale_shape_reused": False,
-                                "translation_applied": False,
-                            }
-                        },
-                    }
-                ),
+                json.dumps(provenance),
             ),
         )
         conn.commit()
@@ -2831,27 +2869,18 @@ def test_current_target_plan_reseeds_same_cycle_late_used_model_input(tmp_path) 
     _create_db(db)
     conn = sqlite3.connect(db)
     try:
+        provenance = json.loads(conn.execute(
+            "SELECT provenance_json FROM forecast_posteriors WHERE city='Paris'"
+        ).fetchone()[0])
+        provenance["used_models"] = ["gfs_global"]
+        provenance["bayes_precision_fusion"]["current_evidence_shape"]["stale_shape_reused"] = False
         conn.execute(
             "UPDATE forecast_posteriors SET source_cycle_time=?, computed_at=?, "
             "provenance_json=? WHERE city='Paris'",
             (
                 "2026-06-07T06:00:00+00:00",
                 "2026-06-07T08:30:00+00:00",
-                json.dumps(
-                        {
-                            "used_models": ["gfs_global"],
-                            "q_lcb_basis": "fused_center_bootstrap_p05",
-                            "bayes_precision_fusion": {
-                                "current_evidence_shape": {
-                                    "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
-                                    "shape_lag_hours": 0.0,
-                                    "source_cycle_time": "2026-06-07T06:00:00+00:00",
-                                    "stale_shape_reused": False,
-                                    "translation_applied": False,
-                                }
-                            },
-                        }
-                ),
+                json.dumps(provenance),
             ),
         )
         conn.execute(
@@ -3461,11 +3490,12 @@ def test_current_target_plan_does_not_call_expired_or_partial_baseline_seedable(
             ) VALUES (
                 'coverage-partial-Paris', 'baseline-partial-Paris',
                 'ecmwf_open_data', 'Paris', '2026-06-09', 'high',
-                'ecmwf_opendata_mx2t3_local_calendar_day_max',
+                ?,
                 'PARTIAL', 'BLOCKED', '2026-06-07T11:00:00+00:00',
                 '2026-06-07T11:00:00+00:00', NULL
             )
-            """
+            """,
+            (_baseline_high_data_version(),),
         )
         conn.commit()
     finally:
@@ -3681,11 +3711,12 @@ def test_current_target_plan_blocks_when_source_run_dependency_schema_is_missing
                 computed_at, recorded_at
             ) VALUES (
                 'coverage', 'baseline-current', 'ecmwf_open_data', 'Madrid',
-                '2026-06-09', 'high', 'ecmwf_opendata_mx2t3_local_calendar_day_max',
+                '2026-06-09', 'high', ?,
                 'COMPLETE', 'LIVE_ELIGIBLE',
                 '2026-06-07T08:00:00+00:00', '2026-06-07T08:00:00+00:00'
             )
-            """
+            """,
+            (_baseline_high_data_version(),),
         )
         conn.execute(
             """

@@ -28,6 +28,11 @@ from src.data.replacement_forecast_materialization_seed_builder import (
 )
 from src.data.replacement_forecast_readiness import SOURCE_ID as REPLACEMENT_SOURCE_ID
 from src.data.replacement_forecast_readiness import STRATEGY_KEY as REPLACEMENT_STRATEGY_KEY
+from src.data.replacement_forecast_source_run_identity import (
+    expected_replacement_dependency_identity_by_role,
+)
+from src.contracts.ensemble_snapshot_provenance import GRID_SURFACE_EVIDENCE_REVISION
+from src.data.replacement_forecast_cycle_policy import CURRENT_EVIDENCE_SEMANTICS_REVISION
 from src.data.replacement_forecast_seed_discovery import (
     _current_manifest_paths_from_db,
     _day0_observed_extreme_seed_payload,
@@ -42,6 +47,12 @@ from src.data.replacement_forecast_seed_discovery import (
 )
 import src.data.replacement_forecast_seed_discovery as seed_discovery
 import src.data.day0_fast_obs as fast_obs
+
+
+def _baseline_high_data_version() -> str:
+    version = expected_replacement_dependency_identity_by_role("high")["baseline_b0"].data_version
+    assert version is not None
+    return version
 
 
 @pytest.fixture(autouse=True)
@@ -787,7 +798,11 @@ def _init_db(path: Path) -> None:
                 source_id TEXT NOT NULL,
                 track TEXT NOT NULL,
                 source_cycle_time TEXT,
-                source_available_at TEXT
+                source_available_at TEXT,
+                status TEXT NOT NULL DEFAULT 'SUCCESS',
+                completeness_status TEXT NOT NULL DEFAULT 'COMPLETE',
+                partial_run INTEGER NOT NULL DEFAULT 0,
+                release_calendar_key TEXT NOT NULL DEFAULT '2026-06-06T00:00:00+00:00'
             );
             CREATE TABLE source_run_coverage (
                 coverage_id TEXT PRIMARY KEY,
@@ -803,7 +818,31 @@ def _init_db(path: Path) -> None:
                 readiness_status TEXT NOT NULL,
                 computed_at TEXT NOT NULL,
                 expires_at TEXT NOT NULL DEFAULT '2099-01-01T00:00:00+00:00',
-                recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                recorded_at TEXT NOT NULL DEFAULT '2026-06-06T02:05:00+00:00',
+                release_calendar_key TEXT NOT NULL DEFAULT '2026-06-06T00:00:00+00:00',
+                track TEXT NOT NULL DEFAULT 'mx2t3_high',
+                expected_members INTEGER NOT NULL DEFAULT 51,
+                observed_members INTEGER NOT NULL DEFAULT 51,
+                expected_steps_json TEXT NOT NULL DEFAULT '[3,6]',
+                observed_steps_json TEXT NOT NULL DEFAULT '[3,6]',
+                snapshot_ids_json TEXT NOT NULL DEFAULT '[1]'
+            );
+            CREATE TABLE ensemble_snapshots (
+                snapshot_id INTEGER PRIMARY KEY,
+                city TEXT NOT NULL,
+                target_date TEXT NOT NULL,
+                temperature_metric TEXT NOT NULL,
+                source_cycle_time TEXT NOT NULL,
+                source_available_at TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                model_version TEXT NOT NULL,
+                dataset_id TEXT NOT NULL,
+                source_run_id TEXT NOT NULL,
+                authority TEXT NOT NULL,
+                causality_status TEXT NOT NULL,
+                boundary_ambiguous INTEGER NOT NULL,
+                contributes_to_target_extrema INTEGER NOT NULL,
+                forecast_window_attribution_status TEXT NOT NULL
             );
             CREATE TABLE forecast_posteriors (
                 posterior_id INTEGER PRIMARY KEY,
@@ -816,7 +855,12 @@ def _init_db(path: Path) -> None:
                 dependency_source_run_ids_json TEXT,
                 runtime_layer TEXT NOT NULL DEFAULT 'live',
                 trade_authority_status TEXT NOT NULL,
-                training_allowed INTEGER NOT NULL
+                training_allowed INTEGER NOT NULL,
+                q_lcb_json TEXT,
+                q_ucb_json TEXT,
+                provenance_json TEXT,
+                source_cycle_time TEXT,
+                computed_at TEXT
             );
             CREATE TABLE readiness_state (
                 readiness_id TEXT PRIMARY KEY,
@@ -836,7 +880,7 @@ def _init_db(path: Path) -> None:
                 (label, label, low, high),
             )
         conn.execute(
-            "INSERT INTO source_run VALUES ('baseline-run', 'ecmwf_open_data', 'mx2t3_high', '2026-06-06T00:00:00+00:00', '2026-06-06T02:00:00+00:00')"
+            "INSERT INTO source_run (source_run_id, source_id, track, source_cycle_time, source_available_at) VALUES ('baseline-run', 'ecmwf_open_data', 'mx2t3_high', '2026-06-06T00:00:00+00:00', '2026-06-06T02:00:00+00:00')"
         )
         conn.execute(
             """
@@ -845,9 +889,21 @@ def _init_db(path: Path) -> None:
                temperature_metric, data_version, completeness_status, readiness_status, computed_at)
             VALUES
               ('coverage-1', 'baseline-run', 'ecmwf_open_data', 'NYC', 'NYC', 'America/New_York',
-               '2026-06-08', 'high', 'ecmwf_opendata_mx2t3_local_calendar_day_max',
+               '2026-06-08', 'high', ?,
                'COMPLETE', 'LIVE_ELIGIBLE', '2026-06-06T02:05:00+00:00')
+            """,
+            (_baseline_high_data_version(),),
+        )
+        conn.execute(
             """
+            INSERT INTO ensemble_snapshots VALUES (
+                1, 'NYC', '2026-06-08', 'high',
+                '2026-06-06T00:00:00+00:00', '2026-06-06T02:00:00+00:00',
+                'ecmwf_open_data', 'ecmwf_ens', ?, 'baseline-run',
+                'VERIFIED', 'OK', 0, 1, 'FULLY_INSIDE_TARGET_LOCAL_DAY'
+            )
+            """,
+            (_baseline_high_data_version(),),
         )
         conn.commit()
     finally:
@@ -904,6 +960,14 @@ def _write_world_day0_observation(path: Path) -> None:
     try:
         conn.execute(
             """
+            CREATE TABLE opportunity_events (
+                event_id TEXT, event_type TEXT, available_at TEXT,
+                received_at TEXT, created_at TEXT, payload_json TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
             INSERT INTO observation_instants VALUES (
                 'NYC',
                 '2026-06-08',
@@ -920,6 +984,29 @@ def _write_world_day0_observation(path: Path) -> None:
                 77.0
             )
             """
+        )
+        # The legacy WU row above is not NYC's current settlement channel.
+        # The NOAA WRH page at the same station supplies the authorized fact.
+        conn.execute(
+            "INSERT INTO opportunity_events VALUES (?,?,?,?,?,?)",
+            (
+                "nyc-noaa-page-77", "DAY0_EXTREME_UPDATED",
+                "2026-06-08T05:05:00+00:00",
+                "2026-06-08T05:05:00+00:00",
+                "2026-06-08T05:05:00+00:00",
+                json.dumps({
+                    "city": "NYC", "target_date": "2026-06-08", "metric": "high",
+                    "settlement_source": "noaa_wrh_klga", "station_id": "KLGA",
+                    "observation_time": "2026-06-08T05:00:00+00:00",
+                    "observation_available_at": "2026-06-08T05:05:00+00:00",
+                    "raw_value": 77.0, "rounded_value": 77, "high_so_far": 77.0,
+                    "settlement_unit": "F", "source_match_status": "MATCH",
+                    "local_date_status": "MATCH", "station_match_status": "MATCH",
+                    "dst_status": "UNAMBIGUOUS", "metric_match_status": "MATCH",
+                    "rounding_status": "MATCH", "source_authorized_status": "AUTHORIZED",
+                    "live_authority_status": "live",
+                }),
+            ),
         )
         conn.commit()
     finally:
@@ -1357,6 +1444,14 @@ def test_seed_discovery_selects_latest_anchor_even_when_fusion_current_missing(t
         )
         conn.execute(
             """
+            UPDATE ensemble_snapshots
+               SET source_cycle_time = '2026-06-06T12:00:00+00:00',
+                   source_available_at = '2026-06-06T12:30:00+00:00'
+             WHERE snapshot_id = 1
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE raw_model_forecasts (
                 raw_model_forecast_id INTEGER PRIMARY KEY,
                 model TEXT NOT NULL,
@@ -1446,12 +1541,12 @@ def test_seed_discovery_uses_latest_causal_baseline_not_newer_independent_head(
             """
         )
         conn.execute(
-            "INSERT INTO source_run VALUES "
+            "INSERT INTO source_run (source_run_id, source_id, track, source_cycle_time, source_available_at) VALUES "
             "('causal-baseline-run', 'ecmwf_open_data', 'mx2t3_high', "
             "'2026-06-06T00:00:00+00:00', '2026-06-06T02:00:00+00:00')"
         )
         conn.execute(
-            "INSERT INTO source_run VALUES "
+            "INSERT INTO source_run (source_run_id, source_id, track, source_cycle_time, source_available_at) VALUES "
             "('expired-causal-run', 'ecmwf_open_data', 'mx2t3_high', "
             "'2026-06-06T03:00:00+00:00', '2026-06-06T05:00:00+00:00')"
         )
@@ -1464,9 +1559,10 @@ def test_seed_discovery_uses_latest_causal_baseline_not_newer_independent_head(
             VALUES
               ('causal-coverage', 'causal-baseline-run', 'ecmwf_open_data',
                'NYC', 'NYC', 'America/New_York', '2026-06-08', 'high',
-               'ecmwf_opendata_mx2t3_local_calendar_day_max',
+               ?,
                'COMPLETE', 'LIVE_ELIGIBLE', '2026-06-06T02:05:00+00:00')
-            """
+            """,
+            (_baseline_high_data_version(),),
         )
         conn.execute(
             """
@@ -1477,10 +1573,11 @@ def test_seed_discovery_uses_latest_causal_baseline_not_newer_independent_head(
             VALUES
               ('expired-causal-coverage', 'expired-causal-run', 'ecmwf_open_data',
                'NYC', 'NYC', 'America/New_York', '2026-06-08', 'high',
-               'ecmwf_opendata_mx2t3_local_calendar_day_max',
+               ?,
                'COMPLETE', 'LIVE_ELIGIBLE', '2026-06-06T05:05:00+00:00',
                '2026-06-06T12:00:00+00:00')
-            """
+            """,
+            (_baseline_high_data_version(),),
         )
         conn.commit()
     finally:
@@ -1596,7 +1693,7 @@ def test_seed_builder_boundary_rejects_each_noncausal_baseline_state(
     coverage: dict[str, object] = {
         "source_run_id": "baseline-run",
         "source_id": "ecmwf_open_data",
-        "data_version": "ecmwf_opendata_mx2t3_local_calendar_day_max",
+        "data_version": _baseline_high_data_version(),
         "temperature_metric": "high",
         "completeness_status": "COMPLETE",
         "readiness_status": "LIVE_ELIGIBLE",
@@ -1658,9 +1755,10 @@ def test_seed_discovery_limit_applies_after_filtering_seedable_targets(tmp_path:
                temperature_metric, data_version, completeness_status, readiness_status, computed_at)
             VALUES
               ('coverage-covered', 'covered-baseline-run', 'ecmwf_open_data', 'NYC', 'NYC', 'America/New_York',
-               '2026-06-09', 'high', 'ecmwf_opendata_mx2t3_local_calendar_day_max',
+               '2026-06-09', 'high', ?,
                'COMPLETE', 'LIVE_ELIGIBLE', '2026-06-07T02:05:00+00:00')
-            """
+            """,
+            (_baseline_high_data_version(),),
         )
         conn.execute(
             """
@@ -1722,8 +1820,9 @@ def test_seed_discovery_prioritizes_held_family_and_skips_unchanged_blocked_budg
             ("Amsterdam", "amsterdam-baseline-run", "Europe/Amsterdam"),
             ("Tokyo", "tokyo-baseline-run", "Asia/Tokyo"),
         ):
+            snapshot_id = 2 if city == "Amsterdam" else 3
             conn.execute(
-                "INSERT INTO source_run VALUES (?, 'ecmwf_open_data', 'mx2t3_high', "
+                "INSERT INTO source_run (source_run_id, source_id, track, source_cycle_time, source_available_at) VALUES (?, 'ecmwf_open_data', 'mx2t3_high', "
                 "'2026-06-06T00:00:00+00:00', '2026-06-06T02:00:00+00:00')",
                 (run_id,),
             )
@@ -1740,14 +1839,26 @@ def test_seed_discovery_prioritizes_held_family_and_skips_unchanged_blocked_budg
                 """
                 INSERT INTO source_run_coverage
                   (coverage_id, source_run_id, source_id, city_id, city, city_timezone, target_local_date,
-                   temperature_metric, data_version, completeness_status, readiness_status, computed_at)
+                   temperature_metric, data_version, completeness_status, readiness_status, computed_at,
+                   snapshot_ids_json)
                 VALUES (?, ?, 'ecmwf_open_data', ?, ?, ?,
-                   '2026-06-08', 'high', 'ecmwf_opendata_mx2t3_local_calendar_day_max',
-                   'COMPLETE', 'LIVE_ELIGIBLE', '2026-06-06T02:05:00+00:00')
+                   '2026-06-08', 'high', ?,
+                   'COMPLETE', 'LIVE_ELIGIBLE', '2026-06-06T02:05:00+00:00', ?)
                 """,
                 # city_id is the canonical upper-snake name the production writer
                 # stores (src/data/ecmwf_open_data.py).
-                (f"coverage-{city}", run_id, city.upper().replace(" ", "_"), city, tz),
+                (f"coverage-{city}", run_id, city.upper().replace(" ", "_"), city, tz, _baseline_high_data_version(), json.dumps([snapshot_id])),
+            )
+            conn.execute(
+                """
+                INSERT INTO ensemble_snapshots VALUES (
+                    ?, ?, '2026-06-08', 'high',
+                    '2026-06-06T00:00:00+00:00', '2026-06-06T02:00:00+00:00',
+                    'ecmwf_open_data', 'ecmwf_ens', ?, ?,
+                    'VERIFIED', 'OK', 0, 1, 'FULLY_INSIDE_TARGET_LOCAL_DAY'
+                )
+                """,
+                (snapshot_id, city, _baseline_high_data_version(), run_id),
             )
         conn.commit()
     finally:
@@ -1885,7 +1996,7 @@ def test_seed_discovery_seeds_day0_when_canonical_observed_extreme_exists(
     seed = json.loads(Path(report.written_seed_files[0]).read_text(encoding="utf-8"))
     assert seed["city"] == "NYC"
     assert seed["day0_observed_extreme_c"] == (77.0 - 32.0) * 5.0 / 9.0
-    assert seed["day0_observed_extreme_source"] == "wu_icao_history"
+    assert seed["day0_observed_extreme_source"] == "noaa_wrh_klga"
     assert seed["day0_observed_extreme_observation_time"] == "2026-06-08T05:00:00+00:00"
     assert seed["day0_observed_extreme_sample_count"] == 1
     assert seed["day0_observed_extreme_unit"] == "F"
@@ -1916,7 +2027,7 @@ def test_seed_discovery_does_not_skip_current_source_run_because_stale_replaceme
     conn = sqlite3.connect(db_path)
     try:
         conn.execute(
-            "INSERT INTO source_run VALUES ("
+            "INSERT INTO source_run (source_run_id, source_id, track, source_cycle_time, source_available_at) VALUES ("
             "'baseline-current-run', 'ecmwf_open_data', 'mx2t3_high', "
             "'2026-06-06T00:00:00+00:00', '2026-06-06T02:00:00+00:00')"
         )
@@ -1927,6 +2038,9 @@ def test_seed_discovery_does_not_skip_current_source_run_because_stale_replaceme
                 computed_at = '2026-06-07T08:00:00+00:00'
             WHERE coverage_id = 'coverage-1'
             """
+        )
+        conn.execute(
+            "UPDATE ensemble_snapshots SET source_run_id = 'baseline-current-run' WHERE snapshot_id = 1"
         )
         conn.execute(
             """
@@ -2023,14 +2137,29 @@ def test_seed_discovery_skips_when_current_posterior_and_readiness_exist(tmp_pat
             INSERT INTO forecast_posteriors (
                 source_id, city, target_date, temperature_metric,
                 dependency_source_run_ids_json, trade_authority_status,
-                training_allowed
+                training_allowed, q_lcb_json, q_ucb_json, provenance_json,
+                source_cycle_time, computed_at
             ) VALUES (
                 'openmeteo_ecmwf_ifs9_bayes_fusion',
                 'NYC', '2026-06-08', 'high',
-                '{"baseline_b0":"baseline-run"}',
-                'LIVE_AUTHORITY', 0
+                ?, 'LIVE_AUTHORITY', 0, '{}', '{}', ?,
+                '2026-06-06T00:00:00+00:00', '2026-06-06T03:00:00+00:00'
             )
-            """
+            """,
+            (
+                json.dumps({"baseline_b0": "baseline-run", "openmeteo_ifs9_anchor": "openmeteo-run"}),
+                json.dumps({
+                    "q_lcb_basis": "fused_center_bootstrap_p05",
+                    "bayes_precision_fusion": {"current_evidence_shape": {
+                        "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                        "shape_lag_hours": 0.0,
+                        "source_cycle_time": "2026-06-06T00:00:00+00:00",
+                        "translation_applied": False,
+                        "grid_surface_evidence_revision": GRID_SURFACE_EVIDENCE_REVISION,
+                        "grid_surface_evidence_identity_hash": "a" * 64,
+                    }},
+                }),
+            ),
         )
         conn.execute(
             """
@@ -2041,7 +2170,10 @@ def test_seed_discovery_skips_when_current_posterior_and_readiness_exist(tmp_pat
             (
                 "ready-current",
                 REPLACEMENT_STRATEGY_KEY,
-                json.dumps({"dependencies": [{"role": "baseline_b0", "source_run_id": "baseline-run"}]}),
+                json.dumps({"dependencies": [
+                    {"role": "baseline_b0", "source_run_id": "baseline-run"},
+                    {"role": "openmeteo_ifs9_anchor", "source_run_id": "openmeteo-run"},
+                ]}),
                 json.dumps({"city": "NYC", "target_date": "2026-06-08", "temperature_metric": "high"}),
             ),
         )
@@ -2053,7 +2185,7 @@ def test_seed_discovery_skips_when_current_posterior_and_readiness_exist(tmp_pat
         forecast_db=db_path,
         raw_manifest_dir=raw_dir,
         seed_dir=seed_dir,
-        computed_at="2026-06-07T09:00:00+00:00",
+        computed_at="2026-06-07T04:00:00+00:00",
     )
 
     assert report.status == "NO_ELIGIBLE_TARGETS"
@@ -2178,7 +2310,7 @@ def test_seed_discovery_blocks_when_replacement_dependency_schema_is_missing(tmp
             """
         )
         conn.execute(
-            "INSERT INTO source_run VALUES ('baseline-current-run', 'ecmwf_open_data', 'mx2t3_high', '2026-06-07T00:00:00+00:00', '2026-06-07T02:00:00+00:00')"
+            "INSERT INTO source_run (source_run_id, source_id, track, source_cycle_time, source_available_at) VALUES ('baseline-current-run', 'ecmwf_open_data', 'mx2t3_high', '2026-06-07T00:00:00+00:00', '2026-06-07T02:00:00+00:00')"
         )
         conn.execute(
             """
@@ -2187,9 +2319,10 @@ def test_seed_discovery_blocks_when_replacement_dependency_schema_is_missing(tmp
                temperature_metric, data_version, completeness_status, readiness_status, computed_at)
             VALUES
               ('coverage-1', 'baseline-current-run', 'ecmwf_open_data', 'NYC', 'NYC', 'America/New_York',
-               '2026-06-07', 'high', 'ecmwf_opendata_mx2t3_local_calendar_day_max',
+               '2026-06-07', 'high', ?,
                'COMPLETE', 'LIVE_ELIGIBLE', '2026-06-07T02:05:00+00:00')
-            """
+            """,
+            (_baseline_high_data_version(),),
         )
         conn.execute(
             """
