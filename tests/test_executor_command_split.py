@@ -881,7 +881,10 @@ def test_day0_durable_certificate_cannot_relabel_old_economics_from_bare_context
 ):
     from dataclasses import replace
     from src.events.day0_authority import bind_day0_probability_semantics
-    from src.execution.executor import _entry_actionable_certificate_payload_and_component
+    from src.execution.executor import (
+        _entry_actionable_certificate_payload_and_component,
+        _entry_q_version_from_authority,
+    )
 
     context = _decision_source_context(
         posterior_identity_hash="d" * 64,
@@ -901,6 +904,10 @@ def test_day0_durable_certificate_cannot_relabel_old_economics_from_bare_context
             else "day0-semrev:day0_settlement_channel_revision_model_v22:same-input"
         )
     intent = replace(intent, qkernel_execution_economics=economics)
+    assert _entry_q_version_from_authority(intent, {
+        "event_type": "FORECAST_SNAPSHOT_READY",
+        "qkernel_execution_economics": economics,
+    }) == (economics["q_version"] if revision == "current" else None)
     _insert_actionable_certificate_for_intent(
         mem_conn, intent, certificate_hash=certificate_hash,
     )
@@ -922,7 +929,10 @@ def test_day0_durable_certificate_cannot_relabel_old_economics_from_bare_context
 def test_day0_certificate_revision_check_does_not_depend_on_context_role(current):
     from dataclasses import replace
     from src.events.day0_authority import bind_day0_probability_semantics
-    from src.execution.executor import _actionable_certificate_intent_mismatch_reason
+    from src.execution.executor import (
+        _actionable_certificate_intent_mismatch_reason,
+        _entry_q_version_from_authority,
+    )
 
     intent = _make_entry_intent()
     assert not intent.decision_source_context.is_day0_observation_context()
@@ -942,6 +952,9 @@ def test_day0_certificate_revision_check_does_not_depend_on_context_role(current
         "qkernel_execution_economics": economics,
     }
     reason = _actionable_certificate_intent_mismatch_reason(payload, intent)
+    assert _entry_q_version_from_authority(intent, payload) == (
+        economics["q_version"] if current else None
+    )
     assert reason == (
         "" if current else "actionable_certificate_day0_probability_revision_not_current"
     )
@@ -1575,23 +1588,41 @@ class TestLiveOrderCommandSplit:
         assert components_by_name["decision_source_integrity"]["details"]["source_id"] == "tigge"
         assert components_by_name["decision_source_integrity"]["details"]["degradation_level"] == "OK"
 
+    @pytest.mark.parametrize("day0", [False, True])
     def test_entry_q_version_stamped_from_decision_source_posterior_identity(
         self,
         mem_conn,
         monkeypatch,
+        day0,
     ):
         """Event-bound entry commands carry the posterior identity that authorized q."""
         import src.execution.executor as executor_module
         from src.execution.executor import _live_order
+        from src.events.day0_authority import bind_day0_probability_semantics
+        from dataclasses import replace
 
-        q_version = "posterior-live-q-version-001"
-        context = _decision_source_context(posterior_identity_hash=q_version)
+        q_version = (
+            bind_day0_probability_semantics("sealed-witness-A")
+            if day0 else "posterior-live-q-version-001"
+        )
+        context_hash = "d" * 64 if day0 else q_version
+        context = _decision_source_context(
+            posterior_identity_hash=context_hash,
+            **({
+                "forecast_source_role": "day0_observed_probability",
+                "authority_tier": "DAY0_OBSERVATION",
+            } if day0 else {}),
+        )
         certificate_hash = "d" * 64
         intent = _make_entry_intent(
             mem_conn,
             decision_source_context=context,
             actionable_certificate_hash=certificate_hash,
         )
+        if day0:
+            intent = replace(intent, qkernel_execution_economics={
+                **intent.qkernel_execution_economics, "q_version": q_version,
+            })
         _insert_actionable_certificate_for_intent(
             mem_conn,
             intent,
@@ -1643,7 +1674,7 @@ class TestLiveOrderCommandSplit:
         }
         assert (
             components_by_name["decision_source_integrity"]["details"]["posterior_identity_hash"]
-            == q_version
+            == context_hash
         )
 
     def test_entry_q_version_falls_back_to_forecast_raw_hash_for_legacy_context(

@@ -949,6 +949,87 @@ class TestDurableFillBridgeScan:
         finally:
             lane._edli_orphaned_command_link_cursor = old_cursor
 
+    def test_stale_bridge_candidate_after_fast_obligation_release_is_noop(self, monkeypatch):
+        import src.ingest.price_channel_ingest as lane
+        import src.events.price_channel_redecision_router as router
+        from src.execution import command_recovery as recovery
+        from src.state.collateral_ledger import init_collateral_schema
+        from src.state.db import init_schema_trade_only
+        from src.state.venue_command_repo import append_event
+        from tests.test_command_recovery import (
+            _advance_to_cancel_pending, _append_order_fact, _insert,
+            _open_test_entry_obligation, _seed_pending_entry_projection,
+        )
+
+        conn = _make_conn()
+        init_schema_trade_only(conn)
+        init_collateral_schema(conn)
+        command_id, position_id, order_id = "cmd-stale-fast", "pos-stale-fast", "ord-stale-fast"
+        _insert(conn, command_id=command_id, position_id=position_id, token_id="tok-stale-fast")
+        _open_test_entry_obligation(conn, command_id)
+        _seed_pending_entry_projection(conn, position_id=position_id,
+                                       command_id=command_id, order_id=order_id,
+                                       token_id="tok-stale-fast")
+        _advance_to_cancel_pending(conn, command_id=command_id, venue_order_id=order_id)
+        append_event(conn, command_id=command_id, event_type="CANCEL_ACKED",
+                     occurred_at="2026-04-26T00:04:00Z")
+        _append_order_fact(conn, command_id=command_id, order_id=order_id,
+                           state="CANCEL_CONFIRMED", matched_size="0", remaining_size="0")
+        assert recovery.reconcile_terminal_order_facts(
+            conn, command_ids=frozenset({command_id}), emit_immediate_redecision=False,
+        )["advanced"] == 1
+        conn.execute("UPDATE entry_exposure_obligations SET status='OPEN', resolved_at=NULL "
+                     "WHERE command_id=?", (command_id,))
+        conn.commit()
+        with conn:
+            result = recovery._reconcile_terminal_entry_exposure_obligation_fast(
+                conn, command_id=command_id,
+            )
+        assert result["terminal_entry_exposure_obligations"]["advanced"] == 1
+
+        def facts():
+            return (
+                tuple(conn.execute("SELECT * FROM position_current WHERE position_id=?",
+                                   (position_id,)).fetchone()),
+                conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0],
+                conn.execute("SELECT COUNT(*) FROM venue_order_facts").fetchone()[0],
+                tuple(conn.execute("SELECT * FROM entry_exposure_obligations WHERE command_id=?",
+                                   (command_id,)).fetchone()),
+            )
+
+        before = facts()
+        class Writer:
+            def __init__(self, **_kwargs): pass
+            def __enter__(self):
+                self.lease = SimpleNamespace(acquired_at=time.monotonic())
+                return self
+            def __exit__(self, *_args): return False
+
+        monkeypatch.setattr(lane, "_edli_trade_fact_bridge_candidates_read_only", lambda: ((), (), ()))
+        for name in (
+            "_edli_orphaned_command_link_candidates_read_only",
+            "_genuine_cancel_reassert_candidates_read_only",
+            "_ws_review_confirmed_entry_candidates_read_only",
+            "_edli_durable_fill_bridge_candidate_ids_read_only",
+        ):
+            monkeypatch.setattr(lane, name, lambda **_kwargs: ())
+        # Discovery raced with the committed fast lane; the writer must use
+        # its real OPEN/proof recheck, not trust this stale candidate.
+        monkeypatch.setattr(lane, "_terminal_entry_obligation_candidates_read_only",
+                            lambda **_kwargs: ((command_id, "voided"),))
+        monkeypatch.setattr(lane, "_prepare_fill_bridge_write_connection", lambda *_a, **_k: conn)
+        monkeypatch.setattr(lane, "_bound_fill_bridge_sqlite_wait_remaining", lambda *_a, **_k: None)
+        monkeypatch.setattr(lane, "_PriceChannelWriteGate", Writer)
+        monkeypatch.setattr(lane, "_close_fill_bridge_write_connection", lambda *_a: None)
+        monkeypatch.setattr(router, "_edli_position_fill_redecision_cycle", lambda: 0)
+        try:
+            assert lane._edli_fill_bridge_repair_cycle()["scheduler_failed"] is False
+            assert conn.execute("SELECT status FROM entry_exposure_obligations WHERE command_id=?",
+                                (command_id,)).fetchone()[0] == "RESOLVED"
+            assert facts() == before
+        finally:
+            conn.close()
+
     def test_invalid_oldest_obligation_probe_does_not_starve_next_valid_debt(self, monkeypatch):
         import src.ingest.price_channel_ingest as lane
         import src.events.price_channel_redecision_router as router

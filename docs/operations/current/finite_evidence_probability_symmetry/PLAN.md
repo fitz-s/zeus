@@ -213,6 +213,23 @@ Status: active
   engine suites have 39 failures/50 passes/4 skips, with the same 39 failures
   reproduced using unchanged base source; the linter's repository-wide
   pre-existing findings are not claimed repaired by this slice.
+- Final identity refinement: the verified Day0 certificate's exact economics
+  q_version is persisted unchanged into the ENTRY command even when the
+  context hash differs. Missing/retired sealed identity cannot fall back to
+  stamping the context. Executor's full suite now has 122 passes; the new
+  real-SQLite fast-lane/bridge stale-selector relationship test also passes
+  without duplicate obligation release or position/order facts.
+- Rebased integration recovery/exchange/bridge suites: 1072 passes and 14
+  failures. Thirteen match the previously reproduced baseline; the additional
+  live_tick timing case passed both alone on the integrated tree and with
+  a89a654ac base source. It is not proved a deterministic new regression and
+  remains a recorded timing instability, not a blanket green suite.
+- ENS's four residual ingest-test failures were reproduced with identical
+  messages on an isolated tracked-source export of 634fc5e36 (no live DB copy).
+  Current station geometry must match the per-station proof at read time;
+  unrelated whole-registry hash changes remain audit-only, not authority loss.
+- Changed-doc registry check found zero issues on the two edited documents;
+  22 unrelated repository docs issues remain outside this repair scope.
 
 ## 2026-09-27 — recent Hong Kong exit-window recovery
 

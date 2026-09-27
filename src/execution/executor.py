@@ -3950,14 +3950,38 @@ def _entry_q_version_from_authority(
     """Return the posterior identity that authorized this entry, when present."""
 
     context = getattr(intent, "decision_source_context", None)
-    context_q_version = _nonempty_q_identity(
-        getattr(context, "posterior_identity_hash", None)
-    )
-    if (
+    context_is_day0 = bool(
         context is not None
         and hasattr(context, "is_day0_observation_context")
         and context.is_day0_observation_context()
+    )
+    if isinstance(actionable_payload, Mapping) and (
+        context_is_day0
+        or str(actionable_payload.get("event_type") or "") == "DAY0_EXTREME_UPDATED"
     ):
+        from src.events.day0_authority import (
+            DAY0_PROBABILITY_SEMANTICS_REVISION,
+            day0_probability_semantics_revision,
+        )
+
+        # The live caller has verified this sealed certificate and its exact
+        # intent binding. Preserve its witness identity, not the context's
+        # potentially different raw hash. Missing/retired proof cannot fall
+        # back to relabeling context; normal current redecision drains it.
+        economics = actionable_payload.get("qkernel_execution_economics")
+        sealed_q = _nonempty_q_identity(
+            economics.get("q_version") if isinstance(economics, Mapping) else None
+        )
+        return (
+            sealed_q
+            if day0_probability_semantics_revision(sealed_q)
+            == DAY0_PROBABILITY_SEMANTICS_REVISION
+            else None
+        )
+    context_q_version = _nonempty_q_identity(
+        getattr(context, "posterior_identity_hash", None)
+    )
+    if context_is_day0:
         from src.events.day0_authority import (
             DAY0_PROBABILITY_SEMANTICS_REVISION,
             bind_day0_probability_semantics,
