@@ -87,8 +87,9 @@ Status: active
   The merge preview is textually clean, but both independent branches assigned
   Day0 survival v23 / resolver v22 to different mechanisms. This is a semantic
   collision, not proof of compatibility.
-- Integration plan: rebase onto the pinned upstream commit, then assign the
-  combined mechanism survival v24 / resolver v23. Historical certificates stay
+- Initial integration plan used survival v24 / resolver v23; subsequent
+  upstream collision required the distinct combined revisions above.
+  Historical certificates stay
   losslessly readable; current held/ENTRY/cache/submit consumers must require
   newly computed current certificates. Never relabel an old probability.
 - Review conditional-HIGH missing-source failures against the typed family
@@ -230,7 +231,9 @@ Status: active
   consumption, while preserving historical parsing and attribution. Verify
   acquisition/cache/reseed drainage explicitly; a stricter gate with no normal
   way to produce its witness is not a completed repair.
-- Day0 survival/resolver revisions become v23/v22. Their historical bind/parser
+- The initial source integration assigned Day0 survival/resolver v23/v22;
+  those are now retired in favor of the combined revisions at this section's
+  start. Their historical bind/parser
   stays lossless. Current ENTRY certificate checks use the already sealed
   economics q_version, not a new prefix on a bare context hash; current-family
   cache reissue rejects and evicts a retired Day0 revision for entry and held
