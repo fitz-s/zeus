@@ -6,6 +6,8 @@
 import json
 import inspect
 import os
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -49,10 +51,11 @@ def test_runtime_state_path_is_code_authoritative(monkeypatch):
     monkeypatch.delenv("ZEUS_PRIMARY_ROOT", raising=False)
     reloaded = importlib.reload(config_mod)
 
-    assert reloaded.runtime_state_path("status_summary.json") == PROJECT_ROOT / "state" / "status_summary.json"
+    isolated_state = Path(os.environ[reloaded.TEST_STATE_ROOT_ENV]).resolve()
+    assert reloaded.runtime_state_path("status_summary.json") == isolated_state / "status_summary.json"
     assert reloaded.PROJECT_ROOT == PROJECT_ROOT
     assert reloaded.RUNTIME_ROOT == PROJECT_ROOT
-    assert reloaded.STATE_DIR == PROJECT_ROOT / "state"
+    assert reloaded.STATE_DIR == isolated_state
 
 
 def test_runtime_state_path_honors_primary_root_at_import(tmp_path):
@@ -65,14 +68,39 @@ def test_runtime_state_path_honors_primary_root_at_import(tmp_path):
         reloaded = importlib.reload(config_mod)
         assert reloaded.PROJECT_ROOT == PROJECT_ROOT
         assert reloaded.RUNTIME_ROOT == tmp_path.resolve()
-        assert reloaded.STATE_DIR == tmp_path.resolve() / "state"
-        assert reloaded.runtime_state_path("status_summary.json") == tmp_path.resolve() / "state" / "status_summary.json"
+        isolated_state = Path(os.environ[reloaded.TEST_STATE_ROOT_ENV]).resolve()
+        assert reloaded.STATE_DIR == isolated_state
+        assert reloaded.runtime_state_path("status_summary.json") == isolated_state / "status_summary.json"
     finally:
         if old_primary is None:
             os.environ.pop("ZEUS_PRIMARY_ROOT", None)
         else:
             os.environ["ZEUS_PRIMARY_ROOT"] = old_primary
         importlib.reload(config_mod)
+
+
+def test_runtime_state_path_without_test_marker_uses_safe_primary_root(tmp_path):
+    from src.config import TEST_STATE_ROOT_ENV
+
+    # The pure config import runs outside pytest but can only resolve state
+    # under this temporary primary root. Never disable the parent's isolation.
+    env = dict(os.environ)
+    env.pop(TEST_STATE_ROOT_ENV, None)
+    env["ZEUS_PRIMARY_ROOT"] = str(tmp_path)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    result = subprocess.run(
+        [sys.executable, "-c", (
+            "import json; from src.config import RUNTIME_ROOT, STATE_DIR, runtime_state_path; "
+            "print(json.dumps([str(RUNTIME_ROOT), str(STATE_DIR), "
+            "str(runtime_state_path('status_summary.json'))]))"
+        )],
+        cwd=PROJECT_ROOT, env=env, capture_output=True, text=True, check=True,
+        timeout=10,
+    )
+    assert json.loads(result.stdout) == [
+        str(tmp_path.resolve()), str(tmp_path.resolve() / "state"),
+        str(tmp_path.resolve() / "state" / "status_summary.json"),
+    ]
 
 
 def test_settings_mode_key_is_legacy_optional(tmp_path):

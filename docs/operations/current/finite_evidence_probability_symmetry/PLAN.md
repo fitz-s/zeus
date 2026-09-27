@@ -230,6 +230,78 @@ Status: active
   unrelated whole-registry hash changes remain audit-only, not authority loss.
 - Changed-doc registry check found zero issues on the two edited documents;
   22 unrelated repository docs issues remain outside this repair scope.
+- Fixed-head integration matrix at 3a6b8145b: 2041 passed, 141 failed across
+  changed suites plus availability, finite-evidence and exact Day0 cache
+  relationship cases. Failures by suite: recovery 13, config 2, ingest 4,
+  downloader 3, bundle reader 21, target plan 42, materializer 42, seed 14.
+  Do not include unrelated old pytest-cache failures in that run's result.
+  Config's two failures reproduce on the original a89a654ac source and tests:
+  its older assertions ignore pytest's protective ZEUS_TEST_STATE_ROOT. Never
+  disable that isolation to obtain a green result. The downloader cross-process
+  CAS case passed immediately alone; its full-suite comparison is still pending.
+  Previously compared source/provider/materializer/consumer failures remain
+  baseline failures, not permission to describe the whole repository as green.
+- Runtime baseline refreshed at 12:23-12:28 UTC: main PID 47723 loaded
+  a89a654ac after another independently initiated restart at 12:05 UTC. The
+  original twelve terminal obligations have drained in that running version;
+  this task's unlanded fast-lane repair did not cause that observed drainage.
+  The remaining OPEN command aac175f1806b43da is ACKED without confirmed fill
+  or terminal no-fill proof and must not be manually released. Global auction
+  receipts advanced at 12:25:22 and 12:26:55 despite transient preemption.
+  HK 993cdf9b-9e7 had a current monitor freshness gap following TRADE lease
+  timeouts while the other six HK positions refreshed. Post-rollout acceptance
+  must verify all seven individually, not substitute process uptime.
+- Last stable-identity refinement: the coordinate manifest must exclude the
+  newly added whole-registry audit hash and source prose from station geometry.
+  Otherwise an unrelated audit edit re-keys every ENS baseline. Preserve
+  station identity, coordinates, elevation, surface and validity in semantic
+  identity; preserve full audit data at its existing provider evidence surface.
+  Missing optional ENS registry audit hash cannot defeat valid physical proof;
+  malformed supplied proof and mismatched current station geometry still fail.
+  This is a pre-deployment identity refinement, not a second probability law.
+
+### Pre-deployment drainage and remaining Day0 acceptance blockers
+
+- Do not land or restart yet. A cold-revision drainage defect is verified:
+  the forecast scheduler chooses the latest cycle and retries prior cycles
+  only for FAILED/PARTIAL jobs. Hong Kong September 27 needs September 26 12Z
+  for a complete native local-day shape, but that old job is SUCCESS under v2.
+  Its retained raw input is absent. Latest September 27 cycles cannot cover
+  the already elapsed day, while the new reader correctly requires v3/v5.
+  Old success can therefore mask the missing current-revision carrier and
+  prevent both held belief regeneration and warm deployment preflight.
+- Bounded repair scope: reuse authoritative active/held target coverage and
+  source-cycle selection to schedule missing current-revision native-window
+  evidence even when a different revision succeeded for that cycle. Preserve
+  immutable old rows; obtain actual source bytes and regenerate, never relabel.
+  Existing source deadlines/backoff and bounded work govern retries. SCOPE is
+  exact source revision/cycle/target coverage, not global freshness relaxation.
+  DRAIN is normal collection followed by existing seed/materialization. RESET
+  is verified current-revision target coverage; unavailable source remains
+  explicitly DATA_DEGRADED without suppressing held monitoring.
+- Required antibodies: HK high and low select September 26 12Z despite old
+  SUCCESS-v2, reject later incomplete-day cycles as substitutes, stop duplicate
+  repair after current proof succeeds, and preserve bounded failure/retry.
+  Independent review must inspect the actual scheduler call path before landing.
+- Baseline test failures are not safety waivers. Independently investigate
+  Day0 absorbing/qualified-fast frontier and invalid ledger cases that failed
+  under both revisions. Refresh only demonstrably obsolete fixture evidence
+  to reach their intended assertions; fix a confirmed semantic defect with
+  high/low causal and missing/stale-evidence twins. The materializer owner
+  must report the concrete cause/design before source changes. Separately
+  verify bundle input high-water-mark gates obscured by old dataset fixtures.
+- Repeated fixed-head matrix at 3465d82cd: 2043 passed, 140 failed. The
+  cross-process rotation CAS test passed within the full matrix (0.931 s);
+  its earlier isolated failure is not proven a baseline defect or a new
+  regression. A temporary JUnit artifact preserves this run's exact traces.
+  The failure distribution is unchanged except that CAS now passes. The
+  blockers above supersede any inference that baseline equivalence alone
+  meets full incident acceptance.
+- Configuration test repair updates obsolete state-path expectations to
+  assert the existing pytest isolation rather than removing it. A pure
+  subprocess config import with an explicitly temporary primary root also
+  proves the unmarked production path; parent test isolation stays active.
+  All 36 configuration tests pass. No production configuration behavior changed.
 
 ## 2026-09-27 — recent Hong Kong exit-window recovery
 
