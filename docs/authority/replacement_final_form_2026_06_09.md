@@ -447,6 +447,11 @@ uses the conditional variance above. Materialization, ENTRY, held redecision and
 share this builder; a new Day0 semantics revision prevents mixing old and new
 decision certificates or settlement attribution.
 
+The combined land-grid-proof and conditional-HIGH mechanism uses Day0 survival
+revision v24 and resolver revision v23. The independently assigned predecessor
+revisions v23/v22 are historical only: current action requires recomputation
+under the combined mechanism, never a changed prefix on an old probability.
+
 For pure hourly HIGH, the conditional IFS within-spread and its disagreement
 with the conditional deterministic centers account for unresolved model error.
 The source-clock pre-observation total variance is never reduced by a

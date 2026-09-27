@@ -854,6 +854,8 @@ def test_day0_entry_q_version_stamps_probability_semantics_revision():
 @pytest.mark.parametrize("revision", [
     "day0_settlement_channel_revision_model_v22",
     "day0_resolver_terminal_composition_v21",
+    "day0_settlement_channel_revision_model_v23",
+    "day0_resolver_terminal_composition_v22",
 ])
 def test_day0_entry_rejects_retired_geometry_revision_without_relabeling(revision):
     from src.events.day0_authority import (
