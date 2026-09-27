@@ -386,7 +386,7 @@ Status: active
   green: existing materializer/schema migration deletes NULL/non-live rows and
   retains a legacy status column, contrary to those tests' expectations. This
   task does not change or authorize that destructive legacy migration policy.
-  A 13:24 UTC read-only check of the active forecasts DB, explicitly using
+  A pre-rollout read-only check of the active forecasts DB, explicitly using
   idx_forecast_posteriors_runtime_layer_target, found no rows matching that
   DELETE predicate; EXPLAIN confirms three covering-index searches. Existing
   v4 and new v5 live rows are outside the deletion predicate. Preserve this
