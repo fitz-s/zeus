@@ -17858,8 +17858,14 @@ class TestRecoveryResolutionTable:
                 assert _get_events(before, "cmd-001")[-1]["event_type"] == "REVIEW_REQUIRED"
             finally:
                 before.close()
-            assert first["matched_cancel_review_required_entries"]["advanced"] == 0
+            assert first.get("authenticated_terminal_fill_review_fast", {}).get(
+                "advanced", 0,
+            ) == 0
+            assert first["errors"] >= 1
             interrupted = False
+            # Current terminal holding truth must drain in the exact capital
+            # lane even if the unrelated maintenance budget has expired.
+            monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "0.000001")
 
         summary = command_recovery.reconcile_unresolved_commands(
             client=client, scope=actual_scope,
@@ -17880,7 +17886,10 @@ class TestRecoveryResolutionTable:
             check.close()
 
         assert summary["scope"] == actual_scope
-        assert summary["matched_cancel_review_required_entries"]["advanced"] == 1
+        if actual_scope == "live_tick":
+            assert summary["authenticated_terminal_fill_review_fast"]["advanced"] == 1
+        else:
+            assert summary["matched_cancel_review_required_entries"]["advanced"] == 1
         assert state == "FILLED"
         assert events[-1]["event_type"] == "FILL_CONFIRMED"
         payload = json.loads(events[-1]["payload_json"])

@@ -4052,7 +4052,10 @@ def _confirmed_bound_trade_fact_summary(
     rows = conn.execute(
         "WITH "
         + _canonical_trade_fact_cte(
-            source_clause_sql="WHERE fact.source IN ('REST', 'WS_USER')"
+            source_clause_sql=(
+                "WHERE fact.source IN ('REST', 'WS_USER') "
+                "AND fact.command_id = ?"
+            )
         )
         + ", "
         + _economic_trade_fact_cte()
@@ -4068,7 +4071,7 @@ def _confirmed_bound_trade_fact_summary(
            AND CAST(COALESCE(fill_price, '0') AS REAL) > 0
          ORDER BY trade_id
         """,
-        (command_id, venue_order_id),
+        (command_id, command_id, venue_order_id),
     ).fetchall()
     fills: list[tuple[int, str, Decimal, Decimal, str, str]] = []
     for raw in rows:
@@ -4296,14 +4299,18 @@ def _latest_order_fact_for_command_order(
 ) -> dict:
     if not _table_exists(conn, "venue_order_facts"):
         return {}
-    sql = "WITH " + _canonical_order_truth_cte() + """
+    sql = (
+        "WITH exact_order_command AS (SELECT ? AS command_id), "
+        + _canonical_order_truth_cte(command_scope_cte="exact_order_command")
+        + """
         SELECT *
           FROM canonical_order_truth
          WHERE command_id = ?
            AND venue_order_id = ?
          LIMIT 1
     """
-    row = conn.execute(sql, (command_id, venue_order_id)).fetchone()
+    )
+    row = conn.execute(sql, (command_id, command_id, venue_order_id)).fetchone()
     return _dict_row(row) if row is not None else {}
 
 
@@ -14839,9 +14846,19 @@ def _reconcile_terminal_exit_residual_priority_pass(
     return summary
 
 
-def _matched_cancel_review_required_candidates(conn: sqlite3.Connection) -> list[dict]:
+def _matched_cancel_review_required_candidates(
+    conn: sqlite3.Connection, *, command_ids: frozenset[str] | None = None,
+) -> list[dict]:
     if not _table_exists(conn, "venue_commands"):
         return []
+    if command_ids is not None and not command_ids:
+        return []
+    scoped_ids = tuple(sorted(command_ids)) if command_ids is not None else ()
+    scope_clause = (
+        f" AND command_id IN ({','.join('?' for _ in scoped_ids)})"
+        if command_ids is not None
+        else ""
+    )
     rows = conn.execute(
         """
         SELECT *
@@ -14850,8 +14867,10 @@ def _matched_cancel_review_required_candidates(conn: sqlite3.Connection) -> list
            AND intent_kind = 'ENTRY'
            AND venue_order_id IS NOT NULL
            AND venue_order_id != ''
+        """ + scope_clause + """
          ORDER BY updated_at, command_id
-        """
+        """,
+        scoped_ids,
     ).fetchall()
     return [_dict_row(row) for row in rows]
 
@@ -16102,6 +16121,7 @@ def _reconcile_terminal_fak_partial_exit_reviews(
 
 def reconcile_matched_cancel_review_required_entries(
     conn: sqlite3.Connection, *, full_fill_command_ids: frozenset[str] | None = None,
+    terminal_positive_command_ids: frozenset[str] | None = None,
 ) -> dict:
     """Clear REVIEW_REQUIRED commands when canonical venue facts prove a fill.
 
@@ -16117,7 +16137,12 @@ def reconcile_matched_cancel_review_required_entries(
     """
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
-    for command in (() if full_fill_command_ids is not None else _terminal_partial_entry_review_candidates(conn)):
+    scoped_command_ids = (
+        full_fill_command_ids
+        if full_fill_command_ids is not None
+        else terminal_positive_command_ids
+    )
+    for command in (() if scoped_command_ids is not None else _terminal_partial_entry_review_candidates(conn)):
         summary["scanned"] += 1
         command_id = str(command.get("command_id") or "")
         venue_order_id = str(command.get("venue_order_id") or "")
@@ -16144,21 +16169,26 @@ def reconcile_matched_cancel_review_required_entries(
             )
             summary["errors"] += 1
 
-    if full_fill_command_ids is None:
+    if scoped_command_ids is None:
         terminal_summary = _reconcile_terminal_fak_partial_exit_reviews(conn)
         for key in ("scanned", "advanced", "stayed", "errors"):
             summary[key] += terminal_summary[key]
 
-    for command in _matched_cancel_review_required_candidates(conn):
-        if full_fill_command_ids is not None and (
-            str(command.get("command_id") or "") not in full_fill_command_ids
-            or not canonical_terminal_entry_order_full_fill_proven(
-                conn, str(command.get("command_id") or ""),
-            )
+    for command in _matched_cancel_review_required_candidates(
+        conn, command_ids=scoped_command_ids,
+    ):
+        command_id = str(command.get("command_id") or "")
+        if scoped_command_ids is not None and command_id not in scoped_command_ids:
+            continue
+        if full_fill_command_ids is not None and not canonical_terminal_entry_order_full_fill_proven(
+            conn, command_id,
+        ):
+            continue
+        if terminal_positive_command_ids is not None and not _terminal_positive_review_has_exact_held_proof(
+            conn, command,
         ):
             continue
         summary["scanned"] += 1
-        command_id = str(command.get("command_id") or "")
         venue_order_id = str(command.get("venue_order_id") or "")
         try:
             already_canceled_outcome = _review_required_cancel_failed_already_canceled_fill_recovery(
@@ -16189,7 +16219,9 @@ def reconcile_matched_cancel_review_required_entries(
             )
             filled_size = str(trade_summary.get("filled_size") or "0")
             confirmed_rows = conn.execute(
-                "WITH " + _canonical_trade_fact_cte() + """
+                "WITH " + _canonical_trade_fact_cte(
+                    source_clause_sql="WHERE fact.command_id = ?",
+                ) + """
                 SELECT trade_fact_id,
                        trade_id,
                        venue_order_id,
@@ -16208,7 +16240,7 @@ def reconcile_matched_cancel_review_required_entries(
                    AND CAST(COALESCE(fill_price, '0') AS REAL) > 0
                  ORDER BY proof_rank DESC, local_sequence DESC
                 """,
-                (command_id, venue_order_id),
+                (command_id, command_id, venue_order_id),
             ).fetchall()
             order_fact = _latest_order_fact_for_command_order(
                 conn,
@@ -16488,7 +16520,7 @@ def reconcile_matched_cancel_review_required_entries(
                 command_id,
                 exc,
             )
-            if full_fill_command_ids is not None:
+            if scoped_command_ids is not None:
                 # This exact current-capital pass is transactional.  Its
                 # command-bound fill and projection cannot be committed
                 # separately on budget interruption or a failed identity read.
@@ -22047,6 +22079,49 @@ def _terminal_positive_order_fact_matches_held_projection(
         command=command,
         venue_order_id=str(command.get("venue_order_id") or ""),
         filled_size=matched_size,
+    )
+
+
+def _terminal_positive_review_has_exact_held_proof(
+    conn: sqlite3.Connection, command: Mapping[str, object],
+) -> bool:
+    """Select only the terminal point-order/Chain proof already owned by review."""
+
+    command_id = str(command.get("command_id") or "")
+    order_id = str(command.get("venue_order_id") or "")
+    if not command_id or not order_id or str(command.get("state") or "") != "REVIEW_REQUIRED":
+        return False
+    events = _command_events(conn, command_id)
+    if (
+        not events
+        or events[-1].get("event_type") != "REVIEW_REQUIRED"
+        or _latest_review_required_payload(events).get("reason")
+        != "partial_remainder_point_order_filled_without_full_trade_fact"
+    ):
+        return False
+    trade = _confirmed_bound_trade_fact_summary(
+        conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        limit_price=command.get("price"),
+        side=command.get("side"),
+    )
+    if (
+        not trade.get("authenticated_confirmed")
+        or not trade.get("fill_prices_respect_limit")
+        or not _exchange_reconcile._preserve_terminal_entry_chain_projection(
+            conn,
+            command=command,
+            venue_order_id=order_id,
+            trade_filled_size=str(trade.get("filled_size") or ""),
+        )
+    ):
+        return False
+    order_fact = _latest_order_fact_for_command_order(
+        conn, command_id=command_id, venue_order_id=order_id,
+    )
+    return _terminal_positive_order_fact_matches_held_projection(
+        conn, command=command, order_fact=order_fact,
     )
 
 
@@ -33662,12 +33737,23 @@ def _reconcile_passes_short_conn(
                 if str(row.get("state") or "")
                 == CommandState.REVIEW_REQUIRED.value
             }
+            matched_review_candidates = _matched_cancel_review_required_candidates(conn)
             point_full_fill_review_command_ids = {
                 str(row["command_id"])
-                for row in _matched_cancel_review_required_candidates(conn)
+                for row in matched_review_candidates
                 if canonical_terminal_entry_order_full_fill_proven(conn, str(row["command_id"]))
             }
-            review_ids = sorted(terminal_fill_review_command_ids | point_full_fill_review_command_ids)
+            terminal_positive_review_command_ids = {
+                str(row["command_id"])
+                for row in matched_review_candidates
+                if str(row["command_id"]) in terminal_fill_review_command_ids
+                and _terminal_positive_review_has_exact_held_proof(conn, row)
+            }
+            review_ids = sorted(
+                terminal_fill_review_command_ids
+                | point_full_fill_review_command_ids
+                | terminal_positive_review_command_ids
+            )
             all_review_command_ids = frozenset(review_ids)
             if review_ids:
                 limit = _LIVE_TICK_IDENTITY_BOUND_MAX_CANDIDATES
@@ -33770,6 +33856,10 @@ def _reconcile_passes_short_conn(
                     if command_id in point_full_fill_review_command_ids:
                         result = reconcile_matched_cancel_review_required_entries(
                             conn, full_fill_command_ids=frozenset({command_id}),
+                        )
+                    elif command_id in terminal_positive_review_command_ids:
+                        result = reconcile_matched_cancel_review_required_entries(
+                            conn, terminal_positive_command_ids=frozenset({command_id}),
                         )
                     else:
                         result = reconcile_authenticated_entry_trade_facts(
