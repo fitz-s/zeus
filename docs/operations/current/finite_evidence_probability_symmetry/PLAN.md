@@ -8,6 +8,31 @@ Status: active
 
 ### Concurrent conditional-HIGH integration acceptance
 
+- Both fixes landed at `85f20ca27`. The official 17:08:11 UTC rollout refused
+  before stopping main: command `7ac3d0d2ce9547be` is a genuine partially
+  matched Karachi Sep28 LOW BUY (8.83 requested, 1.69 confirmed, 7.14 remaining),
+  not the earlier no-fill recovery case. The restart guard released normally;
+  loaded main/source remain `89c8430a5`. No cancellation or guard bypass was
+  attempted. Runtime acceptance remains pending lawful terminal drainage.
+- Before loading, the landed `85f20ca27` reader was run without mocks against
+  canonical forecasts DB in mode=ro/query_only. All four exact held HIGH
+  families now return READY: Cape Town posterior 688647, Helsinki 688649,
+  Lucknow 688644, Milan 688648 (computed 17:10:01–17:10:54 UTC). This proves
+  actual current producer-to-reader compatibility, not loaded monitor freshness
+  or an executable profitable SELL.
+- The 17:07 current all-open audit found Seoul `d75959db-b55` newly degraded:
+  same-station RKSI METAR 271700Z has KMA 20C versus AWC 21C, both real raw
+  records. `KmaObservationConflict` is therefore not a floating-point or
+  missing-data symptom. Do not arbitrarily prefer the newest different
+  temperature. Two independent checks disposition this as correct external
+  DATA_DEGRADED, not an implementation bug. SCOPE is RKSI/Seoul exact local
+  target date, both metrics; other stations remain independent. Ordinary later
+  timestamps do not erase the old conflict. DRAIN/RESET requires a complete
+  authoritative same-instant correction (unique COR; conflicting CORs still
+  block), or final settlement ending this Day0 dependency. Five focused COR,
+  station-isolation and family-local/non-cacheable antibodies pass. No source
+  precedence was invented to select 20 or 21 and no global gate was widened.
+
 - Final WU-fast fix `b210d556a` plus foreign-channel antibody `f314b52d8`
   integrated cleanly onto concurrent `89c8430a5` as `9ebd61152` / `2cbde6e5a`.
   Independent fixed-head and integration reviews accept the exact source-type
