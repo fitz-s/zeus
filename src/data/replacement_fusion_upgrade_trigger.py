@@ -312,6 +312,10 @@ def _capturable_inputs_for_scope(
     from src.data.replacement_current_value_serving import (  # noqa: PLC0415
         read_current_instrument_values,
     )
+    from src.data.replacement_forecast_materializer import (  # noqa: PLC0415
+        _bayes_precision_fusion_city_local_lead_days,
+        _freshest_declared_provider_representatives,
+    )
 
     try:
         served = read_current_instrument_values(
@@ -327,7 +331,27 @@ def _capturable_inputs_for_scope(
                 else None
             ),
         )
-        return {model: int(value.raw_model_forecast_id) for model, value in served.items()}
+        if decision_time is not None:
+            from src.config import runtime_cities_by_name
+            from src.forecast.model_selection import source_physically_eligible
+
+            config = runtime_cities_by_name().get(city)
+            if config is not None:
+                lead = _bayes_precision_fusion_city_local_lead_days(
+                    computed_at=decision_time.astimezone(UTC),
+                    target_local_date=datetime.fromisoformat(target_date).date(),
+                    tz_name=str(config.timezone),
+                )
+                served = {
+                    model: value for model, value in served.items()
+                    if source_physically_eligible(
+                        model, lat=float(config.lat), lon=float(config.lon), lead_days=lead,
+                    )
+                }
+        # Match the materializer's physical and same-provider cycle selection: an older
+        # HRRR row is not a capturable revision when the newer NBM row replaces it.
+        selected = _freshest_declared_provider_representatives(served)
+        return {model: int(value.raw_model_forecast_id) for model, value in selected.items()}
     except Exception:
         return {}
 

@@ -803,9 +803,11 @@ def test_source_clock_scheme_rejects_possessed_d2_at_d2_lead_but_keeps_global(
 
 
 @pytest.mark.parametrize("metric", ("high", "low"))
-@pytest.mark.parametrize("missing_hrrr", (True, False))
+@pytest.mark.parametrize(("missing_hrrr", "shadowed_hrrr"), (
+    (True, False), (True, True), (False, False),
+))
 def test_source_clock_partial_current_producer_to_jit(
-    monkeypatch: pytest.MonkeyPatch, metric: str, missing_hrrr: bool,
+    monkeypatch: pytest.MonkeyPatch, metric: str, missing_hrrr: bool, shadowed_hrrr: bool,
 ) -> None:
     from src.config import runtime_cities_by_name
     from src.engine import event_reactor_adapter as adapter
@@ -814,10 +816,10 @@ def test_source_clock_partial_current_producer_to_jit(
     conn = _conn()
     city = "Los Angeles"
     run = datetime(2026, 9, 27, 18, tzinfo=UTC)
-    decision = run + timedelta(hours=1)
+    decision = run + timedelta(hours=4 if shadowed_hrrr else 1)
     configured = ("gfs_hrrr", "icon_global", "ukmo_global_deterministic_10km")
     for index, model in enumerate(("ecmwf_ifs", *configured)):
-        if missing_hrrr and model == "gfs_hrrr":
+        if missing_hrrr and not shadowed_hrrr and model == "gfs_hrrr":
             continue
         conn.execute(
             """INSERT INTO raw_model_forecasts (
@@ -829,6 +831,20 @@ def test_source_clock_partial_current_producer_to_jit(
              (run + timedelta(minutes=5)).isoformat(),
              (run + timedelta(minutes=10)).isoformat(),
              (run + timedelta(minutes=11)).isoformat(), 20.0 + index),
+        )
+    if shadowed_hrrr:
+        newer = run + timedelta(hours=3)
+        conn.execute(
+            """INSERT INTO raw_model_forecasts (
+                model, city, target_date, metric, source_cycle_time,
+                source_available_at, captured_at, recorded_at, lead_days,
+                forecast_value_c, endpoint, coverage_status
+            ) VALUES ('ncep_nbm_conus', ?, '2026-09-29', ?, ?, ?, ?, ?, 2, 24.0,
+                      'single_runs', 'COVERED')""",
+            (city, metric, newer.isoformat(),
+             (newer + timedelta(minutes=5)).isoformat(),
+             (newer + timedelta(minutes=10)).isoformat(),
+             (newer + timedelta(minutes=11)).isoformat()),
         )
     scheme = CityOneScheme(
         city=city, scheme_status="ACTIVE", final_sources=configured,
@@ -844,7 +860,9 @@ def test_source_clock_partial_current_producer_to_jit(
         likelihood=tuple(SimpleNamespace(
             model=model, z=22.0 + index, train_residuals=(), n_train=0,
             residuals_by_date={},
-        ) for index, model in enumerate(configured) if not (missing_hrrr and model == "gfs_hrrr")),
+        ) for index, model in enumerate(
+            (*configured, "ncep_nbm_conus") if shadowed_hrrr else configured
+        ) if not (missing_hrrr and model == "gfs_hrrr")),
         disagree_var=0.0, anchor_raw_m2_native=None, anchor_raw_n_train=0,
         dropped_models=(),
         selection=SimpleNamespace(excluded_regionals=(), dropped_aliases=()),
@@ -888,6 +906,10 @@ def test_source_clock_partial_current_producer_to_jit(
         assert scheme_proof["fallback_reason"] == "configured_current_provider_set_incomplete"
         assert scheme_proof["missing_sources"] == ["gfs_hrrr"]
         assert set(scheme_proof["configured_current_sources"]) == set(configured) - {"gfs_hrrr"}
+        if shadowed_hrrr:
+            assert "ncep_nbm_conus" in override.used_models
+            assert scheme_proof["configured_coherent_sources"] == ["icon_global", "ukmo_global_deterministic_10km"]
+            assert scheme_proof["configured_current_provider_cohort_family_count"] == 2
     else:
         assert override.method == "SOURCE_CLOCK_FIXED_WEIGHT"
         assert "fallback_reason" not in scheme_proof
@@ -911,7 +933,7 @@ def test_source_clock_partial_current_producer_to_jit(
         conn, family=family, decision_time=decision,
         source_cycle_time=run.isoformat(), provenance=provenance,
     ) is not None
-    if missing_hrrr:
+    if missing_hrrr and not shadowed_hrrr:
         for field, value in (
             ("missing_sources", []),
             ("configured_coherent_sources", ["gfs_hrrr"]),
@@ -972,6 +994,30 @@ def test_source_clock_partial_current_producer_to_jit(
             conn, family=family, decision_time=later,
             source_cycle_time=run.isoformat(), provenance=refreshed_provenance,
         ) is not None
+    if shadowed_hrrr:
+        newer_hrrr_cycle = run + timedelta(hours=5)
+        arrived = newer_hrrr_cycle + timedelta(minutes=10)
+        conn.execute(
+            """INSERT INTO raw_model_forecasts (
+                model, city, target_date, metric, source_cycle_time,
+                source_available_at, captured_at, recorded_at, lead_days,
+                forecast_value_c, endpoint, coverage_status
+            ) VALUES ('gfs_hrrr', ?, '2026-09-29', ?, ?, ?, ?, ?, 2, 21.0,
+                      'single_runs', 'COVERED')""",
+            (city, metric, newer_hrrr_cycle.isoformat(), arrived.isoformat(),
+             arrived.isoformat(), arrived.isoformat()),
+        )
+        assert adapter._posterior_bound_spine_inputs(
+            conn, family=family, decision_time=decision,
+            source_cycle_time=run.isoformat(), provenance=provenance,
+        ) is not None
+        reason: dict[str, str] = {}
+        assert adapter._posterior_bound_multimodel_members(
+            conn, family=family, decision_time=arrived + timedelta(minutes=1),
+            source_cycle_time=run.isoformat(), provenance=provenance,
+            reason_out=reason,
+        ) is None
+        assert reason == {"reason": "model_identity_drift:configured_current_sources"}
 
 
 def test_posterior_identity_binds_day0_carrier_operator_and_content(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -29323,13 +29323,35 @@ def _posterior_bound_multimodel_members(
     if (
         isinstance(scheme, Mapping)
         and scheme.get("fallback_reason") == "configured_current_provider_set_incomplete"
-        and set(scheme["configured_current_sources"])
-        != set(scheme["configured_sources"]).intersection(current)
     ):
-        # Newly available configured evidence retires this partial witness through
-        # the existing family-scoped drift eviction and normal rematerialization.
-        _fail("model_identity_drift:configured_current_sources")
-        return None
+        from src.data.replacement_forecast_materializer import (
+            _bayes_precision_fusion_city_local_lead_days,
+            _freshest_declared_provider_representatives,
+        )
+        from src.forecast.model_selection import source_physically_eligible
+
+        city_config = runtime_cities_by_name()[str(family.city)]
+        lead_days = _bayes_precision_fusion_city_local_lead_days(
+            computed_at=decision_time.astimezone(UTC),
+            target_local_date=date.fromisoformat(str(family.target_date)),
+            tz_name=str(city_config.timezone),
+        )
+        eligible_current = {
+            model: value for model, value in current.items()
+            if source_physically_eligible(
+                model, lat=float(city_config.lat), lon=float(city_config.lon),
+                lead_days=lead_days,
+            )
+        }
+        selected_current = _freshest_declared_provider_representatives(eligible_current)
+        if set(scheme["configured_current_sources"]) != set(
+            scheme["configured_sources"]
+        ).intersection(selected_current):
+            # Compare the producer's current provider representatives, not old
+            # same-provider rows it deliberately superseded. Real arrival drift
+            # retires this family witness through the existing eviction/reseed.
+            _fail("model_identity_drift:configured_current_sources")
+            return None
     unit = str(
         getattr(runtime_cities_by_name().get(str(family.city)), "settlement_unit", "")
         or ""

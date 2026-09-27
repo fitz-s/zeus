@@ -1,8 +1,8 @@
 # Created: 2026-06-11
-# Lifecycle: created=2026-06-11; last_reviewed=2026-09-02; last_reused=2026-09-02
+# Lifecycle: created=2026-06-11; last_reviewed=2026-09-27; last_reused=2026-09-27
 # Purpose: Lock provider-set and exact-input revision reseeding for replacement posteriors.
 # Reuse: Run for fusion upgrade, current-value serving, source callback, or station source changes.
-# Last reused or audited: 2026-09-02
+# Last reused/audited: 2026-09-27
 # Authority basis: Task #32 (operator 2026-06-11) — PARTIAL-fusion upgrade trigger. Relationship
 #   pins for the SINGLE instrument-set comparison + the idempotency bound:
 #     - a posterior fused from {A,B} with capture later containing {A,B,C} for the SAME cycle ⇒
@@ -334,6 +334,83 @@ def test_old_partial_fixed_scheme_same_raw_reseeds_once_through_fusion_authority
     kwargs["target_date"] = future
     assert scope_capture_offers_larger_provider_set(conn, **kwargs)["is_upgrade"] is False
 
+
+def test_older_same_provider_raw_row_does_not_reseed_current_partial_forever() -> None:
+    conn = _conn()
+    city, target, metric = "Los Angeles", "2026-09-29", "high"
+    cycle = "2026-09-27T18:00:00+00:00"
+    _insert_single_runs(
+        conn, city=city, target_date=target, metric=metric, cycle_iso=cycle,
+        models=[_NCEP, _DWD, _UKMO],
+    )
+    newer = "2026-09-27T21:00:00+00:00"
+    _insert_single_runs(
+        conn, city=city, target_date=target, metric=metric, cycle_iso=newer,
+        models=["ncep_nbm_conus"],
+    )
+    ids = dict(conn.execute(
+        "SELECT model, raw_model_forecast_id FROM raw_model_forecasts WHERE city=? AND target_date=? AND metric=?",
+        (city, target, metric),
+    ).fetchall())
+    served = {source: ids[source] for source in (_DWD, _UKMO, "ncep_nbm_conus")}
+    _insert_posterior(
+        conn, city=city, target_date=target, metric=metric,
+        cycle_iso=cycle, used_models=list(served), current_value_ids=served,
+        configured_sources=[_NCEP, _DWD, _UKMO],
+        computed_at="2026-09-27T21:50:00+00:00",
+    )
+    scheme = {
+        "configured_sources": [_NCEP, _DWD, _UKMO],
+        "missing_sources": [_NCEP],
+        "renormalized": False,
+        "fallback_reason": "configured_current_provider_set_incomplete",
+        "fallback_to": "current_precision_fusion",
+    }
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json=? WHERE city=? AND target_date=? AND temperature_metric=?",
+        (json.dumps({"bayes_precision_fusion": {
+            "used_models": list(served),
+            "current_value_serving": {model: {"raw_model_forecast_id": raw_id} for model, raw_id in served.items()},
+            "source_clock_one_scheme": scheme,
+        }}), city, target, metric),
+    )
+    verdict = scope_capture_offers_larger_provider_set(
+        conn, city=city, target_date=target, metric=metric,
+        decision_time=datetime(2026, 9, 27, 22, tzinfo=UTC),
+    )
+    assert verdict["is_upgrade"] is False
+    assert verdict["changed_input_sources"] == []
+
+
+def test_physically_ineligible_new_same_provider_run_cannot_hide_valid_representative() -> None:
+    conn = _conn()
+    city, target, metric = "Los Angeles", "2026-09-30", "high"
+    cycle = "2026-09-27T18:00:00+00:00"
+    newer = "2026-09-27T21:00:00+00:00"
+    _insert_single_runs(
+        conn, city=city, target_date=target, metric=metric,
+        cycle_iso=cycle, models=["ncep_nbm_conus", _DWD, _UKMO],
+    )
+    _insert_single_runs(
+        conn, city=city, target_date=target, metric=metric,
+        cycle_iso=newer, models=[_NCEP],
+    )
+    ids = dict(conn.execute(
+        "SELECT model, raw_model_forecast_id FROM raw_model_forecasts WHERE city=? AND target_date=? AND metric=?",
+        (city, target, metric),
+    ).fetchall())
+    served = {source: ids[source] for source in ("ncep_nbm_conus", _DWD, _UKMO)}
+    _insert_posterior(
+        conn, city=city, target_date=target, metric=metric,
+        cycle_iso=cycle, used_models=list(served), current_value_ids=served,
+        configured_sources=list(served), computed_at="2026-09-27T21:50:00+00:00",
+    )
+    verdict = scope_capture_offers_larger_provider_set(
+        conn, city=city, target_date=target, metric=metric,
+        decision_time=datetime(2026, 9, 27, 22, tzinfo=UTC),
+    )
+    assert verdict["is_upgrade"] is False
+    assert verdict["changed_input_sources"] == []
 
 def test_same_provider_family_new_raw_revision_signals_upgrade() -> None:
     """A source-clock value revision changes q even when the provider-family set is unchanged."""

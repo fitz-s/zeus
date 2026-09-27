@@ -4684,12 +4684,20 @@ def _replacement_bayes_precision_fusion_override(
             _configured_coherent_sources = tuple(sorted(
                 set(_configured_current_sources) & set(_scheme_coherent_current)
             ))
+            _partial_current_cohort_count = _current_provider_family_count(
+                configured_weights=_scheme.weights if _scheme is not None else {},
+                values_c_by_source={
+                    source: float(_scheme_coherent_current[source].value_c)
+                    for source in _configured_coherent_sources
+                },
+            )
             from src.data.forecast_source_registry import SOURCES, source_allows_role  # noqa: PLC0415
 
             _scheme_partial_current = bool(
                 _scheme is not None
                 and not _station_live_omitted
                 and not _scheme_current_pair_missing
+                and _partial_current_cohort_count >= 2
                 and 0 < len(_configured_current_sources) < len(_configured_sources)
                 and not _registered_source_clock_entry_ineligible(_configured_sources)
                 and all(
@@ -4914,7 +4922,8 @@ def _replacement_bayes_precision_fusion_override(
                             _scheme_current_provider_count
                         ),
                         "configured_current_provider_cohort_family_count": (
-                            _scheme_current_provider_cohort_count
+                            _partial_current_cohort_count
+                            if _scheme_partial_current else _scheme_current_provider_cohort_count
                         ),
                         **({
                             "configured_current_sources": list(_configured_current_sources),
