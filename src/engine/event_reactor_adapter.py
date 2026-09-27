@@ -481,6 +481,8 @@ _GLOBAL_PROBABILITY_FAMILY_UNAVAILABLE_REASONS = frozenset(
         "DAY0_NOAA_PRELIMINARY_CARRIER_SAMPLES_MISMATCH",
         "DAY0_NOAA_PRELIMINARY_CARRIER_OPERATOR_MISMATCH",
         "DAY0_NOAA_PRELIMINARY_CARRIER_SAMPLE_COUNT_MISMATCH",
+        "DAY0_NOAA_PRELIMINARY_CARRIER_TOPOLOGY_INVALID",
+        "DAY0_WU_CURRENT_CARRIER_TOPOLOGY_INVALID",
         "POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE",
     }
 )
@@ -47435,12 +47437,67 @@ def _day0_remaining_p_raw_vector(
         native_scale = 1.0 if carrier_unit == "C" else 9.0 / 5.0
         native_offset = 0.0 if carrier_unit == "C" else 32.0
         future_native = tuple(value * native_scale + native_offset for value in future_c)
+        topology = payload.get("_edli_day0_carrier_bin_topology")
+        # SCOPE: this persisted carrier/family only. DRAIN: normal source
+        # rematerialization and redecision. RESET: exact one-to-one bin labels
+        # and finite native bounds again match the current market topology.
+        event_bin_ids = tuple(
+            str(getattr(bin_, "bin_id", None) or getattr(bin_, "label", "") or "").strip()
+            for bin_ in bins
+        )
+        canonical_to_event = tuple(range(len(bins)))
+        if topology is not None:
+            if (
+                not isinstance(topology, (list, tuple))
+                or len(topology) != len(bins)
+                or not all(event_bin_ids)
+                or len(set(event_bin_ids)) != len(bins)
+            ):
+                raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_TOPOLOGY_INVALID")
+            event_index = {bin_id: index for index, bin_id in enumerate(event_bin_ids)}
+            ordered_indexes = []
+            for row in topology:
+                if not isinstance(row, Mapping) or any(
+                    field not in row for field in ("bin_id", "lower_c", "upper_c")
+                ):
+                    raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_TOPOLOGY_INVALID")
+                index = event_index.get(str(row.get("bin_id") or "").strip())
+                if index is None or index in ordered_indexes:
+                    raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_TOPOLOGY_INVALID")
+                event_bin = bins[index]
+                for key, value in (("lower_c", event_bin.low), ("upper_c", event_bin.high)):
+                    stored = row.get(key)
+                    try:
+                        expected_native = (
+                            None if stored is None else float(stored) * native_scale + native_offset
+                        )
+                        actual_native = None if value is None else float(value)
+                    except (TypeError, ValueError, OverflowError) as exc:
+                        raise ValueError(
+                            "DAY0_NOAA_PRELIMINARY_CARRIER_TOPOLOGY_INVALID"
+                        ) from exc
+                    if (
+                        (expected_native is not None and not math.isfinite(expected_native))
+                        or (actual_native is not None and not math.isfinite(actual_native))
+                        or (expected_native is None) != (actual_native is None)
+                    ) or (
+                        expected_native is not None
+                        and not math.isclose(
+                            expected_native, actual_native, rel_tol=0.0, abs_tol=1e-10,
+                        )
+                    ):
+                        raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_TOPOLOGY_INVALID")
+                ordered_indexes.append(index)
+            canonical_to_event = tuple(ordered_indexes)
+        elif wu_current_carrier:
+            raise ValueError("DAY0_WU_CURRENT_CARRIER_TOPOLOGY_INVALID")
+        carrier_bins = tuple(bins[index] for index in canonical_to_event)
         native_bounds = tuple(
             (
                 None if bin_.low is None else float(bin_.low),
                 None if bin_.high is None else float(bin_.high),
             )
-            for bin_ in bins
+            for bin_ in carrier_bins
         )
         instrument_sigma_native = float(
             sigma_instrument_for_city(city).to(carrier_unit).value
@@ -47537,18 +47594,18 @@ def _day0_remaining_p_raw_vector(
             raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_OPERATOR_MISMATCH")
         if int(carrier["sample_count"]) != sample_count:
             raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_SAMPLE_COUNT_MISMATCH")
+        def event_order(values):
+            ordered = np.asarray(values, dtype=float)
+            out = np.empty_like(ordered)
+            out[list(canonical_to_event)] = ordered
+            return out
+
         if wu_current_carrier:
             from src.data.day0_fast_obs import FastStationResidualLikelihood
             from src.data.replacement_forecast_materializer import (
                 _apply_fast_residual_likelihood_to_probability_carrier,
             )
 
-            topology = payload.get("_edli_day0_carrier_bin_topology")
-            if (
-                not isinstance(topology, (list, tuple))
-                or len(topology) != len(bins)
-            ):
-                raise ValueError("DAY0_WU_CURRENT_CARRIER_TOPOLOGY_INVALID")
             try:
                 steps = {float(row["settlement_step_c"]) for row in topology}
                 rules = {str(row["rounding_rule"]) for row in topology}
@@ -47556,22 +47613,8 @@ def _day0_remaining_p_raw_vector(
                     len(steps) != 1 or len(rules) != 1
                     or next(iter(steps)) <= 0.0
                     or next(iter(rules)) != settlement_semantics.rounding_rule
-                    or any(str(row["bin_id"]) != str(bin_.bin_id) for row, bin_ in zip(topology, bins))
                 ):
                     raise ValueError
-                scale = 1.0 if carrier_unit == "C" else 9.0 / 5.0
-                offset = 0.0 if carrier_unit == "C" else 32.0
-                for row, bin_ in zip(topology, bins):
-                    for field, native in (("lower_c", bin_.low), ("upper_c", bin_.high)):
-                        stored = row[field]
-                        if (stored is None) != (native is None) or (
-                            stored is not None
-                            and not math.isclose(
-                                float(stored) * scale + offset, float(native),
-                                rel_tol=0.0, abs_tol=1e-10,
-                            )
-                        ):
-                            raise ValueError
                 residual = FastStationResidualLikelihood(
                     station_id=str(likelihood["station_id"]),
                     settlement_channel=str(likelihood["settlement_channel"]),
@@ -47591,19 +47634,19 @@ def _day0_remaining_p_raw_vector(
                     ),
                     identity_hash=likelihood_identity,
                 )
-                carrier_bins = [SimpleNamespace(
+                topology_bins = [SimpleNamespace(
                     bin_id=str(row["bin_id"]),
                     lower_c=row["lower_c"], upper_c=row["upper_c"],
                 ) for row in topology]
-                q_map = {str(bin_.bin_id): float(value) for bin_, value in zip(bins, carrier["q"])}
+                q_map = {str(row["bin_id"]): float(value) for row, value in zip(topology, carrier["q"])}
                 samples_by_bin = {
-                    str(bin_.bin_id): [float(row[index]) for row in carrier["samples"]]
-                    for index, bin_ in enumerate(bins)
+                    str(topology[index]["bin_id"]): [float(row[index]) for row in carrier["samples"]]
+                    for index in range(len(topology))
                 }
                 mixed_q, _lower, _upper, mixed_samples, receipt = (
                     _apply_fast_residual_likelihood_to_probability_carrier(
                         q=q_map, q_samples_by_bin=samples_by_bin,
-                        bins=carrier_bins, metric=metric,
+                        bins=topology_bins, metric=metric,
                         observed_extreme_c=float(wu_conditioning["observed_extreme_c"]),
                         half_step=next(iter(steps)) / 2.0,
                         rounding_rule=next(iter(rules)), likelihood=residual,
@@ -47614,11 +47657,15 @@ def _day0_remaining_p_raw_vector(
             except (KeyError, TypeError, ValueError, OverflowError) as exc:
                 raise ValueError("DAY0_WU_CURRENT_CARRIER_REPLAY_INVALID") from exc
             payload["_edli_day0_composed_probability_samples"] = [
-                [mixed_samples[str(bin_.bin_id)][index] for bin_ in bins]
+                [mixed_samples[bin_id][index] for bin_id in event_bin_ids]
                 for index in range(sample_count)
             ]
-            return np.asarray([mixed_q[str(bin_.bin_id)] for bin_ in bins], dtype=float)
-        return np.asarray(carrier["q"], dtype=float)
+            return np.asarray([mixed_q[bin_id] for bin_id in event_bin_ids], dtype=float)
+        if canonical_to_event != tuple(range(len(bins))) and _day0_resolver_terminal_carrier(payload):
+            payload["_edli_day0_composed_probability_samples"] = [
+                event_order(row).tolist() for row in carrier["samples"]
+            ]
+        return event_order(carrier["q"])
     boundary_scenarios = _day0_probability_boundary_scenarios_native(
         payload,
         metric=metric,

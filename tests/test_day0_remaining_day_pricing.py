@@ -3140,6 +3140,28 @@ def test_hko_adapter_replays_materialized_carrier_identity_and_q(
     assert payload["_edli_day0_remaining_probability_samples"] == expected["samples"]
     assert payload["_edli_day0_remaining_content_identity"] == expected["content_identity"]
     assert payload["_edli_day0_probability_operator"] == DAY0_REMAINING_CARRIER_OPERATOR_V3
+    ordered_bins = (
+        Bin(None, 23, "C", "23C or below"),
+        Bin(24, 24, "C", "24C"),
+        Bin(25, 25, "C", "25C"),
+        Bin(26, None, "C", "26C or above"),
+    )
+    payload["_edli_day0_carrier_bin_topology"] = [
+        {"bin_id": bin_.label, "lower_c": bin_.low, "upper_c": bin_.high}
+        for bin_ in ordered_bins
+    ]
+    permutation = (3, 1, 0, 2)
+    reordered = era._day0_remaining_p_raw_vector(
+        np.sort(np.asarray((*future, *final_centers))),
+        city=city,
+        settlement_semantics=SettlementSemantics.for_city(city),
+        bins=[ordered_bins[index] for index in permutation],
+        payload=dict(payload),
+        extra_member_sigma=0.0,
+        decision_time=decision_time + timedelta(minutes=1),
+    )
+    assert reordered.tolist() == pytest.approx(np.asarray(expected["q"])[list(permutation)])
+    assert payload["_edli_day0_remaining_probability_samples"] == expected["samples"]
     missing_identity_field = dict(payload)
     missing_identity_field["_edli_day0_provisional_revision_likelihood"] = {
         "identity_hash": hashlib.sha256(
@@ -4012,6 +4034,171 @@ def test_wu_fast_empty_placeholder_does_not_waive_revision_history_for_entry():
             unavailable, **kwargs, entry_authority=False
         )
     unavailable.close()
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_wu_fast_source_clock_carrier_replays_at_later_monitor_cut(metric):
+    """A producer-ordered carrier replays into each current token's bin order."""
+    import src.engine.event_reactor_adapter as era
+    from src.config import ensemble_n_mc
+    from src.signal.ensemble_signal import sigma_instrument_for_city
+
+    city = runtime_cities_by_name()["Tel Aviv"]
+    semantics = SettlementSemantics.for_city(city)
+    cutoff = "2026-09-25T08:23:34+00:00"
+    monitor_at = datetime.fromisoformat(cutoff) + timedelta(minutes=2)
+    future = (28.0, 29.0, 30.0, 31.0)
+    bins = tuple(
+        SimpleNamespace(bin_id=str(index), low=low, high=high)
+        for index, (low, high) in enumerate(
+            ((None, 29), (30, 30), (31, 31), (32, None))
+        )
+    )
+    conditioning = _fast_residual_composite_payload(
+        station="LLBG", settlement_channel="noaa_wrh_llbg"
+    )["_edli_global_day0_binding"]["statistical_probability_conditioning"]
+    conditioning["metric"] = metric
+    likelihood = conditioning["fast_residual_likelihood"]
+    current_state = {
+        "value_native": 29.0,
+        "observed_at_utc": cutoff,
+        "source": "aviationweather_metar",
+    }
+    identity_inputs = day0_remaining_carrier_identity_inputs(
+        city="Tel Aviv",
+        unit="C",
+        decision_time_utc=cutoff,
+        station_id="LLBG",
+        preliminary_survival_identity=likelihood["identity_hash"],
+    )
+    identity_inputs["current_path_state"] = current_state
+    carrier = build_day0_remaining_probability_carrier(
+        future_extremes_c=future,
+        boundary_scenarios=((None, 1.0),),
+        metric=metric,
+        path_error_sigma_c=0.4,
+        instrument_sigma_c=float(sigma_instrument_for_city(city).value),
+        bin_bounds_c=[(bin_.low, bin_.high) for bin_ in bins],
+        n_point=ensemble_n_mc(),
+        n_samples=500,
+        identity_inputs=identity_inputs,
+        settlement_semantics=semantics,
+    )
+    payload = {
+        "metric": metric,
+        "target_date": "2026-09-25",
+        "rounded_value": 29.0,
+        "settlement_source": "aviationweather_metar",
+        "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
+        "_edli_day0_probability_boundary_native": 29.0,
+        "_edli_global_day0_binding": {
+            "configured_station_id": "LLBG",
+            "statistical_probability_conditioning": conditioning,
+        },
+        "_edli_day0_remaining_content_identity": carrier["content_identity"],
+        "_edli_day0_probability_operator": carrier["operator"],
+        "_edli_day0_remaining_carrier_q": carrier["q"],
+        "_edli_day0_remaining_probability_samples": carrier["samples"],
+        "_edli_day0_remaining_probability_sample_count": 500,
+        "_edli_day0_remaining_carrier_probability_cutoff_utc": cutoff,
+        "_edli_day0_remaining_carrier_future_extremes_c": list(future),
+        "_edli_day0_remaining_carrier_path_error_sigma_c": 0.4,
+        "_edli_day0_current_temperature_native": current_state["value_native"],
+        "_edli_day0_current_temperature_observed_at_utc": current_state["observed_at_utc"],
+        "_edli_day0_current_temperature_source": current_state["source"],
+        "_edli_day0_carrier_bin_topology": [
+            {
+                "bin_id": bin_.bin_id,
+                "lower_c": bin_.low,
+                "upper_c": bin_.high,
+                "settlement_step_c": 1.0,
+                "rounding_rule": semantics.rounding_rule,
+            }
+            for bin_ in bins
+        ],
+        "_edli_day0_remaining_vector_witness": {
+            "vector_id": "same-source-vector",
+            "expected_models": ["ecmwf_ifs"],
+            "actual_models": ["ecmwf_ifs"],
+            "capture_times_by_model_utc": {"ecmwf_ifs": cutoff},
+            "provider_source_cycle_time_by_model_utc": {"ecmwf_ifs": cutoff},
+            "provider_source_available_at_by_model_utc": {"ecmwf_ifs": cutoff},
+            "source_run_id_by_model": {"ecmwf_ifs": "source-run"},
+            "provider_run_id_by_model": {"ecmwf_ifs": "provider-run"},
+            "request_hash_by_model": {"ecmwf_ifs": "request-hash"},
+        },
+    }
+
+    def replay(fields, at, event_bins=bins):
+        return era._day0_remaining_p_raw_vector(
+            np.asarray(future),
+            city=city,
+            settlement_semantics=semantics,
+            bins=event_bins,
+            payload=fields,
+            extra_member_sigma=0.0,
+            decision_time=at,
+        )
+
+    composed = replay(payload, monitor_at)
+    assert composed.shape == (len(bins),)
+    assert np.isfinite(composed).all()
+    assert composed.sum() == pytest.approx(1.0)
+    assert payload["_edli_day0_remaining_content_identity"] == carrier["content_identity"]
+    canonical_samples = np.asarray(payload["_edli_day0_composed_probability_samples"])
+
+    # Candidate binding sorts by condition_id, not numerical weather-bin order.
+    # Preserve its token order in both point q and the coherent sample matrix.
+    permutation = (3, 1, 0, 2)
+    event_bins = tuple(bins[index] for index in permutation)
+    permuted_payload = dict(payload)
+    permuted = replay(permuted_payload, monitor_at, event_bins)
+    assert permuted.tolist() == pytest.approx(composed[list(permutation)])
+    assert np.asarray(permuted_payload["_edli_day0_composed_probability_samples"]) == pytest.approx(
+        canonical_samples[:, list(permutation)]
+    )
+
+    changed_cutoff = {
+        **payload,
+        "_edli_day0_remaining_carrier_probability_cutoff_utc": (
+            datetime.fromisoformat(cutoff) + timedelta(seconds=1)
+        ).isoformat(),
+    }
+    # Clocks are causality evidence, deliberately excluded from the carrier's
+    # economic content hash; a still-past cutoff cannot mint a new q.
+    assert replay(changed_cutoff, monitor_at).tolist() == pytest.approx(composed)
+    future_cutoff = {
+        **payload,
+        "_edli_day0_remaining_carrier_probability_cutoff_utc": (
+            monitor_at + timedelta(seconds=1)
+        ).isoformat(),
+    }
+    with pytest.raises(ValueError, match="DAY0_NOAA_PRELIMINARY_CARRIER_CUTOFF_AFTER_DECISION"):
+        replay(future_cutoff, monitor_at)
+    changed_state = {**payload, "_edli_day0_current_temperature_native": 30.0}
+    with pytest.raises(ValueError, match="DAY0_NOAA_PRELIMINARY_CARRIER_IDENTITY_MISMATCH"):
+        replay(changed_state, monitor_at)
+    for bad_bins in (
+        (bins[0], bins[1], bins[1], bins[3]),
+        (*bins[:3], SimpleNamespace(bin_id="other", low=32, high=None)),
+        (*bins[:3], SimpleNamespace(bin_id=bins[3].bin_id, low=33, high=None)),
+    ):
+        with pytest.raises(ValueError, match="DAY0_NOAA_PRELIMINARY_CARRIER_TOPOLOGY_INVALID"):
+            replay(dict(payload), monitor_at, bad_bins)
+    missing_bound = {**payload, "_edli_day0_carrier_bin_topology": [
+        {key: value for key, value in row.items() if key != "lower_c"}
+        if index == 0 else row
+        for index, row in enumerate(payload["_edli_day0_carrier_bin_topology"])
+    ]}
+    with pytest.raises(ValueError, match="DAY0_NOAA_PRELIMINARY_CARRIER_TOPOLOGY_INVALID"):
+        replay(missing_bound, monitor_at)
+    for malformed in ("not-a-number", float("inf")):
+        bad_bound = {**payload, "_edli_day0_carrier_bin_topology": [
+            {**row, "lower_c": malformed} if index == 3 else row
+            for index, row in enumerate(payload["_edli_day0_carrier_bin_topology"])
+        ]}
+        with pytest.raises(ValueError, match="DAY0_NOAA_PRELIMINARY_CARRIER_TOPOLOGY_INVALID"):
+            replay(bad_bound, monitor_at)
 
 
 def test_carried_likelihood_on_noaa_composite_binds_the_configured_station():
@@ -5257,6 +5444,31 @@ def test_noaa_adapter_replays_real_fahrenheit_family_in_native_settlement_units(
             decision_time=decision_time,
         )
         assert replay.tolist() == pytest.approx(expected["q"])
+        ordered_bins = (
+            Bin(None, 79, "F", "79F or below"),
+            Bin(80, 81, "F", "80-81F"),
+            Bin(82, 83, "F", "82-83F"),
+            Bin(84, None, "F", "84F or above"),
+        )
+        payload["_edli_day0_carrier_bin_topology"] = [
+            {
+                "bin_id": bin_.label,
+                "lower_c": None if bin_.low is None else (bin_.low - 32.0) * 5.0 / 9.0,
+                "upper_c": None if bin_.high is None else (bin_.high - 32.0) * 5.0 / 9.0,
+            }
+            for bin_ in ordered_bins
+        ]
+        permutation = (3, 1, 0, 2)
+        reordered = era._day0_remaining_p_raw_vector(
+            np.asarray(future_c)[::-1] * 9.0 / 5.0 + 32.0,
+            city=city,
+            settlement_semantics=SettlementSemantics.for_city(city),
+            bins=[ordered_bins[index] for index in permutation],
+            payload=dict(payload),
+            extra_member_sigma=0.0,
+            decision_time=decision_time + timedelta(minutes=1),
+        )
+        assert reordered.tolist() == pytest.approx(np.asarray(expected["q"])[list(permutation)])
         for mutated in (
             np.asarray(future_f[:-1] + (future_f[-1] + 1.0,)),
             np.asarray(future_f[:-1] + (future_f[-1] + 1e-8,)),
