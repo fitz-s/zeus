@@ -8,6 +8,23 @@ Status: active
 
 ### Concurrent conditional-HIGH integration acceptance
 
+- Post-load acceptance reopened on 2026-09-27 at 14:46 UTC: main PID 99883
+  and forecast PID 81903 loaded landed `4e87e153f`, but Hong Kong HIGH
+  `c157346c-310` has two fresh monitor attempts with
+  `DAY0_CONDITIONAL_HIGH_PERSISTED_WITNESS_INVALID`, stale probability and no
+  valid decision certificate. The same error affects other current HIGH
+  families. The formal restart completed; full probability remediation has
+  not. Current bids of zero do not excuse this computation-path failure.
+  Investigate persisted mixed/station variance metadata versus the new pure
+  hourly HIGH conditional-witness validator. Repair only the proved mismatch;
+  preserve hash validation and mandatory proof for genuinely conditional HIGH.
+  Require exact mixed HIGH and LOW round trips plus malformed/missing/tampered
+  pure conditional HIGH negative twins before reloading any further code.
+  SCOPE is one carrier's typed persisted witness; DRAIN is existing posterior
+  rebuild and held monitor reread; RESET is a successfully reproduced current
+  probability certificate. No arbitrary sigma, fallback probability or gate
+  bypass is authorized by this repair plan.
+
 - Final recovery implementation at child `a59fdaa25` passed all 1,070
   command-recovery and exchange-reconcile tests (133.99 seconds); parent
   recovery source and test files are byte-identical after integration.
