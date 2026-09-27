@@ -4400,6 +4400,7 @@ def maybe_refresh_day0_hourly_vectors(
     causal_run_boundaries: Mapping[tuple[str, str], datetime] | None = None,
     provider_run_hwm: Mapping[str, Day0ProviderRunHwm] | None = None,
     release_due_city_dates: Iterable[tuple[str, str]] = (),
+    high_ensemble_city_dates: Iterable[tuple[str, str]] = (),
     persist_lock_blocking: bool = True,
     return_stats: bool = False,
 ) -> int | Day0HourlyRefreshStats:
@@ -4527,6 +4528,10 @@ def maybe_refresh_day0_hourly_vectors(
         (str(city).strip(), str(target_date).strip())
         for city, target_date in release_due_city_dates
     )
+    high_ensemble_scopes = frozenset(
+        (str(city).strip().casefold(), str(target_date).strip())
+        for city, target_date in high_ensemble_city_dates
+    )
     for city_index, city in enumerate(cities):
         if checked >= max(0, int(max_cities)):
             break
@@ -4610,7 +4615,7 @@ def maybe_refresh_day0_hourly_vectors(
                 quota_lane = "maintenance"
                 quota_context = nullcontext()
                 transport_quota_context = nullcontext()
-            ensemble_target_dates = (
+            low_ensemble_dates = (
                 day0_source_clock_ensemble_target_dates(
                     city=city,
                     decision_time=decision_time,
@@ -4618,6 +4623,18 @@ def maybe_refresh_day0_hourly_vectors(
                 if quota_lane in {"priority", "recovery"}
                 else ()
             )
+            current_local_date = decision_time.astimezone(
+                ZoneInfo(str(getattr(city, "timezone")))
+            ).date().isoformat()
+            ensemble_target_dates = tuple(dict.fromkeys((
+                *low_ensemble_dates,
+                *(
+                    (current_local_date,)
+                    if quota_lane in {"critical", "priority", "recovery"}
+                    and (name.casefold(), current_local_date) in high_ensemble_scopes
+                    else ()
+                ),
+            )))
             if ensemble_target_dates:
                 # ENS-required entry refreshes own a distinct retry/throttle
                 # identity so deterministic-only completion cannot clear or

@@ -6918,6 +6918,11 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
             causal_run_boundaries=causal_run_boundaries,
             provider_run_hwm=provider_run_hwm,
             release_due_city_dates=release_due_city_dates,
+            high_ensemble_city_dates=frozenset(
+                (str(city_name).casefold(), str(target_date))
+                for city_name, target_date, metric in priority_families
+                if str(metric).lower() == "high"
+            ),
             persist_lock_blocking=False,
             return_stats=True,
         )

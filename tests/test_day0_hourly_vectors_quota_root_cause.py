@@ -1,6 +1,7 @@
 # Created: 2026-09-05
-# Last reused or audited: 2026-09-12
-# Lifecycle: created=2026-09-05; last_reviewed=2026-09-12; last_reused=2026-09-12
+# Last reused or audited: 2026-09-27
+# Lifecycle: created=2026-09-05; last_reviewed=2026-09-27; last_reused=2026-09-27
+# Authority basis: current HIGH conditional-variance acquisition plan; shared quota contract.
 # Purpose: Regression tests for the round-3 quota root-cause fixes in
 #   src/data/day0_hourly_vectors.py: a monotone per-model provider-run HWM pin (Open-
 #   Meteo's meta.json is served from more than one replica; replicas have been observed
@@ -539,8 +540,12 @@ def test_per_date_refresh_does_not_publish_invalid_model_or_clock(monkeypatch, i
     assert stats.unavailable_bundles[0].target_dates == ("2026-09-10", "2026-09-11")
 
 
+@pytest.mark.parametrize(
+    "route", ("ambiguous_low", "current_high_priority", "current_high_held")
+)
 def test_deterministic_ready_still_fetches_required_ens_then_composite_dedups(
     monkeypatch: pytest.MonkeyPatch,
+    route: str,
 ) -> None:
     """A deterministic hit cannot hide a missing required ENS carrier."""
     from src.data.openmeteo_quota import OpenMeteoQuotaTracker
@@ -574,7 +579,8 @@ def test_deterministic_ready_still_fetches_required_ens_then_composite_dedups(
     monkeypatch.setattr(day0, "quota_tracker", OpenMeteoQuotaTracker())
     monkeypatch.setattr(day0, "day0_hourly_models_for_city", lambda _city: ["ecmwf_ifs"])
     monkeypatch.setattr(
-        day0, "day0_source_clock_ensemble_target_dates", lambda **_kwargs: (target_date,)
+        day0, "day0_source_clock_ensemble_target_dates",
+        lambda **_kwargs: (target_date,) if route == "ambiguous_low" else (),
     )
     monkeypatch.setattr(
         day0, "_current_provider_bundle_already_persisted", lambda **_kwargs: True
@@ -628,11 +634,19 @@ def test_deterministic_ready_still_fetches_required_ens_then_composite_dedups(
     day0._INCOMPLETE_RETRY_STREAK.clear()
 
     first = day0.maybe_refresh_day0_hourly_vectors(
-        [city], decision_time=decision, interval_s=0.0, quota_priority_cities=1,
+        [city], decision_time=decision, interval_s=0.0,
+        quota_priority_cities=int(route != "current_high_held"),
+        quota_critical_cities=int(route == "current_high_held"),
+        high_ensemble_city_dates=((city.name, target_date),) if route.startswith("current_high") else (),
+        causal_run_boundaries={},
         return_stats=True,
     )
     second = day0.maybe_refresh_day0_hourly_vectors(
-        [city], decision_time=decision, interval_s=0.0, quota_priority_cities=1,
+        [city], decision_time=decision, interval_s=0.0,
+        quota_priority_cities=int(route != "current_high_held"),
+        quota_critical_cities=int(route == "current_high_held"),
+        high_ensemble_city_dates=((city.name, target_date),) if route.startswith("current_high") else (),
+        causal_run_boundaries={},
         return_stats=True,
     )
 
@@ -642,6 +656,36 @@ def test_deterministic_ready_still_fetches_required_ens_then_composite_dedups(
     assert persisted["n"] == 51
     assert hwm_probes["n"] == 2
     assert day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC == {}
+
+
+def test_current_high_ens_does_not_fetch_unrequested_future_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.data.openmeteo_quota import OpenMeteoQuotaTracker
+
+    city = SimpleNamespace(name="Paris", timezone="Europe/Paris")
+    decision = datetime(2026, 9, 10, 9, 0, tzinfo=UTC)
+    target_date = decision.astimezone(ZoneInfo(city.timezone)).date().isoformat()
+    future_date = (date.fromisoformat(target_date) + timedelta(days=1)).isoformat()
+    monkeypatch.setattr(day0, "quota_tracker", OpenMeteoQuotaTracker())
+    monkeypatch.setattr(day0, "day0_hourly_models_for_city", lambda _city: ["ecmwf_ifs"])
+    monkeypatch.setattr(day0, "day0_source_clock_ensemble_target_dates", lambda **_kw: ())
+    monkeypatch.setattr(day0, "_current_provider_bundle_already_persisted", lambda **_kw: True)
+    monkeypatch.setattr(
+        day0, "fetch_day0_source_clock_ensemble_vectors",
+        lambda *_a, **_kw: pytest.fail("tomorrow's HIGH scope must not fetch 51 ENS"),
+    )
+
+    stats = day0.maybe_refresh_day0_hourly_vectors(
+        [city], decision_time=decision, interval_s=0.0,
+        quota_priority_cities=1,
+        high_ensemble_city_dates=((city.name, future_date),),
+        causal_run_boundaries={},
+        return_stats=True,
+    )
+
+    assert stats.cities_attempted == 0
+    assert stats.vectors_written == 0
 
 
 def test_ens_ready_fetches_only_missing_deterministic_and_release_due_refetches(

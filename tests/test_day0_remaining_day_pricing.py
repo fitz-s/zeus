@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-09-22
-# Lifecycle: created=2026-06-10; last_reviewed=2026-09-22; last_reused=2026-09-22
+# Last reused or audited: 2026-09-27
+# Lifecycle: created=2026-06-10; last_reviewed=2026-09-27; last_reused=2026-09-27
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -12410,6 +12410,7 @@ class TestRequestHashProvenance:
         assert captured["timeout_s"] == 4.0
         assert captured["cities"][0] == held.name
         assert captured["quota_critical_cities"] == 1
+        assert captured["high_ensemble_city_dates"] == {(held.name.lower(), today)}
         if debt is not None:
             assert transport_timeouts == [4.0]
             assert captured["provider_run_hwm"] == {}
@@ -12530,6 +12531,10 @@ class TestRequestHashProvenance:
         assert captured["quota_critical_cities"] == 1
         assert captured["quota_priority_cities"] == 1
         assert captured["allow_priority_recovery"] is True
+        assert captured["high_ensemble_city_dates"] == {
+            ("paris", "2026-06-10"),
+            ("wellington", "2026-06-10"),
+        }
 
     @pytest.mark.parametrize(
         ("boundary_now", "expected_timeout"),
