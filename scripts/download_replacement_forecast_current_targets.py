@@ -508,9 +508,12 @@ def _precision_metadata(
         float(city_config.lat), float(city_config.lon), station_lat, station_lon,
     ) > 5.0:
         raise ValueError("OM9 precise station coordinate differs from city contract")
-    response_lat = float(payload["latitude"])
-    response_lon = float(payload["longitude"])
-    target_dem = float(payload["elevation"])
+    try:
+        response_lat = float(payload["latitude"])
+        response_lon = float(payload["longitude"])
+        target_dem = float(payload["elevation"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("OM9 raw response geometry invalid") from exc
     source_proof = source_cell_geometry_proof(
         latitude=float(city_config.lat), longitude=float(city_config.lon),
         target_elevation_m=target_dem,

@@ -272,6 +272,23 @@ def test_source_geometry_invalid_sibling_db_artifact_cannot_mask_new_fetch(
     assert old_path.read_bytes() == raw
 
 
+def test_source_geometry_non_numeric_cached_response_is_retryable(monkeypatch) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    bad = _source_geometry_payload(monkeypatch)
+    bad["latitude"] = "not-a-coordinate"
+    scoped = dl._current_target_scoped_payload(
+        bad, city="Dallas", target_date="2026-06-10", metric="high",
+    )
+    _precision, reason, retry_provider = dl._current_target_source_geometry_check(
+        "Dallas", "2026-06-10", json.dumps(scoped).encode(),
+        anchor_sigma_c=3.0,
+    )
+    assert _precision is None
+    assert reason == "OM9 raw response geometry invalid"
+    assert retry_provider is True
+
+
 def test_source_geometry_upstream_critical_and_active_plan_skip_old_synthetic_cache(
     tmp_path, monkeypatch,
 ) -> None:
