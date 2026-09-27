@@ -7719,6 +7719,7 @@ def _reactor_wake_cancellation_probe(
     capital_recovery_pending: Callable[[], bool] | None = None,
     allow_paused_forecast_snapshot_completion: bool = False,
     ignore_preexisting_wakes: bool = False,
+    defer_forecast_revisions: bool = False,
 ) -> Callable[[], bool]:
     """Cancel only when a newer wake invalidates the current work scope.
 
@@ -7729,7 +7730,10 @@ def _reactor_wake_cancellation_probe(
 
     ``ignore_preexisting_wakes`` is reserved for a full-market completion cut,
     dispatched periodically or from its durable wake. Its snapshot is part of the
-    cut's starting truth; only a wake published after that snapshot cancels it.
+    cut's starting truth. ``defer_forecast_revisions`` aligns this outer probe
+    with the adapter's reserved-cut policy: ordinary forecasts remain queued
+    for the next cut, while new physical facts and capital changes still cancel.
+    The work deadline and submit-time current probability/book gates are unchanged.
     """
 
     from src.runtime.reactor_wake import (
@@ -7738,10 +7742,20 @@ def _reactor_wake_cancellation_probe(
         reactor_wakes_since,
     )
 
+    def read_wakes(cutoff, *, exclude_wake_ids=()):
+        if defer_forecast_revisions:
+            return reactor_wakes_since(
+                cutoff, exclude_wake_ids=exclude_wake_ids, fail_on_error=True,
+            )
+        return reactor_wakes_since(cutoff, exclude_wake_ids=exclude_wake_ids)
+
     observed_revision = reactor_urgent_wake_revision()
-    preexisting_wakes = (
-        tuple(reactor_wakes_since(None)) if ignore_preexisting_wakes else ()
-    )
+    try:
+        preexisting_wakes = (
+            tuple(read_wakes(None)) if ignore_preexisting_wakes else ()
+        )
+    except (OSError, ValueError):
+        return lambda: True  # Unknown physical facts cannot grant a completion turn.
     preexisting_wake_ids = frozenset(wake.wake_id for wake in preexisting_wakes)
     preexisting_urgent_identity = (
         reactor_urgent_wake_identity() if ignore_preexisting_wakes else None
@@ -7772,25 +7786,50 @@ def _reactor_wake_cancellation_probe(
             return True
         if urgent_day0_pending is not None and urgent_day0_pending():
             current_urgent_identity = reactor_urgent_wake_identity()
-            if not (
+            existing_identity = (
                 ignore_preexisting_wakes
                 and preexisting_urgent_identity is not None
                 and current_urgent_identity == preexisting_urgent_identity
-            ):
+            )
+            nonphysical_marker = (
+                defer_forecast_revisions
+                and current_urgent_identity is not None
+                and current_urgent_identity[1] in {
+                    "forecast_posterior_advanced",
+                    "market_price_advanced",
+                    "money_path_substrate_refreshed",
+                }
+            )
+            # A nonphysical marker may follow a Day0 fact in the same revision
+            # window. Inspect all new queued wakes below before accepting it;
+            # the latest marker alone must never hide that earlier hard fact.
+            if not existing_identity and not nonphysical_marker:
                 superseded = True
                 return True
 
         current_revision = reactor_urgent_wake_revision()
+        if current_revision is None and defer_forecast_revisions:
+            superseded = True
+            return True
         if current_revision is None or current_revision == observed_revision:
             return False
-        pending_wakes = reactor_wakes_since(
-            producer_wake_published_at,
-            exclude_wake_ids=owned_wake_ids,
-        )
+        try:
+            pending_wakes = read_wakes(
+                producer_wake_published_at,
+                exclude_wake_ids=owned_wake_ids,
+            )
+        except (OSError, ValueError):
+            superseded = True
+            return True
         if not pending_wakes:
             observed_revision = current_revision
             return False
         for wake in pending_wakes:
+            if defer_forecast_revisions and wake.reason == "forecast_posterior_advanced":
+                # SCOPE: one reserved, bounded full comparison. DRAIN: leave
+                # the newer forecast queued for the next cut. RESET: completion
+                # clears the reservation; JIT still rebinds the selected action.
+                continue
             if wake.reason in {
                 "market_price_advanced",
                 "money_path_substrate_refreshed",
@@ -9225,6 +9264,7 @@ def run_edli_event_reactor_cycle(
         # Only a later wake revision may supersede that cut. Submit-time q/book
         # revalidation remains the independent final authority.
         ignore_preexisting_wakes=completion_reserved_at_start,
+        defer_forecast_revisions=completion_reserved_at_start,
     )
 
     try:

@@ -1,6 +1,6 @@
 # Created: 2026-05-24
 # Last reused/audited: 2026-09-27
-# Lifecycle: created=2026-05-24; last_reviewed=2026-09-20; last_reused=2026-09-20
+# Lifecycle: created=2026-05-24; last_reviewed=2026-09-27; last_reused=2026-09-27
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -4581,9 +4581,9 @@ def test_periodic_cycle_yields_to_already_pending_day0_before_runtime_db_setup(
 
 
 @pytest.mark.parametrize("durable_completion", (False, True))
-@pytest.mark.parametrize("new_day0", (False, True))
+@pytest.mark.parametrize("new_reason", (None, "day0_extreme_event_committed", "forecast_posterior_advanced", "position_fill_projected"))
 def test_reserved_completion_absorbs_preexisting_day0_before_runtime_db_setup(
-    monkeypatch, durable_completion, new_day0,
+    monkeypatch, durable_completion, new_reason,
 ):
     import src.main as main
     import src.state.db as db
@@ -4609,10 +4609,11 @@ def test_reserved_completion_absorbs_preexisting_day0_before_runtime_db_setup(
         lambda *_args, **_kwargs: {"enabled": True, "event_writer_enabled": True},
     )
     monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
-    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_revision", lambda: "day0-wake")
+    revisions = iter(("old", "new" if new_reason else "old"))
+    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_revision", lambda: next(revisions, "new" if new_reason else "old"))
     identities = iter((
         (existing.wake_id, existing.reason),
-        ("new-day0" if new_day0 else existing.wake_id, existing.reason),
+        ("new-wake", new_reason) if new_reason else (existing.wake_id, existing.reason),
     ))
     latest_identity = [None]
 
@@ -4626,7 +4627,11 @@ def test_reserved_completion_absorbs_preexisting_day0_before_runtime_db_setup(
     monkeypatch.setattr(
         reactor_wake,
         "reactor_wakes_since",
-        lambda *_args, **_kwargs: (existing,),
+        lambda *_args, **kwargs: (
+            (reactor_wake.ReactorWake("new-wake", "2026-08-18T02:15:01+00:00", "source", new_reason),)
+            if new_reason and existing.wake_id in kwargs.get("exclude_wake_ids", ())
+            else (existing,)
+        ),
     )
     monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(
@@ -4646,7 +4651,7 @@ def test_reserved_completion_absorbs_preexisting_day0_before_runtime_db_setup(
         producer_wake_ids=(("completion-wake",) if durable_completion else ()),
     )
     try:
-        if new_day0:
+        if new_reason not in (None, "forecast_posterior_advanced"):
             assert run_edli_event_reactor_cycle(**kwargs) is False
         else:
             with pytest.raises(ExitAuctionReached):
@@ -4934,6 +4939,62 @@ def test_completion_day0_snapshot_never_masks_capital_recovery_handoff(monkeypat
     assert cancelled() is True
     recovery[0] = False
     assert cancelled() is True  # An interrupted cut cannot regain authority.
+
+
+@pytest.mark.parametrize("hazard", ("forecast_storm", "day0_then_forecast", "fill", "unknown", "queue_error", "revision_missing", "capital"))
+def test_reserved_full_cut_coalesces_only_proven_nonphysical_revisions(monkeypatch, hazard):
+    from src.events.reactor import _reactor_wake_cancellation_probe
+    from src.runtime import reactor_wake
+
+    old = reactor_wake.ReactorWake("old-day0", "2026-09-27T12:00:00+00:00", "day0", "day0_extreme_event_committed")
+    revision = ["old"]
+    marker = [(old.wake_id, old.reason)]
+    pending = []
+    recovery = [False]
+    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_revision", lambda: revision[0])
+    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_identity", lambda: marker[0])
+
+    def read(_cutoff, *, exclude_wake_ids=(), fail_on_error=False):
+        assert fail_on_error is True
+        if old.wake_id not in exclude_wake_ids:
+            return (old,)
+        if hazard == "queue_error":
+            raise OSError("queue unreadable")
+        return tuple(pending)
+
+    monkeypatch.setattr(reactor_wake, "reactor_wakes_since", read)
+    cancelled = _reactor_wake_cancellation_probe(
+        producer_wake_reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        producer_wake_ids=("completion",), producer_wake_published_at=None,
+        forecast_wake_families=set(), urgent_day0_pending=lambda: True,
+        capital_recovery_pending=lambda: recovery[0], ignore_preexisting_wakes=True,
+        defer_forecast_revisions=True,
+    )
+    assert cancelled() is False
+    reasons = {
+        "day0_then_forecast": "day0_extreme_event_committed",
+        "fill": "position_fill_projected", "unknown": "unknown_authority",
+    }
+    if hazard in reasons:
+        pending.append(reactor_wake.ReactorWake("new-hard", "2026-09-27T12:00:01+00:00", "source", reasons[hazard]))
+    recovery[0] = hazard == "capital"
+    for index in range(12):
+        revision[0] = None if hazard == "revision_missing" else str(index)
+        forecast = reactor_wake.ReactorWake(f"forecast-{index}", "2026-09-27T12:00:02+00:00", "forecast", "forecast_posterior_advanced")
+        pending.append(forecast)
+        marker[0] = (forecast.wake_id, forecast.reason)
+        assert cancelled() is (hazard != "forecast_storm")
+
+
+def test_wakes_since_strict_read_cannot_hide_corrupt_day0_queue_record(tmp_path):
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    reactor_wake.publish_reactor_wake(source="test", reason="forecast_posterior_advanced", path=path, wake_id="forecast")
+    (reactor_wake._wake_queue_dir(path) / "broken.json").write_text("{broken")
+    assert len(reactor_wake.reactor_wakes_since(None, path=path)) == 1
+    with pytest.raises(ValueError, match="REACTOR_WAKE_INVALID"):
+        reactor_wake.reactor_wakes_since(None, path=path, fail_on_error=True)
 
 def test_day0_posterior_advance_reemits_current_observation_on_new_probability_clock():
     conn, _store_obj = _store()

@@ -1412,6 +1412,7 @@ def reactor_wakes_since(
     *,
     path: Path | None = None,
     exclude_wake_ids: Collection[str] = (),
+    fail_on_error: bool = False,
 ) -> tuple[ReactorWake, ...]:
     """Return queued wakes at or after one producer wake's publication time."""
 
@@ -1429,7 +1430,7 @@ def reactor_wakes_since(
         cutoff = None
 
     wakes: list[ReactorWake] = []
-    for _queue_file, wake in _queued_wakes(path):
+    for _queue_file, wake in _queued_wakes(path, fail_on_error=fail_on_error):
         if wake.wake_id in excluded:
             continue
         if cutoff is not None:
