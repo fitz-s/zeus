@@ -1022,9 +1022,12 @@ def _collector_identity_mismatch(identity: dict[str, object], result: dict | Non
 
 
 def _latest_job_run_current_for_identity(conn, identity: dict[str, object]) -> tuple[bool, dict[str, object]]:
-    from src.state.job_run_repo import get_latest_job_run
-
-    row = get_latest_job_run(conn, str(identity["job_name"]))
+    # A held-scope revision migration journals an older cycle *after* the
+    # newest cycle. Recorded-at order cannot decide whether this exact newest
+    # source identity is already complete.
+    row = conn.execute(
+        "SELECT * FROM job_run WHERE job_run_id = ?", (_job_run_id(identity),)
+    ).fetchone()
     if row is None:
         return False, {"reason": "NO_JOB_RUN"}
 

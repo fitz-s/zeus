@@ -164,6 +164,11 @@ def test_held_revision_migration_refetches_exact_old_complete_cycle(monkeypatch,
         "UPDATE job_run SET rows_written = 1, source_run_id = ? WHERE job_run_id = ?",
         (daemon._expected_source_run_id(newest), daemon._job_run_id(newest)),
     )
+    # A journal entry for the older migration may be recorded later than the
+    # newest cycle; it must not make the newest cycle look unjournaled.
+    conn.execute("UPDATE job_run SET recorded_at = ? WHERE job_run_id = 'old-v2-success'",
+        ((now + timedelta(seconds=1)).isoformat(),))
+    assert daemon._latest_job_run_current_for_identity(conn, newest)[0]
     calls = []
     monkeypatch.setattr(
         daemon, "run_opendata_track",
