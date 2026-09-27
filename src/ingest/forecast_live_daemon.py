@@ -826,7 +826,19 @@ def _held_revision_migration_identity(
                 if last_attempt is not None and now_utc - last_attempt < timedelta(
                     seconds=FORECAST_LIVE_SAFE_CYCLE_POLL_SECONDS
                 ):
-                    continue
+                    # SCOPE: this track's earliest eligible held cycle. DRAIN:
+                    # next normal poll after its existing cooldown. RESET: retry
+                    # becomes due or the source/target scope ceases to qualify.
+                    return identity, {
+                        "status": "revision_migration_retry_not_due",
+                        "city": city_name, "target_date": target_date,
+                        "temperature_metric": metric,
+                        "old_source_run_id": row["source_run_id"],
+                        "expected_source_run_id": expected_run_id,
+                        "retry_at": (
+                            last_attempt + timedelta(seconds=FORECAST_LIVE_SAFE_CYCLE_POLL_SECONDS)
+                        ).isoformat(),
+                    }
             return identity, {
                 "city": city_name, "target_date": target_date,
                 "temperature_metric": metric, "old_source_run_id": row["source_run_id"],
@@ -1279,6 +1291,13 @@ def _run_opendata_track_if_due(
                 # Invalid or missing collector clocks cannot order a turn.
                 # The candidate still needs its own release/window/coverage
                 # proof from _held_revision_migration_identity above.
+        retry_at = _parse_utc_timestamp(migration_debt.get("retry_at"))
+        if retry_at is not None and now < retry_at:
+            return {
+                "status": "revision_migration_retry_not_due",
+                "source": migration_identity["source_id"], "track": track,
+                "revision_migration_debt": migration_debt,
+            }
         result = run_opendata_track(
             track, _locks_dir_override=_locks_dir_override,
             _collector=_collector, _source_paused=_source_paused,

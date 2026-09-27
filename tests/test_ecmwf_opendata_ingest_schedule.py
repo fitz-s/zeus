@@ -556,6 +556,62 @@ def test_held_revision_migration_uses_utc_deadline_before_calendar_date(monkeypa
 
 
 @pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+def test_earliest_held_revision_cooldown_reserves_its_turn(monkeypatch, track):
+    from src.data import replacement_forecast_seed_discovery as discovery
+    from src.ingest import forecast_live_daemon as daemon
+
+    now = datetime(2026, 9, 27, 12, 46, tzinfo=timezone.utc)
+    conn = _job_run_conn()
+    earliest = _held_revision_coverage(
+        conn, track, now=now, cycle=datetime(2026, 9, 26, 12, tzinfo=timezone.utc),
+    )
+    later = _held_revision_coverage(
+        conn, track, now=now, cycle=datetime(2026, 9, 26, 18, tzinfo=timezone.utc),
+        city_name="Cape Town",
+    )
+    monkeypatch.setattr(discovery, "held_position_family_priorities", lambda **_: {
+        ("Hong Kong", "2026-09-27", earliest["metric"]): 0,
+        ("Cape Town", "2026-09-27", later["metric"]): 0,
+    })
+    migration, _ = daemon._held_revision_migration_identity(
+        conn, track=track, now_utc=now, deadline_monotonic=time.monotonic() + 10,
+    )
+    _insert_job_run(conn, migration, status="FAILED", recorded_at=now - timedelta(seconds=20))
+    newest = daemon._forecast_work_identity(track, now_utc=now)
+    _insert_job_run(conn, newest, status="PARTIAL", recorded_at=now - timedelta(seconds=5))
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        daemon, "run_opendata_track", lambda _track, **kwargs: calls.append(kwargs) or {"status": "ok"},
+    )
+
+    cooled = daemon._run_opendata_track_if_due(
+        track, _job_conn=conn, _now_utc=now,
+        _source_paused=lambda _: False, _poll_deadline_monotonic=time.monotonic() + 10,
+    )
+    assert cooled["status"] == "revision_migration_retry_not_due"
+    assert cooled["revision_migration_debt"]["old_source_run_id"] == earliest["source_run_id"]
+    assert not calls  # Neither a later held cycle nor latest PARTIAL jumps this due turn.
+
+    due = now + timedelta(seconds=41)
+    selected = daemon._run_opendata_track_if_due(
+        track, _job_conn=conn, _now_utc=due,
+        _source_paused=lambda _: False, _poll_deadline_monotonic=time.monotonic() + 10,
+    )
+    assert selected["revision_migration_debt"]["old_source_run_id"] == earliest["source_run_id"]
+    assert calls[0]["_identity"]["scheduled_for"] == datetime(2026, 9, 26, 12, tzinfo=timezone.utc)
+
+    conn.execute(
+        "UPDATE source_run_coverage SET expires_at = ? WHERE source_run_id = ?",
+        ((now - timedelta(seconds=1)).isoformat(), earliest["source_run_id"]),
+    )
+    next_eligible = daemon._held_revision_migration_identity(
+        conn, track=track, now_utc=now, deadline_monotonic=time.monotonic() + 10,
+    )
+    assert next_eligible is not None
+    assert next_eligible[1]["old_source_run_id"] == later["source_run_id"]
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
 def test_held_migration_failure_yields_next_turn_to_latest(monkeypatch, track):
     """Use existing exact job attempts for alternating fairness, not a new latch."""
     from src.ingest import forecast_live_daemon as daemon
@@ -638,8 +694,11 @@ def test_held_revision_migration_requires_current_complete_proof_and_cools_failu
     )
     assert candidate["scheduled_for"] == old_cycle
     _insert_job_run(conn, candidate, status="FAILED", recorded_at=now - timedelta(seconds=20))
-    assert daemon._held_revision_migration_identity(conn, track=track, now_utc=now,
-        deadline_monotonic=time.monotonic() + 10) is None
+    cooling, cooling_debt = daemon._held_revision_migration_identity(
+        conn, track=track, now_utc=now, deadline_monotonic=time.monotonic() + 10,
+    )
+    assert cooling == candidate
+    assert cooling_debt["status"] == "revision_migration_retry_not_due"
     conn.execute(
         "UPDATE job_run SET finished_at = ?, recorded_at = ? WHERE job_run_id = ?",
         ((now - timedelta(seconds=61)).isoformat(),) * 2 + (daemon._job_run_id(candidate),),
