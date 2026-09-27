@@ -28,6 +28,16 @@ Status: active
   SCOPE is one interrupted positive-entry recovery unit; DRAIN is the next
   ordinary bounded recovery attempt; RESET requires consistent command, fill
   event and position projection. This blocks deployment until proved.
+- The deterministic rollback antibody exposed a second writer: after the
+  interrupted REVIEW unit correctly rolls back, the independent recorded maker
+  economics pass can still reduce a chain-synced five-share holding to the
+  three shares in partial trade receipts, despite a same-order terminal
+  MATCHED five-share fact. Extend the same bounded repair to the owning
+  `exchange_reconcile.py` projection path. Preserve the exact chain/terminal
+  holding until full trade economics arrive; bind order, token and position,
+  never use an unrelated chain amount to overwrite another command or SELL.
+  Require negative identity/nonterminal/unsynced twins and a complete-trade
+  recovery twin. Scope and drainage remain exact-command, not global veto.
 - Conditional HIGH missing-source and superseded-product reasons now use the
   existing family BLOCKED result in prepare/direct/read-only paths; wrong-run
   mixtures and proof corruption still raise. Targeted HIGH hourly refresh now
