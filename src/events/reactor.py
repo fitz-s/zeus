@@ -7737,6 +7737,7 @@ def _reactor_wake_cancellation_probe(
     """
 
     from src.runtime.reactor_wake import (
+        _urgent_wake_path,
         reactor_urgent_wake_identity,
         reactor_urgent_wake_revision,
         reactor_wakes_since,
@@ -7809,10 +7810,28 @@ def _reactor_wake_cancellation_probe(
 
         current_revision = reactor_urgent_wake_revision()
         if current_revision is None and defer_forecast_revisions:
-            superseded = True
-            return True
-        if current_revision is None or current_revision == observed_revision:
+            if observed_revision is not None:
+                # Losing an existing marker invalidates its revision fence.
+                superseded = True
+                return True
+            try:
+                _urgent_wake_path(None).stat()
+            except FileNotFoundError:
+                pass  # Only actual absence can be checked against the queue.
+            except OSError:
+                superseded = True
+                return True
+            else:
+                # The revision read hid an error, or a marker appeared since.
+                superseded = True
+                return True
+        if current_revision is None and not defer_forecast_revisions:
             return False
+        if current_revision is not None and current_revision == observed_revision:
+            return False
+        # A fresh reserved cut may legitimately start before any urgent marker
+        # exists. The queue is written before its marker, so strictly inspect
+        # it even while both revisions are absent. A failed read cancels below.
         try:
             pending_wakes = read_wakes(
                 producer_wake_published_at,

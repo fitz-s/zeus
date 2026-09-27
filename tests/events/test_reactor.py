@@ -4986,6 +4986,138 @@ def test_reserved_full_cut_coalesces_only_proven_nonphysical_revisions(monkeypat
         assert cancelled() is (hazard != "forecast_storm")
 
 
+@pytest.mark.parametrize(
+    ("change", "expected"),
+    (
+        ("empty", False),
+        ("forecast", False),
+        ("day0", True),
+        ("fill", True),
+        ("unknown", True),
+        ("unreadable", True),
+        ("unreadable_marker", True),
+        ("existing_marker", True),
+        ("lost_marker", True),
+        ("capital", True),
+    ),
+)
+def test_reserved_cut_without_initial_urgent_marker_checks_strict_queue(
+    monkeypatch, tmp_path, change, expected,
+):
+    from src.events.reactor import _reactor_wake_cancellation_probe
+    from src.runtime import reactor_wake
+
+    revision = ["initial" if change == "lost_marker" else None]
+    recovery = [False]
+    queued = []
+    reads = []
+    marker = tmp_path / "urgent.json"
+    if change == "existing_marker":
+        marker.write_text("present")
+    if change == "unreadable_marker":
+        class UnreadableMarker:
+            def stat(self):
+                raise PermissionError("marker unreadable")
+
+        marker = UnreadableMarker()
+    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_revision", lambda: revision[0])
+    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_identity", lambda: None)
+    monkeypatch.setattr(reactor_wake, "_urgent_wake_path", lambda _path: marker)
+
+    def read(_cutoff, *, exclude_wake_ids=(), fail_on_error=False):
+        reads.append(fail_on_error)
+        assert fail_on_error is True
+        if change == "unreadable" and len(reads) > 1:
+            raise OSError("queue unreadable")
+        return tuple(w for w in queued if w.wake_id not in exclude_wake_ids)
+
+    monkeypatch.setattr(reactor_wake, "reactor_wakes_since", read)
+    cancelled = _reactor_wake_cancellation_probe(
+        producer_wake_reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        producer_wake_ids=("completion",),
+        producer_wake_published_at=None,
+        forecast_wake_families=set(),
+        urgent_day0_pending=None,
+        capital_recovery_pending=lambda: recovery[0],
+        ignore_preexisting_wakes=True,
+        defer_forecast_revisions=True,
+    )
+    if change == "lost_marker":
+        revision[0] = None
+    elif change == "capital":
+        recovery[0] = True
+    elif change in {"forecast", "day0", "fill", "unknown"}:
+        reason = {
+            "forecast": "forecast_posterior_advanced",
+            "day0": "day0_extreme_event_committed",
+            "fill": "position_fill_projected",
+            "unknown": "unexpected_physical_fact",
+        }[change]
+        queued.append(reactor_wake.ReactorWake(
+            "new-wake", "2026-09-27T12:00:00+00:00", "producer", reason,
+        ))
+    assert cancelled() is expected
+    if change in {"empty", "forecast"}:
+        assert cancelled() is False
+    else:
+        assert cancelled() is True
+    assert all(reads)
+
+
+def test_reserved_cut_detects_physical_wake_published_before_missing_marker(
+    monkeypatch, tmp_path,
+):
+    from src.events.reactor import _reactor_wake_cancellation_probe
+    from src.runtime import reactor_wake
+
+    queued = []
+    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_revision", lambda: None)
+    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_identity", lambda: None)
+    monkeypatch.setattr(
+        reactor_wake, "_urgent_wake_path", lambda _path: tmp_path / "absent.json",
+    )
+
+    def read(_cutoff, *, exclude_wake_ids=(), fail_on_error=False):
+        assert fail_on_error is True
+        return tuple(w for w in queued if w.wake_id not in exclude_wake_ids)
+
+    monkeypatch.setattr(reactor_wake, "reactor_wakes_since", read)
+    cancelled = _reactor_wake_cancellation_probe(
+        producer_wake_reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        producer_wake_ids=(), producer_wake_published_at=None,
+        forecast_wake_families=set(), urgent_day0_pending=None,
+        ignore_preexisting_wakes=True, defer_forecast_revisions=True,
+    )
+    assert cancelled() is False
+    queued.append(reactor_wake.ReactorWake(
+        "queued-before-marker", "2026-09-27T12:00:01+00:00", "producer",
+        "position_fill_projected",
+    ))
+    assert cancelled() is True
+    queued.clear()
+    assert cancelled() is True
+
+
+def test_ordinary_probe_retains_missing_revision_behavior(monkeypatch):
+    from src.events.reactor import _reactor_wake_cancellation_probe
+    from src.runtime import reactor_wake
+
+    revisions = iter(("initial", None))
+    monkeypatch.setattr(
+        reactor_wake, "reactor_urgent_wake_revision", lambda: next(revisions),
+    )
+    monkeypatch.setattr(
+        reactor_wake, "reactor_wakes_since",
+        lambda *_args, **_kwargs: pytest.fail("ordinary probe must not scan queue"),
+    )
+    cancelled = _reactor_wake_cancellation_probe(
+        producer_wake_reason=None, producer_wake_ids=(),
+        producer_wake_published_at=None, forecast_wake_families=set(),
+        urgent_day0_pending=None,
+    )
+    assert cancelled() is False
+
+
 def test_wakes_since_strict_read_cannot_hide_corrupt_day0_queue_record(tmp_path):
     from src.runtime import reactor_wake
 
