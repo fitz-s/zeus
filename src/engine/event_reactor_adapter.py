@@ -29101,7 +29101,7 @@ def _forecast_authority_payload_from_posterior(
         members_native = None
         _fail("event_type_not_forecast_decision")
     source_clock_present, source_clock_certificate = (
-        _source_clock_model_count_certificate(p_provenance)
+        _source_clock_model_count_certificate(p_provenance, family=family, decision_time=decision_time)
     )
     if source_clock_present and source_clock_certificate is None:
         _fail("source_clock_certificate_missing")
@@ -29290,7 +29290,7 @@ def _posterior_bound_multimodel_members(
         return None
     models = tuple(str(model or "").strip() for model in raw_models)
     source_clock_present, source_clock_certificate = (
-        _source_clock_model_count_certificate(provenance)
+        _source_clock_model_count_certificate(provenance, family=family, decision_time=decision_time)
     )
     if source_clock_present and source_clock_certificate is None:
         _fail("source_clock_certificate_missing")
@@ -29409,7 +29409,7 @@ def _posterior_bound_spine_inputs(
         return None
 
     source_clock_present, source_clock_certificate = (
-        _source_clock_model_count_certificate(provenance)
+        _source_clock_model_count_certificate(provenance, family=family, decision_time=decision_time)
     )
     if not source_clock_present:
         return members, source_cycle, None
@@ -29444,6 +29444,9 @@ def _posterior_bound_spine_inputs(
 
 def _source_clock_model_count_certificate(
     provenance: Mapping[str, object],
+    *,
+    family: object | None = None,
+    decision_time: datetime | None = None,
 ) -> tuple[bool, dict[str, object] | None]:
     """Return the source-clock configured-source completeness certificate.
 
@@ -29488,6 +29491,108 @@ def _source_clock_model_count_certificate(
     except (TypeError, ValueError):
         return True, None
     fallback_reason = scheme.get("fallback_reason")
+    partial_current = (
+        fallback_reason == "configured_current_provider_set_incomplete"
+        and scheme.get("fallback_to") == "current_precision_fusion"
+    )
+    if partial_current:
+        try:
+            from src.config import runtime_cities_by_name
+            from src.data.replacement_forecast_materializer import (
+                BETWEEN_COHORT_WINDOW_HOURS,
+                _bayes_precision_fusion_city_local_lead_days,
+                _registered_source_clock_entry_ineligible,
+            )
+            from src.data.forecast_source_registry import SOURCES, source_allows_role
+            from src.forecast.model_selection import source_physically_eligible
+            from src.strategy.live_inference.source_clock_vnext import provider_family_for_source
+
+            if family is None or decision_time is None or decision_time.tzinfo is None:
+                return True, None
+            city = runtime_cities_by_name()[str(family.city)]
+            target = date.fromisoformat(str(family.target_date)[:10])
+            lead = _bayes_precision_fusion_city_local_lead_days(
+                computed_at=decision_time.astimezone(UTC),
+                target_local_date=target, tz_name=str(city.timezone),
+            )
+            current_raw = scheme["configured_current_sources"]
+            coherent_raw = scheme["configured_coherent_sources"]
+            if not isinstance(current_raw, (list, tuple)) or not isinstance(coherent_raw, (list, tuple)):
+                return True, None
+            current = tuple(str(value) for value in current_raw)
+            coherent = tuple(str(value) for value in coherent_raw)
+            missing_set = set(configured) - set(current)
+            between = scheme["between_cohort_value_serving"]
+            shape = scheme["current_evidence_shape"]
+            actual_current = set(configured) & set(served)
+            actual_coherent = set(configured) & set(between)
+            current_family_count = len({provider_family_for_source(s) for s in current})
+            coherent_family_count = len({provider_family_for_source(s) for s in coherent})
+            cycles = {
+                s: datetime.fromisoformat(str(between[s]["served_cycle"]).replace("Z", "+00:00"))
+                for s in coherent
+            }
+            freshest = max(cycles.values())
+            for source in coherent:
+                row = between[source]
+                served_row = serving[source]
+                if (
+                    str(row["raw_model_forecast_id"]) != str(served_row["raw_model_forecast_id"])
+                    or str(row["served_cycle"]) != str(served_row["served_cycle"])
+                    or cycles[source].tzinfo is None
+                    or not 0 <= (freshest - cycles[source]).total_seconds() <= BETWEEN_COHORT_WINDOW_HOURS * 3600
+                ):
+                    return True, None
+            configured_count = int(scheme["configured_current_provider_family_count"])
+            coherent_count = int(scheme["configured_current_provider_cohort_family_count"])
+            provider_count = int(shape["provider_count"])
+            physically_and_entry_eligible = all(
+                source_physically_eligible(s, lat=float(city.lat), lon=float(city.lon), lead_days=lead)
+                and (
+                    not s.startswith(("cwa_", "hko_"))
+                    or (
+                        (spec := SOURCES.get(s)) is not None
+                        and spec.tier != "disabled"
+                        and spec.enabled_by_default
+                        and spec.degradation_level == "OK"
+                        and source_allows_role(spec, "entry_primary")
+                    )
+                )
+                for s in configured
+            ) and not _registered_source_clock_entry_ineligible(configured)
+        except (AttributeError, KeyError, OverflowError, TypeError, ValueError):
+            return True, None
+        if (
+            len(configured) < 3 or len(set(configured)) != len(configured)
+            or len(used) < 2 or len(set(used)) != len(used)
+            or len(set(current)) != len(current)
+            or len(set(coherent)) != len(coherent)
+            or not missing_set or set(missing) != missing_set
+            or set(current) != actual_current
+            or set(coherent) != actual_coherent
+            or not set(coherent).issubset(set(current))
+            or set(used) != set(served) or set(used) != set(weighted)
+            or current_family_count < 2 or coherent_family_count < 2
+            or configured_count != current_family_count
+            or coherent_count != coherent_family_count or provider_count < 2
+            or len({provider_family_for_source(s) for s in used}) < 2
+            or not physically_and_entry_eligible
+            or scheme.get("one_scheme_status") not in _SOURCE_CLOCK_READ_READY_STATUSES
+            or scheme.get("walkforward_pass") is not True
+            or expected != len(configured) or observed != len(current)
+        ):
+            return True, None
+        canonical = tuple(sorted(used))
+        return True, {
+            "posterior_model_count_basis": _SOURCE_CLOCK_MODEL_COUNT_BASIS,
+            "posterior_completeness_status": _SOURCE_CLOCK_READY_STATUS,
+            "posterior_configured_sources": canonical,
+            "posterior_served_sources": canonical,
+            "posterior_missing_sources": (),
+            "posterior_walkforward_pass": True,
+            "posterior_configured_model_count": len(canonical),
+            "posterior_served_model_count": len(canonical),
+        }
     horizon_fallback = (
         fallback_reason
         in {

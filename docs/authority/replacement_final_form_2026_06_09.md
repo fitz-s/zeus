@@ -76,6 +76,17 @@ providers are the minimum. Missing or invalid current shape blocks the live
 posterior; it never falls back to a historical residual, constant width, fitted
 floor, or uniform mixture.
 
+A frozen fixed-weight basket with a physically eligible but absent configured
+provider is incomplete as that fixed-weight proposal. If at least two distinct
+configured provider families have possessed current values in a coherent cohort,
+the existing current precision-fusion proposal may instead serve its own center
+and current ENS/provider width. Its typed provenance retains the original
+configured, possessed, coherent and missing sources; the executable certificate
+identifies the actually weighted and served providers of this distinct proposal.
+The city-local lead, source roles and exact rows must be reproducible at decision
+time. A one-family cohort, ineligible source or missing current shape blocks it.
+The complete fixed-weight proposal continues unchanged.
+
 The center bootstrap uses only current evidence. The ENS/provider center
 displacement is systematic current disagreement and is not divided by member
 count:

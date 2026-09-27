@@ -4675,10 +4675,44 @@ def _replacement_bayes_precision_fusion_override(
                     or _scheme_current_provider_cohort_count < 2
                 )
             )
+            _configured_sources = (
+                () if _scheme is None else tuple(str(source) for source in _scheme.final_sources)
+            )
+            _configured_current_sources = tuple(sorted(
+                set(_configured_sources) & set(_source_values)
+            ))
+            _configured_coherent_sources = tuple(sorted(
+                set(_configured_current_sources) & set(_scheme_coherent_current)
+            ))
+            from src.data.forecast_source_registry import SOURCES, source_allows_role  # noqa: PLC0415
+
+            _scheme_partial_current = bool(
+                _scheme is not None
+                and not _station_live_omitted
+                and not _scheme_current_pair_missing
+                and 0 < len(_configured_current_sources) < len(_configured_sources)
+                and not _registered_source_clock_entry_ineligible(_configured_sources)
+                and all(
+                    not source.startswith(("cwa_", "hko_"))
+                    or (
+                        (spec := SOURCES.get(source)) is not None
+                        and spec.tier != "disabled"
+                        and spec.enabled_by_default
+                        and spec.degradation_level == "OK"
+                        and source_allows_role(spec, "entry_primary")
+                    )
+                    for source in _configured_sources
+                )
+                and all(
+                    source_physically_eligible(source, lat=lat, lon=lon, lead_days=lead_days)
+                    for source in _configured_sources
+                )
+            )
             if (
                 _scheme is not None
                 and not _station_live_omitted
                 and not _scheme_current_pair_missing
+                and not _scheme_partial_current
             ):
                 _entry_ineligible_sources = _registered_source_clock_entry_ineligible(
                     _scheme.final_sources
@@ -4852,7 +4886,7 @@ def _replacement_bayes_precision_fusion_override(
                 # coexist with already-captured, coherent global current facts.
                 # This preserves the two-provider shape gate and never substitutes a
                 # historical width or treats missing between-spread as zero.
-                if _scheme_current_pair_missing:
+                if _scheme_current_pair_missing or _scheme_partial_current:
                     _missing_scheme_sources = [
                         source
                         for source in _scheme.final_sources
@@ -4869,7 +4903,9 @@ def _replacement_bayes_precision_fusion_override(
                         "walkforward_pass": bool(_scheme.walkforward_pass),
                         "sample_n": int(_scheme.sample_n),
                         "fallback_reason": (
-                            "configured_current_provider_pair_unavailable"
+                            "configured_current_provider_set_incomplete"
+                            if _scheme_partial_current
+                            else "configured_current_provider_pair_unavailable"
                             if _scheme_current_provider_count < 2
                             else "configured_current_provider_cohort_unavailable"
                         ),
@@ -4880,6 +4916,10 @@ def _replacement_bayes_precision_fusion_override(
                         "configured_current_provider_cohort_family_count": (
                             _scheme_current_provider_cohort_count
                         ),
+                        **({
+                            "configured_current_sources": list(_configured_current_sources),
+                            "configured_coherent_sources": list(_configured_coherent_sources),
+                        } if _scheme_partial_current else {}),
                     }
                     try:
                         import logging  # noqa: PLC0415
@@ -5172,7 +5212,7 @@ def _replacement_bayes_precision_fusion_override(
             anchor_sigma_c=float(_source_clock_center_sigma_c if _source_clock_center_sigma_c is not None else fused.sd),
             method=(
                 "SOURCE_CLOCK_CURRENT_PRECISION_FUSION"
-                if _scheme_current_pair_missing
+                if _scheme_current_pair_missing or _scheme_partial_current
                 else (
                     "SOURCE_CLOCK_FIXED_WEIGHT"
                     if _source_clock_payload is not None

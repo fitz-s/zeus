@@ -802,6 +802,134 @@ def test_source_clock_scheme_rejects_possessed_d2_at_d2_lead_but_keeps_global(
             assert "ukmo_global_deterministic_10km" in override.used_models
 
 
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("missing_hrrr", (True, False))
+def test_source_clock_partial_current_producer_to_jit(
+    monkeypatch: pytest.MonkeyPatch, metric: str, missing_hrrr: bool,
+) -> None:
+    from src.config import runtime_cities_by_name
+    from src.engine import event_reactor_adapter as adapter
+    from src.strategy.live_inference.source_clock_city_weights import CityOneScheme
+
+    conn = _conn()
+    city = "Los Angeles"
+    run = datetime(2026, 9, 27, 18, tzinfo=UTC)
+    decision = run + timedelta(hours=1)
+    configured = ("gfs_hrrr", "icon_global", "ukmo_global_deterministic_10km")
+    for index, model in enumerate(("ecmwf_ifs", *configured)):
+        if missing_hrrr and model == "gfs_hrrr":
+            continue
+        conn.execute(
+            """INSERT INTO raw_model_forecasts (
+                model, city, target_date, metric, source_cycle_time,
+                source_available_at, captured_at, recorded_at, lead_days,
+                forecast_value_c, endpoint, coverage_status
+            ) VALUES (?, ?, '2026-09-29', ?, ?, ?, ?, ?, 2, ?, 'single_runs', 'COVERED')""",
+            (model, city, metric, run.isoformat(),
+             (run + timedelta(minutes=5)).isoformat(),
+             (run + timedelta(minutes=10)).isoformat(),
+             (run + timedelta(minutes=11)).isoformat(), 20.0 + index),
+        )
+    scheme = CityOneScheme(
+        city=city, scheme_status="ACTIVE", final_sources=configured,
+        weights=dict.fromkeys(configured, 1.0 / len(configured)), sample_n=30,
+        walkforward_pass=True, one_scheme_status="GRID_CAP10_LIVE_READY",
+    )
+    monkeypatch.setattr(
+        "src.strategy.live_inference.source_clock_city_weights.scheme_for_city",
+        lambda *_args, **_kwargs: scheme,
+    )
+    capture = SimpleNamespace(
+        has_extras=True, anchor_z=20.0, anchor_tau0=1.0,
+        likelihood=tuple(SimpleNamespace(
+            model=model, z=22.0 + index, train_residuals=(), n_train=0,
+            residuals_by_date={},
+        ) for index, model in enumerate(configured) if not (missing_hrrr and model == "gfs_hrrr")),
+        disagree_var=0.0, anchor_raw_m2_native=None, anchor_raw_n_train=0,
+        dropped_models=(),
+        selection=SimpleNamespace(excluded_regionals=(), dropped_aliases=()),
+    )
+    monkeypatch.setattr(
+        "src.data.bayes_precision_fusion_capture.capture_bayes_precision_instruments",
+        lambda **_kwargs: capture,
+    )
+    monkeypatch.setattr(
+        "src.forecast.bayes_precision_fusion.fuse_bayes_precision_posterior",
+        lambda **_kwargs: SimpleNamespace(
+            sd=0.5, method="TEST_FUSION",
+            used_models=tuple(x.model for x in capture.likelihood), regional_models=(),
+        ),
+    )
+
+    class _Shape:
+        center_sigma_c = 0.5
+        predictive_sigma_c = 1.2
+        members_c = tuple(20.0 + x * 0.1 for x in range(51))
+
+        @staticmethod
+        def as_payload() -> dict[str, object]:
+            return {"source": "test-current-ens-shape", "provider_count": 3}
+
+    monkeypatch.setattr(materializer_mod, "_read_current_evidence_shape", lambda *_a, **_kw: _Shape())
+    request = replace(
+        _request(), city=city, city_id=city,
+        city_timezone=runtime_cities_by_name()[city].timezone,
+        temperature_metric=metric, target_date=date(2026, 9, 29),
+        source_cycle_time=run, computed_at=decision,
+    )
+    override = materializer_mod._replacement_bayes_precision_fusion_override(
+        request, metric=metric, anchor_value_corrected_c=20.0, conn=conn,
+    )
+    assert override is not None
+    scheme_proof = override.source_clock_one_scheme
+    assert scheme_proof is not None
+    if missing_hrrr:
+        assert override.method == "SOURCE_CLOCK_CURRENT_PRECISION_FUSION"
+        assert scheme_proof["fallback_reason"] == "configured_current_provider_set_incomplete"
+        assert scheme_proof["missing_sources"] == ["gfs_hrrr"]
+        assert set(scheme_proof["configured_current_sources"]) == set(configured) - {"gfs_hrrr"}
+    else:
+        assert override.method == "SOURCE_CLOCK_FIXED_WEIGHT"
+        assert "fallback_reason" not in scheme_proof
+
+    provenance = {"bayes_precision_fusion": {
+        "used_models": list(override.used_models),
+        "current_value_serving": override.current_value_serving,
+        "source_clock_one_scheme": scheme_proof,
+        "decorrelated_providers_expected": override.decorrelated_providers_expected,
+        "decorrelated_providers_served": override.decorrelated_providers_served,
+        "decorrelated_providers_complete": override.decorrelated_providers_complete,
+    }}
+    family = SimpleNamespace(city=city, target_date="2026-09-29", metric=metric)
+    present, certificate = adapter._source_clock_model_count_certificate(
+        provenance, family=family, decision_time=decision,
+    )
+    assert present and certificate is not None, provenance
+    assert certificate["posterior_configured_sources"] == tuple(sorted(override.used_models))
+    assert certificate["posterior_missing_sources"] == ()
+    assert adapter._posterior_bound_spine_inputs(
+        conn, family=family, decision_time=decision,
+        source_cycle_time=run.isoformat(), provenance=provenance,
+    ) is not None
+    if missing_hrrr:
+        for field, value in (
+            ("missing_sources", []),
+            ("configured_coherent_sources", ["gfs_hrrr"]),
+            ("configured_current_sources", "icon_global"),
+            ("configured_current_sources", ["icon_global", "icon_global"]),
+        ):
+            tampered = json.loads(json.dumps(provenance))
+            tampered["bayes_precision_fusion"]["source_clock_one_scheme"][field] = value
+            assert adapter._source_clock_model_count_certificate(
+                tampered, family=family, decision_time=decision,
+            ) == (True, None)
+        tampered = json.loads(json.dumps(provenance))
+        tampered["bayes_precision_fusion"]["current_value_serving"].pop("icon_global")
+        assert adapter._source_clock_model_count_certificate(
+            tampered, family=family, decision_time=decision,
+        ) == (True, None)
+
+
 def test_posterior_identity_binds_day0_carrier_operator_and_content(monkeypatch: pytest.MonkeyPatch) -> None:
     """Equal q values must not alias carrier certificates across migrations."""
 
