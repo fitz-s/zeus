@@ -8,6 +8,64 @@ Status: active
 
 ### Concurrent conditional-HIGH integration acceptance
 
+- Post-load held-only reseed defect verified at 16:00–16:04 UTC: Hong Kong
+  LOW's exact 26T12 v3 source completed at 16:00:39, with native 51 members,
+  all 48 steps and complete/live target coverage. The committed-source wake
+  then discarded it solely because the local target day ended at 16:00,
+  before inspecting current held exposure. LOW therefore remained on rejected
+  v4 posterior 687826. HIGH source completed earlier and produced v5 posterior
+  688035; its held monitor actually consumed fresh q at 16:00:42, disproving
+  the code comment that post-midnight held probabilities are never consumed.
+  Neither observation proves a profitable exit: current bids are zero/.001.
+- Authorized bounded repair plan: preserve the ordinary entry/current-target
+  horizon and all acquisition/calendar/expiry gates. Permit exact committed
+  current-source scopes to re-materialize after local midnight only for
+  canonically confirmed nonterminal held exposure, using already collected,
+  causally possessed, still-valid current-revision ENS and provider evidence.
+  Carry the same held-only eligibility through the existing single-family,
+  seed and materializer path; do not invent a second probability law, turn
+  provisional observations into settlement or reactivate new-money entry.
+  Source finality/settlement, source expiry, absence of held exposure and
+  malformed/unknown proof must retain their existing fail-closed behavior.
+  Inspect the monitor retry twin so a lost source wake cannot strand the
+  otherwise eligible held family. Prefer existing held/source predicates;
+  do not remove the ended-day gate globally or accept a caller boolean as
+  canonical exposure proof.
+- SCOPE: one current held city/date/metric and its exact committed source-run
+  identity. DRAIN: existing source wake and bounded held retry/seed processing.
+  RESET: a valid current posterior, exposure closure, final authority, or
+  independent evidence expiry. Require a real post-midnight HIGH/LOW
+  producer-to-seed/materializer relationship antibody, entry/no-holding,
+  settled, stale/future/expired or wrong-source negatives, and preserved
+  official observation and probability-witness semantics. Independent critic
+  review and affected tests precede landing; runtime proof must show LOW v5
+  and a new actually fresh held receipt, not just an enqueued seed.
+- DRAIN refinement: clearing the process-local wake ACK set is insufficient.
+  Normal polling selects latest 27T06, not the already-successful held 26T12;
+  ended-day migration correctly refuses a new acquisition. Reuse the existing
+  wake lane to select a bounded exact already-committed current source from
+  canonical held coverage and replay that wake without calling a collector.
+  Retain causality, completeness, current shape, expiry and actual exposure
+  checks, and stop repeat work once the current posterior consumes that proof.
+  An independent initial claim that the generic current-journal replay test
+  proved this older-cycle drainage was refuted by the real selected identity.
+  Add the actual latest-versus-older-held relationship test, not merely an
+  ACK-clear unit test. Official CLOB reads at 16:06:30/31 UTC confirmed both
+  Hong Kong contracts active, not closed, and accepting orders; local midnight
+  cannot substitute for a venue closure fact.
+- Implementation boundary: first use only the existing forecast daemon replay
+  lane and the exact committed-source explicit-scope enqueue path. Do not
+  broaden the generic single-family or monitor API merely for convenience;
+  periodic canonical-held replay provides their lost-wake drainage twin.
+  Expand a downstream seed seam only if a real relationship test proves it
+  still blocks this fully proven held-only path. A failed materialization must
+  remain retryable under normal polling/idempotency rather than needing another
+  process restart to clear an ACK forever. Before this slice, the ten required
+  data suites on unmodified `da535a0b3` produced 240 passes and four failures
+  (diagnostic-source role, invalid-date error text, and two old HK hourly
+  fixtures missing local-hour identity). These are an explicit baseline, not
+  a claim that the repository is green.
+
 - Final second-round source checks: 85 schedule/boot tests pass, including
   canonical full/short tracks, unknown/invalid clock retry, same-date and
   cross-date UTC expiry ordering. Parent integration with cycle policy and
