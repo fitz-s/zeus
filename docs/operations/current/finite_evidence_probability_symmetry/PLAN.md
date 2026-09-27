@@ -24,6 +24,44 @@ Status: active
   rebuild and held monitor reread; RESET is a successfully reproduced current
   probability certificate. No arbitrary sigma, fallback probability or gate
   bypass is authorized by this repair plan.
+- Independent post-load diagnosis separates two paths: current held readers
+  still reject v4/old-grid posteriors; the existing held-only Day0 exception
+  rebuilds from current observations and complete hourly vectors, not cached
+  v4 q. Its new mechanism version is not evidence that v5 base materialization
+  succeeded. The actual defects are (1) dynamic pure-hourly HIGH writes the
+  conditional shape identity and witness but omits its required variance-basis
+  field; (2) no posterior binding silently drops the enabled HKO FND final-daily
+  component and changes the provider set. Repair the producer field, retaining
+  strict replay validation. For the exact enabled final-extreme HKO adapter's
+  city/metric, missing binding is typed family-unavailable until the existing
+  v5 writer supplies an exact station raw-row binding; never splice the latest
+  unbound station issue or treat hourly CWA station products as final-extreme
+  products. Test both HIGH and LOW and the binding-restored/disabled/non-final
+  twins. The direct-held exception for other lawful scopes is unchanged.
+- Cold-migration acceptance also requires fairness when the newest source cycle
+  is not globally successful. The current scheduler admits the held revision
+  migration before a fetchable latest cycle only after latest SUCCESS with
+  positive rows; repeatedly PARTIAL/FAILED latest attempts can therefore starve
+  a still-fetchable held cycle until its target day ends. This is a deterministic
+  scheduling counterexample, not a claim that the running newest collector has
+  failed. Use existing exact job identities/last-attempt evidence to give the
+  newly released cycle its first attempt and then fair service to a due held
+  migration, retaining one collector per poll/track, existing cooldowns and
+  source-calendar validity. Test persistent latest PARTIAL, failed migration,
+  normal success, absent/expired held candidates and HIGH/LOW twins. SCOPE is
+  the track's eligible exact cycle identities; DRAIN is alternating bounded
+  attempts; RESET is current revision coverage or target/calendar ineligibility.
+- Concurrent scheduler integration exposed a behavioral defect, not just a
+  fixture mismatch: a reserved completion cut treats an absent urgent-wake
+  revision as cancellation even when the marker has never existed and the
+  strict queue is empty. That prevents normal empty-queue completion from
+  reaching setup or monitor-debt reservation. Repair only that boundary:
+  initial absent plus currently absent plus a successfully read empty queue
+  permits continuation; a disappeared existing marker, unreadable queue or
+  newly arrived physical wake must still cancel. Preserve forecast-only
+  coalescing and independent capital-recovery cancellation. Tests must exercise
+  the real no-marker reader and the disappearance/unreadable/nonempty twins,
+  not manufacture a marker merely to satisfy the new branch.
 
 - Final recovery implementation at child `a59fdaa25` passed all 1,070
   command-recovery and exchange-reconcile tests (133.99 seconds); parent
