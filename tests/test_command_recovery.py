@@ -43030,7 +43030,7 @@ def test_scheduled_deterministic_no_fill_drains_before_venue_reads(
     class StopAtVenueRead(Exception):
         pass
 
-    def stop_at_venue_read(*args, **kwargs):
+    def assert_drained():
         with sqlite3.connect(path) as check:
             assert check.execute(
                 "SELECT state FROM venue_commands WHERE command_id = ?",
@@ -43042,6 +43042,9 @@ def test_scheduled_deterministic_no_fill_drains_before_venue_reads(
             ).fetchone()
             assert phase != "pending_exit"
             assert (shares, cost) == (14.0, 7.0)
+
+    def stop_at_venue_read(*args, **kwargs):
+        assert_drained()
         raise StopAtVenueRead
 
     monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", connection_factory)
@@ -43051,8 +43054,17 @@ def test_scheduled_deterministic_no_fill_drains_before_venue_reads(
         lambda *args, **kwargs: {"cancelled": 0, "deferred": 0, "errors": 0},
     )
     client = MagicMock()
-    with pytest.raises(StopAtVenueRead):
-        command_recovery.reconcile_unresolved_commands(client=client, scope=scope)
+    try:
+        summary = command_recovery.reconcile_unresolved_commands(client=client, scope=scope)
+    except StopAtVenueRead:
+        pass
+    else:
+        # A bounded live tick may defer venue I/O after committing the local
+        # drain. Requiring that optional read made this ordering test load-
+        # dependent; the durable release must still be proved in either path.
+        assert scope == "live_tick"
+        assert summary["venue_snapshot_deferred"] is True
+    assert_drained()
     assert client.mock_calls == []
 
 
