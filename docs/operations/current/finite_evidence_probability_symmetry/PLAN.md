@@ -8,6 +8,18 @@ Status: active
 
 ### Concurrent conditional-HIGH integration acceptance
 
+- Newly isolated current-HK exit path must be resolved before final rollout:
+  absence of ordinary positive-EV statistical SELL is not absence of a panic
+  trigger. Two independent indexed event audits find persistent
+  FLASH_CRASH_PANIC/count=2 with fresh probability and still-lawful bid:
+  HIGH c157 seq1154 at 05:25:52Z bid .22/q .470 and later 06:00–06:10
+  bid .07→.05; LOW 993 seq650–687 on Sep26 22:07–22:30Z bid .10→.14/q .58.
+  Their recorded outcome is GLOBAL_FULL_FAMILY_PREPARATION_PENDING, then the
+  LOW bid falls to .04 at 22:31 and HIGH below-band at 06:12. Independently
+  verify current panic authority and actual auction/actuation drainage; do
+  not infer a lawful profitable fill or change risk law from these events.
+  Ordinary bid-versus-q analysis alone cannot close this execution finding.
+
 - `c6269a42a` official deployment completed after natural order drainage:
   Milan Sep28's outstanding remainder was canceled by normal C3 management
   at 18:06:13Z, preserving its 1.55 confirmed shares. The 18:07:43 restart
@@ -30,17 +42,18 @@ Status: active
   confuse that expiry with the four WU carrier mismatches, reuse cached q,
   or extend source authority. Investigate whether lawful held-source refresh
   is missing. The other five older HK positions still lack official finality.
-- Independent consumer tracing identifies a deterministic replay-clock bug:
-  materialization seals `request.computed_at` into the carrier identity and
-  persists its cutoff. Strict held replay parses and causally bounds that
-  cutoff, but rebuilds the identity using the later monitor decision time.
-  Every later normal tick can therefore disagree with unchanged valid input.
-  Authorized bounded repair: reproduce the immutable identity with its stored
-  validated cutoff; retain current decision-time causal/freshness checks and
-  all identity/q/sample/operator comparisons. Test later-tick HIGH/LOW replay,
-  future cutoff and altered evidence rejection, and exercise the full normal
-  held consumer beyond preparation for all four actual WU families before
-  deployment. Investigate subsequent gates rather than stopping at READY.
+- A proposed replay-clock root cause was **REFUTED by a new relationship
+  test before integration**. Although producer and consumer pass different
+  decision clocks into identity_inputs, the final builder explicitly removes
+  both decision_time_utc and probability_cutoff_utc from its economic hash.
+  Changing the cutoff by one causal second therefore correctly leaves the
+  identity unchanged. The one-line speculative clock change is withdrawn;
+  no rollout may cite it as a repair. Continue actual producer-versus-consumer
+  economic-input comparison (likelihood, current state, conditional shape,
+  bias, vectors and topology), preserve future-cutoff/freshness guards, and
+  require the full normal held consumer for all four WU families, not READY
+  at an intermediate preparation boundary. This failed hypothesis is retained
+  explicitly so neither the earlier plan nor commentary remains current proof.
 - The 18:18Z HK27 expiry investigation finds no currently lawful replacement:
   exact HIGH/LOW v3 coverage remains COMPLETE/LIVE_ELIGIBLE but expires at
   18:00Z. Later HIGH 26T18/27T00/27T06 cycles are noncontributing; later LOW
@@ -52,6 +65,11 @@ Status: active
   posterior, HKO FND must not silently disappear from the probability model.
   This does not demonstrate a missed valid replay wake. Do not extend source
   expiry or relabel a blocked successor to satisfy a fresh-state dashboard.
+- At 18:19Z the official HKO monthly dailyExtract still ends at September 24;
+  September 27 final truth has not been published there. Exact Gamma markets
+  4942733/4942156 for HK27 HIGH/LOW remain active, open and accepting orders,
+  with null UMA resolution. A passed endDate is not closure. This separates
+  unavailable external finality from a missed published settlement ingestion.
 
 - `c6269a42a` landed and live checkout fast-forwarded; official 17:46:14
   restart again refused before stop because three genuine ENTRY commands were
