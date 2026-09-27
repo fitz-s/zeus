@@ -8,6 +8,87 @@ Status: active
 
 ### Concurrent conditional-HIGH integration acceptance
 
+- `c6269a42a` official deployment completed after natural order drainage:
+  Milan Sep28's outstanding remainder was canceled by normal C3 management
+  at 18:06:13Z, preserving its 1.55 confirmed shares. The 18:07:43 restart
+  passed its guards without a manual pause/cancel/bypass; main PID 23430
+  loaded c626 at 18:09:25, source PID 22681 also loaded c626, canonical DB
+  handles and fresh heartbeats were checked, entries_paused remained false.
+  **Runtime acceptance FAILED**, despite the successful restart: Cape
+  559→560, Helsinki 609→610, Lucknow 1822→1823 and Milan 534→535, across
+  18:09–18:11 normal monitor cycles, all reject fresh probability with
+  `DAY0_NOAA_PRELIMINARY_CARRIER_IDENTITY_MISMATCH`. The prior empty-survival
+  defect is passed, but another downstream carrier consumer is incompatible.
+  Do not report a READY intermediate bundle or loaded SHA as full repair.
+  Continue a bounded complete-consumer investigation before another rollout;
+  preserve source identity, probability law and fail-closed invariants.
+- At 18:11, 15 open positions were monitored: four fresh, eleven degraded.
+  Fresh are HK Sep28 HIGH, Karachi Sep28 LOW, Milan Sep28 HIGH and Seoul
+  Sep28. The earlier Seoul conflict does not recur in this cut; this is not
+  proof of permanent source agreement. HK Sep27 HIGH/LOW certificates both
+  expire at 18:00Z and now reject with remaining-members unavailable; do not
+  confuse that expiry with the four WU carrier mismatches, reuse cached q,
+  or extend source authority. Investigate whether lawful held-source refresh
+  is missing. The other five older HK positions still lack official finality.
+- Independent consumer tracing identifies a deterministic replay-clock bug:
+  materialization seals `request.computed_at` into the carrier identity and
+  persists its cutoff. Strict held replay parses and causally bounds that
+  cutoff, but rebuilds the identity using the later monitor decision time.
+  Every later normal tick can therefore disagree with unchanged valid input.
+  Authorized bounded repair: reproduce the immutable identity with its stored
+  validated cutoff; retain current decision-time causal/freshness checks and
+  all identity/q/sample/operator comparisons. Test later-tick HIGH/LOW replay,
+  future cutoff and altered evidence rejection, and exercise the full normal
+  held consumer beyond preparation for all four actual WU families before
+  deployment. Investigate subsequent gates rather than stopping at READY.
+- The 18:18Z HK27 expiry investigation finds no currently lawful replacement:
+  exact HIGH/LOW v3 coverage remains COMPLETE/LIVE_ELIGIBLE but expires at
+  18:00Z. Later HIGH 26T18/27T00/27T06 cycles are noncontributing; later LOW
+  cycles are noncontributing or boundary-ambiguous, not eligible substitutes.
+  The normal postend replay selector correctly requires unexpired exact held
+  coverage on every poll. No HK27 official observations/settlements/outcomes
+  exist in canonical stores at this cut. The deeper normal-consumer rejection
+  is `DAY0_STATION_EXTREME_POSTERIOR_BINDING_REQUIRED`: without a lawful
+  posterior, HKO FND must not silently disappear from the probability model.
+  This does not demonstrate a missed valid replay wake. Do not extend source
+  expiry or relabel a blocked successor to satisfy a fresh-state dashboard.
+
+- `c6269a42a` landed and live checkout fast-forwarded; official 17:46:14
+  restart again refused before stop because three genuine ENTRY commands were
+  still live. Its temporary guard released normally. No persistent pause or
+  order cancellation was authorized or performed; user input was requested for
+  an entry-only deployment window while normal monitoring/order management
+  continues. Loaded runtime remains 8bf until a successful guarded restart.
+- Audit of the two new HK Sep28 entries traces exact actionable certificates
+  to HIGH posterior 688847 and LOW 688704, both v5 with 06Z land-grid-v3 ENS,
+  verified .5078125 land-mask cell 22.25/114.0, and current provider geometry
+  proof. These are not old-v4 admissions. The model assigns NO33 .84155 and
+  NO28 .76664, positive posterior-mean EV/log-growth; negative confidence-tail
+  edge does not veto them under the current mean-action law. HKO FND predicts
+  33/28, opposite those NO outcomes: this is real model disagreement, not proof
+  of future profit. HIGH command 12cc309da55640e3 filled 6.163334 at about .52
+  by 17:50:59; LOW d06f3e76191d408f was canceled after BOOK_MOVED redecision,
+  venue acknowledgment 17:49:04, no fills. These are current facts, not a
+  claim that either strategy forecast is correct or that past losses reversed.
+- Bounded mathematical audit of HK27 NO probabilities rejects the hypothesis
+  that HKO revision likelihood alone leaves 15%/27% mass: both posterior
+  survival witnesses are .99955595 (1,125 transitions, no retractions). HIGH
+  688035 was generated 64 seconds before local day end, observed max 32.7;
+  the FND 33C final-center component, truncated above that bound, contributes
+  approximately .15 under the existing V3 equal-component operator. LOW
+  688397 was generated after midnight, observed min 27.1; the FND 27C component
+  contributes approximately .234 and remaining-vector tails .033. Oracle
+  truncation uses [32,33) / [27,28), not round-to-nearest. These probabilities
+  reproduce from persisted inputs; they are not evidence of realized edge.
+  The existing R10 contract retains an unobserved terminal segment after local
+  midnight. The last current-state anchor is 15:02Z, last provisional extreme
+  is 15:50Z and official finality is absent; 143 temporary observations do not
+  prove complete terminal coverage. This exposes residual temporal-model risk,
+  not sufficient proof to erase FND mass, change sigma/weights or declare the
+  provisional observation final. No hindsight-fitted probability change was
+  made. Final source coverage and new decision outcomes remain distinct from
+  the software defects fixed above.
+
 - Fixed sentinel repair `d0f76f3e0` (parent `ad6ae16e2`) passes independent
   review. Exact WU composite source is required in addition to the shared
   validator, since that validator also accepts pure AWC. The latter remains
