@@ -62,6 +62,21 @@ Status: active
   not proof of a wrong decision or authority to invent a new variance. Do not
   claim this task repaired LOW mathematics or proved a profitable early exit;
   the shared source geometry/proof and execution repairs do cover LOW.
+- HIGH has the same attribution boundary: Hong Kong posterior 684198 uses
+  mixed V3 with HKO FND final-daily 33.0 (raw 2268115), hourly centers
+  [30.72898,31.69706,31.73395], path error 2.98564 and source sigma 3.09427.
+  Therefore the separately landed pure-hourly HIGH conditional-variance repair
+  does not apply to this held case either. Its snapshot 1376639 and LOW's
+  snapshot 1376714 are old v2 at (22.25,114.25), without grid-surface proof;
+  the shared land-grid/precision-authority repair is the applicable change.
+  Do not attribute an avoided Hong Kong loss to the unrelated pure-hourly path.
+- Current September 27 HIGH/LOW Gamma event IDs 1078298/1078162 and canonical
+  market_events agree on HKO Daily Extract Absolute Daily Max/Min, not VHHH
+  airport. The official station table distinguishes HKO headquarters 32 m from
+  HKA airport 6 m. The internal HKO_HQ/oracle_truncate mapping is code plus
+  resolver evidence, not a verbatim assertion that the contract spells floor().
+  Current contract links are the September 27 highest/lowest-temperature-in-
+  hong-kong events on Polymarket; source is weather.gov.hk/en/cis/climat.htm.
 
 - Fixed parent `5f00dcf93` on `316d10e7e` completed 2,275 tests with three
   pre-existing legacy-schema migration failures described below; no all-green
