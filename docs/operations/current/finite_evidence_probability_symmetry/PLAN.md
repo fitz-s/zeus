@@ -65,6 +65,37 @@ Status: active
   (diagnostic-source role, invalid-date error text, and two old HK hourly
   fixtures missing local-hour identity). These are an explicit baseline, not
   a claim that the repository is green.
+- Fixed post-midnight repair is `4f686395d` (parent `62547f4d8`). On the
+  integrated `b255d1f90` base, all 170 scheduling/boot/cycle-monotone tests and
+  19 HKO/partial-provider compatibility cases pass. Required data suites retain
+  exactly the baseline four failing nodes with 240 passes; JUnit set comparison
+  finds no added or removed failure. Fairness antibodies include failed A then
+  eligible B, an invalid prefix exhausting the shared selection budget, and
+  global PARTIAL with exact COMPLETE/LIVE target proof. The selection deadline
+  is not forwarded into a full ENS collector.
+- Real canonical read-only probes at 16:25–16:27 select LOW's exact 26T12 v3
+  source and reject HIGH as already consumed by a certified v5 posterior.
+  LOW exposure is chain-synced, day0_window, three shares. World observation
+  9865773 supplies target-day HKO LOW 27.1 at 15:50Z, captured 15:58:55Z, with
+  143 samples; it is neither the next day's observation nor official finality.
+  Independent pure-reader checks at decision time 16:26Z find three complete
+  hourly models captured 15:54:16Z, a nonempty remaining-vector witness with
+  zero remaining hours, exact 26T12 baseline coverage, and 11 market bins.
+  HKO provisional survival remains probabilistic rather than settlement truth.
+  These checks prove downstream input availability, not a persisted LOW v5;
+  actual materialization and subsequent held receipts remain rollout acceptance.
+- LOW snapshot 1380837 preserves 51 native member slots. Seventeen have
+  ambiguous local-boundary attribution and are null/quarantined under the
+  existing minority-boundary rule; exact target coverage is 34/34 finite
+  members with all nine required target steps. Do not describe it as 51 finite
+  target members or rewrite those nulls. HIGH snapshot 1380459 has 51/51
+  target members. Both exact 26T12 source runs completed all 48 native steps.
+- The September 22 writer-holder attribution remains an evidence gap. Current
+  JIT write contention is bounded, classified TRANSIENT through the batch
+  wrapper, and requeued for a new probability/book/wealth cut without an
+  attempt cap. Inspection found no permanent no-retry defect there; neither
+  this result nor reduced recovery contention identifies the historical holder
+  or proves that missed fill would have succeeded.
 
 - Final second-round source checks: 85 schedule/boot tests pass, including
   canonical full/short tracks, unknown/invalid clock retry, same-date and
