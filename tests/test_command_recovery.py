@@ -1330,8 +1330,17 @@ def test_boot_fast_budget_interrupts_slow_db_pass_before_scheduler(
         calls.append("edli_entry_posterior_projection_repair")
         return {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
 
+    real_monotonic = command_recovery.time.monotonic
+    slow_started = [None]
+
+    def _budget_clock():
+        # Isolate the SQL interruption from machine-dependent schema/setup
+        # overhead. The slow query itself still consumes a real 1 ms budget.
+        return 1000.0 if slow_started[0] is None else 1000.0 + real_monotonic() - slow_started[0]
+
     def _slow_db_pass(conn):
         calls.append("completed_partial_order_facts")
+        slow_started[0] = real_monotonic()
         conn.execute(
             """
             WITH RECURSIVE cnt(x) AS (
@@ -1345,6 +1354,7 @@ def test_boot_fast_budget_interrupts_slow_db_pass_before_scheduler(
         return {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
 
     monkeypatch.setenv("ZEUS_BOOT_FAST_RECOVERY_BUDGET_SECONDS", "0.001")
+    monkeypatch.setattr(command_recovery.time, "monotonic", _budget_clock)
     monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
     monkeypatch.setattr(venue_sync_contract, "capture_venue_read_snapshot", _fail_capture)
     monkeypatch.setattr(
@@ -5205,7 +5215,98 @@ def _append_position_event_payload_copy(
     )
 
 
-def test_terminal_no_fill_global_maker_rest_creates_one_v4_reauction_debt(conn):
+def _record_reauction_monitor_after_release(conn, position, tmp_path):
+    """Canonical protocol fixture; q/book identifiers are supplied, not computed."""
+    from dataclasses import asdict
+    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+    from src.events.reactor import request_global_auction_completion
+    from src.execution.exit_lifecycle import latest_held_sell_reauction_obligation
+    from src.state.db import append_many_and_project
+
+    old = latest_held_sell_reauction_obligation(conn, position)
+    now = datetime.now(timezone.utc)
+    q_identity = f"current-q:{position.trade_id}"
+    published, request = request_global_auction_completion(
+        reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
+        position_id=position.trade_id, family=tuple(old["family"]),
+        probability_content_identity=q_identity,
+        held_token_id=old["held_token_id"], held_best_bid=0.06,
+        bid_observed_at=now.isoformat(), book_state="EXECUTABLE",
+        probability_observed_at=now.isoformat(),
+        completion_deadline_at=(now + timedelta(minutes=2)).isoformat(),
+        selection_epoch_identity=f"current-epoch:{position.trade_id}",
+        sell_book_witness_identity=f"current-book:{position.trade_id}",
+        generation=old["generation"], return_request=True, prepare_only=True,
+        wake_path=tmp_path / "no-wake.json",
+    )
+    assert not published
+    assert request is not None
+    assert request.lineage_status == "PENDING_CANONICAL_LINEAGE"
+    assert not (tmp_path / "no-wake.json").exists()
+    position.last_monitor_at = now.isoformat()
+    position.last_monitor_prob = 0.25
+    position.last_monitor_prob_is_fresh = True
+    position.last_monitor_market_price = 0.06
+    position.last_monitor_market_price_is_fresh = True
+    position.last_monitor_best_bid = 0.06
+    position._monitor_probability_receipt = {"probability_content_identity": q_identity}
+    position.applied_validations = [
+        "GLOBAL_REAUCTION_PENDING",
+        f"global_auction_completion_request_id:{request.request_id}",
+    ]
+    position._held_sell_reauction_obligation = {
+        **asdict(request), "state": "ARMED", "armed_at": now.isoformat(),
+    }
+    if isinstance(old.get("residual_proof"), dict):
+        position._held_sell_reauction_obligation["residual_proof"] = old["residual_proof"]
+    projection = dict(conn.execute(
+        "SELECT * FROM position_current WHERE position_id = ?", (position.trade_id,),
+    ).fetchone())
+    sequence_no = conn.execute(
+        "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events WHERE position_id = ?",
+        (position.trade_id,),
+    ).fetchone()[0]
+    events, _ = build_monitor_refreshed_canonical_write(
+        position, sequence_no=sequence_no, phase_after=projection["phase"],
+        occurred_at=now.isoformat(),
+    )
+    payload = json.loads(events[0]["payload_json"])
+    payload["held_sell_reauction_monitor_lineage"] = {
+        "monitor_event_id": events[0]["event_id"],
+        "selection_epoch_identity": request.selection_epoch_identity,
+        "sell_book_witness_identity": request.sell_book_witness_identity,
+    }
+    events[0]["payload_json"] = json.dumps(payload, sort_keys=True)
+    projection["updated_at"] = now.isoformat()
+    append_many_and_project(conn, events, projection)
+    conn.commit()
+    bound = latest_held_sell_reauction_obligation(conn, position)
+    assert bound["debt_event_id"] == events[0]["event_id"] == bound["monitor_event_id"]
+    from src.execution import exit_lifecycle
+    from src.execution.exit_safety import global_sell_reauction_publish_claim_lineage
+    assert not conn.in_transaction
+    assert exit_lifecycle.needs_global_sell_snapshot_reauction(position, conn)
+    assert exit_lifecycle._canonical_global_sell_command_ownership(
+        conn, position, require_pending_exit=False,
+    ) == "GLOBAL_NO_COMMAND"
+    assert global_sell_reauction_publish_claim_lineage(
+        {"global_sell_reauction_status": "publish_claimed",
+         "release_reason": "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
+         "held_sell_reauction_obligation": bound},
+        position_id=position.trade_id, held_token_id=old["held_token_id"],
+    ) == "complete"
+    if isinstance(old.get("residual_proof"), dict):
+        assert bound["residual_proof"] == old["residual_proof"]
+
+
+@pytest.mark.parametrize("later_change", (
+    "none", "publish_retry", "second_generation", "generation", "family", "token",
+    "command_state", "order_identity", "cancel_pending_command",
+    "new_exit_command", "positive_fill",
+))
+def test_terminal_no_fill_global_maker_rest_creates_one_v4_reauction_debt(
+    conn, tmp_path, later_change,
+):
     from src.execution import command_recovery, exit_lifecycle
     from src.state.portfolio import _position_from_projection_row
 
@@ -5380,6 +5481,87 @@ def test_terminal_no_fill_global_maker_rest_creates_one_v4_reauction_debt(conn):
     )
     conn.commit()
     requests = []
+    assert not exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+        position, conn=conn,
+        requester=lambda released, force_new: requests.append((released.trade_id, force_new)) or True,
+    )
+    assert requests == []
+    _record_reauction_monitor_after_release(conn, position, tmp_path)
+    if later_change in {"generation", "family"}:
+        monitor = conn.execute(
+            "SELECT idempotency_key, payload_json FROM position_events "
+            "WHERE position_id = ? AND event_type = 'MONITOR_REFRESHED' "
+            "ORDER BY sequence_no DESC LIMIT 1", (position.trade_id,),
+        ).fetchone()
+        wrong = json.loads(monitor["payload_json"])
+        wrong_obligation = wrong["held_sell_reauction_obligation"]
+        if later_change == "generation":
+            wrong_obligation["generation"] = "another-release-generation"
+        elif later_change == "family":
+            wrong_obligation["family"] = ["Karachi", "2026-05-17", "low"]
+        _append_position_event_payload_copy(
+            conn, source_idempotency_key=monitor["idempotency_key"],
+            suffix=later_change, payload=wrong,
+        )
+    elif later_change == "token":
+        release = conn.execute(
+            "SELECT idempotency_key, payload_json FROM position_events "
+            "WHERE position_id = ? AND event_type = 'EXIT_RETRY_RELEASED' "
+            "AND source_module = 'src.execution.command_recovery' "
+            "ORDER BY sequence_no DESC LIMIT 1", (position.trade_id,),
+        ).fetchone()
+        wrong = json.loads(release["payload_json"])
+        wrong["held_sell_reauction_obligation"]["held_token_id"] = "another-token"
+        _append_position_event_payload_copy(
+            conn, source_idempotency_key=release["idempotency_key"],
+            suffix="wrong-release-token", payload=wrong,
+        )
+    elif later_change == "command_state":
+        conn.execute(
+            "UPDATE venue_commands SET state = 'UNKNOWN' WHERE command_id = ?",
+            ("cmd-exit-global-maker",),
+        )
+    elif later_change == "order_identity":
+        conn.execute(
+            "UPDATE venue_commands SET venue_order_id = ? WHERE command_id = ?",
+            ("another-venue-order", "cmd-exit-global-maker"),
+        )
+    elif later_change == "cancel_pending_command":
+        from src.state.venue_command_repo import append_event
+        append_event(
+            conn, command_id="cmd-exit-global-maker", event_type="CANCEL_REQUESTED",
+            occurred_at=datetime.now(timezone.utc).isoformat(),
+            payload={"venue_order_id": "ord-exit-global-maker"},
+        )
+    elif later_change == "new_exit_command":
+        _insert(
+            conn, command_id="cmd-new-exit-global-maker", position_id=position.trade_id,
+            intent_kind="EXIT", side="SELL", token_id="tok-global-maker", size=17.0,
+            price=0.06,
+        )
+    elif later_change == "positive_fill":
+        _append_trade_fact(
+            conn, command_id="cmd-exit-global-maker", order_id="ord-exit-global-maker",
+            trade_id="late-maker-fill", state="CONFIRMED", filled_size="1", fill_price="0.06",
+        )
+    conn.commit()
+    if later_change not in {"none", "publish_retry", "second_generation"}:
+        assert not exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+            position, conn=conn,
+            requester=lambda released, force_new: requests.append((released.trade_id, force_new)) or True,
+        )
+        assert requests == []
+        return
+    if later_change == "publish_retry":
+        failed_publications = []
+        assert not exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+            position, conn=conn,
+            requester=lambda released, force_new: failed_publications.append(released.trade_id) or False,
+        )
+        assert failed_publications == [position.trade_id]
+        assert exit_lifecycle._canonical_global_sell_command_ownership(
+            conn, position, require_pending_exit=False,
+        ) == "GLOBAL_NO_COMMAND"
     assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
         position,
         conn=conn,
@@ -5388,7 +5570,55 @@ def test_terminal_no_fill_global_maker_rest_creates_one_v4_reauction_debt(conn):
         ),
     )
     assert requests == [("pos-global-maker", True)]
+    if later_change == "second_generation":
+        prior_generation = exit_lifecycle.latest_held_sell_reauction_obligation(
+            conn, position,
+        )["generation"]
+        second_command = "cmd-exit-global-maker-second"
+        second_order = "ord-exit-global-maker-second"
+        _insert(
+            conn, command_id=second_command, position_id=position.trade_id,
+            intent_kind="EXIT", token_id="tok-global-maker", side="SELL",
+            order_type="GTC", size=17.0, price=0.06,
+        )
+        _advance_to_acked(conn, command_id=second_command, venue_order_id=second_order)
+        _seed_full_exit_intent(
+            conn, position_id=position.trade_id, shares=17.0,
+            reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+            capital_certificate={"execution_mode": "MAKER_REST"},
+            order_id=second_order, command_id=second_command,
+        )
+        conn.execute(
+            "UPDATE position_current SET phase='pending_exit', order_id=?, "
+            "order_status='sell_pending_confirmation' WHERE position_id=?",
+            (second_order, position.trade_id),
+        )
+        second = dict(conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id=?", (second_command,),
+        ).fetchone())
+        second.update(
+            position_city=position.city, position_target_date=position.target_date,
+            position_strategy_key=position.strategy_key,
+        )
+        assert command_recovery._release_exit_after_terminal_no_fill(
+            conn, command=second, observed_at=datetime.now(timezone.utc).isoformat(),
+            order_fact_id=42, terminal_payload=terminal_payload,
+        )
+        conn.commit()
+        current = exit_lifecycle.latest_held_sell_reauction_obligation(conn, position)
+        assert current["generation"] != prior_generation
+        _record_reauction_monitor_after_release(conn, position, tmp_path)
+        assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+            position, conn=conn,
+            requester=lambda released, force_new: requests.append((released.trade_id, force_new)) or True,
+        )
+        assert requests == [("pos-global-maker", True)] * 2
     assert not exit_lifecycle.needs_global_sell_snapshot_reauction(position, conn)
+    assert not exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+        position, conn=conn,
+        requester=lambda released, force_new: requests.append((released.trade_id, force_new)) or True,
+    )
+    assert requests == [("pos-global-maker", True)] * (2 if later_change == "second_generation" else 1)
 
 
 @pytest.mark.parametrize("filled_size", ["10", "11"])
@@ -10270,10 +10500,11 @@ class TestRecoveryResolutionTable:
 
         candidate = {"command_id": "cmd-edli-projection"}
         calls = []
+        scopes = []
         monkeypatch.setattr(
             command_recovery,
             "_latest_unprojected_filled_entry_candidates",
-            lambda _conn: [candidate],
+            lambda _conn, *, command_id: scopes.append(command_id) or [candidate],
         )
         monkeypatch.setattr(
             command_recovery,
@@ -10294,6 +10525,7 @@ class TestRecoveryResolutionTable:
         )
 
         assert calls == [candidate]
+        assert scopes == ["cmd-edli-projection"]
 
     def test_matched_entry_projection_propagates_writer_failure(
         self, conn, monkeypatch
@@ -16420,7 +16652,7 @@ class TestRecoveryResolutionTable:
         )
         from src.state.venue_command_repo import append_event
 
-        _insert(conn, order_type="FAK", size=10.0, price=0.08)
+        _insert(conn, order_type="FAK", size=10.0, price=0.12)
         _advance_to_partial(conn, venue_order_id="ord-001")
         _append_trade_fact(
             conn,
@@ -16429,7 +16661,7 @@ class TestRecoveryResolutionTable:
             trade_id="trade-full",
             state="CONFIRMED",
             filled_size="10",
-            fill_price="0.08",
+            fill_price="0.12",
         )
         _append_order_fact(
             conn,
@@ -16445,7 +16677,7 @@ class TestRecoveryResolutionTable:
             payload={
                 "venue_order_id": "ord-001",
                 "filled_size": "10",
-                "fill_price": "0.08",
+                "fill_price": "0.12",
             },
         )
 
@@ -19270,6 +19502,9 @@ class TestRecoveryResolutionTable:
             "advanced": 1,
             "stayed": 0,
             "errors": 0,
+            "terminal_late_fill_corrections": {
+                "scanned": 1, "advanced": 0, "stayed": 1, "errors": 0,
+            },
         }
         obligation = conn.execute(
             """
@@ -21965,6 +22200,9 @@ class TestRecoveryResolutionTable:
             "advanced": 0,
             "stayed": 0,
             "errors": 0,
+            "terminal_late_fill_corrections": {
+                "scanned": 1, "advanced": 0, "stayed": 1, "errors": 0,
+            },
         }
         assert conn.execute(
             """
@@ -22063,6 +22301,9 @@ class TestRecoveryResolutionTable:
             "advanced": expected_advanced,
             "stayed": 1 - expected_advanced,
             "errors": 0,
+            "terminal_late_fill_corrections": {
+                "scanned": 1, "advanced": 0, "stayed": 1, "errors": 0,
+            },
         }
         assert conn.execute(
             "SELECT status FROM entry_exposure_obligations WHERE command_id = 'cmd-001'"
@@ -22155,6 +22396,9 @@ class TestRecoveryResolutionTable:
             "advanced": 1,
             "stayed": 0,
             "errors": 0,
+            "terminal_late_fill_corrections": {
+                "scanned": 1, "advanced": 0, "stayed": 1, "errors": 0,
+            },
         }
         assert conn.execute(
             "SELECT status FROM entry_exposure_obligations WHERE command_id = 'cmd-001'"
@@ -28087,6 +28331,9 @@ class TestRecoveryResolutionTable:
             "advanced": 1,
             "stayed": 0,
             "errors": 0,
+            "terminal_late_fill_corrections": {
+                "scanned": 1, "advanced": 0, "stayed": 1, "errors": 0,
+            },
         }
         assert conn.execute(
             "SELECT status FROM entry_exposure_obligations WHERE command_id = ?",
@@ -35260,6 +35507,7 @@ class TestRecoveryResolutionTable:
         conn,
         mock_client,
         monkeypatch,
+        tmp_path,
     ):
         from src.execution import command_recovery, exit_lifecycle
         from src.state.portfolio import _position_from_projection_row
@@ -35387,12 +35635,23 @@ class TestRecoveryResolutionTable:
         )
         conn.commit()
         requests = []
+        assert not exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+            position, conn=conn,
+            requester=lambda released, force_new: requests.append((released.trade_id, force_new)) or True,
+        )
+        assert requests == []
+        _record_reauction_monitor_after_release(conn, position, tmp_path)
         assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
             position,
             conn=conn,
             requester=lambda released, force_new: (
                 requests.append((released.trade_id, force_new)) or True
             ),
+        )
+        assert requests == [("pos-001", True)]
+        assert not exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+            position, conn=conn,
+            requester=lambda released, force_new: requests.append((released.trade_id, force_new)) or True,
         )
         assert requests == [("pos-001", True)]
 
@@ -37859,6 +38118,9 @@ def test_live_tick_identity_bound_matched_exit_outruns_account_snapshot(
 
     _conn_factory.supports_nonblocking_flocks = True
     monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+    # The screen-cancel fast lane has its own canonical read boundary. Bind
+    # that read to the same fixture DB, not pytest's empty default state root.
+    monkeypatch.setattr("src.state.db.get_trade_connection_read_only", _conn_factory)
     monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "1")
     monkeypatch.setattr(
         venue_sync_contract,

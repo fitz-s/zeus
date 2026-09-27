@@ -1510,6 +1510,7 @@ def _relinquished_global_sell_command_id(
             SELECT command_id, caused_by, venue_status, source_module, payload_json
               FROM position_events
              WHERE position_id = ? AND event_type = 'EXIT_RETRY_RELEASED'
+               AND source_module = 'src.execution.command_recovery'
              ORDER BY sequence_no DESC, datetime(occurred_at) DESC
              LIMIT 1
             """,
@@ -1518,10 +1519,40 @@ def _relinquished_global_sell_command_id(
         payload = json.loads(str(row[4] or "{}")) if row is not None else {}
     except (sqlite3.Error, TypeError, json.JSONDecodeError):
         return ""
+    released_obligation = (
+        payload.get("held_sell_reauction_obligation")
+        if isinstance(payload, dict) else None
+    )
+    released_family = (
+        released_obligation.get("family")
+        if isinstance(released_obligation, dict) else None
+    )
+    current_family = obligation.get("family")
+    # SCOPE: the exact no-fill command release generation. DRAIN: a fresh
+    # canonical monitor binds q/book and recovery republishes that same debt.
+    # RESET: current complete lineage plus still-valid command/venue proof.
+    # Comparing entire obligations would reject every fresh monitor and even
+    # a retry after a durable publish claim; those mutable witnesses must change.
     if (
         row is None
         or not isinstance(payload, dict)
-        or payload.get("held_sell_reauction_obligation") != obligation
+        or not isinstance(released_obligation, dict)
+        or released_obligation.get("schema_version") != 4
+        or not str(released_obligation.get("generation") or "").strip()
+        or released_obligation.get("generation") != obligation.get("generation")
+        or released_obligation.get("position_id") != position_id
+        or released_obligation.get("position_id") != obligation.get("position_id")
+        or released_obligation.get("held_token_id") != held_token_id
+        or released_obligation.get("held_token_id") != obligation.get("held_token_id")
+        or not isinstance(released_family, (list, tuple))
+        or not isinstance(current_family, (list, tuple))
+        or len(released_family) != 3 or len(current_family) != 3
+        or not all(str(value or "").strip() for value in released_family)
+        or tuple(released_family) != tuple(current_family)
+        or _exit_family_key(*released_family) != _exit_family_key(
+            getattr(position, "city", None), getattr(position, "target_date", None),
+            getattr(position, "temperature_metric", None),
+        )
     ):
         return ""
 

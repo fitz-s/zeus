@@ -302,6 +302,72 @@ Status: active
   subprocess config import with an explicitly temporary primary root also
   proves the unmarked production path; parent test isolation stays active.
   All 36 configuration tests pass. No production configuration behavior changed.
+- Day0 diagnosis found an expected missing-evidence code escaping the family
+  boundary: DAY0_NOAA_PRELIMINARY_CARRIER_CURRENT_TEMPERATURE_STATE_MISSING.
+  Repair only enumerated expected missing/stale witness failures into existing
+  typed BLOCKED results; do not swallow arbitrary computation errors. SCOPE is
+  the exact family, DRAIN is ordinary fresh-state/vector ingestion and retry,
+  RESET is a valid current witness. Prove a blocked family cannot abort the
+  next valid family's materialization, alongside high/low and stale/fresh twins.
+  Separately distinguish current provisional WU evidence from genuinely
+  absorbing NOAA facts before changing any frontier assertion or source math.
+- A new relationship antibody disproved the initial "only obsolete fixture"
+  diagnosis for terminal no-fill SELL reauction. Release first yields
+  GLOBAL_NO_COMMAND; a genuine request constructor plus canonical fresh
+  MONITOR_REFRESHED then changes it to COMMAND_OWNED. The release reader
+  compares the entire old obligation with the new monitor obligation, so
+  required fresh q/book/request lineage destroys otherwise valid handoff.
+  Partial exits retain their independent residual proof and pass the same seam.
+- Repair no-fill handoff binding by its immutable release generation and exact
+  position/token/family, while rechecking the existing canonical command/order
+  terminal no-fill and no-positive-fill predicates. Search the authoritative
+  command-recovery release, not a later publish-claim acknowledgement. SCOPE
+  one release/command; DRAIN the existing monitor then reauction recovery;
+  RESET fresh complete monitor lineage plus still-valid release proof. Prove
+  no-monitor rejection, monitor-bound single publication, retry after a failed
+  publication claim, and different generation/token/new command/positive-fill
+  negative twins. No venue submission, risk or fresh-witness gate is bypassed.
+- Implemented cold migration and exact-cycle journaling were independently
+  reviewed; 56 schedule/boot-schema tests pass. Global source-run PARTIAL is
+  not categorically rejected: exact target COMPLETE/LIVE eligibility governs
+  the bounded historical-cycle hint. Current revision proof is fetched anew.
+  A later migration journal row cannot hide the existing newest-cycle job.
+- Restored current-identity bundle/HWM antibodies: 184 reader/shape/probability
+  tests pass. A current eligible successor blocks the older posterior; retired
+  versions and absent target coverage cannot supersede it. The reader reuses
+  one parsed provenance object without bypassing validation. Three additional
+  legacy reader files retain identical 44 failures before/after that narrow
+  parse change, primarily old Day0/readiness/constructor contracts.
+- Current target/seed tests now use full, target-timezone-derived native ENS
+  steps, not token two-step coverage. All 119 pass. A small source-reader fix
+  passes target_date to the existing effective-date source/station contract;
+  Paris before/after its migration accepts WU/NOAA respectively and current
+  NOAA rejects superseded WU. This historical-date defect is not represented
+  as the cause of today's Hong Kong losses.
+- All 35 GRIB source-context tests now exercise real native-window predicates.
+  Legacy v2 normalization remains testable offline but cannot become current
+  v3 shape authority. Day0 materializer has 206 passes and five remaining old
+  runtime-flag/schema tests; all targeted current-source frontier, HKO
+  provisional support, high/low missing-state, prepare/direct/readonly,
+  isolated CLI and indexed seed predicates pass. Disk queue dispatch was
+  inspected for per-family BLOCKED continuation, not claimed fully replayed.
+- No-fill recovery's 12 relationship cases pass: fresh canonical monitor,
+  failed publish-claim retry, two consecutive release generations, exact-token
+  and venue-order identity, changed command state, new EXIT, unresolved cancel
+  and positive-fill negatives. The protocol fixture uses production request
+  and canonical event writers but supplies q/book identifiers; it is not a
+  standalone proof of the upstream global auction's probability economics.
+- Configuration and retired-source-switch tests preserve the single live
+  source chain: the removed optional acquisition flag is not reinstated. The
+  expensive-plan deadline test pins its decision date so an ended fixture
+  cannot skip the SQL it intends to test; no production timeout was relaxed.
+- Rollout must be staged after code acceptance: typed control-plane entry
+  pause (held monitoring continues), forecast-live current-code restart and
+  exact v3/v5 source verification, then full controlled restart and live proof.
+  Five older ended HK positions cannot use the unfinished-day migration.
+  Without verified settlement/final daily evidence/explicit venue closure,
+  they remain belief ENTRY_BLOCK while monitoring continues; that condition
+  is not restart-blocking. No-bid alone is never proof of market closure.
 
 ## 2026-09-27 — recent Hong Kong exit-window recovery
 
