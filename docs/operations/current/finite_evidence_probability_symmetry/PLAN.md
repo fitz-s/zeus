@@ -8,6 +8,19 @@ Status: active
 
 ### Concurrent conditional-HIGH integration acceptance
 
+- Second integrated fixed-head check at `14b232902`: 1,205 passed and 39
+  known failing nodes across reactor, held belief, Day0 pricing, source
+  scheduling/boot, cycle policy and fusion-upgrade modules. The failures are
+  exactly the independently compared sets: nine reactor, three held-belief and
+  27 Day0-pricing nodes; no additional failing node appeared in integration.
+  JUnit is `/tmp/hk-postload-check.bh6TnA/results.xml` (local diagnostic,
+  not durable authority). Reactor's repaired boundary eliminates four failures
+  against the same unmodified-source/new-antibody comparison. Upgraded held
+  fixtures carry current grid identity, with explicit HIGH/LOW v4, missing and
+  malformed identity rejection twins; no production source gate was weakened.
+  The separately required six engine suites have 50 passes, four skips and
+  39 failures, identical to the unmodified pre-task `bda6bda86` baseline.
+
 - Post-load acceptance reopened on 2026-09-27 at 14:46 UTC: main PID 99883
   and forecast PID 81903 loaded landed `4e87e153f`, but Hong Kong HIGH
   `c157346c-310` has two fresh monitor attempts with
@@ -51,6 +64,16 @@ Status: active
   normal success, absent/expired held candidates and HIGH/LOW twins. SCOPE is
   the track's eligible exact cycle identities; DRAIN is alternating bounded
   attempts; RESET is current revision coverage or target/calendar ineligibility.
+- Runtime confirmed that scheduling defect at 15:10 UTC: the September 27
+  06Z v3 HIGH and LOW collectors committed 373 rows each but remained PARTIAL
+  after 12 failed download steps (deadlines, plus one HIGH SSL transport error).
+  At 15:10:58 the latest identities returned to RUNNING while September 26 12Z
+  v3 held migration had never run. The earlier apparent extraction pause was
+  not proved to be a database-writer deadlock; native sampling shows HTTP SSL
+  waits during the new latest retry. The fairness repair is therefore necessary
+  for current drainage. A lock-miss spectator must not overwrite the collector
+  journal, and a NULL-lock pre-acquisition failure must not permanently consume
+  a migration turn. Non-null malformed clocks are not valid ordering evidence.
 - Concurrent scheduler integration exposed a behavioral defect, not just a
   fixture mismatch: a reserved completion cut treats an absent urgent-wake
   revision as cancellation even when the marker has never existed and the
