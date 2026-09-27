@@ -177,7 +177,7 @@ def test_source_geometry_binds_response_station_and_static_surface(monkeypatch) 
     import src.data.openmeteo_ecmwf_ifs9_bucket_transport as transport
     from src.data.openmeteo_ecmwf_ifs9_precision_guard import _haversine_km
 
-    raw = b'{"latitude":31.2,"longitude":121.3,"elevation":8.0}'
+    raw = b'{"latitude":31.2,"longitude":121.3,"elevation":8.0,"timezone":"Asia/Shanghai"}'
     cell = {
         "revision": "openmeteo_ifs9_o1280_source_cell_v1",
         "static_hsurf_sha256": "static-v1", "selected_flat_index": 12,
@@ -192,7 +192,7 @@ def test_source_geometry_binds_response_station_and_static_surface(monkeypatch) 
         "lon": 121.3363, "elevation_m": 3.0, "registry_sha256": "registry-v1",
     })
     proof = {**cell, "raw_payload_sha256": hashlib.sha256(raw).hexdigest(),
-             "station_registry_sha256": "registry-v1"}
+             "station_registry_sha256": "a" * 64}
     metadata = _metadata(
         nearest_grid_distance_km=_haversine_km(31.1979, 121.3363, 31.2, 121.3),
         city_class="standard", source_geometry_proof=proof,
@@ -201,6 +201,16 @@ def test_source_geometry_binds_response_station_and_static_surface(monkeypatch) 
     assert "OM9_SOURCE_RESPONSE_IDENTITY_MISMATCH" in evaluate_openmeteo_ecmwf_ifs9_precision_guard(
         metadata, raw_payload_bytes=raw + b" "
     ).reason_codes
+    for altered in (
+        b'{"latitude":31.4,"longitude":121.3,"elevation":8.0,"timezone":"Asia/Shanghai"}',
+        b'{"latitude":31.2,"longitude":121.3,"elevation":80.0,"timezone":"Asia/Shanghai"}',
+    ):
+        rebound = _metadata(**{**metadata.__dict__, "source_geometry_proof": {
+            **proof, "raw_payload_sha256": hashlib.sha256(altered).hexdigest(),
+        }})
+        assert "OM9_SOURCE_RESPONSE_GEOMETRY_MISMATCH" in evaluate_openmeteo_ecmwf_ifs9_precision_guard(
+            rebound, raw_payload_bytes=altered,
+        ).reason_codes
     assert "OM9_SOURCE_GEOMETRY_PROOF_MISMATCH" in evaluate_openmeteo_ecmwf_ifs9_precision_guard(
         _metadata(**{**metadata.__dict__, "source_geometry_proof": {**proof, "static_hsurf_sha256": "wrong"}}),
         raw_payload_bytes=raw,
@@ -209,6 +219,15 @@ def test_source_geometry_binds_response_station_and_static_surface(monkeypatch) 
         _metadata(**{**metadata.__dict__, "station_elevation_m": 0.0}),
         raw_payload_bytes=raw,
     ).reason_codes
+    # Same station, changed unrelated registry row: provenance remains historical,
+    # current station identity is still validated independently.
+    monkeypatch.setattr(config, "runtime_station_geometry_for_city", lambda _city: {
+        "validity_reason": None, "station_id": "ZSSS", "lat": 31.1979,
+        "lon": 121.3363, "elevation_m": 3.0, "registry_sha256": "b" * 64,
+    })
+    assert evaluate_openmeteo_ecmwf_ifs9_precision_guard(
+        metadata, raw_payload_bytes=raw,
+    ).status == "PASS"
 
 
 def test_source_geometry_producer_uses_actual_response_and_precise_station(monkeypatch) -> None:

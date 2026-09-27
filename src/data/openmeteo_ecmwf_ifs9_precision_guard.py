@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import hashlib
+import json
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Literal
@@ -129,6 +130,24 @@ def geometry_proof_authenticity_reason(
     if hashlib.sha256(raw_payload_bytes).hexdigest() != raw_sha:
         return "OM9_SOURCE_RESPONSE_IDENTITY_MISMATCH"
     try:
+        response = json.loads(raw_payload_bytes)
+        if not isinstance(response, Mapping):
+            return "OM9_SOURCE_RESPONSE_GEOMETRY_UNAVAILABLE"
+        response_lat = float(response["latitude"])
+        response_lon = float(response["longitude"])
+        response_dem = float(response["elevation"])
+        if not all(math.isfinite(v) for v in (response_lat, response_lon, response_dem)):
+            return "OM9_SOURCE_RESPONSE_GEOMETRY_UNAVAILABLE"
+        if (
+            abs(response_lat - metadata.nearest_grid_lat) > 1e-5
+            or abs(response_lon - metadata.nearest_grid_lon) > 1e-5
+            or abs(response_dem - float(proof["target_dem_elevation_m"])) > 1e-6
+            or response.get("timezone") != metadata.timezone_name
+        ):
+            return "OM9_SOURCE_RESPONSE_GEOMETRY_MISMATCH"
+        scope = response.get("_zeus_current_target_scope")
+        if isinstance(scope, Mapping) and scope.get("city") != metadata.city:
+            return "OM9_SOURCE_RESPONSE_GEOMETRY_MISMATCH"
         from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
         from src.config import cities_by_name, runtime_station_geometry_for_city
 
@@ -148,9 +167,13 @@ def geometry_proof_authenticity_reason(
             or abs(station_height - float(metadata.station_elevation_m)) > 1e-6
             or abs(station_lat - metadata.station_lat) > 1e-6
             or abs(station_lon - metadata.station_lon) > 1e-6
-            or proof.get("station_registry_sha256") != station["registry_sha256"]
         ):
             return "OM9_STATION_SOURCE_IDENTITY_MISMATCH"
+        # The whole-registry hash is audit provenance, not a frozen reader gate:
+        # an unrelated city row may change while this station remains identical.
+        registry_hash = proof.get("station_registry_sha256")
+        if not isinstance(registry_hash, str) or len(registry_hash) != 64:
+            return "OM9_STATION_SOURCE_AUDIT_MISSING"
         target_dem = float(proof["target_dem_elevation_m"])
         if not math.isfinite(target_dem):
             return "OM9_TARGET_DEM_INVALID"
@@ -261,6 +284,9 @@ def evaluate_openmeteo_ecmwf_ifs9_precision_guard(
         "OM9_SOURCE_RESPONSE_IDENTITY_MISSING",
         "OM9_SOURCE_RESPONSE_BYTES_MISSING",
         "OM9_SOURCE_RESPONSE_IDENTITY_MISMATCH",
+        "OM9_SOURCE_RESPONSE_GEOMETRY_UNAVAILABLE",
+        "OM9_SOURCE_RESPONSE_GEOMETRY_MISMATCH",
+        "OM9_STATION_SOURCE_AUDIT_MISSING",
         "OM9_STATION_SOURCE_UNAVAILABLE",
         "OM9_STATION_SOURCE_INVALID",
         "OM9_STATION_SOURCE_IDENTITY_MISMATCH",
