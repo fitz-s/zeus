@@ -32,6 +32,7 @@ permanently-stale belief and the exit gate could never fire. These tests pin:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
@@ -41,6 +42,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from src.contracts import EntryMethod
+from src.contracts.ensemble_snapshot_provenance import GRID_SURFACE_EVIDENCE_REVISION
 from src.engine.position_belief import (
     DEFAULT_MAX_AGE_HOURS,
     LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID,
@@ -60,6 +62,17 @@ from src.types.metric_identity import MetricIdentity
 NOW = datetime(2026, 6, 12, 12, 0, 0, tzinfo=timezone.utc)
 BIN = "Will the highest temperature in Karachi be 37°C on June 12?"
 OTHER_BIN = "Will the highest temperature in Karachi be 38°C on June 12?"
+
+
+def _grid_surface_identity() -> dict[str, str]:
+    # This unit fixture tests the held reader's typed certificate boundary;
+    # source-cell authenticity is exercised by the GRIB ingest/precision tests.
+    return {
+        "grid_surface_evidence_revision": GRID_SURFACE_EVIDENCE_REVISION,
+        "grid_surface_evidence_identity_hash": hashlib.sha256(
+            b"held-belief-fixture-selected-land-cell"
+        ).hexdigest(),
+    }
 
 
 def test_live_input_cycle_uses_shared_frozen_hwm_authority(monkeypatch):
@@ -197,6 +210,7 @@ def _insert(db_path, *, posterior_id, computed_at, q, city="Karachi",
                             "source_cycle_time": shape_cycle.isoformat(),
                             "stale_shape_reused": stale_shape_reused,
                             "translation_applied": translation_applied,
+                            **_grid_surface_identity(),
                         }
                     },
                     "q_bootstrap_samples_basis": q_samples_basis,
@@ -731,6 +745,56 @@ class TestLoadReplacementBelief:
         )
         assert _load(forecasts_db) is None
 
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        (
+            ("semantics_revision", "ensemble_center_scenarios_v4"),
+            ("grid_surface_evidence_revision", None),
+            ("grid_surface_evidence_identity_hash", None),
+            ("grid_surface_evidence_identity_hash", "a" * 63),
+            ("grid_surface_evidence_identity_hash", "z" * 64),
+        ),
+    )
+    @pytest.mark.parametrize(
+        ("metric", "bin_label"),
+        (
+            ("high", BIN),
+            ("low", "Will the lowest temperature in Karachi be 25°C on June 12?"),
+        ),
+    )
+    def test_held_current_shape_rejects_old_or_unproved_grid_identity(
+        self, forecasts_db, field, value, metric, bin_label,
+    ):
+        _insert(
+            forecasts_db, posterior_id="source-proof-bound",
+            computed_at=(NOW - timedelta(hours=1)).isoformat(),
+            source_cycle_time=(NOW - timedelta(hours=6)).isoformat(),
+            metric=metric, q={bin_label: 0.242},
+        )
+
+        def read_belief():
+            return load_replacement_belief(
+                city="Karachi", target_date="2026-06-12",
+                temperature_metric=metric, bin_label=bin_label,
+                direction="buy_no", db_path=forecasts_db, now=NOW,
+            )
+
+        assert read_belief() is not None  # A current typed identity is readable.
+        with sqlite3.connect(forecasts_db) as conn:
+            provenance = json.loads(conn.execute(
+                "SELECT provenance_json FROM forecast_posteriors WHERE posterior_id='source-proof-bound'"
+            ).fetchone()[0])
+            shape = provenance["bayes_precision_fusion"]["current_evidence_shape"]
+            if value is None:
+                shape.pop(field)
+            else:
+                shape[field] = value
+            conn.execute(
+                "UPDATE forecast_posteriors SET provenance_json=? WHERE posterior_id='source-proof-bound'",
+                (json.dumps(provenance),),
+            )
+        assert read_belief() is None
+
     def test_fresh_row_buy_no_is_held_side_converted(self, forecasts_db):
         _insert(forecasts_db, posterior_id="p1",
                 computed_at=(NOW - timedelta(hours=2)).isoformat(),
@@ -1204,6 +1268,7 @@ class TestLoadReplacementBelief:
                                 "source_cycle_time": posterior_cycle.isoformat(),
                                 "stale_shape_reused": False,
                                 "translation_applied": False,
+                                **_grid_surface_identity(),
                             },
                         },
                         "q_bootstrap_samples_basis":
@@ -1315,6 +1380,7 @@ class TestLoadReplacementBelief:
                                 "source_cycle_time": posterior_cycle.isoformat(),
                                 "stale_shape_reused": False,
                                 "translation_applied": False,
+                                **_grid_surface_identity(),
                             },
                         },
                         "q_bootstrap_samples_basis":
@@ -1445,6 +1511,7 @@ class TestLoadReplacementBelief:
                                 "source_cycle_time": carrier_cycle.isoformat(),
                                 "stale_shape_reused": False,
                                 "translation_applied": False,
+                                **_grid_surface_identity(),
                             },
                         },
                         "q_bootstrap_samples_basis":
