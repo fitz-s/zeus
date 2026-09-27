@@ -430,6 +430,97 @@ def _noaa_test_likelihood(
     ).hexdigest()
     return likelihood
 
+
+def _assert_rebuilt_day0_held_token_binding(
+    *, era, family, payload, q, decision_time, monkeypatch,
+) -> None:
+    """Carry the real rebuilt simplex through condition and held-token readers."""
+    from src.engine import monitor_refresh
+    from src.solve.solver import (
+        JointOutcomeProbabilityWitness,
+        OutcomeTokenBinding,
+        joint_probability_witness_identity,
+    )
+
+    point = np.asarray(q, dtype=float)
+    samples = np.asarray(payload["_edli_day0_remaining_probability_samples"], dtype=float)
+    bindings = tuple(
+        OutcomeTokenBinding(
+            bin_id=candidate.bin.label,
+            condition_id=candidate.condition_id,
+            yes_token_id=f"yes-{index}",
+            no_token_id=f"no-{index}",
+        )
+        for index, candidate in enumerate(family.candidates)
+    )
+    identity_fields = dict(
+        family_key=family.family_id,
+        bindings=bindings,
+        q_version=payload["_edli_day0_remaining_content_identity"],
+        resolution_identity="test-settlement-resolution",
+        topology_identity="test-event-topology",
+        posterior_identity_hash="test-source-posterior",
+        source_truth_identity="test-source-truth",
+        authority_certificate_hash="test-authority-certificate",
+        band_alpha=0.05,
+        band_basis="current_coherent_day0_remaining_model_bootstrap_v1",
+        yes_point_q=point,
+        yes_q_samples=samples,
+        captured_at_utc=decision_time,
+    )
+    witness = JointOutcomeProbabilityWitness(
+        **identity_fields,
+        max_age=timedelta(minutes=5),
+        witness_identity=joint_probability_witness_identity(**identity_fields),
+    )
+
+    # Run the production condition-keyed payoff-cap mapping. Spy only on its
+    # existing mask boundary; the original transformation still executes.
+    mapped = {}
+    real_mask = era._apply_day0_mask_to_generated_probabilities
+
+    def record_map(**kwargs):
+        mapped.update(kwargs["q_by_condition"])
+        return real_mask(**kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(era, "_apply_day0_mask_to_generated_probabilities", record_map)
+        caps = era._day0_global_candidate_payoff_q_lcb_caps(
+            payload=payload,
+            family=family,
+            bindings=bindings,
+            samples=samples,
+            point_q=point,
+            band_alpha=0.05,
+            decision_time=decision_time,
+        )
+    assert len(caps) == 2 * len(bindings)
+    assert set(mapped) == {binding.condition_id for binding in bindings}
+
+    for index, binding in enumerate(bindings):
+        assert mapped[binding.condition_id] == pytest.approx(point[index])
+        held_yes = SimpleNamespace(
+            condition_id=binding.condition_id,
+            direction="buy_yes",
+            token_id=binding.yes_token_id,
+            no_token_id=binding.no_token_id,
+        )
+        held_no = SimpleNamespace(
+            condition_id=binding.condition_id,
+            direction="buy_no",
+            token_id=binding.yes_token_id,
+            no_token_id=binding.no_token_id,
+        )
+        pair = (binding.yes_token_id, binding.no_token_id)
+        assert monitor_refresh._current_global_held_point_probability(held_yes, witness) == pytest.approx(point[index])
+        assert monitor_refresh._current_global_held_point_probability(held_no, witness) == pytest.approx(1.0 - point[index])
+        assert monitor_refresh._current_global_held_samples(
+            held_yes, witness, current_token_pair=pair,
+        ) == pytest.approx(samples[:, index])
+        assert monitor_refresh._current_global_held_samples(
+            held_no, witness, current_token_pair=pair,
+        ) == pytest.approx(1.0 - samples[:, index])
+
 # Pin the retention-prune clock so this suite is HERMETIC. The persisted-vector
 # fixtures use fixed captured_at timestamps on the 2026-06-10 target day; the
 # prune cutoff is `now - retention_days`. Without a pinned `now`, the prune uses
@@ -3023,8 +3114,9 @@ def test_noaa_carrier_replay_requires_typed_decision_time():
         )
 
 
+@pytest.mark.parametrize("metric", ("high", "low"))
 def test_hko_adapter_replays_materialized_carrier_identity_and_q(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, metric: str,
 ):
     """HKO held redecision must use the exact materialized provisional q."""
     from src.data.day0_hourly_vectors import DAY0_REMAINING_CARRIER_OPERATOR_V3
@@ -3073,7 +3165,7 @@ def test_hko_adapter_replays_materialized_carrier_identity_and_q(
         future_extremes_c=future,
         final_extreme_centers_c=final_centers,
         boundary_scenarios=((25.9, 0.97), (None, 1.0 - 0.97)),
-        metric="low",
+        metric=metric,
         path_error_sigma_c=path_sigma,
         instrument_sigma_c=0.0,
         bin_bounds_c=[(None, 23), (24, 24), (25, 25), (26, None)],
@@ -3091,9 +3183,9 @@ def test_hko_adapter_replays_materialized_carrier_identity_and_q(
     payload = {
         "city": "Hong Kong",
         "target_date": "2026-09-03",
-        "metric": "low",
+        "metric": metric,
         "rounded_value": 25.0,
-        "low_so_far": 25.9,
+        f"{metric}_so_far": 25.9,
         "settlement_source": "hko_hourly_accumulator",
         "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
         "_edli_day0_probability_boundary_native": 25.9,
@@ -3236,15 +3328,18 @@ def test_hko_adapter_replays_materialized_carrier_identity_and_q(
     payload["_edli_day0_redecision_authority_scope"] = (
         "held_exposure_current_bundle_day0_only_v1"
     )
+    source_topology = json.loads(json.dumps(payload["_edli_day0_carrier_bin_topology"]))
+    event_permutation = (3, 1, 0, 2)
     family = SimpleNamespace(
         city="Hong Kong",
         target_date="2026-09-03",
-        metric="low",
+        metric=metric,
+        family_id=f"hong-kong-2026-09-03-{metric}",
         candidates=[
-            SimpleNamespace(bin=Bin(None, 23, "C", "23C or below")),
-            SimpleNamespace(bin=Bin(24, 24, "C", "24C")),
-            SimpleNamespace(bin=Bin(25, 25, "C", "25C")),
-            SimpleNamespace(bin=Bin(26, None, "C", "26C or above")),
+            SimpleNamespace(
+                bin=ordered_bins[index], condition_id=f"0x{index + 1:064x}",
+            )
+            for index in event_permutation
         ],
     )
     next_decision_time = decision_time + timedelta(minutes=1)
@@ -3270,10 +3365,40 @@ def test_hko_adapter_replays_materialized_carrier_identity_and_q(
     assert payload["_edli_day0_remaining_carrier_future_extremes_c"] == list(
         changed_future
     )
+    assert payload["_edli_day0_source_clock_carrier_provenance"]["carrier_bin_topology"] == source_topology
+    assert payload["_edli_day0_carrier_bin_topology"] == [
+        source_topology[index] for index in event_permutation
+    ]
     assert rebuilt.tolist() == pytest.approx(
         payload["_edli_day0_remaining_carrier_q"]
     )
     assert rebuilt.tolist() != pytest.approx(previous_q)
+    _assert_rebuilt_day0_held_token_binding(
+        era=era, family=family, payload=payload, q=rebuilt,
+        decision_time=next_decision_time, monkeypatch=monkeypatch,
+    )
+
+    for malformed_topology in (
+        source_topology[:-1],
+        [{**source_topology[0]}, {**source_topology[0]}, *source_topology[2:]],
+        [{**source_topology[0], "lower_c": 22}, *source_topology[1:]],
+        [{k: v for k, v in source_topology[0].items() if k != "lower_c"}, *source_topology[1:]],
+    ):
+        invalid = {
+            **payload,
+            "_edli_day0_carrier_bin_topology": malformed_topology,
+        }
+        with pytest.raises(ValueError, match="DAY0_NOAA_PRELIMINARY_CARRIER_TOPOLOGY_INVALID"):
+            era._rebuild_decision_time_day0_carrier(
+                payload=invalid,
+                family=family,
+                unit="C",
+                decision_time=next_decision_time,
+                future_extremes_c=changed_future,
+                final_extreme_centers_c=final_centers,
+                authority_kind="held_current_remaining_path",
+                entry_authority=False,
+            )
 
     mutated = dict(payload)
     mutated["_edli_day0_remaining_carrier_q"] = [1.0, 0.0, 0.0, 0.0]
@@ -4879,16 +5004,24 @@ def test_held_scope_none_rebuilds_shared_current_remaining_carrier(
     import src.engine.event_reactor_adapter as era
 
     decision_time = datetime(2026, 8, 24, 12, 30, tzinfo=UTC)
+    canonical_bins = (
+        Bin(None, 24, "C", "24C or below"),
+        Bin(25, 25, "C", "25C"),
+        Bin(26, None, "C", "26C or above"),
+    )
+    event_order = (2, 1, 0)
     family = SimpleNamespace(
         city="Paris",
         target_date="2026-08-24",
         metric="high",
         candidates=[
-            SimpleNamespace(bin=Bin(None, 24, "C", "24C or below")),
-            SimpleNamespace(bin=Bin(25, 25, "C", "25C")),
-            SimpleNamespace(bin=Bin(26, None, "C", "26C or above")),
+            SimpleNamespace(bin=canonical_bins[index]) for index in event_order
         ],
     )
+    source_topology = [
+        {"bin_id": bin_.label, "lower_c": bin_.low, "upper_c": bin_.high}
+        for bin_ in canonical_bins
+    ]
     witness = {
         "vector_id": "same-vector",
         "vector_ids_by_model": {"icon_d2": "same-vector"},
@@ -4919,6 +5052,7 @@ def test_held_scope_none_rebuilds_shared_current_remaining_carrier(
         "_edli_day0_provisional_revision_likelihood": _noaa_test_likelihood(
             station="LFPG", cutoff=decision_time.isoformat()
         ),
+        "_edli_day0_carrier_bin_topology": source_topology,
     }
     vectors = [
         Day0HourlyVector(
@@ -5029,6 +5163,10 @@ def test_held_scope_none_rebuilds_shared_current_remaining_carrier(
     assert held_payload["_edli_day0_remaining_content_identity"] == (
         entry_payload["_edli_day0_remaining_content_identity"]
     )
+    assert held_payload["_edli_day0_source_clock_carrier_provenance"]["carrier_bin_topology"] == source_topology
+    assert held_payload["_edli_day0_carrier_bin_topology"] == [
+        source_topology[index] for index in event_order
+    ]
     assert np.array_equal(held_q, entry_q)
     assert np.array_equal(
         np.asarray(held_payload["_edli_day0_remaining_probability_samples"]),
@@ -5243,15 +5381,29 @@ def test_noaa_actual_producer_consumer_reuses_canonical_path_sigma(
         + [(value, value + 1) for value in range(78, 96, 2)]
         + [(96, None)]
     )
+    event_order = (len(bounds) - 1, *range(1, len(bounds) - 1), 0)
     family = SimpleNamespace(
         city=city_name,
         target_date=target_date,
         metric=metric,
+        family_id=f"{city_name}-{target_date}-{metric}",
         candidates=[
-            SimpleNamespace(bin=Bin(low, high, unit, f"bin-{index}"))
-            for index, (low, high) in enumerate(bounds)
+            SimpleNamespace(
+                bin=Bin(low, high, unit, f"bin-{index}"),
+                condition_id=f"0x{index + 1:064x}",
+            )
+            for index in event_order
+            for low, high in (bounds[index],)
         ],
     )
+    source_topology = [
+        {
+            "bin_id": f"bin-{index}",
+            "lower_c": None if low is None else (low - 32.0) * 5.0 / 9.0 if unit == "F" else low,
+            "upper_c": None if high is None else (high - 32.0) * 5.0 / 9.0 if unit == "F" else high,
+        }
+        for index, (low, high) in enumerate(bounds)
+    ]
     payload = {
         "metric": metric,
         "target_date": target_date,
@@ -5265,6 +5417,7 @@ def test_noaa_actual_producer_consumer_reuses_canonical_path_sigma(
             station=station,
             cutoff=cutoff,
         ),
+        "_edli_day0_carrier_bin_topology": source_topology,
         "_edli_day0_remaining_vector_witness": {
             "vector_id": "same-vector",
             "expected_models": ["ecmwf_ifs"],
@@ -5301,10 +5454,13 @@ def test_noaa_actual_producer_consumer_reuses_canonical_path_sigma(
     monkeypatch.setattr(era, "_day0_extra_member_sigma_native", capture_extra_sigma)
     original_builder = hourly.build_day0_remaining_probability_carrier
     builder_calls = []
+    builder_results = []
 
     def recording_builder(**kwargs):
         builder_calls.append(dict(kwargs))
-        return original_builder(**kwargs)
+        result = original_builder(**kwargs)
+        builder_results.append(result)
+        return result
 
     monkeypatch.setattr(hourly, "build_day0_remaining_probability_carrier", recording_builder)
     era._rebuild_decision_time_day0_carrier(
@@ -5331,6 +5487,16 @@ def test_noaa_actual_producer_consumer_reuses_canonical_path_sigma(
     assert builder_calls[0]["path_error_sigma_c"] == pytest.approx(
         expected_sigma_c * native_scale
     )
+    assert payload["_edli_day0_source_clock_carrier_provenance"]["carrier_bin_topology"] == source_topology
+    assert payload["_edli_day0_carrier_bin_topology"] == [
+        source_topology[index] for index in event_order
+    ]
+    assert payload["_edli_day0_remaining_carrier_q"] == builder_results[0]["q"]
+    assert payload["_edli_day0_remaining_probability_samples"] == builder_results[0]["samples"]
+    # A later active-carrier mutation cannot rewrite immutable source provenance.
+    payload["_edli_day0_carrier_bin_topology"][0]["bin_id"] = "mutated"
+    assert payload["_edli_day0_source_clock_carrier_provenance"]["carrier_bin_topology"] == source_topology
+    payload["_edli_day0_carrier_bin_topology"][0]["bin_id"] = f"bin-{event_order[0]}"
     assert builder_calls[0]["operator"] == (
         "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2"
     )
@@ -5360,6 +5526,10 @@ def test_noaa_actual_producer_consumer_reuses_canonical_path_sigma(
     )
     assert builder_calls[1]["path_error_sigma_c"] == builder_calls[0]["path_error_sigma_c"]
     assert replay.tolist() == pytest.approx(payload["_edli_day0_remaining_carrier_q"])
+    _assert_rebuilt_day0_held_token_binding(
+        era=era, family=family, payload=payload, q=replay,
+        decision_time=decision_time, monkeypatch=monkeypatch,
+    )
 
 
 @pytest.mark.parametrize("metric", ("high", "low"))
