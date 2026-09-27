@@ -73,7 +73,20 @@ Status: active
   waits during the new latest retry. The fairness repair is therefore necessary
   for current drainage. A lock-miss spectator must not overwrite the collector
   journal, and a NULL-lock pre-acquisition failure must not permanently consume
-  a migration turn. Non-null malformed clocks are not valid ordering evidence.
+  a migration turn. Non-null malformed clocks are not valid ordering evidence:
+  treat them as an unknown prior attempt and run the independently eligible
+  migration so its actual collector rewrites truthful clocks. Do not turn an
+  unorderable journal into a permanent gate; source/calendar/target admission
+  remains unchanged and must still pass independently.
+- Once the latest HIGH retry succeeded, actual held migration still did not
+  start. The canonical old 26T12 coverage stores forecast tracks
+  `mx2t6_high_full_horizon` / `mn2t6_low_full_horizon`, while the new selector
+  filtered the unsuffixed collector track. Its fixture incorrectly copied the
+  collector name into the canonical forecast-track field. Repair this exact
+  producer/reader mapping with the existing forecast-track contract and test
+  both real HIGH/LOW full/short-horizon representations; retain source-run,
+  calendar, city/date, coverage and revision identity checks. This live mapping
+  failure blocks source-drainage acceptance even though scheduler tests passed.
 - Concurrent scheduler integration exposed a behavioral defect, not just a
   fixture mismatch: a reserved completion cut treats an absent urgent-wake
   revision as cancellation even when the marker has never existed and the
