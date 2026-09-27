@@ -44,6 +44,15 @@ import src.data.replacement_forecast_seed_discovery as seed_discovery
 import src.data.day0_fast_obs as fast_obs
 
 
+@pytest.fixture(autouse=True)
+def _legacy_manifest_fixtures_are_not_source_certificates(monkeypatch) -> None:
+    # Older seed-discovery tests supply handcrafted station/grid metadata. They
+    # exercise target/cycle scope, whereas source authenticity is checked by
+    # the precision-guard and downloader geometry tests.
+    import src.data.openmeteo_ecmwf_ifs9_precision_guard as guard
+    monkeypatch.setattr(guard, "geometry_proof_authenticity_reason", lambda *_args, **_kwargs: None)
+
+
 def test_seed_target_sort_keeps_day0_retries_from_starving_pre_settlement_q() -> None:
     day0_held = SimpleNamespace(
         city="Manila",
@@ -2266,7 +2275,7 @@ def test_seed_discovery_does_not_pass_explicit_utc_only_min_target_date(
 @pytest.mark.parametrize("metric", ["high", "low"])
 @pytest.mark.parametrize("explicit_date_list", [False, True])
 def test_target_precision_scope_drains_after_exact_certificate_arrives(
-    tmp_path: Path, metric: str, explicit_date_list: bool,
+    tmp_path: Path, metric: str, explicit_date_list: bool, monkeypatch,
 ) -> None:
     """INV-14: Houston's next-day samples cannot reuse yesterday's UTC window."""
     from scripts.download_replacement_forecast_current_targets import (
@@ -2277,16 +2286,29 @@ def test_target_precision_scope_drains_after_exact_certificate_arrives(
     from src.data.replacement_forecast_current_target_plan import (
         _openmeteo_manifest_metadata_allows_target_date,
     )
+    from src.config import cities_by_name
+    import src.data.openmeteo_ecmwf_ifs9_bucket_transport as transport
+
+    city = cities_by_name["Houston"]
+    monkeypatch.setattr(transport, "source_cell_geometry_proof", lambda **_kwargs: {
+        "selected_grid_lat": float(city.lat), "selected_grid_lon": float(city.lon),
+        "raw_grid_elevation_m": 14.0, "cell_is_sea": False,
+        "nearby_sea": False,
+    })
 
     data_version = OPENMETEO_HIGH_DATA_VERSION if metric == "high" else LOW_DATA_VERSION
-    payload = {"hourly": {"time": [f"2026-09-25T{hour:02}:00" for hour in range(24)],
+    payload = {"latitude": float(city.lat), "longitude": float(city.lon), "elevation": 14.0,
+               "timezone": city.timezone,
+               "hourly": {"time": [f"2026-09-25T{hour:02}:00" for hour in range(24)],
                            "temperature_2m": [25.0] * 24}}
 
     def certificate(day: str) -> RawForecastArtifactManifest:
-        precision = _precision_metadata("Houston", day, anchor_sigma_c=3.0)
         path = _write_file(tmp_path / f"{day}.json", _current_target_scoped_payload(
             payload, city="Houston", target_date=day, metric=metric,
         ))
+        precision = _precision_metadata(
+            "Houston", day, anchor_sigma_c=3.0, raw_payload_bytes=path.read_bytes(),
+        )
         precision_path = _write_file(tmp_path / f"precision_{day}.json", precision)
         metadata = {
             "artifact_class": "openmeteo_ecmwf_ifs9_anchor_current_targets",

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import math
+import hashlib
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Literal
+from typing import Mapping
 
 
 PASS_STATUS = "PASS"
@@ -43,6 +45,7 @@ class OpenMeteoIfs9PrecisionMetadata:
     land_sea_mask: str | None
     city_class: str
     station_mapping_policy: str
+    source_geometry_proof: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         for field_name in ("city", "station_id", "native_grid", "delivery_grid_resolution", "interpolation_method", "endpoint_mode", "timezone_name", "temperature_unit", "city_class", "station_mapping_policy"):
@@ -50,17 +53,17 @@ class OpenMeteoIfs9PrecisionMetadata:
                 raise ValueError(f"{field_name} is required")
         for field_name in ("city_lat", "station_lat", "requested_lat", "nearest_grid_lat"):
             value = float(getattr(self, field_name))
-            if not -90.0 <= value <= 90.0:
+            if not math.isfinite(value) or not -90.0 <= value <= 90.0:
                 raise ValueError(f"{field_name} must be in [-90, 90]")
         for field_name in ("city_lon", "station_lon", "requested_lon", "nearest_grid_lon"):
             value = float(getattr(self, field_name))
-            if not -180.0 <= value <= 180.0:
+            if not math.isfinite(value) or not -180.0 <= value <= 180.0:
                 raise ValueError(f"{field_name} must be in [-180, 180]")
-        if self.nearest_grid_distance_km < 0.0:
+        if not math.isfinite(self.nearest_grid_distance_km) or self.nearest_grid_distance_km < 0.0:
             raise ValueError("nearest_grid_distance_km must be non-negative")
         if self.requested_coordinate_precision_decimals < 0:
             raise ValueError("requested_coordinate_precision_decimals must be non-negative")
-        if self.anchor_sigma_c <= 0.0:
+        if not math.isfinite(self.anchor_sigma_c) or self.anchor_sigma_c <= 0.0:
             raise ValueError("anchor_sigma_c must be positive")
         start = _to_utc(self.local_day_start_utc, field_name="local_day_start_utc")
         end = _to_utc(self.local_day_end_utc, field_name="local_day_end_utc")
@@ -104,7 +107,89 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return radius_km * 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
 
 
-def evaluate_openmeteo_ecmwf_ifs9_precision_guard(metadata: OpenMeteoIfs9PrecisionMetadata) -> OpenMeteoIfs9PrecisionGuardResult:
+def geometry_proof_authenticity_reason(
+    metadata: OpenMeteoIfs9PrecisionMetadata,
+    *,
+    raw_payload_bytes: bytes | None = None,
+) -> str | None:
+    """Validate the provider's actual cell against the local surface and station.
+
+    A precision JSON's self-assertion is not evidence. The request builder also
+    supplies exact raw response bytes so the recorded response identity cannot
+    be rebound to a different provider answer.
+    """
+    proof = metadata.source_geometry_proof
+    if not isinstance(proof, Mapping) or proof.get("revision") != "openmeteo_ifs9_o1280_source_cell_v1":
+        return "OM9_SOURCE_GEOMETRY_PROOF_MISSING"
+    raw_sha = proof.get("raw_payload_sha256")
+    if not isinstance(raw_sha, str) or len(raw_sha) != 64:
+        return "OM9_SOURCE_RESPONSE_IDENTITY_MISSING"
+    if raw_payload_bytes is None:
+        return "OM9_SOURCE_RESPONSE_BYTES_MISSING"
+    if hashlib.sha256(raw_payload_bytes).hexdigest() != raw_sha:
+        return "OM9_SOURCE_RESPONSE_IDENTITY_MISMATCH"
+    try:
+        from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
+        from src.config import cities_by_name, runtime_station_geometry_for_city
+
+        city = cities_by_name.get(metadata.city)
+        if city is None:
+            return "OM9_STATION_SOURCE_UNAVAILABLE"
+        station = runtime_station_geometry_for_city(city)
+        if station["validity_reason"] is not None:
+            return "OM9_STATION_SOURCE_INVALID"
+        station_height = float(station["elevation_m"])
+        station_lat = float(station["lat"])
+        station_lon = float(station["lon"])
+        if not all(math.isfinite(v) for v in (station_height, station_lat, station_lon)):
+            return "OM9_STATION_SOURCE_INVALID"
+        if (
+            str(station["station_id"]) != metadata.station_id
+            or abs(station_height - float(metadata.station_elevation_m)) > 1e-6
+            or abs(station_lat - metadata.station_lat) > 1e-6
+            or abs(station_lon - metadata.station_lon) > 1e-6
+            or proof.get("station_registry_sha256") != station["registry_sha256"]
+        ):
+            return "OM9_STATION_SOURCE_IDENTITY_MISMATCH"
+        target_dem = float(proof["target_dem_elevation_m"])
+        if not math.isfinite(target_dem):
+            return "OM9_TARGET_DEM_INVALID"
+        actual = source_cell_geometry_proof(
+            latitude=metadata.requested_lat,
+            longitude=metadata.requested_lon,
+            target_elevation_m=target_dem,
+        )
+        for key, value in actual.items():
+            claimed = proof.get(key)
+            if isinstance(value, float):
+                if not isinstance(claimed, (int, float)) or not math.isfinite(float(claimed)) or abs(float(claimed) - value) > 1e-6:
+                    return "OM9_SOURCE_GEOMETRY_PROOF_MISMATCH"
+            elif claimed != value:
+                return "OM9_SOURCE_GEOMETRY_PROOF_MISMATCH"
+        grid_lon = float(actual["selected_grid_lon"])
+        if grid_lon > 180.0:
+            grid_lon -= 360.0
+        if (
+            abs(metadata.nearest_grid_lat - float(actual["selected_grid_lat"])) > 1e-5
+            or abs(metadata.nearest_grid_lon - grid_lon) > 1e-5
+            or abs(metadata.grid_elevation_m - float(actual["raw_grid_elevation_m"])) > 1e-6
+            or metadata.land_sea_mask != ("sea" if actual["cell_is_sea"] else "land")
+            or metadata.city_class != ("coastal" if actual["nearby_sea"] else "standard")
+            or abs(metadata.nearest_grid_distance_km - _haversine_km(
+                metadata.requested_lat, metadata.requested_lon,
+                metadata.nearest_grid_lat, metadata.nearest_grid_lon,
+            )) > 1e-4
+        ):
+            return "OM9_SOURCE_GEOMETRY_METADATA_MISMATCH"
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, ImportError):
+        return "OM9_SOURCE_GEOMETRY_PROOF_UNAVAILABLE"
+    return None
+
+
+def evaluate_openmeteo_ecmwf_ifs9_precision_guard(
+    metadata: OpenMeteoIfs9PrecisionMetadata,
+    *, raw_payload_bytes: bytes | None = None,
+) -> OpenMeteoIfs9PrecisionGuardResult:
     """Evaluate whether OM9 anchor metadata is safe enough for live materialization."""
 
     reasons: list[str] = []
@@ -147,6 +232,9 @@ def evaluate_openmeteo_ecmwf_ifs9_precision_guard(metadata: OpenMeteoIfs9Precisi
         reasons.append("OM9_NEAREST_GRID_DISTANCE_HIGH")
     if metadata.anchor_sigma_c <= 0.0:
         reasons.append("OM9_ANCHOR_SIGMA_INVALID")
+    source_reason = geometry_proof_authenticity_reason(metadata, raw_payload_bytes=raw_payload_bytes)
+    if source_reason is not None:
+        reasons.append(source_reason)
 
     high_risk_bucket = "standard"
     if city_class in {"coastal", "island", "peninsula", "mountain", "valley"}:
@@ -169,6 +257,17 @@ def evaluate_openmeteo_ecmwf_ifs9_precision_guard(metadata: OpenMeteoIfs9Precisi
         "OM9_LAND_SEA_MASK_REQUIRED",
         "OM9_NEAREST_GRID_DISTANCE_HIGH",
         "OM9_ANCHOR_SIGMA_INVALID",
+        "OM9_SOURCE_GEOMETRY_PROOF_MISSING",
+        "OM9_SOURCE_RESPONSE_IDENTITY_MISSING",
+        "OM9_SOURCE_RESPONSE_BYTES_MISSING",
+        "OM9_SOURCE_RESPONSE_IDENTITY_MISMATCH",
+        "OM9_STATION_SOURCE_UNAVAILABLE",
+        "OM9_STATION_SOURCE_INVALID",
+        "OM9_STATION_SOURCE_IDENTITY_MISMATCH",
+        "OM9_TARGET_DEM_INVALID",
+        "OM9_SOURCE_GEOMETRY_PROOF_MISMATCH",
+        "OM9_SOURCE_GEOMETRY_METADATA_MISMATCH",
+        "OM9_SOURCE_GEOMETRY_PROOF_UNAVAILABLE",
     }
     reason_tuple = tuple(dict.fromkeys(reasons))
     if not reason_tuple:

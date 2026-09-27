@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+import hashlib
 
 import pytest
 
@@ -19,6 +20,15 @@ from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
 
 
 UTC = timezone.utc
+
+
+@pytest.fixture(autouse=True)
+def _legacy_precision_fixtures_are_not_source_certificates(monkeypatch, request) -> None:
+    # Existing examples isolate the original precision policy; source authenticity
+    # has its own tests below, with raw bytes and independent station/cell witnesses.
+    if not request.node.name.startswith("test_source_geometry_"):
+        import src.data.openmeteo_ecmwf_ifs9_precision_guard as guard
+        monkeypatch.setattr(guard, "geometry_proof_authenticity_reason", lambda *_args, **_kwargs: None)
 
 
 def _metadata(**overrides: object) -> OpenMeteoIfs9PrecisionMetadata:
@@ -146,3 +156,113 @@ def test_openmeteo_ifs9_precision_metadata_rejects_bad_local_day_window() -> Non
         )
     )
     assert dst_23h.status == "PASS"
+
+
+def test_source_geometry_rejects_legacy_fake_zero_and_missing_raw_bytes() -> None:
+    from src.data.openmeteo_ecmwf_ifs9_precision_guard import geometry_proof_authenticity_reason
+
+    legacy = _metadata(grid_elevation_m=0.0, station_elevation_m=0.0,
+                       nearest_grid_lat=31.1979, nearest_grid_lon=121.3363,
+                       nearest_grid_distance_km=0.0, land_sea_mask="land")
+    assert geometry_proof_authenticity_reason(legacy, raw_payload_bytes=b"{}") == "OM9_SOURCE_GEOMETRY_PROOF_MISSING"
+    fake = _metadata(source_geometry_proof={
+        "revision": "openmeteo_ifs9_o1280_source_cell_v1",
+        "raw_payload_sha256": hashlib.sha256(b"{}").hexdigest(),
+    })
+    assert geometry_proof_authenticity_reason(fake) == "OM9_SOURCE_RESPONSE_BYTES_MISSING"
+
+
+def test_source_geometry_binds_response_station_and_static_surface(monkeypatch) -> None:
+    import src.config as config
+    import src.data.openmeteo_ecmwf_ifs9_bucket_transport as transport
+    from src.data.openmeteo_ecmwf_ifs9_precision_guard import _haversine_km
+
+    raw = b'{"latitude":31.2,"longitude":121.3,"elevation":8.0}'
+    cell = {
+        "revision": "openmeteo_ifs9_o1280_source_cell_v1",
+        "static_hsurf_sha256": "static-v1", "selected_flat_index": 12,
+        "selected_grid_lat": 31.2, "selected_grid_lon": 121.3,
+        "raw_grid_elevation_m": 4.0, "effective_grid_elevation_m": 4.0,
+        "target_dem_elevation_m": 8.0, "cell_is_sea": False,
+        "cell_is_center": False, "nearby_sea": False,
+    }
+    monkeypatch.setattr(transport, "source_cell_geometry_proof", lambda **_kwargs: cell)
+    monkeypatch.setattr(config, "runtime_station_geometry_for_city", lambda _city: {
+        "validity_reason": None, "station_id": "ZSSS", "lat": 31.1979,
+        "lon": 121.3363, "elevation_m": 3.0, "registry_sha256": "registry-v1",
+    })
+    proof = {**cell, "raw_payload_sha256": hashlib.sha256(raw).hexdigest(),
+             "station_registry_sha256": "registry-v1"}
+    metadata = _metadata(
+        nearest_grid_distance_km=_haversine_km(31.1979, 121.3363, 31.2, 121.3),
+        city_class="standard", source_geometry_proof=proof,
+    )
+    assert evaluate_openmeteo_ecmwf_ifs9_precision_guard(metadata, raw_payload_bytes=raw).status == "PASS"
+    assert "OM9_SOURCE_RESPONSE_IDENTITY_MISMATCH" in evaluate_openmeteo_ecmwf_ifs9_precision_guard(
+        metadata, raw_payload_bytes=raw + b" "
+    ).reason_codes
+    assert "OM9_SOURCE_GEOMETRY_PROOF_MISMATCH" in evaluate_openmeteo_ecmwf_ifs9_precision_guard(
+        _metadata(**{**metadata.__dict__, "source_geometry_proof": {**proof, "static_hsurf_sha256": "wrong"}}),
+        raw_payload_bytes=raw,
+    ).reason_codes
+    assert "OM9_STATION_SOURCE_IDENTITY_MISMATCH" in evaluate_openmeteo_ecmwf_ifs9_precision_guard(
+        _metadata(**{**metadata.__dict__, "station_elevation_m": 0.0}),
+        raw_payload_bytes=raw,
+    ).reason_codes
+
+
+def test_source_geometry_producer_uses_actual_response_and_precise_station(monkeypatch) -> None:
+    import json
+    import scripts.download_replacement_forecast_current_targets as dl
+    import src.data.openmeteo_ecmwf_ifs9_bucket_transport as transport
+    from src.config import cities_by_name
+
+    requested = cities_by_name["Manila"]
+    response = {"latitude": 14.516696, "longitude": 121.05752,
+                "elevation": 13.0, "timezone": "Asia/Manila"}
+    raw = json.dumps(response, separators=(",", ":")).encode()
+    cell = {
+        "revision": "openmeteo_ifs9_o1280_source_cell_v1",
+        "static_hsurf_sha256": "fixture-static-hash", "selected_flat_index": 491,
+        "selected_grid_lat": response["latitude"], "selected_grid_lon": response["longitude"],
+        "raw_grid_elevation_m": -7.0, "effective_grid_elevation_m": 13.0,
+        "target_dem_elevation_m": 13.0, "cell_is_sea": False,
+        "cell_is_center": True, "nearby_sea": False,
+    }
+    monkeypatch.setattr(transport, "source_cell_geometry_proof", lambda **_kwargs: dict(cell))
+    precision = dl._precision_metadata("Manila", "2026-09-27", anchor_sigma_c=3.0,
+                                       raw_payload_bytes=raw)
+    assert precision["station_id"] == "RPLL"
+    assert precision["station_elevation_m"] == pytest.approx(22.9)
+    assert precision["grid_elevation_m"] == -7.0
+    assert precision["nearest_grid_lat"] == response["latitude"]
+    assert precision["nearest_grid_lon"] == response["longitude"]
+    assert precision["nearest_grid_distance_km"] > 0.0
+    assert precision["source_geometry_proof"]["target_dem_elevation_m"] == 13.0
+    assert precision["source_geometry_proof"]["raw_payload_sha256"] == hashlib.sha256(raw).hexdigest()
+
+    altered = {**response, "latitude": float(requested.lat) + 0.2}
+    with pytest.raises(ValueError, match="raw response grid differs"):
+        dl._precision_metadata("Manila", "2026-09-27", anchor_sigma_c=3.0,
+                               raw_payload_bytes=json.dumps(altered).encode())
+
+
+def test_source_geometry_static_rewrite_cannot_reuse_cached_proof(monkeypatch, tmp_path) -> None:
+    from types import SimpleNamespace
+    import src.data.openmeteo_ecmwf_ifs9_bucket_transport as transport
+
+    static = tmp_path / "hsurf.om"
+    static.write_bytes(b"first-field")
+    monkeypatch.setattr(transport, "select_terrain_optimised_point", lambda *_args, **_kwargs: SimpleNamespace(
+        flat_index=10, grid_latitude=14.5, grid_longitude_east=121.0,
+        model_elevation_m=12.0, is_sea=False, is_center=True,
+    ))
+    monkeypatch.setattr(transport, "read_model_elevation", lambda *_args, **_kwargs: 12.0)
+    monkeypatch.setattr(transport, "om_get_surrounding_gridpoints", lambda *_args: ((10,), (), ()))
+    kwargs = dict(latitude=14.5, longitude=121.0, target_elevation_m=13.0,
+                  local_cache=str(static))
+    first = transport.source_cell_geometry_proof(**kwargs)
+    static.write_bytes(b"later-field")
+    later = transport.source_cell_geometry_proof(**kwargs)
+    assert first["static_hsurf_sha256"] != later["static_hsurf_sha256"]
+    assert first["selected_flat_index"] == later["selected_flat_index"]

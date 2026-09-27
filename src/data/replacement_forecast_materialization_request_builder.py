@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -132,10 +133,33 @@ def _bins(rows: object, *, settlement_step_c: float = 1.0) -> list[dict[str, obj
     return out
 
 
-def _precision_ready(path: Path) -> tuple[Mapping[str, object], tuple[str, ...]]:
+def _precision_ready(
+    path: Path, *, raw_payload_path: Path,
+) -> tuple[Mapping[str, object], tuple[str, ...]]:
     metadata_payload = _json_file(path)
+    raw_bytes = raw_payload_path.read_bytes()
+    raw = json.loads(raw_bytes)
+    if not isinstance(raw, Mapping):
+        return metadata_payload, ("OM9_SOURCE_RESPONSE_INVALID",)
+    metadata = OpenMeteoIfs9PrecisionMetadata(**dict(metadata_payload))
+    try:
+        proof = metadata.source_geometry_proof
+        scope = raw.get("_zeus_current_target_scope")
+        lat, lon, dem = float(raw["latitude"]), float(raw["longitude"]), float(raw["elevation"])
+        if (
+            not isinstance(proof, Mapping)
+            or not all(math.isfinite(value) for value in (lat, lon, dem))
+            or abs(lat - metadata.nearest_grid_lat) > 1e-5
+            or abs(lon - metadata.nearest_grid_lon) > 1e-5
+            or abs(dem - float(proof["target_dem_elevation_m"])) > 1e-6
+            or str(raw["timezone"]) != metadata.timezone_name
+            or isinstance(scope, Mapping) and str(scope.get("city")) != metadata.city
+        ):
+            return metadata_payload, ("OM9_SOURCE_RESPONSE_GEOMETRY_MISMATCH",)
+    except (KeyError, TypeError, ValueError):
+        return metadata_payload, ("OM9_SOURCE_RESPONSE_GEOMETRY_UNAVAILABLE",)
     guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
-        OpenMeteoIfs9PrecisionMetadata(**dict(metadata_payload))
+        metadata, raw_payload_bytes=raw_bytes,
     )
     if not guard.passable_for_live_materialization:
         return metadata_payload, ("OM9_PRECISION_GUARD_NOT_LIVE_PASS_REQUEST_BUILD", *guard.reason_codes)
@@ -217,7 +241,10 @@ def build_replacement_forecast_materialization_request(
         )
 
     precision_metadata_json = _existing_path(payload, "precision_metadata_json", base_dir=base_path)
-    _, precision_reasons = _precision_ready(Path(precision_metadata_json))
+    raw_payload_path = Path(_existing_path(payload, "openmeteo_payload_json", base_dir=base_path))
+    _, precision_reasons = _precision_ready(
+        Path(precision_metadata_json), raw_payload_path=raw_payload_path,
+    )
     if precision_reasons:
         return ReplacementForecastMaterializationRequestBuildResult(
             status="BLOCKED",
@@ -243,7 +270,7 @@ def build_replacement_forecast_materialization_request(
         "anchor_sigma_c": float(payload.get("anchor_sigma_c", 3.00)),
         "settlement_step_c": float(payload.get("settlement_step_c", 1.0)),
         "bins": _bins(payload.get("bins"), settlement_step_c=float(payload.get("settlement_step_c", 1.0))),
-        "openmeteo_payload_json": _existing_path(payload, "openmeteo_payload_json", base_dir=base_path),
+        "openmeteo_payload_json": str(raw_payload_path),
         "precision_metadata_json": precision_metadata_json,
     }
     for optional_key in (
@@ -354,8 +381,21 @@ def build_materialize_request_dataclass(
         local_day_start_utc=target_window.start_utc,
         local_day_end_utc=target_window.end_utc,
     )
+    raw_bytes = Path(openmeteo_payload_path).read_bytes()
+    proof = precision_metadata.source_geometry_proof
+    response_lat = float(openmeteo_payload["latitude"])
+    response_lon = float(openmeteo_payload["longitude"])
+    response_dem = float(openmeteo_payload["elevation"])
+    if not isinstance(proof, Mapping) or (
+        not all(math.isfinite(value) for value in (response_lat, response_lon, response_dem))
+        or abs(response_lat - precision_metadata.nearest_grid_lat) > 1e-5
+        or abs(response_lon - precision_metadata.nearest_grid_lon) > 1e-5
+        or abs(response_dem - float(proof["target_dem_elevation_m"])) > 1e-6
+        or str(openmeteo_payload["timezone"]) != city_timezone
+    ):
+        raise ValueError("OM9_SOURCE_RESPONSE_GEOMETRY_MISMATCH")
     precision_guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
-        precision_metadata
+        precision_metadata, raw_payload_bytes=raw_bytes,
     )
 
     def _opt_float(key: str) -> float | None:
@@ -396,6 +436,7 @@ def build_materialize_request_dataclass(
         ),
         anchor_artifact_id=anchor_artifact_id,
         openmeteo_precision_guard=precision_guard,
+        openmeteo_raw_payload_bytes=raw_bytes,
         anchor_weight=float(request_json.get("anchor_weight", 0.80)),
         anchor_sigma_c=float(request_json.get("anchor_sigma_c", 3.00)),
         settlement_step_c=float(request_json.get("settlement_step_c", 1.0)),

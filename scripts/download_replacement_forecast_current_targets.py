@@ -15,6 +15,7 @@ import contextlib
 import fcntl
 import hashlib
 import json
+import math
 import os
 import sqlite3
 import sys
@@ -474,23 +475,72 @@ def _local_day_window(city_timezone: str, target_date: str) -> tuple[datetime, d
     return start.astimezone(UTC), end.astimezone(UTC)
 
 
-def _precision_metadata(city: str, target_date: str, *, anchor_sigma_c: float) -> dict[str, object]:
+def _precision_metadata(
+    city: str, target_date: str, *, anchor_sigma_c: float,
+    raw_payload_bytes: bytes,
+) -> dict[str, object]:
+    from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
+    from src.data.openmeteo_ecmwf_ifs9_precision_guard import _haversine_km
+    from src.config import runtime_station_geometry_for_city
+
+    payload = json.loads(raw_payload_bytes)
+    if not isinstance(payload, dict):
+        raise ValueError("OM9 raw response is not an object")
     city_config = cities_by_name[city]
+    if payload.get("timezone") != city_config.timezone:
+        raise ValueError("OM9 raw response timezone differs from city contract")
+    scope = payload.get("_zeus_current_target_scope")
+    if isinstance(scope, dict) and (
+        scope.get("city") != city or scope.get("target_date") != target_date
+    ):
+        raise ValueError("OM9 raw response target scope differs from precision metadata")
     start, end = _local_day_window(city_config.timezone, target_date)
-    station_id = city_config.wu_station or city
+    station = runtime_station_geometry_for_city(city_config)
+    if station["validity_reason"] is not None:
+        raise ValueError(f"OM9 precise station source: {station['validity_reason']}")
+    station_id = str(station["station_id"])
+    station_lat = float(station["lat"])
+    station_lon = float(station["lon"])
+    station_height = float(station["elevation_m"])
+    if not all(math.isfinite(value) for value in (station_lat, station_lon, station_height)):
+        raise ValueError("OM9 precise station has non-finite geometry")
+    if _haversine_km(
+        float(city_config.lat), float(city_config.lon), station_lat, station_lon,
+    ) > 5.0:
+        raise ValueError("OM9 precise station coordinate differs from city contract")
+    response_lat = float(payload["latitude"])
+    response_lon = float(payload["longitude"])
+    target_dem = float(payload["elevation"])
+    source_proof = source_cell_geometry_proof(
+        latitude=float(city_config.lat), longitude=float(city_config.lon),
+        target_elevation_m=target_dem,
+    )
+    proof_lon = float(source_proof["selected_grid_lon"])
+    if proof_lon > 180.0:
+        proof_lon -= 360.0
+    if (
+        not all(math.isfinite(value) for value in (response_lat, response_lon, target_dem))
+        or abs(response_lat - float(source_proof["selected_grid_lat"])) > 1e-5
+        or abs(response_lon - proof_lon) > 1e-5
+    ):
+        raise ValueError("OM9 raw response grid differs from same-source static surface")
+    source_proof["raw_payload_sha256"] = hashlib.sha256(raw_payload_bytes).hexdigest()
+    source_proof["station_registry_sha256"] = station["registry_sha256"]
     return {
         "city": city,
         "station_id": station_id,
         "city_lat": float(city_config.lat),
         "city_lon": float(city_config.lon),
-        "station_lat": float(city_config.lat),
-        "station_lon": float(city_config.lon),
+        "station_lat": station_lat,
+        "station_lon": station_lon,
         "requested_lat": float(city_config.lat),
         "requested_lon": float(city_config.lon),
         "requested_coordinate_precision_decimals": 4,
-        "nearest_grid_lat": float(city_config.lat),
-        "nearest_grid_lon": float(city_config.lon),
-        "nearest_grid_distance_km": 0.0,
+        "nearest_grid_lat": response_lat,
+        "nearest_grid_lon": response_lon,
+        "nearest_grid_distance_km": _haversine_km(
+            float(city_config.lat), float(city_config.lon), response_lat, response_lon,
+        ),
         "native_grid": "openmeteo_ecmwf_ifs_9km",
         "delivery_grid_resolution": "9km",
         "interpolation_method": "openmeteo_api_point_interpolation",
@@ -501,11 +551,12 @@ def _precision_metadata(city: str, target_date: str, *, anchor_sigma_c: float) -
         "target_local_date": target_date,
         "temperature_unit": "celsius",
         "anchor_sigma_c": float(anchor_sigma_c),
-        "grid_elevation_m": 0.0,
-        "station_elevation_m": 0.0,
-        "land_sea_mask": "land",
-        "city_class": "standard",
+        "grid_elevation_m": source_proof["raw_grid_elevation_m"],
+        "station_elevation_m": station_height,
+        "land_sea_mask": "sea" if source_proof["cell_is_sea"] else "land",
+        "city_class": "coastal" if source_proof["nearby_sea"] else "standard",
         "station_mapping_policy": "operator_verified_station",
+        "source_geometry_proof": source_proof,
     }
 
 
@@ -707,22 +758,22 @@ def _canonical_current_target_reuse(
             precision_payload = json.loads(precision_path.read_text(encoding="utf-8"))
             if not isinstance(precision_payload, dict):
                 continue
-            expected_precision = _precision_metadata(
-                city,
-                target_date,
-                anchor_sigma_c=anchor_sigma_c,
-            )
-            if precision_payload != expected_precision:
-                continue
-            precision_guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
-                OpenMeteoIfs9PrecisionMetadata(**precision_payload)
-            )
-            if not precision_guard.passable_for_live_materialization:
-                continue
             raw = payload_path.read_bytes()
             if len(raw) != int(row["byte_size"]):
                 continue
             if hashlib.sha256(raw).hexdigest() != str(row["sha256"]):
+                continue
+            expected_precision = _precision_metadata(
+                city, target_date, anchor_sigma_c=anchor_sigma_c,
+                raw_payload_bytes=raw,
+            )
+            if precision_payload != expected_precision:
+                continue
+            precision_guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
+                OpenMeteoIfs9PrecisionMetadata(**precision_payload),
+                raw_payload_bytes=raw,
+            )
+            if not precision_guard.passable_for_live_materialization:
                 continue
             payload = json.loads(raw)
             city_config = cities_by_name.get(city)
@@ -2090,14 +2141,28 @@ def download_current_target_raw_inputs(
                     metric=target.temperature_metric,
                 ),
             )
-            _write_json(
-                precision_path,
-                _precision_metadata(
-                    target.city,
-                    target.target_date,
+            try:
+                precision = _precision_metadata(
+                    target.city, target.target_date,
                     anchor_sigma_c=anchor_sigma_c,
-                ),
-            )
+                    raw_payload_bytes=payload_path.read_bytes(),
+                )
+                guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
+                    OpenMeteoIfs9PrecisionMetadata(**precision),
+                    raw_payload_bytes=payload_path.read_bytes(),
+                )
+                if not guard.passable_for_live_materialization:
+                    raise ValueError(";".join(guard.reason_codes))
+            except (OSError, KeyError, TypeError, ValueError, ImportError) as exc:
+                skipped_cities.append({
+                    "city": target.city,
+                    "target_date": target.target_date,
+                    "metric": target.temperature_metric,
+                    "reason": f"OM9_SOURCE_GEOMETRY_PROOF_UNAVAILABLE:{exc}",
+                })
+                mark_processed(target)
+                continue
+            _write_json(precision_path, precision)
             downloaded["openmeteo_payload_count"] = (
                 int(downloaded["openmeteo_payload_count"]) + 1
             )

@@ -98,6 +98,43 @@ def _anchor_payload(
     }
 
 
+@pytest.fixture(autouse=True)
+def _legacy_downloader_transport_fixtures(monkeypatch, request) -> None:
+    # Historical currency/coverage examples use transport stubs without any
+    # provider response geometry. Keep their clock assertions isolated; the
+    # source-proof tests below exercise the real producer and guard.
+    if request.node.name.startswith("test_source_geometry_"):
+        return
+    import scripts.download_replacement_forecast_current_targets as dl
+    import src.data.openmeteo_ecmwf_ifs9_precision_guard as guard
+    from src.config import cities_by_name
+
+    def old_metadata(city, target_date, *, anchor_sigma_c, raw_payload_bytes=None):
+        config = cities_by_name[city]
+        start, end = dl._local_day_window(config.timezone, target_date)
+        return {
+            "city": city, "station_id": config.wu_station or city,
+            "city_lat": float(config.lat), "city_lon": float(config.lon),
+            "station_lat": float(config.lat), "station_lon": float(config.lon),
+            "requested_lat": float(config.lat), "requested_lon": float(config.lon),
+            "requested_coordinate_precision_decimals": 4,
+            "nearest_grid_lat": float(config.lat), "nearest_grid_lon": float(config.lon),
+            "nearest_grid_distance_km": 0.0,
+            "native_grid": "openmeteo_ecmwf_ifs_9km", "delivery_grid_resolution": "9km",
+            "interpolation_method": "openmeteo_api_point_interpolation",
+            "endpoint_mode": "hourly_zeus_aggregated",
+            "local_day_start_utc": start.isoformat(), "local_day_end_utc": end.isoformat(),
+            "timezone_name": config.timezone, "target_local_date": target_date,
+            "temperature_unit": "celsius", "anchor_sigma_c": float(anchor_sigma_c),
+            "grid_elevation_m": 0.0, "station_elevation_m": 0.0,
+            "land_sea_mask": "land", "city_class": "standard",
+            "station_mapping_policy": "operator_verified_station",
+        }
+
+    monkeypatch.setattr(dl, "_precision_metadata", old_metadata)
+    monkeypatch.setattr(guard, "geometry_proof_authenticity_reason", lambda *_args, **_kwargs: None)
+
+
 def test_current_target_download_prioritizes_held_families_before_alphabetic() -> None:
     import scripts.download_replacement_forecast_current_targets as dl
 

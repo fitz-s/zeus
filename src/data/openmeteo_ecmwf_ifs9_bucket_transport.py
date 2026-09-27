@@ -857,6 +857,68 @@ def read_model_elevation(flat_index: int, *, local_cache: str = HSURF_LOCAL_CACH
     return float(arr[0])
 
 
+@lru_cache(maxsize=8)
+def _static_surface_sha256(path: str, identity: tuple[int, int, int, int, int]) -> str:
+    """Bind a geometry certificate to the exact local O1280 surface artifact."""
+    import hashlib
+    from pathlib import Path
+
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    # A replaced file at the same path must not be paired with a cached old
+    # OmFileReader. The key includes device/inode/size/mtime/ctime, so a
+    # replacement or same-size rewrite revalidates rather than using old data.
+    _hsurf_reader.cache_clear()
+    return digest.hexdigest()
+
+
+def source_cell_geometry_proof(
+    *, latitude: float, longitude: float, target_elevation_m: float,
+    local_cache: str = HSURF_LOCAL_CACHE,
+) -> dict[str, object]:
+    """Prove the selected API land cell against the existing static surface.
+
+    Source coordinates and target DEM elevation must be supplied by the actual
+    provider response. This does not manufacture a station height or an LSM.
+    """
+    from pathlib import Path
+
+    surface = Path(local_cache).resolve(strict=True)
+    stat = surface.stat()
+    if not all(math.isfinite(float(value)) for value in (latitude, longitude, target_elevation_m)):
+        raise ValueError("non-finite Open-Meteo geometry")
+    identity = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    static_sha = _static_surface_sha256(str(surface), identity)
+    cell = select_terrain_optimised_point(
+        latitude, longitude, target_elevation_m, local_cache=str(surface),
+    )
+    raw_elevation = read_model_elevation(cell.flat_index, local_cache=str(surface))
+    if not math.isfinite(raw_elevation):
+        raise ValueError("non-finite O1280 surface elevation")
+    nearby, _, _ = om_get_surrounding_gridpoints(latitude, longitude)
+    nearby_elevations = [read_model_elevation(index, local_cache=str(surface)) for index in nearby]
+    if not all(math.isfinite(value) for value in nearby_elevations):
+        raise ValueError("non-finite O1280 neighbor surface elevation")
+    after = surface.stat()
+    if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) != identity:
+        raise ValueError("O1280 static surface changed during geometry proof")
+    return {
+        "revision": "openmeteo_ifs9_o1280_source_cell_v1",
+        "static_hsurf_sha256": static_sha,
+        "selected_flat_index": cell.flat_index,
+        "selected_grid_lat": cell.grid_latitude,
+        "selected_grid_lon": cell.grid_longitude_east,
+        "raw_grid_elevation_m": raw_elevation,
+        "effective_grid_elevation_m": cell.model_elevation_m,
+        "target_dem_elevation_m": target_elevation_m,
+        "cell_is_sea": cell.is_sea,
+        "cell_is_center": cell.is_center,
+        "nearby_sea": any(value <= SEA_SENTINEL_M for value in nearby_elevations),
+    }
+
+
 def download_hsurf_static_field(*, local_cache: str = HSURF_LOCAL_CACHE) -> str:
     """One-time copy of HSURF.om to ``state/static/`` (small, 2.48 MB). Returns the path.
 
