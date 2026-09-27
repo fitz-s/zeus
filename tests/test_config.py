@@ -542,6 +542,49 @@ def test_hong_kong_station_geometry_has_real_registry_elevation() -> None:
     assert len(row["registry_sha256"]) == 64
 
 
+def test_coordinate_manifest_identity_excludes_station_audit_only_edits(monkeypatch) -> None:
+    import src.config as config
+    from src.data.replacement_forecast_source_run_identity import (
+        expected_replacement_dependency_identity_by_role,
+    )
+
+    original = config.runtime_station_geometry_for_city
+    baseline = config.runtime_coordinate_manifest_json()
+    hong_kong = next(row for row in json.loads(baseline)["cities"] if row["city"] == "Hong Kong")
+    assert set(hong_kong["station_geometry"]) == {
+        "station_id", "lat", "lon", "elevation_m", "station_surface", "validity_reason",
+    }
+    expected = {
+        metric: expected_replacement_dependency_identity_by_role(metric)["baseline_b0"].data_version
+        for metric in ("high", "low")
+    }
+
+    with monkeypatch.context() as patcher:
+        def changed_audit(city):
+            # Editing one unrelated row changes the audit hash of the whole
+            # registry, including every other station's helper result.
+            station = {**original(city), "registry_sha256": "f" * 64}
+            if city.name == "Manila":
+                return {**station, "source": "reworded audit citation"}
+            return station
+        patcher.setattr(config, "runtime_station_geometry_for_city", changed_audit)
+        assert config.runtime_coordinate_manifest_json() == baseline
+        for metric in ("high", "low"):
+            assert expected_replacement_dependency_identity_by_role(metric)["baseline_b0"].data_version == expected[metric]
+
+    for physical in ("lat", "elevation_m"):
+        with monkeypatch.context() as patcher:
+            def changed_physics(city, *, field=physical):
+                station = original(city)
+                if city.name == "Hong Kong":
+                    return {**station, field: float(station[field]) + .001}
+                return station
+            patcher.setattr(config, "runtime_station_geometry_for_city", changed_physics)
+            assert config.runtime_coordinate_manifest_json() != baseline
+            for metric in ("high", "low"):
+                assert expected_replacement_dependency_identity_by_role(metric)["baseline_b0"].data_version != expected[metric]
+
+
 def test_station_geometry_wrong_station_degrades_only_that_city(tmp_path) -> None:
     import json
     from src.config import runtime_cities_by_name, runtime_station_geometry_for_city

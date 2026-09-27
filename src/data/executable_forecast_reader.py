@@ -363,8 +363,12 @@ def grid_surface_evidence_reason(row: Mapping[str, Any]) -> str | None:
         or str(geometry.get("station_id") or "") != str(contract.get("settlement_station_id") or "")
         or str(geometry.get("station_id") or "") != str(expected_station.get("station_id") or "")
         or expected_station.get("validity_reason") is not None
-        or not isinstance(geometry.get("registry_sha256"), str)
-        or len(geometry["registry_sha256"]) != 64
+        or ("registry_sha256" in geometry and (
+            not isinstance(geometry["registry_sha256"], str)
+            or len(geometry["registry_sha256"]) != 64
+            or any(char not in "0123456789abcdef" for char in geometry["registry_sha256"])
+        ))
+        or ("source" in geometry and not isinstance(geometry["source"], str))
     ):
         return "EXECUTABLE_FORECAST_GRID_SURFACE_STATION_UNVERIFIED"
     try:

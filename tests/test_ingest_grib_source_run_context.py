@@ -192,6 +192,21 @@ def _assert_current_station_geometry_binding(row: sqlite3.Row, monkeypatch: pyte
     provenance = json.loads(row["provenance_json"])
     provenance["grid_surface_evidence"]["station_geometry"]["registry_sha256"] = "f" * 64
     assert grid_surface_evidence_reason({**stored, "provenance_json": json.dumps(provenance)}) is None
+    for audit_field in ("registry_sha256", "source"):
+        audit_optional = json.loads(row["provenance_json"])
+        audit_optional["grid_surface_evidence"]["station_geometry"].pop(audit_field)
+        assert grid_surface_evidence_reason({**stored, "provenance_json": json.dumps(audit_optional)}) is None
+    for malformed in ("not-a-sha", "g" * 64, None):
+        audit_invalid = json.loads(row["provenance_json"])
+        audit_invalid["grid_surface_evidence"]["station_geometry"]["registry_sha256"] = malformed
+        assert grid_surface_evidence_reason({**stored, "provenance_json": json.dumps(audit_invalid)}) == (
+            "EXECUTABLE_FORECAST_GRID_SURFACE_STATION_UNVERIFIED"
+        )
+    audit_invalid = json.loads(row["provenance_json"])
+    audit_invalid["grid_surface_evidence"]["station_geometry"]["source"] = 42
+    assert grid_surface_evidence_reason({**stored, "provenance_json": json.dumps(audit_invalid)}) == (
+        "EXECUTABLE_FORECAST_GRID_SURFACE_STATION_UNVERIFIED"
+    )
 
     import src.config as config
     actual = config.runtime_station_geometry_for_city

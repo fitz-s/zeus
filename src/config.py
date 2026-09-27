@@ -589,16 +589,23 @@ def runtime_station_geometry_for_city(
 def runtime_coordinate_manifest_json() -> str:
     """Freeze one station-coordinate, calendar and unit snapshot for source identity."""
     rows = []
+    station_identity_keys = (
+        "station_id", "lat", "lon", "elevation_m", "station_surface", "validity_reason",
+    )
     for name, city in sorted(runtime_cities_by_name().items()):
         lat, lon = float(city.lat), float(city.lon)
         if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
             raise ValueError(f"invalid extraction coordinates: {name}")
         if city.settlement_unit not in {"C", "F"} or not city.timezone:
             raise ValueError(f"invalid extraction calendar/unit: {name}")
+        station = runtime_station_geometry_for_city(city)
         rows.append({
             "city": name, "lat": lat, "lon": lon,
             "timezone": city.timezone, "unit": city.settlement_unit,
-            "station_geometry": runtime_station_geometry_for_city(city),
+            # Whole-registry SHA and source wording are audit metadata, not
+            # this city's physical extraction identity. A note on another
+            # station must not rotate every city's ENS data version.
+            "station_geometry": {key: station[key] for key in station_identity_keys},
         })
     if not rows:
         raise ValueError("runtime extraction city universe is empty")
