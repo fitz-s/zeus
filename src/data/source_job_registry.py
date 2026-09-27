@@ -154,7 +154,7 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
     SourceJobSpec("ingest_day0_fmi_temperature", "ingest_main", "live", "default", True,
                   source_id="fmi_airport_temperature",
                   callable_ref="_day0_fmi_temperature_tick", family="observation",
-                  misfire_grace_time=60,
+                  misfire_grace_time=120,
                   notes="bounded EFHK current-temperature poll; changed physical prints "
                         "wake the existing fusion revision and materialization queue"),
     SourceJobSpec("ingest_day0_metar_commit_retry", "ingest_main", "live", "default", True,

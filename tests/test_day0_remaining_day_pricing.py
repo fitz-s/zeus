@@ -10000,6 +10000,7 @@ class TestRemainingDayMembers:
                     "2026-07-21T20:00:00+00:00"
                 ),
                 "_edli_day0_current_temperature_source": "wu_icao_history",
+                "_edli_day0_conditional_high_shape_identity": "conditional-shape-1",
                 "_edli_day0_trajectory_conditioning_basis": (
                     "current_state_exponential_residual_decay_v1"
                 ),
@@ -10030,6 +10031,8 @@ class TestRemainingDayMembers:
             "2026-07-21T20:00:00+00:00"
         )
         assert authority["current_temperature_source"] == "wu_icao_history"
+        assert authority["conditional_high_shape_identity"] == "conditional-shape-1"
+        json.dumps(authority, allow_nan=False)
         assert authority["trajectory_conditioning_basis"] == (
             "current_state_exponential_residual_decay_v1"
         )

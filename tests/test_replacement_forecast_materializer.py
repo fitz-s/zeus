@@ -2529,6 +2529,8 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
     from src.data.day0_hourly_vectors import (
         Day0CurrentTemperatureState,
         Day0HourlyVector,
+        day0_conditional_high_shape,
+        day0_source_clock_ensemble_member_models,
     )
     from src.signal.ensemble_signal import sigma_instrument_for_city
 
@@ -2623,6 +2625,22 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
         day0_observed_extreme_unit="C",
     )
     times = tuple(f"{target.isoformat()}T{hour:02d}:00" for hour in range(24))
+    run = datetime(2026, 6, 7, 6, tzinfo=UTC)
+    available = datetime(2026, 6, 7, 7, tzinfo=UTC)
+    captured = datetime(2026, 6, 7, 17, 30, tzinfo=UTC)
+
+    def vector_meta(model: str, *, ensemble: bool = False) -> str:
+        api_model = "ecmwf_ifs025_ensemble" if ensemble else model
+        return json.dumps({
+            "provider_source_cycle_time_utc": run.isoformat(),
+            "provider_source_available_at_utc": available.isoformat(),
+            "fetch_started_at": (captured + timedelta(seconds=1)).isoformat(),
+            "fetch_finished_at": (captured + timedelta(seconds=2)).isoformat(),
+            "request_hash": "sha256:chicago-ens" if ensemble else f"sha256:chicago-{model}",
+            "provider_run_id": f"openmeteo:{api_model}:{run.isoformat()}",
+            "request_params_json": json.dumps({"metadata_model": api_model}),
+        })
+
     vectors = [
         Day0HourlyVector(
             model=model,
@@ -2635,8 +2653,23 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
                 celsius(native_boundary_f) if hour <= 13 else value_c
                 for hour in range(24)
             ),
+            source_run_meta_json=vector_meta(model),
         )
         for model, value_c in zip(("ecmwf_ifs", "icon_global"), member_values_c)
+    ]
+    ensemble = [
+        Day0HourlyVector(
+            model=model, city="Chicago", target_date=target.isoformat(),
+            timezone_name="America/Chicago", captured_at=captured.isoformat(),
+            times=times,
+            temps_c=tuple(
+                celsius(native_boundary_f) if hour <= 13
+                else celsius(native_boundary_f + (index - 25) * 0.02)
+                for hour in range(24)
+            ),
+            source_run_meta_json=vector_meta(model, ensemble=True),
+        )
+        for index, model in enumerate(day0_source_clock_ensemble_member_models())
     ]
     likelihood_identity = {
         "semantics": "same_station_preliminary_report_survival_likelihood_jeffreys_prior_only_v2",
@@ -2667,7 +2700,9 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
     )
     monkeypatch.setattr(
         "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
-        lambda **_kwargs: vectors,
+        lambda **kwargs: (
+            ensemble if len(kwargs.get("expected_models") or ()) == 51 else vectors
+        ),
     )
     monkeypatch.setattr(
         "src.data.day0_hourly_vectors.read_day0_current_temperature_state",
@@ -2694,26 +2729,18 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
     assert provenance["day0_remaining_carrier_future_extremes_c"] == pytest.approx(
         member_values_c
     )
-    native_member_sigma_f = math.sqrt(
-        sum(
-            (value - sum(native_members_f) / len(native_members_f)) ** 2
-            for value in native_members_f
-        )
-        / len(native_members_f)
+    shape = day0_conditional_high_shape(
+        conn=conn, city=city, target_date=target.isoformat(),
+        decision_time=computed_at, current_state=current_state,
+        provider_vectors=vectors,
     )
+    assert shape.provider_centers_c == pytest.approx(member_values_c)
+    assert len(shape.ensemble_centers_c) == 51
     instrument_sigma = sigma_instrument_for_city(city)
     assert instrument_sigma.unit == "F"
-    # The current-temperature path retains source-clock variance after removing
-    # both the explicit member-center spread and the carrier's native
-    # instrument noise. `_install_live_fusion` supplies 2.0°C total σ.
-    native_path_sigma_f = math.sqrt(
-        max(
-            (2.0 * 9.0 / 5.0) ** 2
-            - native_member_sigma_f**2
-            - instrument_sigma.value**2,
-            0.0,
-        )
-    )
+    # Only same-observation conditional ENS residual enters the member noise;
+    # the provider spread already appears in the two carrier scenarios.
+    native_path_sigma_f = shape.extra_sigma_c * 9.0 / 5.0
     native_sigma_f = math.hypot(native_path_sigma_f, instrument_sigma.value)
     def normal_cdf(value: float, mean: float) -> float:
         return 0.5 * (1.0 + math.erf((value - mean) / (native_sigma_f * math.sqrt(2.0))))
@@ -2742,6 +2769,7 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
     assert provenance["day0_remaining_carrier_path_error_sigma_c"] == pytest.approx(
         native_path_sigma_f * 5.0 / 9.0
     )
+    assert provenance["day0_conditional_high_shape_identity"] == shape.identity
     assert provenance["q_shape"] == "day0_remaining_shared_carrier_v2"
     assert provenance["day0_remaining_carrier_operator"] == (
         "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2"

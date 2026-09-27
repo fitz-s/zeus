@@ -36502,6 +36502,9 @@ def _live_yes_probabilities(
                     "current_temperature_source": payload.get(
                         "_edli_day0_current_temperature_source"
                     ),
+                    "conditional_high_shape_identity": payload.get(
+                        "_edli_day0_conditional_high_shape_identity"
+                    ),
                     "trajectory_conditioning_basis": payload.get(
                         "_edli_day0_trajectory_conditioning_basis"
                     ),
@@ -39236,6 +39239,10 @@ def _global_day0_probability_authority_payload(
             (
                 "current_temperature_source",
                 "_edli_day0_current_temperature_source",
+            ),
+            (
+                "conditional_high_shape_identity",
+                "_edli_day0_conditional_high_shape_identity",
             ),
             (
                 "trajectory_conditioning_basis",
@@ -43125,6 +43132,9 @@ def _prepare_current_global_probability_family(
             ),
             "current_temperature_source": payload.get(
                 "_edli_day0_current_temperature_source"
+            ),
+            "conditional_high_shape_identity": payload.get(
+                "_edli_day0_conditional_high_shape_identity"
             ),
             "trajectory_conditioning_basis": payload.get(
                 "_edli_day0_trajectory_conditioning_basis"
