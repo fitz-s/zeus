@@ -529,3 +529,32 @@ def test_validate_cities_config_no_warnings():
     from src.config import validate_cities_config
     warnings = validate_cities_config()
     assert warnings == [], f"City config validation warnings: {warnings}"
+
+
+def test_hong_kong_station_geometry_has_real_registry_elevation() -> None:
+    from src.config import runtime_cities_by_name, runtime_station_geometry_for_city
+
+    row = runtime_station_geometry_for_city(runtime_cities_by_name()["Hong Kong"])
+    assert row["validity_reason"] is None
+    assert row["station_id"] == "HKO_HQ"
+    assert row["elevation_m"] == 32.0
+    assert row["station_surface"] == "land"
+    assert len(row["registry_sha256"]) == 64
+
+
+def test_station_geometry_wrong_station_degrades_only_that_city(tmp_path) -> None:
+    import json
+    from src.config import runtime_cities_by_name, runtime_station_geometry_for_city
+
+    registry = tmp_path / "stations.json"
+    registry.write_text(json.dumps({
+        "Hong Kong": {
+            "station": "LEMD", "lat": "22.3022", "lon": "114.1742",
+            "elevation_m": 32, "source": "untrusted",
+        }
+    }))
+    row = runtime_station_geometry_for_city(
+        runtime_cities_by_name()["Hong Kong"], registry_path=registry,
+    )
+    assert row["validity_reason"] == "STATION_REGISTRY_ID_MISMATCH"
+    assert row["station_surface"] is None

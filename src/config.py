@@ -9,6 +9,7 @@ Missing keys raise KeyError immediately at startup, not at trade time.
 # Authority basis: Phase 10 DT-close B001 — docs/operations/task_2026-04-16_dual_track_metric_spine/phase10_evidence/SCAFFOLD_B001_config_contract.md
 
 import json
+import hashlib
 import logging
 import math
 import os
@@ -526,6 +527,65 @@ def runtime_cities_by_name() -> dict[str, City]:
     return dict(cities_by_name)
 
 
+def runtime_station_geometry_for_city(
+    city: City, *, registry_path: Path | None = None,
+) -> dict[str, object]:
+    """Bind a settlement station to recorded ground geometry, never synthetic grid data.
+
+    Invalid registry rows degrade only this city. The existing 5 km station
+    request-coordinate tolerance is an identity check, not a fitted forecast
+    cutoff; it does not attest the model grid's land mask or elevation.
+    """
+    path = registry_path or CONFIG_DIR / "station_precise_coords.json"
+    source_type = str(city.settlement_source_type or "").strip().lower()
+    expected_id = (
+        "HKO_HQ" if source_type == "hko"
+        else str(city.wu_station or "").strip().upper()
+        if source_type in {"wu_icao", "noaa"} else ""
+    )
+    proof: dict[str, object] = {
+        "station_id": expected_id or None, "lat": None, "lon": None,
+        "elevation_m": None, "station_surface": None,
+        "registry_sha256": None, "source": None,
+        "validity_reason": "STATION_SOURCE_IDENTITY_UNAVAILABLE",
+    }
+    if not expected_id:
+        return proof
+    try:
+        raw = path.read_bytes()
+        rows = json.loads(raw)
+        entry = rows[city.name]
+        proof["registry_sha256"] = hashlib.sha256(raw).hexdigest()
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        proof["validity_reason"] = "STATION_REGISTRY_ROW_UNAVAILABLE"
+        return proof
+    if not isinstance(entry, dict) or str(entry.get("station") or "").strip().upper() != expected_id:
+        proof["validity_reason"] = "STATION_REGISTRY_ID_MISMATCH"
+        return proof
+    try:
+        lat, lon, elevation = (
+            float(entry["lat"]), float(entry["lon"]), float(entry["elevation_m"])
+        )
+    except (KeyError, TypeError, ValueError):
+        proof["validity_reason"] = "STATION_REGISTRY_GEOMETRY_INVALID"
+        return proof
+    if not (math.isfinite(lat) and math.isfinite(lon) and math.isfinite(elevation)) or not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        proof["validity_reason"] = "STATION_REGISTRY_GEOMETRY_INVALID"
+        return proof
+    p1, p2 = math.radians(lat), math.radians(float(city.lat))
+    d_lon = math.radians((lon - float(city.lon) + 180) % 360 - 180)
+    a = math.sin((p1 - p2) / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(d_lon / 2) ** 2
+    if 2 * 6371.0088 * math.asin(min(1.0, math.sqrt(a))) > 5.0:
+        proof["validity_reason"] = "STATION_REGISTRY_REQUEST_COORDINATE_MISMATCH"
+        return proof
+    proof.update(
+        lat=lat, lon=lon, elevation_m=elevation,
+        station_surface="land", source=str(entry.get("source") or ""),
+        validity_reason=None,
+    )
+    return proof
+
+
 def runtime_coordinate_manifest_json() -> str:
     """Freeze one station-coordinate, calendar and unit snapshot for source identity."""
     rows = []
@@ -538,6 +598,7 @@ def runtime_coordinate_manifest_json() -> str:
         rows.append({
             "city": name, "lat": lat, "lon": lon,
             "timezone": city.timezone, "unit": city.settlement_unit,
+            "station_geometry": runtime_station_geometry_for_city(city),
         })
     if not rows:
         raise ValueError("runtime extraction city universe is empty")
