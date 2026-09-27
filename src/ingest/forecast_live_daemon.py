@@ -640,6 +640,184 @@ def _retry_identity_for_failed_prior_run(
     return None
 
 
+def _held_revision_migration_identity(
+    conn,
+    *,
+    track: str,
+    now_utc: datetime,
+    deadline_monotonic: float,
+) -> tuple[dict[str, object], dict[str, object]] | None:
+    """Re-fetch one still-actionable held scope whose old cycle lacks current proof.
+
+    Old coverage identifies an exact complete cycle, never authorizes a v3
+    snapshot. The current release calendar and native local-day window must
+    independently authorize its new collection.
+    """
+    from src.config import runtime_cities_by_name
+    from src.contracts.ensemble_snapshot_provenance import (
+        ECMWF_OPENDATA_HIGH_DATA_VERSION_V2,
+        ECMWF_OPENDATA_LOW_DATA_VERSION_V2,
+        opendata_source_run_revision_suffix,
+        split_coordinate_bound_data_version,
+    )
+    from src.data.ecmwf_open_data import STEP_HOURS
+    from src.data.forecast_fetch_plan import metric_for_track
+    from src.data.forecast_target_contract import (
+        build_forecast_target_scope,
+        evaluate_horizon_coverage,
+    )
+    from src.data.release_calendar import FetchDecision
+    from src.data.replacement_forecast_seed_discovery import held_position_family_priorities
+
+    if time.monotonic() >= deadline_monotonic:
+        return None
+    try:
+        held = held_position_family_priorities(deadline_monotonic=deadline_monotonic)
+    except TimeoutError:
+        return None
+    metric = metric_for_track(track)
+    old_base = (
+        ECMWF_OPENDATA_HIGH_DATA_VERSION_V2
+        if metric == "high" else ECMWF_OPENDATA_LOW_DATA_VERSION_V2
+    )
+    city_config = runtime_cities_by_name()
+    for (city_name, target_date, held_metric), priority in sorted(
+        held.items(), key=lambda item: (item[1], item[0][1], item[0][0])
+    ):
+        if held_metric != metric or city_name not in city_config:
+            continue
+        if time.monotonic() >= deadline_monotonic:
+            return None
+        city = city_config[city_name]
+        city_id = city.name.upper().replace(" ", "_")
+        try:
+            rows = conn.execute(
+                """
+                SELECT coverage.source_run_id, coverage.data_version,
+                       coverage.city_id, coverage.city_timezone,
+                       coverage.release_calendar_key, source.release_calendar_key AS source_release_key,
+                       coverage.target_window_start_utc, coverage.target_window_end_utc,
+                       source.source_cycle_time
+                  FROM source_run_coverage coverage INDEXED BY idx_source_run_coverage_scope
+                  JOIN source_run source ON source.source_run_id = coverage.source_run_id
+                 WHERE coverage.city_id = ? AND coverage.city_timezone = ?
+                   AND coverage.city = ? AND coverage.target_local_date = ?
+                   AND coverage.temperature_metric = ? AND coverage.track = ?
+                   AND coverage.source_id = 'ecmwf_open_data'
+                   AND coverage.source_transport = 'ensemble_snapshots_db_reader'
+                   AND coverage.completeness_status = 'COMPLETE'
+                   AND coverage.readiness_status = 'LIVE_ELIGIBLE'
+                   AND coverage.expires_at IS NOT NULL
+                   AND julianday(coverage.expires_at) > julianday(?)
+                   AND source.source_id = coverage.source_id
+                   AND source.track = coverage.track
+                   AND source.status IN ('SUCCESS', 'PARTIAL')
+                   AND source.completeness_status IN ('COMPLETE', 'PARTIAL')
+                 ORDER BY source.source_cycle_time DESC LIMIT 8
+                """,
+                (city_id, city.timezone, city_name, target_date, metric, track,
+                 now_utc.isoformat()),
+            ).fetchall()
+        except Exception as exc:  # noqa: BLE001 - missing authority is not a cycle
+            logger.warning("forecast-live held revision coverage unavailable: %s", exc)
+            return None
+        for row in rows:
+            old_version = split_coordinate_bound_data_version(str(row["data_version"]))
+            if old_version is None or old_version[0] != old_base:
+                continue
+            if str(row["city_timezone"]) != city.timezone:
+                continue
+            cycle = _parse_utc_timestamp(row["source_cycle_time"])
+            if cycle is None:
+                continue
+            old_run_id = (
+                f"ecmwf_open_data:{track}:{cycle.date().isoformat()}T{cycle.hour:02d}Z:"
+                f"coordsha:{old_version[1]}"
+                f"{opendata_source_run_revision_suffix(str(row['data_version']))}"
+            )
+            if row["source_run_id"] != old_run_id:
+                continue
+            identity = _forecast_work_identity_for_cycle(
+                track, cycle_time=cycle, now_utc=now_utc
+            )
+            if (
+                identity["decision"] is not FetchDecision.FETCH_ALLOWED
+                or row["release_calendar_key"] != identity["release_calendar_key"]
+                or row["source_release_key"] != identity["release_calendar_key"]
+            ):
+                continue
+            try:
+                scope = build_forecast_target_scope(
+                    city_id=city_id, city_name=city_name,
+                    city_timezone=city.timezone,
+                    target_local_date=datetime.fromisoformat(target_date).date(),
+                    temperature_metric=metric, source_cycle_time=cycle,
+                    data_version=str(identity["data_version"]),
+                )
+            except (TypeError, ValueError):
+                continue
+            if (
+                cycle > scope.target_window_start_utc
+                or now_utc >= scope.target_window_end_utc
+                or not scope.required_step_hours
+                or evaluate_horizon_coverage(
+                    required_steps=scope.required_step_hours,
+                    live_max_step_hours=max(STEP_HOURS),
+                ).status != "LIVE_ELIGIBLE"
+                or _parse_utc_timestamp(row["target_window_start_utc"]) != scope.target_window_start_utc
+                or _parse_utc_timestamp(row["target_window_end_utc"]) != scope.target_window_end_utc
+            ):
+                continue
+            expected_run_id = _expected_source_run_id(identity)
+            try:
+                current = conn.execute(
+                    """
+                    SELECT job.status, job.finished_at, job.recorded_at,
+                           job.rows_written, job.source_run_id,
+                           EXISTS (
+                               SELECT 1 FROM source_run_coverage proof
+                               JOIN source_run new_run ON new_run.source_run_id = proof.source_run_id
+                               WHERE proof.source_run_id = ? AND proof.source_id = ?
+                                 AND proof.track = ? AND proof.city = ?
+                                 AND proof.target_local_date = ?
+                                 AND proof.temperature_metric = ? AND proof.data_version = ?
+                                 AND proof.completeness_status = 'COMPLETE'
+                                 AND proof.readiness_status = 'LIVE_ELIGIBLE'
+                                 AND proof.expires_at IS NOT NULL
+                                 AND julianday(proof.expires_at) > julianday(?)
+                                 AND new_run.status IN ('SUCCESS', 'PARTIAL')
+                                 AND new_run.completeness_status IN ('COMPLETE', 'PARTIAL')
+                           ) AS scope_complete
+                      FROM job_run job WHERE job.job_run_id = ?
+                    """,
+                    (expected_run_id, str(identity["source_id"]), track, city_name,
+                     target_date, metric, str(identity["data_version"]),
+                     now_utc.isoformat(), _job_run_id(identity)),
+                ).fetchone()
+            except Exception as exc:  # noqa: BLE001 - no proof, no migration
+                logger.warning("forecast-live held revision journal unavailable: %s", exc)
+                return None
+            if current is not None:
+                if (
+                    str(current["status"]).upper() in {"SUCCESS", "PARTIAL"}
+                    and current["source_run_id"] == expected_run_id
+                    and int(current["rows_written"] or 0) > 0
+                    and bool(current["scope_complete"])
+                ):
+                    continue
+                last_attempt = _parse_utc_timestamp(current["finished_at"]) or _parse_utc_timestamp(current["recorded_at"])
+                if last_attempt is not None and now_utc - last_attempt < timedelta(
+                    seconds=FORECAST_LIVE_SAFE_CYCLE_POLL_SECONDS
+                ):
+                    continue
+            return identity, {
+                "city": city_name, "target_date": target_date,
+                "temperature_metric": metric, "old_source_run_id": row["source_run_id"],
+                "expected_source_run_id": expected_run_id,
+            }
+    return None
+
+
 def _job_run_id(identity: dict[str, object]) -> str:
     from src.contracts.ensemble_snapshot_provenance import opendata_source_run_revision_suffix
     scheduled_for = identity["scheduled_for"]
@@ -1051,9 +1229,33 @@ def _run_opendata_track_if_due(
         + max(0, FORECAST_LIVE_SAFE_CYCLE_POLL_SECONDS - FORECAST_LIVE_SAFE_CYCLE_HANDOFF_SECONDS)
     )
     identity = _forecast_work_identity(track, now_utc=now)
+    source_paused = _source_paused or _is_source_paused
+
+    def migrate_held_scope() -> dict | None:
+        if time.monotonic() >= poll_deadline_monotonic:
+            return None
+        migration = _held_revision_migration_identity(
+            _job_conn, track=track, now_utc=now,
+            deadline_monotonic=poll_deadline_monotonic,
+        )
+        if migration is None or time.monotonic() >= poll_deadline_monotonic:
+            return None
+        migration_identity, migration_debt = migration
+        result = run_opendata_track(
+            track, _locks_dir_override=_locks_dir_override,
+            _collector=_collector, _source_paused=_source_paused,
+            _job_conn=_job_conn, _now_utc=now, _identity=migration_identity,
+            _cycle_deadline_monotonic=poll_deadline_monotonic,
+        )
+        return {**result, "revision_migration_debt": migration_debt}
+
     if identity["decision"] is FetchDecision.FETCH_ALLOWED:
         is_current, current_metadata = _latest_job_run_current_for_identity(_job_conn, identity)
         if is_current:
+            if not source_paused(str(identity["source_id"])):
+                migrated = migrate_held_scope()
+                if migrated is not None:
+                    return migrated
             logger.info(
                 "forecast-live OpenData %s current source cycle already journaled: %s",
                 track,
@@ -1070,7 +1272,6 @@ def _run_opendata_track_if_due(
                 "journal": current_metadata,
             }
 
-    source_paused = _source_paused or _is_source_paused
     if source_paused(str(identity["source_id"])):
         return {
             "status": "paused_by_control_plane",
@@ -1079,6 +1280,9 @@ def _run_opendata_track_if_due(
         }
 
     if identity["decision"] is not FetchDecision.FETCH_ALLOWED:
+        migrated = migrate_held_scope()
+        if migrated is not None:
+            return migrated
         return run_opendata_track(
             track,
             _locks_dir_override=_locks_dir_override,
@@ -1139,6 +1343,9 @@ def _run_opendata_track_if_due(
     if time.monotonic() >= poll_deadline_monotonic:
         return newest_result
     retry_now = now if _now_utc is not None else _utcnow().astimezone(timezone.utc)
+    migrated = migrate_held_scope()
+    if migrated is not None:
+        return {**migrated, "newest_cycle_status": "skipped_not_released"}
     retry = _retry_identity_for_failed_prior_run(
         _job_conn,
         current_identity=identity,

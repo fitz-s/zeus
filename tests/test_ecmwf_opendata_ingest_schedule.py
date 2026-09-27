@@ -88,6 +88,204 @@ def _insert_job_run(conn: sqlite3.Connection, identity: dict, *, status: str, re
     conn.commit()
 
 
+def _held_revision_coverage(conn, track: str, *, now: datetime, cycle: datetime, target: str = "2026-09-27") -> dict:
+    from src.contracts.ensemble_snapshot_provenance import (
+        ECMWF_OPENDATA_HIGH_DATA_VERSION_V2,
+        ECMWF_OPENDATA_LOW_DATA_VERSION_V2,
+        coordinate_bound_data_version,
+        opendata_source_run_revision_suffix,
+    )
+    from src.ingest import forecast_live_daemon as daemon
+
+    metric = "high" if track == "mx2t6_high" else "low"
+    conn.executescript(
+        """
+        CREATE TABLE source_run (
+            source_run_id TEXT, source_id TEXT, track TEXT, release_calendar_key TEXT,
+            source_cycle_time TEXT,
+            status TEXT, completeness_status TEXT
+        );
+        CREATE TABLE source_run_coverage (
+            source_run_id TEXT, data_version TEXT, release_calendar_key TEXT,
+            city_id TEXT, city TEXT,
+            city_timezone TEXT, target_local_date TEXT, temperature_metric TEXT,
+            track TEXT, source_id TEXT, source_transport TEXT,
+            completeness_status TEXT, readiness_status TEXT, expires_at TEXT,
+            target_window_start_utc TEXT, target_window_end_utc TEXT
+        );
+        CREATE INDEX idx_source_run_coverage_scope
+            ON source_run_coverage(city_id, city_timezone, target_local_date,
+                temperature_metric, source_id, source_transport, data_version);
+        """
+    )
+    old_identity = daemon._forecast_work_identity_for_cycle(track, cycle_time=cycle, now_utc=now)
+    old_version = coordinate_bound_data_version(
+        ECMWF_OPENDATA_HIGH_DATA_VERSION_V2 if metric == "high"
+        else ECMWF_OPENDATA_LOW_DATA_VERSION_V2, "a" * 64,
+    )
+    old_run_id = (
+        f"ecmwf_open_data:{track}:{cycle:%Y-%m-%dT%HZ}:coordsha:{'a' * 64}"
+        f"{opendata_source_run_revision_suffix(old_version)}"
+    )
+    conn.execute(
+        "INSERT INTO source_run VALUES (?, 'ecmwf_open_data', ?, ?, ?, 'SUCCESS', 'COMPLETE')",
+        (old_run_id, track, old_identity["release_calendar_key"], cycle.isoformat()),
+    )
+    conn.execute(
+        """INSERT INTO source_run_coverage VALUES
+        (?, ?, ?, 'HONG_KONG', 'Hong Kong', 'Asia/Hong_Kong', ?, ?, ?,
+         'ecmwf_open_data', 'ensemble_snapshots_db_reader', 'COMPLETE',
+         'LIVE_ELIGIBLE', ?, '2026-09-26T16:00:00+00:00',
+         '2026-09-27T16:00:00+00:00')""",
+        (old_run_id, old_version, old_identity["release_calendar_key"], target, metric,
+         track, (now + timedelta(hours=5)).isoformat()),
+    )
+    _insert_job_run(conn, old_identity, status="SUCCESS", recorded_at=now - timedelta(hours=1), job_run_id="old-v2-success")
+    return {"source_run_id": old_run_id, "metric": metric}
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+def test_held_revision_migration_refetches_exact_old_complete_cycle(monkeypatch, track):
+    """Old v2 SUCCESS is a cycle hint, not a replacement for fresh v3 proof."""
+    from src.ingest import forecast_live_daemon as daemon
+    from src.data import replacement_forecast_seed_discovery as discovery
+
+    now = datetime(2026, 9, 27, 12, 46, tzinfo=timezone.utc)
+    old_cycle = datetime(2026, 9, 26, 12, tzinfo=timezone.utc)
+    conn = _job_run_conn()
+    old = _held_revision_coverage(conn, track, now=now, cycle=old_cycle)
+    monkeypatch.setattr(discovery, "held_position_family_priorities", lambda **_: {
+        ("Hong Kong", "2026-09-27", old["metric"]): 0
+    })
+    newest = daemon._forecast_work_identity(track, now_utc=now)
+    assert newest["scheduled_for"] > old_cycle
+    _insert_job_run(conn, newest, status="SUCCESS", recorded_at=now)
+    conn.execute(
+        "UPDATE job_run SET rows_written = 1, source_run_id = ? WHERE job_run_id = ?",
+        (daemon._expected_source_run_id(newest), daemon._job_run_id(newest)),
+    )
+    calls = []
+    monkeypatch.setattr(
+        daemon, "run_opendata_track",
+        lambda _track, **kw: calls.append(kw) or {"status": "ok", "source_run_id": daemon._expected_source_run_id(kw["_identity"])},
+    )
+    result = daemon._run_opendata_track_if_due(
+        track, _job_conn=conn, _now_utc=now, _source_paused=lambda _: False,
+        _poll_deadline_monotonic=time.monotonic() + 10,
+    )
+    assert result["status"] == "ok"
+    assert result["revision_migration_debt"]["old_source_run_id"] == old["source_run_id"]
+    assert len(calls) == 1
+    assert calls[0]["_identity"]["scheduled_for"] == old_cycle
+    assert calls[0]["_identity"]["data_version"].endswith("__coordsha_" + calls[0]["_identity"]["coordinate_manifest_sha"])
+    assert daemon._expected_source_run_id(calls[0]["_identity"]).endswith(
+        ":high_boundary_land_grid_v3" if old["metric"] == "high" else ":low_window_land_grid_v3"
+    )
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+def test_held_revision_migration_requires_current_complete_proof_and_cools_failure(monkeypatch, track):
+    from src.ingest import forecast_live_daemon as daemon
+    from src.data import replacement_forecast_seed_discovery as discovery
+
+    now = datetime(2026, 9, 27, 12, 46, tzinfo=timezone.utc)
+    old_cycle = datetime(2026, 9, 26, 12, tzinfo=timezone.utc)
+    conn = _job_run_conn()
+    old = _held_revision_coverage(conn, track, now=now, cycle=old_cycle)
+    monkeypatch.setattr(discovery, "held_position_family_priorities", lambda **_: {
+        ("Hong Kong", "2026-09-27", old["metric"]): 0
+    })
+    candidate, _ = daemon._held_revision_migration_identity(
+        conn, track=track, now_utc=now, deadline_monotonic=time.monotonic() + 10,
+    )
+    assert candidate["scheduled_for"] == old_cycle
+    _insert_job_run(conn, candidate, status="FAILED", recorded_at=now - timedelta(seconds=20))
+    assert daemon._held_revision_migration_identity(conn, track=track, now_utc=now,
+        deadline_monotonic=time.monotonic() + 10) is None
+    conn.execute(
+        "UPDATE job_run SET finished_at = ?, recorded_at = ? WHERE job_run_id = ?",
+        ((now - timedelta(seconds=61)).isoformat(),) * 2 + (daemon._job_run_id(candidate),),
+    )
+    assert daemon._held_revision_migration_identity(conn, track=track, now_utc=now,
+        deadline_monotonic=time.monotonic() + 10) is not None
+    conn.execute(
+        "UPDATE job_run SET status = 'SUCCESS', rows_written = 1, source_run_id = ? WHERE job_run_id = ?",
+        (daemon._expected_source_run_id(candidate), daemon._job_run_id(candidate)),
+    )
+    # A SUCCESS for other cities is not proof for this held Hong Kong family.
+    assert daemon._held_revision_migration_identity(conn, track=track, now_utc=now,
+        deadline_monotonic=time.monotonic() + 10) is not None
+    conn.execute("INSERT INTO source_run VALUES (?, 'ecmwf_open_data', ?, ?, ?, 'SUCCESS', 'COMPLETE')",
+        (daemon._expected_source_run_id(candidate), track, candidate["release_calendar_key"], old_cycle.isoformat()))
+    conn.execute(
+        """INSERT INTO source_run_coverage VALUES
+        (?, ?, ?, 'HONG_KONG', 'Hong Kong', 'Asia/Hong_Kong', '2026-09-27', ?, ?,
+         'ecmwf_open_data', 'ensemble_snapshots_db_reader', 'COMPLETE',
+         'LIVE_ELIGIBLE', ?, '2026-09-26T16:00:00+00:00',
+         '2026-09-27T16:00:00+00:00')""",
+        (daemon._expected_source_run_id(candidate), candidate["data_version"],
+         candidate["release_calendar_key"], old["metric"], track,
+         (now + timedelta(hours=5)).isoformat()),
+    )
+    conn.execute(
+        "UPDATE source_run SET completeness_status = 'PARTIAL' WHERE source_run_id = ?",
+        (daemon._expected_source_run_id(candidate),),
+    )
+    assert daemon._held_revision_migration_identity(conn, track=track, now_utc=now,
+        deadline_monotonic=time.monotonic() + 10) is None
+    conn.execute(
+        "UPDATE job_run SET status = 'PARTIAL' WHERE job_run_id = ?",
+        (daemon._job_run_id(candidate),),
+    )
+    assert daemon._held_revision_migration_identity(conn, track=track, now_utc=now,
+        deadline_monotonic=time.monotonic() + 10) is None
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+def test_held_revision_migration_rejects_ended_stale_and_incomplete_native_day(monkeypatch, track):
+    from src.ingest import forecast_live_daemon as daemon
+    from src.data import replacement_forecast_seed_discovery as discovery
+
+    now = datetime(2026, 9, 27, 12, 46, tzinfo=timezone.utc)
+    old_cycle = datetime(2026, 9, 26, 12, tzinfo=timezone.utc)
+    conn = _job_run_conn()
+    old = _held_revision_coverage(conn, track, now=now, cycle=old_cycle)
+    monkeypatch.setattr(discovery, "held_position_family_priorities", lambda **_: {
+        ("Hong Kong", "2026-09-27", old["metric"]): 0
+    })
+    def candidate(at):
+        return daemon._held_revision_migration_identity(conn, track=track, now_utc=at,
+            deadline_monotonic=time.monotonic() + 10)
+
+    assert candidate(now) is not None
+    query_plan = [str(row[3]) for row in conn.execute(
+        """EXPLAIN QUERY PLAN SELECT coverage.source_run_id
+             FROM source_run_coverage coverage INDEXED BY idx_source_run_coverage_scope
+            WHERE coverage.city_id = 'HONG_KONG'
+              AND coverage.city_timezone = 'Asia/Hong_Kong'
+              AND coverage.target_local_date = '2026-09-27'
+              AND coverage.temperature_metric = ?
+              AND coverage.source_id = 'ecmwf_open_data'
+              AND coverage.source_transport = 'ensemble_snapshots_db_reader'""",
+        (old["metric"],),
+    )]
+    assert any("USING INDEX idx_source_run_coverage_scope" in line for line in query_plan)
+    conn.execute("UPDATE source_run SET status = 'PARTIAL'")
+    assert candidate(now) is not None  # Target-local COMPLETE coverage remains the authority.
+    conn.execute("UPDATE source_run SET status = 'SUCCESS', completeness_status = 'PARTIAL'")
+    assert candidate(now) is not None
+    conn.execute("UPDATE source_run SET completeness_status = 'COMPLETE'")
+    assert candidate(datetime(2026, 9, 27, 16, tzinfo=timezone.utc)) is None
+    conn.execute("UPDATE source_run_coverage SET expires_at = ?", ((now - timedelta(seconds=1)).isoformat(),))
+    assert candidate(now) is None
+    conn.execute("UPDATE source_run_coverage SET expires_at = ?", ((now + timedelta(hours=5)).isoformat(),))
+    conn.execute("UPDATE source_run SET source_cycle_time = ?", (datetime(2026, 9, 27, 0, tzinfo=timezone.utc).isoformat(),))
+    assert candidate(now) is None  # Later cycle omits 9/27 00:00-08:00 HKT.
+    conn.execute("UPDATE source_run SET source_cycle_time = ?", (old_cycle.isoformat(),))
+    conn.execute("UPDATE source_run_coverage SET completeness_status = 'PARTIAL'")
+    assert candidate(now) is None
+
+
 def test_safe_cycle_poll_detects_release_within_one_minute():
     """Safe-fetch remains the gate; post-release detection is bounded to 60s."""
 
