@@ -29319,6 +29319,17 @@ def _posterior_bound_multimodel_members(
         decision_time_iso=decision_time.astimezone(UTC).isoformat(),
         include_station_sources=True,
     )
+    scheme = fusion.get("source_clock_one_scheme")
+    if (
+        isinstance(scheme, Mapping)
+        and scheme.get("fallback_reason") == "configured_current_provider_set_incomplete"
+        and set(scheme["configured_current_sources"])
+        != set(scheme["configured_sources"]).intersection(current)
+    ):
+        # Newly available configured evidence retires this partial witness through
+        # the existing family-scoped drift eviction and normal rematerialization.
+        _fail("model_identity_drift:configured_current_sources")
+        return None
     unit = str(
         getattr(runtime_cities_by_name().get(str(family.city)), "settlement_unit", "")
         or ""

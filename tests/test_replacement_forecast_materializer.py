@@ -929,6 +929,50 @@ def test_source_clock_partial_current_producer_to_jit(
             tampered, family=family, decision_time=decision,
         ) == (True, None)
 
+        arrived = decision + timedelta(minutes=10)
+        conn.execute(
+            """INSERT INTO raw_model_forecasts (
+                model, city, target_date, metric, source_cycle_time,
+                source_available_at, captured_at, recorded_at, lead_days,
+                forecast_value_c, endpoint, coverage_status
+            ) VALUES ('gfs_hrrr', ?, '2026-09-29', ?, ?, ?, ?, ?, 2, 21.0,
+                      'single_runs', 'COVERED')""",
+            (city, metric, run.isoformat(), arrived.isoformat(),
+             arrived.isoformat(), arrived.isoformat()),
+        )
+        # Future availability must not leak into the original decision.
+        assert adapter._posterior_bound_spine_inputs(
+            conn, family=family, decision_time=decision,
+            source_cycle_time=run.isoformat(), provenance=provenance,
+        ) is not None
+        later = arrived + timedelta(minutes=1)
+        reason: dict[str, str] = {}
+        assert adapter._posterior_bound_multimodel_members(
+            conn, family=family, decision_time=later,
+            source_cycle_time=run.isoformat(), provenance=provenance,
+            reason_out=reason,
+        ) is None
+        assert reason == {"reason": "model_identity_drift:configured_current_sources"}
+
+        refreshed = materializer_mod._replacement_bayes_precision_fusion_override(
+            replace(request, computed_at=later), metric=metric,
+            anchor_value_corrected_c=20.0, conn=conn,
+        )
+        assert refreshed is not None
+        assert refreshed.method == "SOURCE_CLOCK_FIXED_WEIGHT"
+        refreshed_provenance = {"bayes_precision_fusion": {
+            "used_models": list(refreshed.used_models),
+            "current_value_serving": refreshed.current_value_serving,
+            "source_clock_one_scheme": refreshed.source_clock_one_scheme,
+            "decorrelated_providers_expected": refreshed.decorrelated_providers_expected,
+            "decorrelated_providers_served": refreshed.decorrelated_providers_served,
+            "decorrelated_providers_complete": refreshed.decorrelated_providers_complete,
+        }}
+        assert adapter._posterior_bound_spine_inputs(
+            conn, family=family, decision_time=later,
+            source_cycle_time=run.isoformat(), provenance=refreshed_provenance,
+        ) is not None
+
 
 def test_posterior_identity_binds_day0_carrier_operator_and_content(monkeypatch: pytest.MonkeyPatch) -> None:
     """Equal q values must not alias carrier certificates across migrations."""
