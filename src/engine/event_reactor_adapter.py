@@ -37626,6 +37626,25 @@ def _carried_day0_revision_likelihood(
     raw = payload.get("_edli_day0_provisional_revision_likelihood")
     if raw is None:
         return None
+    if type(raw) is dict and not raw and str(
+        payload.get("_edli_day0_remaining_content_identity") or ""
+    ).strip():
+        # The current WU-fast producer persists an empty *generic* survival
+        # placeholder: its independent fast-residual proof is nested in the
+        # statistical conditioning.  Only that validated current carrier may
+        # treat the placeholder as absent and resolve the settlement-channel
+        # revision model from current world evidence below.  An empty ordinary
+        # NOAA/HKO carrier remains invalid, not a license to change regimes.
+        from src.events.day0_authority import DAY0_WU_FAST_RESIDUAL_SOURCE
+
+        conditioning = _day0_statistical_probability_conditioning(payload)
+        if (
+            isinstance(conditioning, Mapping)
+            and str(conditioning.get("source") or "").strip().lower()
+            == DAY0_WU_FAST_RESIDUAL_SOURCE
+            and _validated_fast_residual_day0_conditioning(conditioning) is not None
+        ):
+            return None
     if not isinstance(raw, Mapping):
         raise ValueError("GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_INVALID")
     try:

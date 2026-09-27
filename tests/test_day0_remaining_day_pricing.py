@@ -3870,6 +3870,150 @@ def test_wu_settled_fast_residual_keeps_the_wu_revision_model():
     )
 
 
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_current_wu_fast_empty_generic_likelihood_resolves_source_revision(metric):
+    """An empty producer placeholder must still reach the independent model."""
+    import src.engine.event_reactor_adapter as era
+
+    payload = _fast_residual_composite_payload(
+        station="LLBG", settlement_channel="noaa_wrh_llbg"
+    )
+    payload["_edli_global_day0_binding"]["statistical_probability_conditioning"][
+        "metric"
+    ] = metric
+    payload["_edli_day0_remaining_content_identity"] = "c" * 64
+    payload["_edli_day0_provisional_revision_likelihood"] = {}
+    assert era._carried_day0_revision_likelihood(payload) is None
+    source = era._day0_revision_model_source(payload)
+    assert source == "aviationweather_metar"
+
+    conn = _noaa_confirmation_prints("LLBG")
+    likelihood = era._provisional_day0_revision_likelihood(
+        conn,
+        source=source,
+        city="Tel Aviv",
+        city_timezone="Asia/Jerusalem",
+        target_date="2026-09-25",
+        temperature_metric=metric,
+        decision_time=datetime(2026, 9, 25, 9, 0, tzinfo=UTC),
+        entry_authority=False,
+    )
+    assert likelihood["station_id"] == "LLBG"
+    assert likelihood["source_channel_pair"] == {
+        "awc": "aviationweather_metar",
+        "ogimet": "ogimet_metar_llbg",
+    }
+    assert 0.0 < likelihood["boundary_survival_probability"] < 1.0
+    conn.close()
+
+
+def test_empty_generic_likelihood_requires_verified_current_wu_carrier():
+    import src.engine.event_reactor_adapter as era
+
+    payload = _fast_residual_composite_payload(
+        station="LLBG", settlement_channel="noaa_wrh_llbg"
+    )
+    payload["_edli_day0_provisional_revision_likelihood"] = {}
+    with pytest.raises(
+        ValueError, match="GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_INVALID"
+    ):
+        era._carried_day0_revision_likelihood(payload)
+
+    payload["_edli_day0_remaining_content_identity"] = "c" * 64
+    conditioning = payload["_edli_global_day0_binding"][
+        "statistical_probability_conditioning"
+    ]
+    likelihood = conditioning["fast_residual_likelihood"]
+    likelihood["settlement_channel"] = "noaa_wrh_other"
+    with pytest.raises(
+        ValueError, match="GLOBAL_DAY0_FAST_RESIDUAL_POSTERIOR_IDENTITY_INVALID"
+    ):
+        era._carried_day0_revision_likelihood(payload)
+
+    likelihood["settlement_channel"] = "noaa_wrh_llbg"
+    payload["_edli_day0_provisional_revision_likelihood"] = {
+        "identity_hash": "malformed"
+    }
+    with pytest.raises(
+        ValueError, match="GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_INVALID"
+    ):
+        era._carried_day0_revision_likelihood(payload)
+
+    payload["_edli_global_day0_binding"]["statistical_probability_conditioning"] = {
+        "source": "hko_hourly_accumulator"
+    }
+    payload["_edli_day0_provisional_revision_likelihood"] = {}
+    with pytest.raises(
+        ValueError, match="GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_INVALID"
+    ):
+        era._carried_day0_revision_likelihood(payload)
+
+    # The common residual validator also admits a pure AWC fast source.  Its
+    # empty generic likelihood is not the WU-composite producer's placeholder.
+    payload["_edli_global_day0_binding"]["statistical_probability_conditioning"] = {
+        **_fast_residual_composite_payload(
+            station="LLBG", settlement_channel="noaa_wrh_llbg"
+        )["_edli_global_day0_binding"]["statistical_probability_conditioning"],
+        "source": "aviationweather_metar",
+    }
+    with pytest.raises(
+        ValueError, match="GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_INVALID"
+    ):
+        era._carried_day0_revision_likelihood(payload)
+
+
+def test_wu_fast_empty_placeholder_does_not_waive_revision_history_for_entry():
+    import src.engine.event_reactor_adapter as era
+
+    payload = _fast_residual_composite_payload(
+        station="LLBG", settlement_channel="noaa_wrh_llbg"
+    )
+    payload["_edli_day0_remaining_content_identity"] = "c" * 64
+    payload["_edli_day0_provisional_revision_likelihood"] = {}
+    assert era._carried_day0_revision_likelihood(payload) is None
+    source = era._day0_revision_model_source(payload)
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """CREATE TABLE observation_prints (
+            id INTEGER PRIMARY KEY, city TEXT, station_id TEXT,
+            source_channel TEXT, publish_ts_utc TEXT, value_native REAL,
+            unit TEXT, fetched_at_utc TEXT, raw_report TEXT
+        )"""
+    )
+    kwargs = dict(
+        source=source,
+        city="Tel Aviv",
+        city_timezone="Asia/Jerusalem",
+        target_date="2026-09-25",
+        temperature_metric="high",
+        decision_time=datetime(2026, 9, 25, 9, 0, tzinfo=UTC),
+    )
+    with pytest.raises(
+        ValueError, match="NOAA_PRELIMINARY_SURVIVAL_HISTORY_INSUFFICIENT"
+    ):
+        era._provisional_day0_revision_likelihood(
+            conn, **kwargs, entry_authority=True
+        )
+    held = era._provisional_day0_revision_likelihood(
+        conn, **kwargs, entry_authority=False
+    )
+    assert held["semantics"] == (
+        "same_station_preliminary_report_survival_likelihood_"
+        "jeffreys_prior_only_v2"
+    )
+    assert held["boundary_survival_probability"] == 0.5
+    conn.close()
+
+    unavailable = sqlite3.connect(":memory:")
+    with pytest.raises(
+        ValueError, match="METAR_PROVISIONAL_REVISION_AUTHORITY_UNAVAILABLE"
+    ):
+        era._provisional_day0_revision_likelihood(
+            unavailable, **kwargs, entry_authority=False
+        )
+    unavailable.close()
+
+
 def test_carried_likelihood_on_noaa_composite_binds_the_configured_station():
     """A carried NOAA likelihood is station-checked under the composite label."""
     import src.engine.event_reactor_adapter as era
