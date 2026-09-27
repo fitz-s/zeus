@@ -1,5 +1,5 @@
 # Created: 2026-06-09
-# Last reused or audited: 2026-08-24
+# Last reused/audited: 2026-09-27
 # Authority basis: materialization pre-claim deadline hotfix (2026-08-24)
 """Relationship tests for the persistent flock-backed materialization lock."""
 from __future__ import annotations
@@ -234,6 +234,136 @@ def test_normal_preclaim_success_still_runs_runner(tmp_path):
     assert report.processed_count == 1
     assert report.failed_count == 0
     assert len(spawned) == 1
+
+
+def _priority_claim_plan(tmp_path, monkeypatch):
+    import src.data.replacement_forecast_live_materialization_queue as queue
+
+    requests = tmp_path / "requests"
+    requests.mkdir()
+    selected = requests / "London.2026-08-25.high.json"
+    selected.write_text(json.dumps(_materialization_request()), encoding="utf-8")
+    revision = [1]
+    monkeypatch.setattr(queue, "_claim_db_fingerprint", lambda _db: revision[0])
+    monkeypatch.setattr(queue, "_current_money_risk_families", lambda *_a, **_kw: frozenset())
+    monkeypatch.setattr(queue, "_current_global_auction_scope_families", lambda *_a, **_kw: frozenset())
+
+    def priority(_db, files, _payloads, **_kwargs):
+        return ({p.name: (-10 if p.name.startswith("Held") else -1, p.name) for p in files},
+                {p.name for p in files})
+
+    monkeypatch.setattr(queue, "_priority_map_with_names", priority)
+    def plan():
+        return queue._build_request_claim_read_plan(
+            request_path=requests, processed_path=tmp_path / "processed",
+            failed_path=tmp_path / "failed", forecast_db=tmp_path / "forecasts.db",
+            limit=3, lane=queue.MATERIALIZATION_LANE_PRIORITY,
+        )
+    return queue, requests, selected, revision, plan
+
+
+@pytest.mark.parametrize("unrelated_request", (False, True))
+def test_priority_claim_replans_unrelated_queue_or_db_churn(tmp_path, monkeypatch, unrelated_request):
+    queue, requests, selected, revision, plan = _priority_claim_plan(tmp_path, monkeypatch)
+    prior = plan()
+    if unrelated_request:
+        other = dict(_materialization_request(), city="Paris")
+        (requests / "Paris.2026-08-25.high.json").write_text(json.dumps(other), encoding="utf-8")
+    revision[0] = 2  # Unrelated forecast WAL commit.
+    claimed = queue._try_claim_priority_request(prior)
+    assert claimed is not None and claimed.claimed_count == 1
+    assert not selected.exists()
+    assert (claimed.batch_path / selected.name).exists()
+
+
+@pytest.mark.parametrize("preemption", ("held", "superseder", "owner", "changed_selected"))
+def test_priority_claim_replan_preserves_preemption_and_identity(tmp_path, monkeypatch, preemption):
+    queue, requests, selected, revision, plan = _priority_claim_plan(tmp_path, monkeypatch)
+    prior = plan()
+    if preemption == "held":
+        (requests / "Held.2026-08-25.high.json").write_text(
+            json.dumps(dict(_materialization_request(), city="Held")), encoding="utf-8",
+        )
+    elif preemption == "superseder":
+        (requests / "London.newer.json").write_text(
+            json.dumps(dict(_materialization_request(), computed_at="2026-08-24T09:00:00+00:00")),
+            encoding="utf-8",
+        )
+    elif preemption == "owner":
+        duplicate = requests / "London.duplicate.json"
+        duplicate.write_text(selected.read_text(), encoding="utf-8")
+        queue._new_claim_batch(requests.parent / queue.MATERIALIZATION_INFLIGHT_DIR_NAME, (duplicate,))
+    else:
+        selected.write_text(json.dumps(dict(_materialization_request(), computed_at="2026-08-24T10:00:00+00:00")), encoding="utf-8")
+    revision[0] = 2
+    assert queue._try_claim_priority_request(prior) is None
+    assert selected.exists()
+
+
+@pytest.mark.parametrize("during_replan", ("higher_held", "same_identity_owner"))
+def test_priority_replan_rejects_owner_or_held_arriving_after_sort_before_snapshot(
+    tmp_path, monkeypatch, during_replan,
+):
+    queue, requests, selected, revision, plan = _priority_claim_plan(tmp_path, monkeypatch)
+    prior = plan()
+    (requests / "Paris.unrelated.json").write_text(
+        json.dumps(dict(_materialization_request(), city="Paris")), encoding="utf-8",
+    )
+    revision[0] = 2
+    original_snapshot = queue._queue_files_snapshot
+    calls = 0
+
+    def publish_before_builder_snapshot(directory):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            if during_replan == "higher_held":
+                (requests / "Held.2026-08-25.high.json").write_text(
+                    json.dumps(dict(_materialization_request(), city="Held")), encoding="utf-8",
+                )
+            else:
+                duplicate = requests / "London.duplicate.json"
+                duplicate.write_text(selected.read_text(), encoding="utf-8")
+                queue._new_claim_batch(
+                    requests.parent / queue.MATERIALIZATION_INFLIGHT_DIR_NAME,
+                    (duplicate,),
+                )
+        return original_snapshot(directory)
+
+    monkeypatch.setattr(queue, "_queue_files_snapshot", publish_before_builder_snapshot)
+    assert queue._try_claim_priority_request(prior) is None
+    assert selected.exists()
+
+
+@pytest.mark.parametrize("failure_step", ("replan", "final_fingerprint", "replan_deadline"))
+def test_priority_revalidation_read_failure_defers_without_moving_request(
+    tmp_path, monkeypatch, failure_step,
+):
+    queue, requests, selected, _revision, _plan = _priority_claim_plan(tmp_path, monkeypatch)
+    calls = 0
+
+    def fingerprint(_db):
+        nonlocal calls
+        calls += 1
+        if failure_step == "replan" and calls == 3:
+            raise sqlite3.OperationalError("DB_CONNECTION_DEADLINE_EXPIRED")
+        if failure_step == "replan_deadline" and calls == 3:
+            raise queue._ClaimReadDeadlineExceeded()
+        if failure_step == "final_fingerprint" and calls == 3:
+            raise sqlite3.OperationalError("DB_CONNECTION_DEADLINE_EXPIRED")
+        return 1 if calls == 1 else 2 if failure_step != "final_fingerprint" else 1
+
+    monkeypatch.setattr(queue, "_claim_db_fingerprint", fingerprint)
+    report = queue.process_replacement_forecast_live_materialization_queue(
+        request_dir=requests, processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed", forecast_db=tmp_path / "forecasts.db",
+        seed_limit=0, limit=3, lane=queue.MATERIALIZATION_LANE_PRIORITY,
+        runner=lambda _argv: pytest.fail("no child may spawn on failed revalidation"),
+    )
+    assert report.status == "DEFERRED"
+    assert "REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_REVALIDATION" in report.reason_codes
+    assert selected.exists()
+    assert not list((requests.parent / queue.MATERIALIZATION_INFLIGHT_DIR_NAME).glob("priority.*"))
 
 
 

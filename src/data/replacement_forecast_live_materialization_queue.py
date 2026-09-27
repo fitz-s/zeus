@@ -4202,19 +4202,83 @@ def _try_claim_priority_request(
     # move. This is intentionally lock-free: a concurrent writer yields typed
     # debt, never a stale priority claim and never a queue-wide wait.
     try:
-        current_fingerprint = _claim_db_fingerprint(plan.claim.forecast_db_path)
-    except sqlite3.Error:
-        return None
-    if (
-        _queue_files_snapshot(plan.claim.request_path) != plan.claim.request_snapshot
-        or current_fingerprint != plan.claim.forecast_db_fingerprint
-    ):
+        with _claim_read_deadline_guard():
+            current_fingerprint = _claim_db_fingerprint(plan.claim.forecast_db_path)
+            current_snapshot = _queue_files_snapshot(plan.claim.request_path)
+            if (
+                current_snapshot != plan.claim.request_snapshot
+                or current_fingerprint != plan.claim.forecast_db_fingerprint
+            ):
+                # Rebuild the same priority/owner decision against current
+                # truth; unrelated publications must not revoke this request.
+                refreshed = _build_request_claim_read_plan(
+                    request_path=plan.claim.request_path,
+                    processed_path=plan.claim.processed_path,
+                    failed_path=plan.claim.failed_path,
+                    forecast_db=plan.claim.forecast_db_path,
+                    limit=len(plan.claim.selected_files),
+                    lane=MATERIALIZATION_LANE_PRIORITY,
+                )
+                # The builder sorts before its last snapshot. A held request
+                # or owner arriving between those reads invalidates the plan.
+                if (
+                    refreshed.claim.request_snapshot != current_snapshot
+                    or refreshed.claim.forecast_db_fingerprint != current_fingerprint
+                ):
+                    return None
+                if (
+                    not refreshed.claim.selected_files
+                    or refreshed.claim.selected_files[0] != source
+                    or refreshed.unknown_inflight_batches
+                    or refreshed.active_conflict_batches
+                    or refreshed.stale_conflict_batches
+                ):
+                    return None
+                original = next((row for row in plan.claim.request_snapshot if row[0] == source.name), None)
+                updated = next((row for row in refreshed.claim.request_snapshot if row[0] == source.name), None)
+                if original is None or original != updated:
+                    return None
+                plan = refreshed
+            if (
+                _queue_files_snapshot(plan.claim.request_path) != plan.claim.request_snapshot
+                or _claim_db_fingerprint(plan.claim.forecast_db_path)
+                != plan.claim.forecast_db_fingerprint
+            ):
+                return None
+    except (sqlite3.Error, _ClaimReadDeadlineExceeded):
         return None
     payload = _load_request_payload_for_coalescing(source)
     witness = _claim_identity_witness(payload or {})
     if witness is None:
         return None
+    selected_record = next(
+        (row for row in plan.claim.request_snapshot if row[0] == source.name), None
+    )
+    try:
+        source_bytes = source.read_bytes()
+        source_stat = source.stat()
+    except FileNotFoundError:
+        return None
+    if selected_record != (
+        source.name, source_stat.st_mtime_ns, source_stat.st_size,
+        hashlib.sha256(source_bytes).hexdigest(),
+    ):
+        return None
     inflight_path = plan.claim.request_path.parent / MATERIALIZATION_INFLIGHT_DIR_NAME
+    if inflight_path.exists():
+        identity_keys = _claim_identity_keys(witness)
+        for existing_batch in (path for path in inflight_path.iterdir() if path.is_dir()):
+            existing_files = _claim_request_files(existing_batch)
+            if not existing_files:
+                continue
+            existing_witnesses = _read_claim_identity_witnesses(existing_batch)
+            for existing_file in existing_files:
+                existing = existing_witnesses.get(existing_file.name)
+                if existing is None:
+                    existing_payload = _load_request_payload_for_coalescing(existing_file)
+                    existing = _claim_identity_witness(existing_payload or {})
+                if existing is None or identity_keys & _claim_identity_keys(existing):
+                    return None
     inflight_path.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     batch_path = inflight_path / f"priority.{stamp}.pid{os.getpid()}"
