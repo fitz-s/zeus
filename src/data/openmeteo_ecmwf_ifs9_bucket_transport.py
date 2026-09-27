@@ -886,8 +886,10 @@ def source_geometry_static_prerequisite_reason(
         after = path.stat()
         if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) != identity:
             return "OM9_SOURCE_STATIC_HSURF_CHANGED"
-    except (OSError, ValueError, ImportError, IndexError):
+    except FileNotFoundError:
         return "OM9_SOURCE_STATIC_HSURF_UNAVAILABLE"
+    except Exception:  # noqa: BLE001 - malformed .om parsers raise RuntimeError
+        return "OM9_SOURCE_STATIC_HSURF_INVALID"
     return None
 
 

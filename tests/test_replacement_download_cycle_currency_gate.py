@@ -409,6 +409,12 @@ def test_source_geometry_missing_static_blocks_network_then_recovers_next_tick(
     )
     assert fetches == []
 
+    static.write_bytes(b"not-an-om-file")
+    assert original_prerequisite(local_cache=str(static)) == "OM9_SOURCE_STATIC_HSURF_INVALID"
+    corrupt = dl.download_current_target_raw_inputs(**kwargs)
+    assert corrupt["written_manifest_count"] == 0
+    assert fetches == []
+
     # The real prerequisite path probes local terrain; this fixture replaces
     # only external .om reads, never the source guard or response geometry.
     static.write_bytes(b"fixture-surface")
