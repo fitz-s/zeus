@@ -1075,6 +1075,7 @@ FILL_BRIDGE_POSITION_MATERIALIZATION_FAILED = (
 FILL_BRIDGE_DRAIN_LIMIT_PER_TICK = 500
 FILL_BRIDGE_WRITE_TRANCHES_PER_TICK = 8
 _edli_orphaned_command_link_cursor = ""
+_edli_ws_review_scan_cursor = ""
 
 
 def _bound_price_channel_sqlite_wait(
@@ -2763,6 +2764,119 @@ def _genuine_cancel_reassert_candidates_read_only(
         conn.close()
 
 
+def _ws_review_confirmed_entry_candidates(
+    conn, *, limit: int, after_command_id: str | None = None,
+    command_id: str | None = None, probe: bool = False,
+    advance_scan_cursor: bool = False,
+) -> tuple[str, ...]:
+    """Find exact WS-review debt with durable REST confirmation to validate."""
+    global _edli_ws_review_scan_cursor
+    if limit <= 0:
+        return ()
+    rows = conn.execute(
+        """SELECT command.command_id
+             FROM venue_commands AS command INDEXED BY idx_venue_commands_state
+            WHERE command.state = 'REVIEW_REQUIRED'
+              AND command.intent_kind = 'ENTRY' AND command.side = 'BUY'
+              AND command.venue_order_id IS NOT NULL
+              AND (? IS NULL OR command.command_id = ?)
+              AND (? IS NULL OR command.command_id > ?)
+              AND EXISTS (
+                  SELECT 1 FROM venue_command_events AS review
+                   WHERE review.command_id = command.command_id
+                     AND review.sequence_no = (
+                         SELECT MAX(latest.sequence_no)
+                           FROM venue_command_events AS latest
+                          WHERE latest.command_id = command.command_id
+                     )
+                     AND review.event_type = 'REVIEW_REQUIRED'
+                     AND CASE WHEN json_valid(review.payload_json)
+                              THEN json_extract(review.payload_json, '$.reason')
+                              END = 'ws_trade_lifecycle_regression_or_economic_drift'
+                     AND EXISTS (
+                         SELECT 1 FROM venue_trade_facts AS fact INDEXED BY idx_trade_facts_command
+                          WHERE fact.command_id = command.command_id
+                            AND fact.venue_order_id = command.venue_order_id
+                            AND fact.state = 'CONFIRMED' AND fact.source = 'REST'
+                            AND julianday(fact.observed_at) >= julianday(review.occurred_at)
+                            AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+                            AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
+                     )
+              )
+            ORDER BY command.command_id LIMIT ?""",
+        (command_id, command_id, after_command_id, after_command_id,
+         int(limit) if probe or command_id else max(8, int(limit))),
+    ).fetchall()
+    if advance_scan_cursor and rows:
+        _edli_ws_review_scan_cursor = str(_row_get(rows[-1], "command_id"))
+    if probe:
+        return tuple(str(_row_get(row, "command_id")) for row in rows)
+
+    # This cheap indexed predicate only wakes a bounded proof scan. Full
+    # per-leg REST-after-review economics are checked by the existing recovery
+    # law before the candidate may consume the single writer slot.
+    from decimal import Decimal
+    from src.execution.command_recovery import (
+        _authenticated_entry_trade_fact_candidates,
+        _command_events,
+        _confirmed_entry_trade_fact_summary,
+        _fill_size_completes_limit_order,
+        _ws_review_has_post_review_rest_confirmation,
+    )
+
+    qualified = []
+    for row in rows:
+        candidate_id = str(_row_get(row, "command_id"))
+        commands = _authenticated_entry_trade_fact_candidates(conn, command_id=candidate_id)
+        if len(commands) != 1:
+            continue
+        command = commands[0]
+        facts = _confirmed_entry_trade_fact_summary(
+            conn, command_id=candidate_id,
+            venue_order_id=str(command["venue_order_id"]),
+        )
+        if not facts["count"] or any(state != "CONFIRMED" for state in facts["states"]):
+            continue
+        if not _ws_review_has_post_review_rest_confirmation(
+            conn, command_id=candidate_id,
+            venue_order_id=str(command["venue_order_id"]),
+            events=_command_events(conn, candidate_id),
+            economic_facts=list(facts["economic_facts"]),
+        ):
+            continue
+        if not _fill_size_completes_limit_order(
+            Decimal(str(facts["filled_size"])),
+            Decimal(str(command["submission_size"])), side="BUY",
+        ):
+            continue
+        qualified.append(candidate_id)
+        if len(qualified) >= limit:
+            break
+    return tuple(qualified)
+
+
+def _ws_review_confirmed_entry_candidates_read_only(
+    *, limit: int, after_command_id: str | None = None, probe: bool = False,
+) -> tuple[str, ...]:
+    from src.state.db import get_trade_connection_read_only
+
+    conn = get_trade_connection_read_only()
+    try:
+        after = None if probe else (_edli_ws_review_scan_cursor or after_command_id)
+        scan_cursor_before = _edli_ws_review_scan_cursor
+        ids = _ws_review_confirmed_entry_candidates(
+            conn, limit=limit, after_command_id=after, probe=probe,
+            advance_scan_cursor=not probe,
+        )
+        if not ids and after and _edli_ws_review_scan_cursor == scan_cursor_before:
+            ids = _ws_review_confirmed_entry_candidates(
+                conn, limit=limit, probe=probe, advance_scan_cursor=not probe,
+            )
+        return ids
+    finally:
+        conn.close()
+
+
 def _edli_repair_orphaned_command_link(
     conn, *, aggregate_id: str, command_id: str, position_id: str, now: datetime,
 ) -> bool:
@@ -2810,6 +2924,7 @@ def _edli_durable_fill_bridge_work_exists_read_only() -> bool:
         _edli_durable_fill_bridge_candidate_ids_read_only(limit=1)
         or _edli_orphaned_command_link_candidates_read_only(limit=1)
         or _genuine_cancel_reassert_candidates_read_only(limit=1)
+        or _ws_review_confirmed_entry_candidates_read_only(limit=1, probe=True)
     )
 
 
@@ -3800,8 +3915,17 @@ def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
         cancel_candidates = ()
         canonical_failure_reasons.append(FILL_BRIDGE_POSITION_MATERIALIZATION_FAILED)
         logger.error("EDLI genuine-cancel reassert debt discovery failed: %s", exc, exc_info=True)
+    try:
+        review_candidates = _ws_review_confirmed_entry_candidates_read_only(
+            limit=1, after_command_id=_edli_orphaned_command_link_cursor,
+        )
+    except Exception as exc:  # noqa: BLE001 - exact debt retries next cycle
+        review_candidates = ()
+        canonical_failure_reasons.append(FILL_BRIDGE_POSITION_MATERIALIZATION_FAILED)
+        logger.error("EDLI WS-review confirmed-fill debt discovery failed: %s", exc, exc_info=True)
     choices = [(row[1], "link", row) for row in link_candidates]
     choices.extend((command_id, "cancel", command_id) for command_id in cancel_candidates)
+    choices.extend((command_id, "review", command_id) for command_id in review_candidates)
     selected = min(
         choices,
         key=lambda row: (
@@ -3811,10 +3935,11 @@ def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
     )
     link_candidates = (selected[2],) if selected and selected[1] == "link" else ()
     cancel_candidates = (selected[2],) if selected and selected[1] == "cancel" else ()
+    review_candidates = (selected[2],) if selected and selected[1] == "review" else ()
     try:
         durable_bridge_candidate_ids = (
             _edli_durable_fill_bridge_candidate_ids_read_only(
-                limit=FILL_BRIDGE_WRITE_TRANCHES_PER_TICK - len(link_candidates) - len(cancel_candidates)
+                limit=FILL_BRIDGE_WRITE_TRANCHES_PER_TICK - int(selected is not None)
             )
         )
     except Exception as exc:  # noqa: BLE001 - durable facts retry next repair cycle
@@ -3888,7 +4013,7 @@ def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
     # temporary venue-command ID still attached. That already-materialized row
     # is absent from the ordinary orphan scan above. Discover only this exact
     # unsourced terminal command debt, then release the writer after each item.
-    if link_candidates or cancel_candidates:
+    if selected:
         from src.state.db import get_trade_connection_with_world_required
         from src.state.venue_command_repo import reassert_genuine_cancel_after_late_fill
 
@@ -3899,6 +4024,7 @@ def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
         for repair_kind, evidence in (
             *(("link", row) for row in link_candidates),
             *(("cancel", command_id) for command_id in cancel_candidates),
+            *(("review", command_id) for command_id in review_candidates),
         ):
             aggregate_id, command_id, position_id = (
                 evidence if repair_kind == "link" else ("", evidence, "")
@@ -3940,11 +4066,38 @@ def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
                                 bridge_conn, aggregate_id=aggregate_id,
                                 command_id=command_id, position_id=position_id, now=now,
                             )
-                        else:
+                        elif repair_kind == "cancel":
                             repaired = reassert_genuine_cancel_after_late_fill(
                                 bridge_conn, command_id=command_id,
                                 observed_at=now.isoformat(),
                             )
+                        else:
+                            from src.execution.command_recovery import (
+                                reconcile_authenticated_entry_trade_facts,
+                            )
+
+                            if command_id not in _ws_review_confirmed_entry_candidates(
+                                bridge_conn, limit=1, command_id=command_id,
+                            ):
+                                bridge_conn.rollback()
+                                logger.info("EDLI WS-review proof changed before repair: command_id=%s", command_id)
+                                continue
+                            outcome = reconcile_authenticated_entry_trade_facts(
+                                bridge_conn, command_id=command_id,
+                            )
+                            state = bridge_conn.execute(
+                                "SELECT state FROM venue_commands WHERE command_id = ?",
+                                (command_id,),
+                            ).fetchone()
+                            repaired = (
+                                outcome == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+                                and state is not None
+                                and str(_row_get(state, "state")) == "FILLED"
+                            )
+                            if not repaired and not outcome["errors"] and not outcome["advanced"]:
+                                bridge_conn.rollback()
+                                logger.info("EDLI WS-review REST proof incomplete: command_id=%s", command_id)
+                                continue
                         if not repaired:
                             raise RuntimeError(f"EDLI exact repair proof did not converge: {command_id}")
                         if time.monotonic() >= hold_deadline:

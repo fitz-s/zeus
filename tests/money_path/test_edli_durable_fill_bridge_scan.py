@@ -269,6 +269,13 @@ def _seed_interrupted_command_link(conn: sqlite3.Connection, *, conflict: bool =
 
 
 class TestDurableFillBridgeScan:
+    @pytest.fixture(autouse=True)
+    def _isolate_ws_review_discovery(self, monkeypatch):
+        import src.ingest.price_channel_ingest as lane
+
+        monkeypatch.setattr(lane, "_ws_review_confirmed_entry_candidates_read_only",
+                            lambda *, limit, after_command_id=None, probe=False: ())
+
     def test_interrupted_link_retries_exact_debt_and_sources_terminal_fill(self):
         from src.ingest.price_channel_ingest import (
             _edli_orphaned_command_link_candidates,
@@ -565,6 +572,196 @@ class TestDurableFillBridgeScan:
             ).fetchone()[0] == 2
         finally:
             lane._edli_orphaned_command_link_cursor = original_cursor
+
+    @pytest.mark.parametrize("rest_after_review", [True, False])
+    def test_periodic_exact_slot_recovers_only_confirmed_ws_review(self, monkeypatch, rest_after_review):
+        import src.ingest.price_channel_ingest as lane
+        import src.events.price_channel_redecision_router as router
+        from src.state.collateral_ledger import init_collateral_schema
+        from src.state.db import init_schema_trade_only
+        from src.state.venue_command_repo import append_event
+        from tests.test_command_recovery import (
+            _advance_to_acked, _append_trade_fact, _insert,
+            _seed_pending_entry_projection,
+        )
+
+        conn = _make_conn()
+        init_schema_trade_only(conn)
+        init_collateral_schema(conn)
+        command_id, position_id, order_id = "cmd-ws-review", "pos-ws-review", "ord-ws-review"
+        _insert(conn, command_id=command_id, position_id=position_id,
+                token_id="tok-ws-review", order_type="FOK", size=2.0, price=0.50)
+        _advance_to_acked(conn, command_id=command_id, venue_order_id=order_id)
+        _seed_pending_entry_projection(conn, position_id=position_id,
+                                       command_id=command_id, order_id=order_id,
+                                       token_id="tok-ws-review")
+        append_event(conn, command_id=command_id, event_type="REVIEW_REQUIRED",
+                     occurred_at="2026-04-26T00:08:00.000100Z",
+                     payload={"reason": "ws_trade_lifecycle_regression_or_economic_drift",
+                              "venue_order_id": order_id})
+        _append_trade_fact(conn, command_id=command_id, order_id=order_id,
+                           trade_id="trade-ws-review", state="CONFIRMED",
+                           filled_size="2", fill_price="0.50", source="REST",
+                           observed_at=("2026-04-26T00:08:00.000200Z" if rest_after_review
+                                        else "2026-04-26T00:07:00Z"))
+        conn.commit()
+        original_cursor = lane._edli_orphaned_command_link_cursor
+        limits = []
+
+        class Writer:
+            def __init__(self, **_kwargs):
+                pass
+
+            def __enter__(self):
+                self.lease = SimpleNamespace(acquired_at=time.monotonic())
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        def review_debt(*, limit, after_command_id=None, probe=False):
+            rows = lane._ws_review_confirmed_entry_candidates(
+                conn, limit=limit, after_command_id=after_command_id, probe=probe,
+            )
+            return rows or (lane._ws_review_confirmed_entry_candidates(conn, limit=limit, probe=probe)
+                            if after_command_id else ())
+
+        monkeypatch.setattr(lane, "_edli_trade_fact_bridge_candidates_read_only", lambda: ((), (), ()))
+        monkeypatch.setattr(lane, "_edli_orphaned_command_link_candidates_read_only",
+                            lambda *, limit, after_command_id=None: ())
+        monkeypatch.setattr(lane, "_genuine_cancel_reassert_candidates_read_only",
+                            lambda *, limit, after_command_id=None: ())
+        monkeypatch.setattr(lane, "_ws_review_confirmed_entry_candidates_read_only", review_debt)
+        monkeypatch.setattr(lane, "_edli_durable_fill_bridge_candidate_ids_read_only",
+                            lambda *, limit: limits.append(limit) or ())
+        monkeypatch.setattr(lane, "_prepare_fill_bridge_write_connection", lambda *_a, **_k: conn)
+        monkeypatch.setattr(lane, "_bound_fill_bridge_sqlite_wait_remaining", lambda *_a, **_k: None)
+        monkeypatch.setattr(lane, "_PriceChannelWriteGate", Writer)
+        monkeypatch.setattr(lane, "_close_fill_bridge_write_connection", lambda *_a: None)
+        monkeypatch.setattr(router, "_edli_position_fill_redecision_cycle", lambda: 0)
+        monkeypatch.setattr("src.execution.command_recovery._decision_log_trade_case_for_command",
+                            lambda _conn, _command: ({}, 524132))
+        try:
+            lane._edli_orphaned_command_link_cursor = ""
+            assert lane._edli_durable_fill_bridge_work_exists_read_only() is rest_after_review
+            first = lane._edli_fill_bridge_repair_cycle()
+            assert first["scheduler_failed"] is False, first
+            assert conn.execute("SELECT state FROM venue_commands WHERE command_id=?",
+                                (command_id,)).fetchone()[0] == (
+                                    "FILLED" if rest_after_review else "REVIEW_REQUIRED"
+                                )
+            assert conn.execute(
+                "SELECT COUNT(*) FROM execution_fact WHERE command_id=? AND voided_at IS NULL",
+                (command_id,),
+            ).fetchone()[0] == int(rest_after_review)
+            assert limits[-1] == lane.FILL_BRIDGE_WRITE_TRANCHES_PER_TICK - int(rest_after_review)
+            assert not lane._edli_durable_fill_bridge_work_exists_read_only()
+            second = lane._edli_fill_bridge_repair_cycle()
+            assert second["scheduler_failed"] is False, second
+            assert limits[-1] == lane.FILL_BRIDGE_WRITE_TRANCHES_PER_TICK
+            assert conn.execute("SELECT COUNT(*) FROM execution_fact WHERE command_id=?",
+                                (command_id,)).fetchone()[0] == int(rest_after_review)
+        finally:
+            lane._edli_orphaned_command_link_cursor = original_cursor
+
+    def test_three_exact_debts_share_one_fair_slot(self, monkeypatch):
+        import src.ingest.price_channel_ingest as lane
+        import src.events.price_channel_redecision_router as router
+
+        conn = _make_conn()
+        original_cursor = lane._edli_orphaned_command_link_cursor
+        limits, attempts = [], []
+
+        class Writer:
+            def __init__(self, **_kwargs):
+                pass
+
+            def __enter__(self):
+                self.lease = SimpleNamespace(acquired_at=time.monotonic())
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        def candidates(command_id):
+            def read(*, limit, after_command_id=None, probe=False):
+                return (command_id,)
+            return read
+
+        monkeypatch.setattr(lane, "_edli_trade_fact_bridge_candidates_read_only", lambda: ((), (), ()))
+        monkeypatch.setattr(lane, "_edli_orphaned_command_link_candidates_read_only",
+                            lambda *, limit, after_command_id=None: (
+                                ("aggregate", "a-link", "position"),
+                            ))
+        monkeypatch.setattr(lane, "_genuine_cancel_reassert_candidates_read_only",
+                            candidates("b-cancel"))
+        monkeypatch.setattr(lane, "_ws_review_confirmed_entry_candidates_read_only",
+                            candidates("c-review"))
+        monkeypatch.setattr(lane, "_edli_durable_fill_bridge_candidate_ids_read_only",
+                            lambda *, limit: limits.append(limit) or ())
+        monkeypatch.setattr(lane, "_prepare_fill_bridge_write_connection", lambda *_a, **_k: conn)
+        monkeypatch.setattr(lane, "_bound_fill_bridge_sqlite_wait_remaining", lambda *_a, **_k: None)
+        monkeypatch.setattr(lane, "_PriceChannelWriteGate", Writer)
+        monkeypatch.setattr(lane, "_close_fill_bridge_write_connection", lambda *_a: None)
+        monkeypatch.setattr(lane, "_edli_repair_orphaned_command_link",
+                            lambda _conn, **kwargs: attempts.append(kwargs["command_id"]) or False)
+        monkeypatch.setattr("src.state.venue_command_repo.reassert_genuine_cancel_after_late_fill",
+                            lambda _conn, *, command_id, observed_at: attempts.append(command_id) or False)
+        monkeypatch.setattr(lane, "_ws_review_confirmed_entry_candidates",
+                            lambda _conn, *, command_id, **_kwargs: attempts.append(command_id) or ())
+        monkeypatch.setattr(router, "_edli_position_fill_redecision_cycle", lambda: 0)
+        try:
+            lane._edli_orphaned_command_link_cursor = ""
+            results = [lane._edli_fill_bridge_repair_cycle() for _ in range(4)]
+            assert attempts == ["a-link", "b-cancel", "c-review", "a-link"]
+            assert [result["scheduler_failed"] for result in results] == [True, True, False, True]
+            assert limits == [lane.FILL_BRIDGE_WRITE_TRANCHES_PER_TICK - 1] * 4
+        finally:
+            lane._edli_orphaned_command_link_cursor = original_cursor
+
+    def test_ws_review_bounded_proof_scan_advances_past_incomplete_rest(self):
+        import src.ingest.price_channel_ingest as lane
+        from src.state.db import init_schema_trade_only
+        from src.state.venue_command_repo import append_event
+        from tests.test_command_recovery import (
+            _advance_to_acked, _append_trade_fact, _insert,
+        )
+
+        conn = _make_conn()
+        init_schema_trade_only(conn)
+        original_cursor = lane._edli_ws_review_scan_cursor
+        try:
+            lane._edli_ws_review_scan_cursor = ""
+            for i in range(9):
+                command_id = f"cmd-ws-page-{i:02d}"
+                order_id = f"ord-ws-page-{i:02d}"
+                _insert(conn, command_id=command_id, position_id=f"pos-ws-page-{i:02d}",
+                        token_id=f"tok-ws-page-{i:02d}", order_type="FOK",
+                        size=2.0, price=0.50)
+                _advance_to_acked(conn, command_id=command_id, venue_order_id=order_id)
+                append_event(conn, command_id=command_id, event_type="REVIEW_REQUIRED",
+                             occurred_at="2026-04-26T00:08:00Z",
+                             payload={"reason": "ws_trade_lifecycle_regression_or_economic_drift",
+                                      "venue_order_id": order_id})
+                _append_trade_fact(conn, command_id=command_id, order_id=order_id,
+                                   trade_id=f"trade-ws-page-{i:02d}", state="CONFIRMED",
+                                   filled_size="2" if i == 8 else "1",
+                                   fill_price="0.50", source="REST",
+                                   observed_at="2026-04-26T00:09:00Z")
+            conn.commit()
+            assert lane._ws_review_confirmed_entry_candidates(conn, limit=1, probe=True) == (
+                "cmd-ws-page-00",
+            )
+            assert lane._ws_review_confirmed_entry_candidates(
+                conn, limit=1, advance_scan_cursor=True,
+            ) == ()
+            assert lane._edli_ws_review_scan_cursor == "cmd-ws-page-07"
+            assert lane._ws_review_confirmed_entry_candidates(
+                conn, limit=1, after_command_id=lane._edli_ws_review_scan_cursor,
+                advance_scan_cursor=True,
+            ) == ("cmd-ws-page-08",)
+        finally:
+            lane._edli_ws_review_scan_cursor = original_cursor
 
     @pytest.mark.parametrize("expired_at_gate", [False, True])
     def test_exact_link_admission_remains_250ms_but_hold_starts_at_lease(
