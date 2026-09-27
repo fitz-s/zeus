@@ -585,6 +585,113 @@ def _write_json(path: Path, payload: object) -> None:
                 pass
 
 
+def _current_target_source_geometry_check(
+    city: str, target_date: str, raw: bytes, *, anchor_sigma_c: float,
+) -> tuple[dict[str, object] | None, str | None, bool]:
+    """Return a witnessed precision, or a local block / provider-refresh debt.
+
+    Only a malformed/mislocated provider answer can be repaired by fetching the
+    same run again. Missing static surface, station truth or a high-risk cell
+    blocks this one source target without spending repeated network quota.
+    """
+    try:
+        precision = _precision_metadata(
+            city, target_date, anchor_sigma_c=anchor_sigma_c,
+            raw_payload_bytes=raw,
+        )
+        result = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
+            OpenMeteoIfs9PrecisionMetadata(**precision), raw_payload_bytes=raw,
+        )
+    except (KeyError, TypeError, ValueError, ImportError, OSError) as exc:
+        detail = str(exc)
+        return None, detail, isinstance(exc, KeyError) or (
+            isinstance(exc, ValueError) and detail.startswith("OM9 raw response")
+        )
+    if result.passable_for_live_materialization:
+        return precision, None, False
+    reason = ";".join(result.reason_codes)
+    return None, reason, any(
+        code.startswith("OM9_SOURCE_RESPONSE_") for code in result.reason_codes
+    )
+
+
+def _current_target_witnessed_cached_path(
+    base_path: Path, *, city: str, target_date: str, metric: str,
+    city_timezone: str, cycle: datetime, anchor_sigma_c: float,
+) -> tuple[Path | None, str | None]:
+    """Prefer an exact same-cycle artifact with a current cell/station witness.
+
+    Alternate files preserve old DB SHA paths. A failed repair is not stored;
+    the next scheduled pass can try the same provider again, at most once per
+    target per pass, without any in-loop retry or wholesale cache deletion.
+    """
+    local_block: str | None = None
+    candidates = (base_path, *sorted(base_path.parent.glob(f"{base_path.stem}.geometry-*.json")))
+    for path in candidates:
+        if not path.exists():
+            continue
+        if not _current_target_payload_file_materializable(
+            path, city_timezone=city_timezone, target_date=target_date, cycle=cycle,
+        ):
+            continue
+        raw = path.read_bytes()
+        scope = json.loads(raw).get("_zeus_current_target_scope")
+        if scope != {"city": city, "target_date": target_date, "metric": metric}:
+            continue
+        _precision, reason, retry_provider = _current_target_source_geometry_check(
+            city, target_date, raw, anchor_sigma_c=anchor_sigma_c,
+        )
+        if _precision is not None:
+            return path, None
+        if not retry_provider:
+            local_block = reason or "OM9_SOURCE_GEOMETRY_PROOF_UNAVAILABLE"
+    return None, local_block
+
+
+def _current_target_artifact_source_proof(
+    city: str, target_date: str, metric: str,
+    payload_path: Path, precision_path: Path,
+    *, expected_sha256: str, expected_byte_size: int,
+) -> bool:
+    """Validate one DB artifact and its precision witness before coverage counts.
+
+    The registry SHA remains historical audit; a different city's row changing
+    must not freeze this station. Its current identity is independently re-read
+    by the guard, while every other source-cell field must still reproduce.
+    """
+    try:
+        raw = payload_path.read_bytes()
+        if len(raw) != expected_byte_size or hashlib.sha256(raw).hexdigest() != expected_sha256:
+            return False
+        scope = json.loads(raw).get("_zeus_current_target_scope")
+        if not isinstance(scope, dict) or scope != {
+            "city": city, "target_date": target_date, "metric": metric,
+        }:
+            return False
+        stored = json.loads(precision_path.read_bytes())
+        if not isinstance(stored, dict):
+            return False
+        city_config = cities_by_name[city]
+        start, end = _local_day_window(city_config.timezone, target_date)
+        if (
+            stored.get("city") != city
+            or stored.get("target_local_date") != target_date
+            or stored.get("timezone_name") != city_config.timezone
+            or stored.get("local_day_start_utc") != start.isoformat()
+            or stored.get("local_day_end_utc") != end.isoformat()
+            or abs(float(stored["city_lat"]) - float(city_config.lat)) > 1e-6
+            or abs(float(stored["city_lon"]) - float(city_config.lon)) > 1e-6
+            or abs(float(stored["requested_lat"]) - float(city_config.lat)) > 1e-6
+            or abs(float(stored["requested_lon"]) - float(city_config.lon)) > 1e-6
+        ):
+            return False
+        return evaluate_openmeteo_ecmwf_ifs9_precision_guard(
+            OpenMeteoIfs9PrecisionMetadata(**stored), raw_payload_bytes=raw,
+        ).passable_for_live_materialization
+    except (OSError, TypeError, ValueError, KeyError, ImportError, AttributeError):
+        return False
+
+
 def _json_file_valid(path: Path) -> bool:
     try:
         json.loads(path.read_text(encoding="utf-8"))
@@ -739,7 +846,15 @@ def _canonical_current_target_reuse(
                 f"{cycle.strftime('%Y%m%dT%H%M%SZ')}.json"
             )
             artifact_path = Path(str(row["artifact_path"]))
-            if artifact_path.resolve() != expected_path.resolve():
+            if (
+                artifact_path.parent.resolve() != raw_dir.resolve()
+                or artifact_path.name != expected_path.name
+                and not (
+                    artifact_path.name.startswith(f"{expected_path.stem}.geometry-")
+                    and len(artifact_path.name) == len(expected_path.stem) + len(".geometry-") + 12 + len(".json")
+                    and artifact_path.suffix == ".json"
+                )
+            ):
                 continue
             payload_text = str(metadata.get("openmeteo_payload_json") or "").strip()
             precision_text = str(metadata.get("precision_metadata_json") or "").strip()
@@ -755,26 +870,13 @@ def _canonical_current_target_reuse(
                 continue
             if not _json_file_valid(payload_path) or not _json_file_valid(precision_path):
                 continue
-            precision_payload = json.loads(precision_path.read_text(encoding="utf-8"))
-            if not isinstance(precision_payload, dict):
+            if not _current_target_artifact_source_proof(
+                city, target_date, metric, payload_path, precision_path,
+                expected_sha256=str(row["sha256"]),
+                expected_byte_size=int(row["byte_size"]),
+            ):
                 continue
             raw = payload_path.read_bytes()
-            if len(raw) != int(row["byte_size"]):
-                continue
-            if hashlib.sha256(raw).hexdigest() != str(row["sha256"]):
-                continue
-            expected_precision = _precision_metadata(
-                city, target_date, anchor_sigma_c=anchor_sigma_c,
-                raw_payload_bytes=raw,
-            )
-            if precision_payload != expected_precision:
-                continue
-            precision_guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
-                OpenMeteoIfs9PrecisionMetadata(**precision_payload),
-                raw_payload_bytes=raw,
-            )
-            if not precision_guard.passable_for_live_materialization:
-                continue
             payload = json.loads(raw)
             city_config = cities_by_name.get(city)
             if city_config is None or not _current_target_payload_materializable(
@@ -813,6 +915,7 @@ def _canonical_sibling_payload_reuse(
     *,
     cycle: datetime,
     targets: Sequence[object],
+    anchor_sigma_c: float = 3.0,
 ) -> dict[tuple[str, str], tuple[dict, dict[str, object], datetime]]:
     """Reuse one verified hourly payload for a missing target date or metric.
 
@@ -923,6 +1026,15 @@ def _canonical_sibling_payload_reuse(
                         cycle=cycle,
                     )
                 ):
+                    continue
+                rescoped = _current_target_scoped_payload(
+                    payload, city=city, target_date=target_date, metric=wanted_metric,
+                )
+                raw_scoped = (json.dumps(rescoped, indent=2, sort_keys=True, default=str) + "\n").encode()
+                witnessed, _reason, _retry = _current_target_source_geometry_check(
+                    city, target_date, raw_scoped, anchor_sigma_c=anchor_sigma_c,
+                )
+                if witnessed is None:
                     continue
                 reused[key] = (payload, dict(provenance), captured_at)
         except (OSError, TypeError, ValueError, UnicodeError, json.JSONDecodeError):
@@ -1827,6 +1939,7 @@ def download_current_target_raw_inputs(
             for target in targets
             if _current_target_family_key(target) not in canonical_reuse
         ),
+        anchor_sigma_c=anchor_sigma_c,
     )
     sibling_payload_reuse_count = len(resolved_payloads)
     meta_wave_failures: dict[tuple[str, str], Exception] = {}
@@ -1853,6 +1966,7 @@ def download_current_target_raw_inputs(
     from src.data.openmeteo_ecmwf_ifs9_bucket_transport import (
         BucketTransportNotAdmissible,
         fetch_bucket_run_manifest,
+        source_geometry_static_prerequisite_reason,
     )
 
     def current_bucket_manifests() -> dict:
@@ -1865,22 +1979,33 @@ def download_current_target_raw_inputs(
         return bucket_manifests
 
     pending_requests: dict[tuple[str, str], object] = {}
+    witnessed_cached_paths: dict[tuple[str, str, str], Path] = {}
+    source_local_blocks: dict[tuple[str, str, str], str] = {}
+    static_block = source_geometry_static_prerequisite_reason()
     for target in targets:
         city_config = cities_by_name.get(target.city)
         if city_config is None:
             continue
         if _current_target_family_key(target) in canonical_reuse:
             continue
+        if static_block is not None:
+            source_local_blocks[_current_target_family_key(target)] = static_block
+            continue
         target_key = (target.city, target.target_date)
         if target_key in resolved_payloads:
             continue
         payload_path = raw_dir / f"openmeteo_{_safe_name(target.city)}_{target.target_date}_{target.temperature_metric}_{cycle.strftime('%Y%m%dT%H%M%SZ')}.json"
-        if payload_path.exists() and _current_target_payload_file_materializable(
-            payload_path,
-            city_timezone=city_config.timezone,
-            target_date=target.target_date,
-            cycle=cycle,
-        ):
+        cached_path, local_block = _current_target_witnessed_cached_path(
+            payload_path, city=target.city, target_date=target.target_date,
+            metric=target.temperature_metric,
+            city_timezone=city_config.timezone, cycle=cycle,
+            anchor_sigma_c=anchor_sigma_c,
+        )
+        if cached_path is not None:
+            witnessed_cached_paths[_current_target_family_key(target)] = cached_path
+            continue
+        if local_block is not None:
+            source_local_blocks[_current_target_family_key(target)] = local_block
             continue
         pending_requests.setdefault(
             target_key,
@@ -2035,8 +2160,17 @@ def download_current_target_raw_inputs(
             if family_key in canonical_reuse:
                 mark_processed(target)
                 continue
-            payload_path = raw_dir / f"openmeteo_{_safe_name(target.city)}_{target.target_date}_{target.temperature_metric}_{cycle.strftime('%Y%m%dT%H%M%SZ')}.json"
+            base_payload_path = raw_dir / f"openmeteo_{_safe_name(target.city)}_{target.target_date}_{target.temperature_metric}_{cycle.strftime('%Y%m%dT%H%M%SZ')}.json"
+            payload_path = witnessed_cached_paths.get(family_key, base_payload_path)
             precision_path = raw_dir / f"openmeteo_precision_{_safe_name(target.city)}_{target.target_date}_{target.temperature_metric}.json"
+            if family_key in source_local_blocks:
+                skipped_cities.append({
+                    "city": target.city, "target_date": target.target_date,
+                    "metric": target.temperature_metric,
+                    "reason": f"OM9_SOURCE_GEOMETRY_LOCAL_BLOCK:{source_local_blocks[family_key]}",
+                })
+                mark_processed(target)
+                continue
             request = pending_requests.get(target_key) or build_anchor_request(
                 latitude=float(city_config.lat),
                 longitude=float(city_config.lon),
@@ -2051,15 +2185,7 @@ def download_current_target_raw_inputs(
                 "run_authority": "run_pinned_single_runs",
             }
 
-            payload_is_materializable = (
-                payload_path.exists()
-                and _current_target_payload_file_materializable(
-                    payload_path,
-                    city_timezone=city_config.timezone,
-                    target_date=target.target_date,
-                    cycle=cycle,
-                )
-            )
+            payload_is_materializable = family_key in witnessed_cached_paths
             if payload_is_materializable:
                 payload = json.loads(payload_path.read_text(encoding="utf-8"))
             if not payload_is_materializable:
@@ -2132,36 +2258,31 @@ def download_current_target_raw_inputs(
                     )
                     mark_processed(target)
                     continue
-            _write_json(
-                payload_path,
-                _current_target_scoped_payload(
-                    payload,
-                    city=target.city,
-                    target_date=target.target_date,
-                    metric=target.temperature_metric,
-                ),
+            scoped_payload = _current_target_scoped_payload(
+                payload, city=target.city, target_date=target.target_date,
+                metric=target.temperature_metric,
             )
-            try:
-                precision = _precision_metadata(
-                    target.city, target.target_date,
-                    anchor_sigma_c=anchor_sigma_c,
-                    raw_payload_bytes=payload_path.read_bytes(),
-                )
-                guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
-                    OpenMeteoIfs9PrecisionMetadata(**precision),
-                    raw_payload_bytes=payload_path.read_bytes(),
-                )
-                if not guard.passable_for_live_materialization:
-                    raise ValueError(";".join(guard.reason_codes))
-            except (OSError, KeyError, TypeError, ValueError, ImportError) as exc:
+            scoped_bytes = (json.dumps(scoped_payload, indent=2, sort_keys=True, default=str) + "\n").encode()
+            precision, geometry_reason, _retry = _current_target_source_geometry_check(
+                target.city, target.target_date, scoped_bytes,
+                anchor_sigma_c=anchor_sigma_c,
+            )
+            if precision is None:
                 skipped_cities.append({
                     "city": target.city,
                     "target_date": target.target_date,
                     "metric": target.temperature_metric,
-                    "reason": f"OM9_SOURCE_GEOMETRY_PROOF_UNAVAILABLE:{exc}",
+                    "reason": f"OM9_SOURCE_GEOMETRY_PROOF_UNAVAILABLE:{geometry_reason}",
                 })
                 mark_processed(target)
                 continue
+            if not payload_is_materializable and base_payload_path.exists():
+                payload_path = base_payload_path.with_name(
+                    f"{base_payload_path.stem}.geometry-{hashlib.sha256(scoped_bytes).hexdigest()[:12]}.json"
+                )
+                if payload_path.exists() and payload_path.read_bytes() != scoped_bytes:
+                    raise ValueError("OM9 geometry repair path hash collision")
+            _write_json(payload_path, scoped_payload)
             _write_json(precision_path, precision)
             downloaded["openmeteo_payload_count"] = (
                 int(downloaded["openmeteo_payload_count"]) + 1

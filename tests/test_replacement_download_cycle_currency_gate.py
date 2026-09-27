@@ -103,10 +103,13 @@ def _legacy_downloader_transport_fixtures(monkeypatch, request) -> None:
     # Historical currency/coverage examples use transport stubs without any
     # provider response geometry. Keep their clock assertions isolated; the
     # source-proof tests below exercise the real producer and guard.
-    if request.node.name.startswith("test_source_geometry_"):
+    if request.node.name.startswith("test_source_geometry_") or request.node.name == (
+        "test_direct_downloader_reuses_canonical_bytes_without_moving_capture_time"
+    ) or request.node.name.startswith("test_broad_rotation_records_actual_reused_family_after_timeout"):
         return
     import scripts.download_replacement_forecast_current_targets as dl
     import src.data.openmeteo_ecmwf_ifs9_precision_guard as guard
+    import src.data.openmeteo_ecmwf_ifs9_bucket_transport as transport
     from src.config import cities_by_name
 
     def old_metadata(city, target_date, *, anchor_sigma_c, raw_payload_bytes=None):
@@ -133,6 +136,286 @@ def _legacy_downloader_transport_fixtures(monkeypatch, request) -> None:
 
     monkeypatch.setattr(dl, "_precision_metadata", old_metadata)
     monkeypatch.setattr(guard, "geometry_proof_authenticity_reason", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(transport, "source_geometry_static_prerequisite_reason", lambda: None)
+
+
+def _source_geometry_payload(
+    monkeypatch, *, target_date: str = "2026-06-10", wrong_grid: bool = False,
+) -> dict:
+    import src.data.openmeteo_ecmwf_ifs9_bucket_transport as transport
+    from src.config import cities_by_name
+
+    city = cities_by_name["Dallas"]
+    selected_lat = float(city.lat) + 0.005
+    selected_lon = float(city.lon) + 0.005
+    cell = {
+        "revision": "openmeteo_ifs9_o1280_source_cell_v1",
+        "static_hsurf_sha256": "a" * 64, "selected_flat_index": 123,
+        "selected_grid_lat": selected_lat, "selected_grid_lon": selected_lon,
+        "raw_grid_elevation_m": 145.0, "effective_grid_elevation_m": 150.0,
+        "target_dem_elevation_m": 150.0, "cell_is_sea": False,
+        "cell_is_center": True, "nearby_sea": False,
+    }
+    monkeypatch.setattr(transport, "source_cell_geometry_proof", lambda **_kwargs: dict(cell))
+    monkeypatch.setattr(transport, "source_geometry_static_prerequisite_reason", lambda: None)
+    return {
+        **_anchor_payload(target_date),
+        "latitude": selected_lat + (0.2 if wrong_grid else 0.0),
+        "longitude": selected_lon,
+        "elevation": 150.0,
+        "timezone": city.timezone,
+    }
+
+
+def test_source_geometry_invalid_same_cycle_cache_refetches_then_recovers_without_overwrite(
+    tmp_path, monkeypatch,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    wrong = _source_geometry_payload(monkeypatch, wrong_grid=True)
+    correct = _source_geometry_payload(monkeypatch)
+    raw_dir = tmp_path / "raw" / "20260609T000000Z"
+    raw_dir.mkdir(parents=True)
+    original = raw_dir / "openmeteo_Dallas_2026-06-10_high_20260609T000000Z.json"
+    dl._write_json(original, dl._current_target_scoped_payload(
+        wrong, city="Dallas", target_date="2026-06-10", metric="high",
+    ))
+    old_raw = original.read_bytes()
+    fetches: list[int] = []
+
+    def wave(requests, **_kwargs):
+        fetches.append(1)
+        key = next(iter(requests))
+        return ({key: (wrong if len(fetches) == 1 else correct,
+                       {"openmeteo_endpoint": "standard_api_meta_stamped",
+                        "run_authority": "provider_meta_declared"},
+                       datetime.now(timezone.utc))}, {})
+
+    monkeypatch.setattr(dl, "_single_runs_public_for_request", lambda *_args: False)
+    monkeypatch.setattr(dl, "_fetch_meta_stamped_anchor_wave", wave)
+    kwargs = dict(forecast_db=tmp_path / "forecast.db", output_dir=tmp_path / "raw",
+                  cycle=AVAILABLE_CYCLE, limit=None, write_db=False,
+                  release_lag_hours=14.0, anchor_sigma_c=3.0,
+                  required_scopes=(("Dallas", "2026-06-10", "high"),))
+    first = dl.download_current_target_raw_inputs(**kwargs)
+    assert first["written_manifest_count"] == 0
+    assert len(fetches) == 1
+    assert original.read_bytes() == old_raw
+    assert list(raw_dir.glob("*.geometry-*.json")) == []
+
+    second = dl.download_current_target_raw_inputs(**kwargs)
+    assert second["written_manifest_count"] == 1
+    assert len(fetches) == 2
+    assert original.read_bytes() == old_raw
+    repaired, = raw_dir.glob("*.geometry-*.json")
+    assert dl._current_target_source_geometry_check(
+        "Dallas", "2026-06-10", repaired.read_bytes(), anchor_sigma_c=3.0,
+    )[0] is not None
+
+    third = dl.download_current_target_raw_inputs(**kwargs)
+    assert third["written_manifest_count"] == 1
+    assert len(fetches) == 2
+
+
+def test_source_geometry_invalid_sibling_db_artifact_cannot_mask_new_fetch(
+    tmp_path, monkeypatch,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+    from src.data.openmeteo_ecmwf_ifs9_anchor import HIGH_DATA_VERSION
+
+    wrong = _source_geometry_payload(monkeypatch, wrong_grid=True)
+    correct = _source_geometry_payload(monkeypatch)
+    raw_dir = tmp_path / "raw" / "20260609T000000Z"
+    raw_dir.mkdir(parents=True)
+    old_path = raw_dir / "old-sibling.json"
+    dl._write_json(old_path, dl._current_target_scoped_payload(
+        wrong, city="Dallas", target_date="2026-06-10", metric="high",
+    ))
+    raw = old_path.read_bytes()
+    db = tmp_path / "forecast.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute(_ARTIFACTS_DDL)
+        conn.execute(
+            "INSERT INTO raw_forecast_artifacts (source_id,product_id,data_version,"
+            "source_cycle_time,source_available_at,captured_at,artifact_path,sha256,"
+            "byte_size,artifact_metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (dl.OPENMETEO_SOURCE_ID, dl.OPENMETEO_PRODUCT_ID, HIGH_DATA_VERSION,
+             AVAILABLE_CYCLE.isoformat(), AVAILABLE_CYCLE.isoformat(),
+             AVAILABLE_CYCLE.isoformat(), str(old_path), hashlib.sha256(raw).hexdigest(),
+             len(raw), json.dumps({"city": "Dallas", "target_date": "2026-06-10",
+                                   "metric": "high"})),
+        )
+    target = _TargetRow("Dallas", "2026-06-10", "low", False, True)
+    assert dl._canonical_sibling_payload_reuse(
+        db, cycle=AVAILABLE_CYCLE, targets=(target,), anchor_sigma_c=3.0,
+    ) == {}
+    fetches: list[int] = []
+
+    def wave(requests, **_kwargs):
+        fetches.append(1)
+        key = next(iter(requests))
+        return ({key: (correct,
+                       {"openmeteo_endpoint": "standard_api_meta_stamped",
+                        "run_authority": "provider_meta_declared"},
+                       datetime.now(timezone.utc))}, {})
+
+    monkeypatch.setattr(dl, "_single_runs_public_for_request", lambda *_args: False)
+    monkeypatch.setattr(dl, "_fetch_meta_stamped_anchor_wave", wave)
+    report = dl.download_current_target_raw_inputs(
+        forecast_db=db, output_dir=tmp_path / "raw", cycle=AVAILABLE_CYCLE,
+        limit=None, write_db=False, release_lag_hours=14.0, anchor_sigma_c=3.0,
+        required_scopes=(("Dallas", "2026-06-10", "low"),),
+    )
+    assert report["sibling_payload_reuse_count"] == 0
+    assert report["written_manifest_count"] == 1
+    assert len(fetches) == 1
+    assert old_path.read_bytes() == raw
+
+
+def test_source_geometry_upstream_critical_and_active_plan_skip_old_synthetic_cache(
+    tmp_path, monkeypatch,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+    import src.data.replacement_forecast_current_target_plan as plan_mod
+    import src.data.replacement_forecast_production as production
+    from src.config import cities_by_name
+
+    payload = _source_geometry_payload(monkeypatch)
+    path = tmp_path / "openmeteo_Dallas_2026-06-10_high_20260609T000000Z.json"
+    precision_path = tmp_path / "precision.json"
+    dl._write_json(path, dl._current_target_scoped_payload(
+        payload, city="Dallas", target_date="2026-06-10", metric="high",
+    ))
+    raw = path.read_bytes()
+    precision = dl._precision_metadata(
+        "Dallas", "2026-06-10", anchor_sigma_c=3.0, raw_payload_bytes=raw,
+    )
+    db = tmp_path / "forecast.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute(_ARTIFACTS_DDL)
+        conn.execute(
+            "INSERT INTO raw_forecast_artifacts (source_id,product_id,data_version,"
+            "source_cycle_time,source_available_at,captured_at,artifact_path,sha256,"
+            "byte_size,artifact_metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (dl.OPENMETEO_SOURCE_ID, dl.OPENMETEO_PRODUCT_ID,
+             dl.OPENMETEO_HIGH_DATA_VERSION, AVAILABLE_CYCLE.isoformat(),
+             AVAILABLE_CYCLE.isoformat(), AVAILABLE_CYCLE.isoformat(), str(path),
+             hashlib.sha256(raw).hexdigest(), len(raw),
+             json.dumps({"city": "Dallas", "target_date": "2026-06-10",
+                         "metric": "high", "precision_metadata_json": str(precision_path),
+                         "openmeteo_payload_json": str(path)})),
+        )
+    scope = (("Dallas", "2026-06-10", "high"),)
+    manifest = plan_mod._OpenMeteoManifest(
+        str(path), {"city": "Dallas", "target_date": "2026-06-10",
+                    "metric": "high", "target_dates": ["2026-06-10"],
+                    "precision_metadata_json": str(precision_path),
+                    "openmeteo_payload_json": str(path)},
+        AVAILABLE_CYCLE.isoformat(), AVAILABLE_CYCLE.isoformat(),
+        AVAILABLE_CYCLE.isoformat(), AVAILABLE_CYCLE.isoformat(),
+        hashlib.sha256(raw).hexdigest(), len(raw),
+    )
+    kwargs = dict(target_date="2026-06-10",
+                  city_timezone=cities_by_name["Dallas"].timezone,
+                  required_source_cycle_time=AVAILABLE_CYCLE.isoformat())
+    assert production._critical_scopes_missing_current_anchor(db, scope, AVAILABLE_CYCLE) == scope
+    assert plan_mod._openmeteo_manifest_coverage((manifest,), **kwargs)[0] == 0
+
+    # Exercise the actual active availability-poll branch, not only its helper:
+    # same-cycle HWM without a source witness must still fetch this anchor leg.
+    from types import SimpleNamespace
+    import scripts.download_replacement_forecast_current_targets as downloader
+    import src.data.replacement_cycle_availability as availability_mod
+
+    monkeypatch.setattr(
+        plan_mod, "build_replacement_forecast_current_target_plan",
+        lambda _db, **options: SimpleNamespace(missing_openmeteo_manifest_count=(
+            0 if plan_mod._openmeteo_manifest_coverage(
+                (manifest,), target_date="2026-06-10",
+                city_timezone=cities_by_name["Dallas"].timezone,
+                required_source_cycle_time=options["required_openmeteo_source_cycle_time"].isoformat(),
+            )[0] else 1
+        )),
+    )
+    monkeypatch.setattr(
+        availability_mod, "resolve_provider_anchor_cycle_availability",
+        lambda _now: (availability_mod.AnchorCycleAvailability(AVAILABLE_CYCLE, True),),
+    )
+    monkeypatch.setattr(production, "_per_leg_downloaded_cycle", lambda *_args: AVAILABLE_CYCLE)
+    monkeypatch.setattr(production, "_recover_held_common_cycle_anchors_if_needed", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(production, "_probe_resolved_bayes_precision_fusion_extras_cycle", lambda: None)
+    monkeypatch.setattr(production, "_extras_cycle_incomplete", lambda *_args: False)
+    fetched: list[int] = []
+
+    def fetch_proof(**_kwargs):
+        fetched.append(1)
+        dl._write_json(precision_path, precision)
+        return {"status": "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED"}
+
+    monkeypatch.setattr(downloader, "download_current_target_openmeteo_inputs", fetch_proof)
+    cfg = {"forecast_db": db, "download_output_dir": tmp_path / "raw"}
+    clock = SimpleNamespace(as_dict=lambda: {"status": "SOURCE_CLOCK_NO_CHANGE"})
+    first = production._replacement_cycle_availability_poll_if_needed(
+        cfg, source_clock_report=clock,
+    )
+    assert first["anchor_missing_scope_count"] == 1
+    assert first["legs_fetched"] == [{"leg": "anchor", "cycle": AVAILABLE_CYCLE.isoformat()}]
+    assert fetched == [1]
+
+    # The exact same source-cycle raw bytes are usable after a real geometry
+    # certificate arrives: no new cycle/version/DB schema is required.
+    assert production._critical_scopes_missing_current_anchor(db, scope, AVAILABLE_CYCLE) == ()
+    assert plan_mod._openmeteo_manifest_coverage((manifest,), **kwargs)[0] == 1
+    second = production._replacement_cycle_availability_poll_if_needed(
+        cfg, source_clock_report=clock,
+    )
+    assert second["anchor_missing_scope_count"] == 0
+    assert second["status"] == "AVAILABILITY_POLL_CURRENT"
+    assert second["legs_fetched"] == []
+    assert fetched == [1]
+
+
+def test_source_geometry_missing_static_blocks_network_then_recovers_next_tick(
+    tmp_path, monkeypatch,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+    import src.data.openmeteo_ecmwf_ifs9_bucket_transport as transport
+
+    original_prerequisite = transport.source_geometry_static_prerequisite_reason
+    good = _source_geometry_payload(monkeypatch)
+    static = tmp_path / "hsurf.om"
+    monkeypatch.setattr(transport, "source_geometry_static_prerequisite_reason",
+                        lambda: original_prerequisite(local_cache=str(static)))
+    fetches: list[int] = []
+
+    def wave(requests, **_kwargs):
+        fetches.append(1)
+        key = next(iter(requests))
+        return ({key: (good,
+                       {"openmeteo_endpoint": "standard_api_meta_stamped",
+                        "run_authority": "provider_meta_declared"},
+                       datetime.now(timezone.utc))}, {})
+
+    monkeypatch.setattr(dl, "_single_runs_public_for_request", lambda *_args: False)
+    monkeypatch.setattr(dl, "_fetch_meta_stamped_anchor_wave", wave)
+    kwargs = dict(forecast_db=tmp_path / "forecast.db", output_dir=tmp_path / "raw",
+                  cycle=AVAILABLE_CYCLE, limit=None, write_db=False,
+                  release_lag_hours=14.0, anchor_sigma_c=3.0,
+                  required_scopes=(("Dallas", "2026-06-10", "high"),))
+    blocked = dl.download_current_target_raw_inputs(**kwargs)
+    assert blocked["written_manifest_count"] == 0
+    assert blocked["skipped_cities"][0]["reason"].startswith(
+        "OM9_SOURCE_GEOMETRY_LOCAL_BLOCK:OM9_SOURCE_STATIC_HSURF_UNAVAILABLE"
+    )
+    assert fetches == []
+
+    # The real prerequisite path probes local terrain; this fixture replaces
+    # only external .om reads, never the source guard or response geometry.
+    static.write_bytes(b"fixture-surface")
+    monkeypatch.setattr(transport, "read_model_elevation", lambda *_args, **_kwargs: 12.0)
+    recovered = dl.download_current_target_raw_inputs(**kwargs)
+    assert recovered["written_manifest_count"] == 1
+    assert len(fetches) == 1
 
 
 def test_current_target_download_prioritizes_held_families_before_alphabetic() -> None:
@@ -1364,7 +1647,10 @@ def test_direct_downloader_reuses_canonical_bytes_without_moving_capture_time(
     payload_path = raw_dir / (
         "openmeteo_Dallas_2026-06-10_high_20260609T000000Z.json"
     )
-    payload_path.write_text(json.dumps(_anchor_payload()) + "\n")
+    payload = _source_geometry_payload(monkeypatch)
+    dl._write_json(payload_path, dl._current_target_scoped_payload(
+        payload, city="Dallas", target_date="2026-06-10", metric="high",
+    ))
     precision_path = raw_dir / "openmeteo_precision_Dallas_2026-06-10_high.json"
     precision_path.write_text(
         json.dumps(
@@ -1372,6 +1658,7 @@ def test_direct_downloader_reuses_canonical_bytes_without_moving_capture_time(
                 "Dallas",
                 "2026-06-10",
                 anchor_sigma_c=3.0,
+                raw_payload_bytes=payload_path.read_bytes(),
             )
         )
     )
@@ -2137,6 +2424,7 @@ def test_broad_anchor_uses_real_market_keys_and_exact_payload_without_readiness_
     assert calls[0]["required_scopes"] == (
         ("Amsterdam", target_date, "high"),
         ("Amsterdam", target_date, "low"),
+        ("Dallas", target_date, "high"),
         ("Dallas", target_date, "low"),
     )
     assert calls[0]["limit"] == 10
@@ -2311,7 +2599,10 @@ def test_broad_rotation_records_actual_reused_family_after_timeout(
     dallas_payload = raw_dir / (
         f"openmeteo_Dallas_{target_date}_high_{cycle.strftime('%Y%m%dT%H%M%SZ')}.json"
     )
-    dallas_payload.write_text(json.dumps(_anchor_payload(target_date)) + "\n")
+    witnessed_payload = _source_geometry_payload(monkeypatch, target_date=target_date)
+    downloader._write_json(dallas_payload, downloader._current_target_scoped_payload(
+        witnessed_payload, city="Dallas", target_date=target_date, metric="high",
+    ))
     held = {scopes[0]: 0} if pinned_timeout else {}
     monkeypatch.setattr(
         "src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
@@ -2610,7 +2901,7 @@ def test_only_past_held_scopes_close_forecast_lane_without_http(
     assert calls == []
 
 
-def test_covered_critical_scope_does_not_rewrite_anchor(
+def test_synthetic_critical_scope_is_reopened_without_rewriting_old_artifact(
     tmp_path, monkeypatch
 ) -> None:
     db = _make_db(
@@ -2671,9 +2962,10 @@ def test_covered_critical_scope_does_not_rewrite_anchor(
         quota_critical=True,
     )
 
-    assert report["status"] == "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED"
-    assert report["target_count"] == 1
-    assert report["written_manifest_count"] == 0
+    assert report["status"] == "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED"
+    assert len(calls) == 1
+    assert calls[0]["required_scopes"] == (scope,)
+    assert payload_path.read_bytes() == payload_bytes
     assert report["structurally_unservable_scopes"] == [list(past_scope)]
     assert report["scope_exclusions"] == [
         {
@@ -2681,7 +2973,6 @@ def test_covered_critical_scope_does_not_rewrite_anchor(
             "reason": "SOURCE_CYCLE_OUTSIDE_TARGET_WINDOW",
         }
     ]
-    assert calls == []
     assert pool.close_count == 0
     production._close_current_target_bucket_pool()
 

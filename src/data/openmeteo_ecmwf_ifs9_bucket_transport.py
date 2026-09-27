@@ -858,6 +858,40 @@ def read_model_elevation(flat_index: int, *, local_cache: str = HSURF_LOCAL_CACH
 
 
 @lru_cache(maxsize=8)
+def _static_geometry_frontier_valid(
+    path: str, identity: tuple[int, int, int, int, int],
+) -> bool:
+    """Check both ends of the local surface before metered source acquisition."""
+    _hsurf_reader.cache_clear()
+    return all(
+        math.isfinite(read_model_elevation(index, local_cache=path))
+        for index in (0, O1280_TOTAL_POINTS - 1)
+    )
+
+
+def source_geometry_static_prerequisite_reason(
+    *, local_cache: str = HSURF_LOCAL_CACHE,
+) -> str | None:
+    """A missing/broken local HSURF cannot be repaired by re-fetching temperature."""
+    from pathlib import Path
+
+    try:
+        path = Path(local_cache).resolve(strict=True)
+        stat = path.stat()
+        if not path.is_file() or stat.st_size <= 0:
+            return "OM9_SOURCE_STATIC_HSURF_UNAVAILABLE"
+        identity = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+        if not _static_geometry_frontier_valid(str(path), identity):
+            return "OM9_SOURCE_STATIC_HSURF_INVALID"
+        after = path.stat()
+        if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) != identity:
+            return "OM9_SOURCE_STATIC_HSURF_CHANGED"
+    except (OSError, ValueError, ImportError, IndexError):
+        return "OM9_SOURCE_STATIC_HSURF_UNAVAILABLE"
+    return None
+
+
+@lru_cache(maxsize=8)
 def _static_surface_sha256(path: str, identity: tuple[int, int, int, int, int]) -> str:
     """Bind a geometry certificate to the exact local O1280 surface artifact."""
     import hashlib

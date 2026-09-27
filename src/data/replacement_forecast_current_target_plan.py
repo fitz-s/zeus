@@ -222,6 +222,8 @@ class _OpenMeteoManifest:
     source_cycle_time: str
     source_available_at: str
     captured_at: str
+    sha256: str | None = None
+    byte_size: int | None = None
 
 
 def _table_names(conn: sqlite3.Connection) -> set[str]:
@@ -474,7 +476,7 @@ def _load_openmeteo_manifest_index(
         return {}
     optional_columns = [
         col
-        for col in ("source_cycle_time", "source_available_at", "captured_at", "recorded_at")
+        for col in ("source_cycle_time", "source_available_at", "captured_at", "recorded_at", "sha256", "byte_size")
         if col in raw_artifact_columns
     ]
     select_optional = "".join(f", {col}" for col in optional_columns)
@@ -570,6 +572,8 @@ def _load_openmeteo_manifest_index(
             source_cycle_time=source_cycle_time,
             source_available_at=source_available_at,
             captured_at=captured_at,
+            sha256=(str(row["sha256"]) if "sha256" in raw_artifact_columns else None),
+            byte_size=(int(row["byte_size"]) if "byte_size" in raw_artifact_columns else None),
         )
         source_id = str(row["source_id"])
         data_version = str(row["data_version"])
@@ -586,9 +590,11 @@ def _openmeteo_manifest_coverage(
     required_source_cycle_time: str | None = None,
     minimum_source_cycle_time: str | None = None,
     payload_coverage_cache: dict[tuple[str, str, str], bool] | None = None,
+    deadline_monotonic: float | None = None,
 ) -> tuple[int, str | None, str | None]:
     candidates: list[tuple[tuple[str, str, str, str], str | None]] = []
     for manifest in manifests:
+        _check_target_plan_deadline(deadline_monotonic)
         if required_source_cycle_time and required_source_cycle_time not in {
             manifest.column_source_cycle_time,
             str(manifest.metadata.get("source_cycle_time") or ""),
@@ -610,6 +616,35 @@ def _openmeteo_manifest_coverage(
             cache=payload_coverage_cache,
         ):
             continue
+        if required_source_cycle_time is not None:
+            _check_target_plan_deadline(deadline_monotonic)
+            # A current-cycle raw file alone is not a valid anchor certificate:
+            # old synthetic precision sidecars must drain through the downloader.
+            from scripts.download_replacement_forecast_current_targets import (  # noqa: PLC0415
+                _current_target_artifact_source_proof,
+            )
+
+            metadata = manifest.metadata
+            city = str(metadata.get("city") or "")
+            metric = str(metadata.get("metric") or "")
+            precision_text = str(metadata.get("precision_metadata_json") or "")
+            if (
+                not city or metric not in {"high", "low"}
+                or not precision_text or manifest.sha256 is None
+                or manifest.byte_size is None
+            ):
+                continue
+            precision_path = Path(precision_text)
+            if not precision_path.is_absolute():
+                precision_path = Path(manifest.artifact_path).parent / precision_path
+            if not _current_target_artifact_source_proof(
+                city, target_date, metric,
+                Path(manifest.artifact_path), precision_path,
+                expected_sha256=manifest.sha256,
+                expected_byte_size=manifest.byte_size,
+            ):
+                continue
+            _check_target_plan_deadline(deadline_monotonic)
         source_run_id = _openmeteo_source_run_id(manifest.metadata)
         candidates.append(
             (
@@ -2984,6 +3019,7 @@ def build_replacement_forecast_current_target_plan(
                         else row["baseline_source_cycle_time"]
                     ),
                     payload_coverage_cache=payload_coverage_cache,
+                    deadline_monotonic=deadline_monotonic,
                 )
             else:
                 coverage = (1, None, None) if not require_raw_artifacts else (0, None, None)

@@ -715,6 +715,7 @@ def _critical_scopes_missing_current_anchor(
         expected_replacement_dependency_identity_by_role,
     )
     from scripts.download_replacement_forecast_current_targets import (  # noqa: PLC0415
+        _current_target_artifact_source_proof,
         _current_target_payload_file_materializable,
     )
     from src.config import cities_by_name  # noqa: PLC0415
@@ -735,9 +736,10 @@ def _critical_scopes_missing_current_anchor(
                 identity = expected_replacement_dependency_identity_by_role(metric)[
                     "openmeteo_ifs9_anchor"
                 ]
-                row = conn.execute(
+                rows = conn.execute(
                     """
-                    SELECT artifact_path, sha256, byte_size
+                    SELECT artifact_path, sha256, byte_size,
+                           artifact_metadata_json
                     FROM raw_forecast_artifacts
                     WHERE source_id = ?
                       AND product_id = ?
@@ -746,7 +748,6 @@ def _critical_scopes_missing_current_anchor(
                       AND json_extract(artifact_metadata_json, '$.city') = ?
                       AND json_extract(artifact_metadata_json, '$.target_date') = ?
                       AND json_extract(artifact_metadata_json, '$.metric') = ?
-                    LIMIT 1
                     """,
                     (
                         identity.source_id,
@@ -757,19 +758,45 @@ def _critical_scopes_missing_current_anchor(
                         target_date,
                         metric,
                     ),
-                ).fetchone()
-                if row is None:
+                ).fetchall()
+                if not rows:
                     missing.append((city, target_date, metric))
                     continue
                 city_config = cities_by_name.get(city)
-                if city_config is None or not _current_target_payload_file_materializable(
-                    Path(str(row[0])),
-                    city_timezone=city_config.timezone,
-                    target_date=target_date,
-                    cycle=cycle,
-                    expected_sha256=str(row[1]),
-                    expected_byte_size=int(row[2]),
-                ):
+                covered = False
+                for row in rows:
+                    _check_source_preflight_deadline(deadline_monotonic)
+                    if city_config is None:
+                        break
+                    artifact_path = Path(str(row[0]))
+                    if not _current_target_payload_file_materializable(
+                        artifact_path,
+                        city_timezone=city_config.timezone,
+                        target_date=target_date,
+                        cycle=cycle,
+                        expected_sha256=str(row[1]),
+                        expected_byte_size=int(row[2]),
+                    ):
+                        continue
+                    try:
+                        metadata = json.loads(str(row[3] or "{}"))
+                    except (TypeError, ValueError):
+                        continue
+                    if not isinstance(metadata, dict):
+                        continue
+                    precision_text = str(metadata.get("precision_metadata_json") or "")
+                    if not precision_text:
+                        continue
+                    precision_path = Path(precision_text)
+                    if not precision_path.is_absolute():
+                        precision_path = artifact_path.parent / precision_path
+                    if _current_target_artifact_source_proof(
+                        city, target_date, metric, artifact_path, precision_path,
+                        expected_sha256=str(row[1]), expected_byte_size=int(row[2]),
+                    ):
+                        covered = True
+                        break
+                if not covered:
                     missing.append((city, target_date, metric))
                 _check_source_preflight_deadline(deadline_monotonic)
             return tuple(missing)

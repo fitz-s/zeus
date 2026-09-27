@@ -3291,10 +3291,31 @@ def test_meta_stamped_horizon_does_not_supply_another_days_precision(
     metadata["precision_metadata_json"] = str(tmp_path / "precision-2026-06-09.json")
     if declared_dates:
         metadata["target_dates"] = ["2026-06-09"]
+    # Target horizon coverage remains distinct from current-cycle source proof.
+    # This handcrafted artifact has no precision file or DB SHA, so it cannot
+    # satisfy the live acquisition gate even after the date label is corrected.
     assert current_target_plan._openmeteo_manifest_coverage(
         (manifest,), target_date="2026-06-09", city_timezone="Europe/London",
         required_source_cycle_time=cycle,
+    )[0] == 0
+    assert current_target_plan._openmeteo_manifest_coverage(
+        (manifest,), target_date="2026-06-09", city_timezone="Europe/London",
     )[0] == 1
+
+
+def test_current_cycle_source_proof_checks_deadline_between_many_artifacts(tmp_path) -> None:
+    import time
+
+    cycle = "2026-06-07T06:00:00+00:00"
+    manifest = current_target_plan._OpenMeteoManifest(
+        str(tmp_path / "raw.json"), {}, cycle, cycle, cycle, cycle,
+    )
+    with pytest.raises(TimeoutError, match="deadline expired"):
+        current_target_plan._openmeteo_manifest_coverage(
+            (manifest,) * 1000, target_date="2026-06-09",
+            required_source_cycle_time=cycle,
+            deadline_monotonic=time.monotonic() - 0.001,
+        )
 
 
 def test_current_target_plan_requires_target_specific_single_runs_manifest(tmp_path) -> None:
