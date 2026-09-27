@@ -8,6 +8,63 @@ Status: active
 
 ### Concurrent conditional-HIGH integration acceptance
 
+- Post-rollout all-open-position audit at 16:46 UTC found a separate producer /
+  held-reader contract defect in Lucknow, Cape Town, Helsinki and Milan. For
+  `wu_api+same_station_fast_tail`, the producer intentionally leaves the NOAA /
+  HKO preliminary-survival mapping empty and writes the real hashed likelihood
+  in `day0_provisional_observation.fast_residual_likelihood`. The pinned reader
+  unconditionally requires the other mapping's identity. Lucknow v5 posterior
+  688430 with current ENS 1381292 is consequently rejected, despite its real
+  nested likelihood; this is not missing source data or a bid-zero exemption.
+- Authorized repair: for this exact WU-fast source type, validate and bind its
+  actual fast-residual evidence using existing shared validation when possible.
+  Verify canonical hash / revision, station and settlement-channel identity,
+  source and causal clocks, and its equality with the carrier's conditioning
+  identity. Preserve NOAA/HKO's own typed evidence requirements and all v5,
+  geometry, source-age, confidence, and submit checks. Never populate a fake
+  NOAA identity or accept a source-name string as evidence. Change no numerical
+  probability law. Scope is the pinned-carrier read/validation seam and a
+  shared pure validator only if necessary; unrelated fast calibration and
+  policy are not in scope. Require real producer-to-pinned-reader HIGH/LOW
+  positive relationships plus missing/tampered/future/wrong-station/channel
+  negatives, original NOAA/HKO tests, and independent review before rollout.
+  SCOPE is exact WU-fast held certificate; DRAIN is ordinary valid posterior
+  reread/rebuild and monitor refresh; RESET is reproduced evidence, not skipped
+  validation. Re-sample the four current affected families after loading.
+- Shared-validator implementation is authorized in `day0_fast_obs.py`, with
+  the engine's existing helper retained as a thin compatibility wrapper. The
+  reader must also reproduce the carrier-content binding to the real nested
+  likelihood, not merely accept its independently valid hash. Prefer already
+  persisted identity inputs; if an essential producer proof is absent, any
+  additive proof-field change must include normal regeneration of old rows,
+  never relabeling or inventing proof. HIGH/LOW and NOAA/HKO remain separate
+  evidence types with unchanged numerical laws.
+- Taipei's pre-settlement source failure exposed a second independent current
+  reader/writer clock mismatch. Valid v3 snapshot 1380669 / 26T12 has source
+  captured 15:58:40.193423 and authority availability / coverage readiness
+  15:58:45.064987. The writer intentionally records these distinct real clocks;
+  the full executable reader incorrectly requires availability <= capture.
+  Its fallback then reports newer, genuinely noncontributing 26T18/27T06 rows,
+  hiding the valid earlier candidate. Taipei later settled; this continuing
+  reader defect is still relevant to other current and future source reads.
+  A read-only in-memory diagnostic changing only that rejected ordering makes
+  the original call select 1380669; no canonical clock was edited.
+- Authorized clock repair: compare proof-of-possession availability to this
+  candidate's own coverage-readiness time, not the earlier snapshot capture.
+  Preserve capture <= candidate producer readiness <= entry readiness and
+  availability <= decision, target identity, current proof and expiry checks.
+  Reject candidate coverage readiness that is after the decision cut. The
+  scope-level entry-readiness row is a mutable UPSERT and existing tests allow
+  its stamp to advance after the cut; do not introduce a new entry-stamp gate
+  or mistake that mutable row for the candidate's own causal proof.
+  Availability after candidate readiness or after decision remains rejected.
+  Do not alter stored timestamps or force noncontributing later shapes.
+  SCOPE is one executable source candidate's causal ordering; DRAIN is an
+  ordinary reader reevaluation; RESET is valid real candidate clocks, never
+  timestamp rewriting. Require HIGH/LOW valid capture-before-availability
+  cases, future / readiness-order negatives, and the newer-invalid versus
+  earlier-valid fallback relationship before integration and review.
+
 - Post-load held-only reseed defect verified at 16:00–16:04 UTC: Hong Kong
   LOW's exact 26T12 v3 source completed at 16:00:39, with native 51 members,
   all 48 steps and complete/live target coverage. The committed-source wake
