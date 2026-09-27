@@ -19,6 +19,24 @@ Status: active
   verify current panic authority and actual auction/actuation drainage; do
   not infer a lawful profitable fill or change risk law from these events.
   Ordinary bid-versus-q analysis alone cannot close this execution finding.
+- Current authority check refutes a direct-panic bypass repair: INV-46,
+  current cycle-runtime classification and explicit safety antibodies require
+  FLASH_CRASH_PANIC to request global redecision; only RED, absorbing hard
+  fact and exact zero support use the direct path. For c157, global receipt
+  867293 at 05:25:58Z actually includes the held position, evaluates four
+  held legs, finds zero positive SELLs and records
+  NO_CURRENT_EXECUTABLE_POSITIVE_ORDER. Its decompressed c157 SELL point
+  counterfactual EV is -.0031605. Thus this observed panic wake did drain to
+  a rejecting comparison; the monitor's PENDING label alone is not proof of
+  a lost exit. The LOW counterpart also drains in its 22:07–22:30 legal-bid
+  window: indexed global receipts 865743/865746/865748 at 22:10–22:12 evaluate
+  eight held positions and zero positive SELLs. Exact 993 SELL candidates
+  at .10/.09 have EV -.0048806357/-.0049765857 and negative log growth;
+  compressed coverage explicitly contains that position. Both panic paths
+  therefore reached the rejecting comparison, not a missing-candidate dead
+  end. This refutes an execution-bypass repair, not the model-quality risk:
+  current belief remained above the collapsing market. Neither a trigger nor
+  a counterfactual is an executable or guaranteed fill.
 
 - `c6269a42a` official deployment completed after natural order drainage:
   Milan Sep28's outstanding remainder was canceled by normal C3 management
@@ -54,6 +72,56 @@ Status: active
   require the full normal held consumer for all four WU families, not READY
   at an intermediate preparation boundary. This failed hypothesis is retained
   explicitly so neither the earlier plan nor commentary remains current proof.
+- Actual normal held-consumer replay now reproduces all four failures without
+  forcing a pinned path. Capturing the two real builder invocations isolates
+  the economic mismatch: the pinned reader reconstructs canonical ordered
+  bin bounds and matches the persisted identity, whereas the later consumer
+  uses the event/product's arbitrary bin order. Cape's observed order begins
+  22+,20,15,21,14; unchanged future/state/likelihood/sigma/operator then hashes
+  differently. The same ordering mismatch occurs in all four families.
+  Authorized repair: strict replay in the producer's canonical bin order,
+  then explicitly map q and every sample column back to the caller's original
+  bin/token identities. Do not sort q independently, alter the hash contract,
+  omit comparisons or silently accept missing/duplicate bins. Cover shuffled
+  HIGH/LOW, wrong bin identity/topology, immutable q/sample tampering, and
+  the complete normal four-family held path before deployment.
+- Lucknow is not an expired-source exception to that four-family acceptance:
+  at 18:26Z exact snapshot 1381292 / 26T18 coverage is COMPLETE/LIVE_ELIGIBLE
+  until Sep28 00:00Z. Posteriors 689191 and 689207 materialize at 18:25:07
+  and 18:26:33, with actual successful daemon wakes; current monitor 1843
+  and subsequent runtime logs still report carrier identity mismatch. An
+  offline probe's conditional-ENS-unavailable result did not reconstruct the
+  same cut and is not evidence of runtime expiry. Preserve this distinction.
+- Corrected work-in-progress now passes an independent canonical read-only
+  replay of the actual normal held-consumer entry point for all four real
+  positions. Each returns current Day0 authority, 11 bin bindings, 500x11
+  samples and normalized probability. Every witness condition_id aligns
+  with the corresponding consumer token-pair condition_id after remapping.
+  This is complete offline consumer proof, not loaded runtime proof or a
+  profitable exit. Require explicit unordered NOAA/HKO shared-path twins,
+  all malformed-topology negatives, fixed-diff review and baseline failure
+  comparison before landing; then two normal new-process monitor cycles.
+- Independent focused verification passes seven explicit WU HIGH/LOW,
+  HKO V3 and NOAA Fahrenheit unordered replay cases. Parent separately passes
+  four existing empty-survival/source-binding regression cases and confirms
+  both topology ValueErrors classify as exact-family unavailability while
+  unexpected RuntimeErrors with the same text remain genuine errors.
+  Actual normal-consumer held-side validation also checks YES/NO token identity
+  and all 500 held-side samples: condition YES q is not mislabeled as held q.
+  The four current held probabilities in that offline cut are approximately
+  .01778, .01021, 0 and .01021 (Cape/Helsinki/Lucknow/Milan), not the near-one
+  complementary YES probabilities. This repairs missing probability evidence;
+  it does not restore the already-lost executable bids or realize profit.
+- Fixed bin-order repair `b043eb644` passes final independent review with no
+  code blockers. Full pricing plus solve-seam suites have 1,306 passes and
+  exactly the same 65 failing nodes as the fixed pre-repair baseline (1,304
+  passes / 65 failures); parent independently parses both JUnit files and
+  confirms no added or removed failure. Seven fixed-SHA relationship tests
+  and diff checks pass. The clock-change hypothesis remains withdrawn.
+  A later 18:32Z Lucknow offline probe crosses local midnight and returns
+  POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE; runtime/source classification
+  is being independently checked before deciding final acceptance. Do not
+  present the earlier four-family read-only success as current live freshness.
 - The 18:18Z HK27 expiry investigation finds no currently lawful replacement:
   exact HIGH/LOW v3 coverage remains COMPLETE/LIVE_ELIGIBLE but expires at
   18:00Z. Later HIGH 26T18/27T00/27T06 cycles are noncontributing; later LOW
