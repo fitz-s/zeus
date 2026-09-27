@@ -1156,13 +1156,35 @@ def test_noaa_missing_current_state_blocks_only_one_family_and_drains_on_next_cu
         times=tuple(f"2026-06-07T{hour:02d}:00" for hour in range(24)),
         temps_c=tuple(29.0 if hour < 12 else 31.0 for hour in range(24)),
     )
+    if missing_metric == "high":
+        from src.data.day0_hourly_vectors import day0_source_clock_ensemble_member_models
+
+        def source_meta(model: str, *, ensemble: bool = False) -> str:
+            return json.dumps({
+                "provider_source_cycle_time_utc": _dt(6).isoformat(),
+                "provider_source_available_at_utc": _dt(7).isoformat(),
+                "fetch_finished_at": _dt(18, 9).isoformat(),
+                "request_hash": "same-ens-request" if ensemble else f"provider-{model}",
+                "provider_run_id": "same-ens-run" if ensemble else f"provider-{model}",
+            })
+
+        providers = [
+            replace(vector, source_run_meta_json=source_meta("ecmwf_ifs")),
+            replace(vector, model="icon_global", source_run_meta_json=source_meta("icon_global")),
+        ]
+        ensemble = [
+            replace(vector, model=model, source_run_meta_json=source_meta(model, ensemble=True))
+            for model in day0_source_clock_ensemble_member_models()
+        ]
+    else:
+        providers, ensemble = [vector], []
     monkeypatch.setattr(
         "src.data.day0_hourly_vectors.day0_hourly_models_for_city",
-        lambda _city: ["ecmwf_ifs"],
+        lambda _city: [item.model for item in providers],
     )
     monkeypatch.setattr(
         "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
-        lambda **_kwargs: [vector],
+        lambda **kwargs: ensemble if len(kwargs.get("expected_models") or ()) == 51 else providers,
     )
     recovered = materialize_replacement_forecast_live(conn, missing)
     assert recovered.ok is True
@@ -1185,6 +1207,79 @@ def test_noaa_missing_state_boundary_does_not_swallow_unexpected_calculation(
     with pytest.raises(ValueError, match="UNEXPECTED_CALCULATION_ERROR"):
         materializer_mod.compute_replacement_posterior_readonly(conn, request)
     with pytest.raises(ValueError, match="UNEXPECTED_CALCULATION_ERROR"):
+        materialize_replacement_forecast_live(conn, request)
+
+
+@pytest.mark.parametrize("reason", (
+    "DAY0_CONDITIONAL_HIGH_ENSEMBLE_UNAVAILABLE",
+    "DAY0_CONDITIONAL_HIGH_OBSERVATION_ANCHOR_UNAVAILABLE",
+    "DAY0_CONDITIONAL_HIGH_OBSERVATION_MISSING",
+))
+def test_conditional_high_missing_evidence_is_family_blocked_not_calculation_error(
+    monkeypatch: pytest.MonkeyPatch, reason: str,
+) -> None:
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+
+    def missing_high(*_args, metric: str, **_kwargs):
+        if metric == "high":
+            raise ValueError(reason)
+        raise AssertionError("LOW must not use the conditional HIGH path")
+
+    monkeypatch.setattr(materializer_mod, "_day0_noaa_carrier_future_members", missing_high)
+    high = _request(
+        computed_at=_dt(18, 10),
+        expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+        day0_observed_extreme_c=31.0,
+        day0_observed_extreme_source="aviationweather_metar",
+        day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
+    )
+    prepared = materializer_mod.prepare_replacement_forecast_live(conn, high)
+    assert isinstance(prepared, materializer_mod.ReplacementForecastMaterializeResult)
+    assert prepared.status == "BLOCKED"
+    assert prepared.reason_codes == (reason,)
+    assert materializer_mod.compute_replacement_posterior_readonly(conn, high) is None
+    written = materialize_replacement_forecast_live(conn, high)
+    assert written.status == "BLOCKED"
+    assert written.reason_codes == (reason,)
+    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
+
+    low = replace(
+        _request(
+            computed_at=_dt(18, 10),
+            expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+            day0_observed_extreme_c=19.0,
+            day0_observed_extreme_source="noaa_wrh_zspd",
+            day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
+        ),
+        temperature_metric="low",
+        baseline_data_version=_current_baseline_data_version("low"),
+    )
+    assert materialize_replacement_forecast_live(conn, low).ok is True
+
+
+@pytest.mark.parametrize("reason", (
+    "DAY0_CONDITIONAL_HIGH_ENSEMBLE_CYCLE_MISMATCH",
+    "DAY0_CONDITIONAL_HIGH_PROVIDER_REBUILD_MISMATCH",
+    "DAY0_CONDITIONAL_HIGH_RUN_PROOF_INVALID",
+    "UNEXPECTED_CALCULATION_ERROR",
+))
+def test_conditional_high_missing_evidence_boundary_does_not_swallow_mismatch(
+    monkeypatch: pytest.MonkeyPatch, reason: str,
+) -> None:
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+
+    def invalid(*_args, **_kwargs):
+        raise ValueError(reason)
+
+    monkeypatch.setattr(materializer_mod, "_compute_posterior_payload", invalid)
+    request = _request()
+    with pytest.raises(ValueError, match=reason):
+        materializer_mod.prepare_replacement_forecast_live(conn, request)
+    with pytest.raises(ValueError, match=reason):
+        materializer_mod.compute_replacement_posterior_readonly(conn, request)
+    with pytest.raises(ValueError, match=reason):
         materialize_replacement_forecast_live(conn, request)
 
 
@@ -2735,6 +2830,7 @@ def test_materializer_hko_provisional_observation_does_not_truncate_support(
             0.5,
             _dt(18).isoformat(),
             (),
+            None,
         ),
     )
     request = replace(
@@ -3098,6 +3194,42 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
         "src.data.day0_fast_obs.build_fast_station_residual_likelihood",
         lambda *_args, **_kwargs: None,
     )
+
+    complete_ensemble = ensemble[:]
+    ensemble.clear()
+    missing_ens = materialize_replacement_forecast_live(conn, request)
+    assert missing_ens.status == "BLOCKED"
+    assert missing_ens.reason_codes == ("DAY0_CONDITIONAL_HIGH_ENSEMBLE_UNAVAILABLE",)
+    assert materializer_mod.compute_replacement_posterior_readonly(conn, request) is None
+    ensemble[:] = complete_ensemble
+
+    import src.data.day0_hourly_vectors as hourly_vectors
+
+    original_extremes = hourly_vectors.remaining_day_extremes_c_with_current_state
+    with monkeypatch.context() as missing_anchor:
+        def without_ensemble_observation_anchor(vectors, **kwargs):
+            if len(vectors) == 51:
+                return (), ()
+            return original_extremes(vectors, **kwargs)
+
+        missing_anchor.setattr(
+            hourly_vectors, "remaining_day_extremes_c_with_current_state",
+            without_ensemble_observation_anchor,
+        )
+        no_anchor = materialize_replacement_forecast_live(conn, request)
+        assert no_anchor.status == "BLOCKED"
+        assert no_anchor.reason_codes == (
+            "DAY0_CONDITIONAL_HIGH_OBSERVATION_ANCHOR_UNAVAILABLE",
+        )
+
+    ensemble[0] = replace(
+        ensemble[0], source_run_meta_json=vector_meta(ensemble[0].model, ensemble=True).replace(
+            run.isoformat(), datetime(2026, 6, 7, 0, tzinfo=UTC).isoformat(),
+        ),
+    )
+    with pytest.raises(ValueError, match="DAY0_CONDITIONAL_HIGH_ENSEMBLE_CYCLE_MISMATCH"):
+        materialize_replacement_forecast_live(conn, request)
+    ensemble[:] = complete_ensemble
 
     result = materialize_replacement_forecast_live(conn, request)
 

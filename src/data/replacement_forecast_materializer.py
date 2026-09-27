@@ -8675,6 +8675,18 @@ def _materialization_read_snapshot(conn: sqlite3.Connection):
             conn.rollback()
 
 
+# SCOPE: exact city/date/metric. DRAIN: ordinary observation/ENS refresh and
+# family re-materialization; RESET: the next cut has a complete current witness.
+_DAY0_MISSING_CURRENT_EVIDENCE_REASONS = frozenset({
+    "DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_MISSING",
+    "DAY0_NOAA_PRELIMINARY_CARRIER_FUTURE_MEMBERS_MISSING",
+    "DAY0_NOAA_PRELIMINARY_CARRIER_CURRENT_TEMPERATURE_STATE_MISSING",
+    "DAY0_CONDITIONAL_HIGH_OBSERVATION_MISSING",
+    "DAY0_CONDITIONAL_HIGH_ENSEMBLE_UNAVAILABLE",
+    "DAY0_CONDITIONAL_HIGH_OBSERVATION_ANCHOR_UNAVAILABLE",
+})
+
+
 def prepare_replacement_forecast_live(
     conn: sqlite3.Connection,
     request: ReplacementForecastMaterializeRequest,
@@ -8707,11 +8719,7 @@ def prepare_replacement_forecast_live(
             )
         except ValueError as exc:
             reason = str(exc)
-            if reason in {
-                "DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_MISSING",
-                "DAY0_NOAA_PRELIMINARY_CARRIER_FUTURE_MEMBERS_MISSING",
-                "DAY0_NOAA_PRELIMINARY_CARRIER_CURRENT_TEMPERATURE_STATE_MISSING",
-            }:
+            if reason in _DAY0_MISSING_CURRENT_EVIDENCE_REASONS:
                 return ReplacementForecastMaterializeResult(
                     status="BLOCKED",
                     reason_codes=(reason,),
@@ -8743,7 +8751,7 @@ def compute_replacement_posterior_readonly(
         try:
             return _compute_posterior_payload(conn, request, metric=metric, anchor_id=-1)
         except ValueError as exc:
-            if str(exc) != "DAY0_NOAA_PRELIMINARY_CARRIER_CURRENT_TEMPERATURE_STATE_MISSING":
+            if str(exc) not in _DAY0_MISSING_CURRENT_EVIDENCE_REASONS:
                 raise
             # The held read-through has no complete current path witness yet.
             # The monitor keeps its other positions moving and re-reads this
@@ -8946,7 +8954,7 @@ def materialize_replacement_forecast_live(
             anchor_id=anchor_id,
         )
     except ValueError as exc:
-        if str(exc) != "DAY0_NOAA_PRELIMINARY_CARRIER_CURRENT_TEMPERATURE_STATE_MISSING":
+        if str(exc) not in _DAY0_MISSING_CURRENT_EVIDENCE_REASONS:
             raise
         return ReplacementForecastMaterializeResult(
             status="BLOCKED",
