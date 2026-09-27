@@ -38,6 +38,16 @@ Status: active
   never use an unrelated chain amount to overwrite another command or SELL.
   Require negative identity/nonterminal/unsynced twins and a complete-trade
   recovery twin. Scope and drainage remain exact-command, not global veto.
+- A parent retry test then disproved complete drainage: the exact fast selector
+  includes the terminal-order/chain-full, trade-partial REVIEW, but dispatch
+  requires a complete-trade predicate before calling its existing full-order
+  plus held-projection reducer. It consequently stays in the fast lane and
+  can repair only in the unrelated 100ms maintenance lane. Under load that
+  lane interrupts repeatedly. Repair this dispatch, not the production budget:
+  route the exact bound order/held proof through its existing validating reducer
+  within the 1.5s capital unit. Require recovery with maintenance unavailable,
+  retaining exact identity, transaction rollback, peer progress and global
+  deadline boundaries. Earlier quiet-machine passes are insufficient proof.
 - Conditional HIGH missing-source and superseded-product reasons now use the
   existing family BLOCKED result in prepare/direct/read-only paths; wrong-run
   mixtures and proof corruption still raise. Targeted HIGH hourly refresh now
