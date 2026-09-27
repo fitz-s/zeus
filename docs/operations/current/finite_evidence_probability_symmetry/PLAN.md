@@ -36,6 +36,22 @@ Status: active
 - Docs check: neither changed document is reported as defective; 22 separate
   pre-existing repository registry/archive/current-state issues remain outside
   this task. No stale runtime stamp was refreshed to silence them.
+- The AST availability failure is also unchanged: an independent unmodified
+  `65d6767fa` run reports the same 122 sites (106 unique file/kind/expression
+  triples), with no added or removed site. This baseline comparison does not
+  replace the explicit causal-clock behavior tests for the new ENS pin.
+- LOW-specific verification: canonical Hong Kong posterior IDs 684974/685063
+  use a mixed V3 carrier, not pure hourly HIGH. Three hourly centers coexist
+  with HKO FND final-daily 27.0 (raw 2268124); UKMO daily raw 2267216/2286551
+  changes 23.7 to 26.7 in the base fusion. Full-day sigma changes 1.95677 to
+  .77910; path error 1.92009 to .63898; NO27 .506465 to .286364. Neither case
+  clips the residual to zero. The existing LOW/station variance law is distinct
+  from the new pure-hourly HIGH construction. Without the same-cut conditional
+  LOW ensemble and independently justified station uncertainty, a generic
+  variance-subtraction concern is a model-identifiability/causal-evidence gap,
+  not proof of a wrong decision or authority to invent a new variance. Do not
+  claim this task repaired LOW mathematics or proved a profitable early exit;
+  the shared source geometry/proof and execution repairs do cover LOW.
 
 - Fixed parent `5f00dcf93` on `316d10e7e` completed 2,275 tests with three
   pre-existing legacy-schema migration failures described below; no all-green
