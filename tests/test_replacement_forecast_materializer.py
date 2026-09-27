@@ -1485,9 +1485,7 @@ def test_materializer_surfaces_bounds_missing_sub_reason(monkeypatch: pytest.Mon
     assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
 
 
-def test_runtime_layer_requires_live_flags_and_bootstrap_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(materializer_mod, "REQUIRED_FLAGS", ())
-
+def test_runtime_layer_requires_bootstrap_bounds() -> None:
     live_layer = _replacement_is_live_layer(
         replacement_q_mode=REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL,
         q_lcb_map={"cool": 0.1, "warm": 0.6, "hot": 0.05},
@@ -1498,14 +1496,24 @@ def test_runtime_layer_requires_live_flags_and_bootstrap_bounds(monkeypatch: pyt
     assert live_layer is True
 
 
-def test_runtime_layer_rejects_wilson_or_missing_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(materializer_mod, "REQUIRED_FLAGS", ())
-
+def test_runtime_layer_rejects_wilson_or_missing_bounds() -> None:
     assert _replacement_is_live_layer(
         replacement_q_mode=REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL,
         q_lcb_map={"cool": 0.1},
         q_ucb_map={"cool": 0.3},
         q_lcb_basis="legacy_wilson_member_votes",
+    ) is False
+    assert _replacement_is_live_layer(
+        replacement_q_mode=REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL,
+        q_lcb_map=None,
+        q_ucb_map={"cool": 0.3},
+        q_lcb_basis=_QLCB_BASIS,
+    ) is False
+    assert _replacement_is_live_layer(
+        replacement_q_mode=REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL,
+        q_lcb_map={"cool": 0.1},
+        q_ucb_map=None,
+        q_lcb_basis=_QLCB_BASIS,
     ) is False
 
 
