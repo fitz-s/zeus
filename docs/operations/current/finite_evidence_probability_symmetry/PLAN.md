@@ -8,6 +8,18 @@ Status: active
 
 ### Concurrent conditional-HIGH integration acceptance
 
+- Final second-round source checks: 85 schedule/boot tests pass, including
+  canonical full/short tracks, unknown/invalid clock retry, same-date and
+  cross-date UTC expiry ordering. Parent integration with cycle policy and
+  fusion-upgrade tests passes 165 tests at `32defae31`. At 15:24:47 UTC, the
+  new selector against live canonical data (read-only) selects 26T12 full for
+  HIGH (Guangzhou, sharing Hong Kong's 16Z deadline and source run) and LOW
+  (Hong Kong), rather than Cape Town's later 26T18 short cycle. Independent
+  review has no remaining code blocker; actual acquisition/materialization
+  still requires post-load proof. Concurrent upstream `1b596d802` is retained;
+  its scheduler-adapter suite adds one passing case and retains the exact five
+  failing nodes observed on unmodified `7d22b63aa` (93 vs 92 passes).
+
 - Second integrated fixed-head check at `14b232902`: 1,205 passed and 39
   known failing nodes across reactor, held belief, Day0 pricing, source
   scheduling/boot, cycle policy and fusion-upgrade modules. The failures are
@@ -87,6 +99,14 @@ Status: active
   both real HIGH/LOW full/short-horizon representations; retain source-run,
   calendar, city/date, coverage and revision identity checks. This live mapping
   failure blocks source-drainage acceptance even though scheduler tests passed.
+- Read-only validation of that repaired selector proves Hong Kong HIGH/LOW
+  26T12 are eligible, but the full HIGH portfolio tie-break chooses Cape Town
+  first alphabetically even though Hong Kong's local target ends at 16Z and
+  Cape Town's at 22Z. Within the same existing held priority, order by the
+  existing target-local-day UTC end geometry before deterministic name ties.
+  Do not special-case Hong Kong, change source eligibility, run extra collectors
+  or discard other held scopes. Test two cities with different time zones and
+  the same local date/priority so the earlier actual deadline receives service.
 - Concurrent scheduler integration exposed a behavioral defect, not just a
   fixture mismatch: a reserved completion cut treats an absent urgent-wake
   revision as cancellation even when the marker has never existed and the
