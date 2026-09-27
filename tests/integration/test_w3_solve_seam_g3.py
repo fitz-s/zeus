@@ -13560,7 +13560,9 @@ def test_latest_causal_day0_family_event_respects_all_three_clocks():
 @pytest.mark.parametrize("retired", [
     "day0_settlement_channel_revision_model_v22",
     "day0_settlement_channel_revision_model_v23",
-    "day0_resolver_terminal_composition_v22", None,
+    "day0_resolver_terminal_composition_v22",
+    "day0_settlement_channel_revision_model_v24",
+    "day0_resolver_terminal_composition_v23", None,
 ])
 def test_probability_cache_requires_current_day0_geometry_revision(
     monkeypatch, probability_use, retired,

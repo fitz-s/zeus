@@ -856,6 +856,8 @@ def test_day0_entry_q_version_stamps_probability_semantics_revision():
     "day0_resolver_terminal_composition_v21",
     "day0_settlement_channel_revision_model_v23",
     "day0_resolver_terminal_composition_v22",
+    "day0_settlement_channel_revision_model_v24",
+    "day0_resolver_terminal_composition_v23",
 ])
 def test_day0_entry_rejects_retired_geometry_revision_without_relabeling(revision):
     from src.events.day0_authority import (
@@ -880,7 +882,9 @@ def test_day0_entry_rejects_retired_geometry_revision_without_relabeling(revisio
 @pytest.mark.parametrize("revision", [
     None, "day0_settlement_channel_revision_model_v22",
     "day0_settlement_channel_revision_model_v23",
-    "day0_resolver_terminal_composition_v22", "current",
+    "day0_resolver_terminal_composition_v22",
+    "day0_settlement_channel_revision_model_v24",
+    "day0_resolver_terminal_composition_v23", "current",
 ])
 def test_day0_durable_certificate_cannot_relabel_old_economics_from_bare_context(
     mem_conn, revision,

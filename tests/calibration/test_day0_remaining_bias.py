@@ -441,11 +441,11 @@ def test_semantics_revision_is_bumped_and_stamped() -> None:
     )
 
     assert DAY0_PROBABILITY_SEMANTICS_REVISION == (
-        "day0_settlement_channel_revision_model_v24"
+        "day0_settlement_channel_revision_model_v25_land_grid_v3"
     )
     stamped = bind_day0_probability_semantics("q-hash")
     assert day0_probability_semantics_revision(stamped) == (
-        "day0_settlement_channel_revision_model_v24"
+        "day0_settlement_channel_revision_model_v25_land_grid_v3"
     )
     assert day0_probability_semantics_revision(
         "day0-semrev:day0_remaining_center_bias_v20:q-hash"

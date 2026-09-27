@@ -448,8 +448,10 @@ share this builder; a new Day0 semantics revision prevents mixing old and new
 decision certificates or settlement attribution.
 
 The combined land-grid-proof and conditional-HIGH mechanism uses Day0 survival
-revision v24 and resolver revision v23. The independently assigned predecessor
-revisions v23/v22 are historical only: current action requires recomputation
+revision `day0_settlement_channel_revision_model_v25_land_grid_v3` and resolver
+revision `day0_resolver_terminal_composition_v24_land_grid_v3`. The separately
+assigned predecessor revisions, including survival v24 and resolver v23, are
+historical only: current action requires recomputation
 under the combined mechanism, never a changed prefix on an old probability.
 
 For pure hourly HIGH, the conditional IFS within-spread and its disagreement
