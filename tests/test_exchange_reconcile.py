@@ -3190,6 +3190,29 @@ def test_terminal_partial_later_confirmed_remainder_reprojects_cumulative_fill(c
     assert dict(unsettled) == {"amount_micro": 4999750, "settled_at": None}
 
 
+def test_scoped_terminal_late_fill_selector_scopes_raw_fact_windows(conn):
+    """One capital command does not rank unrelated historical fact aliases."""
+    from src.execution.exchange_reconcile import (
+        persisted_terminal_late_entry_fill_command_ids,
+    )
+
+    # The test asserts the boundary, not a fill outcome: command-scoped late
+    # fill repair must put its scope CTE before each raw window relation.
+    statements = []
+    conn.set_trace_callback(statements.append)
+    persisted_terminal_late_entry_fill_command_ids(conn, command_id="cmd-missing")
+    conn.set_trace_callback(None)
+
+    selector_sql = [
+        sql for sql in statements
+        if "canonical_entry_order_truth" in sql and "scoped_command" in sql
+    ]
+    assert len(selector_sql) == 1
+    sql = selector_sql[0]
+    assert "scoped_command AS (SELECT 'cmd-missing' AS command_id)" in sql
+    assert "JOIN scoped_command scope ON scope.command_id = fact.command_id" in sql
+
+
 def test_resolved_obligation_still_drains_persisted_terminal_late_fill(conn):
     from src.execution.command_recovery import (
         reconcile_terminal_entry_exposure_obligations,

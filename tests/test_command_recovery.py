@@ -38561,7 +38561,7 @@ def test_cancel_first_partial_entry_releases_only_unmatched_remainder(
     tmp_path,
     monkeypatch,
 ):
-    """A partial CANCEL_PENDING ENTRY outruns a deferred broad obligation pass."""
+    """A stayed terminal obligation cannot starve an independent CANCEL_PENDING."""
     from src.execution import command_recovery, venue_sync_contract
     from src.state.db import init_schema, init_schema_trade_only, log_execution_fact
     from src.state.venue_command_repo import append_event
@@ -38670,6 +38670,15 @@ def test_cancel_first_partial_entry_releases_only_unmatched_remainder(
         "UPDATE venue_commands SET state = 'PARTIAL' WHERE command_id = ?",
         ("cmd-unrelated-partial-obligation",),
     )
+    # This command is a terminal-looking but ambiguous obligation: no exact
+    # order fact exists.  The exact lane must leave it OPEN, then continue to
+    # the independent CANCEL_PENDING command below rather than returning from
+    # the complete fast pass.
+    _seed_open_terminal_entry_obligation_for_exact_order_test(
+        seed,
+        command_id="cmd-ambiguous-terminal-obligation",
+        venue_order_id="ord-ambiguous-terminal-obligation",
+    )
     seed.commit()
     seed.close()
 
@@ -38717,6 +38726,12 @@ def test_cancel_first_partial_entry_releases_only_unmatched_remainder(
     )
 
     assert broad_labels == []
+    exact = summary["terminal_entry_exposure_obligations_exact"]
+    assert {entry["command_id"] for entry in exact} == {
+        "cmd-ambiguous-terminal-obligation",
+        "cmd-unrelated-partial-obligation",
+    }
+    assert summary["terminal_entry_exposure_obligations_fast"]["stayed"] >= 2
     assert summary["cancel_recovery_fast"]["advanced"] == 1
     assert summary["cancel_ack_terminal_partial_facts_fast"] == {
         "scanned": 1,
@@ -38725,19 +38740,21 @@ def test_cancel_first_partial_entry_releases_only_unmatched_remainder(
         "errors": 0,
     }
     assert summary["terminal_entry_exposure_obligations_fast"] == {
-        "scanned": 1,
+        "scanned": 3,
         "advanced": 1,
-        "stayed": 0,
+        "stayed": 2,
         "errors": 0,
-        "terminal_late_fill_corrections": {
-            "scanned": 1,
-            "advanced": 0,
-            "stayed": 1,
-            "errors": 0,
-        },
     }
     verified = factory()
     try:
+        assert verified.execute(
+            "SELECT status FROM entry_exposure_obligations WHERE command_id = ?",
+            ("cmd-ambiguous-terminal-obligation",),
+        ).fetchone()[0] == "OPEN"
+        assert verified.execute(
+            "SELECT status FROM entry_exposure_obligations WHERE command_id = ?",
+            ("cmd-unrelated-partial-obligation",),
+        ).fetchone()[0] == "OPEN"
         command = verified.execute(
             "SELECT state FROM venue_commands WHERE command_id = ?",
             (command_id,),
@@ -43165,6 +43182,364 @@ def test_terminal_entry_no_fill_scoped_empty_selectors_never_full_scan(conn):
     assert recovery._cancel_ack_terminal_partial_fact_candidates(
         conn, command_ids=frozenset()
     ) == []
+
+
+def _seed_open_terminal_entry_obligation_for_exact_order_test(
+    conn,
+    *,
+    command_id: str,
+    venue_order_id: str | None,
+    state: str = "CANCELLED",
+) -> None:
+    """Create one OPEN terminal ENTRY obligation without fabricating facts."""
+
+    from src.state.venue_command_repo import append_event
+
+    _insert(conn, command_id=command_id, position_id=f"pos-{command_id}")
+    _open_test_entry_obligation(conn, command_id)
+    if venue_order_id is not None:
+        _advance_to_cancel_pending(
+            conn,
+            command_id=command_id,
+            venue_order_id=venue_order_id,
+        )
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="CANCEL_ACKED" if state == "CANCELLED" else "SUBMIT_REJECTED",
+        occurred_at="2026-04-26T00:04:00Z",
+        payload={"venue_order_id": venue_order_id} if venue_order_id else {
+            "side_effect_boundary_crossed": False,
+            "venue_order_created": False,
+        },
+    )
+    conn.execute(
+        "UPDATE venue_commands SET state = ?, venue_order_id = ? WHERE command_id = ?",
+        (state, venue_order_id, command_id),
+    )
+
+
+def test_terminal_entry_obligation_requires_exact_nonempty_order_fact(conn):
+    """A CANCELLED command without an order fact cannot release capital."""
+    from src.execution import command_recovery as recovery
+
+    _seed_open_terminal_entry_obligation_for_exact_order_test(
+        conn, command_id="cmd-empty-terminal", venue_order_id="ord-empty"
+    )
+    conn.commit()
+
+    summary = recovery.reconcile_terminal_entry_exposure_obligations(
+        conn, command_id="cmd-empty-terminal"
+    )
+
+    assert summary["advanced"] == 0
+    assert conn.execute(
+        "SELECT status FROM entry_exposure_obligations WHERE command_id = ?",
+        ("cmd-empty-terminal",),
+    ).fetchone()[0] == "OPEN"
+
+
+def test_terminal_entry_obligation_rejects_wrong_order_fact(conn):
+    """A terminal fact for another order id cannot discharge this obligation."""
+    from src.execution import command_recovery as recovery
+
+    _seed_open_terminal_entry_obligation_for_exact_order_test(
+        conn, command_id="cmd-wrong-terminal", venue_order_id="ord-right"
+    )
+    _append_order_fact(
+        conn,
+        command_id="cmd-wrong-terminal",
+        order_id="ord-wrong",
+        state="CANCEL_CONFIRMED",
+        matched_size="0",
+        remaining_size="10",
+    )
+    conn.commit()
+
+    summary = recovery.reconcile_terminal_entry_exposure_obligations(
+        conn, command_id="cmd-wrong-terminal"
+    )
+
+    assert summary["advanced"] == 0
+    assert conn.execute(
+        "SELECT status FROM entry_exposure_obligations WHERE command_id = ?",
+        ("cmd-wrong-terminal",),
+    ).fetchone()[0] == "OPEN"
+
+
+def test_terminal_entry_obligation_rejects_mixed_exact_and_live_sibling(
+    conn,
+):
+    """A good bound-order fact cannot hide another live command order."""
+    from src.execution import command_recovery as recovery
+
+    _seed_open_terminal_entry_obligation_for_exact_order_test(
+        conn, command_id="cmd-mixed-terminal", venue_order_id="ord-bound"
+    )
+    _append_order_fact(
+        conn,
+        command_id="cmd-mixed-terminal",
+        order_id="ord-bound",
+        state="CANCEL_CONFIRMED",
+        matched_size="0",
+        remaining_size="10",
+    )
+    _append_order_fact(
+        conn,
+        command_id="cmd-mixed-terminal",
+        order_id="ord-sibling-live",
+        state="LIVE",
+        matched_size="0",
+        remaining_size="10",
+    )
+    conn.commit()
+
+    summary = recovery.reconcile_terminal_entry_exposure_obligations(
+        conn, command_id="cmd-mixed-terminal"
+    )
+
+    assert summary["advanced"] == 0
+    assert conn.execute(
+        "SELECT status FROM entry_exposure_obligations WHERE command_id = ?",
+        ("cmd-mixed-terminal",),
+    ).fetchone()[0] == "OPEN"
+
+
+def test_terminal_entry_obligation_releases_exact_terminal_zero_order(conn):
+    """An exact CANCEL_ACKED zero-fill order fact discharges one obligation."""
+    from src.execution import command_recovery as recovery
+
+    _seed_open_terminal_entry_obligation_for_exact_order_test(
+        conn, command_id="cmd-exact-terminal", venue_order_id="ord-exact"
+    )
+    _append_order_fact(
+        conn,
+        command_id="cmd-exact-terminal",
+        order_id="ord-exact",
+        state="CANCEL_CONFIRMED",
+        matched_size="0",
+        remaining_size="10",
+    )
+    conn.commit()
+
+    summary = recovery.reconcile_terminal_entry_exposure_obligations(
+        conn, command_id="cmd-exact-terminal"
+    )
+
+    assert summary["advanced"] == 1
+    assert conn.execute(
+        "SELECT status FROM entry_exposure_obligations WHERE command_id = ?",
+        ("cmd-exact-terminal",),
+    ).fetchone()[0] == "RESOLVED"
+
+
+def test_terminal_entry_obligation_releases_prevenue_submit_rejection(conn):
+    """A typed rejection releases even when signing reserved an order id."""
+    from src.execution import command_recovery as recovery
+
+    _seed_open_terminal_entry_obligation_for_exact_order_test(
+        conn,
+        command_id="cmd-prevenue-terminal",
+        venue_order_id=None,
+        state="SUBMIT_REJECTED",
+    )
+    conn.execute(
+        "UPDATE venue_commands SET venue_order_id = ? WHERE command_id = ?",
+        ("ord-prevenue-signed", "cmd-prevenue-terminal"),
+    )
+    conn.commit()
+
+    summary = recovery.reconcile_terminal_entry_exposure_obligations(
+        conn, command_id="cmd-prevenue-terminal"
+    )
+
+    assert summary["advanced"] == 1
+    assert conn.execute(
+        "SELECT status FROM entry_exposure_obligations WHERE command_id = ?",
+        ("cmd-prevenue-terminal",),
+    ).fetchone()[0] == "RESOLVED"
+
+
+def test_terminal_open_obligation_selector_rotates_without_fact_history(conn, monkeypatch):
+    """A stayed head cannot force later terminal obligations to scan history."""
+    from src.execution import command_recovery as recovery
+
+    for command_id in ("cmd-obligation-a", "cmd-obligation-b", "cmd-obligation-c"):
+        _insert(conn, command_id=command_id, position_id=f"pos-{command_id}")
+        _open_test_entry_obligation(conn, command_id)
+        conn.execute(
+            "UPDATE venue_commands SET state = 'CANCELLED' WHERE command_id = ?",
+            (command_id,),
+        )
+    conn.commit()
+    monkeypatch.setattr(recovery, "_terminal_entry_obligation_rotation_cursor", 0)
+    statements = []
+    conn.set_trace_callback(statements.append)
+    selected = [
+        recovery._terminal_open_entry_obligation_command_ids(conn, limit=1)
+        for _ in range(3)
+    ]
+    conn.set_trace_callback(None)
+
+    assert selected == [
+        ("cmd-obligation-a",),
+        ("cmd-obligation-b",),
+        ("cmd-obligation-c",),
+    ]
+    selector_sql = [sql for sql in statements if "entry_exposure_obligations" in sql]
+    assert selector_sql
+    assert all("venue_order_facts" not in sql for sql in selector_sql)
+    assert all("venue_trade_facts" not in sql for sql in selector_sql)
+
+
+def test_exact_terminal_obligation_bundle_scopes_all_three_reducers(conn, monkeypatch):
+    """The priority bundle cannot fall back from its one command to history."""
+    from src.execution import command_recovery as recovery
+
+    calls = []
+
+    def no_fill(_conn, *, command_ids):
+        calls.append(("no_fill", command_ids))
+        return {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+
+    def partial(_conn, *, command_ids):
+        calls.append(("partial", command_ids))
+        return {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+
+    def obligations(_conn, *, command_id):
+        calls.append(("obligations", command_id))
+        return {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+
+    monkeypatch.setattr(recovery, "reconcile_cancel_ack_terminal_no_fill_facts", no_fill)
+    monkeypatch.setattr(recovery, "reconcile_cancel_ack_terminal_partial_facts", partial)
+    monkeypatch.setattr(recovery, "reconcile_terminal_entry_exposure_obligations", obligations)
+
+    result = recovery._reconcile_terminal_entry_exposure_obligation_fast(
+        conn, command_id="cmd-exact-only"
+    )
+
+    assert calls == [
+        ("no_fill", frozenset({"cmd-exact-only"})),
+        ("partial", frozenset({"cmd-exact-only"})),
+        ("obligations", "cmd-exact-only"),
+    ]
+    assert result["terminal_entry_exposure_obligations"]["stayed"] == 1
+
+
+def test_exact_terminal_obligation_bundle_rejects_nested_late_fill_error(conn, monkeypatch):
+    """A nested late-fill error prevents this command's partial proof commit."""
+    from src.execution import command_recovery as recovery
+
+    clean = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    monkeypatch.setattr(
+        recovery,
+        "reconcile_cancel_ack_terminal_no_fill_facts",
+        lambda _conn, *, command_ids: dict(clean),
+    )
+    monkeypatch.setattr(
+        recovery,
+        "reconcile_cancel_ack_terminal_partial_facts",
+        lambda _conn, *, command_ids: dict(clean),
+    )
+    monkeypatch.setattr(
+        recovery,
+        "reconcile_terminal_entry_exposure_obligations",
+        lambda _conn, *, command_id: {
+            **clean,
+            "terminal_late_fill_corrections": {**clean, "errors": 1},
+        },
+    )
+
+    with pytest.raises(recovery.TerminalEntryObligationExactReducerError):
+        recovery._reconcile_terminal_entry_exposure_obligation_fast(
+            conn, command_id="cmd-nested-error"
+        )
+
+
+def test_exact_terminal_obligation_nested_error_rolls_back_writer_transaction(
+    tmp_path, monkeypatch,
+):
+    """A nested reducer error rolls back facts already materialized for that command."""
+    from src.execution import command_recovery as recovery
+    from src.execution.venue_sync_contract import run_db_only_pass
+
+    db_path = tmp_path / "exact-obligation-rollback.db"
+    setup = sqlite3.connect(db_path)
+    setup.execute("CREATE TABLE marker (command_id TEXT NOT NULL)")
+    setup.commit()
+    setup.close()
+
+    def factory():
+        return sqlite3.connect(db_path)
+
+    clean = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+
+    def materialize_marker(db_conn, *, command_ids):
+        db_conn.execute("INSERT INTO marker(command_id) VALUES (?)", (next(iter(command_ids)),))
+        return dict(clean)
+
+    monkeypatch.setattr(
+        recovery, "reconcile_cancel_ack_terminal_no_fill_facts", materialize_marker
+    )
+    monkeypatch.setattr(
+        recovery,
+        "reconcile_cancel_ack_terminal_partial_facts",
+        lambda _conn, *, command_ids: dict(clean),
+    )
+    monkeypatch.setattr(
+        recovery,
+        "reconcile_terminal_entry_exposure_obligations",
+        lambda _conn, *, command_id: {
+            **clean,
+            "terminal_late_fill_corrections": {**clean, "errors": 1},
+        },
+    )
+
+    with pytest.raises(recovery.TerminalEntryObligationExactReducerError):
+        run_db_only_pass(
+            lambda db_conn: recovery._reconcile_terminal_entry_exposure_obligation_fast(
+                db_conn, command_id="cmd-rollback"
+            ),
+            conn_factory=factory,
+            label="test.exact_terminal_obligation_rollback",
+        )
+    run_db_only_pass(
+        lambda db_conn: db_conn.execute(
+            "INSERT INTO marker(command_id) VALUES ('cmd-peer')"
+        ),
+        conn_factory=factory,
+        label="test.exact_terminal_obligation_peer",
+    )
+
+    verified = factory()
+    try:
+        assert verified.execute(
+            "SELECT command_id FROM marker ORDER BY command_id"
+        ).fetchall() == [("cmd-peer",)]
+    finally:
+        verified.close()
+
+
+def test_terminal_partial_paths_scope_raw_trade_windows(conn, monkeypatch):
+    """Scoped partial and post-reduction paths never rank account-wide trades."""
+    from src.execution import command_recovery as recovery
+
+    original = recovery._canonical_trade_fact_cte
+    scopes = []
+
+    def scoped_cte(*args, **kwargs):
+        scopes.append(kwargs.get("command_scope_cte"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(recovery, "_canonical_trade_fact_cte", scoped_cte)
+    assert recovery._cancel_ack_terminal_partial_fact_candidates(
+        conn, command_ids=frozenset({"cmd-partial-scope"})
+    ) == []
+    assert recovery._terminal_partial_post_reduction_flow_absorbed(
+        conn, command={"position_id": "pos-partial-scope"}
+    ) is False
+
+    assert scopes == ["candidate_commands", "position_command_scope"]
 
 
 @pytest.mark.parametrize(

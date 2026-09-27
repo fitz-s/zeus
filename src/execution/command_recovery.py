@@ -89,6 +89,8 @@ _SCREEN_CANCEL_OPERATION_BUDGET_SECONDS = 8.0
 
 logger = logging.getLogger(__name__)
 _RECOVERY_MONITOR_PREEMPTION = threading.local()
+_terminal_entry_obligation_rotation_lock = threading.Lock()
+_terminal_entry_obligation_rotation_cursor = 0
 
 
 @dataclass(frozen=True)
@@ -115,6 +117,10 @@ class CapitalBlockingCommandScope:
 class TerminalExitHeldTokenMismatch(RuntimeError):
     """A terminal EXIT command must name the exact residual asset it released."""
 
+
+class TerminalEntryObligationExactReducerError(RuntimeError):
+    """One scoped terminal-obligation bundle failed and was rolled back."""
+
 _RECOVERY_LOCK_RETRY_DELAYS = (2.0, 5.0, 10.0)
 _LIVE_TICK_DB_BUDGET_SECONDS = 0.1
 _LIVE_TICK_DB_PROGRESS_OPCODES = 1_000
@@ -136,6 +142,10 @@ _CAPITAL_RECOVERY_LOCK_RETRY_DELAYS = (0.05, 0.10, 0.20, 0.40)
 _LIVE_TICK_IDENTITY_BOUND_MAX_CANDIDATES = 4
 _LIVE_TICK_IDENTITY_BOUND_POINT_READ_BUDGET_SECONDS = 20.0
 _LIVE_TICK_IDENTITY_BOUND_ROTATION_SECONDS = 60
+# A terminal ENTRY obligation can reserve capital across every auction.  Keep
+# one short transaction per command, but allow a normal recovery tick to move
+# several independent commands forward before returning to the auction lane.
+_TERMINAL_ENTRY_OBLIGATION_FAST_MAX_CANDIDATES = 4
 _IDENTITY_BOUND_INFLIGHT_STATES = (
     CommandState.SUBMITTING.value,
     CommandState.SUBMIT_UNKNOWN_SIDE_EFFECT.value,
@@ -894,8 +904,21 @@ def _canonical_trade_fact_cte(
     cte_name: str = "canonical_trade_fact",
     *,
     source_clause_sql: str = "",
+    command_scope_cte: str | None = None,
 ) -> str:
-    """SQL CTE that prevents weaker later trade facts from hiding fills."""
+    """SQL CTE that prevents weaker later trade facts from hiding fills.
+
+    ``command_scope_cte`` must constrain the raw fact relation, before the
+    window function.  A final join to a scoped command set is not sufficient:
+    SQLite would first rank every historical alias/trade pair, which can spend
+    a live capital-recovery budget before the exact obligation is reached.
+    """
+
+    command_scope_join = (
+        f"JOIN {command_scope_cte} scope ON scope.command_id = fact.command_id"
+        if command_scope_cte
+        else ""
+    )
 
     return f"""
         {cte_name} AS (
@@ -923,6 +946,7 @@ def _canonical_trade_fact_cte(
                                        ELSE 100
                                    END AS proof_rank
                               FROM venue_trade_facts fact
+                              {command_scope_join}
                               {source_clause_sql}
                            ) scored
                    ) ranked
@@ -2517,7 +2541,8 @@ def _cancel_ack_terminal_partial_fact_candidates(
         ),
         """
         + _canonical_trade_fact_cte(
-            source_clause_sql="WHERE fact.source IN ('REST', 'WS_USER')"
+            source_clause_sql="WHERE fact.source IN ('REST', 'WS_USER')",
+            command_scope_cte="candidate_commands",
         )
         + ",\n"
         + _economic_trade_fact_cte()
@@ -10358,6 +10383,7 @@ def reconcile_terminal_entry_exposure_obligations(
         )
         + """
         SELECT fact.command_id,
+               fact.venue_order_id,
                fact.state,
                fact.matched_size,
                fact.remaining_size,
@@ -10400,18 +10426,57 @@ def reconcile_terminal_entry_exposure_obligations(
                 or aggregate_absorbed
             )
         )
-        canonical_orders = canonical_orders_by_command.get(command_id, [])
+        command_order_id = str(row.get("venue_order_id") or "").strip()
+        all_command_orders = canonical_orders_by_command.get(command_id, [])
+        canonical_orders = [
+            order
+            for order in all_command_orders
+            if str(order.get("venue_order_id") or "").strip() == command_order_id
+        ]
         # CANCEL_CONFIRMED preserves the unfilled residual on Polymarket.  That
         # remaining_size describes what was cancelled, not live exposure.  The
         # terminal state plus zero matched size is the no-fill proof; an unknown
         # or negative residual remains ambiguous and keeps the obligation open.
-        terminal_no_fill_orders = all(
-            str(order.get("state") or "").upper()
-            in _TERMINAL_NO_FILL_ORDER_FACT_STATES
-            and _decimal_or_none(order.get("matched_size")) == 0
-            and _decimal_or_none(order.get("remaining_size")) is not None
-            and _decimal_or_none(order.get("remaining_size")) >= 0
-            for order in canonical_orders
+        exact_terminal_no_fill_orders = (
+            bool(canonical_orders)
+            # Every order fact emitted for this command must name its bound
+            # venue order.  A matching cancelled fact cannot prove that a
+            # sibling LIVE/unknown order had no exposure.
+            and len(canonical_orders) == len(all_command_orders)
+            and all(
+                str(order.get("state") or "").upper()
+                in _TERMINAL_NO_FILL_ORDER_FACT_STATES
+                and _decimal_or_none(order.get("matched_size")) == 0
+                and _decimal_or_none(order.get("remaining_size")) is not None
+                and _decimal_or_none(order.get("remaining_size")) >= 0
+                for order in canonical_orders
+            )
+        )
+        # A typed deterministic rejection is an explicit no-side-effect fact
+        # even when the signed submission identity preallocated an order id.
+        # If local order facts exist, however, each must independently prove a
+        # terminal zero fill; a LIVE/unknown sibling cannot be erased by the
+        # rejection event.  CANCELLED/EXPIRED have crossed the venue boundary,
+        # so they retain the stricter exact command-order proof above.
+        prevenue_rejection = state in {
+            CommandState.SUBMIT_REJECTED.value,
+            CommandState.REJECTED.value,
+        }
+        prevenue_terminal_no_fill_orders = (
+            not all_command_orders
+            or all(
+                str(order.get("state") or "").upper()
+                in _TERMINAL_NO_FILL_ORDER_FACT_STATES
+                and _decimal_or_none(order.get("matched_size")) == 0
+                and _decimal_or_none(order.get("remaining_size")) is not None
+                and _decimal_or_none(order.get("remaining_size")) >= 0
+                for order in all_command_orders
+            )
+        )
+        terminal_no_fill_orders = (
+            prevenue_terminal_no_fill_orders
+            if prevenue_rejection
+            else exact_terminal_no_fill_orders
         )
         terminal_no_fill = (
             state in no_fill_states
@@ -10423,7 +10488,10 @@ def reconcile_terminal_entry_exposure_obligations(
         terminal_partial = _terminal_partial_entry_obligation_proven(
             conn,
             command=row,
-            canonical_orders=canonical_orders,
+            # Partial exposure must account for every canonical order fact
+            # emitted by this command.  The exact bound-order subset is only
+            # valid for CANCELLED/EXPIRED zero-fill discharge above.
+            canonical_orders=all_command_orders,
             command_bound_projection=bool(
                 row.get("positive_command_bound_position_projection")
             ),
@@ -10731,8 +10799,12 @@ def _terminal_partial_post_reduction_flow_absorbed(
     if not position_id or not _table_exists(conn, "position_current"):
         return False
     sql = (
-        "WITH "
-        + _canonical_trade_fact_cte()
+        "WITH position_command_scope AS ("
+        "SELECT command_id FROM venue_commands WHERE position_id = ?"
+        "), "
+        + _canonical_trade_fact_cte(
+            command_scope_cte="position_command_scope"
+        )
         + ",\n"
         + _economic_trade_fact_cte()
         + """
@@ -10748,8 +10820,9 @@ def _terminal_partial_post_reduction_flow_absorbed(
           JOIN venue_commands cmd
             ON cmd.command_id = fact.command_id
            AND cmd.venue_order_id = fact.venue_order_id
-         WHERE cmd.position_id = ?
-           AND fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+          JOIN position_command_scope scope
+            ON scope.command_id = cmd.command_id
+         WHERE fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
            AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
         """
     )
@@ -31884,6 +31957,148 @@ def _terminal_filled_exit_projection_blocker_count(
     return len(_terminal_filled_exit_projection_blocker_command_ids(conn))
 
 
+def _terminal_open_entry_obligation_command_ids(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = _TERMINAL_ENTRY_OBLIGATION_FAST_MAX_CANDIDATES,
+    rotation_slot: int | None = None,
+) -> tuple[str, ...]:
+    """Return one fair, exact terminal ENTRY-obligation tranche.
+
+    SCOPE: OPEN obligations whose own ENTRY command is already terminal.  This
+    is deliberately only an id selector: canonical order/trade evidence is
+    rechecked inside the writer transaction before any obligation releases.
+    DRAIN: one command receives the terminal fact + obligation reducers below.
+    RESET: a resolved obligation disappears from this query.  A process-local
+    cursor lets another command receive the next turn when the first remains
+    ambiguous, without persisting scheduler state or widening the query into
+    historical order/trade tables.  Restart begins at the queue head; resolved
+    obligations remain durably absent, but this is intentionally not a
+    cross-restart fairness claim.
+    """
+
+    required = {"entry_exposure_obligations", "venue_commands"}
+    if not all(_table_exists(conn, table) for table in required):
+        return ()
+    candidate_limit = min(
+        max(1, int(limit)), _TERMINAL_ENTRY_OBLIGATION_FAST_MAX_CANDIDATES
+    )
+    states = tuple(
+        sorted(
+            _TERMINAL_ENTRY_NO_FILL_COMMAND_STATES
+            | _SETTLEMENT_ABSORBED_ENTRY_COMMAND_STATES
+            | {CommandState.PARTIAL.value}
+        )
+    )
+    placeholders = ",".join("?" for _ in states)
+    base_sql = f"""
+        FROM entry_exposure_obligations obligation
+        JOIN venue_commands command
+          ON command.command_id = obligation.command_id
+       WHERE obligation.status = 'OPEN'
+         AND command.intent_kind = 'ENTRY'
+         AND command.state IN ({placeholders})
+    """
+    total_row = conn.execute(
+        "SELECT COUNT(*) " + base_sql,
+        states,
+    ).fetchone()
+    total = int(total_row[0] or 0) if total_row is not None else 0
+    if total <= 0:
+        return ()
+    if rotation_slot is None:
+        global _terminal_entry_obligation_rotation_cursor
+        with _terminal_entry_obligation_rotation_lock:
+            offset = _terminal_entry_obligation_rotation_cursor % total
+            _terminal_entry_obligation_rotation_cursor = (
+                offset + candidate_limit
+            ) % total
+    else:
+        offset = (max(0, int(rotation_slot)) * candidate_limit) % total
+    rows = conn.execute(
+        "SELECT command.command_id "
+        + base_sql
+        + " ORDER BY obligation.updated_at, obligation.command_id LIMIT ? OFFSET ?",
+        (*states, candidate_limit, offset),
+    ).fetchall()
+    return tuple(
+        command_id
+        for row in rows
+        if (command_id := str(row[0] or "").strip())
+    )
+
+
+def _reconcile_terminal_entry_exposure_obligation_fast(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+) -> dict:
+    """Materialize and release one terminal ENTRY obligation atomically.
+
+    Every reducer receives the same non-empty exact command scope.  In
+    particular, the partial reducer may never rank account-wide trade aliases
+    while a scoped capital obligation waits.  ``run_db_only_pass`` owns the
+    surrounding transaction; an interrupt rolls back any newly materialized
+    terminal fact together with the obligation release.
+    """
+
+    scoped_command_id = str(command_id or "").strip()
+    empty = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    if not scoped_command_id:
+        return {
+            "cancel_ack_terminal_no_fill_facts": dict(empty),
+            "cancel_ack_terminal_partial_facts": dict(empty),
+            "terminal_entry_exposure_obligations": dict(empty),
+        }
+    scoped_ids = frozenset({scoped_command_id})
+    no_fill = reconcile_cancel_ack_terminal_no_fill_facts(
+        conn,
+        command_ids=scoped_ids,
+    )
+    partial = reconcile_cancel_ack_terminal_partial_facts(
+        conn,
+        command_ids=scoped_ids,
+    )
+    obligations = reconcile_terminal_entry_exposure_obligations(
+        conn,
+        command_id=scoped_command_id,
+    )
+    for name, result in (
+        ("cancel_ack_terminal_no_fill_facts", no_fill),
+        ("cancel_ack_terminal_partial_facts", partial),
+        ("terminal_entry_exposure_obligations", obligations),
+    ):
+        if _recovery_result_has_errors(result):
+            # The inner reducers normally retain individual failures in their
+            # summaries.  That is appropriate for a broad maintenance sweep,
+            # but not for this exact capital release: committing a newly
+            # materialized terminal fact while another proof/release step
+            # failed would leave a half-completed obligation transition.
+            raise TerminalEntryObligationExactReducerError(
+                f"terminal entry obligation exact reducer failed: {name}"
+            )
+    return {
+        "cancel_ack_terminal_no_fill_facts": no_fill,
+        "cancel_ack_terminal_partial_facts": partial,
+        "terminal_entry_exposure_obligations": obligations,
+    }
+
+
+def _recovery_result_has_errors(result: Mapping[str, object]) -> bool:
+    """Return whether any nested recovery summary retained an error."""
+
+    try:
+        if int(result.get("errors", 0) or 0) > 0:
+            return True
+    except (TypeError, ValueError):
+        return True
+    return any(
+        _recovery_result_has_errors(value)
+        for value in result.values()
+        if isinstance(value, Mapping)
+    )
+
+
 def capital_blocking_command_scope(
     conn: sqlite3.Connection,
 ) -> CapitalBlockingCommandScope:
@@ -33301,6 +33516,132 @@ def _reconcile_passes_short_conn(
                 monitor_preemptible=False,
             )
 
+        # An OPEN terminal ENTRY obligation is already current-capital debt.
+        # Select only its command ids before any historical order/trade CTE and
+        # run each in an independent writer transaction.  A stayed or timed-out
+        # command therefore cannot make every later obligation replay the same
+        # account-wide selector.  This process-local rotation is deliberately
+        # bounded; restart fairness is not claimed (resolved rows remain absent
+        # from the durable OPEN selector).
+        with open_tracked(
+            read_conn_factory,
+            label="recovery.terminal_entry_obligation_exact:snapshot",
+        ) as conn:
+            terminal_obligation_command_ids = (
+                _terminal_open_entry_obligation_command_ids(conn)
+            )
+        terminal_obligation_exact_active = bool(terminal_obligation_command_ids)
+        terminal_obligation_monitor_preempted = False
+        terminal_obligation_scheduler_expired = False
+        if terminal_obligation_command_ids:
+            exact_results: list[dict[str, object]] = []
+            for command_id in terminal_obligation_command_ids:
+                if (
+                    scheduler_deadline is not None
+                    and time.monotonic() >= scheduler_deadline
+                ):
+                    terminal_obligation_scheduler_expired = True
+                    summary["terminal_entry_exposure_obligations_exact_deferred"] = (
+                        exact_results
+                    )
+                    break
+                command_deadline = _capital_deadline()
+                command_conn_factory = _capital_apply_conn_factory(
+                    command_deadline
+                )
+                command_summary: dict = {}
+                try:
+                    bundle = _run_recovery_pass_with_lock_policy(
+                        "terminal_entry_exposure_obligations_exact",
+                        lambda command_id=command_id: run_db_only_pass(
+                            lambda conn: _reconcile_terminal_entry_exposure_obligation_fast(
+                                conn,
+                                command_id=command_id,
+                            ),
+                            conn_factory=command_conn_factory,
+                            label=(
+                                "recovery.terminal_entry_exposure_obligations_exact"
+                            ),
+                        ),
+                        scope="live_tick",
+                        summary=command_summary,
+                        deadline_monotonic=command_deadline,
+                        bounded_lock_retry_delays=_CAPITAL_RECOVERY_LOCK_RETRY_DELAYS,
+                    )
+                except TerminalEntryObligationExactReducerError as exc:
+                    # The dedicated error is raised only after the writer
+                    # transaction has rolled back this command's complete
+                    # materialize-and-release bundle.  Record it and give the
+                    # next independently scoped command its own transaction.
+                    logger.error(
+                        "recovery: exact terminal entry obligation %s rolled back: %s",
+                        command_id,
+                        exc,
+                    )
+                    command_summary["exact_reducer_error"] = str(exc)
+                    command_summary["errors"] = 1
+                    summary["errors"] += 1
+                    bundle = None
+                exact_results.append(
+                    {
+                        "command_id": command_id,
+                        "result": bundle,
+                        "defer": dict(command_summary),
+                    }
+                )
+                if bundle is not None:
+                    _accumulate(
+                        summary,
+                        "cancel_ack_terminal_no_fill_facts_fast",
+                        bundle["cancel_ack_terminal_no_fill_facts"],
+                    )
+                    _accumulate(
+                        summary,
+                        "cancel_ack_terminal_partial_facts_fast",
+                        bundle["cancel_ack_terminal_partial_facts"],
+                    )
+                    _accumulate(
+                        summary,
+                        "terminal_entry_exposure_obligations_fast",
+                        bundle["terminal_entry_exposure_obligations"],
+                    )
+                if command_summary.get("monitor_preempted"):
+                    # A pending monitor has priority over the remaining exact
+                    # commands.  The selected OPEN rows remain the next-tick
+                    # continuation; do not turn monitor preemption into an
+                    # absence proof or a global historical scan.
+                    terminal_obligation_monitor_preempted = True
+                    break
+            if (
+                not terminal_obligation_monitor_preempted
+                and scheduler_deadline is not None
+                and time.monotonic() >= scheduler_deadline
+            ):
+                # The final exact command can consume the last scheduler
+                # quantum.  Check again after the loop so we do not begin a
+                # later identity/maintenance snapshot with an expired global
+                # deadline.
+                terminal_obligation_scheduler_expired = True
+            summary["terminal_entry_exposure_obligations_exact"] = exact_results
+        if terminal_obligation_monitor_preempted:
+            summary["monitor_preempted"] = True
+            summary["db_lock_deferred"] = True
+            summary["db_lock_deferred_at"] = (
+                "terminal_entry_exposure_obligations_exact"
+            )
+            summary["db_lock_deferred_count"] = 1
+            return exact_results
+        if terminal_obligation_scheduler_expired:
+            # A real scheduler deadline is global, unlike a single command's
+            # bounded writer deadline.  Do not proceed into identity snapshots
+            # or maintenance selectors after it has elapsed.
+            summary["db_budget_deferred"] = True
+            summary["db_budget_deferred_at"] = (
+                "terminal_entry_exposure_obligations_exact"
+            )
+            summary["db_budget_deferred_count"] = 1
+            return exact_results
+
         identity_submit_deferred = 0
         with open_tracked(
             read_conn_factory,
@@ -33666,31 +34007,37 @@ def _reconcile_passes_short_conn(
                     )
                     else []
                 )
-            obligation_states = tuple(
-                sorted(
-                    _TERMINAL_ENTRY_NO_FILL_COMMAND_STATES
-                    | _SETTLEMENT_ABSORBED_ENTRY_COMMAND_STATES
-                    | {CommandState.PARTIAL.value}
+            if terminal_obligation_exact_active:
+                # The exact lane above owns all terminal-obligation work for
+                # this tick.  Do not rediscover that same debt through the
+                # account-wide no-fill/partial/reducer bundle below.
+                terminal_obligation_open = False
+            else:
+                obligation_states = tuple(
+                    sorted(
+                        _TERMINAL_ENTRY_NO_FILL_COMMAND_STATES
+                        | _SETTLEMENT_ABSORBED_ENTRY_COMMAND_STATES
+                        | {CommandState.PARTIAL.value}
+                    )
                 )
-            )
-            terminal_obligation_open = bool(
-                _table_exists(conn, "entry_exposure_obligations")
-                and conn.execute(
-                    f"""
-                    SELECT 1
-                      FROM entry_exposure_obligations obligation
-                      JOIN venue_commands command
-                        ON command.command_id = obligation.command_id
-                     WHERE obligation.status = 'OPEN'
-                       AND command.intent_kind = 'ENTRY'
-                       AND command.state IN (
-                           {','.join('?' for _ in obligation_states)}
-                       )
-                     LIMIT 1
-                    """,
-                    obligation_states,
-                ).fetchone()
-            )
+                terminal_obligation_open = bool(
+                    _table_exists(conn, "entry_exposure_obligations")
+                    and conn.execute(
+                        f"""
+                        SELECT 1
+                          FROM entry_exposure_obligations obligation
+                          JOIN venue_commands command
+                            ON command.command_id = obligation.command_id
+                         WHERE obligation.status = 'OPEN'
+                           AND command.intent_kind = 'ENTRY'
+                           AND command.state IN (
+                               {','.join('?' for _ in obligation_states)}
+                           )
+                         LIMIT 1
+                        """,
+                        obligation_states,
+                    ).fetchone()
+                )
         existing_position_terminal_cancel_result = None
         if existing_position_terminal_cancel_ids:
             terminal_cancel_deadline = _capital_deadline()

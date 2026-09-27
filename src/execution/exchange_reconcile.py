@@ -5240,19 +5240,37 @@ def persisted_terminal_late_entry_fill_command_ids(
     if not all(_table_exists(conn, table) for table in required):
         return []
     scoped = str(command_id or "").strip()
-    scope_sql = " AND command.command_id = ?" if scoped else ""
-    params = (scoped,) if scoped else ()
+    # A command-scoped caller is on the live capital-recovery lane.  Carry the
+    # exact identity into the raw trade/order CTEs, before their window ranks,
+    # rather than filtering only the final command row after every historical
+    # fact has already been sorted.
+    scope_prefix = ""
+    trade_scope_sql = ""
+    order_scope_cte = None
+    scope_sql = ""
+    params: tuple[str, ...] = ()
+    if scoped:
+        scope_prefix = "scoped_command AS (SELECT ? AS command_id), "
+        trade_scope_sql = (
+            "JOIN scoped_command scope "
+            "ON scope.command_id = fact.command_id"
+        )
+        order_scope_cte = "scoped_command"
+        scope_sql = " AND command.command_id = (SELECT command_id FROM scoped_command)"
+        params = (scoped,)
     from src.execution.command_recovery import _canonical_order_truth_cte
 
     rows = conn.execute(
         "WITH "
-        + _canonical_trade_fact_cte()
+        + scope_prefix
+        + _canonical_trade_fact_cte(source_clause_sql=trade_scope_sql)
         + ", "
         + _economic_trade_fact_cte()
         + ", "
         + _canonical_order_truth_cte(
             cte_name="canonical_entry_order_truth",
             partition_by_venue_order=True,
+            command_scope_cte=order_scope_cte,
         )
         + f"""
         SELECT command.command_id
