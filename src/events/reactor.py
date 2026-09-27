@@ -12574,9 +12574,10 @@ def _edli_reactor_day0_hourly_refresher(
                 quota_critical_cities = 1
                 quota_priority_cities = 0
                 allow_priority_recovery = False
+            decision_time = datetime.now(timezone.utc)
             stats = maybe_refresh_day0_hourly_vectors(
                 [city_obj],
-                decision_time=datetime.now(timezone.utc),
+                decision_time=decision_time,
                 interval_s=_reactor_day0_hourly_refresh_interval_seconds(),
                 budget_s=_reactor_day0_hourly_refresh_budget_seconds(),
                 max_cities=1,
@@ -12588,6 +12589,9 @@ def _edli_reactor_day0_hourly_refresher(
                 quota_critical_cities=quota_critical_cities,
                 quota_priority_cities=quota_priority_cities,
                 allow_priority_recovery=allow_priority_recovery,
+                high_ensemble_city_dates=(
+                    ((family[0], family[1]),) if family[2] == "high" else ()
+                ),
                 persist_lock_blocking=False,
                 return_stats=True,
             )

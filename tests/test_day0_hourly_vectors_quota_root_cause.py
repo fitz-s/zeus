@@ -705,28 +705,29 @@ def test_deterministic_ready_still_fetches_required_ens_then_composite_dedups(
         assert probe() == frozenset()
 
 
+@pytest.mark.parametrize("date_offset", (-1, 1))
 def test_current_high_ens_does_not_fetch_unrequested_future_target(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, date_offset: int,
 ) -> None:
     from src.data.openmeteo_quota import OpenMeteoQuotaTracker
 
     city = SimpleNamespace(name="Paris", timezone="Europe/Paris")
     decision = datetime(2026, 9, 10, 9, 0, tzinfo=UTC)
     target_date = decision.astimezone(ZoneInfo(city.timezone)).date().isoformat()
-    future_date = (date.fromisoformat(target_date) + timedelta(days=1)).isoformat()
+    outside_date = (date.fromisoformat(target_date) + timedelta(days=date_offset)).isoformat()
     monkeypatch.setattr(day0, "quota_tracker", OpenMeteoQuotaTracker())
     monkeypatch.setattr(day0, "day0_hourly_models_for_city", lambda _city: ["ecmwf_ifs"])
     monkeypatch.setattr(day0, "day0_source_clock_ensemble_target_dates", lambda **_kw: ())
     monkeypatch.setattr(day0, "_current_provider_bundle_already_persisted", lambda **_kw: True)
     monkeypatch.setattr(
         day0, "fetch_day0_source_clock_ensemble_vectors",
-        lambda *_a, **_kw: pytest.fail("tomorrow's HIGH scope must not fetch 51 ENS"),
+        lambda *_a, **_kw: pytest.fail("outside today's HIGH scope must not fetch 51 ENS"),
     )
 
     stats = day0.maybe_refresh_day0_hourly_vectors(
         [city], decision_time=decision, interval_s=0.0,
         quota_priority_cities=1,
-        high_ensemble_city_dates=((city.name, future_date),),
+        high_ensemble_city_dates=((city.name, outside_date),),
         causal_run_boundaries={},
         return_stats=True,
     )

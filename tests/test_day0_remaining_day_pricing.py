@@ -13038,6 +13038,7 @@ class TestRequestHashProvenance:
         assert captured["quota_critical_cities"] == 0
         assert captured["quota_priority_cities"] == 1
         assert captured["allow_priority_recovery"] is True
+        assert captured["high_ensemble_city_dates"] == (("Paris", "2026-06-25"),)
         assert captured["persist_lock_blocking"] is False
 
     def test_reactor_day0_hourly_refresher_uses_critical_quota_for_held_family(
@@ -13072,6 +13073,7 @@ class TestRequestHashProvenance:
         assert captured["quota_critical_cities"] == 1
         assert captured["quota_priority_cities"] == 0
         assert captured["allow_priority_recovery"] is False
+        assert captured["high_ensemble_city_dates"] == (("Paris", "2026-06-25"),)
 
     def test_reactor_entry_source_clock_uses_priority_even_when_city_is_held(
         self, monkeypatch
@@ -13106,6 +13108,7 @@ class TestRequestHashProvenance:
         assert captured["quota_critical_cities"] == 0
         assert captured["quota_priority_cities"] == 1
         assert captured["allow_priority_recovery"] is True
+        assert captured["high_ensemble_city_dates"] == ()
 
     def test_day0_hourly_priority_source_puts_held_families_before_missing_authority(
         self, monkeypatch
