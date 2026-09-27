@@ -31,6 +31,7 @@ from concurrent.futures import Future
 from datetime import datetime, timedelta, timezone
 import sqlite3
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -95,7 +96,7 @@ def _insert_job_run(conn: sqlite3.Connection, identity: dict, *, status: str, re
 
 def _held_revision_coverage(
     conn, track: str, *, now: datetime, cycle: datetime,
-    target: str = "2026-09-27", city_name: str = "Hong Kong",
+    target: str = "2026-09-27", city_name: str = "Hong Kong", city=None,
 ) -> dict:
     from src.contracts.ensemble_snapshot_provenance import (
         ECMWF_OPENDATA_HIGH_DATA_VERSION_V2,
@@ -108,7 +109,7 @@ def _held_revision_coverage(
     from src.data.forecast_target_contract import compute_target_local_day_window_utc
 
     metric = "high" if track == "mx2t6_high" else "low"
-    city = runtime_cities_by_name()[city_name]
+    city = city or runtime_cities_by_name()[city_name]
     window = compute_target_local_day_window_utc(
         city_timezone=city.timezone, target_local_date=datetime.fromisoformat(target).date(),
     )
@@ -452,6 +453,41 @@ def test_held_revision_migration_prioritizes_earlier_local_day_deadline(monkeypa
     )
     assert debt["city"] == "Hong Kong"  # Ends at 16Z; Cape Town at 22Z.
     assert candidate["scheduled_for"] == datetime(2026, 9, 26, 12, tzinfo=timezone.utc)
+
+
+def test_held_revision_migration_uses_utc_deadline_before_calendar_date(monkeypatch):
+    from src.config import runtime_cities_by_name
+    from src.data import replacement_forecast_seed_discovery as discovery
+    from src.ingest import forecast_live_daemon as daemon
+    import src.config as config
+
+    now = datetime(2026, 9, 27, 9, 0, tzinfo=timezone.utc)
+    cycle = datetime(2026, 9, 26, 6, tzinfo=timezone.utc)
+    conn = _job_run_conn()
+    pago = SimpleNamespace(name="Pago", timezone="Pacific/Pago_Pago")
+    kir = SimpleNamespace(name="Kiritimati", timezone="Pacific/Kiritimati")
+    manifest_json = config.runtime_coordinate_manifest_json()
+    cities = {**runtime_cities_by_name(), pago.name: pago, kir.name: kir}
+    monkeypatch.setattr(config, "runtime_cities_by_name", lambda: cities)
+    monkeypatch.setattr(config, "runtime_coordinate_manifest_json", lambda: manifest_json)
+    _held_revision_coverage(
+        conn, "mx2t6_high", now=now, cycle=cycle,
+        target="2026-09-26", city_name=pago.name, city=pago,
+    )
+    _held_revision_coverage(
+        conn, "mx2t6_high", now=now, cycle=cycle,
+        target="2026-09-27", city_name=kir.name, city=kir,
+    )
+    monkeypatch.setattr(discovery, "held_position_family_priorities", lambda **_: {
+        (pago.name, "2026-09-26", "high"): 0,  # Ends 9/27 11Z.
+        (kir.name, "2026-09-27", "high"): 0,  # Ends 9/27 10Z.
+    })
+    result = daemon._held_revision_migration_identity(
+        conn, track="mx2t6_high", now_utc=now,
+        deadline_monotonic=time.monotonic() + 10,
+    )
+    assert result is not None
+    assert result[1]["city"] == kir.name
 
 
 @pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))

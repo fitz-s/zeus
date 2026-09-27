@@ -694,8 +694,8 @@ def _held_revision_migration_identity(
             ).end_utc
         except (TypeError, ValueError, KeyError):
             continue
-        candidates.append((priority, target_date, target_end, city_name, target_day))
-    for _priority, target_date, _target_end, city_name, target_day in sorted(candidates):
+        candidates.append((priority, target_end, target_date, city_name, target_day))
+    for _priority, _target_end, target_date, city_name, target_day in sorted(candidates):
         if time.monotonic() >= deadline_monotonic:
             return None
         city = city_config[city_name]
