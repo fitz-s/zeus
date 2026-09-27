@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-09-24; last_reused=2026-09-24
+# Lifecycle: created=2026-04-26; last_reviewed=2026-09-27; last_reused=2026-09-27
 # Purpose: Lock executor command split phase ordering and ACK invariants.
 # Reuse: Run when venue command persistence, live order submission, or ACK handling changes.
 # Created: 2026-04-26
-# Last reused/audited: 2026-09-24
+# Last reused/audited: 2026-09-27
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S3
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-4 side-effect boundary.
@@ -849,6 +849,102 @@ def test_day0_entry_q_version_stamps_probability_semantics_revision():
     )
     old = "day0-semrev:retired-day0-v0:q-old"
     assert bind_day0_probability_semantics(old) == old
+
+
+@pytest.mark.parametrize("revision", [
+    "day0_settlement_channel_revision_model_v22",
+    "day0_resolver_terminal_composition_v21",
+])
+def test_day0_entry_rejects_retired_geometry_revision_without_relabeling(revision):
+    from src.events.day0_authority import (
+        bind_day0_probability_semantics,
+        day0_probability_semantics_revision,
+    )
+    from src.execution.executor import _entry_q_version_from_authority
+
+    historical = f"day0-semrev:{revision}:same-input"
+    context = _decision_source_context(
+        posterior_identity_hash=historical,
+        forecast_source_role="day0_observed_probability",
+        authority_tier="DAY0_OBSERVATION",
+    )
+    assert _entry_q_version_from_authority(
+        SimpleNamespace(decision_source_context=context), None,
+    ) is None
+    assert bind_day0_probability_semantics(historical) == historical
+    assert day0_probability_semantics_revision(historical) == revision
+
+
+@pytest.mark.parametrize("revision", [None, "retired", "current"])
+def test_day0_durable_certificate_cannot_relabel_old_economics_from_bare_context(
+    mem_conn, revision,
+):
+    from dataclasses import replace
+    from src.events.day0_authority import bind_day0_probability_semantics
+    from src.execution.executor import _entry_actionable_certificate_payload_and_component
+
+    context = _decision_source_context(
+        posterior_identity_hash="d" * 64,
+        forecast_source_role="day0_observed_probability",
+        authority_tier="DAY0_OBSERVATION",
+    )
+    certificate_hash = "e" * 64
+    intent = _make_entry_intent(
+        mem_conn, decision_source_context=context,
+        actionable_certificate_hash=certificate_hash,
+    )
+    economics = dict(intent.qkernel_execution_economics)
+    if revision is not None:
+        economics["q_version"] = (
+            bind_day0_probability_semantics("same-input")
+            if revision == "current"
+            else "day0-semrev:day0_settlement_channel_revision_model_v22:same-input"
+        )
+    intent = replace(intent, qkernel_execution_economics=economics)
+    _insert_actionable_certificate_for_intent(
+        mem_conn, intent, certificate_hash=certificate_hash,
+    )
+    component, payload = _entry_actionable_certificate_payload_and_component(
+        mem_conn, intent,
+    )
+    if revision == "current":
+        assert component["allowed"] is True
+        assert payload["qkernel_execution_economics"]["q_version"] == economics["q_version"]
+    else:
+        assert component["allowed"] is False
+        assert payload is None
+        assert component["details"]["verification_error"] == (
+            "actionable_certificate_day0_probability_revision_not_current"
+        )
+
+
+@pytest.mark.parametrize("current", [False, True])
+def test_day0_certificate_revision_check_does_not_depend_on_context_role(current):
+    from dataclasses import replace
+    from src.events.day0_authority import bind_day0_probability_semantics
+    from src.execution.executor import _actionable_certificate_intent_mismatch_reason
+
+    intent = _make_entry_intent()
+    assert not intent.decision_source_context.is_day0_observation_context()
+    economics = dict(intent.qkernel_execution_economics)
+    economics["q_version"] = (
+        bind_day0_probability_semantics("same-input") if current
+        else "day0-semrev:day0_settlement_channel_revision_model_v22:same-input"
+    )
+    intent = replace(intent, qkernel_execution_economics=economics)
+    payload = {
+        "event_type": "DAY0_EXTREME_UPDATED",
+        "token_id": intent.token_id,
+        "direction": intent.direction.value,
+        "executable_snapshot_id": intent.executable_snapshot_id,
+        "q_live": intent.q_live,
+        "q_lcb_5pct": intent.q_lcb_5pct,
+        "qkernel_execution_economics": economics,
+    }
+    reason = _actionable_certificate_intent_mismatch_reason(payload, intent)
+    assert reason == (
+        "" if current else "actionable_certificate_day0_probability_revision_not_current"
+    )
 
 
 def _make_entry_intent(

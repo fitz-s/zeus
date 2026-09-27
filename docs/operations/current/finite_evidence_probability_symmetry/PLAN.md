@@ -4,6 +4,216 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-09-27 — current-day full causal repair acceptance
+
+- checked=2026-W39; basis=exact current-case DB/provenance, source code and
+  test evidence below; until=recheck-on-use. Point-in-time runtime statements
+  retain their explicit UTC timestamps and are not week-long liveness proof.
+- Superseding acceptance: investigate every current September 27 target position
+  and the eight first-entry orders whose entry falls on September 27 Hong Kong
+  local time. Seven distinct target-date positions have hard detector incidents;
+  repeated below-floor/no-bid incidents are not separate orders or settled P&L.
+- Evidence set: `993cdf9b-9e7`, `c157346c-310`, `90e6d93e-2a3`,
+  `7828bcd6-c3b`, `ca833ac0-a00`, `25e8406d-77c`,
+  `edli87b89d45ce7c0206a12f2cbe200ae912fe1a40fe136e089b7e49fd869b5cad8e`,
+  plus non-hard target-date positions `9cb4942c-6ca` and `864f9695-e2f`.
+- Six bounded investigation lanes cover exact order/incident identity, Hong
+  Kong exit execution, current source/probability chronology, other current-day
+  failures, detector/repair-controller liveness, and independent semantic review.
+  Main integrator owns shared scheduling/write contention and final acceptance.
+- Every finding needs an entry/source/decision/book/command/fill causal chain,
+  an explicit fix/refutation/evidence gap, and a behavioral regression test for
+  each code repair. No historical profit statistics, hindsight probability
+  fitting, guard relaxation, or restart substitutes for this acceptance.
+- Live data access remains read-only and WAL-aware. Implement only in this
+  origin/live task worktree. Specific repair scope and SCOPE/DRAIN/RESET are
+  recorded here before implementation. Preserve independent concurrent work.
+- Runtime changed independently during investigation: at 11:04:09 UTC the
+  main loaded SHA became `634fc5e36446c2791fa58835f153cbabc26b1881`.
+  This task did not request that restart. Separate before/after evidence;
+  complete investigation, repairs and checks before this task's final rollout.
+
+### Current capital-recovery starvation repair slice
+
+- Verified live defect: twelve CANCELLED ENTRY commands retain OPEN exposure
+  obligations across twelve markets; no projection blockers are counted. The
+  recurring capital recovery fence cancels global auctions. Its terminal-entry
+  fast pass restarts three unscoped historical reducers under one 1.5-second
+  budget and repeatedly interrupts without releasing an obligation, including
+  after the independently performed 11:04 UTC restart. Read-only selectors with
+  no command scope exceed a two-second interrupt budget; exact-command probes
+  complete, establishing a concrete bounded-work mismatch.
+- Repair: select exact terminal OPEN obligation commands outside the writer
+  scope, pass existing exact-command scopes to no-fill and partial fact
+  materializers and the obligation reducer, and commit independently bounded
+  command-sized progress. Preserve fair service when a command remains
+  unresolved; reuse existing recovery continuation/cursor mechanisms when
+  available. Never convert a partial fill into no-fill or release unproved risk.
+- SCOPE: the existing terminal entry obligation fast recovery lane, not global
+  probability, price bands or capital risk policy. DRAIN: existing scheduled
+  recovery makes bounded exact-command progress with current canonical proofs.
+  RESET: obligation RESOLVED removes that identity from selection; finally
+  releases the scheduler handoff even on errors. A still-unproved command stays
+  OPEN and cannot starve independently provable commands.
+- Acceptance: reproduce historical-noise/timeout starvation, prove progressive
+  release and fairness, partial-fill and ambiguous-fact negative twins, atomic
+  rollback, unchanged handoff cleanup, affected recovery tests and independent
+  review. Roll back only the repair commit; no manual live DB mutation.
+- Review refinement: exact-command scope must enter raw fact CTEs before their
+  window functions, including the nested terminal late-fill reader in
+  `src/execution/exchange_reconcile.py`; filtering only the final result is not
+  bounded work. That existing helper is included in this slice; no late-fill
+  validation may be skipped. Each command uses its own timeout summary and
+  transaction, and reducer-reported errors roll back the whole command bundle.
+- Fairness uses a process-local round-robin continuation over durable OPEN
+  obligation identities, with at most four attempted identities per tick.
+  Resolved progress is durable; process restart resets scheduling order, not
+  obligation truth. Acceptance proves fairness across running ticks even when
+  wall-clock slots jump; it does not claim a durable scheduler cursor or
+  starvation freedom under unbounded repeated process restarts. No new schema.
+- Adjacent proof review: test the empty canonical-order set explicitly. A
+  command that has a venue order identity must not discharge a cancelled-order
+  obligation merely because `all([])` is true. Preserve legitimate pre-venue
+  rejection/no-side-effect proof as a separate positive twin; do not require a
+  nonexistent venue receipt for a command proved never to have reached venue.
+
+### Source geometry and precision-proof repair slice
+
+- Verified provider defect: current-target downloader writes requested station
+  coordinates as observed grid coordinates, zero grid/station elevations, and
+  unconditional land/standard classifications. Actual September 26 06Z Manila
+  and Guangzhou raw responses disagree. Producer cache reuse and downstream
+  precision guards accept those invented fields; this is not acceptable source
+  proof even when a particular forecast happens to be correct.
+- Provider repair: bind actual returned coordinates to the existing O1280
+  static surface evidence and exact selected index. Keep target DEM, physical
+  grid elevation, effective downscaling elevation and station ground elevation
+  distinct. Reuse `config/station_precise_coords.json` only with explicit station
+  identity/location checks; Hong Kong's 32 m ground elevation is corroborated by
+  current HKO station information. Missing proof stays missing, never zero.
+  Existing same-provider, same-cycle bucket transport may provide the proof;
+  another grid's certificate cannot be attached to an API response. Revalidate
+  at consumption and reject old synthetic precision-cache identities.
+- Verified ENS selection defect: the extractor uses geometric nearest-grid
+  selection without land/water compatibility. The same-cycle official IFS
+  control mask at Hong Kong's selected (22.25,114.25) has land fraction .390625,
+  versus .5078125 at adjacent (22.25,114.0). This is a mixed, water-class cell,
+  not an all-water cell. Official ECMWF meteogram guidance chooses the nearest
+  land cell among the surrounding four for a land station. The current control
+  stream is oper:fc (formerly enfo:cf); do not demand a retired file path.
+- ENS repair: obtain the official IFS static mask with source hash, cycle and
+  exact grid identity; require matching extraction grid keys and select the
+  nearest eligible land neighbor by the published rule. Bind the chosen grid
+  index and mask proof into extraction/snapshot/shape provenance and identity.
+  Missing/mismatched proof must not fall back to today's unproved nearest cell.
+  Do not claim every perturbed member's mask bytes were separately observed.
+- Preserve native HIGH/LOW local-day extrema, complete 51-member coverage,
+  same-cycle freshness, discrete settlement semantics and the current q
+  formula. No fitted center shifts, variance shrinkage or price-based hindsight.
+- SCOPE: affected city-date-metric source certificates and new entry authority.
+  DRAIN: existing acquisition/seed/materialization loops obtain valid geometry
+  and regenerate certificates; missing provider metadata may use only the
+  already-admitted same-cycle transport ladder. RESET: valid exact-source
+  geometry and current certificate revision, not a manual city enable flag.
+  Held positions retain monitoring/redecision; invalid evidence cannot be
+  relabeled fresh, nor may an ENTRY block disable lawful reduce-only handling.
+- Parallel source writers use isolated child worktrees: provider proof and ENS
+  extraction own disjoint files. Main integrates revisions, identity and entry
+  versus held routing after independent review. No live mutation or restart
+  until source and recovery repairs, negative twins, affected suites and runtime
+  readiness evidence have been completed. Rollback is source commits, never
+  rewriting immutable past decision certificates or incident evidence.
+
+### Source-authority integration and current-case dispositions
+
+- Core materialization independently checks the provider proof against exact
+  raw response bytes and the extracted anchor, rather than trusting a PASS
+  object. ENS selected-grid proof enters snapshot selection, shape identity,
+  Python entry/held authority and SQL coverage with the same requirements.
+  Stable geometry identity excludes transport fetch time and URL: refreshing
+  identical evidence is not a new probability mechanism. An unrelated station
+  registry edit must not invalidate this station's otherwise exact evidence.
+- Retire old current-evidence and Day0 probability mechanism revisions at live
+  consumption, while preserving historical parsing and attribution. Verify
+  acquisition/cache/reseed drainage explicitly; a stricter gate with no normal
+  way to produce its witness is not a completed repair.
+- Day0 survival/resolver revisions become v23/v22. Their historical bind/parser
+  stays lossless. Current ENTRY certificate checks use the already sealed
+  economics q_version, not a new prefix on a bare context hash; current-family
+  cache reissue rejects and evicts a retired Day0 revision for entry and held
+  use. Direct-current Day0 hourly ENS already requests land cells through
+  Open-Meteo and has separate source identity; do not claim OpenData's new
+  static mask certifies that independent transport.
+- Drain review found three old-geometry coverage shortcuts: active availability
+  poll/target plan, scoped acquisition preflight, and downloader raw/sibling
+  reuse. Each must require the same valid provider geometry evidence. Wrong-cell
+  raw is re-fetched only for its family through existing cadence, without
+  overwriting bytes referenced by an immutable DB hash; one network attempt
+  per loop does not permanently disable the source cycle after a transient
+  failure. Missing terrain/registry cannot be repaired by repeatedly fetching
+  temperature data and remains a distinct source-evidence blocker.
+- The integration writer owns materializer, cycle policy and materialization
+  script plus their existing tests in an isolated child worktree. The parent
+  owns Day0 revision changes and authority documentation. Independent review
+  checks cached held-position authority and source regeneration separately.
+- Current-case evidence distinguishes loss detection from realized outcomes:
+  Taipei `ca833ac0-a00` sold 2.29 shares at .81, leaving .008846 dust; Seoul
+  `25e8406d-77c` sold 8.11 at .09 and economically closed; Shanghai
+  `9cb4942c-6ca` also economically closed. Their floor-crossing history must not
+  erase confirmed exit facts or be counted as separate settled total losses.
+- HK `c157346c-310` and `993cdf9b-9e7`, Guangzhou `90e6d93e-2a3` and Manila
+  `7828bcd6-c3b` have no observed fresh legal quote exceeding the model's held
+  payoff probability in the inspected monitor sequences. That refutes a
+  blanket missing-SELL explanation, not a probability-input defect: the ENS
+  grid mismatch and fabricated provider precision are repaired upstream.
+- Lucknow's entry certificate and eventual held binding are verified. Early
+  exit_calibration failures suppressed probability authority; the swallowed
+  historical exception prevents proving their exact cause. A possible expired
+  monitor deadline is not promoted to a confirmed root cause or used to relax
+  binding. Preserve this explicit evidence gap in acceptance.
+- HK September 25/26 official HKO daily rows and venue resolutions were absent
+  at inspection; independent five-minute ingest checked them successfully.
+  Provisional observations cannot settle those positions. This external delay
+  neither explains nor excuses prior exit-decision behavior.
+- Execution recovery commit 451ac4a18 has 41 focused recovery and 232 exchange
+  tests passing, plus 12 independent review checks. The full recovery suite has
+  809 passes and 13 failures; all 13 reproduce on base 634fc5e36. These are
+  explicit pre-existing failures, not a globally green test claim. Production
+  obligation drainage remains unverified until final controlled deployment.
+- Read-only resampling found four of the original twelve terminal obligations
+  still OPEN at 11:46-11:48 UTC, with the same global handoff. Loaded main
+  remained 634fc5e36 although the checkout had advanced independently to
+  a87a9a60d. Independent merge review found no textual conflict with upstream
+  1a063a56b/a87a9a60d: retain their strict projected-fill/void convergence and
+  the task's wider bounded terminal fast lane; test their shared-command
+  idempotence after integration.
+- Real source checks: official 2026-09-26 06Z static ENS land mask selects an
+  eligible cell for all 54 configured stations. Hong Kong moves from fraction
+  .390625 to .5078125 at 18.8409 km; Manila and Guangzhou remain eligible land.
+  Actual persisted same-cycle OM artifacts for these cities pass the new
+  raw-bytes/static-surface/station proof. These checks do not establish a
+  counterfactual profit: the old ENS member GRIBs are no longer available.
+- Exact Day0 causal check: HIGH posterior 684198 at 06:09 UTC used the 06:00
+  provisional high 32.3, not the later 32.7. Its ENS mean 29.5213 versus center
+  32.4683 contributed 2.947 degrees to predictive uncertainty; predictive
+  sigma 3.094 propagated to Day0 path sigma 2.986 and NO32 probability .445537.
+  The same-cycle snapshot 1376639 used the old water-class nearest cell. At
+  09:17 posterior 685579, high 32.7 gave NO32 .32729. NO32 loses at integer 32,
+  not at 33; provisional readings do not establish the final integer.
+- LOW posteriors 684974/685063 changed NO27 from about .506 to .286 when the
+  possessed UKMO daily run advanced from 18Z 23.7 to 00Z 26.7 at 08:07:22;
+  the hourly-vector witness stayed unchanged. Existing source-clock policy
+  explicitly retains older possessed runs with their real cycle identities.
+  This is not evidence of a disguised new run, wrong timezone or look-ahead.
+  The provider publication-to-capture delay was 10m39s; its operational cause
+  is not established by these posterior rows alone.
+- Parent Day0 boundaries: 121 executor tests pass after both context- and
+  certificate-type revision checks; 69 focused calibration/cache/identity
+  tests passed before the final five certificate cases. The six required
+  engine suites have 39 failures/50 passes/4 skips, with the same 39 failures
+  reproduced using unchanged base source; the linter's repository-wide
+  pre-existing findings are not claimed repaired by this slice.
+
 ## 2026-09-27 — recent Hong Kong exit-window recovery
 
 - Scope: investigate September 18–27 entries, held probability and executable

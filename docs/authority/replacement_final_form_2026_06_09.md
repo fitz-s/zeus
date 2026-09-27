@@ -171,6 +171,34 @@ of the missing same-cycle shape. Missing same-cycle ENS is DATA_DEGRADED for the
 family and fails closed until the normal materialization loop writes current
 evidence.
 
+**Source geometry is part of current-evidence authority.** A land-station ENS
+sample uses the nearest eligible land cell among the four surrounding cells,
+with land fraction greater than 0.5, using [ECMWF's land-cell selection
+rule](https://confluence.ecmwf.int/spaces/FUG/pages/673551105/Section%2B8.1.4.1%2BSelection%2Bof%2Bgrid%2Bpoints%2Bfor%2Bmeteograms).
+Unlike its display-product sea fallback when no surrounding land cell exists,
+live station-probability authority requires land evidence and degrades that
+family when none is available. Its official static mask must have the same grid identity as
+the extracted temperature fields. Preserve mask source cycle, content hash,
+selected index and coordinates, station identity and the selection witness;
+missing or mismatched evidence cannot fall back to an unqualified nearest cell.
+
+Provider precision likewise requires the actual response grid, its matching
+model surface evidence and the real station ground elevation. Requested
+coordinates are not observed grid coordinates; target DEM, raw model height,
+effective downscaling height and station height are distinct quantities.
+Invented zero elevations, land labels or station-verification labels do not
+constitute proof. Bind the certificate to exact response bytes and validate it
+again at materialization, including the anchor derived from those bytes.
+
+The stable source-geometry witness participates in current shape identity and
+its semantics revision. Transport fetch times and unrelated registry edits
+must not create a different geometry identity. Old immutable certificates
+remain historical evidence, not live entry or held statistical authority and
+not current coverage. The ordinary acquisition/materialization loop must
+regenerate missing valid witnesses for the affected family. This requirement
+does not change the predictive uncertainty formula, manufacture hard-fact
+observation authority, or suspend monitoring and independently lawful exits.
+
 ### 1d-bis. Interval-censored ENS members (ADDENDUM 2026-09-25 — operator-approved)
 
 ECMWF Open Data mn2t3/mx2t3 are 3-hour aggregates on a 3-hour step grid. A

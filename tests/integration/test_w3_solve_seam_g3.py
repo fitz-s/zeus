@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-09-24
+# Last reused/audited: 2026-09-27
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -13551,6 +13551,53 @@ def test_latest_causal_day0_family_event_respects_all_three_clocks():
 
     assert selected is not None
     assert selected.event_id == visible.event_id
+
+
+@pytest.mark.parametrize("probability_use", [
+    era._CurrentProbabilityUse.ENTRY,
+    era._CurrentProbabilityUse.HELD_MONITOR,
+])
+@pytest.mark.parametrize("retired", [True, False])
+def test_probability_cache_requires_current_day0_geometry_revision(
+    monkeypatch, probability_use, retired,
+):
+    from types import SimpleNamespace
+    from src.events.day0_authority import bind_day0_probability_semantics
+
+    namespace = "day0-geometry-revision-cache"
+    version = (
+        "day0-semrev:day0_settlement_channel_revision_model_v22:same-input"
+        if retired else bind_day0_probability_semantics("same-input")
+    )
+    prepared = SimpleNamespace(
+        probability_witness=SimpleNamespace(q_version=version),
+    )
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE", None)
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE", {})
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE", {})
+    reissued = []
+    def reissue(value, **_kwargs):
+        reissued.append(value)
+        return value
+    monkeypatch.setattr(era, "_reissue_cached_global_probability_family", reissue)
+    era._store_global_probability_family_cache(
+        namespace, family_key="HK-high", event_id="same-event",
+        family_binding_hash="same-binding", prepared=prepared,
+        probability_use=probability_use,
+    )
+    result = era._probe_global_probability_family_cache(
+        namespace, family_key="HK-high", event_id="same-event",
+        causal_snapshot_id="fresh-snapshot",
+        captured_at_utc=_dt.datetime(2026, 9, 27, 8, tzinfo=_dt.timezone.utc),
+        probability_use=probability_use,
+    )
+    if retired:
+        assert result is None
+        assert not reissued
+        assert not era._GLOBAL_PROBABILITY_FAMILY_CACHE
+    else:
+        assert result is prepared
+        assert reissued == [prepared]
 
 
 def test_probability_cache_never_promotes_held_authority_to_entry(monkeypatch):

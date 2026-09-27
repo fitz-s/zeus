@@ -2352,6 +2352,32 @@ def _actionable_certificate_intent_mismatch_reason(
             ):
                 return f"actionable_certificate_qkernel_{key}_mismatch"
 
+    context = getattr(intent, "decision_source_context", None)
+    if (
+        str(payload.get("event_type") or "") == "DAY0_EXTREME_UPDATED"
+        or (
+            context is not None
+            and hasattr(context, "is_day0_observation_context")
+            and context.is_day0_observation_context()
+        )
+    ):
+        from src.events.day0_authority import (
+            DAY0_PROBABILITY_SEMANTICS_REVISION,
+            day0_probability_semantics_revision,
+        )
+
+        # SCOPE: fresh Day0 ENTRY, never historical certificate reads. DRAIN:
+        # current redecision issues a new sealed certificate. RESET: its own
+        # current mechanism identity, not a new prefix on an old context hash.
+        for economics in (payload_economics, intent_economics):
+            if not isinstance(economics, Mapping) or (
+                day0_probability_semantics_revision(economics.get("q_version"))
+                != DAY0_PROBABILITY_SEMANTICS_REVISION
+            ):
+                return "actionable_certificate_day0_probability_revision_not_current"
+        if payload_economics.get("q_version") != intent_economics.get("q_version"):
+            return "actionable_certificate_day0_q_version_mismatch"
+
     decision_text = str(decision_id or "").strip()
     if decision_text.startswith("edli_exec_cmd:"):
         parts = decision_text.split(":")
@@ -3932,13 +3958,26 @@ def _entry_q_version_from_authority(
         and hasattr(context, "is_day0_observation_context")
         and context.is_day0_observation_context()
     ):
-        from src.events.day0_authority import bind_day0_probability_semantics
+        from src.events.day0_authority import (
+            DAY0_PROBABILITY_SEMANTICS_REVISION,
+            bind_day0_probability_semantics,
+            day0_probability_semantics_revision,
+        )
 
         day0_q_version = context_q_version or str(
             getattr(context, "raw_payload_hash", "") or ""
         ).strip()
         if day0_q_version:
-            return bind_day0_probability_semantics(day0_q_version)
+            bound = bind_day0_probability_semantics(day0_q_version)
+            # SCOPE: this fresh ENTRY. DRAIN: current Day0 redecision, not
+            # relabeling an immutable historical certificate. RESET: a current
+            # mechanism witness. Historical parsing/binding stays lossless.
+            if (
+                day0_probability_semantics_revision(bound)
+                != DAY0_PROBABILITY_SEMANTICS_REVISION
+            ):
+                return None
+            return bound
     if context_q_version:
         return context_q_version
     forecast_context_q_version = _forecast_entry_raw_hash_q_version_from_context(

@@ -1312,6 +1312,22 @@ def _probe_global_probability_family_cache(
     if cached is None or cached[0] != event_id:
         return None
     try:
+        from src.events.day0_authority import (
+            DAY0_PROBABILITY_SEMANTICS_REVISION,
+            day0_probability_semantics_revision,
+        )
+
+        cached_q_version = str(
+            getattr(getattr(cached[2], "probability_witness", None), "q_version", "")
+            or ""
+        )
+        if cached_q_version.startswith("day0-semrev:") and (
+            day0_probability_semantics_revision(cached_q_version)
+            != DAY0_PROBABILITY_SEMANTICS_REVISION
+        ):
+            # SCOPE: exact family/use cache entry. DRAIN: normal cache miss
+            # rebuilds current evidence. RESET: current mechanism witness.
+            raise ValueError("GLOBAL_PROBABILITY_CACHE_DAY0_REVISION_SUPERSEDED")
         return _reissue_cached_global_probability_family(
             cached[2],
             event_id=event_id,
