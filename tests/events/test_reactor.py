@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-09-20
+# Last reused/audited: 2026-09-27
 # Lifecycle: created=2026-05-24; last_reviewed=2026-09-20; last_reused=2026-09-20
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
@@ -1917,7 +1917,7 @@ def test_main_threads_pause_carrier_qualification_to_reactor(monkeypatch):
     assert captured["live_entry_block_reason"] == (
         "paused_forecast_snapshot_completion"
     )
-    preemption_pending = captured["urgent_day0_pending"]
+    preemption_pending = captured["capital_recovery_pending"]
     assert callable(preemption_pending)
     assert preemption_pending() is False
     main._capital_recovery_handoff_pending.set()
@@ -4580,8 +4580,10 @@ def test_periodic_cycle_yields_to_already_pending_day0_before_runtime_db_setup(
     assert lock.acquired is False
 
 
+@pytest.mark.parametrize("durable_completion", (False, True))
+@pytest.mark.parametrize("new_day0", (False, True))
 def test_reserved_completion_absorbs_preexisting_day0_before_runtime_db_setup(
-    monkeypatch,
+    monkeypatch, durable_completion, new_day0,
 ):
     import src.main as main
     import src.state.db as db
@@ -4608,11 +4610,19 @@ def test_reserved_completion_absorbs_preexisting_day0_before_runtime_db_setup(
     )
     monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
     monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_revision", lambda: "day0-wake")
-    monkeypatch.setattr(
-        reactor_wake,
-        "reactor_urgent_wake_identity",
-        lambda: (existing.wake_id, existing.reason),
-    )
+    identities = iter((
+        (existing.wake_id, existing.reason),
+        ("new-day0" if new_day0 else existing.wake_id, existing.reason),
+    ))
+    latest_identity = [None]
+
+    def urgent_identity():
+        latest_identity[0] = next(identities, latest_identity[0])
+        return latest_identity[0]
+
+    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_identity", urgent_identity)
+    monkeypatch.setattr(reactor, "_durable_exact_held_sell_completion_pending", lambda: False)
+    monkeypatch.setattr(reactor, "_rehydrate_exact_executable_held_sell_pending", lambda **_kw: (False, ()))
     monkeypatch.setattr(
         reactor_wake,
         "reactor_wakes_since",
@@ -4625,13 +4635,22 @@ def test_reserved_completion_absorbs_preexisting_day0_before_runtime_db_setup(
         lambda: (_ for _ in ()).throw(ExitAuctionReached()),
     )
 
-    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+    # A durable completion must also work after restart, without the RAM flag.
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    if not durable_completion:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+    kwargs = dict(
+        active_lock=threading.Lock(),
+        urgent_day0_pending=lambda: True,
+        producer_wake_reason=(reactor.GLOBAL_AUCTION_COMPLETION_WAKE_REASON if durable_completion else None),
+        producer_wake_ids=(("completion-wake",) if durable_completion else ()),
+    )
     try:
-        with pytest.raises(ExitAuctionReached):
-            run_edli_event_reactor_cycle(
-                active_lock=threading.Lock(),
-                urgent_day0_pending=lambda: True,
-            )
+        if new_day0:
+            assert run_edli_event_reactor_cycle(**kwargs) is False
+        else:
+            with pytest.raises(ExitAuctionReached):
+                run_edli_event_reactor_cycle(**kwargs)
     finally:
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
@@ -4890,6 +4909,31 @@ def test_reserved_probe_ignores_only_wakes_that_preexist_its_current_cut(
     assert cancelled() is False
     assert cancelled() is True
 
+
+
+def test_completion_day0_snapshot_never_masks_capital_recovery_handoff(monkeypatch):
+    from src.events.reactor import _reactor_wake_cancellation_probe
+    from src.runtime import reactor_wake
+
+    existing = reactor_wake.ReactorWake(
+        "existing-day0", "2026-09-27T12:00:00+00:00", "day0",
+        "day0_extreme_event_committed",
+    )
+    recovery = [False]
+    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_revision", lambda: "old")
+    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_identity", lambda: (existing.wake_id, existing.reason))
+    monkeypatch.setattr(reactor_wake, "reactor_wakes_since", lambda *_a, **_k: (existing,))
+    cancelled = _reactor_wake_cancellation_probe(
+        producer_wake_reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        producer_wake_ids=("completion",), producer_wake_published_at=None,
+        forecast_wake_families=set(), urgent_day0_pending=lambda: True,
+        capital_recovery_pending=lambda: recovery[0], ignore_preexisting_wakes=True,
+    )
+    assert cancelled() is False
+    recovery[0] = True
+    assert cancelled() is True
+    recovery[0] = False
+    assert cancelled() is True  # An interrupted cut cannot regain authority.
 
 def test_day0_posterior_advance_reemits_current_observation_on_new_probability_clock():
     conn, _store_obj = _store()
@@ -8009,6 +8053,7 @@ def test_main_reactor_injects_day0_and_monitor_preemption_signals(
     # manufacture a held-monitor preemption signal.
     monkeypatch.setattr(main, "_held_position_monitor_entry_block_reason", lambda: None)
     monkeypatch.setattr(main, "_held_position_monitor_debt_pending", lambda: False)
+    main._capital_recovery_handoff_pending.clear()
     main._day0_urgent_wake_pending.clear()
     main._day0_exit_monitor_attempts.clear()
     try:
@@ -8023,6 +8068,11 @@ def test_main_reactor_injects_day0_and_monitor_preemption_signals(
             "2026-07-19T12:00:00+00:00"
         )
         assert captured["urgent_day0_pending"]() is False
+        assert captured["capital_recovery_pending"]() is False
+        main._capital_recovery_handoff_pending.set()
+        assert captured["capital_recovery_pending"]() is True
+        assert captured["urgent_day0_pending"]() is False
+        main._capital_recovery_handoff_pending.clear()
         assert captured["held_position_monitor_pending"]() is False
         assert captured["held_position_monitor_debt_pending"]() is False
         main._held_position_monitor_handoff_pending.set()

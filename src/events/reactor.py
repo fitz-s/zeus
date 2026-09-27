@@ -7716,6 +7716,7 @@ def _reactor_wake_cancellation_probe(
     producer_wake_published_at: str | None,
     forecast_wake_families: set[tuple[str, str, str]],
     urgent_day0_pending: Callable[[], bool] | None,
+    capital_recovery_pending: Callable[[], bool] | None = None,
     allow_paused_forecast_snapshot_completion: bool = False,
     ignore_preexisting_wakes: bool = False,
 ) -> Callable[[], bool]:
@@ -7726,8 +7727,8 @@ def _reactor_wake_cancellation_probe(
     an overlapping forecast wake; every other capital-risk or unknown reason
     retains the cancellation path.
 
-    ``ignore_preexisting_wakes`` is reserved for an ordinary scheduler cut
-    that already owns monitor-fairness completion. Its snapshot is part of the
+    ``ignore_preexisting_wakes`` is reserved for a full-market completion cut,
+    dispatched periodically or from its durable wake. Its snapshot is part of the
     cut's starting truth; only a wake published after that snapshot cancels it.
     """
 
@@ -7765,6 +7766,9 @@ def _reactor_wake_cancellation_probe(
         nonlocal observed_revision, superseded
 
         if superseded:
+            return True
+        if capital_recovery_pending is not None and capital_recovery_pending():
+            superseded = True
             return True
         if urgent_day0_pending is not None and urgent_day0_pending():
             current_urgent_identity = reactor_urgent_wake_identity()
@@ -9080,6 +9084,7 @@ def run_edli_event_reactor_cycle(
     producer_family_scoped_held_completion: bool = False,
     allow_paused_forecast_snapshot_completion: bool = False,
     urgent_day0_pending: Callable[[], bool] | None = None,
+    capital_recovery_pending: Callable[[], bool] | None = None,
     held_position_monitor_pending: Callable[[], bool] | None = None,
     held_position_monitor_debt_pending: Callable[[], bool] | None = None,
     live_entry_block_reason: str | None = None,
@@ -9103,6 +9108,9 @@ def run_edli_event_reactor_cycle(
     ``urgent_day0_pending`` is the dispatcher's cross-thread signal for a
     newly committed observation. Lower-priority producer batches consult it
     only between durable event units; the Day0 batch itself is never cancelled.
+
+    ``capital_recovery_pending`` is an independent handoff for unresolved venue
+    effects. A preexisting Day0 marker never exempts this cancellation signal.
 
     ``held_position_monitor_pending`` is the typed periodic-monitor handoff
     signal. It may cancel one in-flight auction; that cancellation reserves the
@@ -9192,8 +9200,15 @@ def run_edli_event_reactor_cycle(
     )
     producer_fast_path = committed_event_wake or targeted_forecast_wake
     completion_reserved_at_start = (
-        producer_wake_reason is None
-        and _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+        (
+            producer_wake_reason is None
+            and _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+        )
+        or (
+            completion_wake
+            and not family_scoped_held_completion
+            and not producer_held_sell_reauction_requests
+        )
     )
     _urgent_wake_pending = _reactor_wake_cancellation_probe(
         producer_wake_reason=producer_wake_reason,
@@ -9201,6 +9216,7 @@ def run_edli_event_reactor_cycle(
         producer_wake_published_at=producer_wake_published_at,
         forecast_wake_families=forecast_wake_families,
         urgent_day0_pending=urgent_day0_pending,
+        capital_recovery_pending=capital_recovery_pending,
         allow_paused_forecast_snapshot_completion=(
             allow_paused_forecast_snapshot_completion
         ),
@@ -10384,7 +10400,14 @@ def run_edli_event_reactor_cycle(
                     committed_day0_wake=committed_day0_wake,
                     producer_fast_path=producer_fast_path,
                     urgent_wake_pending=_urgent_wake_pending,
-                    urgent_day0_pending=urgent_day0_pending,
+                    urgent_day0_pending=(
+                        (lambda: bool(
+                            (urgent_day0_pending is not None and urgent_day0_pending())
+                            or capital_recovery_pending()
+                        ))
+                        if capital_recovery_pending is not None
+                        else urgent_day0_pending
+                    ),
                     held_position_monitor_debt_pending=held_position_monitor_debt_pending,
                     generic_completion_latch_cancelled=(
                         _generic_completion_latch_cancelled

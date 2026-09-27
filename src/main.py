@@ -5006,10 +5006,8 @@ def _edli_event_reactor_cycle(
         # truth.  Reuse the reactor's cooperative SQLite/safe-point preemption
         # seam so it releases the active fence after its current bounded unit
         # instead of running lower-value discovery ahead of exact cancel debt.
-        urgent_day0_pending=lambda: (
-            _unowned_day0_urgent_wake_pending()
-            or _capital_recovery_handoff_pending.is_set()
-        ),
+        urgent_day0_pending=_unowned_day0_urgent_wake_pending,
+        capital_recovery_pending=_capital_recovery_handoff_pending.is_set,
         held_position_monitor_pending=(
             lambda: (
                 _periodic_held_position_monitor_successor_pending.is_set()
