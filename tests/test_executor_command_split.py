@@ -877,7 +877,11 @@ def test_day0_entry_rejects_retired_geometry_revision_without_relabeling(revisio
     assert day0_probability_semantics_revision(historical) == revision
 
 
-@pytest.mark.parametrize("revision", [None, "retired", "current"])
+@pytest.mark.parametrize("revision", [
+    None, "day0_settlement_channel_revision_model_v22",
+    "day0_settlement_channel_revision_model_v23",
+    "day0_resolver_terminal_composition_v22", "current",
+])
 def test_day0_durable_certificate_cannot_relabel_old_economics_from_bare_context(
     mem_conn, revision,
 ):
@@ -903,7 +907,7 @@ def test_day0_durable_certificate_cannot_relabel_old_economics_from_bare_context
         economics["q_version"] = (
             bind_day0_probability_semantics("same-input")
             if revision == "current"
-            else "day0-semrev:day0_settlement_channel_revision_model_v22:same-input"
+            else f"day0-semrev:{revision}:same-input"
         )
     intent = replace(intent, qkernel_execution_economics=economics)
     assert _entry_q_version_from_authority(intent, {

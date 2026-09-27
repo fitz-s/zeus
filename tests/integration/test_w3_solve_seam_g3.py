@@ -13557,7 +13557,11 @@ def test_latest_causal_day0_family_event_respects_all_three_clocks():
     era._CurrentProbabilityUse.ENTRY,
     era._CurrentProbabilityUse.HELD_MONITOR,
 ])
-@pytest.mark.parametrize("retired", [True, False])
+@pytest.mark.parametrize("retired", [
+    "day0_settlement_channel_revision_model_v22",
+    "day0_settlement_channel_revision_model_v23",
+    "day0_resolver_terminal_composition_v22", None,
+])
 def test_probability_cache_requires_current_day0_geometry_revision(
     monkeypatch, probability_use, retired,
 ):
@@ -13566,7 +13570,7 @@ def test_probability_cache_requires_current_day0_geometry_revision(
 
     namespace = "day0-geometry-revision-cache"
     version = (
-        "day0-semrev:day0_settlement_channel_revision_model_v22:same-input"
+        f"day0-semrev:{retired}:same-input"
         if retired else bind_day0_probability_semantics("same-input")
     )
     prepared = SimpleNamespace(

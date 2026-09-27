@@ -1482,7 +1482,7 @@ def test_fmi_current_state_revision_publishes_exact_existing_fusion_seed(
             "day0_observed_extreme_unit": "C",
         })
     monkeypatch.setattr(builder, "build_replacement_forecast_materialization_seed", fixed_weather_seed)
-    monkeypatch.setattr(requests, "_precision_ready", lambda *_args: ({}, ()))
+    monkeypatch.setattr(requests, "_precision_ready", lambda *_args, **_kwargs: ({}, ()))
     monkeypatch.setattr(requests, "_om9_localday_coverage_ready", lambda *_a, **_k: ())
     cfg = {"forecast_db": db, "seed_dir": tmp_path / "seeds", "raw_manifest_dir": tmp_path / "raw"}
     current = {"source": SOURCE_CHANNEL, "observed_at_utc": "2026-09-27T12:20:00+00:00",
