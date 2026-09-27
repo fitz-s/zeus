@@ -1,5 +1,5 @@
 # Created: 2026-05-03
-# Last reused/audited: 2026-09-23
+# Last reused/audited: 2026-09-27
 # Authority basis: LOW local-day-min interval provenance contract plus the original SourceRunContext contract.
 """GRIB ingester source-run context linkage tests."""
 
@@ -463,7 +463,7 @@ def test_ingest_persists_contract_outcome_and_forecast_window_evidence(tmp_path:
     assert summary["written"] == 1
     row = conn.execute("SELECT * FROM ensemble_snapshots").fetchone()
     assert row["city_timezone"] == "Europe/London"
-    assert row["settlement_source_type"] == "wu_icao"
+    assert row["settlement_source_type"] == "noaa"
     assert row["settlement_station_id"] == "EGLC"
     assert row["settlement_unit"] == "C"
     assert row["settlement_rounding_policy"] == "wmo_half_up"
@@ -473,10 +473,12 @@ def test_ingest_persists_contract_outcome_and_forecast_window_evidence(tmp_path:
     assert row["forecast_window_end_utc"] == "2026-05-09T00:00:00+00:00"
     assert row["forecast_window_start_local"] == "2026-05-08T01:00:00+01:00"
     assert row["forecast_window_end_local"] == "2026-05-09T01:00:00+01:00"
-    assert row["forecast_window_attribution_status"] == "AMBIGUOUS_CROSSES_LOCAL_DAY_BOUNDARY"
+    # Legacy HIGH lacks the exact clipped-boundary certificate; the local
+    # overlap alone cannot authorize target extrema.
+    assert row["forecast_window_attribution_status"] == "UNKNOWN"
     assert row["contributes_to_target_extrema"] == 0
     block_reasons = json.loads(row["forecast_window_block_reasons_json"])
-    assert "ambiguous_crosses_local_day_boundary" in block_reasons
+    assert "high_boundary_certificate_not_exact" in block_reasons
 
 
 def test_low_boundary_ambiguous_persists_block_evidence_without_relaxing_law1(tmp_path: Path) -> None:
@@ -533,6 +535,10 @@ def _low_boundary_payload(
     issue = datetime(2026, 7, 30, 12, tzinfo=UTC)
     available = datetime(2026, 7, 30, 20, 6, tzinfo=UTC)
     target = date(2026, 8, 1)
+    # Source issue 7/30 12Z, Shanghai target 8/1 spans steps +28..+52.
+    # Native three-hour windows clip both edges and cover every hour inside.
+    inner_ranges = [f"{step}-{step + 3}" for step in range(30, 51, 3)]
+    boundary_ranges = ["27-30", "51-54"]
     members = []
     for member_id in range(51):
         inner = 28.0 + member_id / 100.0
@@ -556,6 +562,8 @@ def _low_boundary_payload(
                     else inner + 1.0
                 ),
                 "boundary_ambiguous": ambiguous,
+                "inner_step_ranges": inner_ranges,
+                "boundary_step_ranges": boundary_ranges,
             }
         )
     return {
@@ -601,8 +609,8 @@ def _low_boundary_payload(
         "nearest_grid_lat": 31.25,
         "nearest_grid_lon": 121.75,
         "nearest_grid_distance_km": 13.0,
-        "selected_step_ranges_inner": ["30-33", "33-36"],
-        "selected_step_ranges_boundary": ["27-30", "123-126"],
+        "selected_step_ranges_inner": inner_ranges,
+        "selected_step_ranges_boundary": boundary_ranges,
         "member_count": 51,
         "missing_members": [],
         "training_allowed": False,
@@ -624,7 +632,7 @@ def _low_source_context() -> SourceRunContext:
 
 
 def test_minority_low_boundary_normalizes_into_current_evidence_shape(tmp_path: Path) -> None:
-    """A stale producer veto cannot hide a usable minority-quarantined ENS shape."""
+    """Minority LOW values normalize, while the historical V2 row stays offline."""
 
     conn = _conn()
     payload = _low_boundary_payload(ambiguous_count=2)
@@ -687,8 +695,8 @@ def test_minority_low_boundary_normalizes_into_current_evidence_shape(tmp_path: 
     )
     assert interval_evidence["members_unit"] == "C"
     assert interval_evidence["native_unit"] == "C"
-    assert interval_evidence["selected_step_ranges_inner"] == ["30-33", "33-36"]
-    assert interval_evidence["selected_step_ranges_boundary"] == ["27-30", "123-126"]
+    assert interval_evidence["selected_step_ranges_inner"] == payload["selected_step_ranges_inner"]
+    assert interval_evidence["selected_step_ranges_boundary"] == ["27-30", "51-54"]
     assert interval_evidence["member_count"] == 51
     assert len(interval_evidence["member_records"]) == 51
     assert interval_evidence["member_records"][0] == {
@@ -717,12 +725,14 @@ def test_minority_low_boundary_normalizes_into_current_evidence_shape(tmp_path: 
     )
 
     from src.data.replacement_forecast_materializer import _read_current_evidence_shape
+    from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
 
     target = date(2026, 8, 1)
     carrier = datetime(2026, 7, 30, 18, tzinfo=UTC)
     request = SimpleNamespace(
         city="Shanghai",
         target_date=target,
+        baseline_data_version=expected_replacement_dependency_identity_by_role("low")["baseline_b0"].data_version,
         source_cycle_time=carrier,
         computed_at=datetime(2026, 7, 31, 4, 16, 50, tzinfo=UTC),
     )
@@ -735,11 +745,11 @@ def test_minority_low_boundary_normalizes_into_current_evidence_shape(tmp_path: 
         center_c=28.28,
     )
 
-    assert shape is not None
-    assert shape.snapshot_id == row["snapshot_id"]
-    assert shape.shape_lag_hours == 6.0
-    assert shape.stale_shape_reused is True
-    assert len(shape.members_c) == 49
+    # Minority normalization retained 49 physically usable values above, but
+    # this V2 artifact cannot masquerade as current land-grid V3 authority.
+    assert row["dataset_id"] == ECMWF_OPENDATA_LOW_DATA_VERSION_V2
+    assert request.baseline_data_version != row["dataset_id"]
+    assert shape is None
 
 
 def test_low_boundary_tie_restores_fully_inside_member_value() -> None:
@@ -896,10 +906,12 @@ def test_invalid_low_boundary_member_fails_closed_end_to_end(tmp_path: Path) -> 
     )
 
     from src.data.replacement_forecast_materializer import _read_current_evidence_shape
+    from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
 
     request = SimpleNamespace(
         city="Shanghai",
         target_date=date(2026, 8, 1),
+        baseline_data_version=expected_replacement_dependency_identity_by_role("low")["baseline_b0"].data_version,
         source_cycle_time=datetime(2026, 7, 30, 18, tzinfo=UTC),
         computed_at=datetime(2026, 7, 31, 4, 16, 50, tzinfo=UTC),
     )
@@ -939,9 +951,7 @@ def test_exact_low_boundary_majority_fails_closed_end_to_end(tmp_path: Path) -> 
     assert row["ambiguous_member_count"] == 26
     assert row["training_allowed"] == 0
     assert row["causality_status"] == "REJECTED_BOUNDARY_AMBIGUOUS"
-    assert row["forecast_window_attribution_status"] == (
-        "AMBIGUOUS_CROSSES_LOCAL_DAY_BOUNDARY"
-    )
+    assert row["forecast_window_attribution_status"] == "INTERVAL_CENSORED_TARGET_LOCAL_DAY"
     assert row["contributes_to_target_extrema"] == 0
     persisted_members = json.loads(row["members_json"])
     assert sum(value is None for value in persisted_members) == 26
@@ -965,10 +975,12 @@ def test_exact_low_boundary_majority_fails_closed_end_to_end(tmp_path: Path) -> 
     assert row["causality_status"] == "REJECTED_BOUNDARY_AMBIGUOUS"
 
     from src.data.replacement_forecast_materializer import _read_current_evidence_shape
+    from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
 
     request = SimpleNamespace(
         city="Shanghai",
         target_date=date(2026, 8, 1),
+        baseline_data_version=expected_replacement_dependency_identity_by_role("low")["baseline_b0"].data_version,
         source_cycle_time=datetime(2026, 7, 30, 18, tzinfo=UTC),
         computed_at=datetime(2026, 7, 31, 4, 16, 50, tzinfo=UTC),
     )
