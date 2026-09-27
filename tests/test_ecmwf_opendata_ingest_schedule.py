@@ -612,6 +612,61 @@ def test_earliest_held_revision_cooldown_reserves_its_turn(monkeypatch, track):
 
 
 @pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+@pytest.mark.parametrize("latest_status", ("SUCCESS", "PARTIAL", "FAILED"))
+def test_held_cooldown_preserves_newest_vs_migration_turn_order(
+    monkeypatch, track, latest_status,
+):
+    from src.data import replacement_forecast_seed_discovery as discovery
+    from src.ingest import forecast_live_daemon as daemon
+
+    now = datetime(2026, 9, 27, 12, 46, tzinfo=timezone.utc)
+    conn = _job_run_conn()
+    earliest = _held_revision_coverage(
+        conn, track, now=now, cycle=datetime(2026, 9, 26, 12, tzinfo=timezone.utc),
+    )
+    later = _held_revision_coverage(
+        conn, track, now=now, cycle=datetime(2026, 9, 26, 18, tzinfo=timezone.utc),
+        city_name="Cape Town",
+    )
+    monkeypatch.setattr(discovery, "held_position_family_priorities", lambda **_: {
+        ("Hong Kong", "2026-09-27", earliest["metric"]): 0,
+        ("Cape Town", "2026-09-27", later["metric"]): 0,
+    })
+    migration, _ = daemon._held_revision_migration_identity(
+        conn, track=track, now_utc=now, deadline_monotonic=time.monotonic() + 10,
+    )
+    _insert_job_run(conn, migration, status="FAILED", recorded_at=now - timedelta(seconds=20))
+    newest = daemon._forecast_work_identity(track, now_utc=now)
+    _insert_job_run(
+        conn, newest, status=latest_status,
+        recorded_at=now - timedelta(seconds=80 if latest_status != "SUCCESS" else 5),
+    )
+    if latest_status == "SUCCESS":
+        conn.execute(
+            "UPDATE job_run SET rows_written = 1, source_run_id = ? WHERE job_run_id = ?",
+            (daemon._expected_source_run_id(newest), daemon._job_run_id(newest)),
+        )
+    calls: list[dict] = []
+    monkeypatch.setattr(daemon, "run_opendata_track",
+        lambda _track, **kwargs: calls.append(kwargs) or {"status": "ok"})
+    result = daemon._run_opendata_track_if_due(
+        track, _job_conn=conn, _now_utc=now,
+        _source_paused=lambda _: False, _poll_deadline_monotonic=time.monotonic() + 10,
+        _use_availability_probe=True,
+        _availability_probe=lambda *_a, **_k: {"status": "released"},
+    )
+    if latest_status == "SUCCESS":
+        assert result["status"] == "revision_migration_retry_not_due"
+        assert result["revision_migration_debt"]["old_source_run_id"] == earliest["source_run_id"]
+        assert not calls
+    else:
+        # Migration just took the more recent genuine collector turn. The
+        # newest terminal failure is owed the next one, even during cooldown.
+        assert result["status"] == "ok"
+        assert len(calls) == 1 and "_identity" not in calls[0]
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
 def test_held_migration_failure_yields_next_turn_to_latest(monkeypatch, track):
     """Use existing exact job attempts for alternating fairness, not a new latch."""
     from src.ingest import forecast_live_daemon as daemon
