@@ -1,6 +1,6 @@
 # Created: 2026-05-03
-# Last reused/audited: 2026-05-24
-# Lifecycle: created=2026-05-03; last_reviewed=2026-05-24; last_reused=2026-05-24
+# Last reused/audited: 2026-09-27
+# Lifecycle: created=2026-05-03; last_reviewed=2026-09-27; last_reused=2026-09-27
 # Purpose: Lock executable forecast bundle source-run, coverage, readiness, and snapshot coherence.
 # Reuse: Run for live-entry forecast reader, producer-readiness, source-cycle, or coverage-window changes.
 # Authority basis: docs/archive/2026-Q2/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
@@ -13,7 +13,12 @@ import json
 import sqlite3
 from datetime import date, datetime, timezone
 
-from src.contracts.ensemble_snapshot_provenance import ECMWF_OPENDATA_HIGH_DATA_VERSION
+import pytest
+
+from src.contracts.ensemble_snapshot_provenance import (
+    ECMWF_OPENDATA_HIGH_DATA_VERSION,
+    ECMWF_OPENDATA_LOW_DATA_VERSION,
+)
 from src.data import executable_forecast_reader
 from src.data.executable_forecast_reader import read_executable_forecast, read_executable_forecast_snapshot
 from src.data.forecast_target_contract import build_forecast_target_scope
@@ -110,7 +115,7 @@ def _insert_snapshot(
             "temperature_metric": scope.temperature_metric,
             "physical_quantity": "mx2t6_local_calendar_day_max",
             "observation_field": "high_temp",
-            "issue_time": "2026-05-03T00:00:00+00:00",
+            "issue_time": source_cycle_time or "2026-05-03T00:00:00+00:00",
             "valid_time": scope.target_local_date.isoformat(),
             "available_at": available_at,
             "fetch_time": "2026-05-03T08:15:00+00:00",
@@ -685,7 +690,7 @@ def test_full_reader_blocks_expired_entry_readiness() -> None:
     assert result.reason_code == "READINESS_EXPIRED"
 
 
-def test_full_reader_blocks_source_available_after_capture() -> None:
+def test_full_reader_blocks_source_available_after_candidate_readiness() -> None:
     conn = _conn()
     _insert_snapshot(conn)
     _insert_source_run(
@@ -711,7 +716,178 @@ def test_full_reader_blocks_source_available_after_capture() -> None:
     result = _read_full(conn)
 
     assert not result.ok
-    assert result.reason_code == "SOURCE_AVAILABLE_AFTER_CAPTURE"
+    assert result.reason_code == "SOURCE_AVAILABLE_AFTER_PRODUCER_READINESS"
+
+
+def _reader_for_metric(conn: sqlite3.Connection, metric: str, *, decision_hour: int = 10):
+    if metric == "low":
+        fields = {
+            "temperature_metric": "low", "physical_quantity": "mn2t6_local_calendar_day_min",
+            "observation_field": "low_temp", "dataset_id": ECMWF_OPENDATA_LOW_DATA_VERSION,
+            "data_version": ECMWF_OPENDATA_LOW_DATA_VERSION,
+            "track": "mn2t6_low_full_horizon",
+            "release_calendar_key": "ecmwf_open_data:mn2t6_low:full",
+        }
+        for table in ("ensemble_snapshots", "source_run", "source_run_coverage", "readiness_state"):
+            columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+            updates = {key: val for key, val in fields.items() if key in columns}
+            conn.execute(
+                f"UPDATE {table} SET " + ", ".join(f"{key}=?" for key in updates),
+                tuple(updates.values()),
+            )
+    return read_executable_forecast(
+        conn,
+        city_id="LONDON", city_name="London", city_timezone="Europe/London",
+        target_local_date=date(2026, 5, 8), temperature_metric=metric,
+        source_id="ecmwf_open_data", source_transport="ensemble_snapshots_db_reader",
+        data_version=(ECMWF_OPENDATA_HIGH_DATA_VERSION if metric == "high"
+                      else ECMWF_OPENDATA_LOW_DATA_VERSION),
+        track="mx2t6_high_full_horizon" if metric == "high" else "mn2t6_low_full_horizon",
+        strategy_key="entry_forecast", market_family="family-1",
+        condition_id="condition-123", decision_time=_utc(2026, 5, 3, decision_hour),
+        require_entry_readiness=False,
+    )
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_source_possession_after_capture_at_candidate_readiness_is_live(metric: str) -> None:
+    conn = _conn()
+    _insert_full_reader_fixture(conn)
+    conn.execute(
+        "UPDATE source_run SET source_available_at = ?, captured_at = ?",
+        (_utc(2026, 5, 3, 8, 45).isoformat(), _utc(2026, 5, 3, 8, 20).isoformat()),
+    )
+    result = _reader_for_metric(conn, metric)
+    assert result.ok and result.bundle is not None
+    assert result.bundle.snapshot.snapshot_id == 1
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize(
+    ("available_hour", "expected_reason"),
+    ((9, "SOURCE_AVAILABLE_AFTER_PRODUCER_READINESS"),
+     (11, "SOURCE_AVAILABLE_AFTER_DECISION_TIME")),
+)
+def test_source_possession_after_readiness_or_decision_is_blocked(
+    metric: str, available_hour: int, expected_reason: str,
+) -> None:
+    conn = _conn()
+    _insert_full_reader_fixture(conn)
+    conn.execute("UPDATE source_run SET source_available_at = ?", (
+        _utc(2026, 5, 3, available_hour).isoformat(),
+    ))
+    result = _reader_for_metric(conn, metric)
+    assert not result.ok
+    assert result.reason_code == expected_reason
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_future_candidate_coverage_cannot_authorize_past_decision(metric: str) -> None:
+    conn = _conn()
+    _insert_full_reader_fixture(conn)
+    conn.execute(
+        "UPDATE source_run_coverage SET computed_at = ?",
+        (_utc(2026, 5, 3, 10, 1).isoformat(),),
+    )
+    result = _reader_for_metric(conn, metric)
+    assert not result.ok
+    assert result.reason_code == "PRODUCER_COVERAGE_AFTER_DECISION_TIME"
+
+
+def test_later_short_noncontributor_yields_to_earlier_full_live_candidate() -> None:
+    """A blocked later run cannot hide an earlier proved, still-live target day."""
+    conn = _conn()
+    _insert_full_reader_fixture(conn)
+    conn.execute(
+        "UPDATE source_run SET captured_at=?, source_available_at=?",
+        (_utc(2026, 5, 3, 8, 20).isoformat(),
+         _utc(2026, 5, 3, 8, 45).isoformat()),
+    )
+    scope = _scope()
+    later = _utc(2026, 5, 3, 6)
+    later_scope = build_forecast_target_scope(
+        city_id=scope.city_id, city_name=scope.city_name,
+        city_timezone=scope.city_timezone, target_local_date=scope.target_local_date,
+        temperature_metric=scope.temperature_metric, source_cycle_time=later,
+        data_version=scope.data_version,
+    )
+    _insert_snapshot(
+        conn, source_run_id="source-run-short",
+        release_calendar_key="ecmwf_open_data:mx2t6_high:short",
+        source_cycle_time=later.isoformat(),
+        available_at=_utc(2026, 5, 3, 9, 20).isoformat(),
+        contributes_to_target_extrema=0,
+        forecast_window_attribution_status="UNKNOWN",
+    )
+    write_source_run(
+        conn, source_run_id="source-run-short", source_id="ecmwf_open_data",
+        track="mx2t6_high_short_horizon",
+        release_calendar_key="ecmwf_open_data:mx2t6_high:short",
+        source_cycle_time=later, source_issue_time=later,
+        source_release_time=_utc(2026, 5, 3, 9),
+        source_available_at=_utc(2026, 5, 3, 9, 20),
+        fetch_started_at=_utc(2026, 5, 3, 9),
+        fetch_finished_at=_utc(2026, 5, 3, 9, 10),
+        captured_at=_utc(2026, 5, 3, 9, 15),
+        imported_at=_utc(2026, 5, 3, 9, 25),
+        target_local_date=scope.target_local_date,
+        city_id=scope.city_id, city_timezone=scope.city_timezone,
+        temperature_metric="high", physical_quantity="mx2t6_local_calendar_day_max",
+        observation_field="high_temp", data_version=scope.data_version,
+        expected_members=51, observed_members=51,
+        expected_steps_json=later_scope.required_step_hours,
+        observed_steps_json=later_scope.required_step_hours,
+        completeness_status="COMPLETE", status="SUCCESS",
+        raw_payload_hash="a" * 64, manifest_hash="b" * 64,
+    )
+    snapshot_id = conn.execute(
+        "SELECT snapshot_id FROM ensemble_snapshots WHERE source_run_id=?",
+        ("source-run-short",),
+    ).fetchone()[0]
+    write_source_run_coverage(
+        conn, coverage_id="coverage-short", source_run_id="source-run-short",
+        source_id="ecmwf_open_data", source_transport="ensemble_snapshots_db_reader",
+        release_calendar_key="ecmwf_open_data:mx2t6_high:short",
+        track="mx2t6_high_short_horizon", city_id=scope.city_id, city=scope.city_name,
+        city_timezone=scope.city_timezone, target_local_date=scope.target_local_date,
+        temperature_metric="high", physical_quantity="mx2t6_local_calendar_day_max",
+        observation_field="high_temp", data_version=scope.data_version,
+        expected_members=51, observed_members=51,
+        expected_steps_json=later_scope.required_step_hours,
+        observed_steps_json=later_scope.required_step_hours,
+        snapshot_ids_json=[snapshot_id],
+        target_window_start_utc=later_scope.target_window_start_utc,
+        target_window_end_utc=later_scope.target_window_end_utc,
+        completeness_status="PARTIAL", readiness_status="BLOCKED",
+        reason_code="EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA",
+        computed_at=_utc(2026, 5, 3, 9, 25), expires_at=None,
+    )
+    write_readiness_state(
+        conn, readiness_id="producer-short", scope_type="city_metric",
+        status="BLOCKED", computed_at=_utc(2026, 5, 3, 9, 25),
+        city_id=scope.city_id, city=scope.city_name, city_timezone=scope.city_timezone,
+        target_local_date=scope.target_local_date, temperature_metric="high",
+        physical_quantity="mx2t6_local_calendar_day_max", observation_field="high_temp",
+        data_version=scope.data_version, source_id="ecmwf_open_data",
+        track="mx2t6_high_short_horizon", source_run_id="source-run-short",
+        strategy_key=PRODUCER_READINESS_STRATEGY_KEY,
+        reason_codes_json=["EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA"],
+        dependency_json={"coverage_id": "coverage-short"},
+        provenance_json={"contract": "LiveEntryForecastTargetContract.v1"},
+    )
+
+    result = read_executable_forecast(
+        conn, city_id=scope.city_id, city_name=scope.city_name,
+        city_timezone=scope.city_timezone, target_local_date=scope.target_local_date,
+        temperature_metric="high", source_id="ecmwf_open_data",
+        source_transport="ensemble_snapshots_db_reader", data_version=scope.data_version,
+        track="mx2t6_high_short_horizon", strategy_key="entry_forecast",
+        market_family="family-1", condition_id="condition-123",
+        decision_time=_utc(2026, 5, 3, 10), require_entry_readiness=False,
+    )
+    assert result.ok and result.bundle is not None
+    assert result.bundle.evidence.source_run_id == "source-run-1"
+    assert result.bundle.snapshot.snapshot_id == 1
 
 
 def test_full_reader_blocks_unparseable_source_cycle_time_before_snapshot_read() -> None:

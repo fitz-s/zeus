@@ -1267,13 +1267,19 @@ def _evaluate_candidate(
             return None, "READINESS_COMPUTED_AT_INVALID"
     else:
         entry_computed_at = producer_computed_at
-    if source_available_at > captured_at:
-        return None, "SOURCE_AVAILABLE_AFTER_CAPTURE"
     if source_available_at > now:
         return None, "SOURCE_AVAILABLE_AFTER_DECISION_TIME"
     if captured_at > now:
         return None, "SOURCE_CAPTURED_AFTER_DECISION_TIME"
-    # Causal-order: capture <= producer-readiness <= entry-readiness.  The
+    if producer_computed_at > now:
+        return None, "PRODUCER_COVERAGE_AFTER_DECISION_TIME"
+    # Captured is stamped before the snapshot write; availability may be the
+    # later, honest authority-write possession clock. Both must be known by
+    # this exact candidate's coverage classification, not just by a mutable
+    # scope-level readiness row from a different cycle.
+    if source_available_at > producer_computed_at:
+        return None, "SOURCE_AVAILABLE_AFTER_PRODUCER_READINESS"
+    # Causal-order: capture/availability <= candidate coverage <= entry-readiness.  The
     # entry stamp is the live (scope-level) entry row; the producer stamp is
     # this candidate's coverage computed_at.  When require_entry_readiness is
     # False, entry_computed_at == producer_computed_at so the second clause is
