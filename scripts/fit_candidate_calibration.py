@@ -882,7 +882,7 @@ def write_content_addressed(out_dir: Path, stem: str, suffix: str, data: bytes) 
             raise RuntimeError(f"content-addressed file collides with different bytes: {path}")
         return path, sha
     out_dir.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = path.with_suffix(f"{path.suffix}.{os.getpid()}.tmp")  # concurrent writers never share
     tmp.write_bytes(data)
     os.replace(tmp, path)
     return path, sha

@@ -2914,6 +2914,37 @@ scripts:
     unguarded_write_rationale: "No writes; opens zeus-world.db strictly read-only via file:...?mode=ro&immutable=0 URI (scoreboard_panels.open_ro); SELECT-only; prints markdown to stdout."
 
   # --- reversal-plan tier0 item 10 (2026-08-24): two-gate capital promotion evaluator ---
+  fit_candidate_calibration.py:
+    class: read_only_evidence
+    lifecycle: long_lived
+    status: active
+    authority_scope: offline_no_promotion
+    read_targets: [state/zeus_trades.db, state/zeus-forecasts.db]
+    write_targets: [--out directory (content-addressed JSON/JSONL; refused under state/)]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: []
+    dangerous_if_run: false
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Fit and release-test the market-anchored family CDF correction
+      (src/calibration/market_anchored_family.py) on the candidate corpus:
+      chronological 7-date outer folds with inner nested-model selection, a
+      content-addressed out-of-sample ledger, 2,000 moving date-block
+      replicates refitting the procedure, studentized-max simultaneous bounds,
+      per-scope verdicts, fitted weather weight w per metric x lane, and
+      p0/market reliability (--diagnostic price_only | proxy_q).
+    do_not_use_when: >
+      Any task needs a live license, sizing or admission: historical rows are
+      diagnostics only (artifact licensing_eligible=false) and nothing here is
+      wired into solve, certificate or submit.
+    canonical_command: "python3 scripts/fit_candidate_calibration.py --diagnostic price_only|proxy_q --out DIR [--state DIR] [--start D] [--end D] [--replicates N] [--blocks 3,7] [--workers N] [--max-overround X]"
+    promotion_barrier: "Read-only DB access; outputs are offline diagnostics that cannot authorize live strategy, sizing, or DB truth changes."
+    required_helpers: [src.calibration.market_anchored_family]
+    required_tests: [tests/calibration/test_candidate_calibration_release.py, tests/calibration/test_market_anchored_family.py]
+    unguarded_write_rationale: "No DB writes; opens zeus_trades.db and zeus-forecasts.db via file:...?mode=ro URIs with PRAGMA query_only; writes only content-addressed files under --out, which is refused inside the state directory."
+
   report_probability_replay_corpus.py:
     class: read_only_evidence
     lifecycle: long_lived
