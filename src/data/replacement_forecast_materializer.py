@@ -187,6 +187,7 @@ class ReplacementForecastMaterializeRequest:
     expires_at: datetime | str | None = None
     anchor_artifact_id: int | None = None
     openmeteo_precision_guard: OpenMeteoIfs9PrecisionGuardResult | None = None
+    openmeteo_raw_payload_bytes: bytes | None = None
     anchor_weight: float = 0.80
     anchor_sigma_c: float = 3.00
     settlement_step_c: float = 1.0
