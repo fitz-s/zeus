@@ -377,7 +377,12 @@ final_s         = extreme(observed_running_boundary, future_s)
 
 For pure remaining-hourly HIGH, condition all 51 same-run IFS members and
 the current deterministic provider paths on the **same** observation and
-decision clock. Use the actual Day0 physical-provider representatives,
+decision clock. The 51 ensemble members share one ensemble-product run and
+request identity; deterministic and ensemble products publish independently,
+so their initialization times need not match. A newer usable ensemble run
+known by the decision cutoff supersedes an older ensemble bundle, regardless
+of which deterministic run is current. Metadata from after the decision may
+not retroactively revoke or authorize its evidence. Use the actual Day0 physical-provider representatives,
 equally weighted; a regional path supersedes its global path from the same
 provider. Their between-spread `B_cond` already belongs to the carrier mixture
 and must not enter `path_error` again. The source-clock full-day posterior and
@@ -386,7 +391,8 @@ approximation; this revision does not integrate the measurement quantization
 interval. Missing members, wrong run, unavailable timestamps, or incomplete
 observation-hour coverage make that family unavailable until the existing
 current-date priority refresh fetches a complete carrier and the materializer
-reissues a certificate. A healthy family resets on the strict same-cycle proof;
+reissues a certificate. A healthy family resets on the ensemble product's
+own current-run proof;
 no global entry pause follows from another family's missing carrier. LOW and
 the closed-local-day treatment retain their existing computation in this
 revision; this change does not establish a conditional-variance repair for them.

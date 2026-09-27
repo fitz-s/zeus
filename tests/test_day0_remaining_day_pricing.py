@@ -68,12 +68,12 @@ UTC = timezone.utc
 
 
 @pytest.mark.parametrize(
-    "damage", (None, "missing_member", "wrong_run", "future_available", "no_anchor")
+    "damage", (None, "det_ens_different_run", "missing_member", "mixed_member_run", "future_available", "no_anchor", "known_superseded", "future_pin", "not_yet_usable")
 )
 @pytest.mark.parametrize("unit", ("C", "F"))
 @pytest.mark.parametrize("regional", (False, True))
 def test_current_high_conditional_ensemble_uses_one_observation_measure(
-    monkeypatch, damage, unit, regional,
+    monkeypatch, tmp_path, damage, unit, regional,
 ):
     """Explained pre-observation spread must not reappear as future noise."""
     import src.data.day0_hourly_vectors as hourly
@@ -90,11 +90,13 @@ def test_current_high_conditional_ensemble_uses_one_observation_measure(
     ensemble_models = hourly.day0_source_clock_ensemble_member_models()
 
     def vector(model, offset=0.0, *, ensemble=False):
+        vector_run = (
+            run - timedelta(hours=6) if ensemble and damage == "det_ens_different_run"
+            else run + timedelta(hours=1) if ensemble and damage == "mixed_member_run" and model.endswith("50")
+            else run
+        )
         meta = {
-            "provider_source_cycle_time_utc": (
-                run + timedelta(hours=1) if ensemble and damage == "wrong_run"
-                else run
-            ).isoformat(),
+            "provider_source_cycle_time_utc": vector_run.isoformat(),
             "provider_source_available_at_utc": (
                 decision + timedelta(minutes=1)
                 if ensemble and damage == "future_available"
@@ -127,6 +129,24 @@ def test_current_high_conditional_ensemble_uses_one_observation_measure(
     ]
     if damage == "missing_member":
         ensemble.pop()
+    if damage in {"known_superseded", "future_pin", "not_yet_usable"}:
+        pinned_file = tmp_path / "day0_provider_run_hwm_pin.json"
+        pinned_file.write_text(json.dumps({
+            "schema_version": 1,
+            "entries": {"ecmwf_ifs025_ensemble": {
+                "run_initialisation_time": (run + timedelta(hours=2)).isoformat(),
+                "run_availability_time": (
+                    decision - timedelta(minutes=5)
+                    if damage == "not_yet_usable"
+                    else run + timedelta(hours=3)
+                ).isoformat(),
+                "recorded_at": (
+                    decision + timedelta(minutes=1) if damage == "future_pin"
+                    else decision - timedelta(minutes=1)
+                ).isoformat(),
+            }},
+        }))
+        monkeypatch.setattr(hourly, "_day0_provider_run_hwm_pin_path", lambda: pinned_file)
     monkeypatch.setattr(hourly, "day0_hourly_models_for_city", lambda _city: models)
     monkeypatch.setattr(
         hourly, "read_freshest_day0_hourly_vectors", lambda **_kwargs: ensemble,
@@ -136,7 +156,7 @@ def test_current_high_conditional_ensemble_uses_one_observation_measure(
         value_native=15.0 if unit == "C" else 59.0,
         observed_at=observed, source="aviationweather_metar"
     )
-    if damage is not None:
+    if damage not in (None, "det_ens_different_run", "future_pin", "not_yet_usable"):
         with pytest.raises(ValueError, match="DAY0_CONDITIONAL_HIGH_"):
             day0_conditional_high_shape(
                 conn=conn, city=city, target_date=target_date,
@@ -161,6 +181,9 @@ def test_current_high_conditional_ensemble_uses_one_observation_measure(
         if regional else list(models)
     )
     assert len(shape.ensemble_centers_c) == 51
+    assert shape.witness["ensemble_run"] == (
+        run - timedelta(hours=6) if damage == "det_ens_different_run" else run
+    ).isoformat()
     assert shape.provider_between_sigma_c == pytest.approx(np.std(shape.provider_centers_c))
     assert shape.model_residual_sigma_c == pytest.approx(
         hypot(shape.ensemble_within_sigma_c, shape.ensemble_center_delta_c)

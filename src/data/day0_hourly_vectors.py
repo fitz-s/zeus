@@ -4246,7 +4246,7 @@ def day0_conditional_high_run_proof(
     ensemble: list[Day0HourlyVector],
     *, decision_time: datetime,
 ) -> tuple[dict[str, tuple[datetime, str, str]], datetime]:
-    """Require every ENS member to share the served deterministic ECMWF run."""
+    """Prove each provider clock and one coherent, current ENS product run."""
 
     cutoff = decision_time.astimezone(UTC)
 
@@ -4282,11 +4282,43 @@ def day0_conditional_high_run_proof(
     ens_meta = [run_meta(vector) for vector in ensemble]
     if len(ens_meta) != DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_COUNT:
         raise ValueError("DAY0_CONDITIONAL_HIGH_ENSEMBLE_UNAVAILABLE")
-    if any(run != ecm_run for run, _hash, _id in ens_meta):
+    ensemble_run = ens_meta[0][0]
+    if any(run != ensemble_run for run, _hash, _id in ens_meta):
         raise ValueError("DAY0_CONDITIONAL_HIGH_ENSEMBLE_CYCLE_MISMATCH")
     if len({(request_hash, provider_run_id) for _run, request_hash, provider_run_id in ens_meta}) != 1:
         raise ValueError("DAY0_CONDITIONAL_HIGH_ENSEMBLE_CAPTURE_MISMATCH")
-    return provider_meta, ecm_run
+    # The deterministic IFS and Ensemble API have independent release clocks.
+    # A known newer ENS run supersedes an older member bundle only after its
+    # own metadata was observed and became publicly usable by this decision.
+    try:
+        pin = json.loads(_day0_provider_run_hwm_pin_path().read_text(encoding="utf-8"))
+        entry = pin["entries"][DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL]
+        pinned_run = _day0_parse_aware_clock(
+            entry["run_initialisation_time"], field_name="ensemble_pin_run"
+        )
+        pinned_available = _day0_parse_aware_clock(
+            entry["run_availability_time"], field_name="ensemble_pin_available"
+        )
+        pinned_recorded = _day0_parse_aware_clock(
+            entry["recorded_at"], field_name="ensemble_pin_recorded"
+        )
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        pass  # No causal pin: the bracketed vector clocks and 3h freshness govern.
+    else:
+        from src.strategy.live_inference.source_clock_vnext import (
+            SOURCE_AVAILABILITY_CONSISTENCY_WAIT_MINUTES,
+        )
+
+        if (
+            pinned_run <= pinned_available
+            and pinned_recorded <= cutoff
+            and pinned_available + timedelta(
+                minutes=SOURCE_AVAILABILITY_CONSISTENCY_WAIT_MINUTES
+            ) <= cutoff
+            and ensemble_run < pinned_run
+        ):
+            raise ValueError("DAY0_CONDITIONAL_HIGH_ENSEMBLE_SUPERSEDED")
+    return provider_meta, ensemble_run
 
 
 def day0_hourly_provider_representatives(
@@ -4368,7 +4400,7 @@ def day0_conditional_high_shape(
     if len(ensemble) != DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_COUNT:
         raise ValueError("DAY0_CONDITIONAL_HIGH_ENSEMBLE_UNAVAILABLE")
 
-    provider_meta, ecm_run = day0_conditional_high_run_proof(
+    provider_meta, ensemble_run = day0_conditional_high_run_proof(
         provider_vectors, ensemble, decision_time=cutoff
     )
     provider_vectors = day0_hourly_provider_representatives(provider_vectors)
@@ -4425,7 +4457,7 @@ def day0_conditional_high_shape(
             _vector_id(vector.model, vector.city, vector.target_date, vector.captured_at)
             for vector in ensemble
         ],
-        "ensemble_run": ecm_run.isoformat(),
+        "ensemble_run": ensemble_run.isoformat(),
         "provider_centers_c": [float(value) for value in provider_values],
         "ensemble_centers_c": [float(value) for value in ensemble_values],
         "provider_scenario_weights": [1.0 / len(provider_vectors)] * len(provider_vectors),

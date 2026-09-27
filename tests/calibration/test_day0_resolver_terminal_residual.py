@@ -504,13 +504,13 @@ def test_switch_off_resolver_input_is_none_and_revision_is_unchanged(monkeypatch
         artifact_file=artifact,
     ) is None
     assert day0_authority.DAY0_PROBABILITY_SEMANTICS_REVISION == (
-        "day0_settlement_channel_revision_model_v23"
+        "day0_settlement_channel_revision_model_v24"
     )
     assert day0_authority.DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL == (
-        "day0_settlement_channel_revision_model_v23"
+        "day0_settlement_channel_revision_model_v24"
     )
     assert day0_authority.DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER == (
-        "day0_resolver_terminal_composition_v22"
+        "day0_resolver_terminal_composition_v23"
     )
 
 
