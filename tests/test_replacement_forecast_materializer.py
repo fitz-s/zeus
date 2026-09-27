@@ -1256,7 +1256,7 @@ def test_stronger_absorbing_frontier_after_prepare_invalidates_fast_owner(
             computed_at=_dt(18),
             expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
             day0_observed_extreme_c=21.0,
-            day0_observed_extreme_source="wu_icao_history",
+            day0_observed_extreme_source="noaa_wrh_zspd",
             day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
         ),
         temperature_metric="low",
@@ -1267,8 +1267,35 @@ def test_stronger_absorbing_frontier_after_prepare_invalidates_fast_owner(
         prior,
         computed_at=_dt(18, 10),
         day0_observed_extreme_c=20.0,
-        day0_observed_extreme_source="wu_api+same_station_fast_tail",
+        day0_observed_extreme_source="aviationweather_metar",
         day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
+    )
+    from src.data.day0_hourly_vectors import Day0HourlyVector
+
+    conn.execute("""CREATE TABLE observation_prints (
+        id INTEGER PRIMARY KEY, city TEXT, station_id TEXT, source_channel TEXT,
+        publish_ts_utc TEXT, value_native REAL, unit TEXT,
+        fetched_at_utc TEXT, raw_report TEXT
+    )""")
+    conn.execute(
+        """INSERT INTO observation_prints VALUES
+           (1, 'Shanghai', 'ZSPD', 'aviationweather_metar', ?, 20, 'C', ?, ?)""",
+        (_dt(18, 5).isoformat(), _dt(18, 5).isoformat(),
+         "METAR ZSPD 061805Z 20/15 T02000150"),
+    )
+    vector = Day0HourlyVector(
+        model="ecmwf_ifs", city="Shanghai", target_date="2026-06-07",
+        timezone_name="Asia/Shanghai", captured_at=_dt(18, 8).isoformat(),
+        times=tuple(f"2026-06-07T{hour:02d}:00" for hour in range(24)),
+        temps_c=tuple(20.0 if hour < 12 else 19.0 for hour in range(24)),
+    )
+    monkeypatch.setattr(
+        "src.data.day0_hourly_vectors.day0_hourly_models_for_city",
+        lambda _city: ["ecmwf_ifs"],
+    )
+    monkeypatch.setattr(
+        "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
+        lambda **_kwargs: [vector],
     )
     likelihood_bound = {"value": 21.0}
     likelihood = SimpleNamespace(
@@ -1951,7 +1978,7 @@ def test_materializer_day0_observed_extreme_conditions_q_and_bounds(monkeypatch:
             computed_at=_dt(18),
             expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
             day0_observed_extreme_c=26.0,
-            day0_observed_extreme_source="wu_api",
+            day0_observed_extreme_source="noaa_wrh_zspd",
             day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
             day0_observed_extreme_sample_count=12,
         ),
@@ -1980,7 +2007,7 @@ def test_materializer_write_replaces_retracted_same_source_high(monkeypatch: pyt
         computed_at=_dt(18),
         expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
         day0_observed_extreme_c=31.0,
-        day0_observed_extreme_source="aviationweather_metar",
+        day0_observed_extreme_source="noaa_wrh_zspd",
         day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
         day0_observed_extreme_sample_count=12,
     )
@@ -1995,7 +2022,7 @@ def test_materializer_write_replaces_retracted_same_source_high(monkeypatch: pyt
     prepared = materializer_mod.prepare_replacement_forecast_live(conn, old_wu)
     assert isinstance(prepared, materializer_mod.PreparedReplacementForecastMaterialization)
 
-    # The old WU worker computed from an earlier read snapshot. A delayed AWC
+    # The old WU worker computed from an earlier read snapshot. A delayed WRH
     # writer commits the stronger, still-causal HIGH31 before that worker owns
     # the writer lock. The writer rejects the stale payload; recomputation must
     # happen after its caller releases the lock.
@@ -2022,7 +2049,7 @@ def test_materializer_write_replaces_retracted_same_source_high(monkeypatch: pyt
         ).fetchone()["provenance_json"]
     )
     assert provenance["day0_conditioning"]["observed_extreme_c"] == 31.0
-    assert provenance["day0_conditioning"]["source"] == "aviationweather_metar"
+    assert provenance["day0_conditioning"]["source"] == "noaa_wrh_zspd"
     assert provenance["day0_conditioning"]["observation_time"] == _dt(17, 55).isoformat()
 
     plateau = materialize_replacement_forecast_live(
@@ -2107,7 +2134,7 @@ def test_materializer_readonly_replaces_retracted_same_source_low(monkeypatch: p
             computed_at=_dt(18),
             expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
             day0_observed_extreme_c=19.0,
-            day0_observed_extreme_source="aviationweather_metar",
+            day0_observed_extreme_source="noaa_wrh_zspd",
             day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
             day0_observed_extreme_sample_count=12,
         ),
@@ -2169,7 +2196,7 @@ def test_materializer_readonly_replaces_retracted_same_source_low(monkeypatch: p
     assert posterior is not None
     assert posterior.provenance_payload is not None
     assert posterior.provenance_payload["day0_conditioning"]["observed_extreme_c"] == 19.0
-    assert posterior.provenance_payload["day0_conditioning"]["source"] == "aviationweather_metar"
+    assert posterior.provenance_payload["day0_conditioning"]["source"] == "noaa_wrh_zspd"
     assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 2
 
 
@@ -2193,7 +2220,7 @@ def test_materializer_equal_frontier_uses_current_request_identity(
     current = replace(
         prior,
         computed_at=_dt(18, 10),
-        day0_observed_extreme_source="wu_icao_history",
+        day0_observed_extreme_source="noaa_wrh_zspd",
         day0_observed_extreme_observation_time=_dt(17, 50).isoformat(),
         day0_observed_extreme_sample_count=10,
     )
@@ -2207,7 +2234,7 @@ def test_materializer_equal_frontier_uses_current_request_identity(
         ).fetchone()["provenance_json"]
     )
     assert provenance["day0_conditioning"]["observed_extreme_c"] == 31.0
-    assert provenance["day0_conditioning"]["source"] == "wu_icao_history"
+    assert provenance["day0_conditioning"]["source"] == "noaa_wrh_zspd"
     assert provenance["day0_conditioning"]["observation_time"] == _dt(
         17, 50
     ).isoformat()
@@ -2615,7 +2642,7 @@ def test_materializer_ignores_malformed_pre_day0_frontier_ledger(
     assert pre_day0.ok is True
     conn.execute(
         "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
-        ("{malformed", pre_day0.posterior_id),
+        ("[]", pre_day0.posterior_id),  # Valid JSON with invalid shape; pre-Day0 is out of scope.
     )
 
     day0 = materialize_replacement_forecast_live(
@@ -2624,7 +2651,7 @@ def test_materializer_ignores_malformed_pre_day0_frontier_ledger(
             computed_at=_dt(18),
             expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
             day0_observed_extreme_c=31.0,
-            day0_observed_extreme_source="aviationweather_metar",
+            day0_observed_extreme_source="noaa_wrh_zspd",
             day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
         ),
     )
@@ -2657,6 +2684,16 @@ def test_materializer_hko_provisional_observation_does_not_truncate_support(
                 settlement_source_type="hko",
             )
         },
+    )
+    conn.execute("""CREATE TABLE observation_prints (
+        id INTEGER PRIMARY KEY, city TEXT, station_id TEXT, source_channel TEXT,
+        publish_ts_utc TEXT, value_native REAL, unit TEXT,
+        fetched_at_utc TEXT, raw_report TEXT
+    )""")
+    conn.execute(
+        """INSERT INTO observation_prints VALUES
+           (1, 'Shanghai', 'HKO', 'hko_rhrread_spot', ?, 25.7, 'C', ?, '')""",
+        (_dt(17, 55).isoformat(), _dt(17, 55).isoformat()),
     )
     likelihood_identity = {
         "semantics": "hko_provisional_monotonic_survival_beta_jeffreys_v1",
@@ -3143,7 +3180,7 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
     assert revised_q != q
 
 
-def test_wu_fast_residual_is_provisional_while_direct_noaa_fast_is_absorbing() -> None:
+def test_wu_and_raw_noaa_fast_are_provisional_until_wrh_authority() -> None:
     composite = _request(
         computed_at=_dt(18),
         expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
@@ -3155,9 +3192,11 @@ def test_wu_fast_residual_is_provisional_while_direct_noaa_fast_is_absorbing() -
         composite,
         day0_observed_extreme_source="aviationweather_metar",
     )
+    settlement_page = replace(direct, day0_observed_extreme_source="noaa_wrh_zspd")
 
     assert materializer_mod._day0_absorbing_observed_extreme_c(composite) is None
-    assert materializer_mod._day0_absorbing_observed_extreme_c(direct) == 31.0
+    assert materializer_mod._day0_absorbing_observed_extreme_c(direct) is None
+    assert materializer_mod._day0_absorbing_observed_extreme_c(settlement_page) == 31.0
 
 
 def test_materializer_day0_allows_elapsed_om9_hours_covered_by_observed_extreme(
@@ -3209,15 +3248,34 @@ def test_materializer_day0_allows_post_localday_observation_to_cover_elapsed_hou
         computed_at=datetime(2026, 6, 7, 17, tzinfo=UTC),
         expires_at=datetime(2026, 6, 8, 0, tzinfo=UTC),
         day0_observed_extreme_c=32.0,
-        day0_observed_extreme_source="wu_icao_history",
+        day0_observed_extreme_source="noaa_wrh_zspd",
         day0_observed_extreme_observation_time=datetime(2026, 6, 7, 15, 0, tzinfo=UTC).isoformat(),
         day0_observed_extreme_sample_count=24,
     )
     partial_anchor = replace(
         _anchor_with_local_hours(hours=range(14, 24)),
         source_cycle_time=datetime(2026, 6, 7, 6, tzinfo=UTC),
+        high_c=18.5,
     )
-    partial_request = replace(request, openmeteo_anchor=partial_anchor)
+    partial_raw = json.loads(request.openmeteo_raw_payload_bytes)
+    partial_raw["hourly"]["time"] = partial_raw["hourly"]["time"][14:]
+    partial_raw["hourly"]["temperature_2m"] = partial_raw["hourly"]["temperature_2m"][14:]
+    partial_bytes = (json.dumps(partial_raw, sort_keys=True, indent=2) + "\n").encode()
+    partial_metadata = replace(
+        request.openmeteo_precision_guard.metadata,
+        source_geometry_proof={
+            **request.openmeteo_precision_guard.metadata.source_geometry_proof,
+            "raw_payload_sha256": hashlib.sha256(partial_bytes).hexdigest(),
+        },
+    )
+    partial_request = replace(
+        request,
+        openmeteo_anchor=partial_anchor,
+        openmeteo_raw_payload_bytes=partial_bytes,
+        openmeteo_precision_guard=evaluate_openmeteo_ecmwf_ifs9_precision_guard(
+            partial_metadata, raw_payload_bytes=partial_bytes,
+        ),
+    )
 
     result = materialize_replacement_forecast_live(conn, partial_request)
 
