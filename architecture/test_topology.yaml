@@ -28,6 +28,7 @@ test_trust_policy:
   # Machine-readable registry: tests with valid lifecycle headers.
   # Tests not in this list require audit before running.
   trusted_tests:
+    tests/test_noaa_wrh_settlement_product.py: {created: "2026-09-12", last_used: "2026-09-27", note: "NOAA WRH settlement-page product and single-station response identity; malformed or foreign station responses fail before atom/print/success coverage."}
     tests/data/test_current_settlement_history.py: {created: "2026-09-20", last_used: "2026-09-21", note: "Current-resolver causal probability validation and physical identity antibodies."}
     tests/forecast/test_probability_validation.py: {created: "2026-09-20", last_used: "2026-09-21", note: "Current-resolver causal probability validation and physical identity antibodies."}
     tests/scripts/test_validate_source_clock_probabilities.py: {created: "2026-09-20", last_used: "2026-09-21", note: "Current-resolver causal probability validation and physical identity antibodies."}

@@ -150,6 +150,10 @@ class WrhFetchFailed(WrhError):
     """Transport fault or non-200, non-403 status after bounded retry."""
 
 
+class WrhStationIdentityInvalid(WrhError):
+    """The response does not prove the single station that was requested."""
+
+
 @dataclass(frozen=True)
 class WrhRow:
     """One row of the page's feed, as the page itself would read it."""
@@ -301,15 +305,26 @@ def _query_params(
 
 
 def _parse_rows(payload: dict, station: str) -> list[WrhRow]:
-    stations = payload.get("STATION") or []
-    if not stations:
-        return []
-    observations = stations[0].get("OBSERVATIONS") or {}
+    # SCOPE: this one station response. DRAIN: refetch its normal request;
+    # RESET: exactly one response STID names the requested station again.
+    # A successful HTTP response can contain another station's observations;
+    # never mint requested-station atoms/prints from that response.
+    stations = payload.get("STATION") if isinstance(payload, dict) else None
+    requested = station.strip().upper() if isinstance(station, str) else ""
+    if not isinstance(stations, list) or len(stations) != 1 or not requested:
+        raise WrhStationIdentityInvalid(f"{station}: expected one station response")
+    response_station = stations[0]
+    if not isinstance(response_station, dict):
+        raise WrhStationIdentityInvalid(f"{station}: station response is not an object")
+    response_id = response_station.get("STID")
+    if not isinstance(response_id, str) or response_id.strip().upper() != requested:
+        raise WrhStationIdentityInvalid(f"{station}: response STID does not match request")
+    observations = response_station.get("OBSERVATIONS") or {}
     timestamps = observations.get("date_time") or []
     temps = observations.get("air_temp_set_1") or []
     pressures = observations.get("sea_level_pressure_set_1") or [None] * len(timestamps)
     metars = observations.get("metar_set_1") or [None] * len(timestamps)
-    prefix = station.upper()
+    prefix = requested
 
     rows: list[WrhRow] = []
     for index, local_timestamp in enumerate(timestamps):

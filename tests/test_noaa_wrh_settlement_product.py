@@ -1,5 +1,5 @@
 # Created: 2026-09-12
-# Last audited: 2026-09-12
+# Last reused/audited: 2026-09-27
 # Purpose: Pin the weather.gov/wrh/timeseries settlement product — page render law,
 #   per-city view selection, settlement-source precedence, and the backfill report.
 # Reuse: Read src/data/noaa_wrh_timeseries.py's measured facts and
@@ -30,6 +30,7 @@ from src.config import cities_by_name, validate_cities_config
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.data.noaa_wrh_timeseries import (
     MAX_REQUEST_WINDOW_DAYS,
+    WrhStationIdentityInvalid,
     WrhWindowTooOld,
     daily_extreme,
     recent_minutes_for_local_day,
@@ -50,6 +51,79 @@ HOURLY_VIEW_CITIES = {
 def _rows(station: str):
     payload = json.loads((FIXTURE_DIR / f"syn_{station}.json").read_text())
     return rows_from_payload(payload, station)
+
+
+@pytest.mark.parametrize("response_station", (None, "", "OTHER", ["KHOU"]))
+def test_page_response_requires_the_requested_station_identity(response_station):
+    payload = json.loads((FIXTURE_DIR / "syn_KHOU.json").read_text())
+    if response_station is None:
+        del payload["STATION"][0]["STID"]
+    else:
+        payload["STATION"][0]["STID"] = response_station
+    with pytest.raises(WrhStationIdentityInvalid):
+        rows_from_payload(payload, "KHOU")
+
+
+@pytest.mark.parametrize("stations", ([], [{"STID": "KHOU"}, {"STID": "KHOU"}], [None]))
+def test_page_response_rejects_missing_or_ambiguous_station_objects(stations):
+    payload = json.loads((FIXTURE_DIR / "syn_KHOU.json").read_text())
+    payload["STATION"] = stations
+    with pytest.raises(WrhStationIdentityInvalid):
+        rows_from_payload(payload, "KHOU")
+
+
+def test_page_response_normalizes_station_case_without_changing_rows():
+    payload = json.loads((FIXTURE_DIR / "syn_KHOU.json").read_text())
+    payload["STATION"][0]["STID"] = " khou "
+    assert rows_from_payload(payload, " KHOU ") == _rows("KHOU")
+
+
+def test_one_valid_station_with_no_observations_remains_a_dark_day():
+    payload = {"STATION": [{"STID": "KHOU", "OBSERVATIONS": {}}]}
+    assert rows_from_payload(payload, "KHOU") == []
+
+
+def test_wrong_station_http_response_cannot_write_atoms_prints_or_success_coverage(
+    tmp_path, monkeypatch,
+):
+    from src.data import daily_obs_append as appender
+    from src.data import noaa_wrh_timeseries as wrh
+
+    payload = json.loads((FIXTURE_DIR / "syn_KHOU.json").read_text())
+    payload["STATION"][0]["STID"] = "OTHER"
+
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return payload
+
+    monkeypatch.setattr(wrh.httpx, "get", lambda *args, **kwargs: Response())
+    monkeypatch.setattr(wrh, "_wait_for_request_slot", lambda: None)
+    monkeypatch.setattr(wrh, "fetch_wrh_token", lambda: "fixture-token")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("wrong-station response reached atom or print writer")
+
+    monkeypatch.setattr(appender, "_build_atom_pair", forbidden)
+    monkeypatch.setattr(appender, "_append_noaa_wrh_prints", forbidden)
+    conn = _attached(*_live_schema_db_pair(tmp_path))
+    try:
+        stats = appender.append_noaa_wrh_city(
+            "Houston", [date(2026, 9, 11)], conn,
+            now_utc=datetime(2026, 9, 12, 15, tzinfo=timezone.utc),
+        )
+        assert (stats["inserted"], stats["prints_written"], stats["fetch_errors"]) == (0, 0, 1)
+        assert conn.execute(
+            "SELECT COUNT(*) FROM observations WHERE source = 'noaa_wrh_khou'"
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            """SELECT status FROM world.data_coverage
+               WHERE city = 'Houston' AND data_source = 'noaa_wrh_khou'
+                 AND target_date = '2026-09-11'"""
+        ).fetchone()[0] == "FAILED"
+    finally:
+        conn.close()
 
 
 def _rounded(city_name: str, value: float) -> float:
