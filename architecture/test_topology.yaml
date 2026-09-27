@@ -1052,6 +1052,7 @@ categories:
     - tests/test_diurnal_curves_empty_hk_handled.py
     - tests/test_hk_rejects_vhhh_source.py
     - tests/test_hourly_clients_parse.py
+    - tests/test_noaa_wrh_settlement_product.py
     - tests/test_obs_v2_reader_gate.py
     - tests/test_obs_v2_writer.py
     - tests/test_temperature.py
