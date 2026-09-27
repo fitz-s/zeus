@@ -1,6 +1,6 @@
 # Created: 2026-05-23
-# Last reused/audited: 2026-09-14
-# Lifecycle: created=2026-05-23; last_reviewed=2026-09-14; last_reused=2026-09-14
+# Last reused/audited: 2026-09-27
+# Lifecycle: created=2026-05-23; last_reviewed=2026-09-27; last_reused=2026-09-27
 # Authority basis: a0d51d480b507f324 root-cause + docs/operations/live_review_may23.md
 # Purpose: Regression antibody — ECMWF OpenData cron triggers must fire after safe_fetch windows for both 00z and 12z cycles.
 # Reuse: Run when forecast_live_daemon.py cron schedule or source_release_calendar.yaml safe_fetch lag changes.
@@ -51,6 +51,8 @@ def _job_run_conn() -> sqlite3.Connection:
             scheduled_for TEXT,
             release_calendar_key TEXT,
             recorded_at TEXT,
+            started_at TEXT,
+            lock_acquired_at TEXT,
             finished_at TEXT,
             status TEXT,
             rows_written INTEGER,
@@ -68,8 +70,9 @@ def _insert_job_run(conn: sqlite3.Connection, identity: dict, *, status: str, re
         """
         INSERT INTO job_run (
             job_run_id, job_name, source_id, track, scheduled_for,
-            release_calendar_key, recorded_at, finished_at, status, rows_written, source_run_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            release_calendar_key, recorded_at, started_at, lock_acquired_at,
+            finished_at, status, rows_written, source_run_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             job_run_id or daemon._job_run_id(identity),
@@ -78,6 +81,8 @@ def _insert_job_run(conn: sqlite3.Connection, identity: dict, *, status: str, re
             identity["track"],
             identity["scheduled_for"].isoformat(),
             identity["release_calendar_key"],
+            recorded_at.isoformat(),
+            recorded_at.isoformat(),
             recorded_at.isoformat(),
             recorded_at.isoformat(),
             status,
@@ -186,6 +191,173 @@ def test_held_revision_migration_refetches_exact_old_complete_cycle(monkeypatch,
     assert daemon._expected_source_run_id(calls[0]["_identity"]).endswith(
         ":high_boundary_land_grid_v3" if old["metric"] == "high" else ":low_window_land_grid_v3"
     )
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+@pytest.mark.parametrize("latest_status", ("FAILED", "PARTIAL"))
+def test_held_migration_gets_next_turn_after_real_latest_failure(
+    monkeypatch, track, latest_status,
+):
+    """An eligible newest cycle can fail forever; its held predecessor still gets a turn."""
+    from src.ingest import forecast_live_daemon as daemon
+    from src.data import replacement_forecast_seed_discovery as discovery
+
+    now = datetime(2026, 9, 27, 12, 46, tzinfo=timezone.utc)
+    old_cycle = datetime(2026, 9, 26, 12, tzinfo=timezone.utc)
+    conn = _job_run_conn()
+    old = _held_revision_coverage(conn, track, now=now, cycle=old_cycle)
+    monkeypatch.setattr(discovery, "held_position_family_priorities", lambda **_: {
+        ("Hong Kong", "2026-09-27", old["metric"]): 0,
+    })
+    newest = daemon._forecast_work_identity(track, now_utc=now)
+    _insert_job_run(
+        conn, newest, status=latest_status, recorded_at=now - timedelta(seconds=5),
+    )
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        daemon, "run_opendata_track",
+        lambda _track, **kw: calls.append(kw) or {"status": "ok"},
+    )
+    result = daemon._run_opendata_track_if_due(
+        track, _job_conn=conn, _now_utc=now, _source_paused=lambda _: False,
+        _poll_deadline_monotonic=time.monotonic() + 10,
+        _use_availability_probe=True,
+        _availability_probe=lambda *_a, **_k: {"status": "released"},
+    )
+    assert result["revision_migration_debt"]["old_source_run_id"] == old["source_run_id"]
+    assert len(calls) == 1
+    assert calls[0]["_identity"]["scheduled_for"] == old_cycle
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+def test_newest_release_gets_first_turn_even_with_held_migration_debt(
+    monkeypatch, track,
+):
+    from src.ingest import forecast_live_daemon as daemon
+    from src.data import replacement_forecast_seed_discovery as discovery
+
+    now = datetime(2026, 9, 27, 12, 46, tzinfo=timezone.utc)
+    conn = _job_run_conn()
+    old = _held_revision_coverage(
+        conn, track, now=now, cycle=datetime(2026, 9, 26, 12, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(discovery, "held_position_family_priorities", lambda **_: {
+        ("Hong Kong", "2026-09-27", old["metric"]): 0,
+    })
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        daemon, "run_opendata_track",
+        lambda _track, **kw: calls.append(kw) or {"status": "ok"},
+    )
+    result = daemon._run_opendata_track_if_due(
+        track, _job_conn=conn, _now_utc=now, _source_paused=lambda _: False,
+        _poll_deadline_monotonic=time.monotonic() + 10,
+        _use_availability_probe=True,
+        _availability_probe=lambda *_a, **_k: {"status": "released"},
+    )
+    assert result["status"] == "ok"
+    assert len(calls) == 1
+    assert "_identity" not in calls[0]
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+def test_prelock_failure_is_not_a_collector_turn(monkeypatch, track):
+    from src.ingest import forecast_live_daemon as daemon
+    from src.data import replacement_forecast_seed_discovery as discovery
+
+    now = datetime(2026, 9, 27, 12, 46, tzinfo=timezone.utc)
+    conn = _job_run_conn()
+    old = _held_revision_coverage(
+        conn, track, now=now, cycle=datetime(2026, 9, 26, 12, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(discovery, "held_position_family_priorities", lambda **_: {
+        ("Hong Kong", "2026-09-27", old["metric"]): 0,
+    })
+    newest = daemon._forecast_work_identity(track, now_utc=now)
+    _insert_job_run(conn, newest, status="FAILED", recorded_at=now - timedelta(seconds=5))
+    conn.execute(
+        "UPDATE job_run SET lock_acquired_at = NULL WHERE job_run_id = ?",
+        (daemon._job_run_id(newest),),
+    )
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        daemon, "run_opendata_track",
+        lambda _track, **kw: calls.append(kw) or {"status": "ok"},
+    )
+    daemon._run_opendata_track_if_due(
+        track, _job_conn=conn, _now_utc=now, _source_paused=lambda _: False,
+        _poll_deadline_monotonic=time.monotonic() + 10,
+        _use_availability_probe=True,
+        _availability_probe=lambda *_a, **_k: {"status": "released"},
+    )
+    assert len(calls) == 1
+    assert "_identity" not in calls[0]
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+def test_held_migration_failure_yields_next_turn_to_latest(monkeypatch, track):
+    """Use existing exact job attempts for alternating fairness, not a new latch."""
+    from src.ingest import forecast_live_daemon as daemon
+    from src.data import replacement_forecast_seed_discovery as discovery
+
+    now = datetime(2026, 9, 27, 12, 46, tzinfo=timezone.utc)
+    old_cycle = datetime(2026, 9, 26, 12, tzinfo=timezone.utc)
+    conn = _job_run_conn()
+    old = _held_revision_coverage(conn, track, now=now, cycle=old_cycle)
+    monkeypatch.setattr(discovery, "held_position_family_priorities", lambda **_: {
+        ("Hong Kong", "2026-09-27", old["metric"]): 0,
+    })
+    newest = daemon._forecast_work_identity(track, now_utc=now)
+    _insert_job_run(conn, newest, status="PARTIAL", recorded_at=now - timedelta(seconds=80))
+    candidate, _ = daemon._held_revision_migration_identity(
+        conn, track=track, now_utc=now, deadline_monotonic=time.monotonic() + 10,
+    )
+    _insert_job_run(
+        conn, candidate, status="FAILED", recorded_at=now - timedelta(seconds=61),
+    )
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        daemon, "run_opendata_track",
+        lambda _track, **kw: calls.append(kw) or {"status": "partial"},
+    )
+    result = daemon._run_opendata_track_if_due(
+        track, _job_conn=conn, _now_utc=now, _source_paused=lambda _: False,
+        _poll_deadline_monotonic=time.monotonic() + 10,
+        _use_availability_probe=True,
+        _availability_probe=lambda *_a, **_k: {"status": "released"},
+    )
+    assert result["status"] == "partial"
+    assert len(calls) == 1
+    assert "_identity" not in calls[0]
+
+
+@pytest.mark.parametrize("prior_status", ("RUNNING", "FAILED", "PARTIAL", "SUCCESS"))
+def test_competing_safe_poll_lock_miss_does_not_replace_collector_attempt(
+    monkeypatch, prior_status,
+):
+    """SKIPPED_LOCK_HELD is a spectator, never the exact job's attempt clock."""
+    from src.data import job_lock
+    from src.ingest import forecast_live_daemon as daemon
+
+    now = datetime(2026, 9, 27, 12, 46, tzinfo=timezone.utc)
+    identity = daemon._forecast_work_identity("mx2t6_high", now_utc=now)
+    conn = _job_run_conn()
+    _insert_job_run(conn, identity, status=prior_status, recorded_at=now - timedelta(seconds=30))
+
+    @contextmanager
+    def lock_held(*_args, **_kwargs):
+        yield False, "opendata_live_forecast_mx2t6_high"
+
+    monkeypatch.setattr(job_lock, "acquire_opendata_track_lock", lock_held)
+    result = daemon.run_opendata_track(
+        "mx2t6_high", _job_conn=conn, _now_utc=now,
+        _source_paused=lambda _: False,
+        _collector=lambda **_kwargs: pytest.fail("lock miss must not collect"),
+    )
+    assert result["status"] == "skipped_lock_held"
+    assert conn.execute(
+        "SELECT status FROM job_run WHERE job_run_id = ?", (daemon._job_run_id(identity),)
+    ).fetchone()["status"] == prior_status
 
 
 @pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))

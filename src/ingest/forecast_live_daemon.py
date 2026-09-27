@@ -1047,6 +1047,8 @@ def _latest_job_run_current_for_identity(conn, identity: dict[str, object]) -> t
         "expected_source_run_id": expected_source_run_id,
         "release_calendar_key": row["release_calendar_key"],
         "expected_release_calendar_key": str(identity["release_calendar_key"]),
+        "finished_at": row["finished_at"],
+        "lock_acquired_at": row["lock_acquired_at"],
     }
     if row["scheduled_for"] != expected_scheduled_for:
         return False, metadata
@@ -1121,19 +1123,10 @@ def run_opendata_track(
                 track,
                 held_lock_key,
             )
-            # The explicit identity is the bounded older-cycle retry path. Its
-            # existing FAILED/PARTIAL row remains the retry debt; a lock miss
-            # is observational and must not overwrite that canonical state.
-            if _job_conn is not None and _identity is None:
-                _write_job_run(
-                    _job_conn,
-                    identity=identity,
-                    status="SKIPPED_LOCK_HELD",
-                    now_utc=now,
-                    result={"status": "skipped_lock_held", "source": SOURCE_ID, "track": track},
-                    reason_code="SKIPPED_LOCK_HELD",
-                    lock_key=held_lock_key,
-                )
+            # A competing safe poll is a spectator, not a collector attempt.
+            # Writing its lock miss into the exact newest job_run would replace
+            # the active RUNNING or completed FAILED/PARTIAL clock and prevent
+            # fair held-cycle migration. The existing journal remains intact.
             return {"status": "skipped_lock_held", "source": SOURCE_ID, "track": track}
         collector = _collector or collect_open_ens_cycle
         lock_acquired_at = _utcnow()
@@ -1234,7 +1227,7 @@ def _run_opendata_track_if_due(
     identity = _forecast_work_identity(track, now_utc=now)
     source_paused = _source_paused or _is_source_paused
 
-    def migrate_held_scope() -> dict | None:
+    def migrate_held_scope(*, newest_attempted_at: datetime | None = None) -> dict | None:
         if time.monotonic() >= poll_deadline_monotonic:
             return None
         migration = _held_revision_migration_identity(
@@ -1244,6 +1237,27 @@ def _run_opendata_track_if_due(
         if migration is None or time.monotonic() >= poll_deadline_monotonic:
             return None
         migration_identity, migration_debt = migration
+        if newest_attempted_at is not None:
+            # One exact job journal supplies the turn order: a failed/partial
+            # migration gives the next poll back to a still-published newest
+            # cycle, while a newer failed/partial collector cannot starve the
+            # held target until its local-day window ends. Lock misses never
+            # count as attempts and no second source worker is introduced.
+            row = _job_conn.execute(
+                "SELECT status, finished_at, lock_acquired_at "
+                "FROM job_run WHERE job_run_id = ?",
+                (_job_run_id(migration_identity),),
+            ).fetchone()
+            if row is not None and str(row["status"]).upper() in {
+                "SUCCESS", "PARTIAL", "FAILED",
+            }:
+                migrated_at = (
+                    _parse_utc_timestamp(row["finished_at"])
+                    if _parse_utc_timestamp(row["lock_acquired_at"]) is not None
+                    else None
+                )
+                if migrated_at is None or migrated_at >= newest_attempted_at:
+                    return None
         result = run_opendata_track(
             track, _locks_dir_override=_locks_dir_override,
             _collector=_collector, _source_paused=_source_paused,
@@ -1274,6 +1288,26 @@ def _run_opendata_track_if_due(
                 "selection": identity.get("metadata"),
                 "journal": current_metadata,
             }
+        # Release gets its first collection turn. After a real terminal
+        # attempt, compare the two exact journals; do not let a permanently
+        # PARTIAL/FAILED newest cycle consume every future held migration turn.
+        if str(current_metadata.get("status") or "").upper() in {
+            "SUCCESS", "PARTIAL", "FAILED",
+        } and not source_paused(str(identity["source_id"])):
+            newest_attempted_at = (
+                _parse_utc_timestamp(current_metadata.get("finished_at"))
+                if _parse_utc_timestamp(current_metadata.get("lock_acquired_at")) is not None
+                else None
+            )
+            if newest_attempted_at is not None:
+                migrated = migrate_held_scope(
+                    newest_attempted_at=newest_attempted_at,
+                )
+                if migrated is not None:
+                    return {
+                        **migrated,
+                        "newest_cycle_status": current_metadata["status"],
+                    }
 
     if source_paused(str(identity["source_id"])):
         return {
