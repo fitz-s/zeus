@@ -8,6 +8,26 @@ Status: active
 
 ### Concurrent conditional-HIGH integration acceptance
 
+- Fixed sentinel repair `d0f76f3e0` (parent `ad6ae16e2`) passes independent
+  review. Exact WU composite source is required in addition to the shared
+  validator, since that validator also accepts pure AWC. The latter remains
+  an explicit empty-map rejection twin. Parent runs six scope/model-relation
+  cases and 11 JIT/cache cases successfully. Full pricing plus solve-seam
+  suites have 1,304 passes and exactly the same 65 baseline failing nodes.
+- Canonical four-city carrier-to-HELD preparation reproduces old INVALID and
+  returns READY after the fix, with actual same-station survival probabilities
+  Cape .98684, Helsinki .97619, Lucknow .96667, Milan .98980. This explicitly
+  exercises the real pinned carrier parameter, not a skipped revision gate.
+  Independent normal-monitor replay instead sees current AWC events not
+  matching those composite pins and correctly chooses the direct-held branch.
+  The historical failed cycle's entire transient input cut is therefore not
+  reconstructed; frozen-HWM replay did not close that attribution gap. Do not
+  mislabel forced-pin or direct-fallback READY as normal runtime recovery.
+  Review accepts the bounded correction for standard deployment; final
+  acceptance still requires all four families fresh in two independent normal
+  new-process monitor cycles, advancing decision times, with valid revision
+  authority and no generic-likelihood error. Preserve fail-closed if any fail.
+
 - Runtime acceptance at 17:25–17:27 UTC is **not complete**. Concurrent
   official rollout loaded `8bfbe1b53` (including both 85f repairs), main PID
   1220 generated 17:24:34.945Z, source PID 99474, canonical DB handles verified,
