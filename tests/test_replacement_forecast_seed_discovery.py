@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -33,6 +33,7 @@ from src.data.replacement_forecast_source_run_identity import (
 )
 from src.contracts.ensemble_snapshot_provenance import GRID_SURFACE_EVIDENCE_REVISION
 from src.data.replacement_forecast_cycle_policy import CURRENT_EVIDENCE_SEMANTICS_REVISION
+from src.data.forecast_target_contract import build_forecast_target_scope
 from src.data.replacement_forecast_seed_discovery import (
     _current_manifest_paths_from_db,
     _day0_observed_extreme_seed_payload,
@@ -53,6 +54,19 @@ def _baseline_high_data_version() -> str:
     version = expected_replacement_dependency_identity_by_role("high")["baseline_b0"].data_version
     assert version is not None
     return version
+
+
+def _scope_step_hours(
+    city: str, city_timezone: str, *, cycle_hour: int = 0,
+) -> str:
+    scope = build_forecast_target_scope(
+        city_id=city.upper().replace(" ", "_"), city_name=city,
+        city_timezone=city_timezone, target_local_date=date(2026, 6, 8),
+        temperature_metric="high",
+        source_cycle_time=datetime(2026, 6, 6, cycle_hour, tzinfo=timezone.utc),
+        data_version=_baseline_high_data_version(),
+    )
+    return json.dumps(scope.required_step_hours, separators=(",", ":"))
 
 
 @pytest.fixture(autouse=True)
@@ -823,8 +837,8 @@ def _init_db(path: Path) -> None:
                 track TEXT NOT NULL DEFAULT 'mx2t3_high',
                 expected_members INTEGER NOT NULL DEFAULT 51,
                 observed_members INTEGER NOT NULL DEFAULT 51,
-                expected_steps_json TEXT NOT NULL DEFAULT '[3,6]',
-                observed_steps_json TEXT NOT NULL DEFAULT '[3,6]',
+                expected_steps_json TEXT NOT NULL DEFAULT '[]',
+                observed_steps_json TEXT NOT NULL DEFAULT '[]',
                 snapshot_ids_json TEXT NOT NULL DEFAULT '[1]'
             );
             CREATE TABLE ensemble_snapshots (
@@ -904,6 +918,11 @@ def _init_db(path: Path) -> None:
             )
             """,
             (_baseline_high_data_version(),),
+        )
+        steps = _scope_step_hours("NYC", "America/New_York")
+        conn.execute(
+            "UPDATE source_run_coverage SET expected_steps_json=?, observed_steps_json=? WHERE coverage_id='coverage-1'",
+            (steps, steps),
         )
         conn.commit()
     finally:
@@ -1419,6 +1438,11 @@ def test_seed_discovery_selects_latest_anchor_even_when_fusion_current_missing(t
              WHERE snapshot_id = 1
             """
         )
+        steps = _scope_step_hours("NYC", "America/New_York", cycle_hour=12)
+        conn.execute(
+            "UPDATE source_run_coverage SET expected_steps_json=?, observed_steps_json=? WHERE coverage_id='coverage-1'",
+            (steps, steps),
+        )
         conn.execute(
             """
             CREATE TABLE raw_model_forecasts (
@@ -1828,6 +1852,11 @@ def test_seed_discovery_prioritizes_held_family_and_skips_unchanged_blocked_budg
                 )
                 """,
                 (snapshot_id, city, _baseline_high_data_version(), run_id),
+            )
+            steps = _scope_step_hours(city, tz)
+            conn.execute(
+                "UPDATE source_run_coverage SET expected_steps_json=?, observed_steps_json=? WHERE coverage_id=?",
+                (steps, steps, f"coverage-{city}"),
             )
         conn.commit()
     finally:
