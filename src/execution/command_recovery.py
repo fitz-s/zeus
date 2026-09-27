@@ -91,6 +91,8 @@ logger = logging.getLogger(__name__)
 _RECOVERY_MONITOR_PREEMPTION = threading.local()
 _terminal_entry_obligation_rotation_lock = threading.Lock()
 _terminal_entry_obligation_rotation_cursor = 0
+_terminal_fill_review_rotation_lock = threading.Lock()
+_terminal_fill_review_rotation_cursor = ""
 
 
 @dataclass(frozen=True)
@@ -3861,20 +3863,16 @@ def _append_matched_order_fill_projection(
             observed_at=_coerce_iso_datetime(observed_at),
             order_fact_source=order_fact_source,
         )
-    except sqlite3.OperationalError as exc:
-        if "database is locked" in str(exc).lower():
-            raise
-        logger.exception(
-            "recovery: entry fill projection failed for command %s order %s",
-            command_id,
-            venue_order_id,
-        )
     except Exception:
         logger.exception(
             "recovery: entry fill projection failed for command %s order %s",
             command_id,
             venue_order_id,
         )
+        # The caller has already appended a fill event in the same transaction.
+        # A failed projection must abort that event as well; logging and
+        # returning would commit FILLED with an incomplete held exposure.
+        raise
 
 
 def _append_exit_order_fill_projection(
@@ -16490,6 +16488,11 @@ def reconcile_matched_cancel_review_required_entries(
                 command_id,
                 exc,
             )
+            if full_fill_command_ids is not None:
+                # This exact current-capital pass is transactional.  Its
+                # command-bound fill and projection cannot be committed
+                # separately on budget interruption or a failed identity read.
+                raise
             summary["errors"] += 1
     return summary
 
@@ -33462,6 +33465,7 @@ def _reconcile_passes_short_conn(
         Venue reads remain bounded to the currently affected order ids and run
         with no DB connection open.
         """
+        global _terminal_fill_review_rotation_cursor
         capital_budget = _capital_recovery_db_budget_seconds()
 
         def _capital_deadline() -> float:
@@ -33470,12 +33474,14 @@ def _reconcile_passes_short_conn(
                 capital_budget,
             )
 
-        def _run_capital_pass(label: str, fn, *, deadline_monotonic: float):
+        def _run_capital_pass(
+            label: str, fn, *, deadline_monotonic: float, pass_summary=None,
+        ):
             return _run_recovery_pass_with_lock_policy(
                 label,
                 fn,
                 scope="live_tick",
-                summary=summary,
+                summary=summary if pass_summary is None else pass_summary,
                 deadline_monotonic=deadline_monotonic,
                 bounded_lock_retry_delays=_CAPITAL_RECOVERY_LOCK_RETRY_DELAYS,
             )
@@ -33665,8 +33671,16 @@ def _reconcile_passes_short_conn(
             all_review_command_ids = frozenset(review_ids)
             if review_ids:
                 limit = _LIVE_TICK_IDENTITY_BOUND_MAX_CANDIDATES
-                start = (_identity_bound_rotation_slot() * limit) % len(review_ids)
-                terminal_fill_review_command_ids = set((review_ids[start:] + review_ids[:start])[:limit])
+                with _terminal_fill_review_rotation_lock:
+                    after_id = _terminal_fill_review_rotation_cursor
+                start = next(
+                    (index for index, command_id in enumerate(review_ids)
+                     if command_id > after_id),
+                    0,
+                )
+                terminal_fill_review_command_ids = tuple(
+                    (review_ids[start:] + review_ids[:start])[:limit]
+                )
             entry_projection_candidates = tuple(
                 command_id
                 for command_id in dict.fromkeys(
@@ -33740,15 +33754,19 @@ def _reconcile_passes_short_conn(
         terminal_fill_review_result = None
         if terminal_fill_review_command_ids:
             # This is already-authenticated current exposure, not historical
-            # maintenance. Give the exact command-bound fold its own capital
-            # deadline before any venue read or broad recovery query can spend
-            # the cumulative live-tick budget.
-            review_deadline = _capital_deadline()
-            review_conn_factory = _capital_apply_conn_factory(review_deadline)
+            # maintenance. One command's fill and held projection form one
+            # transaction; an interrupted command must not roll back already
+            # recovered peers, or commit a fill without its projection.
+            for command_id in terminal_fill_review_command_ids:
+                if scheduler_deadline is not None and time.monotonic() >= scheduler_deadline:
+                    break
+                with _terminal_fill_review_rotation_lock:
+                    _terminal_fill_review_rotation_cursor = command_id
+                review_deadline = _capital_deadline()
+                review_conn_factory = _capital_apply_conn_factory(review_deadline)
+                command_summary: dict = {}
 
-            def _fold_terminal_fill_reviews(conn):
-                folded = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
-                for command_id in sorted(terminal_fill_review_command_ids):
+                def _reconcile_exact_review(conn):
                     if command_id in point_full_fill_review_command_ids:
                         result = reconcile_matched_cancel_review_required_entries(
                             conn, full_fill_command_ids=frozenset({command_id}),
@@ -33757,25 +33775,55 @@ def _reconcile_passes_short_conn(
                         result = reconcile_authenticated_entry_trade_facts(
                             conn, command_id=command_id,
                         )
-                    for key in folded:
-                        folded[key] += int(result.get(key, 0) or 0)
-                return folded
+                    if _recovery_result_has_errors(result):
+                        raise RuntimeError(
+                            f"terminal fill review failed for command {command_id}"
+                        )
+                    return result
 
-            terminal_fill_review_result = _run_capital_pass(
-                "authenticated_terminal_fill_review_fast",
-                lambda: run_db_only_pass(
-                    _fold_terminal_fill_reviews,
-                    conn_factory=review_conn_factory,
-                    label="recovery.authenticated_terminal_fill_review_fast",
-                ),
-                deadline_monotonic=review_deadline,
-            )
-            if terminal_fill_review_result is not None:
-                _accumulate(
-                    summary,
-                    "authenticated_terminal_fill_review_fast",
-                    terminal_fill_review_result,
+                try:
+                    terminal_fill_review_result = _run_capital_pass(
+                        "authenticated_terminal_fill_review_fast",
+                        lambda: run_db_only_pass(
+                            _reconcile_exact_review,
+                            conn_factory=review_conn_factory,
+                            label="recovery.authenticated_terminal_fill_review_fast",
+                        ),
+                        deadline_monotonic=review_deadline,
+                        pass_summary=command_summary,
+                    )
+                except Exception:
+                    logger.exception(
+                        "recovery: terminal fill review %s rolled back",
+                        command_id,
+                    )
+                    summary["errors"] += 1
+                    continue
+                if command_summary:
+                    summary.setdefault(
+                        "authenticated_terminal_fill_review_fast_deferred", []
+                    ).append({"command_id": command_id, **command_summary})
+                if command_summary.get("monitor_preempted"):
+                    summary["monitor_preempted"] = True
+                    summary["db_lock_deferred"] = True
+                    summary["db_lock_deferred_at"] = (
+                        "authenticated_terminal_fill_review_fast"
+                    )
+                    summary["db_lock_deferred_count"] = 1
+                    break
+                if terminal_fill_review_result is not None:
+                    _accumulate(
+                        summary,
+                        "authenticated_terminal_fill_review_fast",
+                        terminal_fill_review_result,
+                    )
+            if scheduler_deadline is not None and time.monotonic() >= scheduler_deadline:
+                summary["db_budget_deferred"] = True
+                summary["db_budget_deferred_at"] = (
+                    "authenticated_terminal_fill_review_fast"
                 )
+                summary["db_budget_deferred_count"] = 1
+                return terminal_fill_review_result
         entry_projection_result = None
         if entry_projection_command_ids:
             # An authenticated cumulative ENTRY fill without a matching

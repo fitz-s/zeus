@@ -2027,6 +2027,81 @@ def _tag_external_operator_closed_position_holdings(
     return False
 
 
+def _preserve_terminal_entry_chain_projection(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, Any],
+    venue_order_id: str,
+    trade_filled_size: str,
+) -> bool:
+    """Do not replace an exact synced terminal holding with a trade prefix."""
+
+    command_id = str(command.get("command_id") or "").strip()
+    position_id = str(command.get("position_id") or "").strip()
+    token_id = str(command.get("token_id") or "").strip()
+    order_id = str(venue_order_id or "").strip()
+    bound_order_id = str(command.get("venue_order_id") or "").strip()
+    prefix = _positive_decimal_or_none(trade_filled_size)
+    if (
+        str(command.get("intent_kind") or "").upper() != "ENTRY"
+        or str(command.get("side") or "").upper() != "BUY"
+        or str(command.get("state") or "").upper()
+            not in {"REVIEW_REQUIRED", "FILLED"}
+        or not all((command_id, position_id, token_id, order_id, bound_order_id))
+        or bound_order_id.lower() != order_id.lower()
+        or prefix is None
+    ):
+        return False
+    current = conn.execute(
+        """
+        SELECT position_id, order_id, token_id, no_token_id, phase,
+               chain_state, shares, chain_shares, cost_basis_usd,
+               chain_cost_basis_usd
+          FROM position_current WHERE position_id = ?
+        """,
+        (position_id,),
+    ).fetchone()
+    if current is None:
+        return False
+    current = dict(current)
+    shares = _positive_decimal_or_none(current.get("shares"))
+    chain_shares = _positive_decimal_or_none(current.get("chain_shares"))
+    cost = _positive_decimal_or_none(current.get("cost_basis_usd"))
+    chain_cost = _positive_decimal_or_none(current.get("chain_cost_basis_usd"))
+    if (
+        str(current.get("order_id") or "").lower() != order_id.lower()
+        or token_id not in {
+            str(current.get("token_id") or ""),
+            str(current.get("no_token_id") or ""),
+        }
+        or str(current.get("phase") or "") not in {"active", "day0_window"}
+        or str(current.get("chain_state") or "") != "synced"
+        or shares is None
+        or chain_shares != shares
+        or cost is None
+        or chain_cost != cost
+        or prefix >= shares
+    ):
+        return False
+    from src.execution.command_recovery import _latest_order_fact_for_command_order
+
+    order = _latest_order_fact_for_command_order(
+        conn, command_id=command_id, venue_order_id=order_id,
+    )
+    if not order:
+        return False
+    matched = _positive_decimal_or_none(order.get("matched_size"))
+    try:
+        remaining = Decimal(str(order.get("remaining_size")))
+    except (TypeError, ValueError, ArithmeticError):
+        return False
+    return (
+        str(order.get("state") or "").upper() == "MATCHED"
+        and matched == shares
+        and remaining == 0
+    )
+
+
 def reconcile_recorded_maker_fill_economics(
     conn: sqlite3.Connection,
     *,
@@ -2307,16 +2382,28 @@ def reconcile_recorded_maker_fill_economics(
                                 summary.get("exit_partial_economics_corrected", 0)
                                 + repaired
                             )
-            _ensure_entry_fill_position_event(
+            if _preserve_terminal_entry_chain_projection(
                 conn,
                 command=command,
                 venue_order_id=order_id,
-                filled_size=corrected_size,
-                fill_price=corrected_price,
-                observed_at=observed,
-                order_fact_source=str(fact.get("source") or "REST"),
-            )
-            summary["projected"] += 1
+                trade_filled_size=corrected_size,
+            ):
+                # The maker trade is an incomplete prefix of this exact
+                # terminal order.  Keep its economic fact, but do not reduce
+                # the already-synced full Chain holding to that prefix while
+                # the terminal-order fill projection is still in review.
+                summary["stayed"] += 1
+            else:
+                _ensure_entry_fill_position_event(
+                    conn,
+                    command=command,
+                    venue_order_id=order_id,
+                    filled_size=corrected_size,
+                    fill_price=corrected_price,
+                    observed_at=observed,
+                    order_fact_source=str(fact.get("source") or "REST"),
+                )
+                summary["projected"] += 1
         except Exception:
             summary["errors"] += 1
             logger.exception(

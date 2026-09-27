@@ -17638,7 +17638,9 @@ class TestRecoveryResolutionTable:
             "review_required_matched_order_fact_with_positive_trade_fact"
         )
 
-    @pytest.mark.parametrize("scope", ["restart_preflight", "live_tick", "boot_fast"])
+    @pytest.mark.parametrize(
+        "scope", ["restart_preflight", "live_tick", "boot_fast", "live_tick_interrupt"]
+    )
     def test_scoped_recovery_clears_terminal_positive_entry_review(
         self,
         tmp_path,
@@ -17727,9 +17729,114 @@ class TestRecoveryResolutionTable:
         client.get_open_orders.return_value = []
         client.get_trades.return_value = []
 
+        actual_scope = "live_tick" if scope == "live_tick_interrupt" else scope
+        if scope == "live_tick_interrupt":
+            from src.execution import exchange_reconcile
+
+            guard_conn = _conn_factory()
+            try:
+                command = dict(guard_conn.execute(
+                    "SELECT * FROM venue_commands WHERE command_id = 'cmd-001'"
+                ).fetchone())
+                preserve = exchange_reconcile._preserve_terminal_entry_chain_projection
+                def protected(**changes):
+                    return preserve(
+                        guard_conn,
+                        command={**command, **changes},
+                        venue_order_id="ord-001",
+                        trade_filled_size="3.0",
+                    )
+                assert protected()
+                assert not protected(venue_order_id="")
+                assert not protected(venue_order_id="ord-other")
+                assert not protected(token_id="tok-other")
+                assert not protected(state="PARTIAL")
+                assert not preserve(
+                    guard_conn, command=command, venue_order_id="ord-001",
+                    trade_filled_size="5.0",
+                )
+                guard_conn.execute(
+                    "UPDATE position_current SET chain_state='unknown' WHERE position_id='pos-001'"
+                )
+                assert not protected()
+                guard_conn.rollback()
+                guard_conn.execute(
+                    "UPDATE position_current SET order_id='ord-other' "
+                    "WHERE position_id='pos-001'"
+                )
+                assert not protected()
+                guard_conn.rollback()
+                assert not protected(command_id="cmd-no-terminal-order-fact")
+            finally:
+                guard_conn.close()
+
+            table_exists = exchange_reconcile._table_exists
+            append_projection = command_recovery._append_matched_order_fill_projection
+            interrupted = True
+            within_matched_projection = False
+
+            def interrupt_projection(conn, table):
+                if (
+                    interrupted
+                    and within_matched_projection
+                    and table == "exchange_reconcile_findings"
+                ):
+                    raise sqlite3.OperationalError("interrupted")
+                return table_exists(conn, table)
+
+            def matched_projection(*args, **kwargs):
+                nonlocal within_matched_projection
+                within_matched_projection = True
+                try:
+                    return append_projection(*args, **kwargs)
+                finally:
+                    within_matched_projection = False
+
+            monkeypatch.setattr(
+                command_recovery, "_append_matched_order_fill_projection",
+                matched_projection,
+            )
+            monkeypatch.setattr(
+                exchange_reconcile, "_table_exists", interrupt_projection
+            )
+            first = command_recovery.reconcile_unresolved_commands(
+                client=client, scope=actual_scope,
+            )
+            before = _conn_factory()
+            try:
+                assert _get_state(before, "cmd-001") == "REVIEW_REQUIRED"
+                assert dict(
+                    before.execute(
+                        """
+                        SELECT shares, chain_shares, cost_basis_usd,
+                               entry_price, order_status
+                          FROM position_current WHERE position_id = 'pos-001'
+                        """
+                    ).fetchone()
+                ) == {
+                    "shares": 5.0,
+                    "chain_shares": 5.0,
+                    "cost_basis_usd": 1.7,
+                    "entry_price": 0.34,
+                    "order_status": "filled",
+                }, {
+                    key: first.get(key)
+                    for key in (
+                        "recorded_maker_fill_economics",
+                        "authenticated_entry_trade_fact",
+                        "authenticated_terminal_fill_review_fast",
+                        "matched_cancel_review_required_entries",
+                        "terminal_positive_entry_projection_repair",
+                    )
+                }
+                assert _get_events(before, "cmd-001")[-1]["event_type"] == "REVIEW_REQUIRED"
+            finally:
+                before.close()
+            assert first["matched_cancel_review_required_entries"]["advanced"] == 0
+            interrupted = False
+
         summary = command_recovery.reconcile_unresolved_commands(
-            client=client,
-            scope=scope,
+            client=client, scope=actual_scope,
         )
 
         check = _conn_factory()
@@ -17746,7 +17853,7 @@ class TestRecoveryResolutionTable:
         finally:
             check.close()
 
-        assert summary["scope"] == scope
+        assert summary["scope"] == actual_scope
         assert summary["matched_cancel_review_required_entries"]["advanced"] == 1
         assert state == "FILLED"
         assert events[-1]["event_type"] == "FILL_CONFIRMED"
@@ -17761,6 +17868,164 @@ class TestRecoveryResolutionTable:
             "entry_price": 0.34,
             "order_status": "filled",
         }
+        if scope == "live_tick_interrupt":
+            # The trade log can remain a three-share prefix even after the
+            # terminal point order clears REVIEW. Re-observation must not
+            # repeatedly publish that prefix over the five-share holding.
+            command_recovery.reconcile_unresolved_commands(
+                client=client, scope=actual_scope,
+            )
+            third = _conn_factory()
+            try:
+                exchange_reconcile.reconcile_recorded_maker_fill_economics(
+                    third, live_tick_scope=False,
+                )
+                assert third.execute(
+                    "SELECT shares, cost_basis_usd FROM position_current "
+                    "WHERE position_id='pos-001'"
+                ).fetchone()[:] == (5.0, 1.7)
+            finally:
+                third.close()
+
+    def test_terminal_review_interrupt_does_not_starve_peer(
+        self, tmp_path, monkeypatch,
+    ):
+        """Each exact positive review owns a transaction and a later tick can retry."""
+        from src.execution import command_recovery, exchange_reconcile, venue_sync_contract
+        from src.state.db import init_schema, init_schema_trade_only
+        from src.state.collateral_ledger import init_collateral_schema
+        from src.state.venue_command_repo import append_event
+
+        db_path = tmp_path / "two-terminal-reviews.db"
+        seed = sqlite3.connect(db_path)
+        seed.row_factory = sqlite3.Row
+        init_schema(seed)
+        init_schema_trade_only(seed)
+        init_collateral_schema(seed)
+        for index in (1, 2):
+            command_id = f"cmd-{index:03d}"
+            position_id = f"pos-{index:03d}"
+            order_id = f"ord-{index:03d}"
+            token_id = f"tok-{index:03d}"
+            _insert(
+                seed, command_id=command_id, position_id=position_id,
+                decision_id=f"dec-{index:03d}", token_id=token_id,
+                size=5.0, price=0.34,
+            )
+            _seed_pending_entry_projection(
+                seed, position_id=position_id, command_id=command_id,
+                order_id=order_id, token_id=token_id,
+            )
+            _advance_to_partial(seed, command_id=command_id, venue_order_id=order_id)
+            _append_trade_fact(
+                seed, command_id=command_id, order_id=order_id,
+                trade_id=f"trade-{index:03d}", state="CONFIRMED",
+                filled_size="5.0", fill_price="0.34",
+            )
+            _append_order_fact(
+                seed, command_id=command_id, order_id=order_id,
+                state="MATCHED", matched_size="5.0", remaining_size="0",
+            )
+            seed.execute(
+                """
+                UPDATE position_current
+                   SET phase='active', chain_state='synced',
+                       shares=5.0, chain_shares=5.0, cost_basis_usd=1.70,
+                       chain_cost_basis_usd=1.70, entry_price=0.34,
+                       order_status='filled'
+                 WHERE position_id=?
+                """,
+                (position_id,),
+            )
+            append_event(
+                seed, command_id=command_id, event_type="REVIEW_REQUIRED",
+                occurred_at="2026-04-26T00:08:00Z",
+                payload={
+                    "reason": "partial_remainder_point_order_filled_without_full_trade_fact",
+                    "venue_order_id": order_id,
+                    "point_order": {
+                        "orderID": order_id, "status": "MATCHED",
+                        "order_type": "GTC", "side": "BUY",
+                        "asset_id": token_id, "original_size": "5.0",
+                        "size_matched": "5.0", "remaining_size": "0",
+                    },
+                },
+            )
+        seed.commit()
+        seed.close()
+
+        def connection():
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", connection)
+        # The existing cap is four; both commands fit in one bounded tick.
+        monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "10")
+        client = MagicMock(
+            spec_set=["get_order", "get_open_orders", "get_trades",
+                      "get_account_truth", "get_clob_market_info"],
+        )
+        client.get_account_truth.return_value = SimpleNamespace(open_orders=[], trades=[])
+        client.get_open_orders.return_value = []
+        client.get_trades.return_value = []
+
+        original = command_recovery.reconcile_matched_cancel_review_required_entries
+        original_authenticated = command_recovery.reconcile_authenticated_entry_trade_facts
+        interrupt_first = True
+
+        def interrupt_exact(conn, *, full_fill_command_ids=None):
+            if interrupt_first and full_fill_command_ids == frozenset({"cmd-001"}):
+                conn.execute(
+                    "UPDATE position_current SET shares=3 WHERE position_id='pos-001'"
+                )
+                raise sqlite3.OperationalError("interrupted")
+            if interrupt_first and full_fill_command_ids is None:
+                return {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+            return original(conn, full_fill_command_ids=full_fill_command_ids)
+
+        def defer_broad_authenticated(conn, *, command_id=None, **kwargs):
+            if interrupt_first and command_id in (None, "cmd-001"):
+                return {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+            return original_authenticated(conn, command_id=command_id, **kwargs)
+
+        monkeypatch.setattr(
+            command_recovery, "reconcile_matched_cancel_review_required_entries",
+            interrupt_exact,
+        )
+        monkeypatch.setattr(
+            command_recovery, "reconcile_authenticated_entry_trade_facts",
+            defer_broad_authenticated,
+        )
+        first = command_recovery.reconcile_unresolved_commands(
+            client=client, scope="live_tick",
+        )
+        check = connection()
+        try:
+            assert _get_state(check, "cmd-001") == "REVIEW_REQUIRED", {
+                key: value for key, value in first.items()
+                if "review" in key or "fill" in key or "projection" in key
+            }
+            assert _get_state(check, "cmd-002") == "FILLED"
+            assert check.execute(
+                "SELECT shares FROM position_current WHERE position_id='pos-001'"
+            ).fetchone()[0] == 5.0
+        finally:
+            check.close()
+        assert first["authenticated_terminal_fill_review_fast"]["advanced"] == 1
+        interrupt_first = False
+        second = command_recovery.reconcile_unresolved_commands(
+            client=client, scope="live_tick",
+        )
+        check = connection()
+        try:
+            assert _get_state(check, "cmd-001") == "FILLED"
+            assert check.execute(
+                "SELECT shares FROM position_current WHERE position_id='pos-001'"
+            ).fetchone()[0] == 5.0
+        finally:
+            check.close()
+        assert second["authenticated_terminal_fill_review_fast"]["advanced"] == 1
 
     @pytest.mark.parametrize("scope", ["restart_preflight", "live_tick", "boot_fast"])
     def test_scoped_recovery_repairs_terminal_positive_entry_projection_size(
