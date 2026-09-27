@@ -11120,6 +11120,249 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
     observations.close()
 
 
+@pytest.mark.parametrize("soft_anchor", (688035, None))
+def test_hko_held_redecision_binds_readiness_posterior_for_station_pin(
+    monkeypatch, soft_anchor,
+):
+    """Held HKO q pins FND through readiness when no action bundle exists.
+
+    The current bundle is blocked, so held redecision has no bundle posterior;
+    readiness still names the source-clock posterior whose exact FND row the
+    remaining carrier must use.  Without that certificate it fails closed.
+    """
+    import src.data.day0_observation_reader as day0_reader
+    import src.data.replacement_forecast_bundle_reader as bundle_reader
+    import src.data.replacement_forecast_current_target_plan as current_target_plan
+    import src.data.replacement_forecast_readiness as readiness_reader
+
+    forecast = sqlite3.connect(":memory:")
+    forecast.row_factory = sqlite3.Row
+    forecast.executescript(
+        """
+        CREATE TABLE market_events (
+            city TEXT, target_date TEXT, temperature_metric TEXT,
+            condition_id TEXT, token_id TEXT, market_slug TEXT,
+            range_label TEXT, range_low REAL, range_high REAL
+        );
+        CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY, city TEXT, target_date TEXT,
+            temperature_metric TEXT, provenance_json TEXT
+        );
+        CREATE TABLE raw_model_forecasts (
+            raw_model_forecast_id INTEGER PRIMARY KEY, model TEXT, city TEXT,
+            target_date TEXT, metric TEXT, source_cycle_time TEXT,
+            source_available_at TEXT, captured_at TEXT, forecast_value_c REAL,
+            source_id TEXT, coverage_status TEXT
+        );
+        CREATE TABLE observation_instants (
+            city TEXT, target_date TEXT, running_min REAL, utc_timestamp TEXT,
+            local_timestamp TEXT, source TEXT, causality_status TEXT,
+            authority TEXT, source_role TEXT, training_allowed INTEGER
+        );
+        """
+    )
+    forecast.executemany(
+        "INSERT INTO market_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            ("Hong Kong", "2026-07-11", "low", "c0", "yes0", "hk-27-below",
+             "27C or below", None, 27.0),
+            ("Hong Kong", "2026-07-11", "low", "c1", "yes1", "hk-28",
+             "28C", 28.0, 28.0),
+            ("Hong Kong", "2026-07-11", "low", "c2", "yes2", "hk-29-above",
+             "29C or above", 29.0, None),
+        ),
+    )
+    forecast.execute(
+        "INSERT INTO observation_instants VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("Hong Kong", "2026-07-11", 28.1, "2026-07-11T07:02:00+00:00",
+         "2026-07-11T15:02:00+08:00", "hko_hourly_accumulator", "CAUSAL",
+         "AUTHORIZED", "SETTLEMENT", 0),
+    )
+    forecast.execute(
+        "INSERT INTO forecast_posteriors VALUES (?, ?, ?, ?, ?)",
+        (688035, "Hong Kong", "2026-07-11", "low", json.dumps({
+            "bayes_precision_fusion": {
+                "used_models": ["ecmwf_ifs", "hko_fnd"],
+                "current_value_serving": {
+                    "hko_fnd": {"raw_model_forecast_id": 2268124},
+                },
+            },
+        })),
+    )
+    forecast.execute(
+        "INSERT INTO raw_model_forecasts VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (2268124, "hko_fnd", "Hong Kong", "2026-07-11", "low",
+         "2026-07-11T02:00:00+00:00", "2026-07-11T02:02:03+00:00",
+         "2026-07-11T02:02:03+00:00", 27.0, "hko_fnd_single_runs", "COVERED"),
+    )
+    monkeypatch.setattr(
+        current_target_plan,
+        "_latest_authorized_day0_fact",
+        lambda *_args, **_kwargs: {
+            "observation_source": "hko_hourly_accumulator",
+            "observation_time": "2026-07-11T07:02:00+00:00",
+            "observed_extreme_native": 28.1,
+        },
+    )
+    monkeypatch.setattr(
+        day0_reader,
+        "hko_provisional_revision_likelihood",
+        lambda *_args, **_kwargs: {
+            "semantics": "hko_provisional_monotonic_survival_beta_jeffreys_v1",
+            "boundary_survival_probability": 0.95,
+        },
+    )
+    dependencies = (
+        [{"role": "soft_anchor_posterior", "posterior_id": soft_anchor}]
+        if soft_anchor is not None
+        else []
+    )
+    monkeypatch.setattr(
+        readiness_reader,
+        "latest_replacement_readiness",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            dependency_json={"dependencies": dependencies},
+        ),
+    )
+    monkeypatch.setattr(
+        bundle_reader,
+        "read_replacement_forecast_bundle",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            ok=False, bundle=None,
+            reason_code="REPLACEMENT_LIVE_CYCLE_AGE_EXCEEDS_BOUND",
+        ),
+    )
+    monkeypatch.setattr(
+        bundle_reader,
+        "read_pinned_replacement_forecast_bundle",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            ok=False, bundle=None,
+            reason_code="REPLACEMENT_LIVE_CYCLE_AGE_EXCEEDS_BOUND",
+        ),
+    )
+
+    def current_observation_payload(*_args, **kwargs):
+        binding = {
+            "city": "Hong Kong", "target_date": "2026-07-11", "metric": "low",
+            "observation_time": "2026-07-11T07:02:00+00:00",
+            "observed_extreme_native": 28.1, "rounded_value": 28,
+            "settlement_source": "hko_hourly_accumulator",
+            "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
+            "probability_base_identity": kwargs["probability_base_identity"],
+        }
+        if kwargs["posterior_id"] is not None:
+            binding["posterior_id"] = int(kwargs["posterior_id"])
+        return {
+            "observation_time": "2026-07-11T07:02:00+00:00",
+            "observation_available_at": "2026-07-11T07:05:00+00:00",
+            "raw_value": 28.1, "rounded_value": 28, "low_so_far": 28.1,
+            "sample_count": 8, "station_id": "HKO",
+            "settlement_source": "hko_hourly_accumulator",
+            "settlement_unit": "C",
+            "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
+            "_edli_global_day0_binding": binding,
+        }
+
+    monkeypatch.setattr(
+        era, "_global_day0_execution_payload", current_observation_payload,
+    )
+    monkeypatch.setattr(
+        "src.data.station_forecast_adapter.load_station_forecast_config",
+        lambda: {"hko_fnd": {
+            "enabled": True, "status": "live", "adapter_kind": "hko_fnd_json",
+            "city": "Hong Kong", "metrics": ["high", "low"],
+        }},
+    )
+    pinned: list[tuple[dict[str, object], ...]] = []
+
+    def remaining_components(*_args, **kwargs):
+        # The members builder's exact station read, on the same payload.
+        pinned.append(era._pinned_station_extreme_providers_c(
+            conn=forecast,
+            payload=kwargs["payload"],
+            family=kwargs["family"],
+            decision_time=kwargs["decision_time"],
+            represented_models=("ecmwf_ifs",),
+        ))
+        matrix = np.asarray([[0.2, 0.5, 0.3]] * 400, dtype=float)
+        return (
+            matrix,
+            np.asarray([0.2, 0.5, 0.3], dtype=float),
+            era._GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS,
+        )
+
+    monkeypatch.setattr(
+        era, "_day0_remaining_global_probability_components", remaining_components,
+    )
+    event_payload = json.loads(
+        _global_scope_event(
+            city="Hong Kong", source_run_id="run-hko",
+            city_timezone="Asia/Hong_Kong",
+        ).payload_json
+    )
+    event_payload.update(
+        {
+            "metric": "low", "station_id": "HKO",
+            "settlement_source": "hko_hourly_accumulator",
+            "settlement_unit": "C",
+            "observation_time": "2026-07-11T07:02:00+00:00",
+            "observation_available_at": "2026-07-11T07:05:00+00:00",
+            "raw_value": 28.1, "rounded_value": 28, "low_so_far": 28.1,
+            "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
+            "source_match_status": "MATCH", "local_date_status": "MATCH",
+            "station_match_status": "MATCH", "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH", "rounding_status": "MATCH",
+            "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
+        }
+    )
+    event = make_opportunity_event(
+        event_type="DAY0_EXTREME_UPDATED",
+        entity_key="Hong Kong|2026-07-11|low|HKO",
+        source="global-auction-current-day0-scope",
+        observed_at="2026-07-11T07:02:00+00:00",
+        available_at="2026-07-11T07:05:00+00:00",
+        received_at="2026-07-11T07:05:00+00:00",
+        payload=event_payload,
+        causal_snapshot_id=str(event_payload["snapshot_id"]),
+    )
+
+    def prepare(day0_payload):
+        return era._prepare_current_global_probability_family(
+            event,
+            forecast_conn=forecast,
+            topology_conn=forecast,
+            observation_conn=forecast,
+            decision_time=_dt.datetime(2026, 7, 11, 7, 30, tzinfo=_dt.timezone.utc),
+            max_age=_dt.timedelta(seconds=30),
+            day0_payload_out=day0_payload,
+            allow_provisional_day0_replacement=True,
+            probability_use=era._CurrentProbabilityUse.HELD_MONITOR,
+        )
+
+    day0_payload: dict[str, object] = {}
+    if soft_anchor is None:
+        with pytest.raises(
+            ValueError, match="DAY0_STATION_EXTREME_POSTERIOR_BINDING_REQUIRED"
+        ):
+            prepare(day0_payload)
+        assert pinned == []
+    else:
+        prepared = prepare(day0_payload)
+        assert prepared.probability_witness.yes_point_q.tolist() == pytest.approx(
+            [0.2, 0.5, 0.3]
+        )
+        assert day0_payload["_edli_day0_redecision_authority_scope"] == (
+            "held_exposure_current_day0_only_v1"
+        )
+        assert day0_payload["_edli_global_day0_binding"]["posterior_id"] == 688035
+        assert [
+            (item["raw_model_forecast_id"], item["forecast_value_c"])
+            for item in pinned[0]
+        ] == [(2268124, 27.0)]
+    forecast.close()
+
+
 def test_post_day_final_daily_observation_builds_exact_complete_global_simplex(
     monkeypatch,
 ):

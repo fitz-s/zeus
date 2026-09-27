@@ -1043,6 +1043,42 @@ class TestLoadReplacementBelief:
 
         assert belief is None
 
+    def test_certified_refusal_names_its_missing_fact(self, forecasts_db, caplog):
+        """A held position cannot go blind without a logged reason."""
+        import src.engine.position_belief as pb
+
+        caplog.set_level("WARNING", logger=pb.__name__)
+        target = "2026-06-12"
+        _insert(
+            forecasts_db,
+            posterior_id=202,
+            computed_at=(NOW - timedelta(hours=1)).isoformat(),
+            q={BIN: 0.20},
+        )
+        _install_live_readiness_binding(
+            forecasts_db,
+            city="Karachi",
+            target_date=target,
+            posterior_id=202,
+            computed_at=NOW - timedelta(minutes=30),
+            expires_at=NOW - timedelta(seconds=1),
+        )
+        assert load_replacement_belief(
+            city="Karachi", target_date=target, temperature_metric="high",
+            bin_label=BIN, direction="buy_yes", now=NOW, db_path=forecasts_db,
+        ) is None
+        assert (
+            "no certified posterior for Karachi/2026-06-12/high: "
+            "readiness_expired_at="
+        ) in caplog.text
+
+        caplog.clear()
+        assert load_replacement_belief(
+            city="Karachi", target_date=target, temperature_metric="low",
+            bin_label=BIN, direction="buy_yes", now=NOW, db_path=forecasts_db,
+        ) is None
+        assert "Karachi/2026-06-12/low: readiness_missing" in caplog.text
+
     def test_newer_non_live_row_cannot_override_live_runtime_layer(self, forecasts_db):
         _insert(
             forecasts_db,

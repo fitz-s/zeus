@@ -8979,6 +8979,79 @@ class TestRemainingDayMembers:
         assert "_edli_day0_conditional_high_shape_identity" not in payload
         assert "_edli_day0_remaining_carrier_q" not in payload
 
+    @pytest.mark.parametrize("metric", ("high", "low"))
+    @pytest.mark.parametrize(
+        ("decision", "post_local"),
+        (
+            # 09:00 HKT on 09-27: the 09-26 local day is physically closed.
+            (datetime(2026, 9, 27, 1, 0, tzinfo=UTC), True),
+            # 23:40 HKT on 09-26: the final-daily scenario is still possible.
+            (datetime(2026, 9, 26, 15, 40, tzinfo=UTC), False),
+        ),
+    )
+    def test_hko_post_local_members_need_no_final_daily_scenario(
+        self, monkeypatch, metric, decision, post_local,
+    ):
+        """A closed local day is decided by observation and survival, not FND.
+
+        Missing posterior identity still fails closed while the day is open.
+        """
+        import src.data.day0_hourly_vectors as hourly
+        import src.engine.event_reactor_adapter as era
+
+        vectors = [
+            Day0HourlyVector(
+                model=model, city="Hong Kong", target_date="2026-09-26",
+                timezone_name="Asia/Hong_Kong",
+                captured_at="2026-09-26T15:00:00+00:00",
+                times=tuple(f"2026-09-26T{hour:02d}:00" for hour in range(24)),
+                temps_c=tuple(value for _ in range(24)),
+            )
+            for model, value in (("ecmwf_ifs", 27.0), ("icon_global", 28.0),
+                                 ("ukmo_global_deterministic_10km", 29.0))
+        ]
+        monkeypatch.setattr(
+            "src.data.station_forecast_adapter.load_station_forecast_config",
+            lambda: {"hko_fnd": {
+                "enabled": True, "status": "live", "adapter_kind": "hko_fnd_json",
+                "city": "Hong Kong", "metrics": ["high", "low"],
+            }},
+        )
+        monkeypatch.setattr(hourly, "day0_hourly_models_for_city", lambda _city: tuple(
+            vector.model for vector in vectors
+        ))
+        monkeypatch.setattr(hourly, "read_freshest_day0_hourly_vectors", lambda **_kw: vectors)
+        monkeypatch.setattr(era, "_latest_day0_current_temperature_native", lambda **_kw: (
+            27.1, datetime(2026, 9, 26, 15, 35, tzinfo=UTC), "hko_rhrread_spot",
+        ))
+        monkeypatch.setattr(era, "_day0_current_vector_witness", lambda **_kw: {
+            "vector_id": "current-three", "expected_models": [v.model for v in vectors],
+        })
+        monkeypatch.setattr(era, "_validate_day0_causal_bundle_successor", lambda **kw: {
+            "bundle_identity": "current-three", "carrier_vector_witness": kw["vector_witness"],
+        })
+        payload = {"metric": metric, "_edli_global_day0_binding": {
+            "probability_base_identity": "direct-held-only",
+        }}
+        result = era._day0_remaining_day_members(
+            payload=payload,
+            family=SimpleNamespace(city="Hong Kong", target_date="2026-09-26", metric=metric),
+            unit="C", decision_time=decision,
+            world_conn=object(), forecast_conn=object(),
+        )
+        if post_local:
+            assert result is not None
+            assert "_edli_day0_q_block_cause" not in payload
+            assert "_edli_day0_station_extreme_providers" not in payload
+            assert payload["_edli_day0_remaining_model_names"] == [
+                "ecmwf_ifs", "icon_global", "ukmo_global_deterministic_10km",
+            ]
+        else:
+            assert result is None
+            assert "DAY0_STATION_EXTREME_POSTERIOR_BINDING_REQUIRED" in str(
+                payload["_edli_day0_q_block_cause"]
+            )
+
     @pytest.mark.parametrize("source", (
         {"enabled": False, "status": "live", "adapter_kind": "hko_fnd_json",
          "city": "Hong Kong", "metrics": ["high"]},

@@ -237,9 +237,17 @@ def _certified_replacement_posterior_row(
         )
         return None
 
+    def refuse(reason: str) -> None:
+        # One named reason per refusal: a held position must never go blind
+        # without the log saying which readiness/posterior fact was absent.
+        logger.warning(
+            "position_belief: no certified posterior for %s/%s/%s: %s",
+            city, target_date, temperature_metric, reason,
+        )
+
     metric = str(temperature_metric or "").strip().lower()
     if metric not in {"high", "low"}:
-        return None
+        return refuse("metric_invalid")
     data_version = HIGH_DATA_VERSION if metric == "high" else LOW_DATA_VERSION
     decision_utc = (
         decision_time.replace(tzinfo=timezone.utc)
@@ -272,18 +280,20 @@ def _certified_replacement_posterior_row(
             decision_iso,
         ),
     ).fetchone()
-    if readiness is None or str(readiness["status"] or "") != LIVE_REPLACEMENT_READY_STATUS:
-        return None
+    if readiness is None:
+        return refuse("readiness_missing")
+    if str(readiness["status"] or "") != LIVE_REPLACEMENT_READY_STATUS:
+        return refuse(f"readiness_status={readiness['status']}")
     expires_at = _parse_computed_at(readiness["expires_at"])
     if expires_at is None or expires_at <= decision_utc:
-        return None
+        return refuse(f"readiness_expired_at={readiness['expires_at']}")
     try:
         payload = json.loads(str(readiness["dependency_json"] or "{}"))
     except (TypeError, ValueError, json.JSONDecodeError):
-        return None
+        return refuse("readiness_dependency_json_invalid")
     dependencies = payload.get("dependencies") if isinstance(payload, Mapping) else None
     if not isinstance(dependencies, list):
-        return None
+        return refuse("readiness_dependencies_missing")
     matches = [
         item
         for item in dependencies
@@ -291,7 +301,7 @@ def _certified_replacement_posterior_row(
         and item.get("role") == "soft_anchor_posterior"
     ]
     if len(matches) != 1:
-        return None
+        return refuse(f"soft_anchor_posterior_count={len(matches)}")
     dependency = matches[0]
     if (
         dependency.get("source_id") != LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID
@@ -299,7 +309,7 @@ def _certified_replacement_posterior_row(
         or dependency.get("data_version") != data_version
         or dependency.get("status") != LIVE_REPLACEMENT_READY_STATUS
     ):
-        return None
+        return refuse("soft_anchor_posterior_identity_mismatch")
     available_at = _parse_computed_at(dependency.get("source_available_at"))
     posterior_id = dependency.get("posterior_id")
     if (
@@ -308,7 +318,7 @@ def _certified_replacement_posterior_row(
         or type(posterior_id) is not int
         or posterior_id <= 0
     ):
-        return None
+        return refuse("soft_anchor_posterior_not_causal")
 
     row = conn.execute(
         f"""
@@ -347,13 +357,13 @@ def _certified_replacement_posterior_row(
         ),
     ).fetchone()
     if row is None:
-        return None
+        return refuse(f"posterior_row_not_live_grade:posterior_id={posterior_id}")
     try:
         dependency_json = json.loads(str(row["dependency_source_run_ids_json"] or "{}"))
     except (TypeError, ValueError, json.JSONDecodeError):
-        return None
+        return refuse(f"posterior_dependencies_invalid:posterior_id={posterior_id}")
     if not isinstance(dependency_json, Mapping):
-        return None
+        return refuse(f"posterior_dependencies_invalid:posterior_id={posterior_id}")
     from src.data.replacement_forecast_bundle_reader import (
         _current_ensemble_snapshot_identity_reason,
     )
@@ -369,7 +379,7 @@ def _certified_replacement_posterior_row(
     except Exception:  # noqa: BLE001 — held belief is fail-closed on identity faults
         current_snapshot_reason = "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_FAULT"
     if current_snapshot_reason is not None:
-        return None
+        return refuse(f"{current_snapshot_reason}:posterior_id={posterior_id}")
     return row
 
 

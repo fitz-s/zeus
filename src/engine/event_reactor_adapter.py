@@ -41409,6 +41409,7 @@ def _prepare_current_global_probability_family(
     day0_observation_conn = observation_conn or forecast_conn
     day0_snapshot: Mapping[str, object] | None = None
     day0_base_identity = ""
+    causal_posterior_id: object | None = None
     provisional_day0_observation = False
     settlement_bound_day0_observation = False
     post_local_incomplete_monitor_authority = False
@@ -42172,8 +42173,13 @@ def _prepare_current_global_probability_family(
                 conditioning=conditioning,
                 observation_conn=day0_observation_conn,
                 decision_time=decision_time,
+                # Held redecision-only q has no action bundle, but readiness
+                # still names the source-clock posterior whose station-native
+                # final-extreme rows the remaining-path carrier must pin.
                 posterior_id=(
-                    bundle.posterior_id if bundle is not None else None
+                    bundle.posterior_id
+                    if bundle is not None
+                    else causal_posterior_id
                 ),
                 probability_base_identity=day0_base_identity,
                 # The same supporting-carrier exception must cross this second
@@ -50606,12 +50612,19 @@ def _day0_remaining_day_members(
                 "current_state_aligned_trajectory_unavailable"
             )
             return None
-        station_extremes = _pinned_station_extreme_providers_c(
-            conn=forecast_conn,
-            payload=payload,
-            family=family,
-            decision_time=decision_time,
-            represented_models=provider_models,
+        # After local close the extreme is physical history: the observed
+        # boundary, its survival and the pre-close tail decide it, so a
+        # final-daily forecast center is not a possible outcome component.
+        station_extremes = (
+            ()
+            if decision_time.astimezone(UTC) > target_end
+            else _pinned_station_extreme_providers_c(
+                conn=forecast_conn,
+                payload=payload,
+                family=family,
+                decision_time=decision_time,
+                represented_models=provider_models,
+            )
         )
         hourly_member_count = len(extremes_c)
         final_extremes_c = tuple(
