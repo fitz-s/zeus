@@ -34,7 +34,7 @@ import time
 
 import pytest
 
-from src.data.ecmwf_open_data import SOURCE_ID as ECMWF_SOURCE_ID
+from src.data.ecmwf_open_data import SOURCE_ID as ECMWF_SOURCE_ID, _forecast_track_for_profile
 from src.data.release_calendar import get_entry, cycle_profile_for_hour
 
 
@@ -124,6 +124,10 @@ def _held_revision_coverage(conn, track: str, *, now: datetime, cycle: datetime,
         """
     )
     old_identity = daemon._forecast_work_identity_for_cycle(track, cycle_time=cycle, now_utc=now)
+    forecast_track = _forecast_track_for_profile(
+        ingest_track=track,
+        horizon_profile=old_identity["release_calendar_key"].rsplit(":", 1)[-1],
+    )
     old_version = coordinate_bound_data_version(
         ECMWF_OPENDATA_HIGH_DATA_VERSION_V2 if metric == "high"
         else ECMWF_OPENDATA_LOW_DATA_VERSION_V2, "a" * 64,
@@ -134,7 +138,7 @@ def _held_revision_coverage(conn, track: str, *, now: datetime, cycle: datetime,
     )
     conn.execute(
         "INSERT INTO source_run VALUES (?, 'ecmwf_open_data', ?, ?, ?, 'SUCCESS', 'COMPLETE')",
-        (old_run_id, track, old_identity["release_calendar_key"], cycle.isoformat()),
+        (old_run_id, forecast_track, old_identity["release_calendar_key"], cycle.isoformat()),
     )
     conn.execute(
         """INSERT INTO source_run_coverage VALUES
@@ -143,10 +147,10 @@ def _held_revision_coverage(conn, track: str, *, now: datetime, cycle: datetime,
          'LIVE_ELIGIBLE', ?, '2026-09-26T16:00:00+00:00',
          '2026-09-27T16:00:00+00:00')""",
         (old_run_id, old_version, old_identity["release_calendar_key"], target, metric,
-         track, (now + timedelta(hours=5)).isoformat()),
+         forecast_track, (now + timedelta(hours=5)).isoformat()),
     )
     _insert_job_run(conn, old_identity, status="SUCCESS", recorded_at=now - timedelta(hours=1), job_run_id="old-v2-success")
-    return {"source_run_id": old_run_id, "metric": metric}
+    return {"source_run_id": old_run_id, "metric": metric, "forecast_track": forecast_track}
 
 
 @pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
@@ -337,19 +341,19 @@ def test_migration_prelock_failure_does_not_permanently_suppress_held_turn(
     assert calls[0]["_identity"] == migration
 
 
-@pytest.mark.parametrize("bad_field", ("lock_acquired_at", "finished_at"))
-def test_malformed_migration_collector_clock_cannot_order_a_turn(monkeypatch, bad_field):
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+@pytest.mark.parametrize("bad_field", ("lock_acquired_at", "finished_at", "inverted"))
+def test_malformed_migration_collector_clock_cannot_suppress_held_turn(monkeypatch, track, bad_field):
     from src.ingest import forecast_live_daemon as daemon
     from src.data import replacement_forecast_seed_discovery as discovery
 
     now = datetime(2026, 9, 27, 12, 46, tzinfo=timezone.utc)
-    track = "mx2t6_high"
     conn = _job_run_conn()
-    _held_revision_coverage(
+    old = _held_revision_coverage(
         conn, track, now=now, cycle=datetime(2026, 9, 26, 12, tzinfo=timezone.utc),
     )
     monkeypatch.setattr(discovery, "held_position_family_priorities", lambda **_: {
-        ("Hong Kong", "2026-09-27", "high"): 0,
+        ("Hong Kong", "2026-09-27", old["metric"]): 0,
     })
     newest = daemon._forecast_work_identity(track, now_utc=now)
     _insert_job_run(conn, newest, status="FAILED", recorded_at=now - timedelta(seconds=5))
@@ -359,10 +363,17 @@ def test_malformed_migration_collector_clock_cannot_order_a_turn(monkeypatch, ba
     _insert_job_run(
         conn, migration, status="FAILED", recorded_at=now - timedelta(seconds=61),
     )
-    conn.execute(
-        f"UPDATE job_run SET {bad_field} = 'not-a-clock' WHERE job_run_id = ?",
-        (daemon._job_run_id(migration),),
-    )
+    if bad_field == "inverted":
+        conn.execute(
+            "UPDATE job_run SET lock_acquired_at = ?, finished_at = ? WHERE job_run_id = ?",
+            ((now - timedelta(seconds=60)).isoformat(),
+             (now - timedelta(seconds=61)).isoformat(), daemon._job_run_id(migration)),
+        )
+    else:
+        conn.execute(
+            f"UPDATE job_run SET {bad_field} = 'not-a-clock' WHERE job_run_id = ?",
+            (daemon._job_run_id(migration),),
+        )
     calls: list[dict] = []
     monkeypatch.setattr(
         daemon, "run_opendata_track",
@@ -373,7 +384,38 @@ def test_malformed_migration_collector_clock_cannot_order_a_turn(monkeypatch, ba
         _poll_deadline_monotonic=time.monotonic() + 10,
     )
     assert len(calls) == 1
-    assert "_identity" not in calls[0]
+    assert calls[0]["_identity"] == migration
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+def test_held_revision_migration_uses_actual_short_profile_track(monkeypatch, track):
+    from src.ingest import forecast_live_daemon as daemon
+    from src.data import replacement_forecast_seed_discovery as discovery
+
+    now = datetime(2026, 9, 27, 11, 30, tzinfo=timezone.utc)
+    conn = _job_run_conn()
+    old = _held_revision_coverage(
+        conn, track, now=now, cycle=datetime(2026, 9, 26, 6, tzinfo=timezone.utc),
+    )
+    assert old["forecast_track"] == f"{track}_short_horizon"
+    monkeypatch.setattr(discovery, "held_position_family_priorities", lambda **_: {
+        ("Hong Kong", "2026-09-27", old["metric"]): 0,
+    })
+    migration, _ = daemon._held_revision_migration_identity(
+        conn, track=track, now_utc=now, deadline_monotonic=time.monotonic() + 10,
+    )
+    assert migration["scheduled_for"] == datetime(2026, 9, 26, 6, tzinfo=timezone.utc)
+    conn.execute(
+        "UPDATE source_run SET track = ? WHERE source_run_id = ?",
+        (f"{track}_full_horizon", old["source_run_id"]),
+    )
+    conn.execute(
+        "UPDATE source_run_coverage SET track = ? WHERE source_run_id = ?",
+        (f"{track}_full_horizon", old["source_run_id"]),
+    )
+    assert daemon._held_revision_migration_identity(
+        conn, track=track, now_utc=now, deadline_monotonic=time.monotonic() + 10,
+    ) is None  # A short release key cannot certify a falsely full-marked source.
 
 
 @pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
@@ -475,7 +517,7 @@ def test_held_revision_migration_requires_current_complete_proof_and_cools_failu
     assert daemon._held_revision_migration_identity(conn, track=track, now_utc=now,
         deadline_monotonic=time.monotonic() + 10) is not None
     conn.execute("INSERT INTO source_run VALUES (?, 'ecmwf_open_data', ?, ?, ?, 'SUCCESS', 'COMPLETE')",
-        (daemon._expected_source_run_id(candidate), track, candidate["release_calendar_key"], old_cycle.isoformat()))
+        (daemon._expected_source_run_id(candidate), old["forecast_track"], candidate["release_calendar_key"], old_cycle.isoformat()))
     conn.execute(
         """INSERT INTO source_run_coverage VALUES
         (?, ?, ?, 'HONG_KONG', 'Hong Kong', 'Asia/Hong_Kong', '2026-09-27', ?, ?,
@@ -483,7 +525,7 @@ def test_held_revision_migration_requires_current_complete_proof_and_cools_failu
          'LIVE_ELIGIBLE', ?, '2026-09-26T16:00:00+00:00',
          '2026-09-27T16:00:00+00:00')""",
         (daemon._expected_source_run_id(candidate), candidate["data_version"],
-         candidate["release_calendar_key"], old["metric"], track,
+         candidate["release_calendar_key"], old["metric"], old["forecast_track"],
          (now + timedelta(hours=5)).isoformat()),
     )
     conn.execute(

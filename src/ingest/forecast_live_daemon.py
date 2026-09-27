@@ -660,7 +660,7 @@ def _held_revision_migration_identity(
         opendata_source_run_revision_suffix,
         split_coordinate_bound_data_version,
     )
-    from src.data.ecmwf_open_data import STEP_HOURS
+    from src.data.ecmwf_open_data import STEP_HOURS, _forecast_track_for_profile
     from src.data.forecast_fetch_plan import metric_for_track
     from src.data.forecast_target_contract import (
         build_forecast_target_scope,
@@ -694,7 +694,7 @@ def _held_revision_migration_identity(
             rows = conn.execute(
                 """
                 SELECT coverage.source_run_id, coverage.data_version,
-                       coverage.city_id, coverage.city_timezone,
+                       coverage.city_id, coverage.city_timezone, coverage.track AS forecast_track,
                        coverage.release_calendar_key, source.release_calendar_key AS source_release_key,
                        coverage.target_window_start_utc, coverage.target_window_end_utc,
                        source.source_cycle_time
@@ -702,7 +702,7 @@ def _held_revision_migration_identity(
                   JOIN source_run source ON source.source_run_id = coverage.source_run_id
                  WHERE coverage.city_id = ? AND coverage.city_timezone = ?
                    AND coverage.city = ? AND coverage.target_local_date = ?
-                   AND coverage.temperature_metric = ? AND coverage.track = ?
+                   AND coverage.temperature_metric = ? AND coverage.track IN (?, ?)
                    AND coverage.source_id = 'ecmwf_open_data'
                    AND coverage.source_transport = 'ensemble_snapshots_db_reader'
                    AND coverage.completeness_status = 'COMPLETE'
@@ -715,7 +715,9 @@ def _held_revision_migration_identity(
                    AND source.completeness_status IN ('COMPLETE', 'PARTIAL')
                  ORDER BY source.source_cycle_time DESC LIMIT 8
                 """,
-                (city_id, city.timezone, city_name, target_date, metric, track,
+                (city_id, city.timezone, city_name, target_date, metric,
+                 _forecast_track_for_profile(ingest_track=track, horizon_profile="full"),
+                 _forecast_track_for_profile(ingest_track=track, horizon_profile="short"),
                  now_utc.isoformat()),
             ).fetchall()
         except Exception as exc:  # noqa: BLE001 - missing authority is not a cycle
@@ -740,8 +742,13 @@ def _held_revision_migration_identity(
             identity = _forecast_work_identity_for_cycle(
                 track, cycle_time=cycle, now_utc=now_utc
             )
+            forecast_track = _forecast_track_for_profile(
+                ingest_track=track,
+                horizon_profile=str(identity["release_calendar_key"]).rsplit(":", 1)[-1],
+            )
             if (
                 identity["decision"] is not FetchDecision.FETCH_ALLOWED
+                or row["forecast_track"] != forecast_track
                 or row["release_calendar_key"] != identity["release_calendar_key"]
                 or row["source_release_key"] != identity["release_calendar_key"]
             ):
@@ -790,7 +797,7 @@ def _held_revision_migration_identity(
                            ) AS scope_complete
                       FROM job_run job WHERE job.job_run_id = ?
                     """,
-                    (expected_run_id, str(identity["source_id"]), track, city_name,
+                    (expected_run_id, str(identity["source_id"]), forecast_track, city_name,
                      target_date, metric, str(identity["data_version"]),
                      now_utc.isoformat(), _job_run_id(identity)),
                 ).fetchone()
@@ -1251,16 +1258,15 @@ def _run_opendata_track_if_due(
             if row is not None and str(row["status"]).upper() in {
                 "SUCCESS", "PARTIAL", "FAILED",
             }:
-                if row["lock_acquired_at"] is not None:
-                    acquired_at = _parse_utc_timestamp(row["lock_acquired_at"])
-                    migrated_at = _parse_utc_timestamp(row["finished_at"])
-                    if (
-                        acquired_at is None or migrated_at is None
-                        or migrated_at < acquired_at
-                        or migrated_at >= newest_attempted_at
-                    ):
-                        return None
-                # A terminal pre-lock error has no collector attempt to rank.
+                acquired_at = _parse_utc_timestamp(row["lock_acquired_at"])
+                migrated_at = _parse_utc_timestamp(row["finished_at"])
+                if (
+                    acquired_at is not None and migrated_at is not None
+                    and migrated_at >= acquired_at
+                    and migrated_at >= newest_attempted_at
+                ):
+                    return None
+                # Invalid or missing collector clocks cannot order a turn.
                 # The candidate still needs its own release/window/coverage
                 # proof from _held_revision_migration_identity above.
         result = run_opendata_track(
