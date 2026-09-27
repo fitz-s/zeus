@@ -57,6 +57,7 @@ _RESERVATION_TTL = timedelta(minutes=5)
 _DAY0_HOURLY_VECTOR_SOURCE = "day0_hourly_vectors"
 _DAY0_CAUSAL_BUNDLE_SOURCE = "day0_causal_evidence_bundle"
 _DAY0_CURRENT_TEMPERATURE_SOURCE = "day0_current_temperature_state"
+_PARTIAL_CURRENT_PROPOSAL_REVISION = "source_clock_partial_current_precision_fusion_v1"
 
 
 def _capturable_current_temperature_state(
@@ -361,6 +362,7 @@ def _latest_posterior_inputs(
     dict[str, object] | None,
     bool,
     bool,
+    Mapping[str, object],
 ]:
     """Return cycle, provider inputs, and committed Day0/source-clock state."""
     try:
@@ -375,14 +377,14 @@ def _latest_posterior_inputs(
             (SOURCE_ID, city, target_date, metric),
         ).fetchone()
     except Exception:
-        return None, frozenset(), {}, frozenset(), frozenset(), None, (), False, False, None, False, False
+        return None, frozenset(), {}, frozenset(), frozenset(), None, (), False, False, None, False, False, {}
     if row is None:
-        return None, frozenset(), {}, frozenset(), frozenset(), None, (), False, False, None, False, False
+        return None, frozenset(), {}, frozenset(), frozenset(), None, (), False, False, None, False, False, {}
     source_cycle_iso = str(row[0]) if row[0] is not None else None
     try:
         prov = json.loads(row[1]) if row[1] else {}
     except Exception:
-        return source_cycle_iso, frozenset(), {}, frozenset(), frozenset(), None, (), False, False, None, False, False
+        return source_cycle_iso, frozenset(), {}, frozenset(), frozenset(), None, (), False, False, None, False, False, {}
     fusion = prov.get("bayes_precision_fusion", {}) or {}
     used = fusion.get("used_models") or []
     if not isinstance(used, (list, tuple)):
@@ -445,7 +447,79 @@ def _latest_posterior_inputs(
             and prov["day0_provisional_observation"].get("source")
             == "wu_api+same_station_fast_tail"
         ),
+        source_clock if isinstance(source_clock, Mapping) else {},
     )
+
+
+def _legacy_partial_current_proposal_needs_recompute(
+    conn: sqlite3.Connection,
+    *,
+    scheme: Mapping[str, object],
+    capturable_inputs: Mapping[str, int],
+    city: str,
+    target_date: str,
+    metric: str,
+    decision_time: datetime | None,
+) -> bool:
+    """Prove the old partial fixed proposal can now use the typed current route."""
+    if decision_time is None or scheme.get("renormalized") is not True or scheme.get("fallback_reason"):
+        return False
+    configured = scheme.get("configured_sources")
+    missing = scheme.get("missing_sources")
+    if not isinstance(configured, (list, tuple)) or not isinstance(missing, (list, tuple)):
+        return False
+    sources = tuple(str(source) for source in configured)
+    absent = tuple(str(source) for source in missing)
+    current = set(sources) & set(capturable_inputs)
+    if (
+        len(sources) < 3 or len(set(sources)) != len(sources)
+        or not absent or len(set(absent)) != len(absent)
+        or set(absent) != set(sources) - current
+    ):
+        return False
+    try:
+        from src.config import runtime_cities_by_name
+        from src.data.forecast_source_registry import SOURCES, source_allows_role
+        from src.data.replacement_current_value_serving import read_freshest_coherent_instrument_values
+        from src.data.replacement_forecast_materializer import (
+            BETWEEN_COHORT_WINDOW_HOURS,
+            _bayes_precision_fusion_city_local_lead_days,
+            _registered_source_clock_entry_ineligible,
+        )
+        from src.forecast.model_selection import source_physically_eligible
+        from src.strategy.live_inference.source_clock_vnext import provider_family_for_source
+
+        config = runtime_cities_by_name()[city]
+        lead = _bayes_precision_fusion_city_local_lead_days(
+            computed_at=decision_time.astimezone(UTC),
+            target_local_date=datetime.fromisoformat(target_date).date(),
+            tz_name=str(config.timezone),
+        )
+        if _registered_source_clock_entry_ineligible(sources) or not all(
+            source_physically_eligible(source, lat=float(config.lat), lon=float(config.lon), lead_days=lead)
+            and (
+                not source.startswith(("cwa_", "hko_"))
+                or (
+                    (spec := SOURCES.get(source)) is not None
+                    and spec.tier != "disabled" and spec.enabled_by_default
+                    and spec.degradation_level == "OK"
+                    and source_allows_role(spec, "entry_primary")
+                )
+            )
+            for source in sources
+        ):
+            return False
+        coherent = read_freshest_coherent_instrument_values(
+            conn, city=city, metric=metric, target_date=target_date,
+            decision_time_iso=decision_time.astimezone(UTC).isoformat(),
+            models=sources, cohort_window_hours=BETWEEN_COHORT_WINDOW_HOURS,
+        )
+        return (
+            len({provider_family_for_source(source) for source in current}) >= 2
+            and len({provider_family_for_source(source) for source in current & set(coherent)}) >= 2
+        )
+    except (AttributeError, KeyError, OverflowError, TypeError, ValueError, sqlite3.Error):
+        return False
 
 
 def _retired_or_nonentry_used_sources(used_models: Sequence[str]) -> tuple[str, ...]:
@@ -535,6 +609,7 @@ def scope_capture_offers_larger_provider_set(
         consumed_current_temperature_state,
         consumed_current_temperature_carrier,
         legacy_wu_fast_residual,
+        source_clock_scheme,
     ) = _latest_posterior_inputs(conn, city=city, target_date=target_date, metric=metric)
     if source_cycle_iso is None:
         return {
@@ -622,6 +697,15 @@ def scope_capture_offers_larger_provider_set(
         if source not in changed_revisions:
             changed_inputs.append(source)
             changed_revisions[source] = "RETIRED_NON_ENTRY"
+    if requested_sources is None and _legacy_partial_current_proposal_needs_recompute(
+        conn, scheme=source_clock_scheme, capturable_inputs=capturable_inputs,
+        city=city, target_date=target_date, metric=metric,
+        decision_time=decision_time,
+    ):
+        changed_inputs.append(_PARTIAL_CURRENT_PROPOSAL_REVISION)
+        changed_revisions[_PARTIAL_CURRENT_PROPOSAL_REVISION] = (
+            _PARTIAL_CURRENT_PROPOSAL_REVISION
+        )
     changed_inputs.sort()
     day0_revision_requested = (
         requested_sources is None

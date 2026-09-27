@@ -229,6 +229,112 @@ def test_source_clock_scheme_excludes_possessed_unselected_family() -> None:
     assert verdict["new_families"] == []
 
 
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_old_partial_fixed_scheme_same_raw_reseeds_once_through_fusion_authority(
+    metric: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _DecisionClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 9, 27, 19, tzinfo=UTC)
+
+    monkeypatch.setattr(queue, "datetime", _DecisionClock)
+    conn = _conn()
+    city, target = "Los Angeles", "2026-09-29"
+    cycle = "2026-09-27T18:00:00+00:00"
+    configured = [_NCEP, _DWD, _UKMO]
+    _insert_single_runs(
+        conn, city=city, target_date=target, metric=metric,
+        cycle_iso=cycle, models=[_DWD, _UKMO],
+    )
+    conn.execute(
+        "UPDATE raw_model_forecasts SET lead_days=2 WHERE city=? AND target_date=? AND metric=?",
+        (city, target, metric),
+    )
+    ids = dict(conn.execute(
+        "SELECT model, raw_model_forecast_id FROM raw_model_forecasts WHERE city=? AND target_date=? AND metric=?",
+        (city, target, metric),
+    ).fetchall())
+    _insert_posterior(
+        conn, city=city, target_date=target, metric=metric, cycle_iso=cycle,
+        used_models=[_DWD, _UKMO], current_value_ids=ids,
+        configured_sources=configured, computed_at="2026-09-27T18:50:00+00:00",
+    )
+    old = {"configured_sources": configured, "missing_sources": [_NCEP], "renormalized": True}
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json=? WHERE city=? AND target_date=? AND temperature_metric=?",
+        (json.dumps({"bayes_precision_fusion": {
+            "used_models": [_DWD, _UKMO],
+            "current_value_serving": {model: {"raw_model_forecast_id": raw_id} for model, raw_id in ids.items()},
+            "source_clock_one_scheme": old,
+        }}), city, target, metric),
+    )
+    kwargs = dict(city=city, target_date=target, metric=metric,
+                  decision_time=datetime(2026, 9, 27, 19, tzinfo=UTC))
+    verdict = scope_capture_offers_larger_provider_set(conn, **kwargs)
+    assert verdict["input_revision_changed"] is True
+    assert verdict["changed_input_revisions"] == {
+        trigger._PARTIAL_CURRENT_PROPOSAL_REVISION: trigger._PARTIAL_CURRENT_PROPOSAL_REVISION,
+    }
+    assert verdict["family_upgrade"] is False
+    assert queue._instrument_set_expansion_already_applied(
+        forecast_db="unused-with-provided-connection", payload={"upgrade_trigger": "instrument_set_expansion",
+                                  "city": city, "target_date": target,
+                                  "temperature_metric": metric, "source_cycle_time": cycle},
+        forecast_conn=conn,
+    ) is False
+
+    old["fallback_reason"] = "configured_current_provider_set_incomplete"
+    old["fallback_to"] = "current_precision_fusion"
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json=? WHERE city=? AND target_date=? AND temperature_metric=?",
+        (json.dumps({"bayes_precision_fusion": {
+            "used_models": [_DWD, _UKMO],
+            "current_value_serving": {model: {"raw_model_forecast_id": raw_id} for model, raw_id in ids.items()},
+            "source_clock_one_scheme": old,
+        }}), city, target, metric),
+    )
+    reset = scope_capture_offers_larger_provider_set(conn, **kwargs)
+    assert reset["is_upgrade"] is False
+    assert queue._instrument_set_expansion_already_applied(
+        forecast_db="unused-with-provided-connection", payload={"upgrade_trigger": "instrument_set_expansion",
+                                  "city": city, "target_date": target,
+                                  "temperature_metric": metric, "source_cycle_time": cycle},
+        forecast_conn=conn,
+    ) is True
+
+    old.pop("fallback_reason")
+    old.pop("fallback_to")
+    old["renormalized"] = False
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json=? WHERE city=? AND target_date=? AND temperature_metric=?",
+        (json.dumps({"bayes_precision_fusion": {
+            "used_models": [_DWD, _UKMO],
+            "current_value_serving": {model: {"raw_model_forecast_id": raw_id} for model, raw_id in ids.items()},
+            "source_clock_one_scheme": old,
+        }}),
+         city, target, metric),
+    )
+    assert scope_capture_offers_larger_provider_set(conn, **kwargs)["is_upgrade"] is False
+
+    old["renormalized"] = True
+    future = "2026-10-02"  # HRRR is outside its lead-two horizon.
+    conn.execute(
+        "UPDATE raw_model_forecasts SET target_date=? WHERE city=? AND target_date=? AND metric=?",
+        (future, city, target, metric),
+    )
+    conn.execute(
+        "UPDATE forecast_posteriors SET target_date=?, provenance_json=? WHERE city=? AND target_date=? AND temperature_metric=?",
+        (future, json.dumps({"bayes_precision_fusion": {
+            "used_models": [_DWD, _UKMO],
+            "current_value_serving": {model: {"raw_model_forecast_id": raw_id} for model, raw_id in ids.items()},
+            "source_clock_one_scheme": old,
+        }}), city, target, metric),
+    )
+    kwargs["target_date"] = future
+    assert scope_capture_offers_larger_provider_set(conn, **kwargs)["is_upgrade"] is False
+
+
 def test_same_provider_family_new_raw_revision_signals_upgrade() -> None:
     """A source-clock value revision changes q even when the provider-family set is unchanged."""
     conn = _conn()
