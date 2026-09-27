@@ -17710,7 +17710,9 @@ def test_family_delta_cache_keeps_full_current_q_and_expires_oldest_book(
         era._store_global_book_epoch(
             trade,
             cached_probabilities,
-            epoch(cached_probabilities, "base", max_age=_dt.timedelta(seconds=1)),
+            # The base cut must outlive this solve/JIT work budget to be
+            # reusable as Miami's sibling book during the Dallas delta.
+            epoch(cached_probabilities, "base", max_age=_dt.timedelta(seconds=180)),
             checked_at=Clock.current,
         )
         == "stored"
@@ -17823,7 +17825,7 @@ def test_family_delta_cache_keeps_full_current_q_and_expires_oldest_book(
 
     # The merged epoch keeps the base cut's earliest expiry.  Once it expires,
     # the provider must recapture both current families instead of reusing Miami.
-    Clock.current += _dt.timedelta(seconds=2)
+    Clock.current += _dt.timedelta(seconds=181)
     refreshed_probabilities, refreshed_epoch = provider(
         current_probabilities,
         Clock.current,
