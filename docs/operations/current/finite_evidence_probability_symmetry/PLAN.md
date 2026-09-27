@@ -384,9 +384,15 @@ Status: active
   source chain: the removed optional acquisition flag is not reinstated. The
   expensive-plan deadline test pins its decision date so an ended fixture
   cannot skip the SQL it intends to test; no production timeout was relaxed.
-- Rollout must be staged after code acceptance: typed control-plane entry
-  pause (held monitoring continues), forecast-live current-code restart and
-  exact v3/v5 source verification, then full controlled restart and live proof.
+- Rollout must occur after code acceptance through the standard
+  `deploy_live.py restart all` invocation-scoped restart guard. That existing
+  guard preserves another operator's pause and edge/strategy overrides, reloads
+  prerequisites while the old main keeps monitoring, and requires warm
+  preflight before main handoff. Do not issue a separate manual pause/resume:
+  ordinary `resume` also expires the independent edge-threshold override.
+  If source migration is not yet ready, preserve the refused preflight evidence,
+  verify actual v3/v5 source drainage and rerun the standard deployment; never
+  bypass preflight or count sidecar reload as successful main deployment.
   Five older ended HK positions cannot use the unfinished-day migration.
   Without verified settlement/final daily evidence/explicit venue closure,
   they remain belief ENTRY_BLOCK while monitoring continues; that condition
