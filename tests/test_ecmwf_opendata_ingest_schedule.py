@@ -93,7 +93,10 @@ def _insert_job_run(conn: sqlite3.Connection, identity: dict, *, status: str, re
     conn.commit()
 
 
-def _held_revision_coverage(conn, track: str, *, now: datetime, cycle: datetime, target: str = "2026-09-27") -> dict:
+def _held_revision_coverage(
+    conn, track: str, *, now: datetime, cycle: datetime,
+    target: str = "2026-09-27", city_name: str = "Hong Kong",
+) -> dict:
     from src.contracts.ensemble_snapshot_provenance import (
         ECMWF_OPENDATA_HIGH_DATA_VERSION_V2,
         ECMWF_OPENDATA_LOW_DATA_VERSION_V2,
@@ -101,16 +104,22 @@ def _held_revision_coverage(conn, track: str, *, now: datetime, cycle: datetime,
         opendata_source_run_revision_suffix,
     )
     from src.ingest import forecast_live_daemon as daemon
+    from src.config import runtime_cities_by_name
+    from src.data.forecast_target_contract import compute_target_local_day_window_utc
 
     metric = "high" if track == "mx2t6_high" else "low"
+    city = runtime_cities_by_name()[city_name]
+    window = compute_target_local_day_window_utc(
+        city_timezone=city.timezone, target_local_date=datetime.fromisoformat(target).date(),
+    )
     conn.executescript(
         """
-        CREATE TABLE source_run (
+        CREATE TABLE IF NOT EXISTS source_run (
             source_run_id TEXT, source_id TEXT, track TEXT, release_calendar_key TEXT,
             source_cycle_time TEXT,
             status TEXT, completeness_status TEXT
         );
-        CREATE TABLE source_run_coverage (
+        CREATE TABLE IF NOT EXISTS source_run_coverage (
             source_run_id TEXT, data_version TEXT, release_calendar_key TEXT,
             city_id TEXT, city TEXT,
             city_timezone TEXT, target_local_date TEXT, temperature_metric TEXT,
@@ -118,7 +127,7 @@ def _held_revision_coverage(conn, track: str, *, now: datetime, cycle: datetime,
             completeness_status TEXT, readiness_status TEXT, expires_at TEXT,
             target_window_start_utc TEXT, target_window_end_utc TEXT
         );
-        CREATE INDEX idx_source_run_coverage_scope
+        CREATE INDEX IF NOT EXISTS idx_source_run_coverage_scope
             ON source_run_coverage(city_id, city_timezone, target_local_date,
                 temperature_metric, source_id, source_transport, data_version);
         """
@@ -142,12 +151,13 @@ def _held_revision_coverage(conn, track: str, *, now: datetime, cycle: datetime,
     )
     conn.execute(
         """INSERT INTO source_run_coverage VALUES
-        (?, ?, ?, 'HONG_KONG', 'Hong Kong', 'Asia/Hong_Kong', ?, ?, ?,
+        (?, ?, ?, ?, ?, ?, ?, ?, ?,
          'ecmwf_open_data', 'ensemble_snapshots_db_reader', 'COMPLETE',
-         'LIVE_ELIGIBLE', ?, '2026-09-26T16:00:00+00:00',
-         '2026-09-27T16:00:00+00:00')""",
-        (old_run_id, old_version, old_identity["release_calendar_key"], target, metric,
-         forecast_track, (now + timedelta(hours=5)).isoformat()),
+         'LIVE_ELIGIBLE', ?, ?, ?)""",
+        (old_run_id, old_version, old_identity["release_calendar_key"],
+         city.name.upper().replace(" ", "_"), city_name, city.timezone,
+         target, metric, forecast_track, (now + timedelta(hours=5)).isoformat(),
+         window.start_utc.isoformat(), window.end_utc.isoformat()),
     )
     _insert_job_run(conn, old_identity, status="SUCCESS", recorded_at=now - timedelta(hours=1), job_run_id="old-v2-success")
     return {"source_run_id": old_run_id, "metric": metric, "forecast_track": forecast_track}
@@ -416,6 +426,32 @@ def test_held_revision_migration_uses_actual_short_profile_track(monkeypatch, tr
     assert daemon._held_revision_migration_identity(
         conn, track=track, now_utc=now, deadline_monotonic=time.monotonic() + 10,
     ) is None  # A short release key cannot certify a falsely full-marked source.
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+def test_held_revision_migration_prioritizes_earlier_local_day_deadline(monkeypatch, track):
+    from src.ingest import forecast_live_daemon as daemon
+    from src.data import replacement_forecast_seed_discovery as discovery
+
+    now = datetime(2026, 9, 27, 12, 46, tzinfo=timezone.utc)
+    conn = _job_run_conn()
+    cape = _held_revision_coverage(
+        conn, track, now=now, cycle=datetime(2026, 9, 26, 18, tzinfo=timezone.utc),
+        city_name="Cape Town",
+    )
+    hong_kong = _held_revision_coverage(
+        conn, track, now=now, cycle=datetime(2026, 9, 26, 12, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(discovery, "held_position_family_priorities", lambda **_: {
+        ("Cape Town", "2026-09-27", cape["metric"]): 0,
+        ("Hong Kong", "2026-09-27", hong_kong["metric"]): 0,
+        ("Hong Kong", "invalid-date", hong_kong["metric"]): 0,
+    })
+    candidate, debt = daemon._held_revision_migration_identity(
+        conn, track=track, now_utc=now, deadline_monotonic=time.monotonic() + 10,
+    )
+    assert debt["city"] == "Hong Kong"  # Ends at 16Z; Cape Town at 22Z.
+    assert candidate["scheduled_for"] == datetime(2026, 9, 26, 12, tzinfo=timezone.utc)
 
 
 @pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))

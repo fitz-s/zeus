@@ -664,6 +664,7 @@ def _held_revision_migration_identity(
     from src.data.forecast_fetch_plan import metric_for_track
     from src.data.forecast_target_contract import (
         build_forecast_target_scope,
+        compute_target_local_day_window_utc,
         evaluate_horizon_coverage,
     )
     from src.data.release_calendar import FetchDecision
@@ -681,11 +682,20 @@ def _held_revision_migration_identity(
         if metric == "high" else ECMWF_OPENDATA_LOW_DATA_VERSION_V2
     )
     city_config = runtime_cities_by_name()
-    for (city_name, target_date, held_metric), priority in sorted(
-        held.items(), key=lambda item: (item[1], item[0][1], item[0][0])
-    ):
+    candidates = []
+    for (city_name, target_date, held_metric), priority in held.items():
         if held_metric != metric or city_name not in city_config:
             continue
+        try:
+            target_day = datetime.fromisoformat(target_date).date()
+            target_end = compute_target_local_day_window_utc(
+                city_timezone=city_config[city_name].timezone,
+                target_local_date=target_day,
+            ).end_utc
+        except (TypeError, ValueError, KeyError):
+            continue
+        candidates.append((priority, target_date, target_end, city_name, target_day))
+    for _priority, target_date, _target_end, city_name, target_day in sorted(candidates):
         if time.monotonic() >= deadline_monotonic:
             return None
         city = city_config[city_name]
@@ -757,7 +767,7 @@ def _held_revision_migration_identity(
                 scope = build_forecast_target_scope(
                     city_id=city_id, city_name=city_name,
                     city_timezone=city.timezone,
-                    target_local_date=datetime.fromisoformat(target_date).date(),
+                    target_local_date=target_day,
                     temperature_metric=metric, source_cycle_time=cycle,
                     data_version=str(identity["data_version"]),
                 )
