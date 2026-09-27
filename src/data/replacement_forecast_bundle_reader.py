@@ -828,6 +828,7 @@ def _live_grade_provenance(
     row_map: Mapping[str, Any],
     *,
     authority_purpose: ReplacementForecastAuthorityPurpose,
+    parsed_provenance: Mapping[str, Any] | None = None,
 ) -> Mapping[str, Any] | None:
     """Return provenance only when it authorizes the named capital action."""
     if str(row_map.get("runtime_layer") or "") != LIVE_RUNTIME_LAYER:
@@ -836,7 +837,11 @@ def _live_grade_provenance(
         return None
     if not row_map.get("q_ucb_json"):
         return None
-    provenance = _json_mapping(row_map.get("provenance_json"), field_name="provenance_json")
+    provenance = (
+        parsed_provenance
+        if parsed_provenance is not None
+        else _json_mapping(row_map.get("provenance_json"), field_name="provenance_json")
+    )
     if _day0_carrier_identity_reason(provenance) is not None:
         return None
     precision_guard = provenance.get("openmeteo_precision_guard")
@@ -1267,6 +1272,7 @@ def read_replacement_forecast_bundle(
     provenance = _live_grade_provenance(
         row_map,
         authority_purpose=authority_purpose,
+        parsed_provenance=raw_provenance,
     )
     if provenance is None:
         return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE")

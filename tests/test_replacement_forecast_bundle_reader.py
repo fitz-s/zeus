@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-09-23
-# Lifecycle: created=2026-06-06; last_reviewed=2026-09-23; last_reused=2026-09-23
+# Last reused/audited: 2026-09-27
+# Lifecycle: created=2026-06-06; last_reviewed=2026-09-27; last_reused=2026-09-27
 # Purpose: Protect replacement posterior bundle reader no-bypass semantics.
 # Reuse: Run before wiring replacement posterior into executable forecast reader or event reactor.
 # Authority basis: Operator-directed live replacement forecast bundle reader semantics.
@@ -39,6 +39,9 @@ from src.contracts.ensemble_snapshot_provenance import (
     grid_surface_evidence_identity_hash,
 )
 from src.data.executable_forecast_reader import grid_surface_evidence_reason
+from src.data.replacement_forecast_source_run_identity import (
+    expected_replacement_dependency_identity_by_role,
+)
 from src.data.openmeteo_ecmwf_ifs9_anchor import (
     PRODUCT_ID as OPENMETEO_ANCHOR_PRODUCT_ID,
     SOURCE_ID as OPENMETEO_ANCHOR_SOURCE_ID,
@@ -1108,7 +1111,27 @@ def _insert_ensemble_snapshot(
     source_cycle_time: datetime,
     available_at: datetime,
 ) -> None:
+    from tests.test_replacement_forecast_materializer import _fixture_ens_surface_provenance
+
     source_run_id = f"ens-run-{snapshot_id}"
+    dataset_id = expected_replacement_dependency_identity_by_role("high")[
+        "baseline_b0"
+    ].data_version
+    assert dataset_id is not None
+    physical_quantity = "mx2t3_local_calendar_day_max"
+    surface = json.loads(
+        _fixture_ens_surface_provenance(cycle=source_cycle_time.isoformat())
+    )
+    surface["grid_surface_evidence"]["mask_source_fetched_at"] = (
+        source_cycle_time + timedelta(minutes=30)
+    ).isoformat()
+    assert grid_surface_evidence_reason({
+        "city": "Shanghai",
+        "dataset_id": dataset_id,
+        "source_cycle_time": source_cycle_time.isoformat(),
+        "source_available_at": available_at.isoformat(),
+        "provenance_json": surface,
+    }) is None
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS source_run (
@@ -1147,11 +1170,12 @@ def _insert_ensemble_snapshot(
             city_id, city_timezone, temperature_metric, physical_quantity,
             observation_field, dataset_id, expected_members, observed_members,
             completeness_status, partial_run, status
-        ) VALUES (?, 'ecmwf_open_data', 'mx2t6_high', 'ecmwf_open_data.mx2t6_high',
+        ) VALUES (?, 'ecmwf_open_data', 'mx2t6_high_full_horizon',
+                  'ecmwf_open_data:mx2t6_high:full_horizon',
                   'SCHEDULED_LIVE', 'SCHEDULED_LIVE', ?, ?, ?, ?, ?,
                   '2026-06-07', 'Shanghai', 'Asia/Shanghai', 'high',
-                  'daily_maximum_temperature', 'high_temp',
-                  'ecmwf_opendata_mx2t3_local_calendar_day_max', 51, 51,
+                  ?, 'high_temp',
+                  ?, 51, 51,
                   'COMPLETE', 0, 'SUCCESS')
         """,
         (
@@ -1161,6 +1185,8 @@ def _insert_ensemble_snapshot(
             available_at.isoformat(),
             available_at.isoformat(),
             available_at.isoformat(),
+            physical_quantity,
+            dataset_id,
         ),
     )
     conn.execute(
@@ -1171,22 +1197,79 @@ def _insert_ensemble_snapshot(
             fetch_time, lead_hours, members_json, model_version, dataset_id,
             causality_status, boundary_ambiguous, provenance_json, authority,
             members_unit, source_cycle_time, source_available_at,
-            contributes_to_target_extrema, source_run_id
+            contributes_to_target_extrema, source_run_id, source_id,
+            forecast_window_attribution_status
         ) VALUES (?, 'Shanghai', '2026-06-07', 'high', ?, ?, ?, ?, ?, 24.0,
-                  ?, 'ecmwf_ens', ?, 'OK', 0, '{}', 'VERIFIED', 'degC', ?, ?, 1, ?)
+                  ?, 'ecmwf_ens', ?, 'OK', 0, ?, 'VERIFIED', 'degC', ?, ?, 1, ?,
+                  'ecmwf_open_data', 'FULLY_INSIDE_TARGET_LOCAL_DAY')
         """,
         (
             snapshot_id,
-            "daily_maximum_temperature",
+            physical_quantity,
             "high_temp",
             source_cycle_time.isoformat(),
             available_at.isoformat(),
             available_at.isoformat(),
             json.dumps([30.0] * 51),
-            "ecmwf_opendata_mx2t3_local_calendar_day_max",
+            dataset_id,
+            json.dumps(surface),
             source_cycle_time.isoformat(),
             available_at.isoformat(),
             source_run_id,
+        ),
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS source_run_coverage (
+            coverage_id TEXT PRIMARY KEY,
+            source_run_id TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            release_calendar_key TEXT NOT NULL,
+            track TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_local_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            physical_quantity TEXT NOT NULL,
+            observation_field TEXT NOT NULL,
+            data_version TEXT NOT NULL,
+            expected_members INTEGER NOT NULL,
+            observed_members INTEGER NOT NULL,
+            expected_steps_json TEXT NOT NULL,
+            observed_steps_json TEXT NOT NULL,
+            snapshot_ids_json TEXT NOT NULL,
+            completeness_status TEXT NOT NULL,
+            readiness_status TEXT NOT NULL,
+            computed_at TEXT NOT NULL,
+            expires_at TEXT,
+            recorded_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO source_run_coverage (
+            coverage_id, source_run_id, source_id, release_calendar_key, track,
+            city, target_local_date, temperature_metric, physical_quantity,
+            observation_field, data_version, expected_members,
+            observed_members, expected_steps_json, observed_steps_json,
+            snapshot_ids_json, completeness_status, readiness_status,
+            computed_at, expires_at, recorded_at
+        ) VALUES (
+            ?, ?, 'ecmwf_open_data', 'ecmwf_open_data:mx2t6_high:full_horizon',
+            'mx2t6_high_full_horizon', 'Shanghai', '2026-06-07', 'high',
+            ?, 'high_temp', ?, 51, 51,
+            '[0,3,6]', '[0,3,6]', ?, 'COMPLETE', 'LIVE_ELIGIBLE', ?, ?, ?
+        )
+        """,
+        (
+            f"coverage-{snapshot_id}",
+            source_run_id,
+            physical_quantity,
+            dataset_id,
+            json.dumps([snapshot_id]),
+            available_at.isoformat(),
+            (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+            available_at.isoformat(),
         ),
     )
 
@@ -1240,6 +1323,23 @@ def test_live_reader_rejects_missing_grid_surface_identity(
     del shape["grid_surface_evidence_identity_hash"]
     row["provenance_json"] = json.dumps(provenance)
     assert reader._live_grade_provenance(row, authority_purpose=purpose) is None
+
+
+@pytest.mark.parametrize("raw_provenance", ('{"incomplete":', "[]"))
+def test_live_reader_does_not_accept_malformed_or_non_object_provenance(
+    raw_provenance: str,
+) -> None:
+    row = {
+        "runtime_layer": LIVE_RUNTIME_LAYER,
+        "q_lcb_json": '{"cold":0.1,"warm":0.7}',
+        "q_ucb_json": '{"cold":0.3,"warm":0.9}',
+        "provenance_json": raw_provenance,
+    }
+    with pytest.raises((ValueError, json.JSONDecodeError)):
+        reader._live_grade_provenance(
+            row,
+            authority_purpose=ReplacementForecastAuthorityPurpose.ENTRY,
+        )
 
 
 @pytest.mark.parametrize(
@@ -1415,6 +1515,15 @@ def _insert_posterior(
     training_allowed: int = 0,
     dependency_source_run_ids: dict[str, str] | None = None,
 ) -> int:
+    if conn.execute(
+        "SELECT 1 FROM ensemble_snapshots WHERE snapshot_id = 1"
+    ).fetchone() is None:
+        _insert_ensemble_snapshot(
+            conn,
+            snapshot_id=1,
+            source_cycle_time=_dt(0),
+            available_at=_dt(3),
+        )
     conn.execute(
         """
         INSERT INTO forecast_posteriors (
@@ -1513,13 +1622,110 @@ def test_live_input_hwm_blocks_posterior_when_newer_ensemble_cycle_is_available(
     assert "basis=current_ensemble_snapshot_superseded" in held.reason_code
 
 
+@pytest.mark.parametrize("newer_evidence", ("current", "retired", "missing_coverage"))
+def test_live_input_hwm_considers_only_newer_current_covered_ensemble(
+    newer_evidence: str,
+) -> None:
+    conn = _conn()
+    _insert_ensemble_snapshot(
+        conn, snapshot_id=1, source_cycle_time=_dt(0), available_at=_dt(1)
+    )
+    _insert_ensemble_snapshot(
+        conn, snapshot_id=2, source_cycle_time=_dt(2), available_at=_dt(3)
+    )
+    if newer_evidence == "retired":
+        retired = "ecmwf_opendata_mx2t3_local_calendar_day_max"
+        conn.execute(
+            "UPDATE ensemble_snapshots SET dataset_id = ? WHERE snapshot_id = 2",
+            (retired,),
+        )
+        conn.execute(
+            "UPDATE source_run SET dataset_id = ? WHERE source_run_id = 'ens-run-2'",
+            (retired,),
+        )
+    elif newer_evidence == "missing_coverage":
+        conn.execute(
+            "DELETE FROM source_run_coverage WHERE source_run_id = 'ens-run-2'"
+        )
+
+    reason = replacement_live_input_lag_reason(
+        conn,
+        city="Shanghai",
+        target_date="2026-06-07",
+        metric="high",
+        decision_time=_dt(4),
+        posterior_source_cycle_time=_dt(0),
+        posterior_computed_at=_dt(3, 5),
+        posterior_provenance=_live_provenance(),
+    )
+    assert (
+        reason is not None and "basis=current_ensemble_snapshot_superseded" in reason
+    ) is (newer_evidence == "current")
+
+    posterior_id = _insert_posterior(conn)
+    held = read_replacement_forecast_bundle(
+        conn,
+        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
+        readiness=_readiness(posterior_id=posterior_id),
+        city="Shanghai",
+        target_date="2026-06-07",
+        temperature_metric="high",
+        decision_time=_dt(4),
+        current_bin_topology_hash="topology-hash",
+        enforce_raw_input_hwm=True,
+        authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+    )
+    assert held.ok is (newer_evidence != "current")
+    if newer_evidence == "current":
+        assert "basis=current_ensemble_snapshot_superseded" in held.reason_code
+
+
+@pytest.mark.parametrize(
+    ("bound_evidence", "expected_reason"),
+    (
+        ("retired", "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_MISMATCH"),
+        ("missing_coverage", "REPLACEMENT_CURRENT_ENSEMBLE_SNAPSHOT_COVERAGE_BLOCKED"),
+    ),
+)
+def test_live_reader_does_not_serve_uncurrent_or_uncovered_bound_ensemble(
+    bound_evidence: str,
+    expected_reason: str,
+) -> None:
+    conn = _conn()
+    posterior_id = _insert_posterior(conn)
+    if bound_evidence == "retired":
+        conn.execute(
+            "UPDATE ensemble_snapshots SET dataset_id = ? WHERE snapshot_id = 1",
+            ("ecmwf_opendata_mx2t3_local_calendar_day_max",),
+        )
+    else:
+        conn.execute(
+            "DELETE FROM source_run_coverage WHERE source_run_id = 'ens-run-1'"
+        )
+    result = read_replacement_forecast_bundle(
+        conn,
+        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
+        readiness=_readiness(posterior_id=posterior_id),
+        city="Shanghai",
+        target_date="2026-06-07",
+        temperature_metric="high",
+        decision_time=_dt(4),
+        current_bin_topology_hash="topology-hash",
+        authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+    )
+    assert result.ok is False
+    assert result.reason_code == expected_reason
+
+
 def _readiness(*, posterior_id: int, baseline_run_id: str = "b0-run", posterior_available_at: datetime | None = None):
     dependencies = (
         ReplacementForecastDependency(
             role="baseline_b0",
             source_id="ecmwf_open_data",
             product_id="ecmwf_opendata_ifs_ens_0p25",
-            data_version="ecmwf_opendata_mx2t3_local_calendar_day_max",
+            data_version=expected_replacement_dependency_identity_by_role("high")[
+                "baseline_b0"
+            ].data_version,
             source_run_id=baseline_run_id,
             source_available_at=_dt(2),
         ),
