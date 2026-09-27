@@ -8,6 +8,19 @@ Status: active
 
 ### Concurrent conditional-HIGH integration acceptance
 
+- Concurrent `8bfbe1b53` landed on top of this repair while the genuine maker
+  command drains. Its JIT/book-cache and bounded-auction changes passed static
+  interaction review and 14 new reactor cases. A full solve-seam baseline
+  comparison nevertheless found one added failing node: the delta-cache test
+  gives the base book only one second of life yet expects reuse through a
+  longer work budget. Fixed 85f has 38 failures / 834 passes; combined 8bf plus
+  fast-family tests has 39 failures / 849 passes. Deployment remains paused.
+  Authorized antibody-only repair: preserve a genuinely long-lived cache's
+  partial-delta merge positive, then prove actual oldest-book expiry forces
+  full recapture. Retain the new insufficient-budget cache negative cases;
+  do not weaken production freshness or simply replace all expected q values.
+  Independent final review and zero-added-failure comparison remain required.
+
 - Both fixes landed at `85f20ca27`. The official 17:08:11 UTC rollout refused
   before stopping main: command `7ac3d0d2ce9547be` is a genuine partially
   matched Karachi Sep28 LOW BUY (8.83 requested, 1.69 confirmed, 7.14 remaining),
