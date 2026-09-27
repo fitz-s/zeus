@@ -2701,6 +2701,7 @@ def test_live_tick_terminal_fill_review_has_own_capital_deadline(monkeypatch):
     monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
     monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
     monkeypatch.setattr(command_recovery, "_identity_bound_rotation_slot", lambda: 0)
+    monkeypatch.setattr(command_recovery, "_terminal_fill_review_rotation_cursor", "")
     monkeypatch.setattr(
         command_recovery,
         "_bounded_authenticated_entry_trade_fact_candidates",
@@ -2748,6 +2749,19 @@ def test_live_tick_terminal_fill_review_has_own_capital_deadline(monkeypatch):
     assert summary["db_budget_deferred_at"] == (
         "review_required_matched_submit_trade_fact"
     )
+    # Even if the wall-clock rotation slot has not moved, a stayed/ambiguous
+    # first tranche must not starve the remaining exact review identities.
+    calls.clear()
+    now[0] = 0.0
+    next_summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    command_recovery._reconcile_passes_short_conn(
+        MagicMock(), next_summary, "2026-08-22T09:28:54+00:00",
+        scope="live_tick",
+    )
+    assert calls[:4] == [
+        ("authenticated_terminal_fill_review_fast", f"cmd-current-review-{index}")
+        for index in (4, 5, 0, 1)
+    ]
 
 
 def test_live_tick_terminal_filled_entry_projection_has_own_capital_deadline(
