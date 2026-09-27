@@ -4543,6 +4543,17 @@ def test_selected_ens_proof_is_required_for_identity_and_shape() -> None:
     assert selected.grid_surface_evidence_revision == "ecmwf_ens_land_cell_selection_v1"
     assert len(selected.grid_surface_evidence_identity_hash) == 64
     proof = json.loads(_fixture_ens_surface_provenance())
+    proof["grid_surface_evidence"]["mask_source_fetched_at"] = "2026-06-06T03:30:00+00:00"
+    conn.execute("UPDATE ensemble_snapshots SET provenance_json=? WHERE snapshot_id=101",
+                 (json.dumps(proof),))
+    assert read_current_evidence_snapshot_identity(conn, request, metric="high") is None
+    assert read_current_evidence_snapshot_id(conn, request, metric="high") is None
+    proof["grid_surface_evidence"]["mask_source_fetched_at"] = "2026-06-06T03:00:00+00:00"
+    conn.execute("UPDATE ensemble_snapshots SET provenance_json=? WHERE snapshot_id=101",
+                 (json.dumps(proof),))
+    assert read_current_evidence_snapshot_identity(conn, request, metric="high") is not None
+    assert read_current_evidence_snapshot_id(conn, request, metric="high") == 101
+    proof = json.loads(_fixture_ens_surface_provenance())
     proof["grid_surface_evidence"]["selected_land_fraction"] = 0.2
     conn.execute("UPDATE ensemble_snapshots SET provenance_json=? WHERE snapshot_id=101",
                  (json.dumps(proof),))
@@ -4579,6 +4590,11 @@ def test_materialized_shape_binds_verified_selected_ens_grid_hash() -> None:
     first = _read_current_evidence_shape(conn, request, **kwargs)
     assert first is not None
     assert first.grid_surface_evidence_revision == "ecmwf_ens_land_cell_selection_v1"
+    provenance = json.loads(_fixture_ens_surface_provenance())
+    provenance["grid_surface_evidence"]["mask_source_fetched_at"] = "2026-06-06T03:30:00+00:00"
+    conn.execute("UPDATE ensemble_snapshots SET provenance_json=? WHERE snapshot_id=101",
+                 (json.dumps(provenance),))
+    assert _read_current_evidence_shape(conn, request, **kwargs) is None
     provenance = json.loads(_fixture_ens_surface_provenance())
     provenance["grid_surface_evidence"]["mask_sha256"] = "c" * 64
     conn.execute("UPDATE ensemble_snapshots SET provenance_json=? WHERE snapshot_id=101",

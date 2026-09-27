@@ -3819,6 +3819,7 @@ def read_current_evidence_snapshot_identity(
         "city": row[1],
         "dataset_id": row[7],
         "source_cycle_time": row[3],
+        "source_available_at": row[4],
         "provenance_json": row[8],
     }
     if grid_surface_evidence_reason(surface_row) is not None:
