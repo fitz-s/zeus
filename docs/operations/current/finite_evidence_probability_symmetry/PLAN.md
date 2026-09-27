@@ -368,6 +368,29 @@ Status: active
   Without verified settlement/final daily evidence/explicit venue closure,
   they remain belief ENTRY_BLOCK while monitoring continues; that condition
   is not restart-blocking. No-bid alone is never proof of market closure.
+- Integration advanced without conflicts onto independent upstream 316d10e7e
+  (HIGH hourly ensemble acquisition). The earlier broad f97307fb2 run passed
+  2700 and failed 32, including 27 adjacent tests all independently reproduced
+  on unmodified 316d10e7e. Two apparently missing 51-member bundles were traced
+  to fixture fetch-clock omissions and unpinned historical clocks; actual fetch
+  writes both timestamps, and strict in-memory readback accepts 51/51 when the
+  required clocks are supplied. No production clock gate was weakened.
+- Fixed-head ac5cf9516 integration passed 2272 with six failures. Two retired
+  REQUIRED_FLAGS fixture references are now removed while Wilson and missing
+  lower/upper-bound rejection remains asserted. A load-sensitive recovery test
+  now permits typed venue deferral only after independently proving the exact
+  command is EXPIRED and original shares/cost preserved; it no longer demands
+  optional venue I/O after bounded local recovery. Production behavior is
+  unchanged by those test repairs.
+- Three legacy schema migration tests remain failed and are not relabeled
+  green: existing materializer/schema migration deletes NULL/non-live rows and
+  retains a legacy status column, contrary to those tests' expectations. This
+  task does not change or authorize that destructive legacy migration policy.
+  A 13:24 UTC read-only check of the active forecasts DB, explicitly using
+  idx_forecast_posteriors_runtime_layer_target, found no rows matching that
+  DELETE predicate; EXPLAIN confirms three covering-index searches. Existing
+  v4 and new v5 live rows are outside the deletion predicate. Preserve this
+  bounded current-state fact, not a general claim that legacy migration is safe.
 
 ## 2026-09-27 — recent Hong Kong exit-window recovery
 
