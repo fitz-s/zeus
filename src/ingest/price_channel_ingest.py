@@ -3834,18 +3834,37 @@ def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
                     deadline_ms=PRICE_CHANNEL_FILL_BRIDGE_DB_WRITE_LEASE_DEADLINE_MS,
                     max_hold_ms=PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS,
                     deadline_monotonic=deadline_monotonic, conn=bridge_conn,
-                ):
-                    bridge_conn.execute("BEGIN")
-                    repaired = _edli_repair_orphaned_command_link(
-                        bridge_conn, aggregate_id=aggregate_id,
-                        command_id=command_id, position_id=position_id, now=now,
+                ) as gate:
+                    # Opening the attached connection and acquiring both writers
+                    # must fit the original 250 ms admission bound. Once leased,
+                    # SQL has its separate existing 1000 ms max-hold budget.
+                    if time.monotonic() >= deadline_monotonic:
+                        raise TimeoutError("EDLI command-link writer admission expired")
+                    hold_deadline = (
+                        gate.lease.acquired_at
+                        + PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS / 1000.0
                     )
-                    bridge_conn.commit()
-                    if repaired:
-                        logger.warning(
-                            "EDLI confirmed fill command link and execution fact repaired: "
-                            "command_id=%s position_id=%s", command_id, position_id,
+                    bridge_conn.set_progress_handler(
+                        lambda: int(time.monotonic() >= hold_deadline), 1_000,
+                    )
+                    try:
+                        if time.monotonic() >= hold_deadline:
+                            raise TimeoutError("EDLI command-link writer hold elapsed before transaction")
+                        bridge_conn.execute("BEGIN")
+                        repaired = _edli_repair_orphaned_command_link(
+                            bridge_conn, aggregate_id=aggregate_id,
+                            command_id=command_id, position_id=position_id, now=now,
                         )
+                        if time.monotonic() >= hold_deadline:
+                            raise TimeoutError("EDLI command-link writer hold elapsed before commit")
+                        bridge_conn.commit()
+                        if repaired:
+                            logger.warning(
+                                "EDLI confirmed fill command link and execution fact repaired: "
+                                "command_id=%s position_id=%s", command_id, position_id,
+                            )
+                    finally:
+                        bridge_conn.set_progress_handler(None, 0)
             except Exception as exc:  # noqa: BLE001 - exact durable debt retries
                 if bridge_conn is not None:
                     bridge_conn.rollback()

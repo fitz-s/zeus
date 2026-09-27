@@ -40,7 +40,9 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import time
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -389,6 +391,7 @@ class TestDurableFillBridgeScan:
                 pass
 
             def __enter__(self):
+                self.lease = SimpleNamespace(acquired_at=time.monotonic())
                 return self
 
             def __exit__(self, *_args):
@@ -446,6 +449,7 @@ class TestDurableFillBridgeScan:
                 pass
 
             def __enter__(self):
+                self.lease = SimpleNamespace(acquired_at=time.monotonic())
                 return self
 
             def __exit__(self, *_args):
@@ -467,6 +471,123 @@ class TestDurableFillBridgeScan:
             assert attempts == ["command-a", "command-b", "command-a"]
             assert [result["scheduler_failed"] for result in results] == [True, False, True]
             assert fresh_limits == [lane.FILL_BRIDGE_WRITE_TRANCHES_PER_TICK - 1] * 3
+        finally:
+            lane._edli_orphaned_command_link_cursor = original_cursor
+
+    @pytest.mark.parametrize("expired_at_gate", [False, True])
+    def test_exact_link_admission_remains_250ms_but_hold_starts_at_lease(
+        self, monkeypatch, expired_at_gate,
+    ):
+        import src.ingest.price_channel_ingest as lane
+        import src.events.price_channel_redecision_router as router
+
+        conn = _make_conn()
+        position_id, command_id = _seed_interrupted_command_link(conn)
+        original_cursor = lane._edli_orphaned_command_link_cursor
+        original_repair = lane._edli_repair_orphaned_command_link
+        calls = []
+
+        def prepare(_opener, *, deadline_monotonic):
+            conn.set_progress_handler(
+                lambda: int(time.monotonic() >= deadline_monotonic), 1_000,
+            )
+            return conn
+
+        class Writer:
+            def __init__(self, *, deadline_monotonic, **_kwargs):
+                self.deadline = deadline_monotonic
+
+            def __enter__(self):
+                until = self.deadline + (0.002 if expired_at_gate else -0.012)
+                time.sleep(max(0.0, until - time.monotonic()))
+                self.lease = SimpleNamespace(acquired_at=time.monotonic())
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        def repair(c, **kwargs):
+            calls.append(kwargs["command_id"])
+            time.sleep(0.025)  # Would exceed the stale admission progress deadline.
+            return original_repair(c, **kwargs)
+
+        monkeypatch.setattr(lane, "_edli_trade_fact_bridge_candidates_read_only", lambda: ((), (), ()))
+        monkeypatch.setattr(lane, "_edli_orphaned_command_link_candidates_read_only",
+                            lambda *, limit, after_command_id=None: (
+                                ("evt-link-retry:intent-link-retry", command_id, position_id),
+                            ))
+        monkeypatch.setattr(lane, "_edli_durable_fill_bridge_candidate_ids_read_only",
+                            lambda *, limit: ())
+        monkeypatch.setattr(lane, "_prepare_fill_bridge_write_connection", prepare)
+        monkeypatch.setattr(lane, "_bound_fill_bridge_sqlite_wait_remaining", lambda *_a, **_k: None)
+        monkeypatch.setattr(lane, "_PriceChannelWriteGate", Writer)
+        monkeypatch.setattr(lane, "_edli_repair_orphaned_command_link", repair)
+        monkeypatch.setattr(lane, "_close_fill_bridge_write_connection",
+                            lambda c: c.set_progress_handler(None, 0))
+        monkeypatch.setattr(router, "_edli_position_fill_redecision_cycle", lambda: 0)
+        try:
+            lane._edli_orphaned_command_link_cursor = ""
+            result = lane._edli_fill_bridge_repair_cycle()
+            fact_count = conn.execute(
+                "SELECT COUNT(*) FROM execution_fact WHERE command_id=?", (command_id,),
+            ).fetchone()[0]
+            assert result["scheduler_failed"] is expired_at_gate, result
+            assert calls == ([] if expired_at_gate else [command_id])
+            assert fact_count == (0 if expired_at_gate else 1)
+        finally:
+            lane._edli_orphaned_command_link_cursor = original_cursor
+
+    def test_exact_link_hold_timeout_rolls_back_before_commit(self, monkeypatch):
+        import src.ingest.price_channel_ingest as lane
+        import src.events.price_channel_redecision_router as router
+
+        conn = _make_conn()
+        position_id, command_id = _seed_interrupted_command_link(conn)
+        original_cursor = lane._edli_orphaned_command_link_cursor
+
+        class Writer:
+            def __init__(self, **_kwargs):
+                pass
+
+            def __enter__(self):
+                self.lease = SimpleNamespace(acquired_at=time.monotonic() - 0.97)
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        def repair(c, **kwargs):
+            c.execute("UPDATE venue_commands SET position_id='transient' WHERE command_id=?",
+                      (kwargs["command_id"],))
+            time.sleep(0.05)
+            c.execute("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<3000) "
+                      "SELECT SUM(x) FROM n").fetchone()
+            return True
+
+        monkeypatch.setattr(lane, "_edli_trade_fact_bridge_candidates_read_only", lambda: ((), (), ()))
+        monkeypatch.setattr(lane, "_edli_orphaned_command_link_candidates_read_only",
+                            lambda *, limit, after_command_id=None: (
+                                ("evt-link-retry:intent-link-retry", command_id, position_id),
+                            ))
+        monkeypatch.setattr(lane, "_edli_durable_fill_bridge_candidate_ids_read_only",
+                            lambda *, limit: ())
+        monkeypatch.setattr(lane, "_prepare_fill_bridge_write_connection", lambda *_a, **_k: conn)
+        monkeypatch.setattr(lane, "_bound_fill_bridge_sqlite_wait_remaining", lambda *_a, **_k: None)
+        monkeypatch.setattr(lane, "_PriceChannelWriteGate", Writer)
+        monkeypatch.setattr(lane, "_edli_repair_orphaned_command_link", repair)
+        monkeypatch.setattr(lane, "_close_fill_bridge_write_connection",
+                            lambda c: c.set_progress_handler(None, 0))
+        monkeypatch.setattr(router, "_edli_position_fill_redecision_cycle", lambda: 0)
+        try:
+            lane._edli_orphaned_command_link_cursor = ""
+            result = lane._edli_fill_bridge_repair_cycle()
+            assert result["scheduler_failed"] is True, result
+            assert conn.execute(
+                "SELECT position_id FROM venue_commands WHERE command_id=?", (command_id,),
+            ).fetchone()[0] == "short-link-retry"
+            assert conn.execute(
+                "SELECT COUNT(*) FROM execution_fact WHERE command_id=?", (command_id,),
+            ).fetchone()[0] == 0
         finally:
             lane._edli_orphaned_command_link_cursor = original_cursor
 
