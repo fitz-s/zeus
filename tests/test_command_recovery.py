@@ -14753,6 +14753,9 @@ class TestRecoveryResolutionTable:
         tmp_path,
         monkeypatch,
     ):
+        # This checks ordering/scope, not the 100 ms maintenance deadline;
+        # schema setup and unrelated CI load must not preempt the spy.
+        monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "5")
         from src.execution import command_recovery, exchange_reconcile, venue_sync_contract
         from src.state.db import init_schema, init_schema_trade_only
         from src.state.collateral_ledger import init_collateral_schema
