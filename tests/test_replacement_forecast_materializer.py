@@ -240,6 +240,7 @@ def _fixture_ens_surface_provenance(*, cycle: str = "2026-06-06T00:00:00+00:00")
         "mask_source_url": "https://example.test/oper-mask.grib2",
         "mask_source_index_url": "https://example.test/oper-mask.index",
         "mask_source_cycle_time": cycle,
+        "mask_source_fetched_at": "2026-06-06T02:30:00+00:00",
         "mask_source_index_offset": 0,
         "mask_source_index_length": 200,
         "mask_sha256": "a" * 64,
