@@ -337,6 +337,15 @@ def grid_surface_evidence_reason(row: Mapping[str, Any]) -> str | None:
         or not 100 <= proof["mask_source_index_length"] <= 1024 * 1024
     ):
         return "EXECUTABLE_FORECAST_GRID_SURFACE_SOURCE_MISMATCH"
+    mask_cycle = _parse_utc(proof.get("mask_source_cycle_time"))
+    mask_fetched = _parse_utc(proof.get("mask_source_fetched_at"))
+    source_available = _parse_utc(row.get("source_available_at"))
+    if (
+        mask_cycle is None or mask_fetched is None or mask_fetched < mask_cycle
+        or (row.get("source_available_at") is not None
+            and (source_available is None or mask_fetched > source_available))
+    ):
+        return "EXECUTABLE_FORECAST_GRID_SURFACE_SOURCE_CLOCK_INVALID"
     geometry = proof.get("station_geometry")
     contract = provenance.get("contract_outcome_evidence")
     if not isinstance(geometry, Mapping) or not isinstance(contract, Mapping):
@@ -931,6 +940,11 @@ def read_executable_forecast_snapshot(
     source_run_id: str | None = None,
     now_utc: datetime | None = None,
 ) -> ExecutableForecastReadResult:
+    if source_id == "ecmwf_open_data":
+        parsed = split_coordinate_bound_data_version(scope.data_version)
+        base = parsed[0] if parsed is not None else scope.data_version
+        if base not in {ECMWF_OPENDATA_HIGH_DATA_VERSION, ECMWF_OPENDATA_LOW_DATA_VERSION}:
+            return ExecutableForecastReadResult("BLOCKED", "EXECUTABLE_FORECAST_GRID_SURFACE_REVISION_MISSING")
     table = _authority_table(conn, "ensemble_snapshots")
     if table is None:
         return ExecutableForecastReadResult("BLOCKED", "NO_EXECUTABLE_FORECAST_ROWS_FOR_TARGET")
@@ -976,6 +990,8 @@ def read_executable_forecast_snapshot(
             "BLOCKED", "EXECUTABLE_FORECAST_EXTREMA_AUTHORITY_UNKNOWN"
         )
     grid_reason = _station_grid_provenance_reason(row)
+    if grid_reason is None and source_id == "ecmwf_open_data":
+        grid_reason = grid_surface_evidence_reason(row)
     if grid_reason is not None:
         return ExecutableForecastReadResult("BLOCKED", grid_reason)
     if now_utc is not None:

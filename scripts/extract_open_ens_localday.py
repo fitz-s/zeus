@@ -302,12 +302,18 @@ def _select_land_grid_points(
         relative_i = ((lon - lon_first) % 360.0) / dx
         relative_j = (lat_first - lat) / dy
         i0, j0 = math.floor(relative_i), math.floor(relative_j)
-        i1, j1 = math.ceil(relative_i), math.ceil(relative_j)
+        # Half-open surrounding cell: an exact gridline takes the east/south
+        # adjacent cell, including the 180-degree longitude wrap. The point
+        # on a polar endpoint uses the last valid adjacent latitude pair.
+        i1 = i0 + 1
+        if j0 == nj - 1:
+            j0 = nj - 2
+        j1 = j0 + 1
         if not 0 <= j0 < nj or not 0 <= j1 < nj:
             raise ValueError("ENS_LAND_STATION_OUTSIDE_GRID")
         neighbors = []
-        for j in sorted({j0, j1}):
-            for i in sorted({i0 % ni, i1 % ni}):
+        for j in (j0, j1):
+            for i in (i0 % ni, i1 % ni):
                 index = j * ni + i
                 fraction = float(land_fraction_at(index))
                 if not math.isfinite(fraction) or not 0 <= fraction <= 1:

@@ -74,6 +74,41 @@ def _insert_snapshot_row(
     forecast_window_end_utc: str | None = None,
 ) -> None:
     scope = _scope(city)
+    from src.config import runtime_cities_by_name, runtime_station_geometry_for_city
+    from scripts.extract_open_ens_localday import _select_land_grid_points
+    from tests.test_ingest_grib_source_run_context import _land_grid_proof
+
+    city_config = runtime_cities_by_name()[city]
+    grid = {
+        "gridType": "regular_ll", "Ni": 1440, "Nj": 721,
+        "latitudeOfFirstGridPointInDegrees": 90.0,
+        "longitudeOfFirstGridPointInDegrees": 180.0,
+        "iDirectionIncrementInDegrees": .25,
+        "jDirectionIncrementInDegrees": .25, "scanningMode": 0,
+    }
+    selected = _select_land_grid_points(
+        grid, [{"city": city, "lat": city_config.lat, "lon": city_config.lon}],
+        lambda _index: .8,
+    )[city]
+    surface = _land_grid_proof()
+    surface.update(
+        station_geometry=runtime_station_geometry_for_city(city_config),
+        request_lat=city_config.lat, request_lon=city_config.lon,
+        mask_source_cycle_time=source_cycle_time,
+        mask_source_fetched_at=source_cycle_time,
+        **{key: selected[key] for key in (
+            "selected_flat_index", "selected_lat", "selected_lon",
+            "selected_land_fraction", "four_neighbors",
+        )},
+    )
+    provenance = dict(provenance_json or {})
+    provenance.update(
+        city=city,
+        nearest_grid_lat=selected["selected_lat"],
+        nearest_grid_lon=selected["selected_lon"],
+        contract_outcome_evidence={"settlement_station_id": surface["station_geometry"]["station_id"]},
+        grid_surface_evidence=surface,
+    )
     conn.execute(
         """
         INSERT INTO ensemble_snapshots (
@@ -126,7 +161,7 @@ def _insert_snapshot_row(
             "boundary_ambiguous": boundary_ambiguous,
             "ambiguous_member_count": 0,
             "manifest_hash": "a" * 64,
-            "provenance_json": json.dumps(provenance_json or {}),
+            "provenance_json": json.dumps(provenance),
             "authority": authority,
             "members_unit": "degC",
             "local_day_start_utc": _WINDOW_START,
@@ -495,7 +530,8 @@ class TestReaderExtremaPreference:
             source_transport="ensemble_snapshots_db_reader",
             source_run_id="run-taipei-legacy",
         )
-        assert result.ok, f"Legacy NULL row should pass: {result.reason_code}"
+        assert result.status == "BLOCKED"
+        assert result.reason_code == "EXECUTABLE_FORECAST_GRID_SURFACE_REVISION_MISSING"
 
     def test_amsterdam_keeps_latest_when_latest_contributes(self):
         """Amsterdam-style: latest cycle also contributes=1 — must still be selected."""

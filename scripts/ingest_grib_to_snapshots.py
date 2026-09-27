@@ -120,6 +120,7 @@ class SourceRunContext:
     source_available_at: datetime | None = None
     dataset_id: str | None = None
     coordinate_manifest_sha: str | None = None
+    grid_surface_source_evidence: dict[str, object] | None = None
 
     def available_at_iso(self) -> str:
         return (self.source_available_at or self.source_release_time).isoformat()
@@ -1395,6 +1396,24 @@ def ingest_json_file(
     if (bound_version[0] if bound_version is not None else data_version) in {
         ECMWF_OPENDATA_HIGH_DATA_VERSION, ECMWF_OPENDATA_LOW_DATA_VERSION,
     }:
+        expected_surface = (
+            source_run_context.grid_surface_source_evidence
+            if source_run_context is not None else None
+        )
+        surface = payload.get("grid_surface_evidence")
+        required_source_keys = (
+            "mask_source", "mask_source_url", "mask_source_index_url",
+            "mask_source_cycle_time", "mask_source_fetched_at",
+            "mask_source_index_offset", "mask_source_index_length",
+            "mask_sha256", "mask_grid_identity_hash",
+        )
+        if not isinstance(expected_surface, dict):
+            return "contract_rejected: EXECUTABLE_FORECAST_GRID_SURFACE_TRUSTED_SOURCE_MISSING"
+        if not isinstance(surface, dict) or any(
+            surface.get(key) != expected_surface.get(key)
+            for key in required_source_keys
+        ):
+            return "contract_rejected: EXECUTABLE_FORECAST_GRID_SURFACE_TRUSTED_SOURCE_MISMATCH"
         surface_reason = grid_surface_evidence_reason({
             "dataset_id": data_version, "source_cycle_time": issue_time,
             "provenance_json": prov_json,

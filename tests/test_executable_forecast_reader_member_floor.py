@@ -70,6 +70,14 @@ def _scope():
 
 def _insert_snapshot(conn: sqlite3.Connection, *, n_members: int = 51) -> None:
     scope = _scope()
+    from tests.test_ingest_grib_source_run_context import _land_grid_proof
+    surface = _land_grid_proof()
+    surface["mask_source_fetched_at"] = "2026-05-03T00:00:00+00:00"
+    provenance = {
+        "city": "London", "nearest_grid_lat": 51.5, "nearest_grid_lon": 0.0,
+        "contract_outcome_evidence": {"settlement_station_id": "EGLC"},
+        "grid_surface_evidence": surface,
+    }
     conn.execute(
         """
         INSERT INTO ensemble_snapshots (
@@ -120,7 +128,7 @@ def _insert_snapshot(conn: sqlite3.Connection, *, n_members: int = 51) -> None:
             "boundary_ambiguous": 0,
             "ambiguous_member_count": 0,
             "manifest_hash": "c" * 64,
-            "provenance_json": "{}",
+            "provenance_json": json.dumps(provenance),
             "authority": "VERIFIED",
             "members_unit": "degC",
             "local_day_start_utc": scope.target_window_start_utc.isoformat(),

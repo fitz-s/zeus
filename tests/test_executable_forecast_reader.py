@@ -72,6 +72,14 @@ def _insert_snapshot(
     forecast_window_attribution_status: str | None = "FULLY_INSIDE_TARGET_LOCAL_DAY",
 ) -> None:
     scope = _scope()
+    from tests.test_ingest_grib_source_run_context import _land_grid_proof
+    surface = _land_grid_proof()
+    surface["mask_source_fetched_at"] = "2026-05-03T00:00:00+00:00"
+    provenance = {
+        "city": "London", "nearest_grid_lat": 51.5, "nearest_grid_lon": 0.0,
+        "contract_outcome_evidence": {"settlement_station_id": "EGLC"},
+        "grid_surface_evidence": surface,
+    }
     conn.execute(
         """
         INSERT INTO ensemble_snapshots (
@@ -122,7 +130,7 @@ def _insert_snapshot(
             "boundary_ambiguous": boundary_ambiguous,
             "ambiguous_member_count": 0,
             "manifest_hash": "2" * 64,
-            "provenance_json": "{}",
+            "provenance_json": json.dumps(provenance),
             "authority": authority,
             "members_unit": "degC",
             "local_day_start_utc": local_day_start_utc or scope.target_window_start_utc.isoformat(),
@@ -309,6 +317,26 @@ def test_reader_returns_only_source_linked_executable_snapshot() -> None:
     assert result.snapshot is not None
     assert result.snapshot.source_run_id == "source-run-1"
     assert len(result.snapshot.members) == 51
+
+
+def test_live_reader_rejects_historical_opendata_and_unproven_current_shape() -> None:
+    from dataclasses import replace
+    from src.contracts.ensemble_snapshot_provenance import ECMWF_OPENDATA_HIGH_DATA_VERSION_V2
+
+    conn = _conn()
+    _insert_snapshot(conn)
+    historical = read_executable_forecast_snapshot(
+        conn, scope=replace(_scope(), data_version=ECMWF_OPENDATA_HIGH_DATA_VERSION_V2),
+        source_id="ecmwf_open_data",
+    )
+    assert historical.status == "BLOCKED"
+    assert historical.reason_code == "EXECUTABLE_FORECAST_GRID_SURFACE_REVISION_MISSING"
+    conn.execute("UPDATE ensemble_snapshots SET provenance_json = '{}' ")
+    unproven = read_executable_forecast_snapshot(
+        conn, scope=_scope(), source_id="ecmwf_open_data",
+    )
+    assert unproven.status == "BLOCKED"
+    assert unproven.reason_code == "EXECUTABLE_FORECAST_GRID_SURFACE_PROOF_MISSING"
 
 
 def test_reader_blocks_legacy_rows_without_source_linkage() -> None:

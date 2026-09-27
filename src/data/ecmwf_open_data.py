@@ -1231,6 +1231,9 @@ def _fetch_cycle_land_mask(
             output_path.with_suffix(".proof.json").write_text(
                 json.dumps(proof, sort_keys=True), encoding="utf-8",
             )
+            from scripts.extract_open_ens_localday import _read_land_mask
+            decoded = _read_land_mask(output_path, output_path.with_suffix(".proof.json"))
+            proof["mask_grid_identity_hash"] = decoded["grid_identity_hash"]
             return proof
         except (OSError, ValueError, requests.RequestException) as exc:
             last_error = exc
@@ -3018,6 +3021,18 @@ def _write_stderr_dump(dump_path: Path, stderr: str) -> None:
         logger.warning("ecmwf_open_data: could not write stderr dump to %s: %s", dump_path, exc)
 
 
+def _source_possession_clock(
+    now_utc: datetime | None, fetched_at: datetime | None, *, extracted: bool,
+) -> datetime:
+    """Never predate a real decoded source with the daemon's cycle-start clock."""
+    candidates = [(now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)]
+    if fetched_at is not None:
+        candidates.append(fetched_at.astimezone(timezone.utc))
+    if extracted:
+        candidates.append(datetime.now(timezone.utc))
+    return max(candidates)
+
+
 def collect_open_ens_cycle(
     *,
     track: str = "mx2t6_high",
@@ -3031,6 +3046,7 @@ def collect_open_ens_cycle(
     _runner=None,
     _fetch_impl=None,  # test seam: replaces _fetch_one_step; callable with same signature
     _mask_fetch_impl=None,  # test seam: exact indexed static LSM acquisition
+    grid_surface_source_evidence: dict[str, object] | None = None,  # skip_extract test seam only
     _paths: OpenDataPaths | None = None,
     now_utc: datetime | None = None,
     coordinate_manifest_json: str | None = None,
@@ -3057,6 +3073,8 @@ def collect_open_ens_cycle(
     """
     if track not in TRACKS:
         raise ValueError(f"Unknown track {track!r}; expected one of {sorted(TRACKS)}")
+    if grid_surface_source_evidence is not None and not skip_extract:
+        raise ValueError("ENS_LAND_MASK_SOURCE_OVERRIDE_REQUIRES_SKIP_EXTRACT")
     cfg = dict(TRACKS[track])
     manifest_json = (
         runtime_coordinate_manifest_json()
@@ -3128,6 +3146,7 @@ def collect_open_ens_cycle(
     )
     stages: list[dict] = []
 
+    trusted_surface = grid_surface_source_evidence
     if not skip_extract:
         # The producer is versioned in this repository.  The coordinate
         # manifest is generated from the live runtime city config immediately
@@ -3501,13 +3520,24 @@ def collect_open_ens_cycle(
             f".{track}_{cycle_date:%Y%m%d}_{cycle_hour:02d}z_lsm.grib2"
         )
         try:
-            (_mask_fetch_impl or _fetch_cycle_land_mask)(
+            mask_source = (_mask_fetch_impl or _fetch_cycle_land_mask)(
                 cycle_date=cycle_date,
                 cycle_hour=cycle_hour,
                 output_path=mask_path,
                 deadline=cycle_deadline_monotonic,
             )
-        except (OSError, ValueError, requests.RequestException) as exc:
+            trusted_surface = {
+                "mask_source": mask_source["source"],
+                "mask_source_url": mask_source["source_url"],
+                "mask_source_index_url": mask_source["source_index_url"],
+                "mask_source_cycle_time": mask_source["source_cycle_time"],
+                "mask_source_fetched_at": mask_source["source_fetched_at"],
+                "mask_source_index_offset": mask_source["source_index_offset"],
+                "mask_source_index_length": mask_source["source_index_length"],
+                "mask_sha256": mask_source["mask_sha256"],
+                "mask_grid_identity_hash": mask_source["mask_grid_identity_hash"],
+            }
+        except (OSError, ValueError, KeyError, TypeError, requests.RequestException) as exc:
             stages.append({"label": f"land_mask_{track}", "ok": False,
                            "status": "ENS_LAND_MASK_UNAVAILABLE", "reason": str(exc)[:300]})
             return {"status": "extract_failed", "track": track,
@@ -3657,13 +3687,13 @@ def collect_open_ens_cycle(
                     # Real possession wall-clock captured immediately before the snapshot write.
                     # Used both for stale-row cleanup (ISO string below) and as the proof-of-
                     # possession basis for the snapshots' source_available_at (C1-AVAIL-CLOCK).
-                    # Honors the injected clock: in production now_utc is None so this is a fresh
-                    # now() taken right before the write (true possession); under an injected
-                    # now_utc (tests, deterministic replay) it MUST equal that clock so every
-                    # wall-clock in collect_open_ens_cycle (computed_at / authority_computed_at /
-                    # this) shares one time base — otherwise the snapshot's available_at floats to
-                    # real-now while decision_time is the injected clock.
-                    snapshot_possession_at = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
+                    # The live daemon supplies its cycle-start now_utc, which may precede
+                    # this newly fetched LSM. The evidence cannot be possessed before the
+                    # mask was fetched; only synthetic skip-extract tests retain their
+                    # injected historical clock without a real collection event.
+                    snapshot_possession_at = _source_possession_clock(
+                        now_utc, _fetch_finished_at, extracted=not skip_extract,
+                    )
                     snapshot_replace_started_at = snapshot_possession_at.isoformat()
                     summary = _ingest_grib_ingest_track(
                         track=cfg["ingest_track"],
@@ -3694,6 +3724,7 @@ def collect_open_ens_cycle(
                             ),
                             dataset_id=cfg["data_version"],
                             coordinate_manifest_sha=manifest_sha,
+                            grid_surface_source_evidence=trusted_surface,
                         ),
                     )
                 logger.info(
@@ -3735,7 +3766,9 @@ def collect_open_ens_cycle(
                 # remains the authority and the run still carries PARTIAL
                 # download facts below.
                 status = "ok"
-            authority_computed_at = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
+            authority_computed_at = _source_possession_clock(
+                now_utc, snapshot_possession_at, extracted=not skip_extract,
+            )
             authority_summary = _write_source_authority_chain(
                 conn,
                 summary=summary,

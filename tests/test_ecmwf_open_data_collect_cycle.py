@@ -56,6 +56,63 @@ def test_hong_kong_selects_nearest_land_of_four_not_water_class_cell() -> None:
     assert selected["Hong Kong"]["selected_land_fraction"] == 0.5078125
 
 
+def test_mask_possession_clock_cannot_use_pre_fetch_cycle_start() -> None:
+    from src.data.ecmwf_open_data import _source_possession_clock
+
+    cycle_start = datetime(2026, 9, 26, 6, tzinfo=timezone.utc)
+    mask_fetched = datetime.now(timezone.utc)
+    snapshot_time = _source_possession_clock(cycle_start, mask_fetched, extracted=True)
+    source_run_time = _source_possession_clock(cycle_start, snapshot_time, extracted=True)
+    assert cycle_start < mask_fetched <= snapshot_time <= source_run_time
+    assert _source_possession_clock(cycle_start, None, extracted=False) == cycle_start
+
+
+def test_collector_does_not_authorize_payload_with_different_mask_hash(tmp_path, monkeypatch) -> None:
+    from src.data import ecmwf_open_data
+    from tests.test_opendata_writes_v2_table import (
+        _make_opendata_high_payload, _trusted_land_source_for_issue,
+    )
+
+    root = tmp_path / "51 source data"
+    monkeypatch.setattr(ecmwf_open_data, "FIFTY_ONE_ROOT", root)
+    issue = "2026-05-01T00:00:00+00:00"
+    payload = _make_opendata_high_payload(
+        "2026-05-02", issue,
+        local_day_start_iso="2026-05-01T23:00:00+00:00",
+        local_day_end_iso="2026-05-02T23:00:00+00:00",
+    )
+    payload["grid_surface_evidence"]["mask_sha256"] = "d" * 64
+    trusted = _trusted_land_source_for_issue(issue)
+    mask_result = {
+        "source": trusted["mask_source"],
+        "source_url": trusted["mask_source_url"],
+        "source_index_url": trusted["mask_source_index_url"],
+        "source_cycle_time": trusted["mask_source_cycle_time"],
+        "source_fetched_at": trusted["mask_source_fetched_at"],
+        "source_index_offset": trusted["mask_source_index_offset"],
+        "source_index_length": trusted["mask_source_index_length"],
+        "mask_sha256": trusted["mask_sha256"],
+        "mask_grid_identity_hash": trusted["mask_grid_identity_hash"],
+    }
+
+    def extract(cmd, *, label, timeout):
+        output_root = Path(cmd[cmd.index("--output-root") + 1])
+        folder = output_root / "open_ens_mx2t6_localday_max" / "london" / "20260501"
+        folder.mkdir(parents=True)
+        (folder / "target.json").write_text(json.dumps(payload), encoding="utf-8")
+        return {"label": label, "ok": True, "returncode": 0, "stdout_tail": "", "stderr_tail": ""}
+
+    conn = _make_conn(tmp_path)
+    result = ecmwf_open_data.collect_open_ens_cycle(
+        track="mx2t6_high", run_date=date(2026, 5, 1), run_hour=0,
+        now_utc=datetime(2026, 5, 1, 9, tzinfo=timezone.utc),
+        skip_download=True, conn=conn, _runner=extract,
+        _mask_fetch_impl=lambda **_kw: mask_result,
+    )
+    assert result["status"] == "empty_ingest"
+    assert conn.execute("SELECT COUNT(*) FROM ensemble_snapshots").fetchone()[0] == 0
+
+
 @pytest.mark.parametrize("fractions", ({391417: 0.4}, {391417: float("nan")}))
 def test_land_grid_selection_refuses_incomplete_or_invalid_mask(fractions) -> None:
     from scripts.extract_open_ens_localday import _select_land_grid_points
@@ -74,6 +131,28 @@ def test_land_grid_selection_refuses_incomplete_or_invalid_mask(fractions) -> No
             [dict(city="Hong Kong", lat=22.3022, lon=114.1742)],
             fractions.__getitem__,
         )
+
+
+def test_gridline_selection_keeps_four_distinct_points_and_wraps_longitude() -> None:
+    from scripts.extract_open_ens_localday import _select_land_grid_points
+
+    grid = {
+        "gridType": "regular_ll", "Ni": 1440, "Nj": 721,
+        "latitudeOfFirstGridPointInDegrees": 90.0,
+        "longitudeOfFirstGridPointInDegrees": 180.0,
+        "iDirectionIncrementInDegrees": 0.25,
+        "jDirectionIncrementInDegrees": 0.25,
+        "scanningMode": 0,
+    }
+    selected = _select_land_grid_points(
+        grid, [{"city": "seam", "lat": 22.25, "lon": 179.75}],
+        lambda idx: .75 if idx % 1440 == 0 else .25,
+    )["seam"]
+    assert {cell["flat_index"] for cell in selected["four_neighbors"]} == {
+        271 * 1440 + 1439, 271 * 1440, 272 * 1440 + 1439, 272 * 1440,
+    }
+    assert selected["selected_lon"] == -180.0
+    assert selected["selected_land_fraction"] == .75
 
 
 @pytest.mark.parametrize("status, content_range, body_size", (
@@ -136,6 +215,7 @@ def _native_partial_scope_payload(
     )
     proof = _land_grid_proof()
     proof["mask_source_cycle_time"] = issue_iso
+    proof["mask_source_fetched_at"] = (datetime.fromisoformat(issue_iso) + timedelta(hours=1)).isoformat()
     payload["grid_surface_evidence"] = proof
     if track == "mn2t6_low":
         payload.update(
@@ -152,6 +232,16 @@ def _native_partial_scope_payload(
                 if f'{window["start_step_hours"]}-{window["end_step_hours"]}' in member["boundary_step_ranges"]:
                     window["value_native_unit"] = 30.0
     return payload
+
+
+def _trusted_land_source_for_date(run_date: date) -> dict[str, object]:
+    from tests.test_ingest_grib_source_run_context import _land_grid_proof, _trusted_land_source
+
+    issue = datetime.combine(run_date, datetime.min.time(), tzinfo=timezone.utc)
+    proof = _land_grid_proof()
+    proof["mask_source_cycle_time"] = issue.isoformat()
+    proof["mask_source_fetched_at"] = (issue + timedelta(hours=1)).isoformat()
+    return _trusted_land_source(proof)
 
 
 @pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
@@ -213,6 +303,7 @@ def test_partial_retry_preserves_qualified_far_scope_and_publishes_near_scope(
     first = ecmwf_open_data.collect_open_ens_cycle(
         track=track, run_date=run_date, run_hour=0, conn=conn,
         skip_extract=True, _fetch_impl=fetch,
+        grid_surface_source_evidence=_trusted_land_source_for_date(run_date),
         now_utc=clock["now"],
     )
     assert first["status"] == "ok", first
@@ -270,6 +361,7 @@ def test_partial_retry_preserves_qualified_far_scope_and_publishes_near_scope(
     second = ecmwf_open_data.collect_open_ens_cycle(
         track=track, run_date=run_date, run_hour=0, conn=conn,
         skip_extract=True, _fetch_impl=fetch,
+        grid_surface_source_evidence=_trusted_land_source_for_date(run_date),
         now_utc=clock["now"],
     )
     assert second["status"] == "ok", second
@@ -324,6 +416,7 @@ def test_partial_retry_preserves_qualified_far_scope_and_publishes_near_scope(
     third = ecmwf_open_data.collect_open_ens_cycle(
         track=track, run_date=run_date, run_hour=0, conn=conn,
         skip_extract=True, _fetch_impl=fetch,
+        grid_surface_source_evidence=_trusted_land_source_for_date(run_date),
         now_utc=clock["now"],
     )
     assert third["status"] == "ok", third
@@ -388,6 +481,7 @@ def test_partial_first_attempt_cannot_certify_far_scope_without_prior_evidence(
     result = ecmwf_open_data.collect_open_ens_cycle(
         track=track, run_date=run_date, run_hour=0, conn=conn,
         skip_extract=True, _fetch_impl=fetch,
+        grid_surface_source_evidence=_trusted_land_source_for_date(run_date),
         now_utc=datetime.now(timezone.utc),
     )
     assert result["status"] == "ok", result
@@ -435,6 +529,7 @@ def test_partial_first_attempt_cannot_certify_far_scope_without_prior_evidence(
     completed = ecmwf_open_data.collect_open_ens_cycle(
         track=track, run_date=run_date, run_hour=0, conn=conn,
         skip_extract=True, _fetch_impl=full_fetch,
+        grid_surface_source_evidence=_trusted_land_source_for_date(run_date),
         now_utc=datetime.now(timezone.utc) + timedelta(minutes=2),
     )
     assert completed["status"] == "ok", completed
@@ -520,6 +615,7 @@ def test_zero_ok_retry_preserves_same_run_qualified_far_authority(
     first = ecmwf_open_data.collect_open_ens_cycle(
         track=track, run_date=run_date, run_hour=0, conn=conn,
         skip_extract=True, _fetch_impl=fetch,
+        grid_surface_source_evidence=_trusted_land_source_for_date(run_date),
         now_utc=datetime.now(timezone.utc),
     )
     assert first["status"] == "ok", first
@@ -1195,7 +1291,15 @@ def test_collect_open_ens_cycle_passes_explicit_manifest(tmp_path, monkeypatch, 
         skip_download=True,
         conn=_make_conn(tmp_path),
         _runner=capture_extract,
-        _mask_fetch_impl=lambda **_kw: {"mask_sha256": "a" * 64},
+        _mask_fetch_impl=lambda **_kw: {
+            "source": "ecmwf_open_data_ifs_oper_fc_step0_lsm",
+            "source_url": "https://example.test/mask.grib2",
+            "source_index_url": "https://example.test/mask.index",
+            "source_cycle_time": "2026-06-06T00:00:00+00:00",
+            "source_fetched_at": "2026-06-06T01:00:00+00:00",
+            "source_index_offset": 0, "source_index_length": 187781,
+            "mask_sha256": "a" * 64, "mask_grid_identity_hash": "b" * 64,
+        },
         _paths=paths,
     )
 

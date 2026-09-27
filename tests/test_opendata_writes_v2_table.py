@@ -126,6 +126,15 @@ def _active_high_dataset():
     return coordinate_bound_data_version(ECMWF_OPENDATA_HIGH_DATA_VERSION, _coordinate_sha())
 
 
+def _trusted_land_source_for_issue(issue_iso: str = "2026-05-01T00:00:00+00:00") -> dict:
+    from tests.test_ingest_grib_source_run_context import _land_grid_proof, _trusted_land_source
+
+    proof = _land_grid_proof()
+    proof["mask_source_cycle_time"] = issue_iso
+    proof["mask_source_fetched_at"] = (datetime.fromisoformat(issue_iso) + timedelta(hours=1)).isoformat()
+    return _trusted_land_source(proof)
+
+
 def _make_opendata_high_payload(
     target_date: str,
     issue_iso: str,
@@ -135,7 +144,7 @@ def _make_opendata_high_payload(
     forecast_window_start_iso: str | None = None,
     forecast_window_end_iso: str | None = None,
     nearest_grid_lat: float | None = 51.5,
-    nearest_grid_lon: float | None = -0.5,
+    nearest_grid_lon: float | None = 0.0,
     nearest_grid_distance_km: float | None = 5.0,
     missing_member_ids: tuple[int, ...] = (),
 ) -> dict:
@@ -155,8 +164,8 @@ def _make_opendata_high_payload(
         "step_type": "max",
         "aggregation_window_hours": 3,
         "city": "London",
-        "lat": 51.4775,
-        "lon": -0.4614,
+        "lat": 51.505299,
+        "lon": 0.055278,
         "unit": "C",
         "manifest_sha256": _coordinate_sha(),
         "manifest_hash": _coordinate_sha(),
@@ -199,6 +208,11 @@ def _make_opendata_high_payload(
                 "forecast_window_end_local": forecast_window_end_iso,
             }
         )
+    from tests.test_ingest_grib_source_run_context import _land_grid_proof
+    proof = _land_grid_proof()
+    proof["mask_source_cycle_time"] = issue_iso
+    proof["mask_source_fetched_at"] = (datetime.fromisoformat(issue_iso) + timedelta(hours=1)).isoformat()
+    payload["grid_surface_evidence"] = proof
     issue_dt = datetime.fromisoformat(issue_iso)
     start_dt, end_dt = map(datetime.fromisoformat, (local_day_start_iso, local_day_end_iso))
     inner, boundary = [], []
@@ -257,8 +271,10 @@ def test_high_boundary_certificate_controls_persisted_authority(tmp_path, bounda
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema_forecasts(conn)
+    from tests.test_ingest_grib_source_run_context import _land_run_context
     assert ingest_json_file(conn, path, metric=HIGH_LOCALDAY_MAX,
-                            model_version="ecmwf_ens", overwrite=False) == "written"
+                            model_version="ecmwf_ens", overwrite=False,
+                            source_run_context=_land_run_context(p["issue_time_utc"], p["grid_surface_evidence"])) == "written"
     row = conn.execute("SELECT * FROM ensemble_snapshots").fetchone()
     assert row["contributes_to_target_extrema"] == contributes
     assert row["training_allowed"] == contributes
@@ -306,6 +322,14 @@ def test_opendata_high_payload_lands_in_v2(tmp_path: Path, monkeypatch):
             cities={"London"},
             overwrite=False,
             require_files=False,
+            source_run_context=_ingmod.SourceRunContext(
+                source_id="ecmwf_open_data", source_transport="ensemble_snapshots_db_reader",
+                source_run_id="test-grid-surface", release_calendar_key="test-grid-surface",
+                source_cycle_time=datetime.fromisoformat(issue),
+                source_release_time=datetime.fromisoformat(issue),
+                source_available_at=datetime(2026, 5, 1, 9, tzinfo=timezone.utc),
+                grid_surface_source_evidence=_trusted_land_source_for_issue(issue),
+            ),
         )
     finally:
         _ingmod._TRACK_CONFIGS["mx2t6_high"]["json_subdir"] = original
@@ -357,6 +381,7 @@ def test_collect_open_ens_cycle_writes_authority_chain_readable_by_live_reader(t
         run_hour=0,
         skip_download=True,
         skip_extract=True,
+        grid_surface_source_evidence=_trusted_land_source_for_issue(),
         conn=forecasts_conn,
         now_utc=now,
     )
@@ -463,6 +488,7 @@ def test_collect_open_ens_cycle_blocks_live_when_member_value_missing(tmp_path: 
         run_hour=0,
         skip_download=True,
         skip_extract=True,
+        grid_surface_source_evidence=_trusted_land_source_for_issue(),
         conn=forecasts_conn,
         now_utc=datetime(2026, 5, 1, 9, 0, tzinfo=timezone.utc),
     )
@@ -485,8 +511,8 @@ def test_collect_open_ens_cycle_blocks_live_when_member_value_missing(tmp_path: 
     assert json.loads(producer["reason_codes_json"]) == ["MISSING_EXPECTED_MEMBERS"]
 
 
-def test_collect_open_ens_cycle_fills_wu_rows_missing_grid_provenance(tmp_path: Path, monkeypatch):
-    """Producer backfills WU grid provenance before readiness/reader authority."""
+def test_collect_open_ens_cycle_refuses_missing_observed_grid_provenance(tmp_path: Path, monkeypatch):
+    """Current land-grid product must never forge a point from request coordinates."""
     from src.data import ecmwf_open_data
 
     forecasts_conn = sqlite3.connect(str(tmp_path / "forecasts.db"))
@@ -520,25 +546,16 @@ def test_collect_open_ens_cycle_fills_wu_rows_missing_grid_provenance(tmp_path: 
         run_hour=0,
         skip_download=True,
         skip_extract=True,
+        grid_surface_source_evidence=_trusted_land_source_for_issue(),
         conn=forecasts_conn,
         now_utc=datetime(2026, 5, 1, 9, 0, tzinfo=timezone.utc),
     )
 
-    assert result["status"] == "ok"
-    snapshot = forecasts_conn.execute("SELECT provenance_json FROM ensemble_snapshots").fetchone()
-    provenance = json.loads(snapshot["provenance_json"])
-    assert provenance["nearest_grid_lat"] is not None
-    assert provenance["nearest_grid_lon"] is not None
-    assert provenance["nearest_grid_distance_km"] is not None
-    assert provenance["nearest_grid_provenance_source"] == "payload_request_coordinate_regular_ll_0p25"
-    coverage = forecasts_conn.execute("SELECT * FROM source_run_coverage").fetchone()
-    assert coverage["readiness_status"] == "LIVE_ELIGIBLE"
-    assert coverage["reason_code"] is None
-    producer = forecasts_conn.execute(
-        "SELECT * FROM readiness_state WHERE strategy_key = 'producer_readiness'"
-    ).fetchone()
-    assert producer["status"] == "LIVE_ELIGIBLE"
-    assert json.loads(producer["reason_codes_json"]) == ["PRODUCER_COVERAGE_READY"]
+    assert result["status"] == "empty_ingest"
+    assert forecasts_conn.execute("SELECT COUNT(*) FROM ensemble_snapshots").fetchone()[0] == 0
+    assert forecasts_conn.execute(
+        "SELECT COUNT(*) FROM source_run_coverage WHERE readiness_status = 'LIVE_ELIGIBLE'"
+    ).fetchone()[0] == 0
 
 
 @pytest.mark.parametrize("track", ["mx2t3", "mn2t3"])
@@ -620,6 +637,7 @@ def test_collect_open_ens_cycle_partial_global_run_allows_covered_target(tmp_pat
         run_date=date(2026, 5, 1),
         run_hour=0,
         skip_extract=True,
+        grid_surface_source_evidence=_trusted_land_source_for_issue(),
         conn=forecasts_conn,
         _fetch_impl=fetch_impl,
         now_utc=datetime(2026, 5, 1, 9, 0, tzinfo=timezone.utc),
@@ -680,6 +698,7 @@ def test_collect_open_ens_cycle_blocks_noncontiguous_missing_download_step(tmp_p
         run_date=date(2026, 5, 1),
         run_hour=0,
         skip_extract=True,
+        grid_surface_source_evidence=_trusted_land_source_for_issue(),
         conn=forecasts_conn,
         _fetch_impl=fetch_impl,
         now_utc=datetime(2026, 5, 1, 9, 0, tzinfo=timezone.utc),
@@ -757,6 +776,7 @@ def test_collect_open_ens_cycle_scopes_ingest_to_selected_cycle(tmp_path: Path, 
         run_hour=0,
         skip_download=True,
         skip_extract=True,
+        grid_surface_source_evidence=_trusted_land_source_for_issue(),
         conn=forecasts_conn,
         now_utc=datetime(2026, 5, 1, 9, 0, tzinfo=timezone.utc),
     )
@@ -788,7 +808,7 @@ def test_collect_open_ens_cycle_clears_prior_same_source_run_rows(tmp_path: Path
     fifty_one_root = tmp_path / "51 source data"
     monkeypatch.setattr(ecmwf_open_data, "FIFTY_ONE_ROOT", fifty_one_root)
     extract_subdir = "open_ens_mx2t6_localday_max"
-    source_run_id = "ecmwf_open_data:mx2t6_high:2026-05-01T00Z:coordsha:" + _coordinate_sha() + ":high_boundary_v2"
+    source_run_id = "ecmwf_open_data:mx2t6_high:2026-05-01T00Z:coordsha:" + _coordinate_sha() + ":high_boundary_land_grid_v3"
     forecasts_conn.execute(
         """
         INSERT INTO ensemble_snapshots (
@@ -900,6 +920,7 @@ def test_collect_open_ens_cycle_clears_prior_same_source_run_rows(tmp_path: Path
         run_hour=0,
         skip_download=True,
         skip_extract=True,
+        grid_surface_source_evidence=_trusted_land_source_for_issue(),
         conn=forecasts_conn,
         now_utc=datetime(2026, 5, 1, 9, 0, tzinfo=timezone.utc),
     )
@@ -933,7 +954,7 @@ def test_collect_open_ens_cycle_overwrites_existing_snapshot_in_place(tmp_path: 
     fifty_one_root = tmp_path / "51 source data"
     monkeypatch.setattr(ecmwf_open_data, "FIFTY_ONE_ROOT", fifty_one_root)
     extract_subdir = "open_ens_mx2t6_localday_max"
-    source_run_id = "ecmwf_open_data:mx2t6_high:2026-05-01T00Z:coordsha:" + _coordinate_sha() + ":high_boundary_v2"
+    source_run_id = "ecmwf_open_data:mx2t6_high:2026-05-01T00Z:coordsha:" + _coordinate_sha() + ":high_boundary_land_grid_v3"
     issue_iso = "2026-05-01T00:00:00+00:00"
     forecasts_conn.execute(
         """
@@ -1001,6 +1022,7 @@ def test_collect_open_ens_cycle_overwrites_existing_snapshot_in_place(tmp_path: 
         run_hour=0,
         skip_download=True,
         skip_extract=True,
+        grid_surface_source_evidence=_trusted_land_source_for_issue(),
         conn=forecasts_conn,
         now_utc=datetime(2026, 5, 1, 9, 0, tzinfo=timezone.utc),
     )
@@ -1086,6 +1108,7 @@ def test_coordinate_revision_appends_without_rebinding_prior_evidence(tmp_path, 
         result = ecmwf_open_data.collect_open_ens_cycle(
             track=track, run_date=date(2026, 5, 1), run_hour=0,
             skip_download=True, skip_extract=True, conn=conn,
+            grid_surface_source_evidence=_trusted_land_source_for_issue(),
             coordinate_manifest_json=manifest,
             now_utc=datetime(2026, 5, 1, 9 + index, tzinfo=timezone.utc),
         )

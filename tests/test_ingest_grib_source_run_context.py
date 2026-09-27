@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import sqlite3
@@ -140,6 +141,29 @@ def _land_grid_proof() -> dict:
     }
 
 
+_LAND_SOURCE_KEYS = (
+    "mask_source", "mask_source_url", "mask_source_index_url",
+    "mask_source_cycle_time", "mask_source_fetched_at",
+    "mask_source_index_offset", "mask_source_index_length",
+    "mask_sha256", "mask_grid_identity_hash",
+)
+
+
+def _trusted_land_source(proof: dict) -> dict:
+    return {key: proof[key] for key in _LAND_SOURCE_KEYS}
+
+
+def _land_run_context(issue_iso: str, proof: dict) -> SourceRunContext:
+    issue = datetime.fromisoformat(issue_iso)
+    return SourceRunContext(
+        source_id="ecmwf_open_data", source_transport="ensemble_snapshots_db_reader",
+        source_run_id=f"test-land:{issue_iso}", release_calendar_key="test-land",
+        source_cycle_time=issue, source_release_time=issue,
+        source_available_at=max(issue + timedelta(hours=10), datetime.fromisoformat(proof["mask_source_fetched_at"])),
+        grid_surface_source_evidence=_trusted_land_source(proof),
+    )
+
+
 def test_current_land_grid_product_requires_typed_proof(tmp_path: Path) -> None:
     from src.contracts.tigge_snapshot_payload import TiggeSnapshotPayload
     from src.data.executable_forecast_reader import grid_surface_evidence_reason
@@ -156,16 +180,51 @@ def test_current_land_grid_product_requires_typed_proof(tmp_path: Path) -> None:
     payload["grid_surface_evidence"] = _land_grid_proof()
     path.write_text(json.dumps(payload))
     assert TiggeSnapshotPayload.from_json_dict(payload).to_json_dict()["grid_surface_evidence"] == payload["grid_surface_evidence"]
+    assert "TRUSTED_SOURCE_MISSING" in ingest_json_file(
+        conn, path, metric=HIGH_LOCALDAY_MAX, model_version="ecmwf_ens", overwrite=False,
+    )
     assert ingest_json_file(
         conn, path, metric=HIGH_LOCALDAY_MAX,
         model_version="ecmwf_ens", overwrite=False,
+        source_run_context=_land_run_context(payload["issue_time_utc"], payload["grid_surface_evidence"]),
     ) == "written"
     row = conn.execute("SELECT * FROM ensemble_snapshots").fetchone()
     assert grid_surface_evidence_reason(dict(row)) is None
     assert json.loads(row["provenance_json"])["grid_surface_evidence"]["selected_flat_index"] == 123
+    assert grid_surface_evidence_reason({**dict(row), "city": "Shanghai"}) == (
+        "EXECUTABLE_FORECAST_GRID_SURFACE_STATION_UNVERIFIED"
+    )
+    assert grid_surface_evidence_reason({
+        **dict(row), "source_available_at": "2026-05-03T08:00:00+00:00",
+    }) == "EXECUTABLE_FORECAST_GRID_SURFACE_SOURCE_CLOCK_INVALID"
 
 
-@pytest.mark.parametrize("corruption", ("mask_cycle", "temperature_grid", "selected_water", "station_id", "request"))
+@pytest.mark.parametrize("field", (
+    "mask_sha256", "mask_grid_identity_hash", "mask_source_cycle_time",
+    "mask_source_url", "mask_source_index_offset", "mask_source_index_length",
+))
+def test_v3_ingest_rejects_raw_payload_against_collector_mask_identity(tmp_path: Path, field: str) -> None:
+    payload = _payload("2026-05-08", "2026-05-03T00:00:00+00:00")
+    payload["data_version"] = ECMWF_OPENDATA_HIGH_DATA_VERSION
+    payload.update(lat=51.505299, lon=0.055278, nearest_grid_lon=0.0)
+    proof = _land_grid_proof()
+    payload["grid_surface_evidence"] = proof
+    expected = _trusted_land_source(proof)
+    expected[field] = "different" if isinstance(expected[field], str) else expected[field] + 1
+    path = tmp_path / "fabricated.json"
+    path.write_text(json.dumps(payload))
+    context = _land_run_context(payload["issue_time_utc"], proof)
+    context = dataclasses.replace(context, grid_surface_source_evidence=expected)
+    assert "TRUSTED_SOURCE_MISMATCH" in ingest_json_file(
+        _conn(), path, metric=HIGH_LOCALDAY_MAX, model_version="ecmwf_ens",
+        overwrite=False, source_run_context=context,
+    )
+
+
+@pytest.mark.parametrize("corruption", (
+    "mask_cycle", "mask_fetched_before_cycle", "temperature_grid",
+    "selected_water", "station_id", "request",
+))
 def test_current_land_grid_rejects_mismatched_physical_evidence(tmp_path: Path, corruption: str) -> None:
     from src.contracts.ensemble_snapshot_provenance import grid_surface_evidence_identity_hash
 
@@ -175,6 +234,8 @@ def test_current_land_grid_rejects_mismatched_physical_evidence(tmp_path: Path, 
     proof = _land_grid_proof()
     if corruption == "mask_cycle":
         proof["mask_source_cycle_time"] = "2026-05-04T00:00:00+00:00"
+    elif corruption == "mask_fetched_before_cycle":
+        proof["mask_source_fetched_at"] = "2026-05-02T23:00:00+00:00"
     elif corruption == "temperature_grid":
         proof["temperature_grid_identity_hash"] = "d" * 64
     elif corruption == "selected_water":
@@ -188,6 +249,7 @@ def test_current_land_grid_rejects_mismatched_physical_evidence(tmp_path: Path, 
     path.write_text(json.dumps(payload), encoding="utf-8")
     assert "GRID_SURFACE" in ingest_json_file(
         _conn(), path, metric=HIGH_LOCALDAY_MAX, model_version="ecmwf_ens", overwrite=False,
+        source_run_context=_land_run_context(payload["issue_time_utc"], _land_grid_proof()),
     )
     if corruption == "mask_cycle":
         valid = _land_grid_proof()
@@ -207,6 +269,7 @@ def test_current_low_land_grid_proof_is_typed_and_required(tmp_path: Path) -> No
         request_lat=31.1433, request_lon=121.8053,
         selected_lat=31.25, selected_lon=121.75,
         mask_source_cycle_time=payload["issue_time_utc"],
+        mask_source_fetched_at=(datetime.fromisoformat(payload["issue_time_utc"]) + timedelta(hours=1)).isoformat(),
     )
     for neighbor in proof["four_neighbors"]:
         neighbor["lat"] = 31.25 if neighbor["flat_index"] in (123, 124) else 31.0
@@ -217,6 +280,7 @@ def test_current_low_land_grid_proof_is_typed_and_required(tmp_path: Path) -> No
     conn = _conn()
     assert ingest_json_file(
         conn, path, metric=LOW_LOCALDAY_MIN, model_version="ecmwf_ens", overwrite=False,
+        source_run_context=_land_run_context(payload["issue_time_utc"], proof),
     ) == "written"
     assert grid_surface_evidence_reason(dict(conn.execute("SELECT * FROM ensemble_snapshots").fetchone())) is None
     payload.pop("grid_surface_evidence")
