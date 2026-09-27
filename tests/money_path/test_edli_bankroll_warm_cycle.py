@@ -91,6 +91,11 @@ def _enable_warm_cfg(monkeypatch) -> None:
     )
 
 
+def _initialize_trade_schema(path: Path) -> None:
+    """Mirror daemon preflight before a hot collateral refresh validates schema."""
+    CollateralLedger(db_path=path).close()
+
+
 def test_warm_cycle_refreshes_execution_authority_after_bankroll(monkeypatch):
     calls = []
     monkeypatch.setattr(
@@ -207,6 +212,7 @@ def test_chain_collateral_publish_emits_identity_bound_authority_wake(monkeypatc
         authority_tier="CHAIN",
     )
     emitted = []
+    _initialize_trade_schema(tmp_path / "trades.db")
     monkeypatch.setattr("src.state.db._zeus_trade_db_path", lambda: tmp_path / "trades.db")
     monkeypatch.setattr(
         "src.runtime.timeout_guard.run_with_timeout",
@@ -661,6 +667,7 @@ def test_post_trade_durable_snapshot_wake_refreshes_allocator_without_entry_reac
 
     trade_db = tmp_path / "trades.db"
     wake_path = tmp_path / "edli-reactor-wake.json"
+    _initialize_trade_schema(trade_db)
     payload = {
         "pusd_balance_micro": 17_000_000,
         "pusd_allowance_micro": 17_000_000,
@@ -802,6 +809,7 @@ def _run_relationship_subprocess(
 _COLLATERAL_PRODUCER_SOURCE = r"""
 import json
 import os
+import sqlite3
 import sys
 from contextlib import ExitStack
 from datetime import datetime, timedelta
@@ -816,6 +824,7 @@ trade_db = Path(sys.argv[1])
 wake_path = Path(sys.argv[2])
 authority_tier = sys.argv[3]
 stale_seconds = float(sys.argv[4])
+CollateralLedger(db_path=trade_db).close()
 payload = {
     "pusd_balance_micro": 23_000_000,
     "pusd_allowance_micro": 23_000_000,
@@ -983,9 +992,17 @@ try:
         assert denial_reason is None
     else:
         assert allocator_state["configured"] is False
-        assert reduce_only_allowed is False
+        # Authority loss blocks new entry while retaining reduce-only exits.
+        # The monitor/exit lane must remain able to drain the held position.
+        assert reduce_only_allowed is True
         assert published_identities == []
-        assert denial_reason == "allocator_not_configured"
+        assert denial_reason is None
+        try:
+            assert_global_submit_allows(reduce_only=False)
+        except AllocationDenied as exc:
+            assert exc.decision.reason == "allocator_not_configured"
+        else:
+            raise AssertionError("collateral authority loss must block new entry")
 
     print(
         json.dumps(
@@ -1054,7 +1071,7 @@ def test_post_trade_collateral_wake_cross_process_relationship(
     assert producer["snapshot_identity"] == producer["wake_identity"]
     assert consumer == {
         "configured": should_restore,
-        "denial_reason": None if should_restore else "allocator_not_configured",
+        "denial_reason": None,
         "entry_reactor_calls": 0,
         "expected_identity": producer["snapshot_identity"],
         "listener_entrypoint": "_run_edli_reactor_wake_listener",
@@ -1063,7 +1080,7 @@ def test_post_trade_collateral_wake_cross_process_relationship(
         "published_identities": (
             [producer["snapshot_identity"]] if should_restore else []
         ),
-        "reduce_only_allowed": should_restore,
+        "reduce_only_allowed": True,
         "wake_remaining": False,
     }
 

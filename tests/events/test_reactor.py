@@ -2541,7 +2541,7 @@ def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
     monkeypatch.setattr(
         reactor_module,
         "_edli_reactor_day0_hourly_refresher",
-        lambda: (lambda *_args, **_kwargs: None),
+        lambda **_factory_kwargs: (lambda *_args, **_kwargs: None),
     )
     monkeypatch.setattr(
         reactor_module,
@@ -2706,10 +2706,15 @@ def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
         reactor_wake.read_reactor_wake(path=wake_path),
     )
     assert tuple(carrier_after_pause[:2]) == ("processed", 1)
-    assert check.execute(
+    ordinary_after_resume = check.execute(
         "SELECT processing_status, attempt_count FROM opportunity_event_processing WHERE event_id = ?",
         (ordinary.event_id,),
-    ).fetchone() == ("pending", 0)
+    ).fetchone()
+    # Forecast wakes reserve one bounded stale-debt slot alongside their exact
+    # carrier. Day0 family-scoped wakes do not receive that global debt slot.
+    assert ordinary_after_resume == (
+        ("processed", 1) if carrier_branch == "forecast" else ("pending", 0)
+    )
     check.close()
     assert not resumed_queue_file.exists()
 
