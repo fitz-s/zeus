@@ -18201,6 +18201,8 @@ def _expired_topology_reuse_harness(
     cached_cities,
     batch_cities,
     gamma_condition_ids=(),
+    cache_max_age_seconds=1,
+    cache_elapsed_seconds=2,
 ):
     """Drive the real book-epoch provider through an expired-price cache miss.
 
@@ -18430,7 +18432,7 @@ def _expired_topology_reuse_harness(
             epoch(
                 cached_probabilities,
                 "base",
-                max_age=_dt.timedelta(seconds=1),
+                max_age=_dt.timedelta(seconds=cache_max_age_seconds),
             ),
             checked_at=Clock.current,
         )
@@ -18438,7 +18440,7 @@ def _expired_topology_reuse_harness(
     )
     # Advance past the cached epoch's max_age: the cache probe now reports
     # ``expired`` and the provider reaches the expired-topology reuse seam.
-    Clock.current += _dt.timedelta(seconds=2)
+    Clock.current += _dt.timedelta(seconds=cache_elapsed_seconds)
 
     record.batch = {
         family(city): probability(family(city), "current")
@@ -18609,6 +18611,27 @@ def test_gamma_market_fetch_cancel_preempts_without_waiting_for_workers(
     finally:
         release.set()
         caller.join(2.0)
+
+
+
+@pytest.mark.parametrize("remaining", (30.0, 5.0))
+def test_book_cache_survives_whole_bounded_comparison_or_is_recaptured(monkeypatch, remaining):
+    with _expired_topology_reuse_harness(
+        monkeypatch, cached_cities=("Dallas", "Miami"),
+        batch_cities=("Dallas", "Miami"),
+        cache_max_age_seconds=180, cache_elapsed_seconds=169,
+    ) as h:
+        context = universe.WorkContext(deadline_monotonic=remaining, monotonic=lambda: 0.0)
+        bound, epoch = h.provider(h.batch, h.clock.current, context)
+        assert set(bound) == set(h.batch)
+        assert {row[0] for row in epoch.asset_states} == set(h.batch)
+        assert len(epoch.asset_states) == 4
+        if remaining == 30.0:
+            assert epoch.captured_at_utc == h.clock.current
+            assert all("recaptured" in row[6] for row in epoch.asset_states)
+        else:
+            assert epoch.captured_at_utc == h.clock.current - _dt.timedelta(seconds=169)
+            assert all("base" in row[6] for row in epoch.asset_states)
 
 
 def test_expired_topology_reuse_fetches_gamma_only_for_the_new_family(
@@ -43043,6 +43066,69 @@ def test_final_command_maker_wall_accepts_only_exact_current_jit_witness():
             + _dt.timedelta(microseconds=1)
         ),
     ) == era._CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE
+
+
+
+@pytest.mark.parametrize("action", ("BUY", "SELL"))
+@pytest.mark.parametrize("clock_case", ("current", "future", "expired", "naive"))
+def test_global_maker_jit_uses_validation_clock_not_book_clock(action, clock_case):
+    if action == "BUY":
+        selected = _current_maker_buy_candidate()
+        tick, bid, ask = "0.001", "0.40", "0.59"
+        rebind = era._global_buy_candidate_from_raw_book
+    else:
+        event = _global_scope_event(city="Alpha", source_run_id="maker-clock")
+        selected = _adapter_sell_actuation(
+            event, required_execution_mode="MAKER_REST"
+        ).decision.candidate
+        tick, bid, ask = "0.01", "0.60", None
+        rebind = era._global_sell_candidate_from_raw_book
+    now = _dt.datetime.now(_dt.timezone.utc)
+    captured = now - _dt.timedelta(seconds=3)
+    issued = now - _dt.timedelta(seconds=1)
+    expires = now + _dt.timedelta(seconds=20)
+    if clock_case == "future":
+        issued = now + _dt.timedelta(seconds=1)
+    elif clock_case == "expired":
+        issued = captured - _dt.timedelta(seconds=1)
+        expires = now - _dt.timedelta(seconds=1)
+    fields = dict(vars(selected.maker_fill_witness))
+    fields.pop("witness_identity")
+    fields.update(
+        training_cutoff_at_utc=now - _dt.timedelta(hours=1),
+        issued_at_utc=issued,
+        valid_until_at_utc=expires,
+    )
+    witness = CurrentMakerFillWitness(
+        witness_identity=current_maker_fill_witness_identity(**fields), **fields
+    )
+    selected = replace(
+        selected, maker_fill_witness=witness,
+        fill_probability_source=witness.witness_identity,
+    )
+    authority = _jit_market_authority(selected, tick=tick, min_order_size="5")
+    authority = replace(authority, snapshot=replace(
+        authority.snapshot, captured_at=captured,
+        freshness_deadline=captured + _dt.timedelta(seconds=30),
+    ))
+    raw = {
+        "asset_id": selected.token_id, "tick_size": tick, "min_order_size": "5",
+        "bids": [{"price": bid, "size": "100"}],
+        "asks": [] if ask is None else [{"price": ask, "size": "80"}],
+    }
+    validation = now.replace(tzinfo=None) if clock_case == "naive" else now
+    kwargs = dict(captured_at_utc=captured, market_authority=authority,
+                  validated_at_utc=validation)
+    if clock_case != "current":
+        with pytest.raises(ValueError, match="CURRENT_MAKER_FILL_WITNESS_TEMPORAL_INVALID"):
+            rebind(selected, raw, **kwargs)
+        return
+    kwargs.pop("validated_at_utc")  # Exercise the production current-clock path.
+    rebound = rebind(selected, raw, **kwargs)
+    assert rebound.book_captured_at_utc == captured
+    assert rebound.maker_fill_witness.issued_at_utc == issued
+    assert rebound.maker_fill_witness.valid_until_at_utc == expires
+    rebound.maker_fill_witness.assert_current_at(now)
 
 
 def test_global_buy_jit_rebinds_exact_maker_witness_to_current_book():

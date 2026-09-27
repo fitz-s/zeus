@@ -4941,6 +4941,128 @@ def test_completion_day0_snapshot_never_masks_capital_recovery_handoff(monkeypat
     assert cancelled() is True  # An interrupted cut cannot regain authority.
 
 
+@pytest.mark.parametrize(
+    "producer_reason",
+    (
+        "forecast_posterior_advanced",
+        "day0_extreme_event_committed",
+        "market_price_advanced",
+        "money_path_substrate_refreshed",
+    ),
+)
+@pytest.mark.parametrize(
+    ("new_reason", "expected_cancelled"),
+    (
+        ("forecast_posterior_advanced", False),
+        ("day0_extreme_event_committed", True),
+        ("position_fill_projected", True),
+    ),
+)
+def test_fairness_reserved_full_cut_protects_every_producer_from_forecast_storm(
+    monkeypatch, producer_reason, new_reason, expected_cancelled,
+):
+    import src.events.reactor as reactor_module
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    class ProbeCaptured(Exception):
+        pass
+
+    old_day0 = reactor_wake.ReactorWake(
+        "old-day0", "2026-09-27T17:04:23+00:00", "day0",
+        "day0_extreme_event_committed",
+    )
+    new_wake = reactor_wake.ReactorWake(
+        "new-wake", "2026-09-27T17:04:32+00:00", "producer", new_reason,
+        forecast_families=(("Cape Town", "2026-09-27", "high"),),
+    )
+    revision = ["old"]
+    marker = [(old_day0.wake_id, old_day0.reason)]
+    queued = [old_day0]
+    recovery = [False]
+    captured = {}
+    original_probe = reactor_module._reactor_wake_cancellation_probe
+
+    monkeypatch.setattr(main, "_settings_section", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_revision", lambda: revision[0])
+    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_identity", lambda: marker[0])
+
+    def read(_cutoff, *, exclude_wake_ids=(), fail_on_error=False):
+        assert fail_on_error is True
+        return tuple(w for w in queued if w.wake_id not in exclude_wake_ids)
+
+    monkeypatch.setattr(reactor_wake, "reactor_wakes_since", read)
+
+    def capture_probe(**kwargs):
+        captured["kwargs"] = kwargs
+        captured["cancelled"] = original_probe(**kwargs)
+        raise ProbeCaptured
+
+    monkeypatch.setattr(reactor_module, "_reactor_wake_cancellation_probe", capture_probe)
+    reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+    try:
+        with pytest.raises(ProbeCaptured):
+            reactor_module.run_edli_event_reactor_cycle(
+                active_lock=threading.Lock(),
+                producer_wake_reason=producer_reason,
+                producer_wake_ids=("selected",),
+                producer_wake_published_at="2026-09-27T17:04:24+00:00",
+                producer_wake_families=(("Cape Town", "2026-09-27", "high"),),
+                urgent_day0_pending=lambda: True,
+                capital_recovery_pending=lambda: recovery[0],
+            )
+        assert captured["kwargs"]["ignore_preexisting_wakes"] is True
+        assert captured["kwargs"]["defer_forecast_revisions"] is True
+        cancelled = captured["cancelled"]
+        assert cancelled() is False  # The old Day0 is in this cut's starting truth.
+        queued.append(new_wake)
+        revision[0] = "new"
+        marker[0] = (new_wake.wake_id, new_wake.reason)
+        assert cancelled() is expected_cancelled
+        if not expected_cancelled:
+            recovery[0] = True
+            assert cancelled() is True  # Capital recovery still interrupts.
+    finally:
+        reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+@pytest.mark.parametrize(
+    ("family_scoped", "exact_requests"),
+    ((True, ()), (False, (object(),))),
+)
+def test_fairness_debt_does_not_absorb_strict_or_exact_completion_wakes(
+    monkeypatch, family_scoped, exact_requests,
+):
+    import src.events.reactor as reactor_module
+    import src.main as main
+
+    class ProbeCaptured(Exception):
+        pass
+
+    captured = {}
+    monkeypatch.setattr(main, "_settings_section", lambda *_args, **_kwargs: {})
+
+    def capture_probe(**kwargs):
+        captured.update(kwargs)
+        raise ProbeCaptured
+
+    monkeypatch.setattr(reactor_module, "_reactor_wake_cancellation_probe", capture_probe)
+    reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+    try:
+        with pytest.raises(ProbeCaptured):
+            reactor_module.run_edli_event_reactor_cycle(
+                active_lock=threading.Lock(),
+                producer_wake_reason="held_sell_global_auction_completion_requested",
+                producer_wake_families=(("Cape Town", "2026-09-27", "high"),),
+                producer_family_scoped_held_completion=family_scoped,
+                producer_held_sell_reauction_requests=exact_requests,
+            )
+        assert captured["ignore_preexisting_wakes"] is False
+        assert captured["defer_forecast_revisions"] is False
+    finally:
+        reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
 @pytest.mark.parametrize("hazard", ("forecast_storm", "day0_then_forecast", "fill", "unknown", "queue_error", "revision_missing", "capital"))
 def test_reserved_full_cut_coalesces_only_proven_nonphysical_revisions(monkeypatch, hazard):
     from src.events.reactor import _reactor_wake_cancellation_probe

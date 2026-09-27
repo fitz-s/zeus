@@ -3876,6 +3876,7 @@ def _probe_global_book_epoch_cache(
     *,
     checked_at: datetime,
     allowed: bool,
+    required_until: datetime | None = None,
     topology_hint: tuple[tuple[str, str, str, str, str], ...] | None = None,
     mutable_family_keys: frozenset[str] | None = None,
 ) -> tuple[object | None, str]:
@@ -3894,13 +3895,14 @@ def _probe_global_book_epoch_cache(
     if not callable(current_identity):
         return None, "current_identity_missing"
     try:
-        # Mirror _global_book_prefetch_is_consumable's one-second reserve:
-        # global_batch_runtime.select_once stamps its own selection_at
-        # 0.7-1.3s after this probe runs, and the freshness check there
-        # compares that later timestamp against the same deadline. Without
-        # the reserve, a book epoch this probe accepts as current can still
-        # expire before selection reads it (GLOBAL_BOOK_EPOCH_EXPIRED).
-        if current_identity(checked_at.astimezone(UTC) + timedelta(seconds=1)) is None:
+        # A reusable epoch must survive the already-budgeted solve and JIT,
+        # not merely be current before the expensive comparison starts.
+        usable_until = checked_at.astimezone(UTC) + timedelta(seconds=1)
+        if required_until is not None:
+            if required_until.tzinfo is None:
+                return None, "required_until_naive"
+            usable_until = max(usable_until, required_until.astimezone(UTC))
+        if current_identity(usable_until) is None:
             return None, "expired"
         return entry.epoch, hit_reason
     except (TypeError, ValueError) as exc:
@@ -10366,6 +10368,13 @@ def event_bound_live_adapter_from_trade_conn(
 
         def _current_book_epoch_with_context(probabilities, _at, work_context):
             nonlocal reduce_only_book_tokens
+            cache_required_until = None
+            if work_context is not None:
+                remaining = work_context.checkpoint("book_cache_budget")
+                if math.isfinite(remaining):
+                    cache_required_until = datetime.now(UTC) + timedelta(
+                        seconds=max(1.0, remaining)
+                    )
             from src.contracts.executable_market_snapshot import (
                 FRESHNESS_WINDOW_DEFAULT,
             )
@@ -11255,6 +11264,7 @@ def event_bound_live_adapter_from_trade_conn(
                     probabilities,
                     checked_at=cache_checked_at,
                     allowed=True,
+                    required_until=cache_required_until,
                     topology_hint=speculative_topology,
                     mutable_family_keys=effective_book_refresh_family_keys,
                 ),
@@ -11935,6 +11945,7 @@ def event_bound_live_adapter_from_trade_conn(
                     bound_probabilities,
                     checked_at=cache_checked_at,
                     allowed=True,
+                    required_until=cache_required_until,
                     mutable_family_keys=effective_book_refresh_family_keys,
                 ),
             )
@@ -13651,6 +13662,7 @@ def _global_buy_candidate_from_raw_book(
     *,
     captured_at_utc: datetime,
     market_authority: _CurrentGlobalMarketAuthority,
+    validated_at_utc: datetime | None = None,
 ) -> object:
     """Replace one BUY candidate with the exact full JIT ask curve."""
 
@@ -13825,7 +13837,11 @@ def _global_buy_candidate_from_raw_book(
                 )
             ):
                 raise ValueError("selected_witness_economics_mismatch")
-            selected_witness.assert_current_at(captured_at_utc)
+            # Book observation and witness issuance are independent clocks.
+            # Preserve the book timestamp; witness validity belongs to this JIT.
+            selected_witness.assert_current_at(
+                validated_at_utc if validated_at_utc is not None else datetime.now(UTC)
+            )
             proposal = passive_buy_proposal_curve(
                 curve,
                 native_bid_levels=bid_levels,
@@ -14402,6 +14418,7 @@ def _global_sell_candidate_from_raw_book(
     *,
     captured_at_utc: datetime,
     market_authority: _CurrentGlobalMarketAuthority,
+    validated_at_utc: datetime | None = None,
 ):
     """Rebind a selected SELL to one freshly fetched native BID ladder."""
 
@@ -14560,7 +14577,11 @@ def _global_sell_candidate_from_raw_book(
                 )
             ):
                 raise ValueError("selected_witness_economics_mismatch")
-            selected_witness.assert_current_at(captured_at_utc)
+            # Book observation and witness issuance are independent clocks.
+            # Preserve the book timestamp; witness validity belongs to this JIT.
+            selected_witness.assert_current_at(
+                validated_at_utc if validated_at_utc is not None else datetime.now(UTC)
+            )
             current_proposal, *_ = global_sell_execution_terms(
                 curve,
                 capacity=selected_capacity,

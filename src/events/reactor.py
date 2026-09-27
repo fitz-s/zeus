@@ -9259,8 +9259,9 @@ def run_edli_event_reactor_cycle(
     producer_fast_path = committed_event_wake or targeted_forecast_wake
     completion_reserved_at_start = (
         (
-            producer_wake_reason is None
-            and _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+            _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+            and not family_scoped_held_completion
+            and not producer_held_sell_reauction_requests
         )
         or (
             completion_wake
