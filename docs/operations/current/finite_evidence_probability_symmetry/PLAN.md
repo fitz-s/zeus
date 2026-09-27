@@ -132,6 +132,27 @@ Status: active
   review accepts the budget separation. This does not guarantee network
   completion before target expiry; post-load proof must show a continuing
   collector across polls and actual source/coverage/posterior convergence.
+- Runtime revealed a cooldown priority inversion after that load: Hong Kong's
+  26T12 attempt had failed less than 60 seconds before startup, so the selector
+  skipped its earlier deadline and occupied both long-running track workers
+  with later-expiring held cycles (HIGH 26T18, LOW 27T00). The desired 26T12
+  candidate was eligible again on the next poll but could no longer run.
+  Retain the earliest otherwise-eligible identity during its existing short
+  retry cooldown and return an explicit deferred operation instead of selecting
+  a later held scope. Preserve the existing actual-attempt comparison against
+  a failed newest cycle, so this reservation does not erase that fairness law.
+  SCOPE is the exact track/cycle cooldown; DRAIN is the next ordinary poll after
+  its existing retry time; RESET is retry-time arrival or independent loss of
+  source/target eligibility. Test both tracks with later candidates, a failed
+  newest cycle, cooldown expiry and expired/ineligible earliest scopes. Do not
+  reduce cooldown, invent a lifecycle phase or authorize stale source data.
+- Cooldown reservation and its fairness-order antibodies are integrated as
+  `1abcaed87` and `b3771759f`: all 95 scheduling/boot tests pass on the parent,
+  and independent review accepts SUCCESS/PARTIAL/FAILED newest-cycle ordering
+  for both tracks. An initial verification command named a nonexistent boot
+  test file and ran no tests; the corrected schema-module command produced
+  the 95-pass result. Deployment and exact Hong Kong source-to-monitor proof
+  remain separate acceptance obligations.
 - Concurrent scheduler integration exposed a behavioral defect, not just a
   fixture mismatch: a reserved completion cut treats an absent urgent-wake
   revision as cancellation even when the marker has never existed and the
