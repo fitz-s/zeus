@@ -2957,6 +2957,10 @@ def test_replacement_availability_cooldown_keeps_metadata_probe_alive_but_suppre
 def test_replacement_maintenance_tick_throttles_timeboxed_repair(monkeypatch) -> None:
     """A timeboxed repair defers broad reseeds instead of multiplying the tick budget."""
     import src.ingest_main as ingest_main
+    monkeypatch.setattr(
+        ingest_main, "_enqueue_broad_reseed_batch",
+        lambda *_args, **_kwargs: "SOURCE_BROAD_RESEEDS_ASYNC_PENDING",
+    )
     import src.data.replacement_forecast_production as prod
     import src.observability.scheduler_health as scheduler_health
 
@@ -3033,7 +3037,7 @@ def test_replacement_maintenance_tick_throttles_timeboxed_repair(monkeypatch) ->
     assert result["current_target_download"]["timeboxed_incomplete"] is True
     assert result["current_target_download"]["unattempted_target_count"] == 2
     assert result["reseed_maintenance_status"] == (
-        "REPLACEMENT_MAINTENANCE_RESEEDS_DEFERRED_DEADLINE"
+        "SOURCE_BROAD_RESEEDS_ASYNC_PENDING"
     )
     assert "cycle_advance_seeds_enqueued" not in result
     assert health[-1] == {
@@ -3052,6 +3056,10 @@ def test_replacement_maintenance_uses_one_parent_deadline(monkeypatch) -> None:
     """BPF's reserved slice and broad anchor share one parent deadline."""
     import src.data.replacement_forecast_production as prod
     import src.ingest_main as ingest_main
+    monkeypatch.setattr(
+        ingest_main, "_enqueue_broad_reseed_batch",
+        lambda *_args, **_kwargs: "SOURCE_BROAD_RESEEDS_ASYNC_PENDING",
+    )
 
     now = [100.0]
     monkeypatch.setattr(ingest_main.time, "monotonic", lambda: now[0])
@@ -3132,7 +3140,7 @@ def test_replacement_maintenance_uses_one_parent_deadline(monkeypatch) -> None:
     assert reseeds == [("fusion", scopes, 2), ("cycle", scopes, 2)]
     assert result["status"] == "REPLACEMENT_MAINTENANCE_PARTIAL"
     assert result["reseed_maintenance_status"] == (
-        "REPLACEMENT_MAINTENANCE_COMMITTED_RESEEDS_PUBLISHED"
+        "SOURCE_BROAD_RESEEDS_ASYNC_PENDING"
     )
     assert result["committed_family_count"] == 2
 
@@ -3681,6 +3689,10 @@ def test_replacement_maintenance_does_not_publish_failsoft_committed_reseed(
     """A trigger error remains retryable; it is never evidence that q was reseeded."""
     import src.data.replacement_forecast_production as prod
     import src.ingest_main as ingest_main
+    monkeypatch.setattr(
+        ingest_main, "_enqueue_broad_reseed_batch",
+        lambda *_args, **_kwargs: "SOURCE_BROAD_RESEEDS_ASYNC_PENDING",
+    )
 
     now = [100.0]
     monkeypatch.setattr(ingest_main.time, "monotonic", lambda: now[0])
@@ -3748,7 +3760,7 @@ def test_replacement_maintenance_does_not_publish_failsoft_committed_reseed(
 
     assert result["status"] == "REPLACEMENT_MAINTENANCE_PARTIAL"
     assert result["reseed_maintenance_status"] == (
-        "REPLACEMENT_MAINTENANCE_RESEEDS_DEFERRED_DEADLINE"
+        "SOURCE_BROAD_RESEEDS_ASYNC_PENDING"
     )
     assert result["committed_fusion_upgrade_status"] == (
         "FUSION_UPGRADE_TRIGGER_FAILSOFT_SKIPPED"
@@ -4797,3 +4809,71 @@ def test_ingest_main_opendata_still_env_gated() -> None:
     assert "ingest_opendata_daily_mx2t6" in owns
     assert "ingest_opendata_daily_mx2t6" not in not_owns   # singleton preserved
     assert len(owns) - len(not_owns) == 3                  # the 3 OpenData jobs (2 daily + startup)
+
+
+def test_exhausted_maintenance_drains_existing_inputs_without_new_source_clock(
+    monkeypatch, broad_reseed_join,
+) -> None:
+    """A slow raw fetch cannot starve an already-committed probability revision."""
+    import threading
+
+    import src.data.replacement_forecast_production as prod
+    import src.ingest_main as ingest_main
+
+    clock = [100.0]
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+    monkeypatch.setattr(ingest_main.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(ingest_main, "_replacement_maintenance_due", lambda: True)
+    monkeypatch.setattr(ingest_main, "_all_held_current_target_scopes", lambda **kw: ())
+    monkeypatch.setattr(ingest_main, "_replacement_bpf_no_progress_retry_after_seconds", lambda: 0)
+    monkeypatch.setattr(ingest_main, "_record_replacement_bpf_maintenance_progress", lambda report: None)
+    monkeypatch.setenv(ingest_main.REPLACEMENT_CURRENT_TARGET_POLL_TIMEOUT_SECONDS_ENV, "10")
+    monkeypatch.setattr(
+        "src.data.bayes_precision_fusion_download.bayes_precision_fusion_quota_cooldown_seconds",
+        lambda: 0,
+    )
+    monkeypatch.setattr(prod, "_replacement_forecast_live_materialization_queue_config", lambda: {})
+
+    def download(*args, **kwargs):
+        clock[0] += 11
+        return {"status": "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE", "timeboxed_incomplete": True}
+
+    monkeypatch.setattr(prod, "_download_bayes_precision_fusion_extra_raw_inputs_if_needed", download)
+    monkeypatch.setattr(prod, "_download_replacement_forecast_current_targets_if_needed", lambda *a, **kw: None)
+    monkeypatch.setattr(prod, "_download_bayes_precision_fusion_candidate_accrual_if_needed", lambda *a, **kw: None)
+
+    def fusion(cfg, **kwargs):
+        calls.append("fusion")
+        entered.set()
+        assert release.wait(5)
+        return {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 1}
+
+    def cycle(cfg, **kwargs):
+        calls.append("cycle")
+        return {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 1}
+
+    monkeypatch.setattr(prod, "_enqueue_fusion_upgrade_reseeds_if_needed", fusion)
+    monkeypatch.setattr(prod, "_enqueue_cycle_advance_reseeds_if_needed", cycle)
+    monkeypatch.setattr(
+        "src.data.source_clock_update_probe.advance_source_clock_cursor",
+        lambda *a, **kw: pytest.fail("catch-up cannot acknowledge a provider cursor"),
+    )
+    try:
+        first = ingest_main._replacement_maintenance_tick.__wrapped__()
+        assert first["reseed_maintenance_status"] == "SOURCE_BROAD_RESEEDS_ASYNC_PENDING"
+        assert entered.wait(2)
+        # Maintenance returns while the scan is blocked. Repeated due passes
+        # retain one pending catch-up, never an unbounded thread/receipt queue.
+        for _ in range(3):
+            ingest_main._replacement_maintenance_tick.__wrapped__()
+        with ingest_main._BROAD_RESEED_CONDITION:
+            assert len(ingest_main._BROAD_RESEED_PENDING["requests"]) == 1
+            request = next(iter(ingest_main._BROAD_RESEED_ACTIVE["requests"].values()))
+            assert request["cursor_sources"] == ()
+            assert request["raw_sources"] == ()
+    finally:
+        release.set()
+        broad_reseed_join()
+    assert calls == ["fusion", "cycle", "fusion", "cycle"]

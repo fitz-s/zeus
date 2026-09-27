@@ -3371,11 +3371,33 @@ def _replacement_maintenance_tick():
             else "REPLACEMENT_MAINTENANCE_BROAD_NOT_DUE"
         )
     elif download_timeboxed or _remaining_budget() <= 0.0:
-        report["reseed_maintenance_status"] = (
-            "REPLACEMENT_MAINTENANCE_COMMITTED_RESEEDS_PUBLISHED"
-            if committed_reseed_report_count == 2
-            else "REPLACEMENT_MAINTENANCE_RESEEDS_DEFERRED_DEADLINE"
-        )
+        # SCOPE: this due catch-up, without a provider-cursor or raw-commit claim.
+        # DRAIN: the existing single broad worker scans inputs already on disk;
+        # its bounded pending batch coalesces repeated no-commit requests.
+        # RESET: each family clears through its durable seed/posterior identity.
+        # Transport exhausting its budget cannot suppress observation/revision
+        # recomputation forever, including families beyond the held portfolio.
+        try:
+            report["reseed_maintenance_status"] = _enqueue_broad_reseed_batch(
+                cfg,
+                include_cycle_advance=True,
+                source_clock_payload={},
+                cursor_sources=(),
+                download_report={
+                    "status": "MAINTENANCE_EXISTING_INPUT_CATCHUP",
+                    "written_row_count": 0,
+                    "source_commit_notifications": 0,
+                    "source_commit_notifications_pending": 0,
+                    "committed_families": (),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - next due tick retries publication
+            maintenance_errors.append(
+                f"catchup_reseed:{type(exc).__name__}: {str(exc)[:180]}"
+            )
+            report["reseed_maintenance_status"] = (
+                "REPLACEMENT_MAINTENANCE_RESEEDS_ENQUEUE_FAILED"
+            )
     else:
         for prefix, reseed in (
             ("fusion_upgrade", _enqueue_fusion_upgrade_reseeds_if_needed),
