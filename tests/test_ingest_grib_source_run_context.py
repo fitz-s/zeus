@@ -164,7 +164,49 @@ def _land_run_context(issue_iso: str, proof: dict) -> SourceRunContext:
     )
 
 
-def test_current_land_grid_product_requires_typed_proof(tmp_path: Path) -> None:
+def _assert_current_station_geometry_binding(row: sqlite3.Row, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run identical HIGH/LOW station and request identity regressions."""
+    from src.data.executable_forecast_reader import grid_surface_evidence_reason
+
+    stored = dict(row)
+    assert grid_surface_evidence_reason(stored) is None
+    for owner, field, delta in (
+        ("station_geometry", "lat", .001),
+        ("station_geometry", "lon", .001),
+        ("station_geometry", "elevation_m", 1.0),
+        ("station_geometry", "elevation_m", None),
+        (None, "request_lat", .001),
+        (None, "request_lon", .001),
+    ):
+        provenance = json.loads(row["provenance_json"])
+        surface = provenance["grid_surface_evidence"]
+        target = surface[owner] if owner else surface
+        target[field] = float(target[field]) + delta if delta is not None else float("nan")
+        changed = {**stored, "provenance_json": json.dumps(provenance)}
+        assert grid_surface_evidence_reason(changed) == (
+            "EXECUTABLE_FORECAST_GRID_SURFACE_STATION_UNVERIFIED"
+        ), (row["temperature_metric"], owner, field)
+
+    # The registry's whole-file hash is audit provenance, not a global
+    # always-newest gate; unrelated-city registry changes cannot freeze HK.
+    provenance = json.loads(row["provenance_json"])
+    provenance["grid_surface_evidence"]["station_geometry"]["registry_sha256"] = "f" * 64
+    assert grid_surface_evidence_reason({**stored, "provenance_json": json.dumps(provenance)}) is None
+
+    import src.config as config
+    actual = config.runtime_station_geometry_for_city
+    for field in ("lat", "lon", "elevation_m"):
+        with monkeypatch.context() as patcher:
+            def revised(city, *, changed_field=field):
+                station = actual(city)
+                return {**station, changed_field: float(station[changed_field]) + .001}
+            patcher.setattr(config, "runtime_station_geometry_for_city", revised)
+            assert grid_surface_evidence_reason(stored) == (
+                "EXECUTABLE_FORECAST_GRID_SURFACE_STATION_UNVERIFIED"
+            ), (row["temperature_metric"], field)
+
+
+def test_current_land_grid_product_requires_typed_proof(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from src.contracts.tigge_snapshot_payload import TiggeSnapshotPayload
     from src.data.executable_forecast_reader import grid_surface_evidence_reason
 
@@ -189,6 +231,7 @@ def test_current_land_grid_product_requires_typed_proof(tmp_path: Path) -> None:
         source_run_context=_land_run_context(payload["issue_time_utc"], payload["grid_surface_evidence"]),
     ) == "written"
     row = conn.execute("SELECT * FROM ensemble_snapshots").fetchone()
+    _assert_current_station_geometry_binding(row, monkeypatch)
     assert grid_surface_evidence_reason(dict(row)) is None
     assert json.loads(row["provenance_json"])["grid_surface_evidence"]["selected_flat_index"] == 123
     assert grid_surface_evidence_reason({**dict(row), "city": "Shanghai"}) == (
@@ -257,7 +300,7 @@ def test_current_land_grid_rejects_mismatched_physical_evidence(tmp_path: Path, 
         assert grid_surface_evidence_identity_hash(valid) == grid_surface_evidence_identity_hash(changed_transport)
 
 
-def test_current_low_land_grid_proof_is_typed_and_required(tmp_path: Path) -> None:
+def test_current_low_land_grid_proof_is_typed_and_required(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from src.data.executable_forecast_reader import grid_surface_evidence_reason
 
     payload = _low_boundary_payload(ambiguous_count=0)
@@ -282,7 +325,9 @@ def test_current_low_land_grid_proof_is_typed_and_required(tmp_path: Path) -> No
         conn, path, metric=LOW_LOCALDAY_MIN, model_version="ecmwf_ens", overwrite=False,
         source_run_context=_land_run_context(payload["issue_time_utc"], proof),
     ) == "written"
-    assert grid_surface_evidence_reason(dict(conn.execute("SELECT * FROM ensemble_snapshots").fetchone())) is None
+    low_row = conn.execute("SELECT * FROM ensemble_snapshots").fetchone()
+    _assert_current_station_geometry_binding(low_row, monkeypatch)
+    assert grid_surface_evidence_reason(dict(low_row)) is None
     payload.pop("grid_surface_evidence")
     path.write_text(json.dumps(payload), encoding="utf-8")
     assert "GRID_SURFACE" in ingest_json_file(
