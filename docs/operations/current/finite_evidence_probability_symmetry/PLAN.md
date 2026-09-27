@@ -8,6 +8,70 @@ Status: active
 
 ### Concurrent conditional-HIGH integration acceptance
 
+- Final source-boundary inspection proves a separate latent identity defect:
+  NOAA WRH requests one STID, but `_parse_rows` consumes STATION[0] without
+  checking its response STID; downstream atoms/prints are labeled from the
+  request config. Mutating the existing KHOU fixture's STID to OTHER still
+  returns all 946 rows. This is not evidence that today's VILK response was
+  wrong or that it caused the losses. Authorized minimal repair: the single-
+  station parser must require an unambiguous response station matching the
+  requested identity and reject missing/wrong/ambiguous identity via typed
+  WrhError. Preserve correct-case parsing, units, clocks and maturity buffer.
+  SCOPE is that exact station response; DRAIN is normal source retry fetching
+  an authentic response; RESET is a unique matching response identity. Prove
+  rejected responses cannot produce observation atoms/prints/success coverage,
+  with existing source and ingest tests, then independent fixed-diff review.
+  Do not rewrite historical rows or infer current wrong-station data.
+  Preserve an authentic matching station with empty observations as the
+  existing no-rows outcome. If required by the tests trust policy, update only
+  this existing test's lifecycle header, trusted-tests registry entry and
+  existing core_law_antibody category membership; no
+  unrelated registry cleanup. Re-run the data zone's ten mandatory suites
+  against their already-recorded four-failure baseline as well as the direct
+  source/appender relationship tests.
+  Protected law: INV-14 source identity, INV-06 settlement truth and INV-47
+  scoped recovery. The sole possible authority-surface edit is
+  architecture/test_topology.yaml's trust/category entries for this test,
+  harmonizing the audited test header with tests/AGENTS.md; no law or source
+  role changes. Leave the unrelated missing backfill script manifest row alone.
+- Source identity repair is fixed at `3b4a3ba3b`, with only this touched test's
+  missing category registered at `c544af7c5`. Full NOAA product/appender tests
+  have 54 passes and one pre-existing missing-backfill-manifest failure;
+  parent confirms that failing function's AST and entire input script manifest
+  are byte/structure-equivalent to pre-fix `1df13fef5`. The ten required data
+  suites have 240 passes and the exact same four old failure nodes across
+  baseline, prior final and this final XML. Wrong-station HTTP 200 cannot reach
+  atom/print writers or WRITTEN coverage; the existing scoped FAILED retry is
+  preserved. The touched test has no remaining topology warning; unrelated
+  repo-wide registry drift is not repaired or advertised as clean.
+  Independent fixed-SHA final review accepts both source commits; its eleven
+  identity/empty-response/writer-boundary cases pass. All confirmed repair
+  slices and current-case dispositions are now ready for the standard guarded
+  deployment, with the explicit post-local source prerequisite above retained.
+
+- Deployment of landed `1df13fef5` remains withheld pending a new exact
+  Lucknow source check. At 18:36:23Z a read-only request to the active official
+  NOAA WRH page's Synoptic backing API returns 48 target-local-day observations
+  and the first next-day boundary observation. These are raw source prints,
+  not declared final settlement. Canonical observations/settlements remain
+  absent. The earlier PAGE_SIDE_UNAVAILABLE message refers to the local print
+  ledger and cannot prove an official outage. Check units/station identity,
+  scheduled source writer cadence and post-midnight target selection before
+  classifying the remaining runtime block as external or a missed ingestion.
+- That Lucknow post-midnight check now identifies an intentional bounded
+  schedule: city_local_day_end_target_date requires one hour after local day
+  end, making Sep27 eligible at 19:30Z; the active daily-observation job runs
+  hourly at :05, so the earliest normally scheduled eligible round is 20:05Z.
+  It retains yesterday as its target, not a midnight date-loss bug. The RO
+  request used VILK/C/all, but did not independently retain the response STID
+  or publication timestamp; raw rows are not finality or complete-coverage
+  proof. Do not change the maturity buffer or assert a guaranteed future write.
+  The postend actual monitor remains appropriately blocked without qualified
+  settlement-channel evidence. The bin-order repair's four-family causal
+  replay proof predates that boundary; after deployment require fresh normal
+  receipts for the still-intraday WU families and explicit correct postend
+  rejection for Lucknow until its separate source prerequisites are satisfied.
+
 - Newly isolated current-HK exit path must be resolved before final rollout:
   absence of ordinary positive-EV statistical SELL is not absence of a panic
   trigger. Two independent indexed event audits find persistent
