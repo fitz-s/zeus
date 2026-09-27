@@ -624,14 +624,59 @@ def test_deterministic_ready_still_fetches_required_ens_then_composite_dedups(
         return len(rows)
 
     monkeypatch.setattr(day0, "persist_day0_hourly_vectors", persist)
+    def persisted_identity(vector: Day0HourlyVector, request_hash: str) -> Day0HourlyVector:
+        meta = _json.loads(vector.source_run_meta_json or "{}")
+        meta.update(
+            request_hash=request_hash,
+            provider_run_id=(
+                f"openmeteo:ecmwf_ifs025_ensemble:{run.isoformat()}"
+                if request_hash == "sha256:ens"
+                else f"openmeteo:ecmwf_ifs025:{run.isoformat()}"
+            ),
+        )
+        return replace(vector, source_run_meta_json=_json.dumps(meta))
+
+    ens_vectors = [persisted_identity(vector, "sha256:ens") for vector in ens_vectors]
+    provider_vector = persisted_identity(replace(ens_vectors[0], model="ecmwf_ifs"), "sha256:det")
     monkeypatch.setattr(
         day0,
         "read_freshest_day0_hourly_vectors",
-        lambda **_kwargs: ens_vectors if persisted["n"] else [],
+        lambda **kwargs: (
+            [provider_vector]
+            if tuple(kwargs.get("expected_models") or ()) == ("ecmwf_ifs",)
+            else ens_vectors if persisted["n"] else []
+        ),
     )
     day0._LAST_REFRESH_MONOTONIC.clear()
     day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.clear()
     day0._INCOMPLETE_RETRY_STREAK.clear()
+
+    if route == "current_high_priority":
+        import src.config as config_module
+        import src.data.replacement_forecast_current_target_plan as target_plan
+        import src.state.db as db_module
+        from src.events import reactor
+
+        monkeypatch.setattr(config_module, "runtime_cities_by_name", lambda: {city.name: city})
+        monkeypatch.setattr(
+            target_plan, "_latest_authorized_day0_fact",
+            lambda *_args, **_kwargs: {
+                "observation_time": (decision - timedelta(minutes=5)).isoformat(),
+            },
+        )
+        monkeypatch.setattr(
+            db_module, "get_world_connection_read_only", lambda **_kw: sqlite3.connect(":memory:")
+        )
+        monkeypatch.setattr(
+            db_module, "get_forecasts_connection_read_only", lambda **_kw: sqlite3.connect(":memory:")
+        )
+
+        def probe():
+            return reactor._edli_day0_hourly_refresh_due_families(
+                cities=[city], decision_time=decision + timedelta(minutes=6),
+            ).refresh_due_families
+
+        assert probe() == frozenset({(city.name, target_date, "high")})
 
     first = day0.maybe_refresh_day0_hourly_vectors(
         [city], decision_time=decision, interval_s=0.0,
@@ -656,6 +701,8 @@ def test_deterministic_ready_still_fetches_required_ens_then_composite_dedups(
     assert persisted["n"] == 51
     assert hwm_probes["n"] == 2
     assert day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC == {}
+    if route == "current_high_priority":
+        assert probe() == frozenset()
 
 
 def test_current_high_ens_does_not_fetch_unrequested_future_target(

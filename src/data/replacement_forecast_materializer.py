@@ -1340,6 +1340,7 @@ def _day0_noaa_preliminary_carrier(
     path_error_sigma_c: float,
     final_extreme_centers_c: Sequence[float] = (),
     remaining_center_bias_c: float = 0.0,
+    conditional_high_shape_identity: str | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
     """Build a source-specific provisional shared remaining-day carrier.
 
@@ -1511,6 +1512,10 @@ def _day0_noaa_preliminary_carrier(
         preliminary_survival_identity=str(likelihood["identity_hash"]),
     )
     identity_inputs["current_path_state"] = current_state.identity()
+    if conditional_high_shape_identity is not None:
+        identity_inputs["conditional_high_shape_identity"] = (
+            conditional_high_shape_identity
+        )
     semantics = SettlementSemantics.for_city(city)
     final_centers_native = tuple(
         float(value) * native_scale + native_offset
@@ -1574,6 +1579,7 @@ def _day0_noaa_future_vector_members(
     request: ReplacementForecastMaterializeRequest,
     *,
     metric: str,
+    physical_representatives: bool = False,
 ) -> tuple[tuple[float, ...], float, str]:
     """Read the exact complete hourly bundle at the materialization cutoff."""
     observation_time = _day0_observed_extreme_time(request)
@@ -1583,6 +1589,7 @@ def _day0_noaa_future_vector_members(
     from src.data.day0_hourly_vectors import (
         DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
         day0_hourly_models_for_city,
+        day0_hourly_provider_representatives,
         read_freshest_day0_hourly_vectors,
         read_day0_current_temperature_state,
         remaining_day_extremes_c_with_current_state,
@@ -1614,6 +1621,8 @@ def _day0_noaa_future_vector_members(
         require_complete_remaining_window=True,
         conn=conn,
     )
+    if physical_representatives:
+        vectors = day0_hourly_provider_representatives(vectors)
     future_values, _innovations = remaining_day_extremes_c_with_current_state(
         vectors,
         target_date=_date_text(request.target_date),
@@ -1635,7 +1644,7 @@ def _day0_noaa_carrier_future_members(
     *,
     metric: str,
     fusion: _BayesPrecisionFusionFusionOverride,
-) -> tuple[tuple[float, ...], float, str, tuple[dict[str, object], ...]]:
+) -> tuple[tuple[float, ...], float, str, tuple[dict[str, object], ...], object | None]:
     """Add station extrema and return only unresolved conditional path noise.
 
     Hourly vectors describe the remaining trajectory. Official station
@@ -1651,11 +1660,6 @@ def _day0_noaa_carrier_future_members(
     ``event_reactor_adapter._day0_extra_member_sigma_native``.
     """
 
-    future, _vector_sigma, cutoff = _day0_noaa_future_vector_members(
-        conn,
-        request,
-        metric=metric,
-    )
     decision_time = _to_utc(request.computed_at, field_name="computed_at")
     from src.data.station_forecast_adapter import load_station_forecast_config
 
@@ -1666,6 +1670,17 @@ def _day0_noaa_carrier_future_members(
         model
         for model in fusion.used_models
         if str(model).strip() in station_models
+    )
+    open_hourly_high = (
+        metric == "high" and not requested
+        and decision_time <= compute_target_local_day_window_utc(
+            city_timezone=request.city_timezone,
+            target_local_date=date.fromisoformat(_date_text(request.target_date)),
+        ).end_utc
+    )
+    future, _vector_sigma, cutoff = _day0_noaa_future_vector_members(
+        conn, request, metric=metric,
+        physical_representatives=open_hourly_high,
     )
     def unresolved_path_sigma(values: Sequence[float]) -> float:
         from src.config import runtime_cities_by_name
@@ -1717,7 +1732,30 @@ def _day0_noaa_carrier_future_members(
         return float(math.sqrt(max(effective_sigma**2 - instrument_sigma**2, 0.0)))
 
     if not requested:
-        return future, unresolved_path_sigma(future), cutoff, ()
+        if open_hourly_high:
+            from src.config import runtime_cities_by_name
+            from src.data.day0_hourly_vectors import (
+                day0_conditional_high_shape,
+                read_day0_current_temperature_state,
+            )
+
+            city = runtime_cities_by_name().get(request.city)
+            if city is None:
+                raise ValueError("DAY0_CONDITIONAL_HIGH_CITY_MISSING")
+            current_state = read_day0_current_temperature_state(
+                conn=conn, city=city, target_date=_date_text(request.target_date),
+                decision_time=decision_time,
+            )
+            if current_state is None:
+                raise ValueError("DAY0_CONDITIONAL_HIGH_OBSERVATION_MISSING")
+            shape = day0_conditional_high_shape(
+                conn=conn, city=city, target_date=_date_text(request.target_date),
+                decision_time=decision_time, current_state=current_state,
+            )
+            if tuple(shape.provider_centers_c) != future:
+                raise ValueError("DAY0_CONDITIONAL_HIGH_PROVIDER_REBUILD_MISMATCH")
+            return future, shape.extra_sigma_c, cutoff, (), shape
+        return future, unresolved_path_sigma(future), cutoff, (), None
     serving = fusion.current_value_serving
     if not isinstance(serving, Mapping):
         raise ValueError("DAY0_STATION_CARRIER_SERVING_IDENTITY_MISSING")
@@ -1784,6 +1822,7 @@ def _day0_noaa_carrier_future_members(
         unresolved_path_sigma(combined),
         cutoff,
         tuple(evidence),
+        None,
     )
 
 
@@ -6709,6 +6748,7 @@ def _compute_posterior_payload(
     _day0_shared_carrier: dict[str, object] | None = None
     _day0_shared_carrier_likelihood: dict[str, object] | None = None
     _day0_shared_carrier_station_extremes: tuple[dict[str, object], ...] = ()
+    _day0_conditional_high_shape: object | None = None
     _day0_remaining_bias_provenance: dict[str, object] = {}
     _day0_shared_carrier_error: str | None = None
     _provisional_extreme_c: float | None = None
@@ -6826,6 +6866,7 @@ def _compute_posterior_payload(
                     _carrier_path_sigma,
                     _carrier_cutoff,
                     _day0_shared_carrier_station_extremes,
+                    _day0_conditional_high_shape,
                 ) = (
                     _day0_noaa_carrier_future_members(
                         conn,
@@ -6854,6 +6895,10 @@ def _compute_posterior_payload(
                             for evidence in _day0_shared_carrier_station_extremes
                         ),
                         remaining_center_bias_c=_day0_remaining_bias.shift_c,
+                        conditional_high_shape_identity=(
+                            None if _day0_conditional_high_shape is None
+                            else _day0_conditional_high_shape.identity
+                        ),
                     )
                 )
                 if not str(
@@ -7594,6 +7639,10 @@ def _compute_posterior_payload(
     # would churn the identity of every row it does not touch.
     if _center_debias_param_hash:
         posterior_config["center_debias_param_hash"] = _center_debias_param_hash
+    if _day0_conditional_high_shape is not None:
+        posterior_config["day0_conditional_high_shape_identity"] = (
+            _day0_conditional_high_shape.identity
+        )
     posterior_config_hash = _json_hash(posterior_config)
     family_id = f"{request.city}:{target_date}:{metric}:{bin_topology_hash}"
     # FIX 5 (2026-06-09) — capture-status provenance (recording only; the FIX-1 live gate is the
@@ -7743,6 +7792,20 @@ def _compute_posterior_payload(
                 ],
                 "day0_remaining_carrier_path_error_sigma_c": float(
                     _carrier_path_sigma
+                ),
+                **(
+                    {
+                        "day0_conditional_high_shape_identity": (
+                            _day0_conditional_high_shape.identity
+                        ),
+                        "day0_conditional_high_shape_witness": dict(
+                            _day0_conditional_high_shape.witness
+                        ),
+                        "day0_remaining_variance_basis": (
+                            "conditional_ens_within_plus_provider_center_delta_v1"
+                        ),
+                    }
+                    if _day0_conditional_high_shape is not None else {}
                 ),
                 # The persisted future extremes stay UNSHIFTED (the bias fitter's
                 # residual basis); the shift and its artifact ride beside them.

@@ -6159,6 +6159,7 @@ def _edli_day0_hourly_refresh_due_families(
         day0_hourly_models_for_city,
         day0_source_clock_ensemble_member_models,
         day0_source_clock_ensemble_target_dates,
+        day0_conditional_high_run_proof,
         read_freshest_day0_hourly_vectors,
     )
     from src.data.replacement_forecast_current_target_plan import (
@@ -6308,6 +6309,22 @@ def _edli_day0_hourly_refresh_due_families(
                 )
                 if not vectors:
                     missing.add((city_name, target_date, metric))
+                if metric == "high" and vectors:
+                    high_ensemble = read_freshest_day0_hourly_vectors(
+                        city=city_name, target_date=target_date, now=now,
+                        expected_models=day0_source_clock_ensemble_member_models(),
+                        require_expected=True,
+                        max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+                        remaining_window_start=observation_time,
+                        require_complete_remaining_window=True,
+                        raise_on_db_error=True, conn=vector_conn,
+                    )
+                    try:
+                        day0_conditional_high_run_proof(
+                            vectors, high_ensemble, decision_time=now
+                        )
+                    except (ValueError, AttributeError):
+                        missing.add((city_name, target_date, metric))
                 if (
                     metric == "low"
                     and target_date in source_clock_low_target_dates

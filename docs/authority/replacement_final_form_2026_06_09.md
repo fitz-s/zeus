@@ -355,18 +355,41 @@ identity binds both carrier operator and content, even when numerical q coincide
 
 Once a causal target-day observation and complete unresolved-hour provider
 trajectories exist, Day0 point q is a different conditional random variable from
-the source-clock full-day extreme:
+the source-clock full-day extreme. The open-local-day, pure-hourly HIGH
+carrier uses the following conditional decomposition:
 
 ```
 provider_path_s = remaining_extreme(
     condition(hourly_path_s, current_temperature, observation_time)
 )
-path_spread²    = Var_s(provider_path_s)
-unresolved²     = max(sigma_pred² - path_spread², 0)
-path_error²     = max(unresolved², instrument_latency_floor²)
-future_s        = provider_path_s + Normal(0, path_error)
+ensemble_path_m = remaining_extreme(
+    condition(same_run_IFS_member_m, current_temperature, observation_time)
+)
+W_cond² = Var_m(ensemble_path_m)
+B_cond² = Var_s(provider_path_s)
+D_cond  = abs(mean_s(provider_path_s) - mean_m(ensemble_path_m))
+residual = sqrt(W_cond² + D_cond²)
+effective = max(residual, hypot(instrument, observation_latency_margin / 2))
+path_error² = max(effective² - instrument², 0)
+future_s = provider_path_s + Normal(0, hypot(instrument, path_error))
 final_s         = extreme(observed_running_boundary, future_s)
 ```
+
+For pure remaining-hourly HIGH, condition all 51 same-run IFS members and
+the current deterministic provider paths on the **same** observation and
+decision clock. Use the actual Day0 physical-provider representatives,
+equally weighted; a regional path supersedes its global path from the same
+provider. Their between-spread `B_cond` already belongs to the carrier mixture
+and must not enter `path_error` again. The source-clock full-day posterior and
+its original sigma remain unchanged. The current-state value is still a point
+approximation; this revision does not integrate the measurement quantization
+interval. Missing members, wrong run, unavailable timestamps, or incomplete
+observation-hour coverage make that family unavailable until the existing
+current-date priority refresh fetches a complete carrier and the materializer
+reissues a certificate. A healthy family resets on the strict same-cycle proof;
+no global entry pause follows from another family's missing carrier. LOW and
+the closed-local-day treatment retain their existing computation in this
+revision; this change does not establish a conditional-variance repair for them.
 
 A station product predicting the **final daily extreme** is not a remaining
 hourly path. Its center remains separately typed in
@@ -380,25 +403,26 @@ mass into an atom. A no-boundary scenario retains its unconditioned Gaussian.
 A zero-variance component contradicting the surviving boundary is unavailable,
 not a fabricated point mass at the boundary.
 
-V3 retains the source-current error width, provider-component weights and
+The typed V3 final-daily station composition retains the source-current error
+width and its separate variance basis, provider-component weights and
 boundary-survival mixture. Remaining-hourly components still use the max/min
 operator above. Both point probabilities and confidence draws use these same
 typed distributions, and carrier identity binds the two center sets separately.
-Without final-daily components, V1 historical replay and V2 results remain
-unchanged. Materialization, ENTRY, held redecision and submit-time reproduction
+V1 historical replay retains its original inputs; current pure-hourly HIGH V2
+uses the conditional variance above. Materialization, ENTRY, held redecision and submit-time reproduction
 share this builder; a new Day0 semantics revision prevents mixing old and new
 decision certificates or settlement attribution.
 
-The provider-path distribution carries current provider disagreement and the
-explicit remaining diurnal shape. It does not carry the error shared by all
-deterministic provider paths. The current provider-path center variance is
-therefore removed from the source-clock total predictive variance; only the
-unresolved remainder is applied as conditional path error. Instrument and
-observation-latency uncertainty is an irreducible floor. This decomposition
-prevents both failure modes: deleting common forecast error makes exact-bin q
-overconfident, while injecting the full `sigma_pred` into every path counts
-provider disagreement twice. The error is applied once before the physical
-max/min.
+For pure hourly HIGH, the conditional IFS within-spread and its disagreement
+with the conditional deterministic centers account for unresolved model error.
+The source-clock pre-observation total variance is never reduced by a
+post-observation provider spread: doing so reintroduces disagreement that the
+current observation already resolved. Instrument and observation-latency
+uncertainty remain the existing maximum floor; the operator adds instrument
+variance only once before physical max/min. The producer, held/ENTRY rebuild,
+and immutable submit replay bind the conditional shape's member/run/observation
+witness and semantics revision. Older certificates must be rematerialized for
+new action, while their original realized-fill attribution remains historical.
 
 The source-clock posterior, finite-member/moment band, topology, and causal
 identity remain bound into the Day0 witness and are reproduced at submit. A

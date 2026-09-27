@@ -50,6 +50,7 @@ from src.data.day0_hourly_vectors import (
     align_day0_hourly_vectors_on_common_causal_grid,
     build_day0_remaining_probability_carrier,
     day0_effective_path_sigma_c,
+    day0_conditional_high_shape,
     day0_remaining_carrier_identity_inputs,
     day0_remaining_carrier_samples_row_major,
     fetch_day0_hourly_vectors,
@@ -64,6 +65,136 @@ from src.data.day0_hourly_vectors import (
 from src.types.market import Bin
 
 UTC = timezone.utc
+
+
+@pytest.mark.parametrize(
+    "damage", (None, "missing_member", "wrong_run", "future_available", "no_anchor")
+)
+@pytest.mark.parametrize("unit", ("C", "F"))
+@pytest.mark.parametrize("regional", (False, True))
+def test_current_high_conditional_ensemble_uses_one_observation_measure(
+    monkeypatch, damage, unit, regional,
+):
+    """Explained pre-observation spread must not reappear as future noise."""
+    import src.data.day0_hourly_vectors as hourly
+
+    city = SimpleNamespace(name="Helsinki", timezone="UTC", settlement_unit=unit)
+    target_date = "2026-09-27"
+    decision = datetime(2026, 9, 27, 11, 0, tzinfo=UTC)
+    observed = decision - timedelta(minutes=30)
+    run = decision - timedelta(hours=5)
+    models = (
+        (("icon_d2",) if regional else ())
+        + ("ecmwf_ifs", "icon_global", "ukmo_global_deterministic_10km")
+    )
+    ensemble_models = hourly.day0_source_clock_ensemble_member_models()
+
+    def vector(model, offset=0.0, *, ensemble=False):
+        meta = {
+            "provider_source_cycle_time_utc": (
+                run + timedelta(hours=1) if ensemble and damage == "wrong_run"
+                else run
+            ).isoformat(),
+            "provider_source_available_at_utc": (
+                decision + timedelta(minutes=1)
+                if ensemble and damage == "future_available"
+                else run + timedelta(hours=1)
+            ).isoformat(),
+            "fetch_finished_at": (decision - timedelta(minutes=5)).isoformat(),
+            "fetch_started_at": (decision - timedelta(minutes=10)).isoformat(),
+            "request_hash": "ensemble-hash" if ensemble else "provider-hash",
+            "provider_run_id": "ensemble-run" if ensemble else model + "-run",
+        }
+        return Day0HourlyVector(
+            model=model, city=city.name, target_date=target_date,
+            timezone_name=city.timezone,
+            captured_at=(decision - timedelta(minutes=20)).isoformat(),
+            times=tuple(
+                (datetime(2026, 9, 27, hour, tzinfo=UTC)).isoformat()
+                for hour in (range(12, 24) if damage == "no_anchor" else range(24))
+            ),
+            temps_c=tuple(
+                15.0 + offset if hour <= 10 else 16.0 + offset
+                for hour in (range(12, 24) if damage == "no_anchor" else range(24))
+            ),
+            source_run_meta_json=json.dumps(meta),
+        )
+
+    providers = [vector(model, .2 if model == "icon_d2" else 0.0) for model in models]
+    ensemble = [
+        vector(model, (index - 25) * .008, ensemble=True)
+        for index, model in enumerate(ensemble_models)
+    ]
+    if damage == "missing_member":
+        ensemble.pop()
+    monkeypatch.setattr(hourly, "day0_hourly_models_for_city", lambda _city: models)
+    monkeypatch.setattr(
+        hourly, "read_freshest_day0_hourly_vectors", lambda **_kwargs: ensemble,
+    )
+    conn = sqlite3.connect(":memory:")
+    current = Day0CurrentTemperatureState(
+        value_native=15.0 if unit == "C" else 59.0,
+        observed_at=observed, source="aviationweather_metar"
+    )
+    if damage is not None:
+        with pytest.raises(ValueError, match="DAY0_CONDITIONAL_HIGH_"):
+            day0_conditional_high_shape(
+                conn=conn, city=city, target_date=target_date,
+                decision_time=decision, current_state=current,
+                provider_vectors=providers,
+            )
+        return
+
+    shape = day0_conditional_high_shape(
+        conn=conn, city=city, target_date=target_date,
+        decision_time=decision, current_state=current,
+        provider_vectors=providers,
+    )
+    prior_total_sigma = 2.5
+    old_path = day0_effective_path_sigma_c(
+        source_clock_predictive_sigma_c=prior_total_sigma,
+        centers_c=shape.provider_centers_c, instrument_sigma_c=.28,
+    )
+    assert len(shape.provider_centers_c) == 3
+    assert shape.witness["provider_models"] == (
+        ["icon_d2", "ecmwf_ifs", "ukmo_global_deterministic_10km"]
+        if regional else list(models)
+    )
+    assert len(shape.ensemble_centers_c) == 51
+    assert shape.provider_between_sigma_c == pytest.approx(np.std(shape.provider_centers_c))
+    assert shape.model_residual_sigma_c == pytest.approx(
+        hypot(shape.ensemble_within_sigma_c, shape.ensemble_center_delta_c)
+    )
+    from src.signal.ensemble_signal import sigma_instrument_for_city
+
+    instrument_c = float(sigma_instrument_for_city(city).to("C").value)
+    assert shape.effective_sigma_c == pytest.approx(
+        max(shape.model_residual_sigma_c, instrument_c)
+    )
+    assert shape.extra_sigma_c == pytest.approx(
+        sqrt(max(shape.effective_sigma_c**2 - instrument_c**2, 0))
+    )
+    assert old_path > 2.0 > shape.effective_sigma_c
+    assert shape.witness["provider_scenario_weights"] == [1 / 3] * 3
+    assert shape.witness["observation_unit"] == unit
+    if unit == "C":
+        # The source-clock posterior used only ICON+UKMO, while this carrier
+        # has three equal scenarios including ECMWF. Its variance basis must
+        # follow the three actual Day0 paths rather than those two weights.
+        skewed = [
+            replace(providers[0], temps_c=tuple(t + .6 for t in providers[0].temps_c)),
+            *providers[1:],
+        ]
+        changed = day0_conditional_high_shape(
+            conn=conn, city=city, target_date=target_date,
+            decision_time=decision, current_state=current,
+            provider_vectors=skewed,
+        )
+        assert changed.provider_between_sigma_c > 0
+        assert np.mean(changed.provider_centers_c) != pytest.approx(
+            np.mean(changed.provider_centers_c[1:])
+        )
+        assert changed.identity != shape.identity
 
 
 def _kma_consumer_fixture(*, damage=None, correction=False):
@@ -2471,13 +2602,14 @@ def test_hko_provisional_replay_requires_persisted_carrier() -> None:
 
 
 @pytest.mark.parametrize(
-    "operator",
+    "operator,conditional_high",
     (
-        "extreme_observed_then_noisy_future_v1",
-        "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+        ("extreme_observed_then_noisy_future_v1", False),
+        ("extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2", False),
+        ("extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2", True),
     ),
 )
-def test_noaa_adapter_replays_materialized_carrier_identity_and_samples(operator):
+def test_noaa_adapter_replays_materialized_carrier_identity_and_samples(operator, conditional_high):
     """Strict replay accepts the persisted V1 history and current V2 carrier."""
     import src.engine.event_reactor_adapter as era
     from src.config import ensemble_n_mc, runtime_cities_by_name
@@ -2529,6 +2661,21 @@ def test_noaa_adapter_replays_materialized_carrier_identity_and_samples(operator
         lambda _city: TemperatureDelta(0.25, "C"),
     )
     try:
+        conditional_witness = {"semantics": "day0_conditional_high_equal_provider_v1", "ens_members": 51}
+        conditional_identity = hashlib.sha256(json.dumps(
+            conditional_witness, sort_keys=True, separators=(",", ":"),
+        ).encode()).hexdigest()
+        identity_inputs = day0_remaining_carrier_identity_inputs(
+            city="Tel Aviv", unit="C", decision_time_utc=cutoff,
+            station_id="LLBG",
+            preliminary_survival_identity=str(likelihood["identity_hash"]),
+        )
+        if conditional_high:
+            identity_inputs["current_path_state"] = {
+                "value_native": 33.0, "observed_at_utc": cutoff,
+                "source": "aviationweather_metar",
+            }
+            identity_inputs["conditional_high_shape_identity"] = conditional_identity
         expected = build_day0_remaining_probability_carrier(
             future_extremes_c=future,
             boundary_scenarios=((33.0, 0.95), (None, 1.0 - 0.95)),
@@ -2539,15 +2686,46 @@ def test_noaa_adapter_replays_materialized_carrier_identity_and_samples(operator
             n_point=ensemble_n_mc(),
             n_samples=500,
             operator=operator,
-            identity_inputs=day0_remaining_carrier_identity_inputs(
-                city="Tel Aviv",
-                unit="C",
-                decision_time_utc=cutoff,
-                station_id="LLBG",
-                preliminary_survival_identity=str(likelihood["identity_hash"]),
-            ),
+            identity_inputs=identity_inputs,
             settlement_semantics=_settlement_semantics("Tel Aviv"),
         )
+        if conditional_high:
+            import src.data.replacement_forecast_materializer as materializer
+
+            monkeypatch.setattr(
+                "src.data.day0_observation_reader.same_station_preliminary_report_survival_likelihood",
+                lambda *_args, **_kwargs: likelihood,
+            )
+            monkeypatch.setattr(
+                "src.data.day0_hourly_vectors.read_day0_current_temperature_state",
+                lambda **_kwargs: Day0CurrentTemperatureState(
+                    value_native=33.0, observed_at=decision_time,
+                    source="aviationweather_metar",
+                ),
+            )
+            monkeypatch.setattr(
+                "src.calibration.day0_resolver_terminal_residual.resolve_day0_resolver_terminal_input",
+                lambda **_kwargs: None,
+            )
+            produced, produced_likelihood = materializer._day0_noaa_preliminary_carrier(
+                sqlite3.connect(":memory:"),
+                SimpleNamespace(
+                    city="Tel Aviv", city_timezone="Asia/Jerusalem",
+                    target_date="2026-08-24", computed_at=decision_time,
+                    day0_observed_extreme_source="aviationweather_metar",
+                    day0_observed_extreme_c=33.0,
+                ),
+                metric="high", future_members_c=future,
+                bins=(SimpleNamespace(lower_c=None, upper_c=30),
+                      SimpleNamespace(lower_c=31, upper_c=31),
+                      SimpleNamespace(lower_c=32, upper_c=32),
+                      SimpleNamespace(lower_c=33, upper_c=None)),
+                path_error_sigma_c=float(np.std(np.asarray(future), ddof=0)),
+                conditional_high_shape_identity=conditional_identity,
+            )
+            assert produced_likelihood == likelihood
+            assert produced["content_identity"] == expected["content_identity"]
+            expected = produced
         payload = {
             "metric": "high",
             "rounded_value": 33.0,
@@ -2576,6 +2754,17 @@ def test_noaa_adapter_replays_materialized_carrier_identity_and_samples(operator
                 "request_hash_by_model": {"ecmwf_ifs": "request-hash-1"},
             },
         }
+        if conditional_high:
+            payload.update({
+                "_edli_day0_current_temperature_native": 33.0,
+                "_edli_day0_current_temperature_observed_at_utc": cutoff,
+                "_edli_day0_current_temperature_source": "aviationweather_metar",
+                "_edli_day0_conditional_high_shape_identity": conditional_identity,
+                "_edli_day0_conditional_high_shape_witness": conditional_witness,
+                "_edli_day0_remaining_variance_basis": (
+                    "conditional_ens_within_plus_provider_center_delta_v1"
+                ),
+            })
         replay = era._day0_remaining_p_raw_vector(
             np.asarray(future),
             city=city,
@@ -2601,6 +2790,22 @@ def test_noaa_adapter_replays_materialized_carrier_identity_and_samples(operator
         assert payload["_edli_day0_remaining_carrier_q"] == expected["q"]
         assert payload["_edli_day0_remaining_probability_samples"] == expected["samples"]
         assert payload["_edli_day0_remaining_probability_sample_count"] == 500
+        if conditional_high:
+            for field in (
+                "_edli_day0_conditional_high_shape_identity",
+                "_edli_day0_conditional_high_shape_witness",
+                "_edli_day0_remaining_variance_basis",
+            ):
+                damaged = dict(payload)
+                damaged.pop(field)
+                with pytest.raises(ValueError, match="DAY0_CONDITIONAL_HIGH_PERSISTED_WITNESS_INVALID"):
+                    era._day0_remaining_p_raw_vector(
+                        np.asarray(future), city=city,
+                        settlement_semantics=SettlementSemantics.for_city(city),
+                        bins=[Bin(None, 30, "C", "30C or below"), Bin(31, 31, "C", "31C"),
+                              Bin(32, 32, "C", "32C"), Bin(33, None, "C", "33C or above")],
+                        payload=damaged, extra_member_sigma=0.0, decision_time=decision_time,
+                    )
         invalid_identity = dict(payload)
         invalid_identity["_edli_day0_provisional_revision_likelihood"] = {
             **likelihood,
@@ -3240,7 +3445,7 @@ def test_materialized_day0_carrier_keeps_exact_station_extreme_provider(
         },
     )
 
-    future, sigma, cutoff, evidence = (
+    future, sigma, cutoff, evidence, conditional_shape = (
         materializer._day0_noaa_carrier_future_members(
             conn,
             request,
@@ -3250,6 +3455,7 @@ def test_materialized_day0_carrier_keeps_exact_station_extreme_provider(
     )
 
     assert future == (31.0, 32.0)
+    assert conditional_shape is None, "typed final-daily station law remains independent"
     assert tuple(item["forecast_value_c"] for item in evidence) == (33.0,)
     from src.config import runtime_cities_by_name
     from src.signal.ensemble_signal import sigma_instrument_for_city
@@ -9723,25 +9929,60 @@ class TestRemainingDayMembers:
                 "wu_icao_history",
             ),
         )
+        seam = []
 
+        def shape_at_engine_seam(**kwargs):
+            seam.append(kwargs)
+            values, _ = remaining_day_extremes_c_with_current_state(
+                kwargs["provider_vectors"], target_date="2026-06-10",
+                decision_time=kwargs["decision_time"], metric="high",
+                current_state=kwargs["current_state"], settlement_unit="C",
+                fallback_window_start=kwargs["current_state"].observed_at,
+            )
+            return SimpleNamespace(provider_centers_c=tuple(values), identity="strict-shape", witness={"member_count": 51})
+
+        monkeypatch.setattr(
+            "src.data.day0_hourly_vectors.day0_conditional_high_shape",
+            shape_at_engine_seam,
+        )
+        monkeypatch.setattr(era, "_day0_current_vector_witness", lambda **_kw: {"vector_id": "current"})
+        monkeypatch.setattr(
+            era, "_validate_day0_causal_bundle_successor",
+            lambda **_kw: {"carrier_vector_witness": {"vector_id": "current"}},
+        )
+
+        payload = {
+            "metric": "high", "rounded_value": 25.0,
+            "observation_time": "2026-06-10T13:00:00+00:00",
+        }
         members = era._day0_remaining_day_members(
-            payload={
-                "metric": "high",
-                "rounded_value": 25.0,
-                "observation_time": "2026-06-10T13:00:00+00:00",
-            },
+            payload=payload,
             family=self._family(),
             unit="C",
             decision_time=datetime(2026, 6, 10, 14, 20, tzinfo=UTC),
             world_conn=object(),
         )
 
-        assert members is not None
+        assert members is not None, (payload.get("_edli_day0_remaining_unavailable_reason"), payload.get("_edli_day0_q_block_cause"), len(seam))
         # The elapsed 30C model anchor is excluded. Its -10C residual is carried
         # into unseen hours but decays, so it cannot become a permanent shift.
         assert members.tolist() == pytest.approx(
             [20.0 - 10.0 * np.exp(-7.0 / 4.2)]
         )
+        assert len(seam) == 1
+        assert seam[0]["city"].name == "Paris"
+        assert seam[0]["provider_vectors"] == [vector]
+
+        after_close = {"metric": "high", "rounded_value": 25.0,
+                       "observation_time": "2026-06-10T13:00:00+00:00"}
+        closed = era._day0_remaining_day_members(
+            payload=after_close, family=self._family(), unit="C",
+            decision_time=datetime(2026, 6, 11, 0, 20, tzinfo=UTC),
+            world_conn=object(),
+        )
+        assert closed is not None, after_close.get("_edli_day0_q_block_cause")
+        assert after_close["_edli_day0_remaining_vector_freshness_as_of_utc"] == "2026-06-10T22:00:00+00:00"
+        assert len(seam) == 1, "closed target-day may use its causal last vector without a new ENS fetch"
 
     def test_current_state_diagnostic_is_persisted_in_probability_authority(self):
         import src.engine.event_reactor_adapter as era

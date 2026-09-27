@@ -39038,6 +39038,9 @@ def _global_day0_execution_payload(
             "day0_remaining_bias_artifact": "_edli_day0_remaining_bias_artifact",
             "day0_remaining_carrier_probability_cutoff_utc": "_edli_day0_remaining_carrier_probability_cutoff_utc",
             "day0_remaining_carrier_likelihood": "_edli_day0_provisional_revision_likelihood",
+            "day0_conditional_high_shape_identity": "_edli_day0_conditional_high_shape_identity",
+            "day0_conditional_high_shape_witness": "_edli_day0_conditional_high_shape_witness",
+            "day0_remaining_variance_basis": "_edli_day0_remaining_variance_basis",
             "day0_remaining_vector_witness": "_edli_day0_remaining_vector_witness",
             "day0_resolver_terminal_input": "_edli_day0_resolver_terminal_input",
         }
@@ -43028,6 +43031,9 @@ def _prepare_current_global_probability_family(
             "_edli_day0_trajectory_conditioning_basis",
             "_edli_day0_model_innovations_c",
             "_edli_day0_current_state_innovation_e_fold_hours",
+            "_edli_day0_conditional_high_shape",
+            "_edli_day0_conditional_high_shape_identity",
+            "_edli_day0_conditional_high_shape_witness",
             "_edli_day0_probability_clock_utc",
             "_edli_day0_process_sigma_native",
             "_edli_day0_process_sigma_basis",
@@ -45364,6 +45370,28 @@ def _day0_process_sigma_native(
         sigma = float(np.sqrt(base_sigma ** 2 + (margin / 2.0) ** 2))
     except Exception:  # noqa: BLE001 - caller turns absence into typed no-trade/log evidence.
         return None
+    conditional_high = payload.get("_edli_day0_conditional_high_shape")
+    if conditional_high is not None:
+        if str(getattr(family, "metric", "")).strip().lower() != "high":
+            return None
+        try:
+            native_scale = 1.0 if unit == "C" else 9.0 / 5.0
+            effective_sigma = float(conditional_high.effective_sigma_c) * native_scale
+            extra_sigma = float(conditional_high.extra_sigma_c) * native_scale
+            identity = str(conditional_high.identity)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if not math.isfinite(effective_sigma) or effective_sigma <= 0.0 or not identity:
+            return None
+        payload["_edli_day0_remaining_path_center_sigma_native"] = float(
+            conditional_high.provider_between_sigma_c * native_scale
+        )
+        payload["_edli_day0_unresolved_path_sigma_native"] = extra_sigma
+        payload["_edli_day0_process_sigma_basis"] = (
+            "conditional_ens_within_plus_provider_center_delta_v1"
+        )
+        payload["_edli_day0_process_sigma_native"] = effective_sigma
+        return effective_sigma
     if source_clock_sigma_raw is not None:
         try:
             source_clock_sigma = float(source_clock_sigma_raw)
@@ -45434,6 +45462,10 @@ def _day0_extra_member_sigma_native(
         if "_edli_day0_source_clock_predictive_sigma_native" in payload:
             raise ValueError("DAY0_SOURCE_CLOCK_PREDICTIVE_SIGMA_INVALID")
         return 0.0
+    conditional_high = payload.get("_edli_day0_conditional_high_shape")
+    if conditional_high is not None:
+        scale = 1.0 if unit == "C" else 9.0 / 5.0
+        return float(conditional_high.extra_sigma_c) * scale
     try:
         from src.signal.forecast_uncertainty import sigma_instrument
 
@@ -47233,6 +47265,24 @@ def _day0_remaining_p_raw_vector(
                 "observed_at_utc": str(current_observed_at),
                 "source": str(current_source),
             }
+        conditional_identity = payload.get("_edli_day0_conditional_high_shape_identity")
+        conditional_witness = payload.get("_edli_day0_conditional_high_shape_witness")
+        conditional_basis = payload.get("_edli_day0_remaining_variance_basis")
+        if conditional_identity is not None or conditional_witness is not None or conditional_basis is not None:
+            if (
+                not isinstance(conditional_identity, str) or not conditional_identity
+                or not isinstance(conditional_witness, Mapping)
+                or conditional_basis != "conditional_ens_within_plus_provider_center_delta_v1"
+            ):
+                raise ValueError("DAY0_CONDITIONAL_HIGH_PERSISTED_WITNESS_INVALID")
+            from hashlib import sha256
+
+            expected_shape_identity = sha256(json.dumps(
+                conditional_witness, sort_keys=True, separators=(",", ":"),
+            ).encode()).hexdigest()
+            if conditional_identity != expected_shape_identity:
+                raise ValueError("DAY0_CONDITIONAL_HIGH_PERSISTED_WITNESS_MISMATCH")
+            identity_inputs["conditional_high_shape_identity"] = conditional_identity
         from src.data.day0_hourly_vectors import (
             DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER,
         )
@@ -48579,6 +48629,9 @@ def _snapshot_day0_source_clock_carrier_provenance(
         "_edli_day0_remaining_bias_status",
         "_edli_day0_remaining_bias_artifact",
         "_edli_day0_remaining_carrier_probability_cutoff_utc",
+        "_edli_day0_conditional_high_shape_identity",
+        "_edli_day0_conditional_high_shape_witness",
+        "_edli_day0_remaining_variance_basis",
         "_edli_day0_remaining_vector_witness",
         "_edli_day0_resolver_terminal_input",
     )
@@ -48770,6 +48823,11 @@ def _rebuild_decision_time_day0_carrier(
             "observed_at_utc": str(current_observed_at),
             "source": str(current_source),
         }
+    conditional_high = payload.get("_edli_day0_conditional_high_shape")
+    if conditional_high is not None:
+        identity_inputs["conditional_high_shape_identity"] = (
+            conditional_high.identity
+        )
     from src.calibration.day0_remaining_bias import day0_remaining_bias
 
     # The same lookup the materializer used: ENTRY and every held rebuild shift
@@ -49901,6 +49959,7 @@ def _day0_remaining_day_members(
         from src.data.day0_hourly_vectors import (
             DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
             day0_hourly_models_for_city,
+            day0_hourly_provider_representatives,
             read_freshest_day0_hourly_vectors,
             remaining_day_extremes_c,
         )
@@ -50096,23 +50155,12 @@ def _day0_remaining_day_members(
                     validated_bundle
                 )
                 payload["_edli_global_day0_binding"] = current_binding
-        from src.strategy.live_inference.source_clock_vnext import (
-            provider_family_for_source,
-        )
-
         # These are deterministic provider trajectories, not exchangeable
         # outcomes. A regional and global product from the same provider share
         # one physics family; input order is specificity-first, so only its
         # first current trajectory may contribute a center.
-        provider_representatives: list[object] = []
-        represented_families: set[str] = set()
-        for vector in vectors:
-            provider_family = provider_family_for_source(str(vector.model))
-            if provider_family in represented_families:
-                continue
-            represented_families.add(provider_family)
-            provider_representatives.append(vector)
-        vectors = provider_representatives
+        complete_provider_vectors = vectors
+        vectors = day0_hourly_provider_representatives(vectors)
         provider_models = [str(vector.model) for vector in vectors]
         payload["_edli_day0_provider_representative_models"] = list(
             provider_models
@@ -50179,6 +50227,29 @@ def _day0_remaining_day_members(
                 dict(evidence) for evidence in station_extremes
             ]
             payload["_edli_day0_provider_representative_models"] = list(provider_models)
+        elif (
+            metric == "high" and current_state is not None
+            and decision_time.astimezone(UTC) <= target_end
+        ):
+            from src.data.day0_hourly_vectors import (
+                Day0CurrentTemperatureState,
+                day0_conditional_high_shape,
+            )
+
+            shape = day0_conditional_high_shape(
+                conn=forecast_conn, city=city_obj, target_date=str(family.target_date),
+                decision_time=decision_time,
+                current_state=Day0CurrentTemperatureState(
+                    value_native=float(current_state[0]),
+                    observed_at=current_state[1], source=str(current_state[2]),
+                ),
+                provider_vectors=complete_provider_vectors,
+            )
+            if tuple(extremes_c) != shape.provider_centers_c:
+                raise ValueError("DAY0_CONDITIONAL_HIGH_PROVIDER_REBUILD_MISMATCH")
+            payload["_edli_day0_conditional_high_shape"] = shape
+            payload["_edli_day0_conditional_high_shape_identity"] = shape.identity
+            payload["_edli_day0_conditional_high_shape_witness"] = dict(shape.witness)
         if direct_entry_authority:
             entry_carrier = payload.get(
                 "_edli_day0_direct_entry_source_clock_carrier"

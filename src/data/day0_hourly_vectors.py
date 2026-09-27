@@ -4211,6 +4211,232 @@ def day0_effective_path_sigma_c(
     return max(baseline, residual)
 
 
+@dataclass(frozen=True)
+class Day0ConditionalHighShape:
+    """Conditional variance of the existing equal-weight hourly-provider carrier."""
+
+    provider_centers_c: tuple[float, ...]
+    ensemble_centers_c: tuple[float, ...]
+    ensemble_within_sigma_c: float
+    provider_between_sigma_c: float
+    ensemble_center_delta_c: float
+    model_residual_sigma_c: float
+    effective_sigma_c: float
+    extra_sigma_c: float
+    identity: str
+    witness: Mapping[str, object]
+
+
+def day0_conditional_high_run_proof(
+    providers: list[Day0HourlyVector],
+    ensemble: list[Day0HourlyVector],
+    *, decision_time: datetime,
+) -> tuple[dict[str, tuple[datetime, str, str]], datetime]:
+    """Require every ENS member to share the served deterministic ECMWF run."""
+
+    cutoff = decision_time.astimezone(UTC)
+
+    def run_meta(vector: Day0HourlyVector) -> tuple[datetime, str, str]:
+        try:
+            meta = json.loads(str(vector.source_run_meta_json or ""))
+            run = _day0_parse_aware_clock(
+                meta["provider_source_cycle_time_utc"], field_name="provider_cycle"
+            )
+            available = _day0_parse_aware_clock(
+                meta["provider_source_available_at_utc"], field_name="provider_available"
+            )
+            finished = _day0_parse_aware_clock(
+                meta["fetch_finished_at"], field_name="fetch_finished"
+            )
+            captured = _day0_parse_aware_clock(vector.captured_at, field_name="captured_at")
+            request_hash = str(meta["request_hash"])
+            provider_run_id = str(meta["provider_run_id"])
+            if not (
+                run <= available <= finished <= cutoff
+                and captured <= finished
+                and request_hash and provider_run_id
+            ):
+                raise ValueError("invalid clocks or identity")
+            return run, request_hash, provider_run_id
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("DAY0_CONDITIONAL_HIGH_RUN_PROOF_INVALID") from exc
+
+    provider_meta = {vector.model: run_meta(vector) for vector in providers}
+    ecm_run = provider_meta.get("ecmwf_ifs", (None, "", ""))[0]
+    if ecm_run is None:
+        raise ValueError("DAY0_CONDITIONAL_HIGH_ECMWF_RUN_MISSING")
+    ens_meta = [run_meta(vector) for vector in ensemble]
+    if len(ens_meta) != DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_COUNT:
+        raise ValueError("DAY0_CONDITIONAL_HIGH_ENSEMBLE_UNAVAILABLE")
+    if any(run != ecm_run for run, _hash, _id in ens_meta):
+        raise ValueError("DAY0_CONDITIONAL_HIGH_ENSEMBLE_CYCLE_MISMATCH")
+    if len({(request_hash, provider_run_id) for _run, request_hash, provider_run_id in ens_meta}) != 1:
+        raise ValueError("DAY0_CONDITIONAL_HIGH_ENSEMBLE_CAPTURE_MISMATCH")
+    return provider_meta, ecm_run
+
+
+def day0_hourly_provider_representatives(
+    vectors: list[Day0HourlyVector],
+) -> list[Day0HourlyVector]:
+    """Keep the first, most specific hourly path for each physical provider."""
+    from src.strategy.live_inference.source_clock_vnext import provider_family_for_source
+
+    seen: set[str] = set()
+    representatives: list[Day0HourlyVector] = []
+    for vector in vectors:
+        family = provider_family_for_source(str(vector.model))
+        if family not in seen:
+            representatives.append(vector)
+            seen.add(family)
+    return representatives
+
+
+def day0_conditional_high_shape(
+    *,
+    conn: sqlite3.Connection,
+    city: Any,
+    target_date: str,
+    decision_time: datetime,
+    current_state: Day0CurrentTemperatureState,
+    provider_vectors: list[Day0HourlyVector] | None = None,
+) -> Day0ConditionalHighShape:
+    """Condition providers and 51 ENS members on the same observed hour/run.
+
+    The 51 members measure within-IFS uncertainty; they are not additional
+    provider scenarios in the existing equal-weight remaining-path mixture.
+    """
+
+    if decision_time.tzinfo is None or current_state.observed_at.tzinfo is None:
+        raise ValueError("DAY0_CONDITIONAL_HIGH_OBSERVATION_CLOCK_INVALID")
+    observed = current_state.observed_at.astimezone(UTC)
+    cutoff = decision_time.astimezone(UTC)
+    if observed > cutoff:
+        raise ValueError("DAY0_CONDITIONAL_HIGH_OBSERVATION_AFTER_DECISION")
+    unit = str(getattr(city, "settlement_unit", "") or "").upper()
+    if unit not in {"C", "F"}:
+        raise ValueError("DAY0_CONDITIONAL_HIGH_UNIT_INVALID")
+    expected = tuple(day0_hourly_models_for_city(city))
+    try:
+        local_target = observed.astimezone(ZoneInfo(str(city.timezone))).date().isoformat()
+    except (ValueError, ZoneInfoNotFoundError) as exc:
+        raise ValueError("DAY0_CONDITIONAL_HIGH_TIMEZONE_INVALID") from exc
+    if local_target != target_date:
+        raise ValueError("DAY0_CONDITIONAL_HIGH_OBSERVATION_DATE_MISMATCH")
+    if provider_vectors is None:
+        provider_vectors = read_freshest_day0_hourly_vectors(
+            city=str(city.name), target_date=target_date, now=cutoff, conn=conn,
+            expected_models=expected, require_expected=True,
+            max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+            remaining_window_start=observed, require_complete_remaining_window=True,
+        )
+    elif provider_vectors != select_ready_day0_hourly_vectors(
+        provider_vectors, target_date=target_date, now=cutoff,
+        expected_models=expected, require_expected=True,
+        max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+        remaining_window_start=observed, require_complete_remaining_window=True,
+    ):
+        raise ValueError("DAY0_CONDITIONAL_HIGH_PROVIDER_BUNDLE_INVALID")
+    if tuple(vector.model for vector in provider_vectors) != expected or len(expected) < 2:
+        raise ValueError("DAY0_CONDITIONAL_HIGH_PROVIDER_BUNDLE_INCOMPLETE")
+    if any(
+        vector.city != str(city.name) or vector.target_date != target_date
+        or vector.timezone_name != str(city.timezone)
+        for vector in provider_vectors
+    ):
+        raise ValueError("DAY0_CONDITIONAL_HIGH_PROVIDER_SCOPE_MISMATCH")
+    ensemble_models = day0_source_clock_ensemble_member_models()
+    ensemble = read_freshest_day0_hourly_vectors(
+        city=str(city.name), target_date=target_date, now=cutoff, conn=conn,
+        expected_models=ensemble_models, require_expected=True,
+        max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+        remaining_window_start=observed, require_complete_remaining_window=True,
+    )
+    if len(ensemble) != DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_COUNT:
+        raise ValueError("DAY0_CONDITIONAL_HIGH_ENSEMBLE_UNAVAILABLE")
+
+    provider_meta, ecm_run = day0_conditional_high_run_proof(
+        provider_vectors, ensemble, decision_time=cutoff
+    )
+    provider_vectors = day0_hourly_provider_representatives(provider_vectors)
+    provider_centers, _ = remaining_day_extremes_c_with_current_state(
+        provider_vectors, target_date=target_date, decision_time=cutoff,
+        metric="high", current_state=current_state, settlement_unit=unit,
+        fallback_window_start=observed,
+    )
+    ensemble_centers, _ = remaining_day_extremes_c_with_current_state(
+        ensemble, target_date=target_date, decision_time=cutoff,
+        metric="high", current_state=current_state, settlement_unit=unit,
+        fallback_window_start=observed,
+    )
+    if len(provider_centers) != len(provider_vectors) or len(ensemble_centers) != len(ensemble_models):
+        raise ValueError("DAY0_CONDITIONAL_HIGH_OBSERVATION_ANCHOR_UNAVAILABLE")
+    provider_values = np.asarray(provider_centers, dtype=float)
+    ensemble_values = np.asarray(ensemble_centers, dtype=float)
+    if not np.isfinite(provider_values).all() or not np.isfinite(ensemble_values).all():
+        raise ValueError("DAY0_CONDITIONAL_HIGH_CENTERS_INVALID")
+    within = float(np.std(ensemble_values, ddof=0))
+    between = float(np.std(provider_values, ddof=0))
+    delta = abs(float(np.mean(provider_values) - np.mean(ensemble_values)))
+    from src.signal.day0_obs_latency import (
+        stale_extreme_uncertainty_margin,
+        staleness_budget_minutes,
+    )
+
+    margin = stale_extreme_uncertainty_margin(
+        unit="C", obs_age_minutes=(cutoff - observed).total_seconds() / 60.0,
+        budget_minutes=staleness_budget_minutes(str(city.name)),
+    )
+    # Provider between-spread already exists in the carrier's equal-weight
+    # scenario centers. Only within-ENS and center disagreement remain noise.
+    from src.signal.ensemble_signal import sigma_instrument_for_city
+
+    instrument_c = float(sigma_instrument_for_city(city).to("C").value)
+    model_residual = math.hypot(within, delta)
+    effective = max(model_residual, math.hypot(instrument_c, margin / 2.0))
+    extra = math.sqrt(max(effective**2 - instrument_c**2, 0.0))
+    witness = {
+        "semantics": "day0_conditional_high_equal_provider_v1",
+        "city": str(city.name), "target_date": target_date,
+        "observed_at": observed.isoformat(),
+        "observed_native": float(current_state.value_native),
+        "observation_unit": unit,
+        "observed_source": str(current_state.source),
+        "provider_models": [vector.model for vector in provider_vectors],
+        "provider_vector_ids": [
+            _vector_id(vector.model, vector.city, vector.target_date, vector.captured_at)
+            for vector in provider_vectors
+        ],
+        "provider_runs": {model: meta[0].isoformat() for model, meta in provider_meta.items()},
+        "ensemble_vector_ids": [
+            _vector_id(vector.model, vector.city, vector.target_date, vector.captured_at)
+            for vector in ensemble
+        ],
+        "ensemble_run": ecm_run.isoformat(),
+        "provider_centers_c": [float(value) for value in provider_values],
+        "ensemble_centers_c": [float(value) for value in ensemble_values],
+        "provider_scenario_weights": [1.0 / len(provider_vectors)] * len(provider_vectors),
+        "within_c": within, "between_c": between, "delta_c": delta,
+        "latency_margin_c": margin, "instrument_sigma_c": instrument_c,
+        "model_residual_sigma_c": model_residual,
+        "effective_sigma_c": effective, "extra_sigma_c": extra,
+    }
+    identity = hashlib.sha256(json.dumps(
+        witness, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    return Day0ConditionalHighShape(
+        provider_centers_c=tuple(float(value) for value in provider_values),
+        ensemble_centers_c=tuple(float(value) for value in ensemble_values),
+        ensemble_within_sigma_c=within,
+        provider_between_sigma_c=between,
+        ensemble_center_delta_c=delta,
+        model_residual_sigma_c=model_residual,
+        effective_sigma_c=effective,
+        extra_sigma_c=extra,
+        identity=identity,
+        witness=witness,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Throttled refresh hook (wired from the day0 emit cycle; NO daemon restart
 # needed for the schema — table is created on first write).

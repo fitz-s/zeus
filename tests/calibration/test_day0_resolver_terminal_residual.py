@@ -1,5 +1,5 @@
 # Created: 2026-09-24
-# Last reused or audited: 2026-09-24
+# Last reused or audited: 2026-09-27
 # Authority basis: resolver-graded Day0 observation model (external review
 #   2026-09-24, design decision item 6).
 """Resolver-graded Day0 terminal residual: label law, hierarchy, operator, switch."""
@@ -504,13 +504,13 @@ def test_switch_off_resolver_input_is_none_and_revision_is_unchanged(monkeypatch
         artifact_file=artifact,
     ) is None
     assert day0_authority.DAY0_PROBABILITY_SEMANTICS_REVISION == (
-        "day0_settlement_channel_revision_model_v22"
+        "day0_settlement_channel_revision_model_v23"
     )
     assert day0_authority.DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL == (
-        "day0_settlement_channel_revision_model_v22"
+        "day0_settlement_channel_revision_model_v23"
     )
     assert day0_authority.DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER == (
-        "day0_resolver_terminal_composition_v21"
+        "day0_resolver_terminal_composition_v22"
     )
 
 

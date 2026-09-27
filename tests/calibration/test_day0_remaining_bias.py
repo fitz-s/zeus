@@ -1,5 +1,5 @@
 # Created: 2026-09-24
-# Last reused or audited: 2026-09-24
+# Last reused or audited: 2026-09-27
 # Authority basis: Day0 remaining-center settlement residual study 2026-09-24;
 #   docs/authority/replacement_final_form_2026_06_09.md "Day0 conditional
 #   remaining-path operator" (settlement-graded remaining-member center shift).
@@ -441,11 +441,11 @@ def test_semantics_revision_is_bumped_and_stamped() -> None:
     )
 
     assert DAY0_PROBABILITY_SEMANTICS_REVISION == (
-        "day0_settlement_channel_revision_model_v22"
+        "day0_settlement_channel_revision_model_v23"
     )
     stamped = bind_day0_probability_semantics("q-hash")
     assert day0_probability_semantics_revision(stamped) == (
-        "day0_settlement_channel_revision_model_v22"
+        "day0_settlement_channel_revision_model_v23"
     )
     assert day0_probability_semantics_revision(
         "day0-semrev:day0_remaining_center_bias_v20:q-hash"
