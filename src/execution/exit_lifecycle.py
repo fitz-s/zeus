@@ -524,6 +524,41 @@ def _is_channel_not_ready_error(error: str) -> bool:
     )
 
 
+def _request_admission_retry_at(exc: Exception, *, now: datetime) -> datetime | None:
+    """Keep only a typed governor denial's future lease/embargo deadline."""
+
+    from src.data.polymarket_request_governor import RequestAdmissionDenied
+
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, RequestAdmissionDenied):
+            detail = str(current)
+            if detail.startswith((
+                "POLYMARKET_REQUEST_IN_FLIGHT:",
+                "POLYMARKET_REQUEST_EMBARGOED:",
+                "POLYMARKET_ENDPOINT_EMBARGOED:",
+                "POLYMARKET_ROUTE_EMBARGOED:",
+            )):
+                match = re.search(
+                    r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))$",
+                    detail,
+                )
+                if match is not None:
+                    try:
+                        deadline = datetime.fromisoformat(
+                            match.group(1).replace("Z", "+00:00")
+                        )
+                    except ValueError:
+                        return None
+                    if deadline.tzinfo is not None and deadline > now:
+                        return deadline.astimezone(timezone.utc)
+            return None
+        current = current.__cause__ or current.__context__
+    return None
+
+
 def _is_exit_transient_lock_error(error: str) -> bool:
     """True when a sell is blocked by transient token reservation state.
 
@@ -8080,6 +8115,7 @@ def _execute_live_exit(
         )
         if not intent_recorded:
             return "exit_blocked: exit_intent_persistence_failed"
+    request_denial: dict[str, datetime] = {}
     try:
         required_book_hash = (
             global_sell_authority.jit_candidate.executable_sell_curve.book_hash
@@ -8104,6 +8140,7 @@ def _execute_live_exit(
                 else None
             ),
             require_exact_handoff_snapshot=global_authorized,
+            request_denial_sink=request_denial,
         )
     except Exception as exc:  # noqa: BLE001
         snapshot_reason = f"{exit_context.exit_reason} [EXECUTABLE_SNAPSHOT_ERROR]"
@@ -8342,6 +8379,7 @@ def _execute_live_exit(
             reason=snapshot_reason,
             error=snapshot_error,
             conn=conn,
+            request_denial_retry_at=request_denial.get("retry_at"),
         )
         if conn is not None:
             log_pending_exit_recovery_event(
@@ -9068,6 +9106,7 @@ def _latest_exit_snapshot_context(
     *,
     now: datetime | None = None,
     require_sell_bid: bool = True,
+    reject_future_captured: bool = False,
 ) -> dict[str, object]:
     """Return executor snapshot kwargs for the latest fresh snapshot by token.
 
@@ -9086,6 +9125,8 @@ def _latest_exit_snapshot_context(
     saved = conn.row_factory
     conn.row_factory = sqlite3.Row
     try:
+        captured_filter = "AND captured_at <= ?" if reject_future_captured else ""
+        params = (now_s, now_s, token_id) if reject_future_captured else (now_s, token_id)
         bid_filter = (
             """
                AND orderbook_top_bid IS NOT NULL
@@ -9102,12 +9143,13 @@ def _latest_exit_snapshot_context(
                    orderbook_top_bid, orderbook_top_ask
               FROM executable_market_snapshots
              WHERE freshness_deadline >= ?
+               {captured_filter}
                AND selected_outcome_token_id = ?
                {bid_filter}
              ORDER BY captured_at DESC, snapshot_id DESC
              LIMIT 1
             """,
-            (now_s, token_id),
+            params,
         ).fetchone()
     except sqlite3.OperationalError:
         row = None
@@ -9450,6 +9492,7 @@ def _latest_or_capture_exit_snapshot_context(
     required_snapshot_id: str | None = None,
     prefetched_orderbook: Mapping[str, object] | None = None,
     require_exact_handoff_snapshot: bool = False,
+    request_denial_sink: dict[str, datetime] | None = None,
 ) -> dict[str, object]:
     """Return fresh snapshot kwargs for exits, capturing one when possible.
 
@@ -9647,6 +9690,21 @@ def _latest_or_capture_exit_snapshot_context(
             ),
         }
     except Exception as exc:
+        # The caller's ``now`` preceded the network attempt. Revalidate at the
+        # actual failure time; otherwise a slow capture can revive expired data.
+        checked_at = _utcnow()
+        denied_until = _request_admission_retry_at(exc, now=checked_at)
+        if denied_until is not None and request_denial_sink is not None:
+            request_denial_sink["retry_at"] = denied_until
+        # A concurrent capture can commit while this request is denied. Only
+        # a committed, exact-token, still-valid snapshot may enter the ordinary
+        # executor/JIT gates; never read this connection's uncommitted capture.
+        if denied_until is not None and conn is not None and not conn.in_transaction:
+            concurrent = _latest_exit_snapshot_context(
+                conn, token_id, now=checked_at, reject_future_captured=True,
+            )
+            if concurrent and matches_required_book(concurrent):
+                return concurrent
         logger.warning(
             "Exit executable snapshot capture failed for %s token=%s: %s",
             position.trade_id,
@@ -13654,6 +13712,7 @@ def _mark_exit_retry(
     conn: sqlite3.Connection | None = None,
     post_only_cross_command_id: str = "",
     fak_no_fill_command_id: str = "",
+    request_denial_retry_at: datetime | None = None,
 ) -> None:
     """Transition position to retry_pending with exponential backoff."""
     _mark_pending_exit(position)
@@ -13726,14 +13785,24 @@ def _mark_exit_retry(
     if _is_channel_not_ready_error(error):
         # Transient channel gap: do NOT consume the bounded retry budget toward
         # backoff_exhausted/admin-close. Keep the exit alive and retrying on a
-        # short fixed cooldown so it sells once the channel recovers, rather than
+        # governor's typed deadline (or the generic cooldown) so it sells once
+        # the channel recovers, rather than
         # abandoning a still-sellable reversal exit. (2026-06-23 diagnosis.)
         position.last_exit_error = error[:500]
         position.exit_state = "retry_pending"
         position.order_status = "retry_pending"
-        position.next_exit_retry_at = (
-            _utcnow() + timedelta(seconds=CHANNEL_NOT_READY_COOLDOWN_SECONDS)
-        ).isoformat()
+        now = _utcnow()
+        denial_deadline = request_denial_retry_at
+        if (
+            denial_deadline is not None
+            and denial_deadline.tzinfo is not None
+            and denial_deadline > now
+        ):
+            position.next_exit_retry_at = denial_deadline.astimezone(timezone.utc).isoformat()
+        else:
+            position.next_exit_retry_at = (
+                now + timedelta(seconds=CHANNEL_NOT_READY_COOLDOWN_SECONDS)
+            ).isoformat()
         _dual_write_canonical_pending_exit_if_available(
             conn,
             position,

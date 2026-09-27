@@ -1,7 +1,7 @@
 # Created: 2026-05-20
-# Last reused/audited: 2026-09-03
+# Last reused/audited: 2026-09-27
 # Authority basis: PHASE_2_ULTRAPLAN.md §8.2 + §8.3; finite-evidence probability symmetry packet held/entry single-q law
-# Lifecycle: created=2026-05-20; last_reviewed=2026-09-03; last_reused=2026-09-03
+# Lifecycle: created=2026-05-20; last_reviewed=2026-09-27; last_reused=2026-09-27
 # Purpose: T5 GREEN antibody — _maybe_write_day0_nowcast gate conditions + write_nowcast_run call.
 # Reuse: Run when _maybe_write_day0_nowcast, write_nowcast_run wiring, or day0 gate logic changes.
 """
@@ -1844,6 +1844,65 @@ def test_smoothed_tail_point_can_authorize_sell_reversal() -> None:
     )
 
     assert decision.reason == "SELL_REVERSAL"
+
+
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+@pytest.mark.parametrize(
+    ("point", "bid", "sample", "expected"),
+    [
+        (0.00038684040815750704, 0.001, 0.0, "HOLD"),
+        (0.0001, 0.13, 0.0, "SELL_REVERSAL"),
+        (0.1, 0.36, 0.0, "SELL_REVERSAL"),
+        (0.229, 0.05, 0.0, "HOLD"),
+        (0.1, 0.42, 1.0, "SELL_REVERSAL"),
+        (0.99997, 0.95, 1.0, "HOLD"),
+    ],
+)
+def test_coherent_band_round_trip_preserves_current_exit_authority(
+    monkeypatch, direction, point, bid, sample, expected,
+) -> None:
+    """An edge-coordinate rounding error must not revoke a valid held witness."""
+    from src.engine.cycle_runtime import _build_exit_context
+
+    monkeypatch.setattr(
+        "src.calibration.market_anchored_live_fit.get_active_provider", lambda: None
+    )
+    lower, upper = monitor_refresh_module._current_global_monitor_edge_band(
+        [sample] * 500,
+        alpha=0.05,
+        current_p_market=bid,
+        held_probability_point=point,
+    )
+    pos = _make_position()
+    pos.direction = direction
+    pos.shares = pos.chain_shares = 10.0
+    pos.chain_state = "synced"
+    pos.last_monitor_prob = point
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_market_price = bid
+    pos.last_monitor_market_price_is_fresh = True
+    pos.last_monitor_best_bid = bid
+    pos.last_monitor_bid_size = 10.0
+    edge = SimpleNamespace(
+        p_posterior=point, p_market=[bid], confidence_band_lower=lower,
+        confidence_band_upper=upper,
+    )
+    context = _build_exit_context(
+        pos, edge, hours_to_settlement=1.0, ExitContext=ExitContext,
+    )
+
+    assert context.fresh_prob == point
+    assert context.current_ci[0] <= point <= context.current_ci[1]
+    assert "current_ci" not in context.missing_authority_fields()
+    decision = pos.evaluate_exit(context)
+    assert decision.reason == expected
+    # Complete numerical evidence cannot replace source freshness or repair a
+    # genuinely contradictory confidence interval downstream.
+    stale = replace(context, fresh_prob_is_fresh=False)
+    malformed = replace(context, current_ci=(0.9, 0.1))
+    absent = replace(context, current_ci=None)
+    for unavailable in (stale, malformed, absent):
+        assert pos.evaluate_exit(unavailable).reason == "EVIDENCE_UNAVAILABLE"
 
 
 def test_canonical_monitor_sync_restores_exit_confirmation_from_latest_event() -> None:

@@ -7213,7 +7213,16 @@ def _current_global_monitor_edge_band(
     # solver tails while closing the carrier over the point used for payoff.
     q_lcb = min(float(q_lcb), float(held_probability_point))
     q_ucb = max(float(q_ucb), float(held_probability_point))
-    return float(q_lcb - current_p_market), float(q_ucb - current_p_market)
+    edge_lower = float(q_lcb - current_p_market)
+    edge_upper = float(q_ucb - current_p_market)
+    # ExitContext translates back to probability space. Preserve the original
+    # interval when subtraction/addition would otherwise round an endpoint
+    # inward and falsely exclude its own current probability witness.
+    if edge_lower + current_p_market > q_lcb:
+        edge_lower = math.nextafter(edge_lower, -math.inf)
+    if edge_upper + current_p_market < q_ucb:
+        edge_upper = math.nextafter(edge_upper, math.inf)
+    return edge_lower, edge_upper
 
 
 def _refresh_day0_monitor_probability(

@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-09-22
-# Lifecycle: created=2026-04-27; last_reviewed=2026-09-22; last_reused=2026-09-22
+# Last reused/audited: 2026-09-27
+# Lifecycle: created=2026-04-27; last_reviewed=2026-09-27; last_reused=2026-09-27
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
@@ -18520,3 +18520,187 @@ def _bind_complete_reauction_monitor_for_test(conn, position):
         (event_id, position.trade_id, seq, _NOW.isoformat(), phase, phase,
          json.dumps({'held_sell_reauction_obligation': obligation})))
     conn.commit()
+
+
+def test_held_exit_governor_denial_uses_lease_deadline_not_fixed_cooldown(conn, monkeypatch):
+    """The Sep-18 HK window closed during the old 120-second generic cooldown."""
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+
+    position = Position(
+        trade_id="hk-denied-sell", market_id="condition-test", city="Hong Kong",
+        cluster="asia", target_date="2026-09-19", bin_label="27C",
+        direction="buy_no", token_id=YES_TOKEN, no_token_id=NO_TOKEN,
+        entry_price=0.30, size_usd=21.6, shares=72.0,
+        state="pending_exit", exit_state="exit_intent", env="test",
+    )
+    now = datetime(2026, 9, 18, 23, 16, 54, tzinfo=timezone.utc)
+    denied_until = now + timedelta(minutes=1)
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: now)
+
+    exit_lifecycle._mark_exit_retry(
+        position, reason="FLASH_CRASH_PANIC", error="exit_executable_snapshot_unavailable",
+        request_denial_retry_at=denied_until, conn=conn,
+    )
+
+    assert position.next_exit_retry_at == denied_until.isoformat()
+    assert position.exit_retry_count == 0
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: denied_until + timedelta(seconds=1))
+    assert not exit_lifecycle.is_exit_cooldown_active(position)
+
+
+@pytest.mark.parametrize(
+    "case", ["valid", "expired", "invalidated", "future", "wrong_token", "wrong_hash",
+             "uncommitted", "expired_during_capture", "network"]
+)
+def test_exit_capture_denial_rechecks_only_committed_exact_token_snapshot(
+    conn, monkeypatch, case,
+):
+    from src.data.polymarket_request_governor import RequestAdmissionDenied
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+    from src.state.snapshot_repo import record_snapshot_invalidation
+
+    position = Position(
+        trade_id="hk-snapshot-race", market_id="condition-test",
+        condition_id="condition-test", city="Hong Kong", cluster="asia",
+        target_date="2026-09-19", bin_label="27C", direction="buy_no",
+        token_id=YES_TOKEN, no_token_id=NO_TOKEN,
+        entry_price=0.30, size_usd=21.6, shares=72.0,
+    )
+    now = datetime(2026, 9, 18, 23, 16, 54, tzinfo=timezone.utc)
+    denied_until = now + timedelta(minutes=1)
+    clock = [now]
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: clock[0])
+    monkeypatch.setattr(
+        "src.data.market_scanner.get_sibling_outcomes",
+        lambda _market_id: [{"market_id": "condition-test", "condition_id": "condition-test",
+                             "token_id": YES_TOKEN, "no_token_id": NO_TOKEN,
+                             "question_id": "question-test", "active": True,
+                             "accepting_orders": True}],
+    )
+    monkeypatch.setattr("src.data.market_scanner.get_last_scan_authority", lambda: "VERIFIED")
+
+    def concurrent_capture(conn_arg, **_kwargs):
+        _ensure_snapshot(
+            conn_arg, token_id=YES_TOKEN, no_token_id=NO_TOKEN,
+            selected_outcome_token_id=YES_TOKEN if case == "wrong_token" else NO_TOKEN,
+            snapshot_id="hk-concurrent-snapshot", orderbook_top_bid="0.06",
+            captured_at=now + timedelta(seconds=1) if case == "future" else now - timedelta(seconds=1),
+            freshness_deadline=(now - timedelta(seconds=1) if case == "expired"
+                                else now + timedelta(seconds=2) if case == "expired_during_capture"
+                                else now + timedelta(minutes=3)),
+        )
+        if case == "invalidated":
+            record_snapshot_invalidation(
+                conn_arg, condition_id="condition-test", token_id=NO_TOKEN,
+                reason="held_snapshot_due", invalidated_at=now,
+            )
+        if case != "uncommitted":
+            conn_arg.commit()  # Simulates the other capture publishing before this denial returns.
+        if case == "expired_during_capture":
+            clock[0] += timedelta(seconds=3)
+        if case == "network":
+            raise RuntimeError("SSL handshake timed out")
+        raise RequestAdmissionDenied(
+            f"POLYMARKET_REQUEST_IN_FLIGHT:{denied_until.isoformat()}"
+        )
+
+    monkeypatch.setattr(
+        "src.data.market_scanner.capture_executable_market_snapshot", concurrent_capture,
+    )
+    denial = {}
+    context = exit_lifecycle._latest_or_capture_exit_snapshot_context(
+        conn, object(), position, NO_TOKEN, now=now,
+        required_raw_orderbook_hash="d" * 64 if case == "wrong_hash" else None,
+        request_denial_sink=denial,
+    )
+    if case == "network":
+        assert denial == {}
+    else:
+        assert denial["retry_at"] == denied_until
+    if case == "valid":
+        assert context["executable_snapshot_id"] == "hk-concurrent-snapshot"
+        assert context["executable_snapshot_orderbook_top_bid"] == "0.06"
+    else:
+        assert context == {}
+
+
+@pytest.mark.parametrize("message", [
+    "POLYMARKET_REQUEST_IN_FLIGHT:bad-date",
+    "POLYMARKET_REQUEST_IN_FLIGHT:2026-09-18T23:15:00+00:00",
+    "POLYMARKET_ROUTE_LIMIT:clob:10/10",
+])
+def test_exit_capture_malformed_or_elapsed_denial_keeps_generic_retry(message):
+    from src.data.polymarket_request_governor import RequestAdmissionDenied
+    from src.execution import exit_lifecycle
+
+    assert exit_lifecycle._request_admission_retry_at(
+        RequestAdmissionDenied(message),
+        now=datetime(2026, 9, 18, 23, 16, 54, tzinfo=timezone.utc),
+    ) is None
+    assert exit_lifecycle._request_admission_retry_at(
+        RuntimeError(message),
+        now=datetime(2026, 9, 18, 23, 16, 54, tzinfo=timezone.utc),
+    ) is None
+
+
+def test_exit_capture_recognizes_typed_governor_denial_wrapped_by_scanner():
+    from src.data.polymarket_request_governor import RequestAdmissionDenied
+    from src.execution import exit_lifecycle
+
+    now = datetime(2026, 9, 18, 23, 16, 54, tzinfo=timezone.utc)
+    deadline = now + timedelta(minutes=1)
+    try:
+        raise RuntimeError("scanner request failure") from RequestAdmissionDenied(
+            f"POLYMARKET_REQUEST_IN_FLIGHT:{deadline.isoformat()}"
+        )
+    except RuntimeError as exc:
+        assert exit_lifecycle._request_admission_retry_at(exc, now=now) == deadline
+
+
+@pytest.mark.parametrize("typed_denial", [True, False])
+def test_live_exit_snapshot_denial_deadline_reaches_monitor_retry(
+    conn, monkeypatch, typed_denial,
+):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+
+    position = Position(
+        trade_id=f"hk-live-denial-{typed_denial}", market_id="condition-test",
+        condition_id="condition-test", city="Hong Kong", cluster="asia",
+        target_date="2026-09-19", bin_label="27C", direction="buy_no",
+        token_id=YES_TOKEN, no_token_id=NO_TOKEN, entry_price=0.30,
+        size_usd=21.6, shares=72.0, cost_basis_usd=21.6,
+        state="holding", strategy_key="opening_inertia", env="test",
+    )
+    portfolio = PortfolioState(positions=[position])
+    context = ExitContext(
+        exit_reason="EDGE_REVERSAL", current_market_price=0.06,
+        current_market_price_is_fresh=True, best_bid=0.06,
+    )
+    now = datetime(2026, 9, 18, 23, 16, 54, tzinfo=timezone.utc)
+    denied_until = now + timedelta(minutes=1)
+    clock = [now]
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: clock[0])
+
+    def capture_unavailable(*_args, **kwargs):
+        if typed_denial:
+            kwargs["request_denial_sink"]["retry_at"] = denied_until
+        return {}
+
+    monkeypatch.setattr(exit_lifecycle, "_latest_or_capture_exit_snapshot_context", capture_unavailable)
+    monkeypatch.setattr(
+        exit_lifecycle, "execute_exit_order",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no executor without snapshot")),
+    )
+
+    outcome = exit_lifecycle.execute_exit(portfolio, position, context, clob=object(), conn=conn)
+
+    assert outcome == "exit_blocked: executable_snapshot_unavailable"
+    assert position.exit_state == "retry_pending"
+    expected = (denied_until if typed_denial else
+                now + timedelta(seconds=exit_lifecycle.CHANNEL_NOT_READY_COOLDOWN_SECONDS))
+    assert position.next_exit_retry_at == expected.isoformat()
+    clock[0] = denied_until + timedelta(seconds=1)
+    assert exit_lifecycle.is_exit_cooldown_active(position) is (not typed_denial)

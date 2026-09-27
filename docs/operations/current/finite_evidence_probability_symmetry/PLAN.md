@@ -4,6 +4,80 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-09-27 — recent Hong Kong exit-window recovery
+
+- Scope: investigate September 18–27 entries, held probability and executable
+  exits. Repair demonstrated current defects; do not fit rules to realized
+  outcomes or claim that avoided losses establish profitable fills.
+- Verified counterexample: position `a3855b7f-667` encountered request-governor
+  `POLYMARKET_REQUEST_IN_FLIGHT` at 2026-09-18T23:16:54Z with a lease ending
+  23:17:54Z. Snapshot capture discarded that deadline and the exit retried on
+  the generic 120-second channel cooldown. A same-token, full-depth 0.06 bid
+  snapshot captured at 23:17:31Z was invalidated at 23:18:50Z, before the actual
+  next attempt at 23:19:44Z. Capture time alone does not prove commit visibility
+  or a fill; the retry timing defect is independently reproducible.
+- Bounded repair: preserve typed request-admission denial and its deadline at
+  the exit capture boundary; re-read newly committed exact-token snapshot truth
+  after a failed concurrent capture. Retry through the existing monitor lane
+  when the actual admission restriction clears. No sleeps, stale quote reuse,
+  request-governor bypass, fabricated fills or weakened price/depth/identity,
+  collateral, action-law, final SDK or lifecycle gates.
+- SCOPE: one held position's pre-submit snapshot acquisition. DRAIN: existing
+  monitor/retry cadence after the governor deadline, with current q/book and
+  unchanged submit-time validation. RESET: fresh valid snapshot or a later
+  independently classified admission failure; missing/malformed denial proof
+  retains fail-closed handling.
+- Owned implementation: `src/execution/exit_lifecycle.py` and existing exit
+  tests. Further recent-case findings require a concrete counterexample and
+  plan amendment before their own bounded repair.
+- Acceptance: red-before/green-after virtual-clock replay of the missed
+  snapshot window; expired/invalidated/wrong-token/hash and malformed-deadline
+  negative cases; ordinary network-failure and global-auction authority twins;
+  focused exit suites, required affected checks, independent final review,
+  fast-forward landing and separate verification of loaded runtime authority.
+- Rollback: revert the bounded repair commit; canonical facts remain unchanged.
+  Research uses read-only canonical DB connections, no live DB copies.
+
+### Current held confidence-band round-trip repair
+
+- Verified counterexample: `1fc89633-3e8` on September 26 repeatedly had
+  `current_ci` unavailable. Its coherent held point
+  `0.00038684040815750704` becomes upper bound `0.000386840408157507`
+  after subtracting and adding its `0.001` quote. Strict interval membership
+  therefore rejects the valid probability. That observed quote is not a legal
+  SELL; no avoided-loss claim follows from this example. The same arithmetic
+  defect occurs at legal bids for other ordinary points.
+- Repair only the numeric coordinate conversion in
+  `src/engine/monitor_refresh.py`: round each edge-space endpoint outward by
+  one representable float so inverse translation cannot shrink the original
+  coherent probability interval. Keep strict downstream interval validation,
+  point payoff, source freshness, confidence-tail math and action law intact.
+- Acceptance in existing `tests/test_monitor_refresh_nowcast_wiring.py`:
+  reproduce the recent point, both lower/upper boundary twins, legal-price
+  SELL and HOLD through the actual ExitContext builder, and strict rejection
+  of malformed/missing confidence authority. No probability or quote is fitted
+  to the later outcome. Run the scoped engine relationship suites and review
+  the final combined diff before landing.
+
+### Verification of the first bounded repairs
+
+- CI relationship regression: unmodified helper failed 10 of the 12 new
+  YES/NO cases; repaired helper passed all 12. Together with existing coherent
+  band tests, 16 focused tests passed. The full seven-file engine check returned
+  123 passed, 39 failed, 4 skipped. Re-running with the original HEAD helper
+  restored in memory and the new cases excluded returned the identical 39
+  failed node IDs, 111 passed, 4 skipped. Existing failures include retired
+  exit-reason expectations, observation fixtures and scheduler/linter checks;
+  these checks are not claimed green and were not weakened for this repair.
+- Exit repair: 15 new focused tests passed. Reverting only the owned exit source
+  to HEAD with apply_patch, running existing tests, and restoring the exact patch
+  established 18 pre-existing failures / 318 passes. The repaired full file has
+  the same 18 failures / 333 passes, with no new failed node IDs.
+- Independent review confirmed the current global capital law, rejected a
+  broad exception fallback, and accepted its restriction to typed admission
+  denial. The numeric repair preserves strict confidence and source checks.
+  These tests establish decision/retry behavior, not a historical venue fill.
+
 ## 2026-09-03 — persistent executable catastrophe不能被global preparation撤销
 
 - **实时反例：** Istanbul Sep-2 HIGH 26C 的 residual 5.0043 shares 在
