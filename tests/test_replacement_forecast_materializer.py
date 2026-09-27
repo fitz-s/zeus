@@ -1212,6 +1212,7 @@ def test_noaa_missing_state_boundary_does_not_swallow_unexpected_calculation(
 
 @pytest.mark.parametrize("reason", (
     "DAY0_CONDITIONAL_HIGH_ENSEMBLE_UNAVAILABLE",
+    "DAY0_CONDITIONAL_HIGH_ENSEMBLE_SUPERSEDED",
     "DAY0_CONDITIONAL_HIGH_OBSERVATION_ANCHOR_UNAVAILABLE",
     "DAY0_CONDITIONAL_HIGH_OBSERVATION_MISSING",
 ))
@@ -2959,7 +2960,7 @@ def test_hko_spot_request_rebinds_to_current_official_extrema(
 
 
 def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
 ) -> None:
     """The persisted Chicago carrier must use F members, boundary, bins, and sigma."""
 
@@ -3229,6 +3230,38 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
     )
     with pytest.raises(ValueError, match="DAY0_CONDITIONAL_HIGH_ENSEMBLE_CYCLE_MISMATCH"):
         materialize_replacement_forecast_live(conn, request)
+    ensemble[:] = complete_ensemble
+
+    pinned_run = run + timedelta(hours=2)
+    pin_file = tmp_path / "day0_provider_run_hwm_pin.json"
+    pin_file.write_text(json.dumps({
+        "schema_version": 1,
+        "entries": {"ecmwf_ifs025_ensemble": {
+            "run_initialisation_time": pinned_run.isoformat(),
+            "run_availability_time": (run + timedelta(hours=3)).isoformat(),
+            "recorded_at": (computed_at - timedelta(minutes=1)).isoformat(),
+        }},
+    }))
+    with monkeypatch.context() as pinned:
+        pinned.setattr(hourly_vectors, "_day0_provider_run_hwm_pin_path", lambda: pin_file)
+        stale = materialize_replacement_forecast_live(conn, request)
+        assert stale.status == "BLOCKED"
+        assert stale.reason_codes == ("DAY0_CONDITIONAL_HIGH_ENSEMBLE_SUPERSEDED",)
+        next_ensemble = []
+        for vector in complete_ensemble:
+            meta = json.loads(vector.source_run_meta_json)
+            meta["provider_source_cycle_time_utc"] = pinned_run.isoformat()
+            meta["provider_source_available_at_utc"] = (
+                run + timedelta(hours=3)
+            ).isoformat()
+            meta["provider_run_id"] = meta["provider_run_id"].replace(
+                run.isoformat(), pinned_run.isoformat(),
+            )
+            next_ensemble.append(replace(vector, source_run_meta_json=json.dumps(meta)))
+        ensemble[:] = next_ensemble
+        refreshed = materialize_replacement_forecast_live(conn, request)
+        assert refreshed.ok is True
+        assert refreshed.posterior_id is not None
     ensemble[:] = complete_ensemble
 
     result = materialize_replacement_forecast_live(conn, request)
