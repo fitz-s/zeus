@@ -8,6 +8,29 @@ Status: active
 
 ### Concurrent conditional-HIGH integration acceptance
 
+- Final recovery implementation at child `a59fdaa25` passed all 1,070
+  command-recovery and exchange-reconcile tests (133.99 seconds); parent
+  recovery source and test files are byte-identical after integration.
+  Independent final review accepts the exact capital-lane drainage, atomic
+  rollback, actual-held-token identity and cumulative trade-prefix behavior.
+  Three existing business-order tests isolate their maintenance wall-clock
+  budget locally; production 100ms maintenance / 1.5s capital budgets and the
+  dedicated deadline/interruption tests remain unchanged.
+- Across the earlier integrated matrix, 32 failures are independently
+  established baseline failures (28 adjacent Day0, three legacy-schema
+  migrations, one unchanged availability AST lint); the one newly exposed
+  recovery failure is repaired and covered above. This is not a claim that
+  the entire repository is green. A current read-only check of the live
+  posterior table found no row matching the legacy migration delete predicate.
+- Rollout gate: all verified repair slices and affected compatibility checks
+  must pass before the first task-requested restart. Use only the standard
+  `deploy_live.py restart all` guard/preflight/handoff workflow after a
+  fast-forward landing; do not issue a generic pause/resume or bypass flags.
+  Startup alone does not prove remediation: inspect exact current v3 coverage,
+  v5 posterior provenance, newly computed Day0 certificate revisions, canonical
+  per-position monitor events and current rejection reasons. Ended targets and
+  absent executable bids remain explicit gaps, never fabricated profitable exits.
+
 - Subsequent upstream `964a37c19` proves the hourly ENS product's independent
   release clock. Preserve that correction; do not force its run to equal the
   deterministic provider or the OpenData base shape. The combined mechanism
