@@ -1088,9 +1088,10 @@ def _materialize(
         else int(payload["openmeteo_anchor_artifact_id"])
     )
     if "openmeteo_payload_json" in payload:
-        openmeteo_payload = _load_json(
-            _resolve_input_path(payload["openmeteo_payload_json"], base_dir=base_dir)
-        )
+        openmeteo_raw_payload_bytes = _resolve_input_path(
+            payload["openmeteo_payload_json"], base_dir=base_dir
+        ).read_bytes()
+        openmeteo_payload = json.loads(openmeteo_raw_payload_bytes)
         if not isinstance(openmeteo_payload, Mapping):
             raise ValueError("Open-Meteo payload JSON must decode to an object")
     else:
@@ -1104,6 +1105,19 @@ def _materialize(
                 timezone_name=str(payload["city_timezone"]),
             )
         )
+        # The direct route has no pre-existing file. Seal the same target-scoped
+        # canonical artifact representation as the current-target downloader;
+        # external precision proof must independently name these exact bytes.
+        scoped_payload = dict(openmeteo_payload)
+        scoped_payload["_zeus_current_target_scope"] = {
+            "city": str(payload["city"]),
+            "target_date": target_date.isoformat(),
+            "metric": metric,
+        }
+        openmeteo_raw_payload_bytes = (
+            json.dumps(scoped_payload, indent=2, sort_keys=True, default=str) + "\n"
+        ).encode("utf-8")
+        openmeteo_payload = scoped_payload
     openmeteo_anchor = extract_openmeteo_ecmwf_ifs9_localday_anchor(
         openmeteo_payload,
         city_timezone=str(payload["city_timezone"]),
@@ -1120,7 +1134,8 @@ def _materialize(
     if not isinstance(precision_payload, Mapping):
         raise ValueError("precision_metadata_json must decode to an object")
     precision_guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
-        OpenMeteoIfs9PrecisionMetadata(**dict(precision_payload))
+        OpenMeteoIfs9PrecisionMetadata(**dict(precision_payload)),
+        raw_payload_bytes=openmeteo_raw_payload_bytes,
     )
     request = ReplacementForecastMaterializeRequest(
         city=str(payload["city"]),
@@ -1149,6 +1164,7 @@ def _materialize(
             else _dt(str(payload["expires_at"]), field_name="expires_at")
         ),
         openmeteo_precision_guard=precision_guard,
+        openmeteo_raw_payload_bytes=openmeteo_raw_payload_bytes,
         anchor_weight=float(payload.get("anchor_weight", 0.80)),
         anchor_sigma_c=float(payload.get("anchor_sigma_c", 3.00)),
         settlement_step_c=float(payload.get("settlement_step_c", 1.0)),

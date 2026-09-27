@@ -100,11 +100,9 @@ _STRICT_AWARE_ISO_RE = re.compile(
 #   (event_reactor_adapter._FUSED_BOOTSTRAP_QLCB_BASIS). Defining it ONCE here (the module both the
 #   materializer and the readers already import, no cycle) makes all four sites share one definition.
 TRADEABLE_GRADE_QLCB_BASIS = "fused_center_bootstrap_p05"
-# v4 re-keys probability identity after simultaneous provider-cycle provenance became
-# mandatory for the live between-provider spread. Older rows can no longer prove current
-# semantics, so the existing coverage and reseed paths rematerialize every certificate
-# instead of serving a mixed law.
-CURRENT_EVIDENCE_SEMANTICS_REVISION = "ensemble_center_scenarios_v4"
+# v5 binds the selected ENS land-cell and mask evidence into the source-clock
+# probability identity. The existing coverage/seed loop regenerates old rows.
+CURRENT_EVIDENCE_SEMANTICS_REVISION = "ensemble_center_scenarios_v5"
 
 # A bounded older ENS shape retains its raw absolute members and the full
 # ENS/provider-center disagreement. This identity supersedes every anomaly-
@@ -226,6 +224,16 @@ def _current_evidence_shape_has_probability_authority(
         return False
     if stale_shape_reused not in (None, False):
         return False
+    from src.contracts.ensemble_snapshot_provenance import GRID_SURFACE_EVIDENCE_REVISION
+
+    proof_hash = shape.get("grid_surface_evidence_identity_hash")
+    if (
+        shape.get("grid_surface_evidence_revision") != GRID_SURFACE_EVIDENCE_REVISION
+        or not isinstance(proof_hash, str)
+        or len(proof_hash) != 64
+        or any(char not in "0123456789abcdef" for char in proof_hash)
+    ):
+        return False
     return (
         str(shape.get("semantics_revision") or "")
         in LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS
@@ -322,6 +330,12 @@ def tradeable_grade_coverage_sql(
     revision_value = (
         f"json_extract({provenance_expr}, '{shape_path}.semantics_revision')"
     )
+    from src.contracts.ensemble_snapshot_provenance import GRID_SURFACE_EVIDENCE_REVISION
+
+    surface_revision_type = f"json_type({provenance_expr}, '{shape_path}.grid_surface_evidence_revision')"
+    surface_revision_value = f"json_extract({provenance_expr}, '{shape_path}.grid_surface_evidence_revision')"
+    surface_hash_type = f"json_type({provenance_expr}, '{shape_path}.grid_surface_evidence_identity_hash')"
+    surface_hash_value = f"json_extract({provenance_expr}, '{shape_path}.grid_surface_evidence_identity_hash')"
     carrier_identity_type = (
         f"json_type({provenance_expr}, '$.day0_remaining_carrier_content_identity')"
     )
@@ -366,6 +380,11 @@ def tradeable_grade_coverage_sql(
         f"(julianday('{decision_iso}') - julianday({ens_cycle_value})) * 24.0 "
         f"BETWEEN 0.0 AND {max_lag!r} AND "
         f"({stale_type} IS NULL OR {stale_type} = 'false') AND "
+        f"{surface_revision_type} = 'text' AND "
+        f"{surface_revision_value} = '{GRID_SURFACE_EVIDENCE_REVISION}' AND "
+        f"{surface_hash_type} = 'text' AND "
+        f"length({surface_hash_value}) = 64 AND "
+        f"{surface_hash_value} NOT GLOB '*[^0-9a-f]*' AND "
         f"{revision_value} = "
         f"'{CURRENT_EVIDENCE_SEMANTICS_REVISION}')"
     )

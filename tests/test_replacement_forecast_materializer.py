@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-09-25
-# Lifecycle: created=2026-06-06; last_reviewed=2026-09-25; last_reused=2026-09-25
+# Last reused/audited: 2026-09-27
+# Lifecycle: created=2026-06-06; last_reviewed=2026-09-27; last_reused=2026-09-27
 # Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + Bayes-fusion replacement live layer.
 # Reuse: Run before changing replacement forecast live/experiment write path.
 # Authority basis: Operator-directed replacement forecast simple-switch readiness.
@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -201,20 +201,114 @@ def _anchor_with_local_hours(*, hours: range | tuple[int, ...]) -> OpenMeteoIfs9
     )
 
 
+def _fixture_raw_openmeteo_bytes() -> bytes:
+    response = {
+        "latitude": 31.14, "longitude": 121.80, "elevation": 8.0,
+        "timezone": "Asia/Shanghai",
+        "hourly": {
+            "time": [f"2026-06-07T{hour:02d}:00" for hour in range(24)],
+            "temperature_2m": [27.0 if hour == 12 else 18.5 for hour in range(24)],
+        },
+        "hourly_units": {"temperature_2m": "°C"},
+        "_zeus_current_target_scope": {"city": "Shanghai", "target_date": "2026-06-07", "metric": "high"},
+    }
+    return (json.dumps(response, indent=2, sort_keys=True) + "\n").encode()
+
+
+def _fixture_ens_surface_provenance(*, cycle: str = "2026-06-06T00:00:00+00:00") -> str:
+    """Portable, internally consistent land-mask witness, not an ECMWF observation."""
+    from src.config import cities_by_name, runtime_station_geometry_for_city
+    from src.contracts.ensemble_snapshot_provenance import GRID_SURFACE_EVIDENCE_REVISION
+
+    station = runtime_station_geometry_for_city(cities_by_name["Shanghai"])
+    assert station["validity_reason"] is None
+    neighbors = [
+        {"flat_index": idx, "lat": lat, "lon": lon, "land_fraction": fraction}
+        for idx, lat, lon, fraction in (
+            (100, 31.14, 121.80, 0.9),
+            (101, 31.14, 122.05, 0.2),
+            (102, 31.39, 121.80, 0.2),
+            (103, 31.39, 122.05, 0.2),
+        )
+    ]
+    proof = {
+        "revision": GRID_SURFACE_EVIDENCE_REVISION,
+        "selection_rule": "nearest_land_of_surrounding_four_v1",
+        "request_lat": station["lat"], "request_lon": station["lon"],
+        "station_geometry": dict(station),
+        "mask_source": "ecmwf_open_data_ifs_oper_fc_step0_lsm",
+        "mask_source_url": "https://example.test/oper-mask.grib2",
+        "mask_source_index_url": "https://example.test/oper-mask.index",
+        "mask_source_cycle_time": cycle,
+        "mask_source_index_offset": 0,
+        "mask_source_index_length": 200,
+        "mask_sha256": "a" * 64,
+        "mask_grid_identity_hash": "b" * 64,
+        "temperature_grid_identity_hash": "b" * 64,
+        "selected_flat_index": 100,
+        "selected_lat": 31.14, "selected_lon": 121.80,
+        "selected_land_fraction": 0.9,
+        "four_neighbors": neighbors,
+    }
+    return json.dumps({
+        "city": "Shanghai",
+        "nearest_grid_lat": 31.14,
+        "nearest_grid_lon": 121.80,
+        "contract_outcome_evidence": {"settlement_station_id": station["station_id"]},
+        "grid_surface_evidence": proof,
+    })
+
+
+@pytest.fixture(autouse=True)
+def _materializer_unit_source_surface(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Controlled HSURF input; never mock the precision guard or raw witness."""
+    import src.data.openmeteo_ecmwf_ifs9_bucket_transport as transport
+
+    monkeypatch.setattr(transport, "source_cell_geometry_proof", lambda **_kwargs: {
+        "revision": "openmeteo_ifs9_o1280_source_cell_v1",
+        "static_hsurf_sha256": "b" * 64,
+        "selected_flat_index": 100,
+        "selected_grid_lat": 31.14, "selected_grid_lon": 121.80,
+        "raw_grid_elevation_m": 10.0,
+        "effective_grid_elevation_m": 8.0,
+        "target_dem_elevation_m": 8.0,
+        "cell_is_sea": False, "cell_is_center": False, "nearby_sea": False,
+    })
+
+
 def _precision_guard(**overrides: object):
+    from src.config import cities_by_name, runtime_station_geometry_for_city
+    from src.data.openmeteo_ecmwf_ifs9_precision_guard import _haversine_km
+
+    city = cities_by_name["Shanghai"]
+    station = runtime_station_geometry_for_city(city)
+    assert station["validity_reason"] is None
+    raw_bytes = _fixture_raw_openmeteo_bytes()
+    proof = {
+        "revision": "openmeteo_ifs9_o1280_source_cell_v1",
+        "static_hsurf_sha256": "b" * 64,
+        "selected_flat_index": 100,
+        "selected_grid_lat": 31.14, "selected_grid_lon": 121.80,
+        "raw_grid_elevation_m": 10.0,
+        "effective_grid_elevation_m": 8.0,
+        "target_dem_elevation_m": 8.0,
+        "cell_is_sea": False, "cell_is_center": False, "nearby_sea": False,
+        "raw_payload_sha256": hashlib.sha256(raw_bytes).hexdigest(),
+        "station_registry_sha256": station["registry_sha256"],
+    }
     values = {
         "city": "Shanghai",
-        "station_id": "ZSSS",
-        "city_lat": 31.2304,
-        "city_lon": 121.4737,
-        "station_lat": 31.1979,
-        "station_lon": 121.3363,
-        "requested_lat": 31.1979,
-        "requested_lon": 121.3363,
+        "station_id": station["station_id"],
+        "city_lat": float(city.lat),
+        "city_lon": float(city.lon),
+        "station_lat": station["lat"],
+        "station_lon": station["lon"],
+        "requested_lat": station["lat"],
+        "requested_lon": station["lon"],
         "requested_coordinate_precision_decimals": 4,
-        "nearest_grid_lat": 31.2,
-        "nearest_grid_lon": 121.3,
-        "nearest_grid_distance_km": 3.5,
+        "nearest_grid_lat": 31.14,
+        "nearest_grid_lon": 121.80,
+        "nearest_grid_distance_km": _haversine_km(station["lat"], station["lon"], 31.14, 121.80),
         "native_grid": "openmeteo_ecmwf_ifs_9km",
         "delivery_grid_resolution": "0p1",
         "interpolation_method": "nearest_gridpoint",
@@ -225,15 +319,105 @@ def _precision_guard(**overrides: object):
         "target_local_date": date(2026, 6, 7),
         "temperature_unit": "C",
         "anchor_sigma_c": 3.0,
-        "grid_elevation_m": 4.0,
-        "station_elevation_m": 3.0,
+        "grid_elevation_m": 10.0,
+        "station_elevation_m": station["elevation_m"],
         "land_sea_mask": "land",
-        "city_class": "flat_inland",
+        "city_class": "standard",
         "station_mapping_policy": "settlement_station",
+        "source_geometry_proof": proof,
     }
     values.update(overrides)
     return evaluate_openmeteo_ecmwf_ifs9_precision_guard(
-        OpenMeteoIfs9PrecisionMetadata(**values)  # type: ignore[arg-type]
+        OpenMeteoIfs9PrecisionMetadata(**values),  # type: ignore[arg-type]
+        raw_payload_bytes=raw_bytes,
+    )
+
+
+def test_materializer_reauthenticates_same_artifact_and_anchor(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.config import cities_by_name, runtime_station_geometry_for_city
+    from src.data.openmeteo_ecmwf_ifs9_anchor import extract_openmeteo_ecmwf_ifs9_localday_anchor
+    from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
+    from src.data.openmeteo_ecmwf_ifs9_precision_guard import _haversine_km
+
+    city = cities_by_name["Shanghai"]
+    station = runtime_station_geometry_for_city(city)
+    assert station["validity_reason"] is None
+    response = {
+        "latitude": 31.14, "longitude": 121.80, "elevation": 8.0,
+        "timezone": "Asia/Shanghai",
+        "hourly": {
+            "time": [f"2026-06-07T{hour:02d}:00" for hour in range(24)],
+            "temperature_2m": [27.0 if hour == 12 else 18.5 for hour in range(24)],
+        },
+        "hourly_units": {"temperature_2m": "°C"},
+        "_zeus_current_target_scope": {"city": "Shanghai", "target_date": "2026-06-07", "metric": "high"},
+    }
+    raw_bytes = (json.dumps(response, sort_keys=True, indent=2) + "\n").encode()
+    # Deterministic substitute for the large HSURF file; the production guard,
+    # exact artifact bytes and anchor extraction remain unmocked.
+    static_cell = {
+        "revision": "openmeteo_ifs9_o1280_source_cell_v1",
+        "static_hsurf_sha256": "b" * 64,
+        "selected_flat_index": 100,
+        "selected_grid_lat": response["latitude"],
+        "selected_grid_lon": response["longitude"],
+        "raw_grid_elevation_m": 10.0,
+        "effective_grid_elevation_m": 8.0,
+        "target_dem_elevation_m": 8.0,
+        "cell_is_sea": False,
+        "cell_is_center": False,
+        "nearby_sea": False,
+    }
+    import src.data.openmeteo_ecmwf_ifs9_bucket_transport as transport
+    monkeypatch.setattr(transport, "source_cell_geometry_proof", lambda **_kwargs: dict(static_cell))
+    proof = {
+        **static_cell,
+        "raw_payload_sha256": hashlib.sha256(raw_bytes).hexdigest(),
+        "station_registry_sha256": station["registry_sha256"],
+    }
+    metadata = OpenMeteoIfs9PrecisionMetadata(
+        city="Shanghai", station_id=station["station_id"],
+        city_lat=float(city.lat), city_lon=float(city.lon),
+        station_lat=station["lat"], station_lon=station["lon"],
+        requested_lat=station["lat"], requested_lon=station["lon"],
+        requested_coordinate_precision_decimals=4,
+        nearest_grid_lat=response["latitude"], nearest_grid_lon=response["longitude"],
+        nearest_grid_distance_km=_haversine_km(
+            station["lat"], station["lon"], response["latitude"], response["longitude"]
+        ),
+        native_grid="openmeteo_ecmwf_ifs_9km", delivery_grid_resolution="9km",
+        interpolation_method="openmeteo_api_point_interpolation",
+        endpoint_mode="hourly_zeus_aggregated",
+        local_day_start_utc="2026-06-06T16:00:00+00:00",
+        local_day_end_utc="2026-06-07T16:00:00+00:00",
+        timezone_name="Asia/Shanghai", target_local_date="2026-06-07",
+        temperature_unit="celsius", anchor_sigma_c=3.0,
+        grid_elevation_m=10.0, station_elevation_m=station["elevation_m"],
+        land_sea_mask="land", city_class="standard",
+        station_mapping_policy="operator_verified_station", source_geometry_proof=proof,
+    )
+    guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(metadata, raw_payload_bytes=raw_bytes)
+    assert guard.passable_for_live_materialization
+    anchor = extract_openmeteo_ecmwf_ifs9_localday_anchor(
+        response, city_timezone="Asia/Shanghai", target_local_date=date(2026, 6, 7),
+        source_cycle_time=_dt(0),
+    )
+    request = replace(_request(), openmeteo_anchor=anchor, openmeteo_precision_guard=guard,
+                      openmeteo_raw_payload_bytes=raw_bytes)
+    assert materializer_mod._precision_guard_block_reason(request) == ()
+    assert materializer_mod._precision_guard_block_reason(replace(request, openmeteo_raw_payload_bytes=None)) == (
+        "OM9_SOURCE_RESPONSE_BYTES_MISSING",
+    )
+    assert materializer_mod._precision_guard_block_reason(replace(request, openmeteo_anchor=replace(anchor, high_c=28.0))) == (
+        "OM9_SOURCE_RESPONSE_ANCHOR_MISMATCH",
+    )
+    bad_guard = replace(guard, status="PASS", reason_codes=("fabricated",))
+    assert materializer_mod._precision_guard_block_reason(replace(request, openmeteo_precision_guard=bad_guard)) == (
+        "OM9_PRECISION_GUARD_RESULT_MISMATCH",
+    )
+    changed_raw = raw_bytes.replace(b"27.0", b"29.0")
+    assert materializer_mod._precision_guard_block_reason(replace(request, openmeteo_raw_payload_bytes=changed_raw)) == (
+        "OM9_SOURCE_RESPONSE_ANCHOR_MISMATCH",
     )
 
 
@@ -280,6 +464,10 @@ def _install_live_fusion(
         current_evidence_shape={
             "snapshot_id": snapshot_id,
             "shape_hash": "test-current-shape",
+            # This override isolates downstream Day0/commit behavior. The
+            # selector/proof verification is exercised in the row tests below.
+            "grid_surface_evidence_revision": "ecmwf_ens_land_cell_selection_v1",
+            "grid_surface_evidence_identity_hash": "a" * 64,
             "semantics_revision": (
                 materializer_mod.CURRENT_EVIDENCE_SEMANTICS_REVISION
                 if shape_lag_hours == 0.0
@@ -339,6 +527,7 @@ def _request(
         expires_at=expires_at or _dt(6),
         anchor_artifact_id=anchor_artifact_id,
         openmeteo_precision_guard=guard,
+        openmeteo_raw_payload_bytes=_fixture_raw_openmeteo_bytes(),
         day0_observed_extreme_c=day0_observed_extreme_c,
         day0_observed_extreme_source=day0_observed_extreme_source,
         day0_observed_extreme_observation_time=day0_observed_extreme_observation_time,
@@ -2578,20 +2767,56 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
         ),
         source_cycle_time=datetime(2026, 6, 7, 6, tzinfo=UTC),
     )
-    guard = _precision_guard(
-        city="Chicago",
-        station_id="KORD",
-        city_lat=41.8781,
-        city_lon=-87.6298,
-        station_lat=41.9742,
-        station_lon=-87.9073,
-        requested_lat=41.9742,
-        requested_lon=-87.9073,
-        local_day_start_utc=datetime(2026, 6, 7, 5, tzinfo=UTC),
-        local_day_end_utc=datetime(2026, 6, 8, 5, tzinfo=UTC),
-        timezone_name="America/Chicago",
-        target_local_date=target,
+    from src.config import runtime_station_geometry_for_city
+    from src.data.openmeteo_ecmwf_ifs9_precision_guard import _haversine_km
+    import src.data.openmeteo_ecmwf_ifs9_bucket_transport as transport
+
+    station = runtime_station_geometry_for_city(city)
+    raw = {
+        "latitude": 41.98, "longitude": -87.90, "elevation": 207.0,
+        "timezone": "America/Chicago",
+        "hourly": {
+            "time": [f"2026-06-07T{hour:02d}:00" for hour in range(24)],
+            "temperature_2m": [22.0 if hour == 0 else 31.0 if hour == 12 else 25.0 for hour in range(24)],
+        },
+        "hourly_units": {"temperature_2m": "°C"},
+        "_zeus_current_target_scope": {"city": "Chicago", "target_date": target.isoformat(), "metric": "high"},
+    }
+    raw_bytes = (json.dumps(raw, sort_keys=True, indent=2) + "\n").encode()
+    static_cell = {
+        "revision": "openmeteo_ifs9_o1280_source_cell_v1",
+        "static_hsurf_sha256": "b" * 64, "selected_flat_index": 110,
+        "selected_grid_lat": 41.98, "selected_grid_lon": -87.90,
+        "raw_grid_elevation_m": 205.0, "effective_grid_elevation_m": 207.0,
+        "target_dem_elevation_m": 207.0, "cell_is_sea": False,
+        "cell_is_center": False, "nearby_sea": False,
+    }
+    monkeypatch.setattr(transport, "source_cell_geometry_proof", lambda **_kwargs: dict(static_cell))
+    metadata = OpenMeteoIfs9PrecisionMetadata(
+        city="Chicago", station_id=station["station_id"],
+        city_lat=float(city.lat), city_lon=float(city.lon),
+        station_lat=station["lat"], station_lon=station["lon"],
+        requested_lat=station["lat"], requested_lon=station["lon"],
+        requested_coordinate_precision_decimals=4,
+        nearest_grid_lat=41.98, nearest_grid_lon=-87.90,
+        nearest_grid_distance_km=_haversine_km(station["lat"], station["lon"], 41.98, -87.90),
+        native_grid="openmeteo_ecmwf_ifs_9km", delivery_grid_resolution="9km",
+        interpolation_method="openmeteo_api_point_interpolation",
+        endpoint_mode="hourly_zeus_aggregated",
+        local_day_start_utc="2026-06-07T05:00:00+00:00",
+        local_day_end_utc="2026-06-08T05:00:00+00:00",
+        timezone_name="America/Chicago", target_local_date=target,
+        temperature_unit="C", anchor_sigma_c=3.0,
+        grid_elevation_m=205.0, station_elevation_m=station["elevation_m"],
+        land_sea_mask="land", city_class="standard",
+        station_mapping_policy="operator_verified_station",
+        source_geometry_proof={
+            **static_cell, "raw_payload_sha256": hashlib.sha256(raw_bytes).hexdigest(),
+            "station_registry_sha256": station["registry_sha256"],
+        },
     )
+    guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(metadata, raw_payload_bytes=raw_bytes)
+    assert guard.passable_for_live_materialization
     request = ReplacementForecastMaterializeRequest(
         city="Chicago",
         city_id="Chicago",
@@ -2618,6 +2843,7 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
         computed_at=computed_at,
         expires_at=datetime(2026, 6, 7, 20, tzinfo=UTC),
         openmeteo_precision_guard=guard,
+        openmeteo_raw_payload_bytes=raw_bytes,
         day0_observed_extreme_c=celsius(native_boundary_f),
         day0_observed_extreme_source="aviationweather_metar",
         day0_observed_extreme_observation_time=computed_at.isoformat(),
@@ -2841,7 +3067,25 @@ def test_materializer_day0_allows_elapsed_om9_hours_covered_by_observed_extreme(
         day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
         day0_observed_extreme_sample_count=2,
     )
-    partial_request = replace(request, openmeteo_anchor=_anchor_with_local_hours(hours=range(2, 24)))
+    partial_raw = json.loads(request.openmeteo_raw_payload_bytes)
+    partial_raw["hourly"]["time"] = partial_raw["hourly"]["time"][2:]
+    partial_raw["hourly"]["temperature_2m"] = partial_raw["hourly"]["temperature_2m"][2:]
+    partial_bytes = (json.dumps(partial_raw, sort_keys=True, indent=2) + "\n").encode()
+    partial_metadata = replace(
+        request.openmeteo_precision_guard.metadata,
+        source_geometry_proof={
+            **request.openmeteo_precision_guard.metadata.source_geometry_proof,
+            "raw_payload_sha256": hashlib.sha256(partial_bytes).hexdigest(),
+        },
+    )
+    partial_request = replace(
+        request,
+        openmeteo_anchor=_anchor_with_local_hours(hours=range(2, 24)),
+        openmeteo_raw_payload_bytes=partial_bytes,
+        openmeteo_precision_guard=evaluate_openmeteo_ecmwf_ifs9_precision_guard(
+            partial_metadata, raw_payload_bytes=partial_bytes,
+        ),
+    )
 
     result = materialize_replacement_forecast_live(conn, partial_request)
 
@@ -3883,7 +4127,8 @@ def _create_target_frontier_tables(conn: sqlite3.Connection) -> None:
             contributes_to_target_extrema INTEGER,
             source_cycle_time TEXT, issue_time TEXT,
             source_available_at TEXT, available_at TEXT,
-            members_json TEXT, members_unit TEXT, dataset_id TEXT
+            members_json TEXT, members_unit TEXT, dataset_id TEXT,
+            provenance_json TEXT
         );
         CREATE TABLE unrelated_writer (value INTEGER);
         INSERT INTO source_run VALUES (
@@ -3920,9 +4165,13 @@ def _create_target_frontier_tables(conn: sqlite3.Connection) -> None:
             'FULLY_INSIDE_TARGET_LOCAL_DAY', 1,
             '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00',
             '2026-06-06T03:00:00+00:00', '2026-06-06T03:00:00+00:00',
-            '[20.0,21.0]', 'degC', '{_current_baseline_data_version("high")}'
+            '[20.0,21.0]', 'degC', '{_current_baseline_data_version("high")}', '{{}}'
         );
         """
+    )
+    conn.execute(
+        "UPDATE ensemble_snapshots SET provenance_json = ? WHERE snapshot_id = 101",
+        (_fixture_ens_surface_provenance(),),
     )
     _set_target_frontier_coverage(conn, snapshot_id=101)
     conn.commit()
@@ -4002,10 +4251,12 @@ def test_target_dependency_witness_is_bounded_to_exact_target_rows() -> None:
             'FULLY_INSIDE_TARGET_LOCAL_DAY', 1,
             '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00',
             '2026-06-06T03:30:00+00:00', '2026-06-06T03:30:00+00:00',
-            '[19.0,22.0]', 'degC', '{_current_baseline_data_version("high")}'
+            '[19.0,22.0]', 'degC', '{_current_baseline_data_version("high")}', '{{}}'
         )
         """
     )
+    conn.execute("UPDATE ensemble_snapshots SET provenance_json=? WHERE snapshot_id=102",
+                 (_fixture_ens_surface_provenance(),))
     _set_target_frontier_coverage(conn, snapshot_id=102)
     with pytest.raises(cli._TargetDependencyWitnessUnavailable):
         cli._revalidate_target_dependency_witness(conn, prepared, baseline)
@@ -4276,6 +4527,120 @@ def test_shared_frontier_helpers_match_materializer_selectors() -> None:
     assert snapshot_id == snapshot.snapshot_id == 101
 
 
+def test_selected_ens_proof_is_required_for_identity_and_shape() -> None:
+    """An indexed snapshot id cannot bypass the same selected-row land proof."""
+    from src.data.replacement_forecast_materializer import (
+        read_current_evidence_snapshot_id,
+        read_current_evidence_snapshot_identity,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    _create_target_frontier_tables(conn)
+    request = _prepared_target_frontier(101).request
+    selected = read_current_evidence_snapshot_identity(conn, request, metric="high")
+    assert selected is not None
+    assert selected.grid_surface_evidence_revision == "ecmwf_ens_land_cell_selection_v1"
+    assert len(selected.grid_surface_evidence_identity_hash) == 64
+    proof = json.loads(_fixture_ens_surface_provenance())
+    proof["grid_surface_evidence"]["selected_land_fraction"] = 0.2
+    conn.execute("UPDATE ensemble_snapshots SET provenance_json=? WHERE snapshot_id=101",
+                 (json.dumps(proof),))
+    assert read_current_evidence_snapshot_identity(conn, request, metric="high") is None
+    assert read_current_evidence_snapshot_id(conn, request, metric="high") is None
+    conn.execute("UPDATE ensemble_snapshots SET provenance_json=? WHERE snapshot_id=101",
+                 (_fixture_ens_surface_provenance(),))
+    proof["grid_surface_evidence"]["selected_land_fraction"] = 0.9
+    proof["grid_surface_evidence"]["mask_source_cycle_time"] = "2026-06-06T06:00:00+00:00"
+    conn.execute("UPDATE ensemble_snapshots SET provenance_json=? WHERE snapshot_id=101",
+                 (json.dumps(proof),))
+    assert read_current_evidence_snapshot_id(conn, request, metric="high") is None
+    conn.close()
+
+
+def test_materialized_shape_binds_verified_selected_ens_grid_hash() -> None:
+    from src.data.replacement_forecast_materializer import _read_current_evidence_shape
+
+    conn = sqlite3.connect(":memory:")
+    _create_target_frontier_tables(conn)
+    request = _prepared_target_frontier(101).request
+    conn.execute("UPDATE ensemble_snapshots SET members_json=? WHERE snapshot_id=101",
+                 (json.dumps([20.0 + index * .05 for index in range(51)]),))
+    kwargs = {
+        "metric": "high",
+        "provider_values_c": {"ecmwf_ifs9": 21.0, "icon": 22.0},
+        "provider_weights": {"ecmwf_ifs9": .6, "icon": .4},
+        "center_c": 21.5,
+        "provider_cycles": {
+            "ecmwf_ifs9": "2026-06-06T00:00:00+00:00",
+            "icon": "2026-06-06T00:00:00+00:00",
+        },
+    }
+    first = _read_current_evidence_shape(conn, request, **kwargs)
+    assert first is not None
+    assert first.grid_surface_evidence_revision == "ecmwf_ens_land_cell_selection_v1"
+    provenance = json.loads(_fixture_ens_surface_provenance())
+    provenance["grid_surface_evidence"]["mask_sha256"] = "c" * 64
+    conn.execute("UPDATE ensemble_snapshots SET provenance_json=? WHERE snapshot_id=101",
+                 (json.dumps(provenance),))
+    second = _read_current_evidence_shape(conn, request, **kwargs)
+    assert second is not None
+    assert first.predictive_sigma_c == second.predictive_sigma_c
+    assert first.grid_surface_evidence_identity_hash != second.grid_surface_evidence_identity_hash
+    assert first.shape_hash != second.shape_hash
+    conn.close()
+
+
+def test_direct_cli_seals_one_source_artifact_and_refuses_old_proof_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direct fetch and precision metadata must describe the same sealed bytes."""
+    import scripts.materialize_replacement_forecast_live as cli
+
+    raw = json.loads(_fixture_raw_openmeteo_bytes())
+    raw.pop("_zeus_current_target_scope")
+    metadata_path = tmp_path / "precision.json"
+    metadata_path.write_text(json.dumps(asdict(_precision_guard().metadata), default=str), encoding="utf-8")
+    seed = {
+        "city": "Shanghai", "city_timezone": "Asia/Shanghai",
+        "target_date": "2026-06-07", "temperature_metric": "high",
+        "source_cycle_time": _dt(0).isoformat(), "computed_at": _dt(4).isoformat(),
+        "baseline_source_run_id": "b0-run",
+        "baseline_data_version": _current_baseline_data_version("high"),
+        "baseline_source_available_at": _dt(2).isoformat(),
+        "openmeteo_source_run_id": "om9-run", "openmeteo_source_available_at": _dt(3).isoformat(),
+        "latitude": 31.1433, "longitude": 121.8053,
+        "precision_metadata_json": str(metadata_path),
+        "bins": [{"bin_id": "warm", "lower_c": 20.0, "upper_c": 30.0}],
+    }
+    input_path = tmp_path / "seed.json"
+    input_path.write_text(json.dumps(seed), encoding="utf-8")
+    monkeypatch.setattr(cli, "fetch_openmeteo_ecmwf_ifs9_anchor_payload", lambda _request: dict(raw))
+    captured: list[bytes] = []
+
+    def checked_dry_run(_conn, request):
+        captured.append(request.openmeteo_raw_payload_bytes)
+        reasons = materializer_mod._precision_guard_block_reason(request)
+        return materializer_mod.ReplacementForecastMaterializeResult(
+            status="BLOCKED" if reasons else "READY", reason_codes=reasons,
+            posterior_id=None, anchor_id=None, readiness_id=None,
+        )
+
+    monkeypatch.setattr(cli, "_dry_run_from_read_snapshot", checked_dry_run)
+    conn = sqlite3.connect(":memory:")
+    code, response = cli._materialize(input_path, commit=False, init_schema=False, conn=conn)
+    assert code == 0, response
+    assert captured == [_fixture_raw_openmeteo_bytes()]
+
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["source_geometry_proof"]["raw_payload_sha256"] = "f" * 64
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    code, response = cli._materialize(input_path, commit=False, init_schema=False, conn=conn)
+    conn.close()
+    assert code == 1
+    assert "OM9_SOURCE_RESPONSE_IDENTITY_MISMATCH" in response["reason_codes"]
+    assert captured == [_fixture_raw_openmeteo_bytes()] * 2
+
+
 @pytest.mark.parametrize("metric", ("high", "low"))
 def test_current_ensemble_requires_exact_complete_target_coverage(
     metric: str,
@@ -4347,6 +4712,8 @@ def test_current_ensemble_requires_exact_complete_target_coverage(
         )
         """
     )
+    conn.execute("UPDATE ensemble_snapshots SET provenance_json=? WHERE snapshot_id=101",
+                 (_fixture_ens_surface_provenance(),))
 
     def selected() -> tuple[object | None, datetime | None]:
         return (
@@ -4595,10 +4962,12 @@ def test_final_ens_frontier_detects_absent_to_present() -> None:
             'FULLY_INSIDE_TARGET_LOCAL_DAY', 1,
             '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00',
             '2026-06-06T03:30:00+00:00', '2026-06-06T03:30:00+00:00',
-            '[19.0,22.0]', 'degC', '{_current_baseline_data_version("high")}'
+            '[19.0,22.0]', 'degC', '{_current_baseline_data_version("high")}', '{{}}'
         )
         """
     )
+    conn.execute("UPDATE ensemble_snapshots SET provenance_json=? WHERE snapshot_id=102",
+                 (_fixture_ens_surface_provenance(),))
     _set_target_frontier_coverage(conn, snapshot_id=102)
 
     current = cli._revalidate_target_dependency_witness(conn, prepared, baseline)
@@ -4608,8 +4977,8 @@ def test_final_ens_frontier_detects_absent_to_present() -> None:
     assert current.ensemble_frontier_id == 102
 
 
-def test_final_ens_frontier_exact_city_update_supersedes_casefold() -> None:
-    """Final selection must preserve production exact-first semantics after UPDATE."""
+def test_final_ens_frontier_exact_city_update_without_proof_fails_closed() -> None:
+    """An exact-city alias cannot displace a certified canonical-city proof."""
     import scripts.materialize_replacement_forecast_live as cli
 
     conn = sqlite3.connect(":memory:")
@@ -4625,7 +4994,7 @@ def test_final_ens_frontier_exact_city_update_supersedes_casefold() -> None:
             'FULLY_INSIDE_TARGET_LOCAL_DAY', 1,
             '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00',
             '2026-06-06T03:30:00+00:00', '2026-06-06T03:30:00+00:00',
-            '[19.0,22.0]', 'degC', '{_current_baseline_data_version("high")}'
+            '[19.0,22.0]', 'degC', '{_current_baseline_data_version("high")}', '{{}}'
         )
         """
     )
@@ -4649,7 +5018,7 @@ def test_final_ens_frontier_exact_city_update_supersedes_casefold() -> None:
     )
     conn.close()
 
-    assert current_id == 102
+    assert current_id is None
 
 
 def test_existing_frontier_indexes_require_no_live_ddl() -> None:
@@ -4699,11 +5068,13 @@ def test_final_ens_selector_has_indexed_logarithmic_work() -> None:
                 'FULLY_INSIDE_TARGET_LOCAL_DAY', 1,
                 '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00',
                 '2026-06-06T03:00:00+00:00', '2026-06-06T03:00:00+00:00',
-                '[20.0,21.0]', 'degC', '{_current_baseline_data_version("high")}'
+                '[20.0,21.0]', 'degC', '{_current_baseline_data_version("high")}', '{{}}'
             )
             """,
             ((snapshot_id,) for snapshot_id in range(1, row_count + 1)),
         )
+        conn.execute("UPDATE ensemble_snapshots SET provenance_json=? WHERE snapshot_id=?",
+                     (_fixture_ens_surface_provenance(), row_count))
         _set_target_frontier_coverage(conn, snapshot_id=row_count)
         request = _prepared_target_frontier(row_count).request
 
@@ -5035,6 +5406,8 @@ def test_final_frontier_queries_use_exact_target_indexes_without_temp_sort() -> 
                   'ens-run', 'FULLY_INSIDE_TARGET_LOCAL_DAY', 1, 'OK', 0, 'degC')
         """
     )
+    conn.execute("UPDATE ensemble_snapshots SET provenance_json=? WHERE snapshot_id=101",
+                 (_fixture_ens_surface_provenance(),))
     _set_target_frontier_coverage(
         conn,
         snapshot_id=101,
@@ -5588,7 +5961,7 @@ def test_materialize_cli_bootstraps_hot_indexes_outside_writer_lock(
     monkeypatch.setattr(
         cli,
         "evaluate_openmeteo_ecmwf_ifs9_precision_guard",
-        lambda _metadata: _precision_guard(),
+        lambda _metadata, **_kwargs: _precision_guard(),
     )
     monkeypatch.setattr(cli, "_bins", lambda _payload: _bins())
     monkeypatch.setattr(cli, "_ensure_replacement_frontier_indexes", bootstrap_indexes)
@@ -5733,7 +6106,7 @@ def test_materialize_script_reports_durable_manifest_when_posterior_fails(
 
     monkeypatch.setattr(cli, "extract_openmeteo_ecmwf_ifs9_localday_anchor", lambda *args, **kwargs: _anchor())
     monkeypatch.setattr(cli, "OpenMeteoIfs9PrecisionMetadata", lambda **kwargs: object())
-    monkeypatch.setattr(cli, "evaluate_openmeteo_ecmwf_ifs9_precision_guard", lambda _metadata: _precision_guard())
+    monkeypatch.setattr(cli, "evaluate_openmeteo_ecmwf_ifs9_precision_guard", lambda _metadata, **_kwargs: _precision_guard())
     monkeypatch.setattr(cli, "_bins", lambda _payload: _bins())
     monkeypatch.setattr(cli, "_prepare_live_schema_and_manifest", lambda *args, **kwargs: receipt)
     monkeypatch.setattr(
@@ -5809,7 +6182,7 @@ def test_materialize_script_preserves_deadline_deferred_after_manifest(
     monkeypatch.setattr(
         cli,
         "evaluate_openmeteo_ecmwf_ifs9_precision_guard",
-        lambda _metadata: _precision_guard(),
+        lambda _metadata, **_kwargs: _precision_guard(),
     )
     monkeypatch.setattr(cli, "_bins", lambda _payload: _bins())
     monkeypatch.setattr(
@@ -5881,7 +6254,7 @@ def test_materialize_script_threads_day0_zero_observation_state(
     monkeypatch.setattr(
         cli,
         "evaluate_openmeteo_ecmwf_ifs9_precision_guard",
-        lambda _metadata: _precision_guard(),
+        lambda _metadata, **_kwargs: _precision_guard(),
     )
     monkeypatch.setattr(cli, "_bins", lambda _payload: _bins())
     monkeypatch.setattr(
@@ -6326,7 +6699,7 @@ def _coordinate_bound_frontier_conn() -> sqlite3.Connection:
             contributes_to_target_extrema INTEGER,
             source_cycle_time TEXT, issue_time TEXT,
             source_available_at TEXT, available_at TEXT,
-            members_json TEXT, members_unit TEXT
+            members_json TEXT, members_unit TEXT, provenance_json TEXT
         )
         """
     )
@@ -6347,17 +6720,18 @@ def _insert_coordinate_bound_frontier_row(
             ?, 'ecmwf_open_data', 'ecmwf_ens', 'VERIFIED', 'OK', 0,
             'FULLY_INSIDE_TARGET_LOCAL_DAY', 1,
             '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00',
-            ?, ?, '[20.0,21.0]', 'degC')
+            ?, ?, '[20.0,21.0]', 'degC', ?)
         """,
-        (snapshot_id, metric, dataset_id, available_at.isoformat(), available_at.isoformat()),
+        (snapshot_id, metric, dataset_id, available_at.isoformat(), available_at.isoformat(),
+         _fixture_ens_surface_provenance()),
     )
 
 
 @pytest.mark.parametrize(
     ("metric", "base"),
     (
-        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max_boundary_v2"),
-        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min_window_v2"),
+        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max_boundary_land_grid_v3"),
+        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min_window_land_grid_v3"),
     ),
 )
 def test_current_evidence_uses_only_the_request_coordinate_dataset(
@@ -6682,6 +7056,11 @@ def _low_revision_authority_conn(db_path: Path | None = None) -> sqlite3.Connect
              json.dumps([19.0 + index * 0.01 for index in range(51)]), version,
              run_id, cycle.isoformat(), issued.isoformat(), issued.isoformat()),
         )
+        if run_id == "new12":
+            conn.execute(
+                "UPDATE ensemble_snapshots SET provenance_json=? WHERE snapshot_id=?",
+                (_fixture_ens_surface_provenance(cycle=cycle.isoformat()), snapshot_id),
+            )
     for raw_id, model in enumerate(("ecmwf_ifs9", "gfs", "icon", "gem", "jma"), 101):
         conn.execute(
             """INSERT INTO raw_model_forecasts (
@@ -6752,6 +7131,12 @@ def _built_low_revision_request(tmp_path: Path) -> ReplacementForecastMaterializ
     from tests.test_replacement_forecast_materialization_request_builder import _write_inputs
 
     seed = _write_inputs(tmp_path)
+    from dataclasses import asdict
+
+    (tmp_path / str(seed["openmeteo_payload_json"])).write_bytes(_fixture_raw_openmeteo_bytes())
+    (tmp_path / str(seed["precision_metadata_json"])).write_text(
+        json.dumps(asdict(_precision_guard().metadata), default=str), encoding="utf-8",
+    )
     seed.update(
         temperature_metric="low",
         source_cycle_time=_dt(12).isoformat(),

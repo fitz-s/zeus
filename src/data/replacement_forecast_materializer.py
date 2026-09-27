@@ -49,7 +49,10 @@ from src.data.openmeteo_ecmwf_ifs9_anchor import (
     SOURCE_ID as ANCHOR_SOURCE_ID,
     OpenMeteoIfs9LocalDayAnchor,
 )
-from src.data.openmeteo_ecmwf_ifs9_precision_guard import OpenMeteoIfs9PrecisionGuardResult
+from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
+    OpenMeteoIfs9PrecisionGuardResult,
+    evaluate_openmeteo_ecmwf_ifs9_precision_guard,
+)
 from src.data.replacement_forecast_bundle_reader import (
     HIGH_DATA_VERSION,
     LOW_DATA_VERSION,
@@ -727,8 +730,37 @@ def _precision_guard_block_reason(
     guard = request.openmeteo_precision_guard
     if guard is None:
         return ("OM9_PRECISION_GUARD_REQUIRED_FOR_MATERIALIZATION",)
-    if not guard.passable_for_live_materialization:
-        return ("OM9_PRECISION_GUARD_NOT_LIVE_PASS", *guard.reason_codes)
+    raw_bytes = request.openmeteo_raw_payload_bytes
+    if not isinstance(raw_bytes, bytes):
+        return ("OM9_SOURCE_RESPONSE_BYTES_MISSING",)
+    try:
+        raw = json.loads(raw_bytes)
+        if not isinstance(raw, Mapping):
+            raise ValueError("Open-Meteo response must be an object")
+        from src.data.openmeteo_ecmwf_ifs9_anchor import (
+            extract_openmeteo_ecmwf_ifs9_localday_anchor,
+        )
+
+        extracted = extract_openmeteo_ecmwf_ifs9_localday_anchor(
+            raw,
+            city_timezone=request.city_timezone,
+            target_local_date=date.fromisoformat(_date_text(request.target_date)),
+            source_cycle_time=_to_utc(
+                request.openmeteo_anchor.source_cycle_time,
+                field_name="openmeteo_source_cycle_time",
+            ),
+        )
+        if extracted != request.openmeteo_anchor:
+            return ("OM9_SOURCE_RESPONSE_ANCHOR_MISMATCH",)
+        validated = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
+            guard.metadata, raw_payload_bytes=raw_bytes,
+        )
+    except (TypeError, ValueError, KeyError, AttributeError, UnicodeDecodeError):
+        return ("OM9_SOURCE_RESPONSE_INVALID",)
+    if not validated.passable_for_live_materialization:
+        return ("OM9_PRECISION_GUARD_NOT_LIVE_PASS", *validated.reason_codes)
+    if validated != guard:
+        return ("OM9_PRECISION_GUARD_RESULT_MISMATCH",)
     return ()
 
 
@@ -3195,6 +3227,8 @@ class _CurrentEvidenceShape:
     stale_shape_reused: bool
     ens_center_delta_raw_c: float
     between_cohort_status: str
+    grid_surface_evidence_revision: str | None = None
+    grid_surface_evidence_identity_hash: str | None = None
     # Between-spread freshest-coherent-cohort provenance (consult v2 (b), 2026-07-17):
     # populated only when the ±3h cohort filter excludes a provider from the between term.
     # The status is always persisted and is part of the shape_hash identity.
@@ -3218,6 +3252,10 @@ class _CurrentEvidenceShape:
         payload = asdict(self)
         payload.pop("members_c")
         payload.pop("member_bounds_c")
+        if self.grid_surface_evidence_revision is None:
+            payload.pop("grid_surface_evidence_revision", None)
+        if self.grid_surface_evidence_identity_hash is None:
+            payload.pop("grid_surface_evidence_identity_hash", None)
         if payload.get("interval_censored_member_count") is None:
             payload.pop("interval_censored_member_count", None)
         if payload.get("stale_shape_reused") is False:
@@ -3327,6 +3365,8 @@ def _current_evidence_shape_from_values(
     carrier_cycle_time: str | datetime | None = None,
     provider_cycles: Mapping[str, str] | None = None,
     shape_age_gamma_c2_per_6h: float = 0.0,
+    grid_surface_evidence_revision: str | None = None,
+    grid_surface_evidence_identity_hash: str | None = None,
 ) -> _CurrentEvidenceShape:
     """Compose current ensemble and provider disagreement without a fitted floor.
 
@@ -3515,6 +3555,9 @@ def _current_evidence_shape_from_values(
         "ens_center_delta_raw_c": ens_center_delta_raw,
         "between_cohort_status": BETWEEN_COHORT_STATUS_SIMULTANEOUS_PROVEN,
     }
+    if grid_surface_evidence_revision is not None and grid_surface_evidence_identity_hash is not None:
+        identity["grid_surface_evidence_revision"] = grid_surface_evidence_revision
+        identity["grid_surface_evidence_identity_hash"] = grid_surface_evidence_identity_hash
     if stale_shape_reused:
         identity["stale_shape_reused"] = True
     member_values_hash = str(identity["member_values_hash"])
@@ -3540,6 +3583,8 @@ def _current_evidence_shape_from_values(
         stale_shape_reused=stale_shape_reused,
         ens_center_delta_raw_c=ens_center_delta_raw,
         between_cohort_status=BETWEEN_COHORT_STATUS_SIMULTANEOUS_PROVEN,
+        grid_surface_evidence_revision=grid_surface_evidence_revision,
+        grid_surface_evidence_identity_hash=grid_surface_evidence_identity_hash,
         # Cohort membership is diagnostic provenance; the status and filtered between
         # value above are the identity-bearing proof.
         between_cohort_models=between_cohort_models,
@@ -3626,6 +3671,8 @@ class CurrentEvidenceSnapshotIdentity:
     source_cycle_time: str
     source_available_at: str
     members_unit: str
+    grid_surface_evidence_revision: str
+    grid_surface_evidence_identity_hash: str
     # Native-unit per-member bounds when the row is interval-censored, else None.
     member_bounds: tuple[tuple[float, float], ...] | None = None
 
@@ -3758,9 +3805,33 @@ def read_current_evidence_snapshot_identity(
         select_sql="""snapshot_id, city, members_json,
                       COALESCE(source_cycle_time, issue_time),
                       COALESCE(source_available_at, available_at), members_unit,
-                      forecast_window_attribution_status""",
+                      forecast_window_attribution_status, dataset_id,
+                      provenance_json""",
     )
     if row is None:
+        return None
+    from src.contracts.ensemble_snapshot_provenance import (
+        grid_surface_evidence_identity_hash,
+    )
+    from src.data.executable_forecast_reader import grid_surface_evidence_reason
+
+    surface_row = {
+        "city": row[1],
+        "dataset_id": row[7],
+        "source_cycle_time": row[3],
+        "provenance_json": row[8],
+    }
+    if grid_surface_evidence_reason(surface_row) is not None:
+        # SCOPE: this city/date/metric's selected ENS row. DRAIN: the ENS
+        # ingest writes a land-grid proof; the ordinary seed loop recomputes.
+        # RESET: this same selector verifies its exact selected row's proof.
+        return None
+    try:
+        provenance = json.loads(row[8])
+        surface_proof = provenance["grid_surface_evidence"]
+        surface_revision = str(surface_proof["revision"])
+        surface_hash = grid_surface_evidence_identity_hash(surface_proof)
+    except (TypeError, ValueError, KeyError, AttributeError, json.JSONDecodeError):
         return None
     member_bounds = None
     if row[6] == INTERVAL_CENSORED_ATTRIBUTION_STATUS:
@@ -3785,6 +3856,8 @@ def read_current_evidence_snapshot_identity(
         source_cycle_time=str(row[3]),
         source_available_at=str(row[4]),
         members_unit=str(row[5]),
+        grid_surface_evidence_revision=surface_revision,
+        grid_surface_evidence_identity_hash=surface_hash,
         member_bounds=member_bounds,
     )
 
@@ -3797,13 +3870,8 @@ def read_current_evidence_snapshot_id(
 ) -> int | None:
     """Return the production-equivalent bounded frontier identity."""
 
-    row = _current_evidence_snapshot_row(
-        conn,
-        request,
-        metric=metric,
-        select_sql="snapshot_id",
-    )
-    return None if row is None else int(row[0])
+    identity = read_current_evidence_snapshot_identity(conn, request, metric=metric)
+    return None if identity is None else identity.snapshot_id
 
 
 def _read_current_evidence_shape(
@@ -3875,6 +3943,8 @@ def _read_current_evidence_shape(
             snapshot_id=snapshot.snapshot_id,
             source_cycle_time=snapshot.source_cycle_time,
             source_available_at=snapshot.source_available_at,
+            grid_surface_evidence_revision=snapshot.grid_surface_evidence_revision,
+            grid_surface_evidence_identity_hash=snapshot.grid_surface_evidence_identity_hash,
             provider_values_c=provider_values_c,
             provider_weights=provider_weights,
             center_c=center_c,

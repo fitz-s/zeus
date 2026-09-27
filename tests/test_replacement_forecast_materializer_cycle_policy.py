@@ -1,8 +1,8 @@
 # Purpose: Verify forecast-cycle eligibility, coverage and current-carrier reseeding.
 # Reuse: Run when changing posterior cycle authority or seed coverage and drain rules.
 # Created: 2026-06-10
-# Last reused or audited: 2026-09-22
-# Lifecycle: created=2026-06-10; last_reviewed=2026-09-22; last_reused=2026-09-22
+# Last reused or audited: 2026-09-27
+# Lifecycle: created=2026-06-10; last_reviewed=2026-09-27; last_reused=2026-09-27
 # Authority basis: operator staleness/cycle-physics directive 2026-06-10 (bounded re-materialization
 #   staleness gate at materialization, fail-closed; cycle-phase provenance treats all standard
 #   00Z/06Z/12Z/18Z cycles as live-eligible synoptic); 2026-08-19 causal
@@ -25,6 +25,7 @@ Two cross-module invariants are pinned here (Fitz: relationship tests, not funct
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -33,6 +34,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.data.openmeteo_ecmwf_ifs9_anchor import OpenMeteoIfs9LocalDayAnchor
+from src.contracts.ensemble_snapshot_provenance import GRID_SURFACE_EVIDENCE_REVISION
 from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
     OpenMeteoIfs9PrecisionMetadata,
     evaluate_openmeteo_ecmwf_ifs9_precision_guard,
@@ -50,6 +52,7 @@ from src.data.replacement_forecast_cycle_policy import (
 )
 from src.data.replacement_forecast_materializer import (
     ReplacementForecastMaterializeRequest,
+    _current_evidence_shape_from_values,
     _prewrite_block_reasons,
     materialize_replacement_forecast_live,
 )
@@ -59,6 +62,77 @@ from src.state.schema.v2_schema import apply_canonical_schema
 
 UTC = timezone.utc
 _STALE_REASON = "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_TOO_STALE"
+_SURFACE_HASH = hashlib.sha256(b"selected-land-cell-proof").hexdigest()
+
+
+def _surface_identity() -> dict[str, str]:
+    return {
+        "grid_surface_evidence_revision": GRID_SURFACE_EVIDENCE_REVISION,
+        "grid_surface_evidence_identity_hash": _SURFACE_HASH,
+    }
+
+
+def test_entry_held_and_sql_coverage_require_same_land_grid_identity() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE posterior (q_lcb_json TEXT, q_ucb_json TEXT, provenance_json TEXT)")
+    shape = {
+        "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+        "source_cycle_time": "2026-09-27T06:00:00+00:00",
+        "shape_lag_hours": 0.0,
+        "translation_applied": False,
+        **_surface_identity(),
+    }
+    coverage = tradeable_grade_coverage_sql(
+        posterior_columns={"q_lcb_json", "q_ucb_json", "provenance_json"},
+        decision_time=datetime(2026, 9, 27, 7, tzinfo=UTC),
+    )
+    for changed, expected in (
+        ({}, True),
+        ({"grid_surface_evidence_identity_hash": "a" * 63}, False),
+        ({"grid_surface_evidence_identity_hash": "z" * 64}, False),
+        ({"grid_surface_evidence_revision": "old-grid"}, False),
+        ({"semantics_revision": "ensemble_center_scenarios_v4"}, False),
+    ):
+        candidate = {**shape, **changed}
+        provenance = {
+            "q_lcb_basis": "fused_center_bootstrap_p05",
+            "bayes_precision_fusion": {"current_evidence_shape": candidate},
+        }
+        assert current_evidence_shape_has_entry_authority(provenance) is expected
+        assert current_evidence_shape_has_held_authority(provenance) is expected
+        conn.execute("DELETE FROM posterior")
+        conn.execute("INSERT INTO posterior VALUES ('{}', '{}', ?)", (json.dumps(provenance),))
+        assert bool(conn.execute(f"SELECT count(*) FROM posterior WHERE 1=1 {coverage}").fetchone()[0]) is expected
+    conn.close()
+
+
+def test_selected_land_cell_changes_current_shape_hash_without_changing_math() -> None:
+    inputs = {
+        "snapshot_id": 17,
+        "source_cycle_time": "2026-09-27T06:00:00+00:00",
+        "source_available_at": "2026-09-27T06:30:00+00:00",
+        "members_c": tuple(20.0 + n * .05 for n in range(51)),
+        "provider_values_c": {"ecmwf_ifs9": 21.0, "icon": 22.0},
+        "provider_weights": {"ecmwf_ifs9": .6, "icon": .4},
+        "provider_cycles": {
+            "ecmwf_ifs9": "2026-09-27T06:00:00+00:00",
+            "icon": "2026-09-27T06:00:00+00:00",
+        },
+        "center_c": 21.5,
+    }
+    no_geometry = _current_evidence_shape_from_values(**inputs)
+    first = _current_evidence_shape_from_values(**inputs,
+        grid_surface_evidence_revision=GRID_SURFACE_EVIDENCE_REVISION,
+        grid_surface_evidence_identity_hash="a" * 64)
+    second = _current_evidence_shape_from_values(**inputs,
+        grid_surface_evidence_revision=GRID_SURFACE_EVIDENCE_REVISION,
+        grid_surface_evidence_identity_hash="b" * 64)
+    assert first.predictive_sigma_c == second.predictive_sigma_c == no_geometry.predictive_sigma_c
+    assert len({first.shape_hash, second.shape_hash, no_geometry.shape_hash}) == 3
+    assert current_evidence_shape_has_entry_authority({"bayes_precision_fusion": {
+        "current_evidence_shape": no_geometry.as_payload()}}) is False
+    assert current_evidence_shape_has_entry_authority({"bayes_precision_fusion": {
+        "current_evidence_shape": first.as_payload()}}) is True
 
 
 @pytest.mark.parametrize(
@@ -108,6 +182,7 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage() -> No
                 "source_cycle_time": "2026-06-07T12:00:00+00:00",
                 "stale_shape_reused": False,
                 "translation_applied": False,
+                **_surface_identity(),
             }
         }
     }
@@ -161,6 +236,15 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage() -> No
     assert current_evidence_shape_semantics_mismatch(stale) is True
     assert current_evidence_shape_semantics_mismatch({}) is False
     assert current_evidence_shape_has_entry_authority(current) is True
+    assert current_evidence_shape_has_held_authority(current) is True
+    for proof in ({}, {"grid_surface_evidence_identity_hash": "a" * 63},
+                  {"grid_surface_evidence_revision": "old-mask"}):
+        missing_proof = json.loads(json.dumps(current))
+        missing_proof["bayes_precision_fusion"]["current_evidence_shape"].update(proof)
+        if not proof:
+            missing_proof["bayes_precision_fusion"]["current_evidence_shape"].pop("grid_surface_evidence_identity_hash")
+        assert current_evidence_shape_has_entry_authority(missing_proof) is False
+        assert current_evidence_shape_has_held_authority(missing_proof) is False
     assert current_evidence_shape_has_entry_authority(stale_reused) is False
     assert current_evidence_shape_has_held_authority(stale_reused) is False
 
@@ -427,6 +511,7 @@ def test_day0_carrier_coverage_requires_complete_current_v2_pair() -> None:
                 "translation_applied": False,
                 "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
                 "source_cycle_time": "2026-09-20T00:00:00Z",
+                **_surface_identity(),
             }
         },
     }
@@ -588,6 +673,7 @@ def test_day0_v3_coverage_rejects_malformed_provider_and_infinite_value() -> Non
                 "stale_shape_reused": False,
                 "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
                 "source_cycle_time": "2026-09-20T00:00:00Z",
+                **_surface_identity(),
             }
         },
     }
@@ -680,6 +766,7 @@ def test_day0_v1_coverage_drains_seed_and_v2_coverage_stops_reenqueue(tmp_path, 
         "stale_shape_reused": False,
         "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
         "source_cycle_time": now.isoformat(),
+        **_surface_identity(),
     }
     provenance = {
         "q_lcb_basis": "fused_center_bootstrap_p05",
