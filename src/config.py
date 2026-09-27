@@ -537,10 +537,10 @@ def runtime_station_geometry_for_city(
     cutoff; it does not attest the model grid's land mask or elevation.
     """
     path = registry_path or CONFIG_DIR / "station_precise_coords.json"
-    source_type = str(city.settlement_source_type or "").strip().lower()
+    source_type = str(getattr(city, "settlement_source_type", "") or "").strip().lower()
     expected_id = (
         "HKO_HQ" if source_type == "hko"
-        else str(city.wu_station or "").strip().upper()
+        else str(getattr(city, "wu_station", "") or "").strip().upper()
         if source_type in {"wu_icao", "noaa"} else ""
     )
     proof: dict[str, object] = {

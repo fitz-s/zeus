@@ -600,11 +600,11 @@ def test_coordinate_manifest_seals_source_run_and_dataset_identity(track: str) -
     assert ":coordsha:" in expected_a
     assert identity_a["data_version"].endswith(expected_a.split(":coordsha:", 1)[1].split(":", 1)[0])
     assert identity_b["data_version"].endswith(expected_b.split(":coordsha:", 1)[1].split(":", 1)[0])
-    expected_suffix = ":high_boundary_v2" if track == "mx2t6_high" else ":low_window_v2"
+    expected_suffix = ":high_boundary_land_grid_v3" if track == "mx2t6_high" else ":low_window_land_grid_v3"
     assert expected_a.endswith(expected_suffix)
     assert daemon._job_run_id(identity_a).endswith(expected_suffix)
     if track == "mx2t6_high":
-        legacy = dict(identity_a, data_version=str(identity_a["data_version"]).replace("_boundary_v2", ""))
+        legacy = dict(identity_a, data_version=str(identity_a["data_version"]).replace("_boundary_land_grid_v3", "_boundary_v2"))
         assert daemon._job_run_id(legacy) != daemon._job_run_id(identity_a)
         assert daemon._expected_source_run_id(legacy) != expected_a
     assert identity_a["data_version"] != identity_b["data_version"]
@@ -627,6 +627,7 @@ def test_low_uncertified_coordinate_identity_is_readable_but_not_current() -> No
     from hashlib import sha256
     from src.contracts.ensemble_snapshot_provenance import (
         ECMWF_OPENDATA_LOW_DATA_VERSION,
+        ECMWF_OPENDATA_LOW_DATA_VERSION_V2,
         ECMWF_OPENDATA_LOW_DATA_VERSION_UNCERTIFIED,
         assert_data_version_allowed,
         coordinate_bound_data_version,
@@ -652,7 +653,11 @@ def test_low_uncertified_coordinate_identity_is_readable_but_not_current() -> No
     assert metric_identity_for_data_version(old_identity).data_version == old_identity
     assert metric_identity_for_data_version(current_identity).data_version == current_identity
     assert opendata_source_run_revision_suffix(old_identity) == ""
-    assert opendata_source_run_revision_suffix(current_identity) == ":low_window_v2"
+    assert opendata_source_run_revision_suffix(current_identity) == ":low_window_land_grid_v3"
+    previous_identity = coordinate_bound_data_version(ECMWF_OPENDATA_LOW_DATA_VERSION_V2, manifest_sha)
+    assert metric_identity_for_data_version(previous_identity).data_version == previous_identity
+    assert opendata_source_run_revision_suffix(previous_identity) == ":low_window_v2"
+    assert previous_identity != current_identity
     assert old_identity != current_identity
 
 

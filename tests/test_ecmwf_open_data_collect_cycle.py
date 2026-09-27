@@ -28,11 +28,93 @@ from src.state.schema.v2_schema import apply_canonical_schema
 from src.state.source_run_repo import write_source_run
 
 
+def test_hong_kong_selects_nearest_land_of_four_not_water_class_cell() -> None:
+    from scripts.extract_open_ens_localday import _select_land_grid_points
+
+    grid = {
+        "gridType": "regular_ll", "Ni": 1440, "Nj": 721,
+        "latitudeOfFirstGridPointInDegrees": 90.0,
+        "longitudeOfFirstGridPointInDegrees": 180.0,
+        "iDirectionIncrementInDegrees": 0.25,
+        "jDirectionIncrementInDegrees": 0.25,
+        "scanningMode": 0,
+    }
+    # Same-cycle IFS 0.25-degree LSM: the geometrically nearest cell has
+    # 39.0625% land, whereas an adjacent cell has 50.78125%.
+    fractions = {
+        391417: 0.390625, 391416: 0.5078125,
+        389977: 0.625, 389976: 0.65625,
+    }
+    selected = _select_land_grid_points(
+        grid,
+        [dict(city="Hong Kong", lat=22.3022, lon=114.1742)],
+        fractions.__getitem__,
+    )
+    assert selected["Hong Kong"]["selected_flat_index"] == 391416
+    assert selected["Hong Kong"]["selected_lat"] == 22.25
+    assert selected["Hong Kong"]["selected_lon"] == 114.0
+    assert selected["Hong Kong"]["selected_land_fraction"] == 0.5078125
+
+
+@pytest.mark.parametrize("fractions", ({391417: 0.4}, {391417: float("nan")}))
+def test_land_grid_selection_refuses_incomplete_or_invalid_mask(fractions) -> None:
+    from scripts.extract_open_ens_localday import _select_land_grid_points
+
+    grid = {
+        "gridType": "regular_ll", "Ni": 1440, "Nj": 721,
+        "latitudeOfFirstGridPointInDegrees": 90.0,
+        "longitudeOfFirstGridPointInDegrees": 180.0,
+        "iDirectionIncrementInDegrees": 0.25,
+        "jDirectionIncrementInDegrees": 0.25,
+        "scanningMode": 0,
+    }
+    with pytest.raises((KeyError, ValueError)):
+        _select_land_grid_points(
+            grid,
+            [dict(city="Hong Kong", lat=22.3022, lon=114.1742)],
+            fractions.__getitem__,
+        )
+
+
+@pytest.mark.parametrize("status, content_range, body_size", (
+    (200, None, 32),
+    (206, "bytes 5-35/99", 31),
+    (206, "bytes 5-36/99", 31),
+))
+def test_static_mask_range_rejects_unproved_http_payload(
+    status: int, content_range: str | None, body_size: int,
+) -> None:
+    from src.data.ecmwf_open_data import _read_static_mask_range
+
+    class Response:
+        headers = {"Content-Length": str(body_size)}
+        status_code = status
+
+        def __init__(self):
+            self.headers = dict(self.headers)
+            if content_range:
+                self.headers["Content-Range"] = content_range
+
+        def iter_content(self, chunk_size):
+            yield b"G" * body_size
+
+        def close(self):
+            pass
+
+    class Session:
+        def get(self, *_args, **_kwargs):
+            return Response()
+
+    with pytest.raises(Exception):
+        _read_static_mask_range(Session(), "https://example.test/lsm.grib2", 5, 32)
+
+
 def _native_partial_scope_payload(
     *, track: str, target: date, issue: date, manifest_sha: str,
 ) -> dict[str, object]:
     """Small full-member native-window payload for one London target day."""
     from tests.test_opendata_writes_v2_table import _make_opendata_high_payload
+    from tests.test_ingest_grib_source_run_context import _land_grid_proof
     from src.data import ecmwf_open_data
 
     start = datetime.combine(target, datetime.min.time(), tzinfo=timezone.utc) - timedelta(hours=1)
@@ -49,7 +131,12 @@ def _native_partial_scope_payload(
         manifest_sha256=manifest_sha, manifest_hash=manifest_sha,
         data_version=cfg["data_version"],
         lead_day=(target - issue).days,
+        lat=51.505299, lon=0.055278,
+        nearest_grid_lat=51.5, nearest_grid_lon=0.0,
     )
+    proof = _land_grid_proof()
+    proof["mask_source_cycle_time"] = issue_iso
+    payload["grid_surface_evidence"] = proof
     if track == "mn2t6_low":
         payload.update(
             physical_quantity="mn2t3_local_calendar_day_min",
@@ -1108,6 +1195,7 @@ def test_collect_open_ens_cycle_passes_explicit_manifest(tmp_path, monkeypatch, 
         skip_download=True,
         conn=_make_conn(tmp_path),
         _runner=capture_extract,
+        _mask_fetch_impl=lambda **_kw: {"mask_sha256": "a" * 64},
         _paths=paths,
     )
 
@@ -1248,6 +1336,7 @@ def test_versioned_extractor_preserves_high_native_inner_and_boundary_candidates
             "lon": -74.0,
             "timezone": "America/New_York",
             "unit": "C",
+            "station_geometry": {"station_id": "KJFK", "station_surface": "land", "validity_reason": None},
         }]}),
         encoding="utf-8",
     )
@@ -1285,11 +1374,28 @@ def test_versioned_extractor_preserves_high_native_inner_and_boundary_candidates
     monkeypatch.setattr(
         extractor,
         "_scan_grib_with_city_values",
-        lambda _path, _track, _cities: {
+        lambda _path, _track, _cities, **_kwargs: {
             "issue_dt": datetime(2026, 6, 6, 0, tzinfo=timezone.utc),
             "entries": entries,
+            "rejected_cities": {},
+            "temperature_grid_identity_hash": "c" * 64,
+            "selected_cities": {"New York": {
+                "selected_flat_index": 1, "selected_lat": 40.75,
+                "selected_lon": -74.0, "selected_land_fraction": .9,
+                "nearest_grid_distance_km": 5.0, "four_neighbors": [],
+            }},
         },
     )
+    monkeypatch.setattr(extractor, "_read_land_mask", lambda *_a: {
+        "proof": {"source": "ecmwf_open_data_ifs_oper_fc_step0_lsm",
+                  "source_url": "https://example.test/mask.grib2",
+                  "source_index_url": "https://example.test/mask.index",
+                  "source_cycle_time": "2026-06-06T00:00:00+00:00",
+                  "source_fetched_at": "2026-06-06T01:00:00+00:00",
+                  "source_index_offset": 0, "source_index_length": 187781,
+                  "mask_sha256": "b" * 64},
+        "grid_identity_hash": "c" * 64,
+    })
 
     output_root = tmp_path / "raw"
     result = extractor.extract_open_ens_localday(
@@ -1297,6 +1403,8 @@ def test_versioned_extractor_preserves_high_native_inner_and_boundary_candidates
         track_name="mx2t6_high",
         manifest_path=manifest,
         output_root=output_root,
+        mask_grib_path=grib,
+        mask_proof_path=grib,
     )
     assert result["status"] == "ok"
     payload_path = next(output_root.rglob("*_target_2026-06-06_lead_0.json"))
@@ -1380,4 +1488,7 @@ def test_extractor_rejects_mixed_cycle_grid_or_duplicate_member_step(
             grib,
             extractor.TRACKS["mx2t6_high"],
             cities,
+            mask={"fields": {key: first[key] for key in extractor._GRID_KEYS},
+                  "values": [1.0] * 4,
+                  "proof": {"source_cycle_time": "2026-09-22T00:00:00+00:00"}},
         )

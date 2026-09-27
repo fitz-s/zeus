@@ -357,12 +357,15 @@ def _high_local_day_max_boundary_certificate(payload: dict) -> dict[str, Any] | 
     """Prove all 51 native daily maxima without assigning cross-midnight maxima."""
     from src.contracts.ensemble_snapshot_provenance import (
         ECMWF_OPENDATA_HIGH_DATA_VERSION,
+        ECMWF_OPENDATA_HIGH_DATA_VERSION_V2,
         split_coordinate_bound_data_version,
     )
 
     version = str(payload.get("data_version") or "")
     bound = split_coordinate_bound_data_version(version)
-    if (bound[0] if bound else version) != ECMWF_OPENDATA_HIGH_DATA_VERSION:
+    if (bound[0] if bound else version) not in {
+        ECMWF_OPENDATA_HIGH_DATA_VERSION_V2, ECMWF_OPENDATA_HIGH_DATA_VERSION,
+    }:
         return None
     reasons: list[str] = []
     records: list[dict[str, Any]] = []
@@ -500,6 +503,7 @@ def _member_interval_bounds(payload: dict, *, city_timezone: str) -> dict[str, A
     """
     from src.contracts.ensemble_snapshot_provenance import (  # noqa: PLC0415
         ECMWF_OPENDATA_LOW_DATA_VERSION,
+        ECMWF_OPENDATA_LOW_DATA_VERSION_V2,
         split_coordinate_bound_data_version,
     )
     from src.data.forecast_extrema_authority import (  # noqa: PLC0415
@@ -525,7 +529,9 @@ def _member_interval_bounds(payload: dict, *, city_timezone: str) -> dict[str, A
         version = str(payload.get("data_version") or "")
         bound = split_coordinate_bound_data_version(version)
         if (
-            (bound[0] if bound else version) != ECMWF_OPENDATA_LOW_DATA_VERSION
+            (bound[0] if bound else version) not in {
+                ECMWF_OPENDATA_LOW_DATA_VERSION_V2, ECMWF_OPENDATA_LOW_DATA_VERSION,
+            }
             or not _boundary_policy(payload).get("boundary_ambiguous")
             or not _low_native_windows_cover_day(
                 payload,
@@ -589,6 +595,7 @@ def _provenance_json(
         "nearest_grid_distance_km": payload.get("nearest_grid_distance_km"),
         "nearest_grid_provenance_source": payload.get("nearest_grid_provenance_source"),
         "nearest_grid_resolution_deg": payload.get("nearest_grid_resolution_deg"),
+        "grid_surface_evidence": payload.get("grid_surface_evidence"),
         "member_axis": _member_axis_provenance(payload),
     }
     # Reuse precomputed evidence when available to avoid duplicate timezone/range parsing.
@@ -734,6 +741,18 @@ def _fill_opendata_grid_provenance(payload: dict) -> None:
 
     data_version = str(payload.get("data_version") or "")
     if "ecmwf_opendata" not in data_version:
+        return
+    from src.contracts.ensemble_snapshot_provenance import (
+        ECMWF_OPENDATA_HIGH_DATA_VERSION,
+        ECMWF_OPENDATA_LOW_DATA_VERSION,
+        split_coordinate_bound_data_version,
+    )
+    parsed = split_coordinate_bound_data_version(data_version)
+    if (parsed[0] if parsed is not None else data_version) in {
+        ECMWF_OPENDATA_HIGH_DATA_VERSION, ECMWF_OPENDATA_LOW_DATA_VERSION,
+    }:
+        # New land-grid product must carry the sampled GRIB cell itself. The
+        # old geometric reconstruction cannot mint spatial authority.
         return
     required = (
         payload.get("nearest_grid_lat"),
@@ -1366,6 +1385,22 @@ def ingest_json_file(
     ):
         training_allowed = 0
     prov_json = _provenance_json(payload, metric, contract_evidence=contract_evidence)
+    from src.contracts.ensemble_snapshot_provenance import (
+        ECMWF_OPENDATA_HIGH_DATA_VERSION,
+        ECMWF_OPENDATA_LOW_DATA_VERSION,
+        split_coordinate_bound_data_version,
+    )
+    from src.data.executable_forecast_reader import grid_surface_evidence_reason
+    bound_version = split_coordinate_bound_data_version(data_version)
+    if (bound_version[0] if bound_version is not None else data_version) in {
+        ECMWF_OPENDATA_HIGH_DATA_VERSION, ECMWF_OPENDATA_LOW_DATA_VERSION,
+    }:
+        surface_reason = grid_surface_evidence_reason({
+            "dataset_id": data_version, "source_cycle_time": issue_time,
+            "provenance_json": prov_json,
+        })
+        if surface_reason is not None:
+            return f"contract_rejected: {surface_reason}"
     lead_hours = _lead_hours(payload)
     now = _now_utc_iso()
     # R-L: new provenance fields from local-calendar-day extractor (Phase 4.5)

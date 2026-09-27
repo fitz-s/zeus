@@ -118,6 +118,7 @@ class TiggeSnapshotPayload:
         forecast_window_end_utc: Optional[str] = None,
         forecast_window_start_local: Optional[str] = None,
         forecast_window_end_local: Optional[str] = None,
+        grid_surface_evidence: Optional[dict] = None,
     ) -> None:
         self.generated_at = generated_at
         self.data_version = data_version
@@ -162,6 +163,7 @@ class TiggeSnapshotPayload:
         self.forecast_window_end_utc = forecast_window_end_utc
         self.forecast_window_start_local = forecast_window_start_local
         self.forecast_window_end_local = forecast_window_end_local
+        self.grid_surface_evidence = grid_surface_evidence
 
     def to_json_dict(self) -> dict:
         """Produce a JSON-serializable dict. None fields are omitted."""
@@ -212,6 +214,7 @@ class TiggeSnapshotPayload:
             ("forecast_window_end_utc", "forecast_window_end_utc"),
             ("forecast_window_start_local", "forecast_window_start_local"),
             ("forecast_window_end_local", "forecast_window_end_local"),
+            ("grid_surface_evidence", "grid_surface_evidence"),
         ]:
             val = getattr(self, attr)
             if val is not None:
@@ -305,12 +308,15 @@ class TiggeSnapshotPayload:
             forecast_window_end_utc=d.get("forecast_window_end_utc"),
             forecast_window_start_local=d.get("forecast_window_start_local"),
             forecast_window_end_local=d.get("forecast_window_end_local"),
+            grid_surface_evidence=d.get("grid_surface_evidence"),
         )
 
     def validate(self) -> None:
         """Raise ProvenanceViolation on any contract violation."""
         if not isinstance(self.causality, dict):
             raise ProvenanceViolation(f"causality must be dict, got {type(self.causality)}")
+        if self.grid_surface_evidence is not None and not isinstance(self.grid_surface_evidence, dict):
+            raise ProvenanceViolation("grid_surface_evidence must be an object")
         if "status" not in self.causality:
             raise ProvenanceViolation(f"causality missing 'status': {self.causality!r}")
         if len(self.members) != self.member_count:

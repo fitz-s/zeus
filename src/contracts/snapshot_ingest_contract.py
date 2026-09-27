@@ -21,8 +21,10 @@ from typing import Literal
 
 from src.contracts.ensemble_snapshot_provenance import (
     ECMWF_OPENDATA_HIGH_DATA_VERSION,
+    ECMWF_OPENDATA_HIGH_DATA_VERSION_V2,
     ECMWF_OPENDATA_HIGH_DATA_VERSION_UNCERTIFIED,
     ECMWF_OPENDATA_LOW_DATA_VERSION,
+    ECMWF_OPENDATA_LOW_DATA_VERSION_V2,
     ECMWF_OPENDATA_LOW_DATA_VERSION_UNCERTIFIED,
     ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
     TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
@@ -78,6 +80,16 @@ _LOW_LOCALDAY_MIN_OPENDATA_WINDOW_V2 = MetricIdentity(
 )
 
 _ALLOWED_DATA_VERSIONS: dict[str, MetricIdentity] = {
+    # Historical v2 rows retain their physical meaning; new land-grid source
+    # identity is additive and never rewrites immutable previous certificates.
+    ECMWF_OPENDATA_HIGH_DATA_VERSION_V2: MetricIdentity(
+        temperature_metric="high", physical_quantity="mx2t3_local_calendar_day_max",
+        observation_field="high_temp", data_version=ECMWF_OPENDATA_HIGH_DATA_VERSION_V2,
+    ),
+    ECMWF_OPENDATA_LOW_DATA_VERSION_V2: MetricIdentity(
+        temperature_metric="low", physical_quantity="mn2t3_local_calendar_day_min",
+        observation_field="low_temp", data_version=ECMWF_OPENDATA_LOW_DATA_VERSION_V2,
+    ),
     ECMWF_OPENDATA_HIGH_DATA_VERSION: MetricIdentity(
         temperature_metric="high",
         physical_quantity="mx2t3_local_calendar_day_max",

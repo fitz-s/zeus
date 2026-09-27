@@ -13,9 +13,15 @@ import math
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, List
+from typing import Any, List, Mapping
 
 from src.config import settings
+from src.contracts.ensemble_snapshot_provenance import (
+    ECMWF_OPENDATA_HIGH_DATA_VERSION,
+    ECMWF_OPENDATA_LOW_DATA_VERSION,
+    GRID_SURFACE_EVIDENCE_REVISION,
+    split_coordinate_bound_data_version,
+)
 from src.data.forecast_extrema_authority import (
     ForecastExtremaEligibility,
     LEGACY_NULL_PASSTHROUGH_VALIDATION,
@@ -287,6 +293,115 @@ def _station_grid_provenance_reason(row: dict[str, Any]) -> str | None:
     )
     if not all(_is_finite_number(value) for value in required):
         return "EXECUTABLE_FORECAST_STATION_GRID_PROVENANCE_MISSING"
+    return None
+
+
+def grid_surface_evidence_reason(row: Mapping[str, Any]) -> str | None:
+    """Validate executable ENS cell/mask authority without changing the q law.
+
+    Historical pre-land-grid products remain readable offline; this validator
+    rejects them when a caller requires the current land-grid data version.
+    """
+    version = str(row.get("dataset_id") or row.get("data_version") or "")
+    parsed = split_coordinate_bound_data_version(version)
+    base = parsed[0] if parsed is not None else version
+    if base not in {ECMWF_OPENDATA_HIGH_DATA_VERSION, ECMWF_OPENDATA_LOW_DATA_VERSION}:
+        return "EXECUTABLE_FORECAST_GRID_SURFACE_REVISION_MISSING"
+    raw = row.get("provenance_json")
+    try:
+        provenance = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, json.JSONDecodeError):
+        return "EXECUTABLE_FORECAST_GRID_SURFACE_PROVENANCE_INVALID"
+    if not isinstance(provenance, Mapping):
+        return "EXECUTABLE_FORECAST_GRID_SURFACE_PROVENANCE_INVALID"
+    proof = provenance.get("grid_surface_evidence")
+    if not isinstance(proof, Mapping) or proof.get("revision") != GRID_SURFACE_EVIDENCE_REVISION:
+        return "EXECUTABLE_FORECAST_GRID_SURFACE_PROOF_MISSING"
+    if (
+        proof.get("selection_rule") != "nearest_land_of_surrounding_four_v1"
+        or proof.get("mask_source") != "ecmwf_open_data_ifs_oper_fc_step0_lsm"
+        or proof.get("mask_source_cycle_time") != str(row.get("source_cycle_time") or row.get("issue_time") or "")
+        or proof.get("temperature_grid_identity_hash") != proof.get("mask_grid_identity_hash")
+    ):
+        return "EXECUTABLE_FORECAST_GRID_SURFACE_SOURCE_MISMATCH"
+    for key in ("mask_sha256", "mask_grid_identity_hash", "temperature_grid_identity_hash"):
+        text = proof.get(key)
+        if not isinstance(text, str) or len(text) != 64 or any(c not in "0123456789abcdef" for c in text):
+            return "EXECUTABLE_FORECAST_GRID_SURFACE_HASH_INVALID"
+    if (
+        not str(proof.get("mask_source_url") or "").startswith("https://")
+        or not str(proof.get("mask_source_index_url") or "").startswith("https://")
+        or not isinstance(proof.get("mask_source_index_offset"), int)
+        or proof["mask_source_index_offset"] < 0
+        or not isinstance(proof.get("mask_source_index_length"), int)
+        or not 100 <= proof["mask_source_index_length"] <= 1024 * 1024
+    ):
+        return "EXECUTABLE_FORECAST_GRID_SURFACE_SOURCE_MISMATCH"
+    geometry = proof.get("station_geometry")
+    contract = provenance.get("contract_outcome_evidence")
+    if not isinstance(geometry, Mapping) or not isinstance(contract, Mapping):
+        return "EXECUTABLE_FORECAST_GRID_SURFACE_STATION_UNVERIFIED"
+    from src.config import runtime_cities_by_name, runtime_station_geometry_for_city
+
+    city_name = str(provenance.get("city") or "")
+    city = runtime_cities_by_name().get(city_name)
+    expected_station = runtime_station_geometry_for_city(city) if city is not None else {}
+    if (
+        city is None
+        or (row.get("city") is not None and str(row["city"]) != city_name)
+        or geometry.get("validity_reason") is not None
+        or geometry.get("station_surface") != "land"
+        or str(geometry.get("station_id") or "") != str(contract.get("settlement_station_id") or "")
+        or str(geometry.get("station_id") or "") != str(expected_station.get("station_id") or "")
+        or expected_station.get("validity_reason") is not None
+        or not isinstance(geometry.get("registry_sha256"), str)
+        or len(geometry["registry_sha256"]) != 64
+    ):
+        return "EXECUTABLE_FORECAST_GRID_SURFACE_STATION_UNVERIFIED"
+    try:
+        selected_id = int(proof["selected_flat_index"])
+        request_lat, request_lon = float(proof["request_lat"]), float(proof["request_lon"])
+        selected_lat, selected_lon = float(proof["selected_lat"]), float(proof["selected_lon"])
+        fraction = float(proof["selected_land_fraction"])
+        neighbors = proof["four_neighbors"]
+        nearest_lat = float(provenance["nearest_grid_lat"])
+        nearest_lon = float(provenance["nearest_grid_lon"])
+        station_lat = float(geometry["lat"])
+        station_lon = float(geometry["lon"])
+        def distance(lat: float, lon: float) -> float:
+            p1, p2 = math.radians(request_lat), math.radians(lat)
+            dl = math.radians((lon - request_lon + 180.0) % 360.0 - 180.0)
+            h = math.sin((p1 - p2) / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+            return 2 * 6371.0088 * math.asin(min(1.0, math.sqrt(h)))
+        cells = [
+            (int(n["flat_index"]), float(n["lat"]), float(n["lon"]), float(n["land_fraction"]))
+            for n in neighbors
+        ]
+        land_cells = [cell for cell in cells if cell[3] > .5]
+        nearest_land = min(land_cells, key=lambda cell: (distance(cell[1], cell[2]), cell[0]))
+        if (
+            type(proof["selected_flat_index"]) is not int or selected_id < 0
+            or not isinstance(neighbors, list) or len(neighbors) != 4
+            or not all(math.isfinite(v) for v in (request_lat, request_lon, station_lat, station_lon, selected_lat, selected_lon, fraction, nearest_lat, nearest_lon))
+            or not -90 <= request_lat <= 90 or not -180 <= request_lon <= 180
+            or distance(station_lat, station_lon) > 5.0
+            or selected_lat != nearest_lat or selected_lon != nearest_lon
+            or not 0.5 < fraction <= 1.0
+            or len({cell[0] for cell in cells}) != 4
+            or any(not math.isfinite(value) or not 0 <= value <= 1 for _, _, _, value in cells)
+            or nearest_land != (selected_id, selected_lat, selected_lon, fraction)
+            or not any(
+                type(n.get("flat_index")) is int
+                and n["flat_index"] == selected_id
+                and float(n.get("land_fraction")) == fraction
+                and float(n.get("lat")) == selected_lat
+                and float(n.get("lon")) == selected_lon
+                for n in neighbors if isinstance(n, Mapping)
+            )
+        ):
+            return "EXECUTABLE_FORECAST_GRID_SURFACE_SELECTED_CELL_MISMATCH"
+    except (KeyError, TypeError, ValueError):
+        return "EXECUTABLE_FORECAST_GRID_SURFACE_SELECTED_CELL_MISMATCH"
     return None
 
 

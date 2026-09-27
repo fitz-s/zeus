@@ -16,6 +16,7 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import re
 import sys
 from dataclasses import dataclass
@@ -42,6 +43,7 @@ if str(REPO_ROOT) not in sys.path:
 from src.contracts.ensemble_snapshot_provenance import (  # noqa: E402
     ECMWF_OPENDATA_HIGH_DATA_VERSION,
     ECMWF_OPENDATA_LOW_DATA_VERSION,
+    GRID_SURFACE_EVIDENCE_REVISION,
 )
 
 # Keep the producer self-contained.  The historical copy imported these
@@ -264,10 +266,146 @@ def _compute_city_grid_indices(
     return indices, grids
 
 
+def _select_land_grid_points(
+    grid: dict[str, float | int | str],
+    cities: list[dict],
+    land_fraction_at,
+) -> dict[str, dict[str, object]]:
+    """ECMWF meteogram rule: nearest land cell among four surrounding a land site.
+
+    The caller supplies values from an authenticated *same-grid* IFS LSM.
+    Unknown fractions and no land cell are source gaps, never permission to
+    silently reuse the geometrically nearest water-class temperature cell.
+    """
+    if grid.get("gridType") != "regular_ll" or grid.get("scanningMode") != 0:
+        raise ValueError("ENS_LAND_GRID_LAYOUT_INVALID")
+    ni, nj = int(grid["Ni"]), int(grid["Nj"])
+    lat_first = float(grid["latitudeOfFirstGridPointInDegrees"])
+    lon_first = float(grid["longitudeOfFirstGridPointInDegrees"])
+    dx = float(grid["iDirectionIncrementInDegrees"])
+    dy = float(grid["jDirectionIncrementInDegrees"])
+    if ni < 2 or nj < 2 or dx <= 0 or dy <= 0:
+        raise ValueError("ENS_LAND_GRID_LAYOUT_INVALID")
+
+    def distance(lat_a: float, lon_a: float, lat_b: float, lon_b: float) -> float:
+        p1, p2 = math.radians(lat_a), math.radians(lat_b)
+        delta_p = p2 - p1
+        delta_l = math.radians((lon_b - lon_a + 180.0) % 360.0 - 180.0)
+        h = math.sin(delta_p / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(delta_l / 2) ** 2
+        return 2.0 * 6371.0088 * math.asin(min(1.0, math.sqrt(h)))
+
+    result: dict[str, dict[str, object]] = {}
+    for city in cities:
+        lat, lon = float(city["lat"]), float(city["lon"])
+        if not math.isfinite(lat) or not math.isfinite(lon) or not -90 <= lat <= 90 or not -180 <= lon <= 180:
+            raise ValueError("ENS_LAND_STATION_COORDINATES_INVALID")
+        relative_i = ((lon - lon_first) % 360.0) / dx
+        relative_j = (lat_first - lat) / dy
+        i0, j0 = math.floor(relative_i), math.floor(relative_j)
+        i1, j1 = math.ceil(relative_i), math.ceil(relative_j)
+        if not 0 <= j0 < nj or not 0 <= j1 < nj:
+            raise ValueError("ENS_LAND_STATION_OUTSIDE_GRID")
+        neighbors = []
+        for j in sorted({j0, j1}):
+            for i in sorted({i0 % ni, i1 % ni}):
+                index = j * ni + i
+                fraction = float(land_fraction_at(index))
+                if not math.isfinite(fraction) or not 0 <= fraction <= 1:
+                    raise ValueError("ENS_LAND_MASK_FRACTION_INVALID")
+                grid_lon = (lon_first + i * dx + 180.0) % 360.0 - 180.0
+                grid_lat = lat_first - j * dy
+                neighbors.append({
+                    "flat_index": index,
+                    "lat": round(grid_lat, 6),
+                    "lon": round(grid_lon, 6),
+                    "land_fraction": fraction,
+                    "distance_km": distance(lat, lon, grid_lat, grid_lon),
+                })
+        if len(neighbors) != 4:
+            raise ValueError("ENS_LAND_FOUR_NEIGHBORS_UNAVAILABLE")
+        land = [cell for cell in neighbors if cell["land_fraction"] > 0.5]
+        if not land:
+            raise ValueError("ENS_LAND_NEIGHBOR_UNAVAILABLE")
+        selected = min(land, key=lambda cell: (cell["distance_km"], cell["flat_index"]))
+        result[str(city["city"])] = {
+            "selected_flat_index": selected["flat_index"],
+            "selected_lat": selected["lat"],
+            "selected_lon": selected["lon"],
+            "selected_land_fraction": selected["land_fraction"],
+            "nearest_grid_distance_km": selected["distance_km"],
+            "four_neighbors": neighbors,
+        }
+    return result
+
+
+_GRID_KEYS = (
+    "gridType", "Ni", "Nj", "latitudeOfFirstGridPointInDegrees",
+    "longitudeOfFirstGridPointInDegrees", "iDirectionIncrementInDegrees",
+    "jDirectionIncrementInDegrees", "scanningMode",
+)
+
+
+def _grid_identity(fields: dict[str, float | int | str]) -> str:
+    return hashlib.sha256(json.dumps(
+        {key: fields[key] for key in _GRID_KEYS},
+        sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+
+
+def _read_land_mask(mask_path: Path, proof_path: Path) -> dict[str, object]:
+    """Bind the exact bounded Range message to its retrieved source envelope."""
+    raw = mask_path.read_bytes()
+    proof = json.loads(proof_path.read_text(encoding="utf-8"))
+    if not isinstance(proof, dict) or proof.get("mask_sha256") != hashlib.sha256(raw).hexdigest():
+        raise ValueError("ENS_LAND_MASK_SOURCE_HASH_MISMATCH")
+    if proof.get("source") != "ecmwf_open_data_ifs_oper_fc_step0_lsm":
+        raise ValueError("ENS_LAND_MASK_SOURCE_INVALID")
+    with mask_path.open("rb") as fh:
+        gid = codes_grib_new_from_file(fh)
+        if gid is None:
+            raise ValueError("ENS_LAND_MASK_MESSAGE_MISSING")
+        try:
+            if (
+                str(codes_get(gid, "shortName")) != "lsm"
+                or int(codes_get(gid, "paramId")) != 172
+                or str(codes_get(gid, "typeOfLevel")) != "surface"
+                or str(codes_get(gid, "centre")) != "ecmf"
+                or int(codes_get(gid, "step")) != 0
+            ):
+                raise ValueError("ENS_LAND_MASK_PARAMETER_INVALID")
+            fields: dict[str, float | int | str] = {
+                "gridType": str(codes_get(gid, "gridType")),
+                "Ni": int(codes_get(gid, "Ni")),
+                "Nj": int(codes_get(gid, "Nj")),
+                "latitudeOfFirstGridPointInDegrees": float(codes_get(gid, "latitudeOfFirstGridPointInDegrees")),
+                "longitudeOfFirstGridPointInDegrees": float(codes_get(gid, "longitudeOfFirstGridPointInDegrees")),
+                "iDirectionIncrementInDegrees": float(codes_get(gid, "iDirectionIncrementInDegrees")),
+                "jDirectionIncrementInDegrees": float(codes_get(gid, "jDirectionIncrementInDegrees")),
+                "scanningMode": int(codes_get(gid, "scanningMode")),
+            }
+            cycle = datetime.strptime(
+                f'{int(codes_get(gid, "dataDate")):08d}{int(codes_get(gid, "dataTime")):04d}',
+                "%Y%m%d%H%M",
+            ).replace(tzinfo=timezone.utc).isoformat()
+            if cycle != proof.get("source_cycle_time"):
+                raise ValueError("ENS_LAND_MASK_CYCLE_MISMATCH")
+            values = codes_get_values(gid)
+            if len(values) != fields["Ni"] * fields["Nj"]:
+                raise ValueError("ENS_LAND_MASK_GRID_SIZE_MISMATCH")
+            extra_gid = codes_grib_new_from_file(fh)
+            if extra_gid is not None:
+                codes_release(extra_gid)
+                raise ValueError("ENS_LAND_MASK_NOT_SINGLE_MESSAGE")
+            return {"fields": fields, "values": values, "proof": proof, "grid_identity_hash": _grid_identity(fields)}
+        finally:
+            codes_release(gid)
+
+
 def _scan_grib_with_city_values(
     grib_path: Path,
     track: TrackConfig,
     cities: list[dict],
+    *, mask: dict[str, object],
 ) -> dict[tuple[int, int], dict]:
     """Single pass over the GRIB extracting per-(member, step_hours) entries
     plus per-city values. Returns {(member, step): {meta+per_city_values}}.
@@ -276,8 +414,8 @@ def _scan_grib_with_city_values(
     """
     bucket: dict[tuple[int, int], dict] = {}
     issue_dt: Optional[datetime] = None
-    city_indices: Optional[list[int]] = None
-    city_grids: Optional[list[tuple[float, float]]] = None
+    selected_cities: dict[str, dict[str, object]] | None = None
+    rejected_cities: dict[str, str] = {}
     issue_fields: tuple[int, int] | None = None
     grid_fields: dict[str, float | int | str] | None = None
     seen_member_steps: set[tuple[int, int]] = set()
@@ -340,6 +478,16 @@ def _scan_grib_with_city_values(
                 }
                 if grid_fields is None:
                     grid_fields = current_grid
+                    if current_grid != mask["fields"]:
+                        raise ValueError("ENS_LAND_MASK_TEMPERATURE_GRID_MISMATCH")
+                    selected_cities = {}
+                    for city in cities:
+                        try:
+                            selected_cities.update(_select_land_grid_points(
+                                current_grid, [city], mask["values"].__getitem__,
+                            ))
+                        except (KeyError, ValueError) as exc:
+                            rejected_cities[str(city["city"])] = str(exc)[:100]
                 elif current_grid != grid_fields:
                     raise ValueError(
                         f"{grib_path.name}: mixed grid metadata; expected "
@@ -474,8 +622,6 @@ def _scan_grib_with_city_values(
                         minute=data_time % 100,
                         tzinfo=timezone.utc,
                     )
-                if city_indices is None:
-                    city_indices, city_grids = _compute_city_grid_indices(gid, cities)
                 key = (member, step_hours)
                 if key in seen_member_steps:
                     raise ValueError(
@@ -493,18 +639,24 @@ def _scan_grib_with_city_values(
                         "city_values_k": {},
                     }
                 values = codes_get_values(gid)
-                for city, idx, (g_lat, g_lon) in zip(cities, city_indices, city_grids):
+                for city in cities:
+                    if city["city"] in rejected_cities:
+                        continue
+                    selected = selected_cities[str(city["city"])]
+                    idx = int(selected["selected_flat_index"])
                     bucket[key]["city_values_k"][city["city"]] = {
                         "value_k": float(values[idx]),
-                        "nearest_grid_lat": g_lat,
-                        "nearest_grid_lon": g_lon,
-                        # nearest_grid_distance_km no longer computed
-                        # (downstream payloads hardcode None anyway, lines 385-387/457-459).
-                        "nearest_grid_distance_km": None,
+                        "nearest_grid_lat": selected["selected_lat"],
+                        "nearest_grid_lon": selected["selected_lon"],
+                        "nearest_grid_distance_km": selected["nearest_grid_distance_km"],
                     }
             finally:
                 codes_release(gid)
-    return {"issue_dt": issue_dt, "entries": bucket}
+    if issue_dt is not None and issue_dt.isoformat() != mask["proof"]["source_cycle_time"]:
+        raise ValueError("ENS_LAND_MASK_TEMPERATURE_CYCLE_MISMATCH")
+    return {"issue_dt": issue_dt, "entries": bucket, "selected_cities": selected_cities,
+            "rejected_cities": rejected_cities,
+            "temperature_grid_identity_hash": _grid_identity(grid_fields) if grid_fields is not None else None}
 
 
 def _windows_overlap(
@@ -528,6 +680,8 @@ def extract_open_ens_localday(
     manifest_path: Path = DEFAULT_MANIFEST,
     output_root: Path = ROOT / "raw",
     cities_filter: Optional[set[str]] = None,
+    mask_grib_path: Path | None = None,
+    mask_proof_path: Path | None = None,
 ) -> dict:
     """Single GRIB → per-city local-calendar-day JSONs (one per lead_day).
 
@@ -542,13 +696,27 @@ def extract_open_ens_localday(
     if not grib_path.exists():
         raise FileNotFoundError(f"GRIB not found: {grib_path}")
 
+    if mask_grib_path is None or mask_proof_path is None:
+        raise ValueError("ENS_LAND_MASK_SOURCE_PROOF_REQUIRED")
+    mask = _read_land_mask(mask_grib_path, mask_proof_path)
     cities = _load_cities(manifest_path)
     if cities_filter is not None:
         cities = [c for c in cities if c["city"] in cities_filter]
+    # One city with an unresolved station registry must not suppress all the
+    # independent city sources. It receives no snapshot/coverage success.
+    rejected_cities = [
+        city["city"] for city in cities
+        if not isinstance(city.get("station_geometry"), dict)
+        or city["station_geometry"].get("validity_reason") is not None
+        or city["station_geometry"].get("station_surface") != "land"
+    ]
+    cities = [city for city in cities if city["city"] not in rejected_cities]
     if not cities:
-        return {"status": "no_cities", "written": 0}
+        return {"status": "no_cities", "written": 0, "rejected_cities": rejected_cities}
 
-    scan = _scan_grib_with_city_values(grib_path, track, cities)
+    scan = _scan_grib_with_city_values(grib_path, track, cities, mask=mask)
+    rejected_cities.extend(scan["rejected_cities"])
+    cities = [city for city in cities if city["city"] not in scan["rejected_cities"]]
     entries: dict[tuple[int, int], dict] = scan["entries"]
     issue_dt: datetime = scan["issue_dt"]
     if issue_dt is None:
@@ -557,6 +725,31 @@ def extract_open_ens_localday(
     issue_date_compact = issue_dt.strftime("%Y%m%d")
     cycle_hour = issue_dt.hour
     manifest_hash = manifest_sha256(manifest_path)
+
+    def surface_evidence(city: dict) -> dict[str, object]:
+        selected = scan["selected_cities"][city["city"]]
+        return {
+            "revision": GRID_SURFACE_EVIDENCE_REVISION,
+            "selection_rule": "nearest_land_of_surrounding_four_v1",
+            "request_lat": float(city["lat"]),
+            "request_lon": float(city["lon"]),
+            "station_geometry": city["station_geometry"],
+            "mask_source": mask["proof"]["source"],
+            "mask_source_url": mask["proof"]["source_url"],
+            "mask_source_index_url": mask["proof"]["source_index_url"],
+            "mask_source_cycle_time": mask["proof"]["source_cycle_time"],
+            "mask_source_fetched_at": mask["proof"]["source_fetched_at"],
+            "mask_source_index_offset": mask["proof"]["source_index_offset"],
+            "mask_source_index_length": mask["proof"]["source_index_length"],
+            "mask_sha256": mask["proof"]["mask_sha256"],
+            "mask_grid_identity_hash": mask["grid_identity_hash"],
+            "temperature_grid_identity_hash": scan["temperature_grid_identity_hash"],
+            "selected_flat_index": selected["selected_flat_index"],
+            "selected_lat": selected["selected_lat"],
+            "selected_lon": selected["selected_lon"],
+            "selected_land_fraction": selected["selected_land_fraction"],
+            "four_neighbors": selected["four_neighbors"],
+        }
 
     # Group by (city, target_local_date, lead_day): for each member, find
     # which (member, step_hours) windows overlap the local day fully and
@@ -695,9 +888,10 @@ def extract_open_ens_localday(
                     "step_horizon_deficit_hours": 0.0,
                     "causality": {"status": "OK"},
                     "boundary_ambiguous": False,
-                    "nearest_grid_lat": None,
-                    "nearest_grid_lon": None,
-                    "nearest_grid_distance_km": None,
+                    "nearest_grid_lat": scan["selected_cities"][city_name]["selected_lat"],
+                    "nearest_grid_lon": scan["selected_cities"][city_name]["selected_lon"],
+                    "nearest_grid_distance_km": scan["selected_cities"][city_name]["nearest_grid_distance_km"],
+                    "grid_surface_evidence": surface_evidence(city),
                     # Keep the legacy alias while exposing both native planes.
                     "selected_step_ranges": sorted(selected_step_ranges_inner),
                     "selected_step_ranges_inner": sorted(selected_step_ranges_inner),
@@ -772,9 +966,10 @@ def extract_open_ens_localday(
                         "boundary_ambiguous": len(boundary_ambiguous_members) > 0,
                         "ambiguous_member_count": len(boundary_ambiguous_members),
                     },
-                    "nearest_grid_lat": None,
-                    "nearest_grid_lon": None,
-                    "nearest_grid_distance_km": None,
+                    "nearest_grid_lat": scan["selected_cities"][city_name]["selected_lat"],
+                    "nearest_grid_lon": scan["selected_cities"][city_name]["selected_lon"],
+                    "nearest_grid_distance_km": scan["selected_cities"][city_name]["nearest_grid_distance_km"],
+                    "grid_surface_evidence": surface_evidence(city),
                     "selected_step_ranges_inner": sorted(selected_step_ranges_inner),
                     "selected_step_ranges_boundary": sorted(selected_step_ranges_boundary),
                     "member_count": len(members_out),
@@ -807,12 +1002,15 @@ def extract_open_ens_localday(
         "skipped": summary_skipped,
         "output_root": str(output_root / track.output_subdir),
         "sample_outputs": output_paths[:3],
+        "rejected_cities": rejected_cities,
     }
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--grib-path", type=Path, required=True)
+    parser.add_argument("--mask-grib-path", type=Path, required=True)
+    parser.add_argument("--mask-proof-path", type=Path, required=True)
     parser.add_argument("--track", choices=sorted(TRACKS), required=True)
     parser.add_argument("--manifest-path", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--output-root", type=Path, default=ROOT / "raw")
@@ -823,6 +1021,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     cities_filter = set(args.cities) if args.cities else None
     summary = extract_open_ens_localday(
         grib_path=args.grib_path,
+        mask_grib_path=args.mask_grib_path,
+        mask_proof_path=args.mask_proof_path,
         track_name=args.track,
         manifest_path=args.manifest_path,
         output_root=args.output_root,

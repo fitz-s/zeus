@@ -1162,6 +1162,81 @@ def _resolve_index_parts(
     return resolved
 
 
+def _read_static_mask_range(session: Any, url: str, offset: int, length: int, *, deadline: float | None = None) -> bytes:
+    """Read exactly one indexed static LSM GRIB message; never the full GRIB."""
+    if not 0 <= offset or not 100 <= length <= 1024 * 1024:
+        raise ValueError("ENS_LAND_MASK_INDEX_BOUNDS_INVALID")
+    response = session.get(
+        url, stream=True,
+        headers={"Range": f"bytes={offset}-{offset + length - 1}"},
+        timeout=_remaining_step_timeout(deadline),
+    )
+    try:
+        _validate_range_response(response, offset=offset, length=length)
+        chunks: list[bytes] = []
+        total = 0
+        for chunk in response.iter_content(chunk_size=65536):
+            _remaining_step_timeout(deadline)
+            total += len(chunk)
+            if total > length:
+                raise ValueError("ENS_LAND_MASK_RANGE_OVERSIZED")
+            chunks.append(chunk)
+        message = b"".join(chunks)
+        if len(message) != length or not message.startswith(b"GRIB") or not message.endswith(b"7777"):
+            raise ValueError("ENS_LAND_MASK_MESSAGE_INVALID")
+        return message
+    finally:
+        response.close()
+
+
+def _fetch_cycle_land_mask(
+    *, cycle_date: date, cycle_hour: int, output_path: Path,
+    deadline: float | None = None,
+) -> dict[str, object]:
+    """Acquire bounded same-cycle IFS control static geometry for ENS extraction."""
+    from ecmwf.opendata import Client
+
+    last_error: Exception | None = None
+    for mirror in _DOWNLOAD_SOURCES:
+        try:
+            client = Client(source=mirror)
+            client.session = _RateLimitedSession()
+            client.session._zeus_deadline = deadline
+            result = client._get_urls(
+                target=str(output_path), use_index=False,
+                date=int(cycle_date.strftime("%Y%m%d")), time=cycle_hour,
+                stream="oper", type=["fc"], step=[0], param=["lsm"],
+            )
+            parts = _resolve_index_parts(client, result, deadline=deadline)
+            if len(parts) != 1 or len(parts[0][1]) != 1:
+                raise ValueError("ENS_LAND_MASK_INDEX_NOT_SINGLE_MESSAGE")
+            url, ((offset, length),) = parts[0]
+            message = _read_static_mask_range(
+                client.session, url, offset, length, deadline=deadline,
+            )
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(message)
+            proof: dict[str, object] = {
+                "source": "ecmwf_open_data_ifs_oper_fc_step0_lsm",
+                "source_url": url,
+                "source_index_url": f"{os.path.splitext(url)[0]}.index",
+                "source_cycle_time": datetime.combine(
+                    cycle_date, datetime.min.time(), timezone.utc
+                ).replace(hour=cycle_hour).isoformat(),
+                "source_index_offset": offset,
+                "source_index_length": length,
+                "source_fetched_at": datetime.now(timezone.utc).isoformat(),
+                "mask_sha256": hashlib.sha256(message).hexdigest(),
+            }
+            output_path.with_suffix(".proof.json").write_text(
+                json.dumps(proof, sort_keys=True), encoding="utf-8",
+            )
+            return proof
+        except (OSError, ValueError, requests.RequestException) as exc:
+            last_error = exc
+    raise ValueError(f"ENS_LAND_MASK_UNAVAILABLE:{type(last_error).__name__ if last_error else 'NO_MIRROR'}")
+
+
 def _probe_index_member_count(
     client: Any,
     *,
@@ -1996,6 +2071,15 @@ def _is_finite_number(value: object) -> bool:
 
 
 def _station_grid_provenance_reason(row: dict[str, Any]) -> str | None:
+    from src.contracts.ensemble_snapshot_provenance import split_coordinate_bound_data_version
+    from src.data.executable_forecast_reader import grid_surface_evidence_reason
+
+    version = str(row.get("dataset_id") or "")
+    parsed = split_coordinate_bound_data_version(version)
+    if (parsed[0] if parsed is not None else version) in {
+        ECMWF_OPENDATA_HIGH_DATA_VERSION, ECMWF_OPENDATA_LOW_DATA_VERSION,
+    }:
+        return grid_surface_evidence_reason(row)
     provenance = _snapshot_provenance(row)
     contract = provenance.get("contract_outcome_evidence")
     if not isinstance(contract, dict):
@@ -2946,6 +3030,7 @@ def collect_open_ens_cycle(
     conn=None,
     _runner=None,
     _fetch_impl=None,  # test seam: replaces _fetch_one_step; callable with same signature
+    _mask_fetch_impl=None,  # test seam: exact indexed static LSM acquisition
     _paths: OpenDataPaths | None = None,
     now_utc: datetime | None = None,
     coordinate_manifest_json: str | None = None,
@@ -3412,6 +3497,24 @@ def collect_open_ens_cycle(
         })
 
     if not skip_extract:
+        mask_path = output_path.with_name(
+            f".{track}_{cycle_date:%Y%m%d}_{cycle_hour:02d}z_lsm.grib2"
+        )
+        try:
+            (_mask_fetch_impl or _fetch_cycle_land_mask)(
+                cycle_date=cycle_date,
+                cycle_hour=cycle_hour,
+                output_path=mask_path,
+                deadline=cycle_deadline_monotonic,
+            )
+        except (OSError, ValueError, requests.RequestException) as exc:
+            stages.append({"label": f"land_mask_{track}", "ok": False,
+                           "status": "ENS_LAND_MASK_UNAVAILABLE", "reason": str(exc)[:300]})
+            return {"status": "extract_failed", "track": track,
+                    "data_version": cfg["data_version"],
+                    "reason": "ENS_LAND_MASK_UNAVAILABLE", "stages": stages,
+                    "snapshots_inserted": 0}
+        _fetch_finished_at = datetime.now(timezone.utc)
         if cycle_deadline_monotonic is not None:
             remaining = cycle_deadline_monotonic - time.monotonic()
             if remaining <= 0:
@@ -3429,6 +3532,8 @@ def collect_open_ens_cycle(
                 _conda_python(),
                 str(paths.extract_script),
                 "--grib-path", str(output_path),
+                "--mask-grib-path", str(mask_path),
+                "--mask-proof-path", str(mask_path.with_suffix(".proof.json")),
                 "--track", cfg["ingest_track"],
                 "--output-root", str(coordinate_raw_root),
                 "--manifest-path", str(coordinate_manifest),

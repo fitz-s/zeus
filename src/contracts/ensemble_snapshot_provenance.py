@@ -62,7 +62,9 @@ dry-run reports always surface the refusal count even when
 from __future__ import annotations
 
 import re
-from typing import Iterable
+import hashlib
+import json
+from typing import Iterable, Mapping
 
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 
@@ -76,9 +78,39 @@ from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 # renamed to reflect the new physical quantity. Old mx2t6 versions kept in
 # the allow-list so the 1568 historical rows remain readable.
 ECMWF_OPENDATA_HIGH_DATA_VERSION_UNCERTIFIED = "ecmwf_opendata_mx2t3_local_calendar_day_max"
-ECMWF_OPENDATA_HIGH_DATA_VERSION = "ecmwf_opendata_mx2t3_local_calendar_day_max_boundary_v2"
+ECMWF_OPENDATA_HIGH_DATA_VERSION_V2 = "ecmwf_opendata_mx2t3_local_calendar_day_max_boundary_v2"
+ECMWF_OPENDATA_HIGH_DATA_VERSION = "ecmwf_opendata_mx2t3_local_calendar_day_max_boundary_land_grid_v3"
 ECMWF_OPENDATA_LOW_DATA_VERSION_UNCERTIFIED = "ecmwf_opendata_mn2t3_local_calendar_day_min"
-ECMWF_OPENDATA_LOW_DATA_VERSION = "ecmwf_opendata_mn2t3_local_calendar_day_min_window_v2"
+ECMWF_OPENDATA_LOW_DATA_VERSION_V2 = "ecmwf_opendata_mn2t3_local_calendar_day_min_window_v2"
+ECMWF_OPENDATA_LOW_DATA_VERSION = "ecmwf_opendata_mn2t3_local_calendar_day_min_window_land_grid_v3"
+GRID_SURFACE_EVIDENCE_REVISION = "ecmwf_ens_land_cell_selection_v1"
+
+
+def grid_surface_evidence_identity_hash(proof: Mapping[str, object]) -> str:
+    """Stable selected physical grid identity, excluding fetch/transport clocks.
+
+    The whole-file registry hash is audit-only: changing an unrelated city's
+    station must not mint another city's probability revision.
+    """
+    station = proof.get("station_geometry")
+    if not isinstance(station, Mapping):
+        raise ValueError("grid surface station identity missing")
+    identity = {
+        "revision": proof["revision"],
+        "selection_rule": proof["selection_rule"],
+        "request": {key: proof[key] for key in ("request_lat", "request_lon")},
+        "station": {key: station[key] for key in ("station_id", "lat", "lon", "elevation_m", "station_surface")},
+        "selected": {key: proof[key] for key in (
+            "selected_flat_index", "selected_lat", "selected_lon", "selected_land_fraction",
+        )},
+        "mask": {key: proof[key] for key in (
+            "mask_source_cycle_time", "mask_sha256", "mask_grid_identity_hash",
+            "temperature_grid_identity_hash",
+        )},
+    }
+    return hashlib.sha256(json.dumps(
+        identity, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    ).encode()).hexdigest()
 
 # Coordinate-bound Open Data identities preserve the immutable snapshot's
 # manifest coordinate system.  The base is deliberately closed: accepting an
@@ -86,9 +118,11 @@ ECMWF_OPENDATA_LOW_DATA_VERSION = "ecmwf_opendata_mn2t3_local_calendar_day_min_w
 # the 3-hour metric identity without an explicit contract update.
 _COORDINATE_BOUND_BASE_DATA_VERSIONS: frozenset[str] = frozenset({
     ECMWF_OPENDATA_HIGH_DATA_VERSION,
+    ECMWF_OPENDATA_HIGH_DATA_VERSION_V2,
     ECMWF_OPENDATA_HIGH_DATA_VERSION_UNCERTIFIED,
     ECMWF_OPENDATA_LOW_DATA_VERSION_UNCERTIFIED,
     ECMWF_OPENDATA_LOW_DATA_VERSION,
+    ECMWF_OPENDATA_LOW_DATA_VERSION_V2,
 })
 _COORDINATE_BOUND_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -126,8 +160,12 @@ def opendata_source_run_revision_suffix(data_version: str) -> str:
     identity = split_coordinate_bound_data_version(data_version)
     base = identity[0] if identity is not None else data_version
     if base == ECMWF_OPENDATA_HIGH_DATA_VERSION:
-        return ":high_boundary_v2"
+        return ":high_boundary_land_grid_v3"
     if base == ECMWF_OPENDATA_LOW_DATA_VERSION:
+        return ":low_window_land_grid_v3"
+    if base == ECMWF_OPENDATA_HIGH_DATA_VERSION_V2:
+        return ":high_boundary_v2"
+    if base == ECMWF_OPENDATA_LOW_DATA_VERSION_V2:
         return ":low_window_v2"
     return ""
 
@@ -159,9 +197,11 @@ CANONICAL_ENSEMBLE_DATA_VERSIONS: frozenset[str] = frozenset({
     HIGH_LOCALDAY_MAX.data_version,
     LOW_LOCALDAY_MIN.data_version,
     ECMWF_OPENDATA_HIGH_DATA_VERSION,
+    ECMWF_OPENDATA_HIGH_DATA_VERSION_V2,
     ECMWF_OPENDATA_HIGH_DATA_VERSION_UNCERTIFIED,
     ECMWF_OPENDATA_LOW_DATA_VERSION_UNCERTIFIED,
     ECMWF_OPENDATA_LOW_DATA_VERSION,
+    ECMWF_OPENDATA_LOW_DATA_VERSION_V2,
     TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
     ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
     # Legacy — historical rows only; no new writes use these.

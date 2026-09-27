@@ -18,7 +18,10 @@ import pytest
 
 from src.contracts.ensemble_snapshot_provenance import (
     ECMWF_OPENDATA_HIGH_DATA_VERSION,
+    ECMWF_OPENDATA_HIGH_DATA_VERSION_V2,
     ECMWF_OPENDATA_LOW_DATA_VERSION,
+    ECMWF_OPENDATA_LOW_DATA_VERSION_V2,
+    GRID_SURFACE_EVIDENCE_REVISION,
 )
 from src.contracts.snapshot_ingest_contract import (
     LOW_BOUNDARY_SEMANTICS_REVISION,
@@ -26,7 +29,7 @@ from src.contracts.snapshot_ingest_contract import (
 )
 from src.state.db import init_schema
 from src.state.schema.v2_schema import apply_canonical_schema
-from src.types.metric_identity import LOW_LOCALDAY_MIN
+from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 
 UTC = timezone.utc
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
@@ -54,7 +57,7 @@ def _conn() -> sqlite3.Connection:
 def _payload(target_date: str, issue_iso: str) -> dict:
     return {
         "generated_at": "2026-05-03T08:00:00+00:00",
-        "data_version": ECMWF_OPENDATA_HIGH_DATA_VERSION,
+        "data_version": ECMWF_OPENDATA_HIGH_DATA_VERSION_V2,
         "physical_quantity": "mx2t3_local_calendar_day_max",
         "param": "mx2t3",
         "paramId": 121,
@@ -103,6 +106,124 @@ def _write_payload(root: Path, payload: dict) -> None:
     json_dir.mkdir(parents=True)
     json_path = json_dir / f"{extract_subdir}_target_{target}_lead_5.json"
     json_path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _land_grid_proof() -> dict:
+    return {
+        "revision": GRID_SURFACE_EVIDENCE_REVISION,
+        "selection_rule": "nearest_land_of_surrounding_four_v1",
+        "request_lat": 51.505299, "request_lon": 0.055278,
+        "station_geometry": {
+            "station_id": "EGLC", "lat": 51.505299, "lon": 0.055278,
+            "elevation_m": 5.8, "station_surface": "land",
+            "registry_sha256": "a" * 64, "source": "test", "validity_reason": None,
+        },
+        "mask_source": "ecmwf_open_data_ifs_oper_fc_step0_lsm",
+        "mask_source_url": "https://example.test/mask.grib2",
+        "mask_source_index_url": "https://example.test/mask.index",
+        "mask_source_cycle_time": "2026-05-03T00:00:00+00:00",
+        "mask_source_fetched_at": "2026-05-03T09:00:00+00:00",
+        "mask_source_index_offset": 0, "mask_source_index_length": 187781,
+        "mask_sha256": "b" * 64,
+        "mask_grid_identity_hash": "c" * 64,
+        "temperature_grid_identity_hash": "c" * 64,
+        "selected_flat_index": 123,
+        "selected_lat": 51.5, "selected_lon": 0.0,
+        "selected_land_fraction": 0.8,
+        "four_neighbors": [
+            {"flat_index": i, "lat": 51.5 if i in (123, 124) else 51.25,
+             "lon": 0.0 if i in (123, 125) else 0.25,
+             "land_fraction": .8 if i == 123 else .2,
+             "distance_km": 3.9 + i - 123}
+            for i in (123, 124, 125, 126)
+        ],
+    }
+
+
+def test_current_land_grid_product_requires_typed_proof(tmp_path: Path) -> None:
+    from src.contracts.tigge_snapshot_payload import TiggeSnapshotPayload
+    from src.data.executable_forecast_reader import grid_surface_evidence_reason
+
+    conn = _conn()
+    payload = _payload("2026-05-08", "2026-05-03T00:00:00+00:00")
+    payload["data_version"] = ECMWF_OPENDATA_HIGH_DATA_VERSION
+    payload.update(lat=51.505299, lon=0.055278, nearest_grid_lon=0.0)
+    path = tmp_path / "payload.json"
+    path.write_text(json.dumps(payload))
+    assert "GRID_SURFACE" in ingest_json_file(
+        conn, path, metric=HIGH_LOCALDAY_MAX, model_version="ecmwf_ens", overwrite=False,
+    )
+    payload["grid_surface_evidence"] = _land_grid_proof()
+    path.write_text(json.dumps(payload))
+    assert TiggeSnapshotPayload.from_json_dict(payload).to_json_dict()["grid_surface_evidence"] == payload["grid_surface_evidence"]
+    assert ingest_json_file(
+        conn, path, metric=HIGH_LOCALDAY_MAX,
+        model_version="ecmwf_ens", overwrite=False,
+    ) == "written"
+    row = conn.execute("SELECT * FROM ensemble_snapshots").fetchone()
+    assert grid_surface_evidence_reason(dict(row)) is None
+    assert json.loads(row["provenance_json"])["grid_surface_evidence"]["selected_flat_index"] == 123
+
+
+@pytest.mark.parametrize("corruption", ("mask_cycle", "temperature_grid", "selected_water", "station_id", "request"))
+def test_current_land_grid_rejects_mismatched_physical_evidence(tmp_path: Path, corruption: str) -> None:
+    from src.contracts.ensemble_snapshot_provenance import grid_surface_evidence_identity_hash
+
+    payload = _payload("2026-05-08", "2026-05-03T00:00:00+00:00")
+    payload["data_version"] = ECMWF_OPENDATA_HIGH_DATA_VERSION
+    payload.update(lat=51.505299, lon=0.055278, nearest_grid_lon=0.0)
+    proof = _land_grid_proof()
+    if corruption == "mask_cycle":
+        proof["mask_source_cycle_time"] = "2026-05-04T00:00:00+00:00"
+    elif corruption == "temperature_grid":
+        proof["temperature_grid_identity_hash"] = "d" * 64
+    elif corruption == "selected_water":
+        proof["selected_land_fraction"] = .4
+    elif corruption == "station_id":
+        proof["station_geometry"]["station_id"] = "WRONG"
+    else:
+        proof["request_lat"] = 0.0
+    payload["grid_surface_evidence"] = proof
+    path = tmp_path / "invalid_grid.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    assert "GRID_SURFACE" in ingest_json_file(
+        _conn(), path, metric=HIGH_LOCALDAY_MAX, model_version="ecmwf_ens", overwrite=False,
+    )
+    if corruption == "mask_cycle":
+        valid = _land_grid_proof()
+        changed_transport = {**valid, "mask_source_fetched_at": "2026-05-05T00:00:00+00:00"}
+        assert grid_surface_evidence_identity_hash(valid) == grid_surface_evidence_identity_hash(changed_transport)
+
+
+def test_current_low_land_grid_proof_is_typed_and_required(tmp_path: Path) -> None:
+    from src.data.executable_forecast_reader import grid_surface_evidence_reason
+
+    payload = _low_boundary_payload(ambiguous_count=0)
+    payload["data_version"] = ECMWF_OPENDATA_LOW_DATA_VERSION
+    payload.update(lat=31.1433, lon=121.8053)
+    proof = _land_grid_proof()
+    proof["station_geometry"].update(station_id="ZSPD", lat=31.1433, lon=121.8053, elevation_m=3.96)
+    proof.update(
+        request_lat=31.1433, request_lon=121.8053,
+        selected_lat=31.25, selected_lon=121.75,
+        mask_source_cycle_time=payload["issue_time_utc"],
+    )
+    for neighbor in proof["four_neighbors"]:
+        neighbor["lat"] = 31.25 if neighbor["flat_index"] in (123, 124) else 31.0
+        neighbor["lon"] = 121.75 if neighbor["flat_index"] in (123, 125) else 122.0
+    payload.update(nearest_grid_lat=31.25, nearest_grid_lon=121.75, grid_surface_evidence=proof)
+    path = tmp_path / "low_v3.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    conn = _conn()
+    assert ingest_json_file(
+        conn, path, metric=LOW_LOCALDAY_MIN, model_version="ecmwf_ens", overwrite=False,
+    ) == "written"
+    assert grid_surface_evidence_reason(dict(conn.execute("SELECT * FROM ensemble_snapshots").fetchone())) is None
+    payload.pop("grid_surface_evidence")
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    assert "GRID_SURFACE" in ingest_json_file(
+        _conn(), path, metric=LOW_LOCALDAY_MIN, model_version="ecmwf_ens", overwrite=False,
+    )
 
 
 def test_source_run_context_writes_executable_v2_linkage(tmp_path: Path) -> None:
@@ -238,7 +359,7 @@ def test_low_boundary_ambiguous_persists_block_evidence_without_relaxing_law1(tm
     conn = _conn()
     payload = {
         **_payload("2026-05-08", "2026-05-03T00:00:00+00:00"),
-        "data_version": ECMWF_OPENDATA_LOW_DATA_VERSION,
+        "data_version": ECMWF_OPENDATA_LOW_DATA_VERSION_V2,
         "physical_quantity": "mn2t3_local_calendar_day_min",
         "param": "mn2t3",
         "paramId": 122,
@@ -315,7 +436,7 @@ def _low_boundary_payload(
         )
     return {
         "generated_at": available.isoformat(),
-        "data_version": ECMWF_OPENDATA_LOW_DATA_VERSION,
+        "data_version": ECMWF_OPENDATA_LOW_DATA_VERSION_V2,
         "physical_quantity": "mn2t3_local_calendar_day_min",
         "param": "mn2t3",
         "paramId": 122,
