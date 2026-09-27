@@ -304,7 +304,8 @@ def test_same_cycle_queue_coverage_waits_for_consumed_current_state(monkeypatch,
     with sqlite3.connect(forecast_db) as conn:
         cross_source = {**newer, "source": "aviationweather_metar"}
         conn.execute("UPDATE forecast_posteriors SET provenance_json = ?",
-                     (json.dumps({"day0_current_temperature_state": cross_source}),))
+                     (json.dumps({"day0_current_temperature_state": cross_source,
+                                  "day0_remaining_carrier_content_identity": "newer"}),))
     assert queue._seed_already_covered(forecast_db=forecast_db, seed=seed) is True
     for bad in (
         {**revision, "value_native": 15.5},  # equal-clock correction lacks ordering proof
@@ -314,12 +315,14 @@ def test_same_cycle_queue_coverage_waits_for_consumed_current_state(monkeypatch,
     ):
         with sqlite3.connect(forecast_db) as conn:
             conn.execute("UPDATE forecast_posteriors SET provenance_json = ?",
-                         (json.dumps({"day0_current_temperature_state": bad}),))
+                         (json.dumps({"day0_current_temperature_state": bad,
+                                      "day0_remaining_carrier_content_identity": "newer"}),))
         assert queue._seed_already_covered(forecast_db=forecast_db, seed=seed) is False
     with sqlite3.connect(forecast_db) as conn:
         older = {**revision, "observed_at_utc": "2026-09-27T12:10:00+00:00"}
         conn.execute("UPDATE forecast_posteriors SET provenance_json = ?",
-                     (json.dumps({"day0_current_temperature_state": older}),))
+                     (json.dumps({"day0_current_temperature_state": older,
+                                  "day0_remaining_carrier_content_identity": "newer"}),))
     assert queue._seed_already_covered(forecast_db=forecast_db, seed=seed) is False
     assert queue._request_semantic_key({**seed, "source_cycle_time": "2026-09-27T09:00:00Z"}) != queue._request_semantic_key({
         **seed, "source_cycle_time": "2026-09-27T09:00:00Z",

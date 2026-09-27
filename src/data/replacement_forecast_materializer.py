@@ -1212,6 +1212,15 @@ def _target_local_day_has_started(
     return computed >= target_window.start_utc
 
 
+def _target_local_day_is_open(request: ReplacementForecastMaterializeRequest) -> bool:
+    computed = _to_utc(request.computed_at, field_name="computed_at")
+    window = compute_target_local_day_window_utc(
+        city_timezone=request.city_timezone,
+        target_local_date=date.fromisoformat(_date_text(request.target_date)),
+    )
+    return window.start_utc <= computed < window.end_utc
+
+
 def _local_hour_slot(value: datetime, *, city_timezone: str) -> datetime:
     tz = ZoneInfo(city_timezone)
     return value.astimezone(tz).replace(minute=0, second=0, microsecond=0)
@@ -1374,6 +1383,7 @@ def _day0_noaa_preliminary_carrier(
     final_extreme_centers_c: Sequence[float] = (),
     remaining_center_bias_c: float = 0.0,
     conditional_high_shape_identity: str | None = None,
+    fast_residual_likelihood: object | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
     """Build a source-specific provisional shared remaining-day carrier.
 
@@ -1387,7 +1397,10 @@ def _day0_noaa_preliminary_carrier(
     source = str(request.day0_observed_extreme_source or "").strip().lower()
     noaa_preliminary = _is_noaa_preliminary_source(source)
     hko_provisional = _is_hko_provisional_source(source)
-    if not noaa_preliminary and not hko_provisional:
+    from src.events.day0_authority import DAY0_WU_FAST_RESIDUAL_SOURCE
+
+    wu_fast_residual = source == DAY0_WU_FAST_RESIDUAL_SOURCE
+    if not (noaa_preliminary or hko_provisional or wu_fast_residual):
         raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_SOURCE_INVALID")
     observed = _day0_observed_extreme_c(request)
     if observed is None:
@@ -1410,7 +1423,30 @@ def _day0_noaa_preliminary_carrier(
     city = runtime_cities_by_name().get(request.city)
     if city is None:
         raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_STATION_MISSING")
-    if hko_provisional:
+    if wu_fast_residual:
+        from src.config import settlement_source_type_for_city
+
+        station = str(getattr(city, "wu_station", "") or "").strip().upper()
+        source_type = settlement_source_type_for_city(city, _date_text(request.target_date))
+        settlement_channel = (
+            "wu_icao_history" if source_type == "wu_icao"
+            else f"noaa_wrh_{station.lower()}" if source_type == "noaa"
+            else None
+        )
+        if (
+            not station or settlement_channel is None
+            or fast_residual_likelihood is None
+            or getattr(fast_residual_likelihood, "station_id", None) != station
+            or getattr(fast_residual_likelihood, "settlement_channel", None)
+            != settlement_channel
+            or getattr(fast_residual_likelihood, "fast_channel", None)
+            != "aviationweather_metar"
+        ):
+            raise ValueError("DAY0_WU_CURRENT_CARRIER_RESIDUAL_IDENTITY_INVALID")
+        likelihood = fast_residual_likelihood.as_payload()
+        if not str(likelihood.get("identity_hash") or ""):
+            raise ValueError("DAY0_WU_CURRENT_CARRIER_RESIDUAL_IDENTITY_INVALID")
+    elif hko_provisional:
         from src.data.day0_observation_reader import hko_provisional_revision_likelihood
 
         if (
@@ -1476,24 +1512,26 @@ def _day0_noaa_preliminary_carrier(
         )
         if "evidence_basis" in likelihood:
             identity_fields = identity_fields + ("evidence_basis",)
-    likelihood_identity = {field: likelihood.get(field) for field in identity_fields}
-    expected_likelihood_hash = hashlib.sha256(
-        json.dumps(
-            likelihood_identity,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
-    if str(likelihood.get("identity_hash") or "").strip().lower() != expected_likelihood_hash:
-        raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_LIKELIHOOD_IDENTITY_INVALID")
+    if not wu_fast_residual:
+        likelihood_identity = {field: likelihood.get(field) for field in identity_fields}
+        expected_likelihood_hash = hashlib.sha256(
+            json.dumps(
+                likelihood_identity,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        if str(likelihood.get("identity_hash") or "").strip().lower() != expected_likelihood_hash:
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_LIKELIHOOD_IDENTITY_INVALID")
     if noaa_preliminary and (
         str(likelihood.get("station_id") or "").strip().upper() != station
         or likelihood.get("source_channel_pair") != expected_source_pair
     ):
         raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_LIKELIHOOD_IDENTITY_INVALID")
-    survival = float(likelihood["boundary_survival_probability"])
-    if not 0.0 < survival < 1.0:
-        raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_SURVIVAL_INVALID")
+    if not wu_fast_residual:
+        survival = float(likelihood["boundary_survival_probability"])
+        if not 0.0 < survival < 1.0:
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_SURVIVAL_INVALID")
     bounds = [
         (
             None if getattr(item, "lower_c", None) is None else float(item.lower_c),
@@ -1514,7 +1552,10 @@ def _day0_noaa_preliminary_carrier(
             None if boundary is None else float(boundary) * native_scale + native_offset,
             float(weight),
         )
-        for boundary, weight in ((float(observed), survival), (None, 1.0 - survival))
+        for boundary, weight in (
+            ((None, 1.0),) if wu_fast_residual
+            else ((float(observed), survival), (None, 1.0 - survival))
+        )
     )
     native_bounds = tuple(
         (
@@ -1560,7 +1601,7 @@ def _day0_noaa_preliminary_carrier(
 
     # The AWC->OGIMET likelihood above stays telemetry under its own name; the
     # resolver-graded input is separately typed and replaces only the mixture.
-    resolver_terminal = resolve_day0_resolver_terminal_input(
+    resolver_terminal = None if wu_fast_residual else resolve_day0_resolver_terminal_input(
         city=city,
         target_date=_date_text(request.target_date),
         metric=metric,
@@ -6825,6 +6866,8 @@ def _compute_posterior_payload(
     _day0_remaining_bias_provenance: dict[str, object] = {}
     _day0_shared_carrier_error: str | None = None
     _provisional_extreme_c: float | None = None
+    from src.events.day0_authority import DAY0_WU_FAST_RESIDUAL_SOURCE
+
     if (
         bayes_precision_fusion_override is not None
         and bayes_precision_fusion_override.predictive_sigma_c is not None
@@ -6923,17 +6966,20 @@ def _compute_posterior_payload(
                 if _current_shape is not None
                 else "fused_center_residual_std"
             )
+            _wu_fast_residual_source = (
+                str(request.day0_observed_extreme_source or "").strip().lower()
+                == DAY0_WU_FAST_RESIDUAL_SOURCE
+                and _target_local_day_is_open(request)
+            )
             if (
                 _provisional_extreme_c is not None
                 and (
-                    _is_noaa_preliminary_source(
-                        request.day0_observed_extreme_source
-                    )
-                    or _is_hko_provisional_source(
-                        request.day0_observed_extreme_source
-                    )
-                )
+                    _is_noaa_preliminary_source(request.day0_observed_extreme_source)
+                    or _is_hko_provisional_source(request.day0_observed_extreme_source)
+                    or _wu_fast_residual_source)
             ):
+                if _wu_fast_residual_source and _fast_residual_likelihood is None:
+                    raise ValueError("DAY0_WU_CURRENT_CARRIER_RESIDUAL_UNAVAILABLE")
                 (
                     _carrier_future,
                     _carrier_path_sigma,
@@ -6971,6 +7017,9 @@ def _compute_posterior_payload(
                         conditional_high_shape_identity=(
                             None if _day0_conditional_high_shape is None
                             else _day0_conditional_high_shape.identity
+                        ),
+                        fast_residual_likelihood=(
+                            _fast_residual_likelihood if _wu_fast_residual_source else None
                         ),
                     )
                 )
@@ -7073,6 +7122,12 @@ def _compute_posterior_payload(
                     ),
                     anchor_vector_id=_day0_center_vector_id,
                 )
+                if (
+                    _wu_fast_residual_source
+                    and _day0_shared_carrier is not None
+                    and _day0_remaining_witness is None
+                ):
+                    raise ValueError("DAY0_WU_CURRENT_CARRIER_VECTOR_WITNESS_MISSING")
             elif _provisional_extreme_c is not None:
                 # Provisional observations do not license the center correction,
                 # but the same canonical vector identity is still required to
@@ -7582,6 +7637,11 @@ def _compute_posterior_payload(
         and (
             _is_noaa_preliminary_source(request.day0_observed_extreme_source)
             or _is_hko_provisional_source(request.day0_observed_extreme_source)
+            or (
+                str(request.day0_observed_extreme_source or "").strip().lower()
+                == DAY0_WU_FAST_RESIDUAL_SOURCE
+                and _target_local_day_is_open(request)
+            )
         )
         and bayes_precision_fusion_override is not None
         and bayes_precision_fusion_override.predictive_sigma_c is not None
@@ -7889,8 +7949,10 @@ def _compute_posterior_payload(
                 # residual basis); the shift and its artifact ride beside them.
                 **_day0_remaining_bias_provenance,
                 "day0_remaining_carrier_probability_cutoff_utc": _carrier_cutoff,
-                "day0_preliminary_report_survival_likelihood": dict(
-                    _day0_shared_carrier_likelihood or {}
+                "day0_preliminary_report_survival_likelihood": (
+                    {} if str(request.day0_observed_extreme_source or "").strip().lower()
+                    == DAY0_WU_FAST_RESIDUAL_SOURCE
+                    else dict(_day0_shared_carrier_likelihood or {})
                 ),
                 **(
                     {

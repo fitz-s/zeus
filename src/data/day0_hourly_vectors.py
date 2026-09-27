@@ -3938,6 +3938,29 @@ def remaining_day_extremes_c(
     return out
 
 
+def day0_current_temperature_channels(city: Any) -> tuple[str, tuple[str, ...]] | None:
+    """Return the station and physical-current channels admitted for a city."""
+
+    source_type = str(getattr(city, "settlement_source_type", "") or "").strip().lower()
+    unit = str(getattr(city, "settlement_unit", "") or "").strip().upper()
+    station = "HKO" if source_type == "hko" else str(
+        getattr(city, "wu_station", "") or ""
+    ).strip().upper()
+    if not station or unit not in {"C", "F"}:
+        return None
+    if source_type == "wu_icao":
+        channels = ("wu_icao_history", "aviationweather_metar")
+    elif source_type == "hko":
+        channels = ("hko_rhrread_spot",)
+    elif source_type == "noaa":
+        channels = (f"ogimet_metar_{station.lower()}", "aviationweather_metar")
+        if str(getattr(city, "name", "") or "") == "Helsinki" and station == "EFHK" and unit == "C":
+            channels += ("fmi_airport_temperature",)
+    else:
+        return None
+    return station, channels
+
+
 def read_day0_current_temperature_state(
     *,
     conn: sqlite3.Connection,
@@ -3957,25 +3980,13 @@ def read_day0_current_temperature_state(
         return None
     city_name = str(getattr(city, "name", "") or "").strip()
     timezone_name = str(getattr(city, "timezone", "") or "").strip()
-    source_type = str(getattr(city, "settlement_source_type", "") or "").strip().lower()
     unit = str(getattr(city, "settlement_unit", "") or "").strip().upper()
     if not city_name or not timezone_name or unit not in {"C", "F"}:
         return None
-    station = "HKO" if source_type == "hko" else str(
-        getattr(city, "wu_station", "") or ""
-    ).strip().upper()
-    if not station:
+    source_contract = day0_current_temperature_channels(city)
+    if source_contract is None:
         return None
-    if source_type == "wu_icao":
-        channels = ("wu_icao_history", "aviationweather_metar")
-    elif source_type == "hko":
-        channels = ("hko_rhrread_spot",)
-    elif source_type == "noaa":
-        channels = (f"ogimet_metar_{station.lower()}", "aviationweather_metar")
-        if city_name == "Helsinki" and station == "EFHK" and unit == "C":
-            channels += ("fmi_airport_temperature",)
-    else:
-        return None
+    station, channels = source_contract
     try:
         target = date.fromisoformat(str(target_date)[:10])
         tz = ZoneInfo(timezone_name)

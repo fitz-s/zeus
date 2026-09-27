@@ -63,7 +63,7 @@ def _capturable_current_temperature_state(
     *, city: str, target_date: str, decision_time: datetime | None,
 ) -> dict[str, object] | None:
     """Read physical state on WORLD without importing it as an absorbing fact."""
-    if city != "Helsinki" or decision_time is None:
+    if decision_time is None:
         return None
     from src.config import runtime_cities_by_name
     from src.data.day0_hourly_vectors import read_day0_current_temperature_state
@@ -360,6 +360,7 @@ def _latest_posterior_inputs(
     bool,
     dict[str, object] | None,
     bool,
+    bool,
 ]:
     """Return cycle, provider inputs, and committed Day0/source-clock state."""
     try:
@@ -374,14 +375,14 @@ def _latest_posterior_inputs(
             (SOURCE_ID, city, target_date, metric),
         ).fetchone()
     except Exception:
-        return None, frozenset(), {}, frozenset(), frozenset(), None, (), False, False, None, False
+        return None, frozenset(), {}, frozenset(), frozenset(), None, (), False, False, None, False, False
     if row is None:
-        return None, frozenset(), {}, frozenset(), frozenset(), None, (), False, False, None, False
+        return None, frozenset(), {}, frozenset(), frozenset(), None, (), False, False, None, False, False
     source_cycle_iso = str(row[0]) if row[0] is not None else None
     try:
         prov = json.loads(row[1]) if row[1] else {}
     except Exception:
-        return source_cycle_iso, frozenset(), {}, frozenset(), frozenset(), None, (), False, False, None, False
+        return source_cycle_iso, frozenset(), {}, frozenset(), frozenset(), None, (), False, False, None, False, False
     fusion = prov.get("bayes_precision_fusion", {}) or {}
     used = fusion.get("used_models") or []
     if not isinstance(used, (list, tuple)):
@@ -438,6 +439,12 @@ def _latest_posterior_inputs(
         source_clock_scheme_bound,
         prov.get("day0_current_temperature_state") if isinstance(prov.get("day0_current_temperature_state"), dict) else None,
         bool(prov.get("day0_remaining_carrier_content_identity")),
+        (
+            prov.get("q_shape") == "fused_day0_fast_residual_likelihood"
+            and isinstance(prov.get("day0_provisional_observation"), Mapping)
+            and prov["day0_provisional_observation"].get("source")
+            == "wu_api+same_station_fast_tail"
+        ),
     )
 
 
@@ -527,6 +534,7 @@ def scope_capture_offers_larger_provider_set(
         source_clock_scheme_bound,
         consumed_current_temperature_state,
         consumed_current_temperature_carrier,
+        legacy_wu_fast_residual,
     ) = _latest_posterior_inputs(conn, city=city, target_date=target_date, metric=metric)
     if source_cycle_iso is None:
         return {
@@ -648,7 +656,10 @@ def scope_capture_offers_larger_provider_set(
                 current_day0_vector_revision
             )
     current_requested = requested_sources is None or _DAY0_CURRENT_TEMPERATURE_SOURCE in requested_sources
-    if current_requested and city == "Helsinki" and consumed_current_temperature_carrier:
+    if (
+        current_requested
+        and (consumed_current_temperature_carrier or legacy_wu_fast_residual)
+    ):
         try:
             current_state = _capturable_current_temperature_state(
                 city=city, target_date=target_date, decision_time=decision_time,
@@ -657,11 +668,6 @@ def scope_capture_offers_larger_provider_set(
             current_state = None
         if (
             current_state is not None
-            and (
-                current_state.get("source") == "fmi_airport_temperature"
-                or (consumed_current_temperature_state or {}).get("source")
-                == "fmi_airport_temperature"
-            )
             and current_state != consumed_current_temperature_state
         ):
             changed_inputs.append(_DAY0_CURRENT_TEMPERATURE_SOURCE)

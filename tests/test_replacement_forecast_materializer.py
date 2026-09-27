@@ -539,6 +539,23 @@ def _request(
     )
 
 
+def _wu_current_carrier_test_witness(*, city: str, target_date: str, metric: str, at: datetime):
+    models = ("ecmwf_ifs", "icon_global")
+    clock = at.isoformat()
+    return {
+        "vector_id": "ecmwf-current-vector", "expected_models": list(models),
+        "actual_models": list(models),
+        "vector_ids_by_model": dict.fromkeys(models, "ecmwf-current-vector"),
+        "capture_times_by_model_utc": dict.fromkeys(models, clock),
+        "provider_source_cycle_time_by_model_utc": dict.fromkeys(models, clock),
+        "provider_source_available_at_by_model_utc": dict.fromkeys(models, clock),
+        "source_run_id_by_model": dict.fromkeys(models, "source-run"),
+        "provider_run_id_by_model": dict.fromkeys(models, "provider-run"),
+        "request_hash_by_model": dict.fromkeys(models, "request-hash"),
+        "city": city, "target_date": target_date, "metric": metric,
+    }
+
+
 @pytest.mark.parametrize("frozen_two_source_scheme", (False, True))
 @pytest.mark.parametrize(
     ("metric", "model", "value_c"),
@@ -2959,8 +2976,81 @@ def test_hko_spot_request_rebinds_to_current_official_extrema(
     assert rebound.day0_observed_extreme_sample_count == 12
 
 
+def test_wu_composite_missing_fusion_retains_typed_capture_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(
+        computed_at=datetime(2026, 6, 7, 18, tzinfo=UTC),
+        day0_observed_extreme_c=26.0,
+        day0_observed_extreme_source="wu_api+same_station_fast_tail",
+        day0_observed_extreme_observation_time=datetime(2026, 6, 7, 17, 55, tzinfo=UTC).isoformat(),
+        day0_observed_extreme_sample_count=1,
+    )
+    monkeypatch.setattr(
+        materializer_mod, "_replacement_bayes_precision_fusion_override",
+        lambda *_args, **_kwargs: None,
+    )
+    result = materializer_mod._compute_posterior_payload(
+        _conn(), request, metric="high", anchor_id=1,
+    )
+    assert result.live_eligible is False
+    assert result.replacement_q_mode == "BAYES_PRECISION_FUSION_CAPTURE_MISSING"
+
+
+def test_legacy_wu_fast_posterior_without_current_carrier_cannot_replay() -> None:
+    import src.engine.event_reactor_adapter as era
+
+    bundle = SimpleNamespace(city="Shanghai", target_date="2026-06-07", provenance_json={
+        "q_shape": "fused_day0_fast_residual_likelihood",
+        "day0_provisional_observation": {
+            "active": True, "source": "wu_api+same_station_fast_tail",
+            "metric": "low", "unit": "C",
+        },
+    })
+    with pytest.raises(ValueError, match="GLOBAL_DAY0_WU_CURRENT_CARRIER_MISSING"):
+        era._day0_replacement_conditioning(
+            bundle, provisional=True, metric="low", unit="C",
+            decision_time=datetime(2026, 6, 7, 6, tzinfo=UTC),
+            entry_authority=False,
+        )
+    closed = era._day0_replacement_conditioning(
+        bundle, provisional=True, metric="low", unit="C",
+        decision_time=datetime(2026, 6, 8, 18, tzinfo=UTC),
+        entry_authority=False,
+    )
+    assert closed["source"] == "wu_api+same_station_fast_tail"
+    request = _request(
+        computed_at=datetime(2026, 6, 8, 18, tzinfo=UTC),
+        day0_observed_extreme_c=26.0,
+        day0_observed_extreme_source="wu_api+same_station_fast_tail",
+        day0_observed_extreme_observation_time="2026-06-07T17:55:00+00:00",
+    )
+    assert materializer_mod._target_local_day_is_open(request) is False
+
+
+def test_day0_current_path_revision_separates_old_q_cohort() -> None:
+    from src.events.day0_authority import (
+        DAY0_PROBABILITY_SEMANTICS_REVISION,
+        bind_day0_probability_semantics,
+        day0_probability_semantics_revision,
+    )
+
+    stamped = bind_day0_probability_semantics("current-path-cert")
+    assert day0_probability_semantics_revision(stamped) == DAY0_PROBABILITY_SEMANTICS_REVISION
+    assert DAY0_PROBABILITY_SEMANTICS_REVISION in {
+        "day0_settlement_channel_revision_model_v26_land_grid_v3",
+        "day0_resolver_terminal_composition_v25_land_grid_v3",
+    }
+    assert stamped not in {
+        "day0-semrev:day0_settlement_channel_revision_model_v24:current-path-cert",
+        "day0-semrev:day0_resolver_terminal_composition_v23:current-path-cert",
+    }
+
+
+@pytest.mark.parametrize("source", ("aviationweather_metar", "wu_api+same_station_fast_tail"))
 def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
     monkeypatch: pytest.MonkeyPatch, tmp_path,
+    source: str,
 ) -> None:
     """The persisted Chicago carrier must use F members, boundary, bins, and sigma."""
 
@@ -3098,10 +3188,12 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
         openmeteo_precision_guard=guard,
         openmeteo_raw_payload_bytes=raw_bytes,
         day0_observed_extreme_c=celsius(native_boundary_f),
-        day0_observed_extreme_source="aviationweather_metar",
+        day0_observed_extreme_source=source,
         day0_observed_extreme_observation_time=computed_at.isoformat(),
         day0_observed_extreme_sample_count=1,
-        day0_observed_extreme_unit="C",
+        day0_observed_extreme_unit=(
+            "F" if source == "wu_api+same_station_fast_tail" else "C"
+        ),
     )
     times = tuple(f"{target.isoformat()}T{hour:02d}:00" for hour in range(24))
     run = datetime(2026, 6, 7, 6, tzinfo=UTC)
@@ -3191,10 +3283,38 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
         "src.data.day0_observation_reader.same_station_preliminary_report_survival_likelihood",
         lambda *_args, **_kwargs: likelihood,
     )
+    from src.data.day0_fast_obs import (
+        FAST_RESIDUAL_LIKELIHOOD_REVISION,
+        FastStationResidualLikelihood,
+    )
+
+    residual_identity = {
+        "semantics_revision": FAST_RESIDUAL_LIKELIHOOD_REVISION,
+        "station_id": "KORD", "settlement_channel": "wu_icao_history",
+        "fast_channel": "aviationweather_metar", "unit": "F",
+        "as_of": computed_at.isoformat(),
+        "window_start": (computed_at - timedelta(days=7)).isoformat(),
+        "matched_pairs": 30, "residual_weights_c": ((0.0, 0.8),),
+        "unknown_weight": 0.2, "settlement_extreme_c": None,
+    }
+    residual = FastStationResidualLikelihood(
+        **residual_identity,
+        identity_hash=hashlib.sha256(json.dumps(
+            residual_identity, sort_keys=True, separators=(",", ":"),
+        ).encode()).hexdigest(),
+    )
     monkeypatch.setattr(
         "src.data.day0_fast_obs.build_fast_station_residual_likelihood",
-        lambda *_args, **_kwargs: None,
+        lambda *_args, **_kwargs: residual if source == "wu_api+same_station_fast_tail" else None,
     )
+    if source == "wu_api+same_station_fast_tail":
+        monkeypatch.setattr(
+            materializer_mod, "_day0_remaining_vector_witness",
+            lambda *_args, **_kwargs: _wu_current_carrier_test_witness(
+                city="Chicago", target_date=target.isoformat(), metric="high",
+                at=computed_at,
+            ),
+        )
 
     complete_ensemble = ensemble[:]
     ensemble.clear()
@@ -3303,7 +3423,11 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
         upper_edge = math.inf if upper_f is None else upper_f + 0.5
         probability = 0.0
         for mean in native_members_f:
-            for boundary, weight in ((native_boundary_f, 0.5), (None, 0.5)):
+            for boundary, weight in (
+                ((native_boundary_f, 0.8), (None, 0.2))
+                if source == "wu_api+same_station_fast_tail"
+                else ((native_boundary_f, 0.5), (None, 0.5))
+            ):
                 lower_cdf = 0.0 if math.isinf(lower_edge) else maximum_cdf(lower_edge, mean, boundary)
                 upper_cdf = 1.0 if math.isinf(upper_edge) else maximum_cdf(upper_edge, mean, boundary)
                 probability += weight * (upper_cdf - lower_cdf) / len(native_members_f)
@@ -3317,13 +3441,147 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
         native_path_sigma_f * 5.0 / 9.0
     )
     assert provenance["day0_conditional_high_shape_identity"] == shape.identity
-    assert provenance["q_shape"] == "day0_remaining_shared_carrier_v2"
+    assert provenance["q_shape"] == (
+        "fused_day0_fast_residual_likelihood"
+        if source == "wu_api+same_station_fast_tail"
+        else "day0_remaining_shared_carrier_v2"
+    )
     assert provenance["day0_remaining_carrier_operator"] == (
         "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2"
     )
     assert provenance["day0_remaining_carrier_content_identity"]
     assert provenance["day0_remaining_carrier_sample_count"] == 500
     assert provenance["day0_current_temperature_state"] == current_state.identity()
+    if source == "wu_api+same_station_fast_tail":
+        assert provenance["day0_preliminary_report_survival_likelihood"] == {}
+        assert provenance["day0_provisional_observation"]["fast_residual_likelihood"]["unknown_weight"] == 0.2
+        import src.engine.event_reactor_adapter as era
+        import numpy as np
+
+        conditioning = era._day0_replacement_conditioning(
+            SimpleNamespace(provenance_json=provenance), provisional=True,
+            metric="high", unit="F", decision_time=computed_at,
+            entry_authority=False,
+        )
+        from src.events.opportunity_event import make_opportunity_event
+
+        fact = {
+            "observation_time": computed_at.isoformat(),
+            "observed_extreme_native": native_boundary_f,
+            "sample_count": 1, "unit": "F", "station_id": "KORD",
+            "observation_source": "wu_icao_history",
+            "observation_available_at": computed_at.isoformat(),
+            "raw_payload_sha256": "a" * 64,
+        }
+        event = make_opportunity_event(
+            event_type="DAY0_EXTREME_UPDATED",
+            entity_key="Chicago|2026-06-07|high|KORD", source="test-current-carrier",
+            observed_at=computed_at.isoformat(), available_at=computed_at.isoformat(),
+            received_at=computed_at.isoformat(),
+            payload={
+                "city": "Chicago", "target_date": target.isoformat(), "metric": "high",
+                "station_id": "KORD", "settlement_source": "wu_icao_history",
+                "settlement_unit": "F", "observation_time": computed_at.isoformat(),
+                "rounded_value": native_boundary_f, "raw_value": native_boundary_f,
+                "high_so_far": native_boundary_f,
+                "source_match_status": "MATCH", "local_date_status": "MATCH",
+                "station_match_status": "MATCH", "dst_status": "UNAMBIGUOUS",
+                "metric_match_status": "MATCH", "rounding_status": "MATCH",
+                "source_authorized_status": "AUTHORIZED", "live_authority_status": "live",
+            }, causal_snapshot_id="wu-current-carrier",
+        )
+        with monkeypatch.context() as boundary:
+            boundary.setattr(
+                "src.data.replacement_forecast_current_target_plan._latest_authorized_day0_fact",
+                lambda *_args, **_kwargs: fact,
+            )
+            boundary.setattr(
+                "src.data.day0_fast_obs.latest_fast_station_extreme_c",
+                lambda *_args, **_kwargs: (celsius(native_boundary_f), computed_at.isoformat(), 1, "F"),
+            )
+            projected = era._global_day0_execution_payload(
+                event,
+                family=SimpleNamespace(city="Chicago", target_date=target.isoformat(), metric="high"),
+                resolution=SimpleNamespace(measurement_unit="F", station_id="KORD"),
+                conditioning=conditioning, observation_conn=conn,
+                decision_time=computed_at, posterior_id=result.posterior_id,
+            )
+        assert projected["_edli_day0_carrier_bin_topology"] == provenance["bin_topology"]
+        assert projected["_edli_day0_remaining_content_identity"] == provenance[
+            "day0_remaining_carrier_content_identity"
+        ]
+        state = provenance["day0_current_temperature_state"]
+        replay_payload = {
+            **projected,
+            "metric": "high", "target_date": target.isoformat(),
+            "settlement_source": source, "rounded_value": native_boundary_f,
+        }
+        assert {field: replay_payload.get(field) for field in (
+            "_edli_day0_current_temperature_native",
+            "_edli_day0_current_temperature_observed_at_utc",
+            "_edli_day0_current_temperature_source",
+            "_edli_day0_conditional_high_shape_identity",
+            "_edli_day0_conditional_high_shape_witness",
+            "_edli_day0_remaining_variance_basis",
+            "_edli_day0_remaining_center_bias_c",
+        )} == {
+            "_edli_day0_current_temperature_native": state["value_native"],
+            "_edli_day0_current_temperature_observed_at_utc": state["observed_at_utc"],
+            "_edli_day0_current_temperature_source": state["source"],
+            "_edli_day0_conditional_high_shape_identity": provenance["day0_conditional_high_shape_identity"],
+            "_edli_day0_conditional_high_shape_witness": provenance["day0_conditional_high_shape_witness"],
+            "_edli_day0_remaining_variance_basis": provenance["day0_remaining_variance_basis"],
+            "_edli_day0_remaining_center_bias_c": provenance.get("day0_remaining_center_bias_c"),
+        }
+        replay = era._day0_remaining_p_raw_vector(
+            np.asarray(native_members_f), city=city,
+            settlement_semantics=semantics,
+            bins=[SimpleNamespace(bin_id=bin_id, low=lower_f, high=upper_f)
+                  for bin_id, lower_f, upper_f in native_bins],
+            payload=replay_payload, extra_member_sigma=0.0,
+            decision_time=computed_at,
+        )
+        assert replay.tolist() == pytest.approx([q[bin_id] for bin_id, *_ in native_bins])
+        composed = replay_payload["_edli_day0_composed_probability_samples"]
+        assert len(composed) == 500
+        for index, row in enumerate(composed):
+            assert row == pytest.approx([
+                provenance["q_bootstrap_samples_by_bin"][bin_id][index]
+                for bin_id, *_ in native_bins
+            ])
+        assert replay.tolist() != pytest.approx(provenance["day0_remaining_carrier_q"])
+        from copy import deepcopy
+
+        tampered_payload = deepcopy(replay_payload)
+        tampered_likelihood = tampered_payload[
+            "_edli_global_day0_binding"
+        ][
+            "statistical_probability_conditioning"
+        ]["fast_residual_likelihood"]
+        tampered_likelihood["unknown_weight"] = 0.01
+        with pytest.raises(ValueError, match="DAY0_FAST_RESIDUAL_POSTERIOR_IDENTITY_INVALID"):
+            era._day0_remaining_p_raw_vector(
+                np.asarray(native_members_f), city=city,
+                settlement_semantics=semantics,
+                bins=[SimpleNamespace(bin_id=bin_id, low=lower_f, high=upper_f)
+                      for bin_id, lower_f, upper_f in native_bins],
+                payload=tampered_payload, extra_member_sigma=0.0,
+                decision_time=computed_at,
+            )
+        closed_payload = deepcopy(replay_payload)
+        closed_payload.pop("_edli_day0_remaining_content_identity")
+        closed_payload.pop("_edli_day0_current_temperature_native")
+        closed_payload.pop("_edli_day0_current_temperature_observed_at_utc")
+        closed_payload.pop("_edli_day0_current_temperature_source")
+        with pytest.raises(ValueError, match="DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE"):
+            era._day0_remaining_p_raw_vector(
+                np.asarray(native_members_f), city=city,
+                settlement_semantics=semantics,
+                bins=[SimpleNamespace(bin_id=bin_id, low=lower_f, high=upper_f)
+                      for bin_id, lower_f, upper_f in native_bins],
+                payload=closed_payload, extra_member_sigma=0.0,
+                decision_time=computed_at + timedelta(days=1),
+            )
     bootstrap_samples = provenance["q_bootstrap_samples_by_bin"]
     assert set(bootstrap_samples) == set(q)
     assert all(len(samples) == 500 for samples in bootstrap_samples.values())
@@ -3358,7 +3616,156 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
     assert revised_q != q
 
 
+def test_wu_composite_low_rebuilds_current_path_before_one_residual_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shanghai LOW prices a changed level with the same provisional extreme."""
+    from src.data.day0_fast_obs import (
+        FAST_RESIDUAL_LIKELIHOOD_REVISION, FastStationResidualLikelihood,
+    )
+    from src.data.day0_hourly_vectors import Day0CurrentTemperatureState
+
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    observed = _dt(17, 55)
+    current = {"value": 24.0}
+    request = replace(
+        _request(
+            computed_at=_dt(18), expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+            day0_observed_extreme_c=23.0,
+            day0_observed_extreme_source="wu_api+same_station_fast_tail",
+            day0_observed_extreme_observation_time=observed.isoformat(),
+            day0_observed_extreme_sample_count=10,
+        ),
+        temperature_metric="low",
+        baseline_data_version=_current_baseline_data_version("low"),
+        bins=(
+            _TemperatureBin("cool", upper_c=22.0, center_c=21.0),
+            _TemperatureBin("warm", lower_c=23.0, upper_c=25.0, center_c=24.0),
+            _TemperatureBin("hot", lower_c=26.0, center_c=27.0),
+        ),
+    )
+    residual_identity = {
+        "semantics_revision": FAST_RESIDUAL_LIKELIHOOD_REVISION,
+        "station_id": "ZSPD", "settlement_channel": "wu_icao_history",
+        "fast_channel": "aviationweather_metar", "unit": "C",
+        "as_of": observed.isoformat(),
+        "window_start": (observed - timedelta(days=7)).isoformat(),
+        "matched_pairs": 30, "residual_weights_c": ((0.0, 0.8),),
+        "unknown_weight": 0.2, "settlement_extreme_c": None,
+    }
+    residual = FastStationResidualLikelihood(
+        **residual_identity, identity_hash=hashlib.sha256(json.dumps(
+            residual_identity, sort_keys=True, separators=(",", ":"),
+        ).encode()).hexdigest(),
+    )
+    monkeypatch.setattr(
+        "src.data.day0_fast_obs.build_fast_station_residual_likelihood",
+        lambda *_args, **_kwargs: residual,
+    )
+    monkeypatch.setattr(
+        "src.data.day0_hourly_vectors.read_day0_current_temperature_state",
+        lambda **_kwargs: Day0CurrentTemperatureState(
+            value_native=current["value"], observed_at=observed,
+            source="aviationweather_metar",
+        ),
+    )
+    monkeypatch.setattr(
+        materializer_mod, "_day0_noaa_carrier_future_members",
+        lambda *_args, **_kwargs: (
+            (current["value"], current["value"] + 3.0), 0.4,
+            _dt(18).isoformat(), (), None,
+        ),
+    )
+    monkeypatch.setattr(
+        materializer_mod, "_day0_remaining_vector_witness",
+        lambda *_args, **_kwargs: _wu_current_carrier_test_witness(
+            city="Shanghai", target_date="2026-06-07", metric="low",
+            at=_dt(18),
+        ),
+    )
+    first = materialize_replacement_forecast_live(conn, request)
+    assert first.ok is True
+    first_row = conn.execute(
+        "SELECT q_json, provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+        (first.posterior_id,),
+    ).fetchone()
+    q_first, provenance_first = json.loads(first_row["q_json"]), json.loads(first_row["provenance_json"])
+    assert provenance_first["q_shape"] == "fused_day0_fast_residual_likelihood"
+    assert provenance_first["day0_current_temperature_state"]["value_native"] == 24.0
+    assert provenance_first["day0_provisional_observation"]["support_truncation"] is False
+    assert provenance_first["day0_provisional_observation"]["fast_residual_likelihood"]["unknown_weight"] == 0.2
+    assert q_first != dict(zip(
+        ("cool", "warm", "hot"), provenance_first["day0_remaining_carrier_q"],
+    ))
+    import numpy as np
+    import src.engine.event_reactor_adapter as era
+    from src.config import runtime_cities_by_name
+    from src.contracts.settlement_semantics import SettlementSemantics
+
+    conditioning = era._day0_replacement_conditioning(
+        SimpleNamespace(provenance_json=provenance_first), provisional=True,
+        metric="low", unit="C", decision_time=_dt(18), entry_authority=False,
+    )
+    state = provenance_first["day0_current_temperature_state"]
+    payload = {
+        "metric": "low", "target_date": "2026-06-07",
+        "settlement_source": "wu_api+same_station_fast_tail",
+        "rounded_value": 23.0,
+        "statistical_probability_conditioning": conditioning,
+        "_edli_day0_current_temperature_native": state["value_native"],
+        "_edli_day0_current_temperature_observed_at_utc": state["observed_at_utc"],
+        "_edli_day0_current_temperature_source": state["source"],
+        "_edli_day0_remaining_content_identity": provenance_first["day0_remaining_carrier_content_identity"],
+        "_edli_day0_probability_operator": provenance_first["day0_remaining_carrier_operator"],
+        "_edli_day0_remaining_carrier_q": provenance_first["day0_remaining_carrier_q"],
+        "_edli_day0_remaining_probability_samples": provenance_first["day0_remaining_carrier_probability_samples"],
+        "_edli_day0_remaining_probability_sample_count": provenance_first["day0_remaining_carrier_sample_count"],
+        "_edli_day0_remaining_carrier_future_extremes_c": provenance_first["day0_remaining_carrier_future_extremes_c"],
+        "_edli_day0_remaining_carrier_final_extremes_c": provenance_first["day0_remaining_carrier_final_extremes_c"],
+        "_edli_day0_remaining_carrier_path_error_sigma_c": provenance_first["day0_remaining_carrier_path_error_sigma_c"],
+        "_edli_day0_remaining_carrier_probability_cutoff_utc": provenance_first["day0_remaining_carrier_probability_cutoff_utc"],
+        "_edli_day0_carrier_bin_topology": provenance_first["bin_topology"],
+        "_edli_day0_remaining_vector_witness": provenance_first["day0_remaining_vector_witness"],
+    }
+    bins = [SimpleNamespace(bin_id=item.bin_id, low=item.lower_c, high=item.upper_c)
+            for item in request.bins]
+    replay = era._day0_remaining_p_raw_vector(
+        np.asarray(provenance_first["day0_remaining_carrier_future_extremes_c"]),
+        city=runtime_cities_by_name()["Shanghai"],
+        settlement_semantics=SettlementSemantics.for_city(runtime_cities_by_name()["Shanghai"]),
+        bins=bins, payload=payload, extra_member_sigma=0.0,
+        decision_time=_dt(18),
+    )
+    assert replay.tolist() == pytest.approx([q_first[item.bin_id] for item in request.bins])
+    composed = payload["_edli_day0_composed_probability_samples"]
+    assert len(composed) == 500
+    for index, row in enumerate(composed):
+        assert row == pytest.approx([
+            provenance_first["q_bootstrap_samples_by_bin"][item.bin_id][index]
+            for item in request.bins
+        ])
+
+    current["value"] = 27.0
+    revised = materialize_replacement_forecast_live(
+        conn, replace(request, computed_at=_dt(18, 10)),
+    )
+    assert revised.ok is True
+    revised_row = conn.execute(
+        "SELECT q_json, provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+        (revised.posterior_id,),
+    ).fetchone()
+    q_revised = json.loads(revised_row["q_json"])
+    provenance_revised = json.loads(revised_row["provenance_json"])
+    assert provenance_revised["day0_current_temperature_state"]["value_native"] == 27.0
+    assert provenance_revised["day0_remaining_carrier_content_identity"] != provenance_first[
+        "day0_remaining_carrier_content_identity"
+    ]
+    assert q_revised != q_first
+
+
 def test_wu_and_raw_noaa_fast_are_provisional_until_wrh_authority() -> None:
+
     composite = _request(
         computed_at=_dt(18),
         expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),

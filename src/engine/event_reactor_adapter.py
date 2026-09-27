@@ -37363,6 +37363,26 @@ def _day0_provisional_carrier_station(
     """Validate source-specific carrier identity and return its station key."""
 
     normalized = str(source or "").strip().lower()
+    from src.events.day0_authority import DAY0_WU_FAST_RESIDUAL_SOURCE
+
+    if normalized == DAY0_WU_FAST_RESIDUAL_SOURCE:
+        from src.config import settlement_source_type_for_city
+
+        station = str(getattr(city, "wu_station", "") or "").strip().upper()
+        source_type = settlement_source_type_for_city(city, str(target_date)[:10])
+        expected_channel = (
+            "wu_icao_history" if source_type == "wu_icao"
+            else f"noaa_wrh_{station.lower()}" if source_type == "noaa"
+            else None
+        )
+        if (
+            not station or expected_channel is None
+            or str(likelihood.get("station_id") or "").strip().upper() != station
+            or likelihood.get("settlement_channel") != expected_channel
+            or likelihood.get("fast_channel") != "aviationweather_metar"
+        ):
+            raise ValueError("DAY0_WU_CURRENT_CARRIER_RESIDUAL_IDENTITY_INVALID")
+        return station
     if normalized.startswith("hko_hourly_accumulator"):
         identity_fields = (
             "semantics",
@@ -37620,6 +37640,36 @@ def _day0_replacement_conditioning(
     conditioning = provenance.get(key)
     if not isinstance(conditioning, Mapping) or conditioning.get("active") is not True:
         raise ValueError("GLOBAL_DAY0_REPLACEMENT_CONDITIONING_MISSING")
+    from src.events.day0_authority import DAY0_WU_FAST_RESIDUAL_SOURCE
+
+    wu_source = (
+        str(conditioning.get("source") or "").strip().lower()
+        == DAY0_WU_FAST_RESIDUAL_SOURCE
+    )
+    wu_open_day = False
+    if wu_source:
+        try:
+            from zoneinfo import ZoneInfo
+
+            bundle_city = runtime_cities_by_name()[str(replacement_bundle.city)]
+            target = date.fromisoformat(str(replacement_bundle.target_date)[:10])
+            wu_open_day = decision_time.astimezone(ZoneInfo(bundle_city.timezone)).date() == target
+        except (AttributeError, KeyError, TypeError, ValueError):
+            # Unknown scope cannot prove an old WU certificate safe for a
+            # different local date; fail closed until its owner is identified.
+            wu_open_day = True
+    if (
+        wu_open_day
+        and (
+            not provenance.get("day0_remaining_carrier_content_identity")
+            or not isinstance(provenance.get("day0_current_temperature_state"), Mapping)
+        )
+    ):
+        # SCOPE: this legacy Day0 city/date/metric certificate only. DRAIN:
+        # fusion-upgrade catch-up reseeds the existing writer from a current
+        # observation and complete hourly bundle. RESET: the new certificate
+        # carries a reproducible conditional path and its current-state identity.
+        raise ValueError("GLOBAL_DAY0_WU_CURRENT_CARRIER_MISSING")
     expected_metric = str(metric or "").strip().lower()
     expected_unit = str(unit or "").strip().upper()
     conditioned_metric = (
@@ -37721,6 +37771,11 @@ def _day0_replacement_conditioning(
                 "day0_remaining_bias_status",
                 "day0_remaining_bias_artifact",
                 "day0_remaining_carrier_probability_cutoff_utc",
+                "bin_topology",
+                "day0_current_temperature_state",
+                "day0_conditional_high_shape_identity",
+                "day0_conditional_high_shape_witness",
+                "day0_remaining_variance_basis",
                 "day0_remaining_vector_witness",
                 "day0_causal_evidence_bundle",
                 "day0_resolver_terminal_input",
@@ -39057,6 +39112,7 @@ def _global_day0_execution_payload(
             "day0_remaining_bias_artifact": "_edli_day0_remaining_bias_artifact",
             "day0_remaining_carrier_probability_cutoff_utc": "_edli_day0_remaining_carrier_probability_cutoff_utc",
             "day0_remaining_carrier_likelihood": "_edli_day0_provisional_revision_likelihood",
+            "bin_topology": "_edli_day0_carrier_bin_topology",
             "day0_conditional_high_shape_identity": "_edli_day0_conditional_high_shape_identity",
             "day0_conditional_high_shape_witness": "_edli_day0_conditional_high_shape_witness",
             "day0_remaining_variance_basis": "_edli_day0_remaining_variance_basis",
@@ -39066,6 +39122,15 @@ def _global_day0_execution_payload(
         for source_key, payload_key in carrier_fields.items():
             if source_key in conditioning:
                 payload[payload_key] = conditioning[source_key]
+        current_state = conditioning.get("day0_current_temperature_state")
+        if isinstance(current_state, Mapping):
+            for field, destination in (
+                ("value_native", "_edli_day0_current_temperature_native"),
+                ("observed_at_utc", "_edli_day0_current_temperature_observed_at_utc"),
+                ("source", "_edli_day0_current_temperature_source"),
+            ):
+                if field in current_state:
+                    payload[destination] = current_state[field]
         carrier_likelihood = conditioning.get("day0_remaining_carrier_likelihood")
         if isinstance(carrier_likelihood, Mapping):
             survival = carrier_likelihood.get("boundary_survival_probability")
@@ -43028,6 +43093,7 @@ def _prepare_current_global_probability_family(
             "_edli_day0_probability_operator",
             "_edli_day0_remaining_carrier_q",
             "_edli_day0_remaining_probability_samples",
+            "_edli_day0_composed_probability_samples",
             "_edli_day0_remaining_probability_sample_count",
             "_edli_day0_remaining_carrier_future_extremes_c",
             "_edli_day0_remaining_carrier_final_extremes_c",
@@ -43036,6 +43102,7 @@ def _prepare_current_global_probability_family(
             "_edli_day0_remaining_bias_status",
             "_edli_day0_remaining_bias_artifact",
             "_edli_day0_remaining_carrier_probability_cutoff_utc",
+            "_edli_day0_carrier_bin_topology",
             "_edli_day0_remaining_vector_witness",
             "_edli_day0_causal_evidence_bundle",
             "_edli_day0_causal_evidence_bundle_validation",
@@ -45684,9 +45751,11 @@ class _Day0CarrierRowSampler:
     rows: np.ndarray
 
     @classmethod
-    def from_payload(cls, payload: Mapping[str, object]) -> "_Day0CarrierRowSampler":
+    def from_payload(
+        cls, payload: Mapping[str, object], *, samples_key: str = "_edli_day0_remaining_probability_samples",
+    ) -> "_Day0CarrierRowSampler":
         rows = np.asarray(
-            payload.get("_edli_day0_remaining_probability_samples"), dtype=np.float64
+            payload.get(samples_key), dtype=np.float64
         )
         if (
             rows.ndim != 2
@@ -46238,8 +46307,16 @@ def _market_analysis_from_event_snapshot(
         # construction failure degrades LOUDLY to the legacy static sampler
         # (no regression vs the pre-fix behavior).
         _day0_sampler = (
-            _Day0CarrierRowSampler.from_payload(payload)
+            _Day0CarrierRowSampler.from_payload(
+                payload,
+                samples_key=(
+                    "_edli_day0_composed_probability_samples"
+                    if "_edli_day0_composed_probability_samples" in payload
+                    else "_edli_day0_remaining_probability_samples"
+                ),
+            )
             if _day0_resolver_terminal_carrier(payload)
+            or "_edli_day0_composed_probability_samples" in payload
             else _make_day0_bootstrap_sampler(
                 members_native=members,
                 payload=payload,
@@ -47041,7 +47118,10 @@ def _day0_remaining_p_raw_vector(
 
     if decision_time is None:
         source_hint = _day0_probability_conditioning_source(payload)
-        if _day0_is_shared_provisional_carrier_source(source_hint):
+        if _day0_is_shared_provisional_carrier_source(source_hint) or (
+            str(source_hint).strip().lower() == "wu_api+same_station_fast_tail"
+            and payload.get("_edli_day0_remaining_content_identity")
+        ):
             raise ValueError(
                 "DAY0_NOAA_PRELIMINARY_CARRIER_DECISION_TIME_MISSING"
             )
@@ -47061,7 +47141,29 @@ def _day0_remaining_p_raw_vector(
     from src.events.day0_authority import day0_evidence_finality
 
     finality = day0_evidence_finality(payload)
-    if finality == "PROVISIONAL_CURRENT_SNAPSHOT":
+    from src.events.day0_authority import DAY0_WU_FAST_RESIDUAL_SOURCE
+
+    source = _day0_probability_conditioning_source(payload)
+    wu_source = str(source).strip().lower() == DAY0_WU_FAST_RESIDUAL_SOURCE
+    wu_current_carrier = wu_source and bool(
+        payload.get("_edli_day0_remaining_content_identity")
+    )
+    if wu_source and not wu_current_carrier and decision_time is not None:
+        try:
+            local_date = decision_time.astimezone(ZoneInfo(city.timezone)).date()
+            target_date = date.fromisoformat(str(payload["target_date"])[:10])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("DAY0_WU_CURRENT_CARRIER_SCOPE_INVALID") from exc
+        if local_date == target_date:
+            raise ValueError("DAY0_WU_CURRENT_CARRIER_MISSING")
+    wu_conditioning = (
+        _validated_fast_residual_day0_conditioning(
+            _day0_statistical_probability_conditioning(payload)
+        ) if wu_current_carrier else None
+    )
+    if wu_current_carrier and wu_conditioning is None:
+        raise ValueError("DAY0_WU_CURRENT_CARRIER_RESIDUAL_IDENTITY_INVALID")
+    if finality == "PROVISIONAL_CURRENT_SNAPSHOT" and not wu_current_carrier:
         try:
             boundary_survival_probability = float(
                 payload[
@@ -47100,13 +47202,12 @@ def _day0_remaining_p_raw_vector(
     from src.events.day0_authority import (
         DAY0_MONOTONE_SETTLEMENT_BOUND,
     )
-    source = _day0_probability_conditioning_source(payload)
     hko_provisional = str(source).strip().lower().startswith(
         "hko_hourly_accumulator"
     )
     shared_provisional_carrier = (
         finality in {"PROVISIONAL_CURRENT_SNAPSHOT", DAY0_MONOTONE_SETTLEMENT_BOUND}
-        and _day0_is_shared_provisional_carrier_source(source)
+        and (wu_current_carrier or _day0_is_shared_provisional_carrier_source(source))
     )
     if shared_provisional_carrier:
         from src.data.day0_hourly_vectors import (
@@ -47122,19 +47223,23 @@ def _day0_remaining_p_raw_vector(
             ("_edli_day0_remaining_carrier_probability_cutoff_utc", "CUTOFF"),
             ("_edli_day0_remaining_carrier_future_extremes_c", "VECTOR"),
             ("_edli_day0_remaining_carrier_path_error_sigma_c", "PATH_SIGMA"),
-            ("_edli_day0_provisional_revision_likelihood", "LIKELIHOOD"),
             ("_edli_day0_probability_operator", "OPERATOR"),
         )
         for field, label in required_fields:
             value = payload.get(field)
             if value is None or (isinstance(value, str) and not value.strip()):
                 raise ValueError(f"DAY0_NOAA_PRELIMINARY_CARRIER_{label}_MISSING")
-        likelihood = payload["_edli_day0_provisional_revision_likelihood"]
+        likelihood = (
+            wu_conditioning["fast_residual_likelihood"]
+            if wu_current_carrier else payload.get("_edli_day0_provisional_revision_likelihood")
+        )
         if not isinstance(likelihood, Mapping):
             raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_LIKELIHOOD_INVALID")
         try:
             likelihood_identity = str(likelihood["identity_hash"]).strip()
-            survival = float(likelihood["boundary_survival_probability"])
+            survival = (
+                None if wu_current_carrier else float(likelihood["boundary_survival_probability"])
+            )
             sample_count = int(payload["_edli_day0_remaining_probability_sample_count"])
             path_sigma_c = float(payload["_edli_day0_remaining_carrier_path_error_sigma_c"])
             # Replay reproduces the persisted certificate: the shift it was built
@@ -47144,7 +47249,9 @@ def _day0_remaining_p_raw_vector(
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_PERSISTED_FIELDS_INVALID") from exc
-        if not likelihood_identity or not 0.0 < survival < 1.0:
+        if not likelihood_identity or (
+            not wu_current_carrier and not 0.0 < survival < 1.0
+        ):
             raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_LIKELIHOOD_INVALID")
         configured_station = _day0_provisional_carrier_station(
             city=city,
@@ -47152,14 +47259,15 @@ def _day0_remaining_p_raw_vector(
             likelihood=likelihood,
             target_date=payload.get("target_date"),
         )
-        try:
-            payload_survival = float(
-                payload["_edli_day0_provisional_boundary_survival_probability"]
-            )
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_LIKELIHOOD_MISSING") from exc
-        if not math.isclose(payload_survival, survival, rel_tol=0.0, abs_tol=0.0):
-            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_LIKELIHOOD_MISMATCH")
+        if not wu_current_carrier:
+            try:
+                payload_survival = float(
+                    payload["_edli_day0_provisional_boundary_survival_probability"]
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_LIKELIHOOD_MISSING") from exc
+            if not math.isclose(payload_survival, survival, rel_tol=0.0, abs_tol=0.0):
+                raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_LIKELIHOOD_MISMATCH")
         if sample_count != 500:
             raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_SAMPLE_COUNT_INVALID")
         if not math.isfinite(path_sigma_c) or path_sigma_c < 0.0:
@@ -47245,7 +47353,9 @@ def _day0_remaining_p_raw_vector(
             )
         ):
             raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_WITNESS_INVALID")
-        if hko_provisional:
+        if wu_current_carrier:
+            boundary_scenarios = ((None, 1.0),)
+        elif hko_provisional:
             boundary_scenarios = (
                 (float(probability_boundary), survival),
                 (None, 1.0 - survival),
@@ -47361,6 +47471,87 @@ def _day0_remaining_p_raw_vector(
             raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_OPERATOR_MISMATCH")
         if int(carrier["sample_count"]) != sample_count:
             raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_SAMPLE_COUNT_MISMATCH")
+        if wu_current_carrier:
+            from src.data.day0_fast_obs import FastStationResidualLikelihood
+            from src.data.replacement_forecast_materializer import (
+                _apply_fast_residual_likelihood_to_probability_carrier,
+            )
+
+            topology = payload.get("_edli_day0_carrier_bin_topology")
+            if (
+                not isinstance(topology, (list, tuple))
+                or len(topology) != len(bins)
+            ):
+                raise ValueError("DAY0_WU_CURRENT_CARRIER_TOPOLOGY_INVALID")
+            try:
+                steps = {float(row["settlement_step_c"]) for row in topology}
+                rules = {str(row["rounding_rule"]) for row in topology}
+                if (
+                    len(steps) != 1 or len(rules) != 1
+                    or next(iter(steps)) <= 0.0
+                    or next(iter(rules)) != settlement_semantics.rounding_rule
+                    or any(str(row["bin_id"]) != str(bin_.bin_id) for row, bin_ in zip(topology, bins))
+                ):
+                    raise ValueError
+                scale = 1.0 if carrier_unit == "C" else 9.0 / 5.0
+                offset = 0.0 if carrier_unit == "C" else 32.0
+                for row, bin_ in zip(topology, bins):
+                    for field, native in (("lower_c", bin_.low), ("upper_c", bin_.high)):
+                        stored = row[field]
+                        if (stored is None) != (native is None) or (
+                            stored is not None
+                            and not math.isclose(
+                                float(stored) * scale + offset, float(native),
+                                rel_tol=0.0, abs_tol=1e-10,
+                            )
+                        ):
+                            raise ValueError
+                residual = FastStationResidualLikelihood(
+                    station_id=str(likelihood["station_id"]),
+                    settlement_channel=str(likelihood["settlement_channel"]),
+                    fast_channel=str(likelihood["fast_channel"]),
+                    unit=str(likelihood["unit"]),
+                    as_of=str(likelihood["as_of"]),
+                    window_start=str(likelihood["window_start"]),
+                    matched_pairs=int(likelihood["matched_pairs"]),
+                    residual_weights_c=tuple(
+                        (float(row["residual_c"]), float(row["weight"]))
+                        for row in likelihood["residual_weights_c"]
+                    ),
+                    unknown_weight=float(likelihood["unknown_weight"]),
+                    settlement_extreme_c=(
+                        None if likelihood.get("settlement_extreme_c") is None
+                        else float(likelihood["settlement_extreme_c"])
+                    ),
+                    identity_hash=likelihood_identity,
+                )
+                carrier_bins = [SimpleNamespace(
+                    bin_id=str(row["bin_id"]),
+                    lower_c=row["lower_c"], upper_c=row["upper_c"],
+                ) for row in topology]
+                q_map = {str(bin_.bin_id): float(value) for bin_, value in zip(bins, carrier["q"])}
+                samples_by_bin = {
+                    str(bin_.bin_id): [float(row[index]) for row in carrier["samples"]]
+                    for index, bin_ in enumerate(bins)
+                }
+                mixed_q, _lower, _upper, mixed_samples, receipt = (
+                    _apply_fast_residual_likelihood_to_probability_carrier(
+                        q=q_map, q_samples_by_bin=samples_by_bin,
+                        bins=carrier_bins, metric=metric,
+                        observed_extreme_c=float(wu_conditioning["observed_extreme_c"]),
+                        half_step=next(iter(steps)) / 2.0,
+                        rounding_rule=next(iter(rules)), likelihood=residual,
+                    )
+                )
+                if receipt["scenario_weights"] != likelihood["scenario_weights"]:
+                    raise ValueError
+            except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                raise ValueError("DAY0_WU_CURRENT_CARRIER_REPLAY_INVALID") from exc
+            payload["_edli_day0_composed_probability_samples"] = [
+                [mixed_samples[str(bin_.bin_id)][index] for bin_ in bins]
+                for index in range(sample_count)
+            ]
+            return np.asarray([mixed_q[str(bin_.bin_id)] for bin_ in bins], dtype=float)
         return np.asarray(carrier["q"], dtype=float)
     boundary_scenarios = _day0_probability_boundary_scenarios_native(
         payload,

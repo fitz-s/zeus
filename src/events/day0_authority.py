@@ -43,10 +43,10 @@ DAY0_HELD_PINNED_RECOMPUTE_GLOBAL_AUTHORITY = (
 # revision (a provisional carrier that cannot compose fails closed rather than
 # fall back).
 DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL = (
-    "day0_settlement_channel_revision_model_v25_land_grid_v3"
+    "day0_settlement_channel_revision_model_v26_land_grid_v3"
 )
 DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER = (
-    "day0_resolver_terminal_composition_v24_land_grid_v3"
+    "day0_resolver_terminal_composition_v25_land_grid_v3"
 )
 
 

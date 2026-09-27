@@ -2709,6 +2709,170 @@ def test_same_cycle_same_extreme_new_current_temperature_revisions_reseed(
     forecast.close()
 
 
+@pytest.mark.parametrize(
+    ("city", "metric", "station", "source", "unit", "old", "new"),
+    (
+        ("Amsterdam", "high", "EHAM", "ogimet_metar_eham", "C", 20.0, 19.0),
+        ("Chicago", "low", "KORD", "ogimet_metar_kord", "F", 55.0, 56.0),
+        ("Hong Kong", "low", "HKO", "hko_rhrread_spot", "C", 23.0, 24.0),
+    ),
+)
+def test_non_helsinki_current_state_revisions_reseed_only_consuming_posterior(
+    tmp_path, monkeypatch, city, metric, station, source, unit, old, new,
+) -> None:
+    """A new physical level changes a consumed Day0 path without an extreme change."""
+    from src.state.schema.observation_prints_schema import append_print, ensure_table
+
+    forecast = _conn()
+    cycle = "2026-09-27T06:00:00+00:00"
+    target = "2026-09-27"
+    _insert_posterior(
+        forecast, city=city, target_date=target, metric=metric,
+        cycle_iso=cycle, used_models=[_DWD],
+        computed_at="2026-09-27T12:05:00+00:00",
+    )
+    old_state = {"source": source, "observed_at_utc": "2026-09-27T12:00:00+00:00",
+                 "value_native": old}
+    provenance = {"bayes_precision_fusion": {"used_models": [_DWD]},
+                  "day0_remaining_carrier_content_identity": "old-carrier",
+                  "day0_current_temperature_state": old_state}
+    forecast.execute("UPDATE forecast_posteriors SET provenance_json = ?",
+                     (json.dumps(provenance),))
+    forecast.commit()
+    world_path = tmp_path / "world.sqlite"
+    with sqlite3.connect(world_path) as world:
+        ensure_table(world)
+        for minute, value in ((0, old), (20, new)):
+            stamp = f"2026-09-27T12:{minute:02d}:00+00:00"
+            append_print(
+                world, city=city, station_id=station, source_channel=source,
+                publish_ts_utc=stamp, value_native=value, unit=unit,
+                fetched_at_utc=stamp, raw_report="physical-current-only",
+            )
+    monkeypatch.setattr(
+        "src.state.db.get_world_connection_read_only",
+        lambda: sqlite3.connect(world_path),
+    )
+
+    def verdict(conn, *, scope_city=city, scope_metric=metric, at="12:25:00"):
+        return scope_capture_offers_larger_provider_set(
+            conn, city=scope_city, target_date=target, metric=scope_metric,
+            changed_sources=("day0_current_temperature_state",),
+            decision_time=datetime.fromisoformat(f"{target}T{at}+00:00"),
+        )
+
+    before = verdict(forecast, at="12:05:00")
+    assert before["input_revision_changed"] is False
+    changed = verdict(forecast)
+    assert changed["changed_input_sources"] == ["day0_current_temperature_state"]
+    revision = changed["changed_input_revisions"]["day0_current_temperature_state"]
+    assert revision == {"source": source, "observed_at_utc": "2026-09-27T12:20:00+00:00",
+                        "value_native": new}
+    # No carrier means this posterior did not consume current state; merely
+    # stamping q_shape=fast-residual cannot create remaining-path authority.
+    forecast.execute("UPDATE forecast_posteriors SET provenance_json = ?",
+                     (json.dumps({"bayes_precision_fusion": {"used_models": [_DWD]},
+                                  "q_shape": "fused_day0_fast_residual_likelihood"}),))
+    forecast.commit()
+    assert verdict(forecast)["input_revision_changed"] is False
+    forecast.execute("UPDATE forecast_posteriors SET provenance_json = ?",
+                     (json.dumps({"bayes_precision_fusion": {"used_models": [_DWD]},
+                                  "q_shape": "fused_day0_fast_residual_likelihood",
+                                  "day0_provisional_observation": {
+                                      "active": True,
+                                      "source": "wu_api+same_station_fast_tail",
+                                  }}),))
+    forecast.commit()
+    # Existing live WU rows lack a carrier. The ordinary upgrade tick must
+    # bootstrap them without waiting for another provider cycle or extreme.
+    assert verdict(forecast)["changed_input_revisions"]["day0_current_temperature_state"] == revision
+    forecast.execute("UPDATE forecast_posteriors SET provenance_json = ?",
+                     (json.dumps({**provenance, "day0_current_temperature_state": revision}),))
+    forecast.commit()
+    assert verdict(forecast)["input_revision_changed"] is False
+    forecast.close()
+
+
+@pytest.mark.parametrize(
+    ("city", "metric", "source"),
+    (("Amsterdam", "high", "ogimet_metar_eham"),
+     ("Chicago", "low", "ogimet_metar_kord"),
+     ("Hong Kong", "low", "hko_rhrread_spot")),
+)
+def test_non_helsinki_queue_requires_actual_current_path_consumption(
+    tmp_path, monkeypatch, city, metric, source,
+) -> None:
+    db = tmp_path / "forecasts.sqlite"
+    target = "2026-09-27"
+    older = {"source": source, "observed_at_utc": f"{target}T12:00:00+00:00",
+             "value_native": 20.0}
+    current = {**older, "observed_at_utc": f"{target}T12:20:00+00:00",
+               "value_native": 19.0}
+    seed = {"city": city, "target_date": target, "temperature_metric": metric,
+            "computed_at": f"{target}T12:25:00+00:00",
+            "baseline_source_run_id": "baseline", "openmeteo_source_run_id": "anchor",
+            "day0_current_temperature_state": current}
+    dependencies = {"baseline_b0": "baseline", "openmeteo_ifs9_anchor": "anchor"}
+    with sqlite3.connect(db) as conn:
+        conn.executescript("""
+            CREATE TABLE forecast_posteriors (
+                posterior_id INTEGER PRIMARY KEY, source_id TEXT, runtime_layer TEXT,
+                city TEXT, target_date TEXT, temperature_metric TEXT,
+                dependency_source_run_ids_json TEXT, source_cycle_time TEXT,
+                computed_at TEXT, provenance_json TEXT
+            );
+            CREATE TABLE readiness_state (
+                strategy_key TEXT, status TEXT, provenance_json TEXT,
+                dependency_json TEXT
+            );
+        """)
+        conn.execute(
+            "INSERT INTO forecast_posteriors VALUES (1, ?, 'live', ?, ?, ?, ?, ?, ?, ?)",
+            (queue.SOURCE_ID, city, target, metric, json.dumps(dependencies),
+             f"{target}T06:00:00+00:00", f"{target}T12:26:00+00:00",
+             json.dumps({"q_shape": "fused_day0_fast_residual_likelihood"})),
+        )
+        conn.execute("INSERT INTO readiness_state VALUES (?, 'READY', ?, ?)",
+                     (queue.STRATEGY_KEY, json.dumps({"city": city, "target_date": target,
+                                                       "temperature_metric": metric}),
+                      json.dumps({"dependencies": [
+                          {"role": "baseline_b0", "source_run_id": "baseline"},
+                          {"role": "openmeteo_ifs9_anchor", "source_run_id": "anchor"},
+                      ]})))
+    monkeypatch.setattr(queue, "tradeable_grade_coverage_sql", lambda **_: "AND 1=1")
+    monkeypatch.setattr(queue, "replacement_live_input_lag_reason", lambda *_a, **_k: None)
+
+    def update(state, *, carrier=True, clock="12:26:00"):
+        provenance = {"day0_current_temperature_state": state}
+        if carrier:
+            provenance["day0_remaining_carrier_content_identity"] = "physical-path"
+        with sqlite3.connect(db) as conn:
+            conn.execute("UPDATE forecast_posteriors SET provenance_json = ?, computed_at = ?",
+                         (json.dumps(provenance), f"{target}T{clock}+00:00"))
+
+    assert queue._seed_already_covered(forecast_db=db, seed=seed) is False
+    update(current, carrier=False)  # a provenance label alone is no q witness
+    assert queue._seed_already_covered(forecast_db=db, seed=seed) is False
+    update(current)
+    assert queue._seed_already_covered(forecast_db=db, seed=seed) is True
+    update(older)
+    assert queue._seed_already_covered(forecast_db=db, seed=seed) is False
+    update({**current, "source": "fmi_airport_temperature"})
+    assert queue._seed_already_covered(forecast_db=db, seed=seed) is False
+    update({**current, "observed_at_utc": f"{target}T13:20:00+00:00"})
+    assert queue._seed_already_covered(forecast_db=db, seed=seed) is False
+    update(current)
+    assert queue._seed_already_covered(
+        forecast_db=db,
+        seed={**seed, "day0_current_temperature_state": {
+            **current, "observed_at_utc": "2026-09-26T00:20:00+00:00"}},
+    ) is False
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE forecast_posteriors SET city = 'Helsinki'")
+    update(current)
+    assert queue._seed_already_covered(forecast_db=db, seed=seed) is False
+
+
 def test_legacy_gem_global_is_not_cmc_but_gem_hrdps_is() -> None:
     """2026-06-17 coarse-global removal antibody: gem_global is no longer a CMC family member, so a
     stray legacy gem_global capture must NOT register CMC. The new CMC rep gem_hrdps_continental

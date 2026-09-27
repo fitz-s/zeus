@@ -19,6 +19,7 @@ from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from src.config import PROJECT_ROOT
 from src.contracts.replacement_pipeline_files import (
@@ -1190,14 +1191,25 @@ def _day0_enqueue_ownership_snapshot(
     return checks
 
 
-def _typed_efhk_current_state(value: object) -> tuple[datetime, float, str] | None:
+def _typed_day0_current_state(
+    value: object, *, city: str, target_date: str,
+) -> tuple[datetime, float, str] | None:
     if not isinstance(value, Mapping):
+        return None
+    from src.config import runtime_cities_by_name
+    from src.data.day0_hourly_vectors import day0_current_temperature_channels
+
+    city_config = runtime_cities_by_name().get(city)
+    if city_config is None:
+        return None
+    contract = day0_current_temperature_channels(city_config)
+    if contract is None:
         return None
     source = value.get("source")
     raw_time = value.get("observed_at_utc")
     raw_value = value.get("value_native")
     if (
-        source not in {"fmi_airport_temperature", "aviationweather_metar", "ogimet_metar_efhk"}
+        source not in contract[1]
         or not isinstance(raw_time, str)
         or not isinstance(raw_value, (int, float))
         or isinstance(raw_value, bool)
@@ -1206,9 +1218,14 @@ def _typed_efhk_current_state(value: object) -> tuple[datetime, float, str] | No
         return None
     try:
         parsed = datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
-    except ValueError:
+        target = date.fromisoformat(target_date)
+        timezone_name = ZoneInfo(str(city_config.timezone))
+    except (TypeError, ValueError, ZoneInfoNotFoundError):
         return None
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
+    if (
+        parsed.tzinfo is None or parsed.utcoffset() is None
+        or parsed.astimezone(timezone_name).date() != target
+    ):
         return None
     return parsed.astimezone(timezone.utc), float(raw_value), source
 
@@ -1320,12 +1337,17 @@ def _seed_already_covered(
             if not isinstance(actual_provenance, Mapping):
                 return False
             actual_state = actual_provenance.get("day0_current_temperature_state")
-            requested_fact = _typed_efhk_current_state(requested_current_state)
-            actual_fact = _typed_efhk_current_state(actual_state)
+            requested_fact = _typed_day0_current_state(
+                requested_current_state, city=city, target_date=target_date,
+            )
+            actual_fact = _typed_day0_current_state(
+                actual_state, city=city, target_date=target_date,
+            )
             seed_clock = _parse_utc_iso(seed.get("computed_at"))
             posterior_clock = _parse_utc_iso(posterior["computed_at"])
             if (
-                city != "Helsinki" or requested_fact is None or actual_fact is None
+                not actual_provenance.get("day0_remaining_carrier_content_identity")
+                or requested_fact is None or actual_fact is None
                 or seed_clock is None or posterior_clock is None
                 or requested_fact[0] > seed_clock or actual_fact[0] > posterior_clock
             ):
