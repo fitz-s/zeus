@@ -4714,6 +4714,131 @@ def test_held_scope_none_rebuilds_shared_current_remaining_carrier(
     assert later_q.tolist() != pytest.approx(held_q.tolist())
 
 
+def test_pure_hourly_high_current_shape_rebuild_replays_its_persisted_witness(
+    monkeypatch, tmp_path,
+):
+    """The fresh shape's three fields travel together into strict carrier replay."""
+    import src.data.day0_hourly_vectors as hourly
+    import src.engine.event_reactor_adapter as era
+
+    city = runtime_cities_by_name()["Paris"]
+    decision = datetime(2026, 9, 27, 12, 30, tzinfo=UTC)
+    observed = decision - timedelta(minutes=30)
+    run = decision - timedelta(hours=5)
+    models = ("ecmwf_ifs", "icon_global")
+    times = tuple(datetime(2026, 9, 27, hour, tzinfo=ZoneInfo(city.timezone)).isoformat()
+                  for hour in range(24))
+
+    def vector(model, value, *, ensemble=False):
+        meta = {
+            "provider_source_cycle_time_utc": run.isoformat(),
+            "provider_source_available_at_utc": (run + timedelta(hours=1)).isoformat(),
+            "fetch_started_at": (decision - timedelta(minutes=10)).isoformat(),
+            "fetch_finished_at": (decision - timedelta(minutes=5)).isoformat(),
+            "request_hash": "one-ens-request" if ensemble else f"provider-{model}",
+            "provider_run_id": "one-ens-run" if ensemble else f"provider-{model}",
+        }
+        return Day0HourlyVector(
+            model=model, city=city.name, target_date="2026-09-27",
+            timezone_name=city.timezone, captured_at=(decision - timedelta(minutes=20)).isoformat(),
+            times=times, temps_c=tuple(value for _ in times),
+            source_run_meta_json=json.dumps(meta),
+        )
+
+    providers = [vector("ecmwf_ifs", 25.0), vector("icon_global", 26.0)]
+    ensemble = [
+        vector(model, 25.0 + (index - 25) * 0.02, ensemble=True)
+        for index, model in enumerate(hourly.day0_source_clock_ensemble_member_models())
+    ]
+    monkeypatch.setattr(hourly, "day0_hourly_models_for_city", lambda _city: models)
+    monkeypatch.setattr(hourly, "read_freshest_day0_hourly_vectors", lambda **kwargs:
+        ensemble if len(kwargs.get("expected_models") or ()) == 51 else providers)
+    monkeypatch.setattr(hourly, "_day0_provider_run_hwm_pin_path", lambda: tmp_path / "no-pin")
+    monkeypatch.setattr(era, "_latest_day0_current_temperature_native",
+                        lambda **_kwargs: (24.0, observed, "aviationweather_metar"))
+    witness = {
+        "vector_id": "current-provider-pair", "expected_models": list(models),
+        "actual_models": list(models),
+        **{key: {model: "proof" for model in models} for key in (
+            "capture_times_by_model_utc", "provider_source_cycle_time_by_model_utc",
+            "provider_source_available_at_by_model_utc", "source_run_id_by_model",
+            "provider_run_id_by_model", "request_hash_by_model",
+        )},
+    }
+    monkeypatch.setattr(era, "_day0_current_vector_witness", lambda **_kwargs: witness)
+    monkeypatch.setattr(era, "_validate_day0_causal_bundle_successor", lambda **_kwargs: {
+        "bundle_identity": "current-pair", "carrier_vector_witness": witness,
+    })
+    family = SimpleNamespace(
+        city="Paris", target_date="2026-09-27", metric="high", candidates=[
+            SimpleNamespace(bin=Bin(None, 24, "C", "24C or below")),
+            SimpleNamespace(bin=Bin(25, 25, "C", "25C")),
+            SimpleNamespace(bin=Bin(26, None, "C", "26C or above")),
+        ],
+    )
+    payload = {
+        "metric": "high", "rounded_value": 24.0, "high_so_far": 24.0,
+        "observation_time": observed.isoformat(),
+        "settlement_source": "aviationweather_metar",
+        "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
+        "_edli_day0_probability_boundary_native": 24.0,
+        "_edli_day0_provisional_boundary_survival_probability": 0.95,
+        "_edli_day0_provisional_revision_likelihood": _noaa_test_likelihood(
+            station="LFPB", cutoff=decision.isoformat(),
+        ),
+        "_edli_day0_causal_evidence_bundle": {"bundle_identity": "current-pair"},
+    }
+    members = era._day0_remaining_day_members(
+        payload=payload, family=family, unit="C", decision_time=decision,
+        world_conn=object(), forecast_conn=object(),
+    )
+    assert members is not None
+    assert payload["_edli_day0_remaining_variance_basis"] == (
+        "conditional_ens_within_plus_provider_center_delta_v1"
+    )
+    assert payload["_edli_day0_conditional_high_shape_identity"]
+    assert isinstance(payload["_edli_day0_conditional_high_shape_witness"], dict)
+    q = era._day0_remaining_p_raw_vector(
+        np.asarray(payload["_edli_day0_unclamped_remaining_extrema_native"]),
+        city=city, settlement_semantics=SettlementSemantics.for_city(city),
+        bins=[candidate.bin for candidate in family.candidates], payload=payload,
+        extra_member_sigma=0.0, decision_time=decision,
+    )
+    assert q.sum() == pytest.approx(1.0)
+    assert payload["_edli_day0_decision_carrier_rebuild_basis"] == (
+        "held_shared_current_remaining_path_vector_witness_v1"
+    )
+    for missing in (
+        "_edli_day0_conditional_high_shape_identity",
+        "_edli_day0_conditional_high_shape_witness",
+        "_edli_day0_remaining_variance_basis",
+    ):
+        broken = dict(payload)
+        broken.pop(missing)
+        with pytest.raises(ValueError, match="DAY0_CONDITIONAL_HIGH_PERSISTED_WITNESS_INVALID"):
+            era._day0_remaining_p_raw_vector(
+                np.asarray(payload["_edli_day0_unclamped_remaining_extrema_native"]),
+                city=city, settlement_semantics=SettlementSemantics.for_city(city),
+                bins=[candidate.bin for candidate in family.candidates], payload=broken,
+                extra_member_sigma=0.0, decision_time=decision,
+            )
+    for tampered in (
+        {"_edli_day0_conditional_high_shape_identity": "a" * 64},
+        {"_edli_day0_conditional_high_shape_witness": {
+            **payload["_edli_day0_conditional_high_shape_witness"],
+            "forged_source": "unbound",
+        }},
+    ):
+        broken = {**payload, **tampered}
+        with pytest.raises(ValueError, match="DAY0_CONDITIONAL_HIGH_PERSISTED_WITNESS_MISMATCH"):
+            era._day0_remaining_p_raw_vector(
+                np.asarray(payload["_edli_day0_unclamped_remaining_extrema_native"]),
+                city=city, settlement_semantics=SettlementSemantics.for_city(city),
+                bins=[candidate.bin for candidate in family.candidates], payload=broken,
+                extra_member_sigma=0.0, decision_time=decision,
+            )
+
+
 def test_live_day0_entry_explicitly_marks_canonical_authority(monkeypatch):
     """The live ENTRY dispatcher cannot silently use canonical's held default."""
     import src.engine.event_reactor_adapter as era
@@ -8195,7 +8320,8 @@ class TestRemainingDayMembers:
         )
         assert "_edli_day0_remaining_source_cycle_time_utc" not in payload
 
-    def test_station_extreme_provider_uses_posterior_pinned_row(self):
+    @pytest.mark.parametrize("metric", ("high", "low"))
+    def test_station_extreme_provider_uses_posterior_pinned_row(self, metric):
         """A later HKO issue cannot be spliced onto an older causal posterior."""
         import src.engine.event_reactor_adapter as era
 
@@ -8236,7 +8362,7 @@ class TestRemainingDayMembers:
                 7,
                 "Hong Kong",
                 "2026-08-28",
-                "high",
+                metric,
                 json.dumps({"bayes_precision_fusion": serving}),
             ),
         )
@@ -8251,7 +8377,7 @@ class TestRemainingDayMembers:
                     "hko_fnd",
                     "Hong Kong",
                     "2026-08-28",
-                    "high",
+                    metric,
                     "2026-08-28T00:50:00+00:00",
                     captured_at,
                     captured_at,
@@ -8265,7 +8391,7 @@ class TestRemainingDayMembers:
             conn=conn,
             payload={"_edli_global_day0_binding": {"posterior_id": 7}},
             family=SimpleNamespace(
-                city="Hong Kong", target_date="2026-08-28", metric="high"
+                city="Hong Kong", target_date="2026-08-28", metric=metric
             ),
             decision_time=datetime(2026, 8, 28, 7, 0, tzinfo=UTC),
             represented_models=("ecmwf_ifs",),
@@ -8276,6 +8402,160 @@ class TestRemainingDayMembers:
         assert evidence[0]["raw_model_forecast_id"] == 11
         assert evidence[0]["forecast_value_c"] == 32.0
         conn.close()
+
+    @pytest.mark.parametrize("metric", ("high", "low"))
+    def test_hko_final_daily_without_posterior_binding_blocks_one_family(
+        self, monkeypatch, metric,
+    ):
+        """Three complete hourly paths cannot silently drop HKO FND."""
+        import src.data.day0_hourly_vectors as hourly
+        import src.engine.event_reactor_adapter as era
+
+        decision = datetime(2026, 9, 27, 7, 0, tzinfo=UTC)
+        vectors = [
+            Day0HourlyVector(
+                model=model, city="Hong Kong", target_date="2026-09-27",
+                timezone_name="Asia/Hong_Kong", captured_at=decision.isoformat(),
+                times=tuple(f"2026-09-27T{hour:02d}:00" for hour in range(24)),
+                temps_c=tuple(value for _ in range(24)),
+            )
+            for model, value in (("ecmwf_ifs", 27.0), ("icon_global", 28.0),
+                                 ("ukmo_global_deterministic_10km", 29.0))
+        ]
+        monkeypatch.setattr(hourly, "day0_hourly_models_for_city", lambda _city: tuple(
+            vector.model for vector in vectors
+        ))
+        monkeypatch.setattr(hourly, "read_freshest_day0_hourly_vectors", lambda **_kw: vectors)
+        monkeypatch.setattr(era, "_latest_day0_current_temperature_native", lambda **_kw: (
+            27.1, decision - timedelta(minutes=5), "hko_rhrread_spot",
+        ))
+        monkeypatch.setattr(era, "_day0_current_vector_witness", lambda **_kw: {
+            "vector_id": "current-three", "expected_models": [v.model for v in vectors],
+        })
+        monkeypatch.setattr(era, "_validate_day0_causal_bundle_successor", lambda **kw: {
+            "bundle_identity": "current-three", "carrier_vector_witness": kw["vector_witness"],
+        })
+        payload = {"metric": metric, "observation_time": (
+            decision - timedelta(minutes=5)
+        ).isoformat(), "_edli_global_day0_binding": {
+            "probability_base_identity": "direct-held-only",
+        }}
+        result = era._day0_remaining_day_members(
+            payload=payload,
+            family=SimpleNamespace(city="Hong Kong", target_date="2026-09-27", metric=metric),
+            unit="C", decision_time=decision,
+            world_conn=object(), forecast_conn=object(),
+        )
+        assert result is None
+        assert "DAY0_STATION_EXTREME_POSTERIOR_BINDING_REQUIRED" in str(
+            payload["_edli_day0_q_block_cause"]
+        )
+        assert "_edli_day0_conditional_high_shape_identity" not in payload
+        assert "_edli_day0_remaining_carrier_q" not in payload
+
+    @pytest.mark.parametrize("source", (
+        {"enabled": False, "status": "live", "adapter_kind": "hko_fnd_json",
+         "city": "Hong Kong", "metrics": ["high"]},
+        {"enabled": True, "status": "live", "adapter_kind": "cwa_township_hourly_xml",
+         "city": "Hong Kong", "metrics": ["high"]},
+        {"enabled": True, "status": "live", "adapter_kind": "hko_fnd_json",
+         "city": "Taipei", "metrics": ["high"]},
+        {"enabled": True, "status": "live", "adapter_kind": "hko_fnd_json",
+         "city": "Hong Kong", "metrics": ["low"]},
+    ))
+    def test_missing_station_binding_only_blocks_enabled_matching_final_source(
+        self, monkeypatch, source,
+    ):
+        import src.engine.event_reactor_adapter as era
+        monkeypatch.setattr(
+            "src.data.station_forecast_adapter.load_station_forecast_config",
+            lambda: {"hypothetical": source},
+        )
+        assert era._pinned_station_extreme_providers_c(
+            conn=object(), payload={},
+            family=SimpleNamespace(city="Hong Kong", target_date="2026-09-27", metric="high"),
+            decision_time=datetime(2026, 9, 27, 7, tzinfo=UTC),
+            represented_models=("ecmwf_ifs",),
+        ) == ()
+
+    @pytest.mark.parametrize("metric", ("high", "low"))
+    @pytest.mark.parametrize("conn", (None, object()))
+    def test_hko_pinned_posterior_requires_readable_forecast_connection(
+        self, metric, conn,
+    ):
+        import src.engine.event_reactor_adapter as era
+
+        with pytest.raises(
+            ValueError, match="DAY0_STATION_EXTREME_POSTERIOR_READER_UNAVAILABLE"
+        ):
+            era._pinned_station_extreme_providers_c(
+                conn=conn,
+                payload={"_edli_global_day0_binding": {"posterior_id": 7}},
+                family=SimpleNamespace(
+                    city="Hong Kong", target_date="2026-09-27", metric=metric
+                ),
+                decision_time=datetime(2026, 9, 27, 7, tzinfo=UTC),
+                represented_models=("ecmwf_ifs",),
+            )
+
+    @pytest.mark.parametrize("metric", ("high", "low"))
+    def test_hko_malformed_posterior_identity_cannot_authorize_station_drop(
+        self, metric,
+    ):
+        import src.engine.event_reactor_adapter as era
+
+        conn = sqlite3.connect(":memory:")
+        try:
+            with pytest.raises(
+                ValueError, match="DAY0_STATION_EXTREME_POSTERIOR_ID_INVALID"
+            ):
+                era._pinned_station_extreme_providers_c(
+                    conn=conn,
+                    payload={"_edli_global_day0_binding": {
+                        "posterior_id": "not-an-integer",
+                    }},
+                    family=SimpleNamespace(
+                        city="Hong Kong", target_date="2026-09-27", metric=metric
+                    ),
+                    decision_time=datetime(2026, 9, 27, 7, tzinfo=UTC),
+                    represented_models=("ecmwf_ifs",),
+                )
+        finally:
+            conn.close()
+
+    @pytest.mark.parametrize("metric", ("high", "low"))
+    @pytest.mark.parametrize("provenance", ({}, {
+        "bayes_precision_fusion": {"used_models": ["ecmwf_ifs"]},
+    }))
+    def test_hko_pinned_posterior_without_serving_proof_cannot_drop_final_source(
+        self, metric, provenance,
+    ):
+        import src.engine.event_reactor_adapter as era
+
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.execute(
+                "CREATE TABLE forecast_posteriors (posterior_id INTEGER PRIMARY KEY, "
+                "city TEXT, target_date TEXT, temperature_metric TEXT, "
+                "provenance_json TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO forecast_posteriors VALUES (?,?,?,?,?)",
+                (7, "Hong Kong", "2026-09-27", metric, json.dumps(provenance)),
+            )
+            with pytest.raises(
+                ValueError, match="DAY0_STATION_EXTREME_POSTERIOR_PROVENANCE_MISSING"
+            ):
+                era._pinned_station_extreme_providers_c(
+                    conn=conn, payload={"posterior_id": 7},
+                    family=SimpleNamespace(
+                        city="Hong Kong", target_date="2026-09-27", metric=metric
+                    ),
+                    decision_time=datetime(2026, 9, 27, 7, tzinfo=UTC),
+                    represented_models=("ecmwf_ifs",),
+                )
+        finally:
+            conn.close()
 
     def test_remaining_members_keep_pinned_station_final_extreme(
         self, monkeypatch

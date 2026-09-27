@@ -49182,14 +49182,45 @@ def _pinned_station_extreme_providers_c(
     ``raw_model_forecast_id`` in ``current_value_serving`` is the causal join.
     """
 
-    execute = getattr(conn, "execute", None)
-    if not callable(execute):
-        return ()
+    from src.data.station_forecast_adapter import load_station_forecast_config
+
     binding = payload.get("_edli_global_day0_binding")
     posterior_id = payload.get("posterior_id")
     if posterior_id in (None, "") and isinstance(binding, Mapping):
         posterior_id = binding.get("posterior_id")
+    execute = getattr(conn, "execute", None)
+    city_name = str(getattr(family, "city", "") or "")
+    metric_name = str(getattr(family, "metric", "") or "").strip().lower()
+
+    def expects_station_final() -> bool:
+        for source in load_station_forecast_config().values():
+            if not isinstance(source, Mapping):
+                continue
+            declared_metrics = source.get("metrics")
+            if not isinstance(declared_metrics, list):
+                declared_metrics = [source.get("metric")]
+            if (
+                source.get("enabled") is True
+                and source.get("status") == "live"
+                and source.get("adapter_kind") == "hko_fnd_json"
+                and source.get("city") == city_name
+                and metric_name in declared_metrics
+            ):
+                return True
+        return False
+
     if posterior_id in (None, ""):
+        if expects_station_final():
+            # SCOPE: this held city/date/metric's HKO final-daily scenario.
+            # DRAIN: a current v5 posterior binds the exact station raw row.
+            # RESET: its validated posterior_id permits the normal pinned read.
+            raise ValueError("DAY0_STATION_EXTREME_POSTERIOR_BINDING_REQUIRED")
+        return ()
+    if not callable(execute):
+        if expects_station_final():
+            # SCOPE/RESET are the same exact family/read; DRAIN on a readable
+            # forecast connection, never silently substitute hourly-only q.
+            raise ValueError("DAY0_STATION_EXTREME_POSTERIOR_READER_UNAVAILABLE")
         return ()
     try:
         posterior_id = int(posterior_id)
@@ -49225,13 +49256,15 @@ def _pinned_station_extreme_providers_c(
         else None
     )
     if not isinstance(fusion, Mapping):
+        if expects_station_final():
+            raise ValueError("DAY0_STATION_EXTREME_POSTERIOR_PROVENANCE_MISSING")
         return ()
     serving = fusion.get("current_value_serving")
     used_models = fusion.get("used_models")
     if not isinstance(serving, Mapping) or not isinstance(used_models, list):
+        if expects_station_final():
+            raise ValueError("DAY0_STATION_EXTREME_POSTERIOR_PROVENANCE_MISSING")
         return ()
-    from src.data.station_forecast_adapter import load_station_forecast_config
-
     station_models = {
         str(model).strip() for model in load_station_forecast_config()
     }
@@ -50467,6 +50500,9 @@ def _day0_remaining_day_members(
             payload["_edli_day0_conditional_high_shape"] = shape
             payload["_edli_day0_conditional_high_shape_identity"] = shape.identity
             payload["_edli_day0_conditional_high_shape_witness"] = dict(shape.witness)
+            payload["_edli_day0_remaining_variance_basis"] = (
+                "conditional_ens_within_plus_provider_center_delta_v1"
+            )
         if direct_entry_authority:
             entry_carrier = payload.get(
                 "_edli_day0_direct_entry_source_clock_carrier"
