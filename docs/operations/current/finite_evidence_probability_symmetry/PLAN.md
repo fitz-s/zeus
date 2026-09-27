@@ -8,6 +8,24 @@ Status: active
 
 ### Concurrent conditional-HIGH integration acceptance
 
+- Final WU-fast fix `b210d556a` plus foreign-channel antibody `f314b52d8`
+  integrated cleanly onto concurrent `89c8430a5` as `9ebd61152` / `2cbde6e5a`.
+  Independent fixed-head and integration reviews accept the exact source-type
+  branch and shared validator. Reader reconstruction compares carrier identity,
+  q, every sample, operator and sample count, not merely an input hash.
+  Integration cross-tests pass 18 cases; source scheduling/boot/cycle/queue
+  passes 193 cases. Combined reader/materializer/fast/fusion suites produce
+  454 passes and 39 failures. Exact JUnit `(classname, name)` comparison with
+  fixed 7403 baseline finds zero added or removed failing nodes; this is not a
+  global-green claim. Shared fast-observation suites likewise retain exactly
+  five baseline failing nodes with 163 passes.
+- Clock fix `706ef718e` plus LOW fallback antibody `6ad5e0b32` integrated as
+  `c36bddd21` / `40e8d3e28`. All 70 executable-reader and GRIB source-context
+  cases pass on the combined parent. The LOW/HIGH invalid-newer/valid-older
+  fallback twin is covered without stored-clock mutation. Fixed-SHA final
+  review is YES at `6ad5e0b32`; post-load receipts remain a separate rollout
+  acceptance gate.
+
 - Post-rollout all-open-position audit at 16:46 UTC found a separate producer /
   held-reader contract defect in Lucknow, Cape Town, Helsinki and Milan. For
   `wu_api+same_station_fast_tail`, the producer intentionally leaves the NOAA /
