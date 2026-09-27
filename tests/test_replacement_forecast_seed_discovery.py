@@ -960,14 +960,6 @@ def _write_world_day0_observation(path: Path) -> None:
     try:
         conn.execute(
             """
-            CREATE TABLE opportunity_events (
-                event_id TEXT, event_type TEXT, available_at TEXT,
-                received_at TEXT, created_at TEXT, payload_json TEXT
-            )
-            """
-        )
-        conn.execute(
-            """
             INSERT INTO observation_instants VALUES (
                 'NYC',
                 '2026-06-08',
@@ -984,29 +976,6 @@ def _write_world_day0_observation(path: Path) -> None:
                 77.0
             )
             """
-        )
-        # The legacy WU row above is not NYC's current settlement channel.
-        # The NOAA WRH page at the same station supplies the authorized fact.
-        conn.execute(
-            "INSERT INTO opportunity_events VALUES (?,?,?,?,?,?)",
-            (
-                "nyc-noaa-page-77", "DAY0_EXTREME_UPDATED",
-                "2026-06-08T05:05:00+00:00",
-                "2026-06-08T05:05:00+00:00",
-                "2026-06-08T05:05:00+00:00",
-                json.dumps({
-                    "city": "NYC", "target_date": "2026-06-08", "metric": "high",
-                    "settlement_source": "noaa_wrh_klga", "station_id": "KLGA",
-                    "observation_time": "2026-06-08T05:00:00+00:00",
-                    "observation_available_at": "2026-06-08T05:05:00+00:00",
-                    "raw_value": 77.0, "rounded_value": 77, "high_so_far": 77.0,
-                    "settlement_unit": "F", "source_match_status": "MATCH",
-                    "local_date_status": "MATCH", "station_match_status": "MATCH",
-                    "dst_status": "UNAMBIGUOUS", "metric_match_status": "MATCH",
-                    "rounding_status": "MATCH", "source_authorized_status": "AUTHORIZED",
-                    "live_authority_status": "live",
-                }),
-            ),
         )
         conn.commit()
     finally:
@@ -1996,7 +1965,10 @@ def test_seed_discovery_seeds_day0_when_canonical_observed_extreme_exists(
     seed = json.loads(Path(report.written_seed_files[0]).read_text(encoding="utf-8"))
     assert seed["city"] == "NYC"
     assert seed["day0_observed_extreme_c"] == (77.0 - 32.0) * 5.0 / 9.0
-    assert seed["day0_observed_extreme_source"] == "noaa_wrh_klga"
+    from src.config import runtime_cities_by_name, settlement_source_type_for_city
+
+    assert settlement_source_type_for_city(runtime_cities_by_name()["NYC"], "2026-06-08") == "wu_icao"
+    assert seed["day0_observed_extreme_source"] == "wu_icao_history"
     assert seed["day0_observed_extreme_observation_time"] == "2026-06-08T05:00:00+00:00"
     assert seed["day0_observed_extreme_sample_count"] == 1
     assert seed["day0_observed_extreme_unit"] == "F"

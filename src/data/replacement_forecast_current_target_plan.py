@@ -842,16 +842,17 @@ def _latest_authorized_day0_fact(
     metric = str(temperature_metric or "").strip().lower()
     if metric not in {"high", "low"}:
         return None
-    from src.config import runtime_cities_by_name
+    from src.config import runtime_cities_by_name, settlement_source_type_for_city
     from src.events.triggers.day0_extreme_updated import (
         _expected_station_for_city,
         _station_matches,
     )
 
     city_obj = runtime_cities_by_name().get(city)
-    expected_station = _expected_station_for_city(city_obj)
+    expected_station = _expected_station_for_city(city_obj, target_date)
     source_type = str(
-        getattr(city_obj, "settlement_source_type", "") or ""
+        settlement_source_type_for_city(city_obj, target_date)
+        if city_obj is not None else ""
     ).strip().lower()
     expected_unit = str(
         getattr(city_obj, "settlement_unit", "") or ""

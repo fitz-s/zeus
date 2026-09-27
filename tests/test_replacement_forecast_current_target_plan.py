@@ -948,13 +948,19 @@ def test_day0_global_fact_binds_hour_bucket_digest_by_extreme_source_clock() -> 
         target_date="2026-08-13",
         temperature_metric="high",
         decision_time=datetime(2026, 8, 13, 18, 30, tzinfo=timezone.utc),
-        require_settlement_channel=True,
+        require_settlement_channel=False,
     )
 
     assert fact is not None
     assert fact["observed_extreme_native"] == 34.0
     assert fact["observation_time"] == "2026-08-13T17:50:00+00:00"
     assert fact["raw_payload_sha256"] == digest
+    assert _latest_authorized_day0_fact(
+        conn, city="Tel Aviv", target_date="2026-08-13",
+        temperature_metric="high",
+        decision_time=datetime(2026, 8, 13, 18, 30, tzinfo=timezone.utc),
+        require_settlement_channel=True,
+    ) is None  # Ogimet's physical mirror is not the NOAA settlement page.
     conn.close()
 
 
@@ -1217,13 +1223,19 @@ def test_day0_global_fact_binds_fetch_digest_when_hour_bucket_differs_from_day_e
         target_date="2026-08-13",
         temperature_metric="high",
         decision_time=datetime(2026, 8, 13, 19, tzinfo=timezone.utc),
-        require_settlement_channel=True,
+        require_settlement_channel=False,
     )
 
     assert fact is not None
     assert fact["observed_extreme_native"] == 34.0
     assert fact["observation_time"] == "2026-08-13T17:50:00+00:00"
     assert fact["raw_payload_sha256"] == digest
+    assert _latest_authorized_day0_fact(
+        conn, city="Tel Aviv", target_date="2026-08-13",
+        temperature_metric="high",
+        decision_time=datetime(2026, 8, 13, 19, tzinfo=timezone.utc),
+        require_settlement_channel=True,
+    ) is None
     conn.close()
 
 
@@ -1682,6 +1694,62 @@ def test_day0_event_fact_lookup_uses_family_index_when_available(monkeypatch) ->
         "idx_opportunity_events_day0_family_extreme" in statement
         for statement in statements
     )
+    conn.close()
+
+
+def test_day0_source_contract_uses_target_date_across_paris_migration() -> None:
+    from src.config import runtime_cities_by_name, settlement_source_type_for_city
+
+    city = runtime_cities_by_name()["Paris"]
+    assert settlement_source_type_for_city(city, "2026-07-14") == "wu_icao"
+    assert settlement_source_type_for_city(city, "2026-09-03") == "noaa"
+    conn = _day0_source_switch_conn()
+    _insert_paris_day0_event(
+        conn, event_id="old-wu", settlement_source="wu_api", metric="high",
+        observation_time="2026-07-14T14:00:00+00:00",
+        available_at="2026-07-14T14:15:00+00:00", raw_value=34.0,
+    )
+    old = _latest_authorized_day0_fact(
+        conn, city="Paris", target_date="2026-07-14",
+        temperature_metric="high",
+        decision_time=datetime(2026, 7, 14, 15, tzinfo=timezone.utc),
+        require_settlement_channel=True,
+    )
+    assert old is not None
+    assert old["observation_source"] == "wu_api"
+
+    for event_id, source, value in (
+        ("old-wu-current-day", "wu_api", 37.0),
+        ("new-noaa-current-day", "noaa_wrh_lfpb", 32.0),
+    ):
+        conn.execute(
+            "INSERT INTO opportunity_events VALUES (?,?,?,?,?,?)",
+            (
+                event_id, "DAY0_EXTREME_UPDATED", "2026-09-03T14:15:00+00:00",
+                "2026-09-03T14:15:00+00:00", "2026-09-03T14:15:00+00:00",
+                json.dumps({
+                    "city": "Paris", "target_date": "2026-09-03", "metric": "high",
+                    "settlement_source": source, "station_id": "LFPB",
+                    "observation_time": "2026-09-03T14:00:00+00:00",
+                    "observation_available_at": "2026-09-03T14:15:00+00:00",
+                    "raw_value": value, "rounded_value": int(value), "high_so_far": value,
+                    "settlement_unit": "C", "source_match_status": "MATCH",
+                    "local_date_status": "MATCH", "station_match_status": "MATCH",
+                    "dst_status": "UNAMBIGUOUS", "metric_match_status": "MATCH",
+                    "rounding_status": "MATCH", "source_authorized_status": "AUTHORIZED",
+                    "live_authority_status": "live",
+                }),
+            ),
+        )
+    current = _latest_authorized_day0_fact(
+        conn, city="Paris", target_date="2026-09-03",
+        temperature_metric="high",
+        decision_time=datetime(2026, 9, 3, 15, tzinfo=timezone.utc),
+        require_settlement_channel=True,
+    )
+    assert current is not None
+    assert current["observed_extreme_native"] == 32.0
+    assert current["observation_source"] == "noaa_wrh_lfpb"
     conn.close()
 
 
