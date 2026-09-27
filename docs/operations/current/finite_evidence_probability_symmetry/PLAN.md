@@ -8,6 +8,35 @@ Status: active
 
 ### Concurrent conditional-HIGH integration acceptance
 
+- Subsequent upstream `964a37c19` proves the hourly ENS product's independent
+  release clock. Preserve that correction; do not force its run to equal the
+  deterministic provider or the OpenData base shape. The combined mechanism
+  now has distinct opaque revisions
+  `day0_settlement_channel_revision_model_v25_land_grid_v3` and
+  `day0_resolver_terminal_composition_v24_land_grid_v3`; retired v24/v23 sealed
+  certificates and both ENTRY/held caches are explicit negative antibodies.
+- Fixed merged head `6de032831` completed 2,757 tests with 33 failures. Of
+  those, 28 adjacent Day0 failures match an independently run unmodified
+  upstream baseline, three are the existing legacy migration failures, and
+  the availability AST-wide lint is being compared separately. Do not classify
+  the remaining recovery failure as harmless timing: a live-tick interruption
+  can leave a FILLED command with an incompletely restored positive position.
+- Additional bounded repair plan: inspect positive-entry recovery transaction
+  boundaries and propagate database interruption so a partial projection cannot
+  be committed as successful. Add a deterministic interruption/rollback and
+  subsequent-success antibody; preserve current deadline and exact venue proof.
+  SCOPE is one interrupted positive-entry recovery unit; DRAIN is the next
+  ordinary bounded recovery attempt; RESET requires consistent command, fill
+  event and position projection. This blocks deployment until proved.
+- Conditional HIGH missing-source and superseded-product reasons now use the
+  existing family BLOCKED result in prepare/direct/read-only paths; wrong-run
+  mixtures and proof corruption still raise. Targeted HIGH hourly refresh now
+  requests that family's 51 members through the existing date/quota guards.
+  Real carrier tests cover missing/old evidence followed by valid recovery.
+- Docs check: neither changed document is reported as defective; 22 separate
+  pre-existing repository registry/archive/current-state issues remain outside
+  this task. No stale runtime stamp was refreshed to silence them.
+
 - Fixed parent `5f00dcf93` on `316d10e7e` completed 2,275 tests with three
   pre-existing legacy-schema migration failures described below; no all-green
   claim or live deployment follows from that result.
