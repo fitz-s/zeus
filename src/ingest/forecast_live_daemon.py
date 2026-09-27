@@ -1283,7 +1283,6 @@ def _run_opendata_track_if_due(
             track, _locks_dir_override=_locks_dir_override,
             _collector=_collector, _source_paused=_source_paused,
             _job_conn=_job_conn, _now_utc=now, _identity=migration_identity,
-            _cycle_deadline_monotonic=poll_deadline_monotonic,
         )
         return {**result, "revision_migration_debt": migration_debt}
 
@@ -1420,7 +1419,6 @@ def _run_opendata_track_if_due(
         _job_conn=_job_conn,
         _now_utc=retry_now,
         _identity=retry_identity,
-        _cycle_deadline_monotonic=poll_deadline_monotonic,
     )
     return {
         **retry_result,

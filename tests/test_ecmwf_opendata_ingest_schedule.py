@@ -209,6 +209,71 @@ def test_held_revision_migration_refetches_exact_old_complete_cycle(monkeypatch,
 
 
 @pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+def test_held_migration_poll_bounds_selection_not_whole_collector(monkeypatch, tmp_path, track):
+    from src.data import replacement_forecast_seed_discovery as discovery
+    from src.ingest import forecast_live_daemon as daemon
+
+    now = datetime(2026, 9, 27, 12, 46, tzinfo=timezone.utc)
+    conn = _job_run_conn()
+    old = _held_revision_coverage(
+        conn, track, now=now, cycle=datetime(2026, 9, 26, 12, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(discovery, "held_position_family_priorities", lambda **_: {
+        ("Hong Kong", "2026-09-27", old["metric"]): 0,
+    })
+    newest = daemon._forecast_work_identity(track, now_utc=now)
+    _insert_job_run(conn, newest, status="SUCCESS", recorded_at=now)
+    conn.execute(
+        "UPDATE job_run SET rows_written = 1, source_run_id = ? WHERE job_run_id = ?",
+        (daemon._expected_source_run_id(newest), daemon._job_run_id(newest)),
+    )
+    collected: list[dict] = []
+    poll_deadline = time.monotonic() + 0.5
+
+    def collector(**kwargs):
+        collected.append(kwargs)
+        # The selected native cycle may outlive the short scheduling poll;
+        # the collector still owns its ordinary per-step/extract deadlines.
+        time.sleep(max(0.0, poll_deadline - time.monotonic()) + 0.01)
+        return {"status": "download_failed", "reason": "TEST_NO_NETWORK"}
+
+    monkeypatch.setattr(daemon, "_write_job_run", lambda *_args, **_kwargs: None)
+    result = daemon._run_opendata_track_if_due(
+        track, _job_conn=conn, _now_utc=now,
+        _locks_dir_override=tmp_path / "locks",
+        _collector=collector, _source_paused=lambda _: False,
+        _poll_deadline_monotonic=poll_deadline,
+    )
+    assert result["revision_migration_debt"]["old_source_run_id"] == old["source_run_id"]
+    assert len(collected) == 1
+    assert collected[0]["run_date"].isoformat() == "2026-09-26"
+    assert collected[0]["run_hour"] == 12
+    assert "cycle_deadline_monotonic" not in collected[0]
+    assert time.monotonic() >= poll_deadline
+
+    collected.clear()
+    # A decision deadline still prevents starting the migration at all.
+    assert daemon._run_opendata_track_if_due(
+        track, _job_conn=conn, _now_utc=now,
+        _locks_dir_override=tmp_path / "locks",
+        _collector=collector, _source_paused=lambda _: False,
+        _poll_deadline_monotonic=time.monotonic() - 1,
+    )["status"] == "current_cycle_already_journaled"
+    assert not collected
+
+    # Caller-supplied collector deadlines remain honored; only poll-derived
+    # limits must not be imposed on a full native ENS source run.
+    explicit_deadline = time.monotonic() + 10
+    daemon.run_opendata_track(
+        track, _identity=newest,
+        _locks_dir_override=tmp_path / "locks",
+        _collector=collector, _source_paused=lambda _: False,
+        _cycle_deadline_monotonic=explicit_deadline,
+    )
+    assert collected[-1]["cycle_deadline_monotonic"] == explicit_deadline
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
 @pytest.mark.parametrize("latest_status", ("FAILED", "PARTIAL"))
 def test_held_migration_gets_next_turn_after_real_latest_failure(
     monkeypatch, track, latest_status,
@@ -771,12 +836,12 @@ def test_not_released_newest_cycle_retries_one_exact_failed_predecessor(monkeypa
     assert "_cycle_deadline_monotonic" not in calls[0]
     assert calls[1]["_identity"] == prior
     assert calls[1]["_locks_dir_override"] == lock_dir
-    assert calls[1]["_cycle_deadline_monotonic"] > time.monotonic()
+    assert "_cycle_deadline_monotonic" not in calls[1]
 
 
 @pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
-def test_safe_poll_not_released_probe_allocates_remaining_window_to_prior_debt(monkeypatch, track):
-    """Both tracks give the same poll's remaining budget to their exact prior failure."""
+def test_safe_poll_not_released_probe_selects_prior_debt_without_truncating_collect(monkeypatch, track):
+    """The poll bounds selection; both tracks retain normal collector timeouts."""
     from src.ingest import forecast_live_daemon as daemon
 
     now = datetime(2026, 8, 24, 23, 31, tzinfo=timezone.utc)
@@ -808,7 +873,7 @@ def test_safe_poll_not_released_probe_allocates_remaining_window_to_prior_debt(m
     assert result["status"] == "partial"
     assert len(calls) == 1
     assert calls[0]["_identity"] == prior
-    assert calls[0]["_cycle_deadline_monotonic"] > time.monotonic()
+    assert "_cycle_deadline_monotonic" not in calls[0]
     assert conn.execute("SELECT COUNT(*) AS n FROM job_run").fetchone()["n"] == 1
 
 
