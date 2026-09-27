@@ -2054,7 +2054,7 @@ def _preserve_terminal_entry_chain_projection(
         return False
     current = conn.execute(
         """
-        SELECT position_id, order_id, token_id, no_token_id, phase,
+        SELECT position_id, order_id, token_id, no_token_id, direction, phase,
                chain_state, shares, chain_shares, cost_basis_usd,
                chain_cost_basis_usd
           FROM position_current WHERE position_id = ?
@@ -2068,12 +2068,17 @@ def _preserve_terminal_entry_chain_projection(
     chain_shares = _positive_decimal_or_none(current.get("chain_shares"))
     cost = _positive_decimal_or_none(current.get("cost_basis_usd"))
     chain_cost = _positive_decimal_or_none(current.get("chain_cost_basis_usd"))
+    direction = str(current.get("direction") or "").lower()
+    held_token_id = (
+        str(current.get("no_token_id") or "")
+        if direction == "buy_no"
+        else str(current.get("token_id") or "")
+        if direction == "buy_yes"
+        else ""
+    )
     if (
         str(current.get("order_id") or "").lower() != order_id.lower()
-        or token_id not in {
-            str(current.get("token_id") or ""),
-            str(current.get("no_token_id") or ""),
-        }
+        or token_id != held_token_id
         or str(current.get("phase") or "") not in {"active", "day0_window"}
         or str(current.get("chain_state") or "") != "synced"
         or shares is None
@@ -2082,6 +2087,17 @@ def _preserve_terminal_entry_chain_projection(
         or chain_cost != cost
         or prefix >= shares
     ):
+        return False
+    aggregate = _entry_fill_economics_for_command(
+        conn,
+        command_id=command_id,
+        fallback_filled_size=trade_filled_size,
+        fallback_fill_price=str(command.get("price") or ""),
+    )
+    if aggregate is None or aggregate[0] >= shares:
+        # A single old maker leg is not a command-level deficit once newer
+        # authenticated trades complete the order; keep normal economic
+        # re-projection available for the complete fact set.
         return False
     from src.execution.command_recovery import _latest_order_fact_for_command_order
 

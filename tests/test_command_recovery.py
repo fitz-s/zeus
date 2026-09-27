@@ -17764,6 +17764,7 @@ class TestRecoveryResolutionTable:
                 assert not protected(venue_order_id="")
                 assert not protected(venue_order_id="ord-other")
                 assert not protected(token_id="tok-other")
+                assert not protected(token_id="tok-001-no")
                 assert not protected(state="PARTIAL")
                 assert not preserve(
                     guard_conn, command=command, venue_order_id="ord-001",
@@ -17781,6 +17782,14 @@ class TestRecoveryResolutionTable:
                 assert not protected()
                 guard_conn.rollback()
                 assert not protected(command_id="cmd-no-terminal-order-fact")
+                guard_conn.execute("BEGIN IMMEDIATE")
+                _append_trade_fact(
+                    guard_conn, command_id="cmd-001", order_id="ord-001",
+                    trade_id="trade-remainder", state="CONFIRMED",
+                    filled_size="2.0", fill_price="0.34",
+                )
+                assert not protected()
+                guard_conn.rollback()
             finally:
                 guard_conn.close()
 
