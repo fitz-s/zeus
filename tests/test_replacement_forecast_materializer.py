@@ -586,6 +586,15 @@ def _assert_wu_fast_pinned_contract(
     assert reason(resigned("settlement_channel", "noaa_wrh_wrong")) == (
         "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_IDENTITY_INVALID"
     )
+    likelihood = provenance["day0_provisional_observation"]["fast_residual_likelihood"]
+    other_valid_channel = (
+        f"noaa_wrh_{likelihood['station_id'].lower()}"
+        if likelihood["settlement_channel"] == "wu_icao_history"
+        else "wu_icao_history"
+    )
+    assert reason(resigned("settlement_channel", other_valid_channel)) == (
+        "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_CARRIER_INVALID"
+    )
     future = resigned("as_of", (decision_time + timedelta(minutes=1)).isoformat())
     future["day0_provisional_observation"]["observation_time"] = (
         decision_time + timedelta(minutes=1)
