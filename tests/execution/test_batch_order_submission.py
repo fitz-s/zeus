@@ -1,8 +1,8 @@
 # Created: 2026-07-02
-# Last reused/audited: 2026-07-08
+# Last reused/audited: 2026-09-27
 # Authority basis: docs/rebuild/order_engine_implementation_architecture_2026-07-02.md
 #   §1 "batch submit + safe prefixes" + architecture/invariants.yaml INV-28
-#   -- W2.1 packet (inert, no production call site).
+#   -- W2.1 batch journal and active C3 cancel boundary.
 """W2.1 batch cancel orchestrator: INV-28 persist-before-side-effect
 discipline at batch shape, chunking, mapping precedence, and partial-batch
 failure semantics for cancel_commands_batch.
@@ -166,7 +166,7 @@ def _seed_ackable_command(conn, *, command_id: str, token_id: str = "yes-token",
             chain_id=137, funder_address="0xfunder", condition_id="condition-test", question_id="question-test",
             yes_token_id=token_id, no_token_id=f"{token_id}-no", selected_outcome_token_id=token_id,
             outcome_label="YES", side="SELL", price=Decimal("0.50"), size=Decimal("10"), order_type="GTC",
-            post_only=False, tick_size=Decimal("0.01"), min_order_size=Decimal("0.01"), neg_risk=False,
+            post_only=True, tick_size=Decimal("0.01"), min_order_size=Decimal("0.01"), neg_risk=False,
             fee_details={"source": "test", "token_id": token_id, "fee_rate_fraction": 0.0, "fee_rate_bps": 0.0,
                          "fee_rate_source_field": "fee_rate_fraction", "fee_rate_raw_unit": "fraction"},
             canonical_pre_sign_payload_hash="a" * 64, signed_order=None, signed_order_hash=None,
@@ -187,6 +187,7 @@ def _seed_ackable_command(conn, *, command_id: str, token_id: str = "yes-token",
         conn, command_id=command_id, event_type="SUBMIT_ACKED", occurred_at=now,
         payload={"order_id": venue_order_id, "batch": True},
     )
+    conn.commit()
 
 
 def _acked(venue_order_id: str) -> dict:
@@ -284,3 +285,174 @@ class TestCancelCommandsBatchPartialFailure:
             "SELECT command_id FROM venue_command_events WHERE event_type = 'CANCEL_REPLACE_BLOCKED'"
         ).fetchall()
         assert sorted(r[0] for r in events) == ["cmd-a", "cmd-b"]
+
+
+def _wal_cancel_fixture(tmp_path, monkeypatch):
+    from src.state import db, write_coordinator
+    from src.state.collateral_ledger import init_collateral_schema
+    from src.state.db import init_schema, init_schema_trade_only
+
+    path = tmp_path / "trades.db"
+    seed = sqlite3.connect(path)
+    seed.row_factory = sqlite3.Row
+    seed.execute("PRAGMA journal_mode=WAL")
+    seed.execute("PRAGMA foreign_keys=ON")
+    init_schema(seed)
+    init_schema_trade_only(seed)
+    init_collateral_schema(seed)
+    _seed_ackable_command(seed, command_id="cmd-wal", venue_order_id="vord-wal")
+    seed.close()
+
+    coordinator = write_coordinator.WriteCoordinator({write_coordinator.DBIdentity.TRADE: path})
+    monkeypatch.setattr(db, "_zeus_trade_db_path", lambda: path)
+    monkeypatch.setattr(write_coordinator, "default_runtime_write_coordinator", lambda: coordinator)
+    conn = sqlite3.connect(path, timeout=0.1)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=100")
+    return path, conn, coordinator
+
+
+def test_wal_writer_contention_defers_before_sdk_then_retries(tmp_path, monkeypatch):
+    path, conn, _coordinator = _wal_cancel_fixture(tmp_path, monkeypatch)
+    holder = sqlite3.connect(path)
+    client = FakeGatewayClient(cancel_responses=[[_acked("vord-wal")]])
+    try:
+        holder.execute("BEGIN IMMEDIATE")
+        first = cancel_commands_batch(conn, client, ["cmd-wal"])
+        assert first[0].status == "not_attempted"
+        assert first[0].error_message.startswith("batch_cancel_persist_failed:")
+        assert client.cancel_calls == []
+        assert conn.execute("SELECT state FROM venue_commands WHERE command_id='cmd-wal'").fetchone()[0] == "ACKED"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_command_events WHERE command_id='cmd-wal' AND event_type='CANCEL_REQUESTED'"
+        ).fetchone()[0] == 0
+
+        holder.rollback()
+        second = cancel_commands_batch(conn, client, ["cmd-wal"])
+        assert second[0].status == "acked"
+        assert client.cancel_calls == [["vord-wal"]]
+    finally:
+        holder.rollback()
+        holder.close()
+        conn.close()
+
+
+def test_sdk_is_outside_lease_and_request_is_committed(tmp_path, monkeypatch):
+    path, conn, coordinator = _wal_cancel_fixture(tmp_path, monkeypatch)
+
+    class SpyClient(FakeGatewayClient):
+        def cancel_orders_batch(self, order_ids):
+            assert coordinator.current_owner_snapshot() == ()
+            with sqlite3.connect(path) as reader:
+                assert reader.execute(
+                    "SELECT state FROM venue_commands WHERE command_id='cmd-wal'"
+                ).fetchone()[0] == "CANCEL_PENDING"
+            return super().cancel_orders_batch(order_ids)
+
+    client = SpyClient(cancel_responses=[[_acked("vord-wal")]])
+    try:
+        result = cancel_commands_batch(conn, client, ["cmd-wal"])
+        assert result[0].status == "acked"
+        assert client.cancel_calls == [["vord-wal"]]
+    finally:
+        conn.close()
+
+
+def test_ack_write_failure_marks_uncertain_without_second_sdk(tmp_path, monkeypatch):
+    from src.execution import batch_order_submission
+    from src.state import venue_command_repo
+
+    _path, conn, _coordinator = _wal_cancel_fixture(tmp_path, monkeypatch)
+    original = venue_command_repo.append_event
+    failed = False
+
+    def fail_ack_once(*args, **kwargs):
+        nonlocal failed
+        if kwargs.get("event_type") == "CANCEL_ACKED" and not failed:
+            failed = True
+            raise sqlite3.OperationalError("simulated ack write interruption")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(venue_command_repo, "append_event", fail_ack_once)
+    client = FakeGatewayClient(cancel_responses=[[_acked("vord-wal")]])
+    try:
+        first = batch_order_submission.cancel_commands_batch(conn, client, ["cmd-wal"])
+        assert first[0].status == "unknown"
+        assert first[0].error_message.startswith("batch_cancel_ack_persist_failed:")
+        assert conn.execute("SELECT state FROM venue_commands WHERE command_id='cmd-wal'").fetchone()[0] == "REVIEW_REQUIRED"
+        second = batch_order_submission.cancel_commands_batch(conn, client, ["cmd-wal"])
+        assert second[0].status == "not_requestable"
+        assert client.cancel_calls == [["vord-wal"]]
+    finally:
+        conn.close()
+
+
+def test_second_request_failure_rolls_back_the_whole_chunk(tmp_path, monkeypatch):
+    from src.state import venue_command_repo
+
+    path, conn, _coordinator = _wal_cancel_fixture(tmp_path, monkeypatch)
+    _seed_ackable_command(conn, command_id="cmd-wal2", venue_order_id="vord-wal2")
+    original = venue_command_repo.append_event
+
+    def fail_second_request(*args, **kwargs):
+        if kwargs.get("command_id") == "cmd-wal2" and kwargs.get("event_type") == "CANCEL_REQUESTED":
+            raise sqlite3.OperationalError("second request interrupted")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(venue_command_repo, "append_event", fail_second_request)
+    client = FakeGatewayClient(cancel_responses=[[_acked("vord-wal"), _acked("vord-wal2")]])
+    try:
+        outcomes = cancel_commands_batch(conn, client, ["cmd-wal", "cmd-wal2"])
+        assert [outcome.status for outcome in outcomes] == ["not_attempted", "not_attempted"]
+        assert client.cancel_calls == []
+        with sqlite3.connect(path) as reader:
+            assert reader.execute(
+                "SELECT command_id, state FROM venue_commands WHERE command_id IN ('cmd-wal', 'cmd-wal2') ORDER BY command_id"
+            ).fetchall() == [("cmd-wal", "ACKED"), ("cmd-wal2", "ACKED")]
+            assert reader.execute(
+                "SELECT COUNT(*) FROM venue_command_events WHERE event_type='CANCEL_REQUESTED'"
+            ).fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_second_ack_failure_rolls_back_ack_then_marks_both_uncertain(tmp_path, monkeypatch):
+    from src.state import venue_command_repo
+
+    path, conn, _coordinator = _wal_cancel_fixture(tmp_path, monkeypatch)
+    _seed_ackable_command(conn, command_id="cmd-wal2", venue_order_id="vord-wal2")
+    original = venue_command_repo.append_event
+
+    def fail_second_ack(*args, **kwargs):
+        if kwargs.get("command_id") == "cmd-wal2" and kwargs.get("event_type") == "CANCEL_ACKED":
+            raise sqlite3.OperationalError("second ack interrupted")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(venue_command_repo, "append_event", fail_second_ack)
+    client = FakeGatewayClient(cancel_responses=[[_acked("vord-wal"), _acked("vord-wal2")]])
+    try:
+        outcomes = cancel_commands_batch(conn, client, ["cmd-wal", "cmd-wal2"])
+        assert [outcome.status for outcome in outcomes] == ["unknown", "unknown"]
+        assert client.cancel_calls == [["vord-wal", "vord-wal2"]]
+        with sqlite3.connect(path) as reader:
+            assert reader.execute(
+                "SELECT command_id, state FROM venue_commands WHERE command_id IN ('cmd-wal', 'cmd-wal2') ORDER BY command_id"
+            ).fetchall() == [("cmd-wal", "REVIEW_REQUIRED"), ("cmd-wal2", "REVIEW_REQUIRED")]
+            assert reader.execute(
+                "SELECT COUNT(*) FROM venue_command_events WHERE event_type='CANCEL_ACKED'"
+            ).fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_batch_never_commits_an_ambient_transaction(mem_conn):
+    _seed_ackable_command(mem_conn, command_id="cmd-outer", venue_order_id="vord-outer")
+    mem_conn.execute("CREATE TABLE caller_work (value TEXT)")
+    mem_conn.execute("INSERT INTO caller_work VALUES ('uncommitted')")
+    client = FakeGatewayClient(cancel_responses=[[_acked("vord-outer")]])
+    result = cancel_commands_batch(mem_conn, client, ["cmd-outer"])
+    assert result[0].status == "not_attempted"
+    assert result[0].error_message == "batch_cancel_persist_failed:RuntimeError"
+    assert mem_conn.in_transaction
+    assert mem_conn.execute("SELECT value FROM caller_work").fetchone()[0] == "uncommitted"
+    assert client.cancel_calls == []

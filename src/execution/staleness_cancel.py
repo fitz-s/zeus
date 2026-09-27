@@ -863,6 +863,19 @@ def run_c3_staleness_cancel_cycle(
         rate_budget=rate_budget,
     )
     result["outcomes"] = outcomes
+    for outcome in outcomes:
+        if outcome.status != "acked":
+            error = str(outcome.error_message or "")
+            reason = (
+                error if error.startswith("batch_cancel_")
+                else error.split(":", 1)[0]
+                if error.startswith(("rate_budget_", "cutover_pending:"))
+                else outcome.status
+            )
+            logger.warning(
+                "c3_staleness_cancel outcome command_id=%s status=%s reason=%s",
+                outcome.command_id, outcome.status, reason,
+            )
 
     # Family-level gating (conservative suppression): a family is confirmed
     # ONLY if EVERY one of its commands in this cycle's outcomes durably

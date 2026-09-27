@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-09-23
+# Last reused/audited: 2026-09-27
 # Authority basis: docs/rebuild/schema_packets/w1_2_order_state_extension_schema_packet_2026-07-02.md
 #   (SCH-W1.2-ORDER-STATE) + docs/operations/current/plans/order_engine_rebuild_execution_plan_2026-07-02.md
 #   W4 row (C3 staleness path, same packet: DELETE maker_rest_escalation).
@@ -1087,7 +1087,7 @@ def assert_pending_reader_flag(kwargs):
     assert kwargs == {"include_pending_cancels": True}
 
 
-def test_pending_cancel_real_batch_retry_rate_denial_ack_and_dedup(monkeypatch):
+def test_pending_cancel_real_batch_retry_rate_denial_ack_and_dedup(monkeypatch, caplog):
     from src.execution import staleness_cancel
 
     trade_conn = _trade_db()
@@ -1123,6 +1123,7 @@ def test_pending_cancel_real_batch_retry_rate_denial_ack_and_dedup(monkeypatch):
         trade_conn, trade_conn, forecasts_conn, client, now=NOW, rate_budget=budget
     )
     assert first["outcomes"][0].status == "not_attempted"
+    assert "command_id=c-pending status=not_attempted reason=rate_budget_DENIED" in caplog.text
     assert client.cancel_calls == []
     assert conn_state(trade_conn, "c-pending") == "CANCEL_PENDING"
     assert trade_conn.execute(

@@ -5,8 +5,10 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional, Sequence
 
 from src.venue.batch_submit import MAX_ORDERS_PER_BATCH, chunk_orders
@@ -14,6 +16,55 @@ from src.venue.batch_submit import MAX_ORDERS_PER_BATCH, chunk_orders
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+@contextmanager
+def _cancel_journal_transaction(conn: sqlite3.Connection, *, owner: str):
+    """Own only this batch's TRADE writes; never commit a caller's transaction."""
+    if conn.in_transaction:
+        raise RuntimeError("batch_cancel_existing_transaction")
+
+    from src.state.db import _zeus_trade_db_path
+    from src.state.write_coordinator import (
+        DBIdentity,
+        WritePriority,
+        bounded_sqlite_write,
+        default_runtime_write_coordinator,
+    )
+
+    main = next(
+        (row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main"),
+        "",
+    )
+    canonical = bool(main) and Path(main).resolve() == _zeus_trade_db_path().resolve()
+    lease_context = (
+        default_runtime_write_coordinator().lease(
+            (DBIdentity.TRADE,),
+            owner=owner,
+            write_class="live",
+            priority=WritePriority.MONITOR,
+            deadline_ms=1_500,
+            max_hold_ms=500,
+        )
+        if canonical else nullcontext(None)
+    )
+    with lease_context as lease:
+        with (bounded_sqlite_write(conn, lease, max_hold_ms=500) if lease else nullcontext()):
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                yield
+                conn.commit()
+            except BaseException:
+                if conn.in_transaction:
+                    conn.rollback()
+                raise
+
+
+def _journal_error(exc: Exception) -> str:
+    # Never expose SDK response bodies, order IDs, keys, or SQL parameters in logs.
+    if isinstance(exc, sqlite3.Error):
+        return str(getattr(exc, "sqlite_errorname", None) or type(exc).__name__)
+    return type(exc).__name__
 
 
 @dataclass(frozen=True)
@@ -109,29 +160,25 @@ def cancel_commands_batch(
         now = _now()
         persisted: list[tuple[int, str, str]] = []
         try:
-            for idx, command_id, venue_order_id, state in eligible:
-                if state != "CANCEL_PENDING":
-                    append_event(
-                        conn,
-                        command_id=command_id,
-                        event_type="CANCEL_REQUESTED",
-                        occurred_at=now,
-                        payload={"venue_order_id": venue_order_id, "batch": True},
-                    )
-                persisted.append((idx, command_id, venue_order_id))
+            with _cancel_journal_transaction(conn, owner="batch_cancel_request"):
+                for idx, command_id, venue_order_id, state in eligible:
+                    if state != "CANCEL_PENDING":
+                        append_event(
+                            conn,
+                            command_id=command_id,
+                            event_type="CANCEL_REQUESTED",
+                            occurred_at=now,
+                            payload={"venue_order_id": venue_order_id, "batch": True},
+                        )
+                    persisted.append((idx, command_id, venue_order_id))
         except Exception as exc:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
             for idx, command_id, *_rest in eligible:
                 outcomes[idx] = BatchCancelOutcome(
-                    idx, command_id, "not_requestable",
-                    error_message=f"batch_cancel_persist_failed: {exc}",
+                    idx, command_id, "not_attempted",
+                    error_message=f"batch_cancel_persist_failed:{_journal_error(exc)}",
                 )
             should_continue = False
             continue
-        conn.commit()
 
         # --- SDK call: ONE call for the whole chunk. --------------------
         try:
@@ -145,47 +192,75 @@ def cancel_commands_batch(
             should_continue = False
             continue
         except Exception as exc:
+            try:
+                with _cancel_journal_transaction(conn, owner="batch_cancel_unknown"):
+                    for _idx, command_id, _venue_order_id in persisted:
+                        _append_cancel_unknown(
+                            conn, command_id,
+                            CancelOutcome("UNKNOWN", "post_cancel_exception_possible_side_effect", {
+                                "exception_type": type(exc).__name__,
+                            }), _now(),
+                        )
+            except Exception as persist_exc:
+                error = f"batch_cancel_unknown_persist_failed:{_journal_error(persist_exc)}"
+            else:
+                error = "post_cancel_exception_possible_side_effect"
             for idx, command_id, venue_order_id in persisted:
-                outcome = CancelOutcome(
-                    "UNKNOWN",
-                    f"post_cancel_exception_possible_side_effect: {exc}",
-                    {"exception_type": type(exc).__name__, "exception_message": str(exc)},
-                )
-                _append_cancel_unknown(conn, command_id, outcome, _now())
                 outcomes[idx] = BatchCancelOutcome(
-                    idx, command_id, "unknown", venue_order_id=venue_order_id, error_message=outcome.reason,
+                    idx, command_id, "unknown", venue_order_id=venue_order_id,
+                    error_message=error,
                 )
-            conn.commit()
             should_continue = False
             continue
 
         # --- ack phase. --------------------------------------------------
-        mapped = map_batch_items(
-            legacy_results,
-            echo_keys=[venue_order_id for *_r, venue_order_id in persisted],
-            echo_candidate_fields=CANCEL_ECHO_CANDIDATE_FIELDS,
-        )
-        ack_time = _now()
-        for (idx, command_id, venue_order_id), mapped_item in zip(persisted, mapped):
-            if mapped_item.source == "unmapped":
-                outcome = CancelOutcome("UNKNOWN", "batch_response_unmapped", {})
+        try:
+            mapped = map_batch_items(
+                legacy_results,
+                echo_keys=[venue_order_id for *_r, venue_order_id in persisted],
+                echo_candidate_fields=CANCEL_ECHO_CANDIDATE_FIELDS,
+            )
+            ack_time = _now()
+            with _cancel_journal_transaction(conn, owner="batch_cancel_ack"):
+                for (idx, command_id, venue_order_id), mapped_item in zip(persisted, mapped):
+                    if mapped_item.source == "unmapped":
+                        outcome = CancelOutcome("UNKNOWN", "batch_response_unmapped", {})
+                    else:
+                        outcome = parse_cancel_response(mapped_item.raw_item)
+                    if is_cancel_confirmed_status(outcome.status):
+                        append_event(
+                            conn, command_id=command_id, event_type="CANCEL_ACKED", occurred_at=ack_time,
+                            payload={"venue_order_id": venue_order_id, "cancel_outcome": outcome.raw_response, "batch": True},
+                        )
+                        outcomes[idx] = BatchCancelOutcome(idx, command_id, "acked", venue_order_id=venue_order_id)
+                    elif outcome.status == "NOT_CANCELED":
+                        append_event(
+                            conn, command_id=command_id, event_type="CANCEL_FAILED", occurred_at=ack_time,
+                            payload={"venue_order_id": venue_order_id, "reason": outcome.reason, "cancel_outcome": outcome.raw_response, "batch": True},
+                        )
+                        outcomes[idx] = BatchCancelOutcome(idx, command_id, "not_canceled", venue_order_id=venue_order_id, error_message=outcome.reason)
+                    else:
+                        _append_cancel_unknown(conn, command_id, outcome, ack_time)
+                        outcomes[idx] = BatchCancelOutcome(idx, command_id, "unknown", venue_order_id=venue_order_id, error_message=outcome.reason)
+        except Exception as exc:
+            # A venue call may already have happened. Discard speculative ACKs,
+            # then journal uncertainty; never send the chunk a second time here.
+            try:
+                with _cancel_journal_transaction(conn, owner="batch_cancel_ack_unknown"):
+                    for _idx, command_id, _venue_order_id in persisted:
+                        _append_cancel_unknown(
+                            conn, command_id,
+                            CancelOutcome("UNKNOWN", "batch_cancel_ack_persist_failed", {}), _now(),
+                        )
+            except Exception as persist_exc:
+                error = f"batch_cancel_unknown_persist_failed:{_journal_error(persist_exc)}"
             else:
-                outcome = parse_cancel_response(mapped_item.raw_item)
-            if is_cancel_confirmed_status(outcome.status):
-                append_event(
-                    conn, command_id=command_id, event_type="CANCEL_ACKED", occurred_at=ack_time,
-                    payload={"venue_order_id": venue_order_id, "cancel_outcome": outcome.raw_response, "batch": True},
+                error = f"batch_cancel_ack_persist_failed:{_journal_error(exc)}"
+            for idx, command_id, venue_order_id in persisted:
+                outcomes[idx] = BatchCancelOutcome(
+                    idx, command_id, "unknown", venue_order_id=venue_order_id,
+                    error_message=error,
                 )
-                outcomes[idx] = BatchCancelOutcome(idx, command_id, "acked", venue_order_id=venue_order_id)
-            elif outcome.status == "NOT_CANCELED":
-                append_event(
-                    conn, command_id=command_id, event_type="CANCEL_FAILED", occurred_at=ack_time,
-                    payload={"venue_order_id": venue_order_id, "reason": outcome.reason, "cancel_outcome": outcome.raw_response, "batch": True},
-                )
-                outcomes[idx] = BatchCancelOutcome(idx, command_id, "not_canceled", venue_order_id=venue_order_id, error_message=outcome.reason)
-            else:
-                _append_cancel_unknown(conn, command_id, outcome, ack_time)
-                outcomes[idx] = BatchCancelOutcome(idx, command_id, "unknown", venue_order_id=venue_order_id, error_message=outcome.reason)
-        conn.commit()
+            should_continue = False
 
     return [o for o in outcomes if o is not None]
