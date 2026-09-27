@@ -16814,6 +16814,10 @@ class TestRecoveryResolutionTable:
         scope,
     ):
         """Every production recovery scope corrects command truth before projections."""
+        if scope == "live_tick":
+            # Verify semantic ordering without CI load exhausting the separate
+            # 100 ms maintenance budget; deadline tests own that budget.
+            monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "5")
 
         from src.execution import command_recovery, venue_sync_contract
         from src.state.collateral_ledger import init_collateral_schema
@@ -43311,6 +43315,10 @@ def test_deterministic_no_fill_buy_releases_risk_obligation_atomically(
 def test_scheduled_deterministic_no_fill_drains_before_venue_reads(
     conn, monkeypatch, tmp_path, scope
 ):
+    if scope == "live_tick":
+        # This tests local-drain-before-venue ordering, not the maintenance
+        # interrupt deadline exercised by its dedicated bounded-tick tests.
+        monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "5")
     from src.execution import command_recovery, venue_sync_contract
 
     command_id = "scheduled-no-fill"
