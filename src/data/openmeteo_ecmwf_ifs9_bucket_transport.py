@@ -835,7 +835,10 @@ def _hsurf_reader(local_cache: str = HSURF_LOCAL_CACHE):
 
     local = _Path(local_cache)
     if local.exists():
-        return OmFileReader(fsspec.open(str(local), mode="rb"))
+        try:
+            return OmFileReader(fsspec.open(str(local), mode="rb"))
+        except RuntimeError as exc:
+            raise ValueError("invalid local HSURF .om") from exc
     backend = fsspec.open(
         f"blockcache::{HSURF_S3_URI}",
         mode="rb",

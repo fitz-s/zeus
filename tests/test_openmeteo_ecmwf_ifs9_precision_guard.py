@@ -285,3 +285,35 @@ def test_source_geometry_static_rewrite_cannot_reuse_cached_proof(monkeypatch, t
     later = transport.source_cell_geometry_proof(**kwargs)
     assert first["static_hsurf_sha256"] != later["static_hsurf_sha256"]
     assert first["selected_flat_index"] == later["selected_flat_index"]
+
+
+def test_source_geometry_corrupt_static_direct_guard_returns_typed_block(
+    monkeypatch, tmp_path,
+) -> None:
+    import json
+    import scripts.download_replacement_forecast_current_targets as dl
+    import src.data.openmeteo_ecmwf_ifs9_bucket_transport as transport
+
+    raw = json.dumps({"latitude": 14.516696, "longitude": 121.05752,
+                      "elevation": 13.0, "timezone": "Asia/Manila"}).encode()
+    cell = {
+        "revision": "openmeteo_ifs9_o1280_source_cell_v1",
+        "static_hsurf_sha256": "a" * 64, "selected_flat_index": 491,
+        "selected_grid_lat": 14.516696, "selected_grid_lon": 121.05752,
+        "raw_grid_elevation_m": -7.0, "effective_grid_elevation_m": 13.0,
+        "target_dem_elevation_m": 13.0, "cell_is_sea": False,
+        "cell_is_center": True, "nearby_sea": False,
+    }
+    real_source_cell = transport.source_cell_geometry_proof
+    monkeypatch.setattr(transport, "source_cell_geometry_proof", lambda **_kwargs: cell)
+    metadata = OpenMeteoIfs9PrecisionMetadata(**dl._precision_metadata(
+        "Manila", "2026-09-27", anchor_sigma_c=3.0, raw_payload_bytes=raw,
+    ))
+    malformed = tmp_path / "hsurf.om"
+    malformed.write_bytes(b"not-an-om-file")
+    monkeypatch.setattr(transport, "source_cell_geometry_proof", lambda **kwargs: real_source_cell(
+        **kwargs, local_cache=str(malformed),
+    ))
+    result = evaluate_openmeteo_ecmwf_ifs9_precision_guard(metadata, raw_payload_bytes=raw)
+    assert result.status == "BLOCK"
+    assert "OM9_SOURCE_GEOMETRY_PROOF_UNAVAILABLE" in result.reason_codes
