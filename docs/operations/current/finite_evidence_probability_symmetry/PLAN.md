@@ -6,6 +6,47 @@ Status: active
 
 ## 2026-09-27 — current-day full causal repair acceptance
 
+### Latest verified delivery boundary — 19:15 UTC
+
+- Final guarded rollout completed with loaded main `c7be6df3f` (PID 57119,
+  generated 19:10:14.839Z), forecast PID 55037 and ingest PID 55019. Main holds
+  all three canonical DBs. No bypass, manual order/cancel, extra entry pause,
+  manual resume or direct canonical data edit was used. Effective entry-pause
+  selection is false; the deployment guard expired at 19:15:02.215Z.
+- The new main has multiple independent successful normal monitor cycles for
+  HK28 HIGH 2c606 (MON154–156), LOW f317 (MON54–56), Cape 8f3 (MON659–661),
+  Helsinki fd4 (MON705–707), and Milan ab6 (MON630–632). All have fresh
+  probability plus fresh quotes and correctly bound held-side token receipts.
+  No persistent carrier-order mismatch remains in these acceptance windows.
+  Initial HK HIGH/Cape quote recovery and a LOW read-deadline were observed;
+  subsequent normal cycles recovered without relaxed bounds or manual writes.
+- Current open positions: 15; eight have fresh probability and quote. The
+  other seven are the older HK holdings, whose expired-source/official-final
+  prerequisites remain unsatisfied. Their near-zero bids are not lawful exits
+  under the price band, and running monitors do not mean their risk is gone.
+  Lucknow settled at 19:13:43Z by venue resolution (winning 25C bin), at a loss;
+  absence of a forecast settlement_outcomes row is not absence of venue
+  resolution. Do not keep reporting it as an open post-local source blocker.
+- Technical acceptance is not profitability acceptance. The recent HK panic
+  requests did reach global comparisons; negative modeled SELL EV led to HOLD.
+  The audited new HK LOW likewise retains positive mean belief above its bid.
+  Source/consumer/recovery defects are repaired and tested, but a persistent
+  predictive advantage, reversal of realized losses, or cessation of all future
+  losses has not been established. Existing economic action law was not changed
+  into an unvalidated model-independent stop-loss rule.
+- Tests: final carrier suites 1,307 pass / 65 identical baseline failures;
+  required data suites 240 pass / four identical baseline failures; NOAA product
+  suite 54 pass / one unchanged unrelated script-registry failure. Independent
+  review passed the fixed repair commits and source-to-held-token relationships.
+  This is zero added regression evidence, not a globally green repository.
+- Durable promotions are the source/consumer/recovery code, behavioral antibodies
+  and existing authority/evidence surfaces. Eleven completed own child branch
+  refs were removed after patch-equivalence/supersession checks; code remains in
+  live history and existing recoverable worktree archives. Other tasks' branches
+  and worktrees remain untouched. Final parent worktree archival follows the
+  documentation-only closeout. Topology friction: unrelated pre-existing drift
+  remains reported separately; the touched NOAA test is fully registered.
+
 ### Concurrent conditional-HIGH integration acceptance
 
 - Follow-up repair `143e95115` passes final independent fixed-SHA review.
