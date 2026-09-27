@@ -803,11 +803,13 @@ def test_source_clock_scheme_rejects_possessed_d2_at_d2_lead_but_keeps_global(
 
 
 @pytest.mark.parametrize("metric", ("high", "low"))
-@pytest.mark.parametrize(("missing_hrrr", "shadowed_hrrr"), (
-    (True, False), (True, True), (False, False),
+@pytest.mark.parametrize(("missing_hrrr", "shadowed_hrrr", "split_cohort"), (
+    (True, False, False), (True, True, False),
+    (True, True, True), (False, False, False),
 ))
 def test_source_clock_partial_current_producer_to_jit(
-    monkeypatch: pytest.MonkeyPatch, metric: str, missing_hrrr: bool, shadowed_hrrr: bool,
+    monkeypatch: pytest.MonkeyPatch, metric: str, missing_hrrr: bool,
+    shadowed_hrrr: bool, split_cohort: bool,
 ) -> None:
     from src.config import runtime_cities_by_name
     from src.engine import event_reactor_adapter as adapter
@@ -816,7 +818,7 @@ def test_source_clock_partial_current_producer_to_jit(
     conn = _conn()
     city = "Los Angeles"
     run = datetime(2026, 9, 27, 18, tzinfo=UTC)
-    decision = run + timedelta(hours=4 if shadowed_hrrr else 1)
+    decision = run + timedelta(hours=7 if split_cohort else 4 if shadowed_hrrr else 1)
     configured = ("gfs_hrrr", "icon_global", "ukmo_global_deterministic_10km")
     for index, model in enumerate(("ecmwf_ifs", *configured)):
         if missing_hrrr and not shadowed_hrrr and model == "gfs_hrrr":
@@ -833,7 +835,7 @@ def test_source_clock_partial_current_producer_to_jit(
              (run + timedelta(minutes=11)).isoformat(), 20.0 + index),
         )
     if shadowed_hrrr:
-        newer = run + timedelta(hours=3)
+        newer = run + timedelta(hours=6 if split_cohort else 3)
         conn.execute(
             """INSERT INTO raw_model_forecasts (
                 model, city, target_date, metric, source_cycle_time,
@@ -845,6 +847,20 @@ def test_source_clock_partial_current_producer_to_jit(
              (newer + timedelta(minutes=5)).isoformat(),
              (newer + timedelta(minutes=10)).isoformat(),
              (newer + timedelta(minutes=11)).isoformat()),
+        )
+    if split_cohort:
+        icon_cycle = run + timedelta(hours=4)
+        conn.execute(
+            """INSERT INTO raw_model_forecasts (
+                model, city, target_date, metric, source_cycle_time,
+                source_available_at, captured_at, recorded_at, lead_days,
+                forecast_value_c, endpoint, coverage_status
+            ) VALUES ('icon_global', ?, '2026-09-29', ?, ?, ?, ?, ?, 2, 25.0,
+                      'single_runs', 'COVERED')""",
+            (city, metric, icon_cycle.isoformat(),
+             (icon_cycle + timedelta(minutes=5)).isoformat(),
+             (icon_cycle + timedelta(minutes=10)).isoformat(),
+             (icon_cycle + timedelta(minutes=11)).isoformat()),
         )
     scheme = CityOneScheme(
         city=city, scheme_status="ACTIVE", final_sources=configured,
@@ -910,6 +926,13 @@ def test_source_clock_partial_current_producer_to_jit(
             assert "ncep_nbm_conus" in override.used_models
             assert scheme_proof["configured_coherent_sources"] == ["icon_global", "ukmo_global_deterministic_10km"]
             assert scheme_proof["configured_current_provider_cohort_family_count"] == 2
+        cohort = scheme_proof["configured_cohort_value_serving"]
+        assert set(cohort) == set(scheme_proof["configured_coherent_sources"])
+        assert scheme_proof["configured_cohort_decision_time"] == decision.isoformat()
+        if split_cohort:
+            assert cohort["icon_global"]["served_cycle"] == run.isoformat()
+            assert scheme_proof["between_cohort_value_serving"]["icon_global"]["served_cycle"] == (run + timedelta(hours=4)).isoformat()
+            assert override.current_value_serving["icon_global"]["served_cycle"] == (run + timedelta(hours=4)).isoformat()
     else:
         assert override.method == "SOURCE_CLOCK_FIXED_WEIGHT"
         assert "fallback_reason" not in scheme_proof
@@ -923,15 +946,16 @@ def test_source_clock_partial_current_producer_to_jit(
         "decorrelated_providers_complete": override.decorrelated_providers_complete,
     }}
     family = SimpleNamespace(city=city, target_date="2026-09-29", metric=metric)
+    posterior_kwargs = {"posterior_computed_at": decision} if missing_hrrr else {}
     present, certificate = adapter._source_clock_model_count_certificate(
-        provenance, family=family, decision_time=decision,
+        provenance, family=family, decision_time=decision, **posterior_kwargs,
     )
     assert present and certificate is not None, provenance
     assert certificate["posterior_configured_sources"] == tuple(sorted(override.used_models))
     assert certificate["posterior_missing_sources"] == ()
     assert adapter._posterior_bound_spine_inputs(
         conn, family=family, decision_time=decision,
-        source_cycle_time=run.isoformat(), provenance=provenance,
+        source_cycle_time=run.isoformat(), provenance=provenance, **posterior_kwargs,
     ) is not None
     if missing_hrrr and not shadowed_hrrr:
         for field, value in (
@@ -943,12 +967,19 @@ def test_source_clock_partial_current_producer_to_jit(
             tampered = json.loads(json.dumps(provenance))
             tampered["bayes_precision_fusion"]["source_clock_one_scheme"][field] = value
             assert adapter._source_clock_model_count_certificate(
-                tampered, family=family, decision_time=decision,
+                tampered, family=family, decision_time=decision, **posterior_kwargs,
             ) == (True, None)
+        tampered = json.loads(json.dumps(provenance))
+        tampered["bayes_precision_fusion"]["source_clock_one_scheme"]["configured_cohort_decision_time"] = (
+            decision - timedelta(minutes=1)
+        ).isoformat()
+        assert adapter._source_clock_model_count_certificate(
+            tampered, family=family, decision_time=decision, **posterior_kwargs,
+        ) == (True, None)
         tampered = json.loads(json.dumps(provenance))
         tampered["bayes_precision_fusion"]["current_value_serving"].pop("icon_global")
         assert adapter._source_clock_model_count_certificate(
-            tampered, family=family, decision_time=decision,
+            tampered, family=family, decision_time=decision, **posterior_kwargs,
         ) == (True, None)
 
         arrived = decision + timedelta(minutes=10)
@@ -965,14 +996,14 @@ def test_source_clock_partial_current_producer_to_jit(
         # Future availability must not leak into the original decision.
         assert adapter._posterior_bound_spine_inputs(
             conn, family=family, decision_time=decision,
-            source_cycle_time=run.isoformat(), provenance=provenance,
+            source_cycle_time=run.isoformat(), provenance=provenance, **posterior_kwargs,
         ) is not None
         later = arrived + timedelta(minutes=1)
         reason: dict[str, str] = {}
         assert adapter._posterior_bound_multimodel_members(
             conn, family=family, decision_time=later,
             source_cycle_time=run.isoformat(), provenance=provenance,
-            reason_out=reason,
+            reason_out=reason, **posterior_kwargs,
         ) is None
         assert reason == {"reason": "model_identity_drift:configured_current_sources"}
 
@@ -994,7 +1025,7 @@ def test_source_clock_partial_current_producer_to_jit(
             conn, family=family, decision_time=later,
             source_cycle_time=run.isoformat(), provenance=refreshed_provenance,
         ) is not None
-    if shadowed_hrrr:
+    if shadowed_hrrr and not split_cohort:
         newer_hrrr_cycle = run + timedelta(hours=5)
         arrived = newer_hrrr_cycle + timedelta(minutes=10)
         conn.execute(
@@ -1009,13 +1040,13 @@ def test_source_clock_partial_current_producer_to_jit(
         )
         assert adapter._posterior_bound_spine_inputs(
             conn, family=family, decision_time=decision,
-            source_cycle_time=run.isoformat(), provenance=provenance,
+            source_cycle_time=run.isoformat(), provenance=provenance, **posterior_kwargs,
         ) is not None
         reason: dict[str, str] = {}
         assert adapter._posterior_bound_multimodel_members(
             conn, family=family, decision_time=arrived + timedelta(minutes=1),
             source_cycle_time=run.isoformat(), provenance=provenance,
-            reason_out=reason,
+            reason_out=reason, **posterior_kwargs,
         ) is None
         assert reason == {"reason": "model_identity_drift:configured_current_sources"}
 
@@ -1787,6 +1818,51 @@ def test_materializer_writes_authorized_06z_cycle_as_live_layer(monkeypatch: pyt
     provenance = json.loads(row["provenance_json"])
     assert row["runtime_layer"] == LIVE_RUNTIME_LAYER
     assert provenance["cycle_phase"] == "synoptic"
+
+
+def test_non_day0_partial_cohort_proof_changes_equal_q_posterior_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    fusion = materializer_mod._replacement_bayes_precision_fusion_override()
+    request = _request(source_cycle_time=_dt(6), computed_at=_dt(10), expires_at=_dt(12))
+    common = {
+        "fallback_reason": "configured_current_provider_set_incomplete",
+        "configured_coherent_sources": ["icon_global", "ukmo_global_deterministic_10km"],
+    }
+
+    def materialized(scheme: dict[str, object]) -> tuple[int, str, dict[str, float]]:
+        monkeypatch.setattr(
+            materializer_mod, "_replacement_bayes_precision_fusion_override",
+            lambda *_args, **_kwargs: replace(fusion, source_clock_one_scheme=scheme),
+        )
+        computed = materializer_mod._compute_posterior_payload(
+            conn, request, metric="high", anchor_id=17,
+        )
+        assert computed.live_eligible
+        posterior_id = materializer_mod._write_posterior_row(
+            conn, request, metric="high", anchor_id=17, result=computed,
+        )
+        assert posterior_id is not None
+        return posterior_id, computed.posterior_config_hash, computed.q
+
+    old = materialized(dict(common))
+    first = materialized({**common,
+        "configured_cohort_decision_time": _dt(10).isoformat(),
+        "configured_cohort_value_serving": {"icon_global": {"raw_model_forecast_id": 10}},
+    })
+    revised_row = materialized({**common,
+        "configured_cohort_decision_time": _dt(10).isoformat(),
+        "configured_cohort_value_serving": {"icon_global": {"raw_model_forecast_id": 11}},
+    })
+    revised_cutoff = materialized({**common,
+        "configured_cohort_decision_time": _dt(10, 1).isoformat(),
+        "configured_cohort_value_serving": {"icon_global": {"raw_model_forecast_id": 10}},
+    })
+    assert old[2] == first[2] == revised_row[2] == revised_cutoff[2]
+    assert len({old[0], first[0], revised_row[0], revised_cutoff[0]}) == 4
+    assert len({old[1], first[1], revised_row[1], revised_cutoff[1]}) == 4
 
 
 def test_materializer_surfaces_bounds_missing_sub_reason(monkeypatch: pytest.MonkeyPatch) -> None:

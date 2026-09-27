@@ -87,6 +87,15 @@ The city-local lead, source roles and exact rows must be reproducible at decisio
 time. A one-family cohort, ineligible source or missing current shape blocks it.
 The complete fixed-weight proposal continues unchanged.
 
+The configured-basket eligibility cohort, latest center inputs and actual
+between-spread cohort are separate evidence roles. Their provider sets and runs
+need not coincide. The eligibility cohort carries its exact raw rows and the
+posterior's computed-at cutoff, both bound into posterior identity; JIT reproduces
+that cohort at the same cutoff and checks the cutoff against the canonical
+posterior row. Current center/source supersession and current ENS/between-shape
+checks remain independently mandatory. Old partial certificates lacking this
+cohort proof are rematerialized through the existing input-revision queue.
+
 The center bootstrap uses only current evidence. The ENS/provider center
 displacement is systematic current disagreement and is not divided by member
 count:

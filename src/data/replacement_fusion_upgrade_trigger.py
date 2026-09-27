@@ -57,7 +57,7 @@ _RESERVATION_TTL = timedelta(minutes=5)
 _DAY0_HOURLY_VECTOR_SOURCE = "day0_hourly_vectors"
 _DAY0_CAUSAL_BUNDLE_SOURCE = "day0_causal_evidence_bundle"
 _DAY0_CURRENT_TEMPERATURE_SOURCE = "day0_current_temperature_state"
-_PARTIAL_CURRENT_PROPOSAL_REVISION = "source_clock_partial_current_precision_fusion_v1"
+_PARTIAL_CURRENT_PROPOSAL_REVISION = "source_clock_partial_configured_cohort_proof_v2"
 
 
 def _capturable_current_temperature_state(
@@ -486,7 +486,22 @@ def _legacy_partial_current_proposal_needs_recompute(
     decision_time: datetime | None,
 ) -> bool:
     """Prove the old partial fixed proposal can now use the typed current route."""
-    if decision_time is None or scheme.get("renormalized") is not True or scheme.get("fallback_reason"):
+    if decision_time is None:
+        return False
+    old_fixed = scheme.get("renormalized") is True and not scheme.get("fallback_reason")
+    configured_proof = scheme.get("configured_cohort_value_serving")
+    coherent_sources = scheme.get("configured_coherent_sources")
+    new_typed_missing_proof = (
+        scheme.get("fallback_reason") == "configured_current_provider_set_incomplete"
+        and scheme.get("fallback_to") == "current_precision_fusion"
+        and (
+            not isinstance(configured_proof, Mapping)
+            or not isinstance(coherent_sources, (list, tuple))
+            or set(configured_proof) != set(coherent_sources)
+            or not str(scheme.get("configured_cohort_decision_time") or "").strip()
+        )
+    )
+    if not (old_fixed or new_typed_missing_proof):
         return False
     configured = scheme.get("configured_sources")
     missing = scheme.get("missing_sources")

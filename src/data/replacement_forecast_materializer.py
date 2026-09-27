@@ -4928,6 +4928,11 @@ def _replacement_bayes_precision_fusion_override(
                         **({
                             "configured_current_sources": list(_configured_current_sources),
                             "configured_coherent_sources": list(_configured_coherent_sources),
+                            "configured_cohort_value_serving": {
+                                source: _scheme_coherent_current[source].as_provenance()
+                                for source in _configured_coherent_sources
+                            },
+                            "configured_cohort_decision_time": computed_at.isoformat(),
                         } if _scheme_partial_current else {}),
                     }
                     try:
@@ -7807,6 +7812,19 @@ def _compute_posterior_payload(
                 ),
             }
         )
+        _scheme_proof = bayes_precision_fusion_override.source_clock_one_scheme
+        if (
+            isinstance(_scheme_proof, Mapping)
+            and _scheme_proof.get("fallback_reason")
+            == "configured_current_provider_set_incomplete"
+        ):
+            posterior_config["source_clock_configured_cohort_identity"] = _json_hash(
+                {
+                    "decision_time": _scheme_proof.get("configured_cohort_decision_time"),
+                    "coherent_sources": _scheme_proof.get("configured_coherent_sources"),
+                    "serving": _scheme_proof.get("configured_cohort_value_serving"),
+                }
+            )
     # The served-center de-bias is an INPUT that shaped this row's q, so it belongs in the
     # config identity. posterior_config otherwise carries only the UNCORRECTED fused center
     # (bayes_precision_fusion_anchor_value_c above), so two rows fitted under different 6h

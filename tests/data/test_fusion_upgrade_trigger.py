@@ -286,6 +286,26 @@ def test_old_partial_fixed_scheme_same_raw_reseeds_once_through_fusion_authority
 
     old["fallback_reason"] = "configured_current_provider_set_incomplete"
     old["fallback_to"] = "current_precision_fusion"
+    old["renormalized"] = False
+    # A typed v1 row still needs a new posterior on identical raw input.
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json=? WHERE city=? AND target_date=? AND temperature_metric=?",
+        (json.dumps({"bayes_precision_fusion": {
+            "used_models": [_DWD, _UKMO],
+            "current_value_serving": {model: {"raw_model_forecast_id": raw_id} for model, raw_id in ids.items()},
+            "source_clock_one_scheme": old,
+        }}), city, target, metric),
+    )
+    typed_without_cohort = scope_capture_offers_larger_provider_set(conn, **kwargs)
+    assert typed_without_cohort["changed_input_revisions"] == {
+        trigger._PARTIAL_CURRENT_PROPOSAL_REVISION: trigger._PARTIAL_CURRENT_PROPOSAL_REVISION,
+    }
+    old["configured_coherent_sources"] = [_DWD, _UKMO]
+    old["configured_cohort_value_serving"] = {
+        source: {"raw_model_forecast_id": ids[source], "served_cycle": cycle}
+        for source in (_DWD, _UKMO)
+    }
+    old["configured_cohort_decision_time"] = "2026-09-27T18:50:00+00:00"
     conn.execute(
         "UPDATE forecast_posteriors SET provenance_json=? WHERE city=? AND target_date=? AND temperature_metric=?",
         (json.dumps({"bayes_precision_fusion": {
@@ -305,6 +325,7 @@ def test_old_partial_fixed_scheme_same_raw_reseeds_once_through_fusion_authority
 
     old.pop("fallback_reason")
     old.pop("fallback_to")
+    old.pop("configured_cohort_value_serving")
     old["renormalized"] = False
     conn.execute(
         "UPDATE forecast_posteriors SET provenance_json=? WHERE city=? AND target_date=? AND temperature_metric=?",
@@ -365,6 +386,12 @@ def test_older_same_provider_raw_row_does_not_reseed_current_partial_forever() -
         "renormalized": False,
         "fallback_reason": "configured_current_provider_set_incomplete",
         "fallback_to": "current_precision_fusion",
+        "configured_coherent_sources": [_DWD, _UKMO],
+        "configured_cohort_value_serving": {
+            source: {"raw_model_forecast_id": served[source], "served_cycle": cycle}
+            for source in (_DWD, _UKMO)
+        },
+        "configured_cohort_decision_time": "2026-09-27T21:50:00+00:00",
     }
     conn.execute(
         "UPDATE forecast_posteriors SET provenance_json=? WHERE city=? AND target_date=? AND temperature_metric=?",

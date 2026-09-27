@@ -29083,6 +29083,7 @@ def _forecast_authority_payload_from_posterior(
             decision_time=decision_time,
             source_cycle_time=p_source_cycle_time,
             provenance=p_provenance,
+            posterior_computed_at=p_computed_at,
             reason_out=members_reason,
         )
         if members_native is None:
@@ -29101,7 +29102,10 @@ def _forecast_authority_payload_from_posterior(
         members_native = None
         _fail("event_type_not_forecast_decision")
     source_clock_present, source_clock_certificate = (
-        _source_clock_model_count_certificate(p_provenance, family=family, decision_time=decision_time)
+        _source_clock_model_count_certificate(
+            p_provenance, family=family, decision_time=decision_time,
+            posterior_computed_at=p_computed_at,
+        )
     )
     if source_clock_present and source_clock_certificate is None:
         _fail("source_clock_certificate_missing")
@@ -29258,6 +29262,7 @@ def _posterior_bound_multimodel_members(
     decision_time: datetime,
     source_cycle_time: object,
     provenance: Mapping[str, object],
+    posterior_computed_at: object | None = None,
     reason_out: dict[str, str] | None = None,
 ) -> tuple[float, ...] | None:
     """Read the exact current inputs recorded by one replacement posterior.
@@ -29290,7 +29295,10 @@ def _posterior_bound_multimodel_members(
         return None
     models = tuple(str(model or "").strip() for model in raw_models)
     source_clock_present, source_clock_certificate = (
-        _source_clock_model_count_certificate(provenance, family=family, decision_time=decision_time)
+        _source_clock_model_count_certificate(
+            provenance, family=family, decision_time=decision_time,
+            posterior_computed_at=posterior_computed_at,
+        )
     )
     if source_clock_present and source_clock_certificate is None:
         _fail("source_clock_certificate_missing")
@@ -29351,6 +29359,32 @@ def _posterior_bound_multimodel_members(
             # same-provider rows it deliberately superseded. Real arrival drift
             # retires this family witness through the existing eviction/reseed.
             _fail("model_identity_drift:configured_current_sources")
+            return None
+        from src.data.replacement_current_value_serving import read_freshest_coherent_instrument_values
+        from src.data.replacement_forecast_materializer import BETWEEN_COHORT_WINDOW_HOURS
+
+        # The configured-basket eligibility cohort is distinct from both the
+        # latest center rows and the full fusion's between-spread cohort.
+        configured_cohort = read_freshest_coherent_instrument_values(
+            conn, city=family.city, metric=family.metric, target_date=family.target_date,
+            decision_time_iso=str(scheme["configured_cohort_decision_time"]),
+            models=tuple(scheme["configured_sources"]),
+            cohort_window_hours=BETWEEN_COHORT_WINDOW_HOURS,
+        )
+        expected_cohort = set(scheme["configured_current_sources"]).intersection(configured_cohort)
+        recorded_cohort = scheme["configured_cohort_value_serving"]
+        if set(recorded_cohort) != expected_cohort or any(
+            int(recorded_cohort[model]["raw_model_forecast_id"])
+            != configured_cohort[model].raw_model_forecast_id
+            or str(recorded_cohort[model]["served_cycle"])
+            != configured_cohort[model].served_cycle
+            or str(recorded_cohort[model]["served_via"])
+            != configured_cohort[model].served_via
+            or str(recorded_cohort[model]["captured_at"])
+            != configured_cohort[model].captured_at
+            for model in expected_cohort
+        ):
+            _fail("model_identity_drift:configured_cohort")
             return None
     unit = str(
         getattr(runtime_cities_by_name().get(str(family.city)), "settlement_unit", "")
@@ -29419,6 +29453,7 @@ def _posterior_bound_spine_inputs(
     decision_time: datetime,
     source_cycle_time: object,
     provenance: Mapping[str, object],
+    posterior_computed_at: object | None = None,
 ) -> tuple[tuple[float, ...], str, tuple[float, ...] | None] | None:
     """Return the exact posterior inputs and its recorded provider weights.
 
@@ -29436,13 +29471,17 @@ def _posterior_bound_spine_inputs(
         decision_time=decision_time,
         source_cycle_time=source_cycle_time,
         provenance=provenance,
+        posterior_computed_at=posterior_computed_at,
     )
     source_cycle = str(source_cycle_time or "").strip()
     if members is None or not source_cycle:
         return None
 
     source_clock_present, source_clock_certificate = (
-        _source_clock_model_count_certificate(provenance, family=family, decision_time=decision_time)
+        _source_clock_model_count_certificate(
+            provenance, family=family, decision_time=decision_time,
+            posterior_computed_at=posterior_computed_at,
+        )
     )
     if not source_clock_present:
         return members, source_cycle, None
@@ -29480,6 +29519,7 @@ def _source_clock_model_count_certificate(
     *,
     family: object | None = None,
     decision_time: datetime | None = None,
+    posterior_computed_at: object | None = None,
 ) -> tuple[bool, dict[str, object] | None]:
     """Return the source-clock configured-source completeness certificate.
 
@@ -29555,24 +29595,39 @@ def _source_clock_model_count_certificate(
             current = tuple(str(value) for value in current_raw)
             coherent = tuple(str(value) for value in coherent_raw)
             missing_set = set(configured) - set(current)
-            between = scheme["between_cohort_value_serving"]
+            configured_cohort = scheme["configured_cohort_value_serving"]
+            cohort_decision_time = datetime.fromisoformat(
+                str(scheme["configured_cohort_decision_time"]).replace("Z", "+00:00")
+            )
+            if (
+                not isinstance(configured_cohort, Mapping)
+                or cohort_decision_time.tzinfo is None
+                or cohort_decision_time > decision_time
+                or cohort_decision_time != _parse_utc(
+                    posterior_computed_at.isoformat()
+                    if isinstance(posterior_computed_at, datetime)
+                    else posterior_computed_at
+                )
+            ):
+                return True, None
             shape = scheme["current_evidence_shape"]
             actual_current = set(configured) & set(served)
-            actual_coherent = set(configured) & set(between)
+            actual_coherent = set(configured_cohort)
             current_family_count = len({provider_family_for_source(s) for s in current})
             coherent_family_count = len({provider_family_for_source(s) for s in coherent})
             cycles = {
-                s: datetime.fromisoformat(str(between[s]["served_cycle"]).replace("Z", "+00:00"))
+                s: datetime.fromisoformat(str(configured_cohort[s]["served_cycle"]).replace("Z", "+00:00"))
                 for s in coherent
             }
             freshest = max(cycles.values())
             for source in coherent:
-                row = between[source]
-                served_row = serving[source]
+                row = configured_cohort[source]
+                captured_at = datetime.fromisoformat(str(row["captured_at"]).replace("Z", "+00:00"))
                 if (
-                    str(row["raw_model_forecast_id"]) != str(served_row["raw_model_forecast_id"])
-                    or str(row["served_cycle"]) != str(served_row["served_cycle"])
-                    or cycles[source].tzinfo is None
+                    int(row["raw_model_forecast_id"]) <= 0
+                    or not str(row["served_via"] or "").strip()
+                    or cycles[source].tzinfo is None or captured_at.tzinfo is None
+                    or cycles[source] > cohort_decision_time or captured_at > cohort_decision_time
                     or not 0 <= (freshest - cycles[source]).total_seconds() <= BETWEEN_COHORT_WINDOW_HOURS * 3600
                 ):
                     return True, None
@@ -33333,6 +33388,7 @@ def _generate_candidate_proofs(
                         decision_time=decision_time,
                         source_cycle_time=_replacement_cycle,
                         provenance=_replacement_provenance,
+                        posterior_computed_at=getattr(_replacement_bundle, "computed_at", None),
                     )
                 else:
                     _posterior_spine = None
