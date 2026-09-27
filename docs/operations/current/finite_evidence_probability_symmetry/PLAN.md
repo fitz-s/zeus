@@ -65,7 +65,7 @@ Status: active
   (diagnostic-source role, invalid-date error text, and two old HK hourly
   fixtures missing local-hour identity). These are an explicit baseline, not
   a claim that the repository is green.
-- Fixed post-midnight repair is `4f686395d` (parent `62547f4d8`). On the
+- Fixed post-midnight repair is `4f686395d` (rebased parent `80639f9af`). On the
   integrated `b255d1f90` base, all 170 scheduling/boot/cycle-monotone tests and
   19 HKO/partial-provider compatibility cases pass. Required data suites retain
   exactly the baseline four failing nodes with 240 passes; JUnit set comparison
@@ -96,6 +96,14 @@ Status: active
   attempt cap. Inspection found no permanent no-retry defect there; neither
   this result nor reduced recovery contention identifies the historical holder
   or proves that missed fill would have succeeded.
+- Final independent review accepts fixed `4f686395d`, including the repaired
+  fairness and strict RESET boundaries. Rebase onto concurrent `f933d7feb`
+  is clean; the three source modules plus its changed materialization-queue
+  suite pass all 193 tests on the integrated parent. Process-local fairness
+  resets on restart, so no claim of fairness across repeated external restarts
+  is made. There are no remaining code-review blockers for this bounded repair;
+  actual LOW v5 publication and two fresh held monitor receipts remain required
+  after the standard guarded rollout.
 
 - Final second-round source checks: 85 schedule/boot tests pass, including
   canonical full/short tracks, unknown/invalid clock retry, same-date and
