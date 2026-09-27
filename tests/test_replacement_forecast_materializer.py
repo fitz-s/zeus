@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import sqlite3
 import subprocess
 import sys
@@ -1114,6 +1115,10 @@ def test_noaa_missing_current_state_blocks_only_one_family_and_drains_on_next_cu
     assert blocked.reason_codes == (
         "DAY0_NOAA_PRELIMINARY_CARRIER_CURRENT_TEMPERATURE_STATE_MISSING",
     )
+    prepared = materializer_mod.prepare_replacement_forecast_live(conn, missing)
+    assert isinstance(prepared, materializer_mod.ReplacementForecastMaterializeResult)
+    assert prepared.status == "BLOCKED"
+    assert prepared.reason_codes == blocked.reason_codes
     assert materializer_mod.compute_replacement_posterior_readonly(conn, missing) is None
 
     healthy = replace(
@@ -6470,18 +6475,11 @@ def test_materialize_script_threads_day0_zero_observation_state(
 
 
 def test_materialize_script_fails_closed_without_precision_metadata(tmp_path) -> None:
-    (tmp_path / "openmeteo_payload.json").write_text(
-        json.dumps(
-            {
-                "hourly_units": {"temperature_2m": "C"},
-                "hourly": {
-                    "time": ["2026-06-07T00:00", "2026-06-07T06:00"],
-                    "temperature_2m": [23.0, 27.0],
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
+    (tmp_path / "openmeteo_payload.json").write_bytes(_fixture_raw_openmeteo_bytes())
+    test_state = tmp_path / "isolated-state"
+    test_state.mkdir()
+    for db_name in ("zeus-forecasts.db", "zeus-world.db"):
+        sqlite3.connect(test_state / db_name).close()
     request = {
         "city": "Shanghai",
         "city_id": "Shanghai",
@@ -6505,6 +6503,11 @@ def test_materialize_script_fails_closed_without_precision_metadata(tmp_path) ->
     result = subprocess.run(
         [sys.executable, "scripts/materialize_replacement_forecast_live.py", "--input-json", str(input_json)],
         cwd=REPO_ROOT,
+        env={
+            **os.environ,
+            "ZEUS_TEST_STATE_ROOT": str(test_state),
+            "ZEUS_PRIMARY_ROOT": str(tmp_path),
+        },
         capture_output=True,
         text=True,
     )
@@ -6513,6 +6516,8 @@ def test_materialize_script_fails_closed_without_precision_metadata(tmp_path) ->
     payload = json.loads(result.stderr)
     assert payload["status"] == "ERROR"
     assert "precision_metadata_json" in payload["error"]
+    assert (test_state / "zeus-world.db").is_file()
+    assert (test_state / "zeus-forecasts.db").is_file()
 
 
 def test_boot_current_posterior_family_scan_uses_covering_index(
@@ -6630,7 +6635,8 @@ def test_seed_cycle_boundary_uses_ordered_live_family_index(
             source_cycle_time TEXT NOT NULL,
             computed_at TEXT NOT NULL,
             runtime_layer TEXT NOT NULL,
-            q_json TEXT NOT NULL
+            q_json TEXT NOT NULL,
+            provenance_json TEXT NOT NULL DEFAULT '{}'
         );
         CREATE INDEX idx_forecast_posteriors_runtime_layer_target
             ON forecast_posteriors(
@@ -6639,7 +6645,10 @@ def test_seed_cycle_boundary_uses_ordered_live_family_index(
         """
     )
     conn.executemany(
-        "INSERT INTO forecast_posteriors VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        """INSERT INTO forecast_posteriors (
+            posterior_id, source_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, runtime_layer, q_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             (
                 1,
