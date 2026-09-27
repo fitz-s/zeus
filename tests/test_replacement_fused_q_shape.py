@@ -4,6 +4,7 @@
 """Current-evidence predictive-shape authority antibodies."""
 from __future__ import annotations
 
+import json
 import math
 import statistics
 from types import SimpleNamespace
@@ -11,6 +12,12 @@ from types import SimpleNamespace
 import pytest
 
 import src.data.replacement_forecast_materializer as mod
+from src.contracts.ensemble_snapshot_provenance import (
+    ECMWF_OPENDATA_HIGH_DATA_VERSION,
+    GRID_SURFACE_EVIDENCE_REVISION,
+    grid_surface_evidence_identity_hash,
+)
+from src.data.executable_forecast_reader import grid_surface_evidence_reason
 from src.data.replacement_forecast_cycle_policy import (
     BETWEEN_COHORT_STATUS_SIMULTANEOUS_PROVEN,
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
@@ -151,7 +158,7 @@ def test_aligned_ensemble_center_preserves_within_between_decomposition() -> Non
     raw = tuple(range(-25, 26))
     scale = 0.32530930629305355 / statistics.pstdev(raw)
     members = tuple(11.0204 + value * scale for value in raw)
-    shape = mod._current_evidence_shape_from_values(
+    inputs = dict(
         snapshot_id=1202928,
         source_cycle_time="2026-07-10T12:00:00+00:00",
         source_available_at="2026-07-10T20:25:16.964968+00:00",
@@ -173,11 +180,38 @@ def test_aligned_ensemble_center_preserves_within_between_decomposition() -> Non
             "ukmo_global": "2026-07-10T12:00:00+00:00",
         },
     )
+    shape = mod._current_evidence_shape_from_values(**inputs)
 
     assert shape.ensemble_center_delta_c == pytest.approx(0.0, abs=1e-12)
     assert shape.predictive_sigma_c == pytest.approx(0.4085217065969294)
+    # Numerical shape construction is useful offline, but geometry-free math
+    # alone is never a live probability witness.
     assert mod._fusion_current_evidence_shape_has_live_authority(
         SimpleNamespace(current_evidence_shape=shape.as_payload())
+    ) is False
+
+    from tests.test_replacement_forecast_materializer import _fixture_ens_surface_provenance
+
+    surface = json.loads(_fixture_ens_surface_provenance(cycle=inputs["source_cycle_time"]))
+    surface["grid_surface_evidence"]["mask_source_fetched_at"] = inputs["source_available_at"]
+    assert grid_surface_evidence_reason({
+        "city": "Shanghai",
+        "dataset_id": ECMWF_OPENDATA_HIGH_DATA_VERSION,
+        "source_cycle_time": inputs["source_cycle_time"],
+        "source_available_at": inputs["source_available_at"],
+        "provenance_json": surface,
+    }) is None
+    certified = mod._current_evidence_shape_from_values(
+        **inputs,
+        grid_surface_evidence_revision=GRID_SURFACE_EVIDENCE_REVISION,
+        grid_surface_evidence_identity_hash=grid_surface_evidence_identity_hash(
+            surface["grid_surface_evidence"]
+        ),
+    )
+    assert certified.predictive_sigma_c == shape.predictive_sigma_c
+    assert certified.shape_hash != shape.shape_hash
+    assert mod._fusion_current_evidence_shape_has_live_authority(
+        SimpleNamespace(current_evidence_shape=certified.as_payload())
     ) is True
 
 

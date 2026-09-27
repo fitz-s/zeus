@@ -33,11 +33,21 @@ from src.data.replacement_forecast_cycle_policy import (
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
     TRADEABLE_GRADE_QLCB_BASIS,
 )
+from src.contracts.ensemble_snapshot_provenance import (
+    ECMWF_OPENDATA_HIGH_DATA_VERSION,
+    GRID_SURFACE_EVIDENCE_REVISION,
+    grid_surface_evidence_identity_hash,
+)
+from src.data.executable_forecast_reader import grid_surface_evidence_reason
 from src.data.openmeteo_ecmwf_ifs9_anchor import (
     PRODUCT_ID as OPENMETEO_ANCHOR_PRODUCT_ID,
     SOURCE_ID as OPENMETEO_ANCHOR_SOURCE_ID,
 )
-from src.data.replacement_forecast_readiness import LIVE_RUNTIME_LAYER, ReplacementForecastDependency, build_replacement_forecast_readiness
+from src.data.replacement_forecast_readiness import (
+    LIVE_RUNTIME_LAYER,
+    ReplacementForecastDependency,
+    build_replacement_forecast_readiness,
+)
 from src.data.replacement_input_hwm import (
     ReplacementInputHwmReadUnavailable,
     _exact_current_value_serving_lag,
@@ -1182,6 +1192,16 @@ def _insert_ensemble_snapshot(
 
 
 def _live_provenance() -> dict[str, object]:
+    from tests.test_replacement_forecast_materializer import _fixture_ens_surface_provenance
+
+    surface = json.loads(_fixture_ens_surface_provenance())
+    assert grid_surface_evidence_reason({
+        "city": "Shanghai",
+        "dataset_id": ECMWF_OPENDATA_HIGH_DATA_VERSION,
+        "source_cycle_time": _dt(0).isoformat(),
+        "source_available_at": _dt(3).isoformat(),
+        "provenance_json": surface,
+    }) is None
     return {
         "reader_test": True,
         "replacement_q_mode": "FUSED_NORMAL_FULL",
@@ -1192,12 +1212,34 @@ def _live_provenance() -> dict[str, object]:
                 "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
                 "snapshot_id": 1,
                 "source_cycle_time": _dt(0).isoformat(),
+                "grid_surface_evidence_revision": GRID_SURFACE_EVIDENCE_REVISION,
+                "grid_surface_evidence_identity_hash": grid_surface_evidence_identity_hash(
+                    surface["grid_surface_evidence"]
+                ),
                 "shape_lag_hours": 0.0,
                 "stale_shape_reused": False,
                 "translation_applied": False,
             }
         },
     }
+
+
+@pytest.mark.parametrize("purpose", tuple(ReplacementForecastAuthorityPurpose))
+def test_live_reader_rejects_missing_grid_surface_identity(
+    purpose: ReplacementForecastAuthorityPurpose,
+) -> None:
+    provenance = _live_provenance()
+    row = {
+        "runtime_layer": LIVE_RUNTIME_LAYER,
+        "q_lcb_json": '{"cold":0.1,"warm":0.7}',
+        "q_ucb_json": '{"cold":0.3,"warm":0.9}',
+        "provenance_json": json.dumps(provenance),
+    }
+    assert reader._live_grade_provenance(row, authority_purpose=purpose) is not None
+    shape = provenance["bayes_precision_fusion"]["current_evidence_shape"]
+    del shape["grid_surface_evidence_identity_hash"]
+    row["provenance_json"] = json.dumps(provenance)
+    assert reader._live_grade_provenance(row, authority_purpose=purpose) is None
 
 
 @pytest.mark.parametrize(
