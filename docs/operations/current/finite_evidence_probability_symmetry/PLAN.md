@@ -20,6 +20,13 @@ Status: active
   full recapture. Retain the new insufficient-budget cache negative cases;
   do not weaken production freshness or simply replace all expected q values.
   Independent final review and zero-added-failure comparison remain required.
+- Test-only fix `068214fef` (parent `39b457269`) now preserves the intended
+  180-second cache positive and advances 181 seconds for the oldest-expiry
+  negative. Existing short-headroom/long-budget twins remain unchanged.
+  Fixed full solve-seam result is 844 passes / the exact same 38 baseline
+  failing nodes, zero additions or removals. Parent focused delta/budget/
+  BUY-SELL maker-clock cases pass 11/11; fixed-SHA independent review is YES.
+  No production clock or freshness rule changed in this antibody repair.
 
 - Both fixes landed at `85f20ca27`. The official 17:08:11 UTC rollout refused
   before stopping main: command `7ac3d0d2ce9547be` is a genuine partially
