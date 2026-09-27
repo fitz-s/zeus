@@ -1074,6 +1074,7 @@ FILL_BRIDGE_POSITION_MATERIALIZATION_FAILED = (
 )
 FILL_BRIDGE_DRAIN_LIMIT_PER_TICK = 500
 FILL_BRIDGE_WRITE_TRANCHES_PER_TICK = 8
+_edli_orphaned_command_link_cursor = ""
 
 
 def _bound_price_channel_sqlite_wait(
@@ -2538,7 +2539,10 @@ def _edli_durable_fill_bridge_candidate_ids(conn, *, limit: int) -> tuple[str, .
 
 def _edli_durable_fill_bridge_work_exists(conn) -> bool:
     """Return whether a confirmed EDLI fill still lacks a canonical position."""
-    return bool(_edli_durable_fill_bridge_candidate_ids(conn, limit=1))
+    return bool(
+        _edli_durable_fill_bridge_candidate_ids(conn, limit=1)
+        or _edli_orphaned_command_link_candidates(conn, limit=1)
+    )
 
 
 def _edli_durable_fill_bridge_candidate_ids_read_only(
@@ -2564,9 +2568,191 @@ def _edli_durable_fill_bridge_candidate_ids_read_only(
         conn.close()
 
 
+def _edli_orphaned_command_link_candidates(
+    conn, *, limit: int, command_id: str | None = None,
+    after_command_id: str | None = None,
+) -> tuple[tuple[str, str, str], ...]:
+    """Find confirmed open EDLI fills whose command still points at a temporary ID.
+
+    SCOPE: exact order, token, condition, snapshot and EDLI aggregate identity;
+    never scan historical positions or repair a command owned by another real
+    position. DRAIN: one bounded tranche per reconcile tick. RESET: the command
+    link converges (or the position closes), removing it from this query.
+    """
+    from src.events.edli_position_bridge import (
+        _edli_events_table,
+        edli_bridge_position_id,
+        edli_bridge_position_id_legacy,
+    )
+
+    bounded_limit = max(0, int(limit))
+    if not bounded_limit:
+        return ()
+    table = _edli_events_table(conn)
+    if table not in {"world.edli_live_order_events", "edli_live_order_events"}:
+        raise ValueError(f"unexpected EDLI events table: {table!r}")
+    conn.create_function("edli_bridge_position_id_v1", 1, edli_bridge_position_id, deterministic=True)
+    conn.create_function(
+        "edli_bridge_position_id_legacy_v1", 1, edli_bridge_position_id_legacy,
+        deterministic=True,
+    )
+    exact_filter = "AND command.command_id = ?" if command_id else ""
+    cursor_filter = "AND command.command_id > ?" if after_command_id else ""
+    rows = conn.execute(
+        f"""
+        SELECT command.command_id, position.position_id, event.aggregate_id
+          FROM position_current AS position INDEXED BY idx_position_current_phase_quote
+          CROSS JOIN venue_commands AS command INDEXED BY idx_venue_commands_venue_order_intent
+            ON command.venue_order_id = position.order_id
+           AND command.intent_kind = 'ENTRY'
+          CROSS JOIN {table} AS event
+         WHERE position.phase IN ('active', 'day0_window', 'pending_exit')
+           AND event.rowid = (
+               SELECT command_event.rowid
+                 FROM {table} AS command_event
+                      INDEXED BY idx_edli_live_order_events_execution_command
+                WHERE command_event.event_type = 'ExecutionCommandCreated'
+                  -- Unary + leaves the command text unchanged and makes SQLite
+                  -- seek the event expression index instead of scanning it.
+                  AND json_extract(command_event.payload_json, '$.execution_command_id') = +command.decision_id
+                LIMIT 1
+           )
+           AND position.shares > 0
+           AND command.state IN ('CANCELLED', 'EXPIRED', 'REJECTED', 'SUBMIT_REJECTED')
+           AND command.side = 'BUY'
+           AND command.position_id != position.position_id
+           AND NOT EXISTS (
+               SELECT 1 FROM position_current AS other
+                WHERE other.position_id = command.position_id
+           )
+           AND (
+               SELECT COUNT(*) FROM venue_commands AS same_aggregate
+                WHERE same_aggregate.decision_id = command.decision_id
+           ) = 1
+           AND NOT EXISTS (
+               SELECT 1 FROM venue_commands AS colliding_id
+                WHERE colliding_id.command_id = command.decision_id
+                  AND colliding_id.command_id != command.command_id
+           )
+           AND (
+               command.market_id = position.condition_id
+               OR EXISTS (
+                   SELECT 1 FROM executable_market_snapshots AS snapshot
+                    WHERE snapshot.snapshot_id = command.snapshot_id
+                      AND snapshot.gamma_market_id = command.market_id
+                      AND snapshot.condition_id = position.condition_id
+                      AND snapshot.selected_outcome_token_id = command.token_id
+               )
+           )
+           AND command.snapshot_id = position.decision_snapshot_id
+           AND NOT EXISTS (
+               SELECT 1 FROM execution_fact AS sourced
+                WHERE sourced.command_id = command.command_id
+                  AND sourced.order_role = 'entry'
+                  AND sourced.voided_at IS NULL
+           )
+           AND command.token_id = CASE position.direction
+               WHEN 'buy_yes' THEN position.token_id
+               WHEN 'buy_no' THEN position.no_token_id
+               ELSE NULL END
+           AND position.position_id IN (
+               edli_bridge_position_id_v1(event.aggregate_id),
+               edli_bridge_position_id_legacy_v1(event.aggregate_id)
+           )
+           AND EXISTS (
+               SELECT 1 FROM {table} AS observed
+                    INDEXED BY idx_edli_live_order_events_aggregate
+                WHERE observed.aggregate_id = event.aggregate_id
+                  AND observed.event_type = 'UserTradeObserved'
+                  AND json_extract(observed.payload_json, '$.fill_authority_state') = 'FILL_CONFIRMED'
+                  AND json_extract(observed.payload_json, '$.venue_order_id') = command.venue_order_id
+           )
+           AND (
+               SELECT COUNT(*) FROM position_current AS sibling
+                WHERE sibling.order_id = command.venue_order_id
+                  AND sibling.phase IN ('active', 'day0_window', 'pending_exit')
+           ) = 1
+           {exact_filter}
+           {cursor_filter}
+         ORDER BY command.command_id
+         LIMIT ?
+        """,
+        (*((command_id,) if command_id else ()),
+         *((after_command_id,) if after_command_id else ()), bounded_limit),
+    ).fetchall()
+    return tuple(
+        (str(_row_get(row, "aggregate_id")), str(_row_get(row, "command_id")),
+         str(_row_get(row, "position_id"))) for row in rows
+    )
+
+
+def _edli_orphaned_command_link_candidates_read_only(
+    *, limit: int, after_command_id: str | None = None,
+) -> tuple[tuple[str, str, str], ...]:
+    from src.state.db import ZEUS_WORLD_DB_PATH, get_trade_connection_read_only
+
+    conn = get_trade_connection_read_only()
+    try:
+        attached = {str(_row_get(row, "name") or "") for row in conn.execute("PRAGMA database_list")}
+        if "world" not in attached:
+            conn.execute("ATTACH DATABASE ? AS world", (f"{ZEUS_WORLD_DB_PATH.resolve().as_uri()}?mode=ro",))
+        candidates = _edli_orphaned_command_link_candidates(
+            conn, limit=limit, after_command_id=after_command_id,
+        )
+        if not candidates and after_command_id:
+            candidates = _edli_orphaned_command_link_candidates(conn, limit=limit)
+        return candidates
+    finally:
+        conn.close()
+
+
+def _edli_repair_orphaned_command_link(
+    conn, *, aggregate_id: str, command_id: str, position_id: str, now: datetime,
+) -> bool:
+    """Converge one exact EDLI link and source its already-confirmed fill."""
+    if (aggregate_id, command_id, position_id) not in _edli_orphaned_command_link_candidates(
+        conn, limit=1, command_id=command_id,
+    ):
+        return False
+    from src.events.edli_position_bridge import sync_venue_command_position_link_for_edli_fill
+    from src.execution.exchange_reconcile import reconcile_persisted_terminal_late_entry_fills
+
+    conn.execute("SAVEPOINT edli_orphaned_command_link")
+    try:
+        if not sync_venue_command_position_link_for_edli_fill(
+            conn, aggregate_id, position_id=position_id, now=now,
+        ):
+            raise RuntimeError(f"EDLI command link did not converge: {command_id}")
+        linked = conn.execute(
+            "SELECT position_id FROM venue_commands WHERE command_id = ?", (command_id,),
+        ).fetchone()
+        if linked is None or str(_row_get(linked, "position_id")) != position_id:
+            raise RuntimeError(f"EDLI command link chose another command: {command_id}")
+        outcome = reconcile_persisted_terminal_late_entry_fills(
+            conn, command_id=command_id, observed_at=now,
+        )
+        sourced = conn.execute(
+            """SELECT 1 FROM execution_fact WHERE command_id = ? AND position_id = ?
+                 AND order_role = 'entry' AND voided_at IS NULL
+                 AND filled_at IS NOT NULL AND fill_price > 0 AND shares > 0 LIMIT 1""",
+            (command_id, position_id),
+        ).fetchone()
+        if outcome["errors"] or outcome["advanced"] != 1 or sourced is None:
+            raise RuntimeError(f"EDLI terminal fill remains unsourced: {command_id}: {outcome}")
+        conn.execute("RELEASE SAVEPOINT edli_orphaned_command_link")
+        return True
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT edli_orphaned_command_link")
+        conn.execute("RELEASE SAVEPOINT edli_orphaned_command_link")
+        raise
+
+
 def _edli_durable_fill_bridge_work_exists_read_only() -> bool:
     """Probe bridge work without acquiring either canonical DB writer."""
-    return bool(_edli_durable_fill_bridge_candidate_ids_read_only(limit=1))
+    return bool(
+        _edli_durable_fill_bridge_candidate_ids_read_only(limit=1)
+        or _edli_orphaned_command_link_candidates_read_only(limit=1)
+    )
 
 
 def _edli_trade_fact_bridge_candidates_read_only():
@@ -3539,10 +3725,19 @@ def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
                         _close_fill_bridge_write_connection(conn)
 
     bridged_positions = 0
+    global _edli_orphaned_command_link_cursor
+    try:
+        link_candidates = _edli_orphaned_command_link_candidates_read_only(
+            limit=1, after_command_id=_edli_orphaned_command_link_cursor,
+        )
+    except Exception as exc:  # noqa: BLE001 - durable debt retries next cycle
+        link_candidates = ()
+        canonical_failure_reasons.append(FILL_BRIDGE_POSITION_MATERIALIZATION_FAILED)
+        logger.error("EDLI command-link debt discovery failed: %s", exc, exc_info=True)
     try:
         durable_bridge_candidate_ids = (
             _edli_durable_fill_bridge_candidate_ids_read_only(
-                limit=FILL_BRIDGE_WRITE_TRANCHES_PER_TICK
+                limit=FILL_BRIDGE_WRITE_TRANCHES_PER_TICK - len(link_candidates)
             )
         )
     except Exception as exc:  # noqa: BLE001 - durable facts retry next repair cycle
@@ -3611,6 +3806,58 @@ def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
                         _close_fill_bridge_write_connection(bridge_conn)
                     except Exception:  # noqa: BLE001
                         pass
+
+    # One confirmed open position can survive a bridge interruption with its
+    # temporary venue-command ID still attached. That already-materialized row
+    # is absent from the ordinary orphan scan above. Discover only this exact
+    # unsourced terminal command debt, then release the writer after each item.
+    if link_candidates:
+        from src.state.db import get_trade_connection_with_world_required
+
+        # Advance even on one failed item: an older persistent failure cannot
+        # monopolize every bounded tick. Durable debt remains selectable after
+        # the cursor wraps, including after a process restart.
+        _edli_orphaned_command_link_cursor = link_candidates[-1][1]
+        for aggregate_id, command_id, position_id in link_candidates:
+            bridge_conn = None
+            deadline_monotonic = _fill_bridge_write_deadline()
+            try:
+                bridge_conn = _prepare_fill_bridge_write_connection(
+                    get_trade_connection_with_world_required,
+                    deadline_monotonic=deadline_monotonic,
+                )
+                _bound_fill_bridge_sqlite_wait_remaining(
+                    bridge_conn, deadline_monotonic=deadline_monotonic,
+                )
+                with _PriceChannelWriteGate(
+                    owner="price_channel_fill_bridge", scope="world_trade",
+                    deadline_ms=PRICE_CHANNEL_FILL_BRIDGE_DB_WRITE_LEASE_DEADLINE_MS,
+                    max_hold_ms=PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS,
+                    deadline_monotonic=deadline_monotonic, conn=bridge_conn,
+                ):
+                    bridge_conn.execute("BEGIN")
+                    repaired = _edli_repair_orphaned_command_link(
+                        bridge_conn, aggregate_id=aggregate_id,
+                        command_id=command_id, position_id=position_id, now=now,
+                    )
+                    bridge_conn.commit()
+                    if repaired:
+                        logger.warning(
+                            "EDLI confirmed fill command link and execution fact repaired: "
+                            "command_id=%s position_id=%s", command_id, position_id,
+                        )
+            except Exception as exc:  # noqa: BLE001 - exact durable debt retries
+                if bridge_conn is not None:
+                    bridge_conn.rollback()
+                canonical_failure_reasons.append(FILL_BRIDGE_POSITION_MATERIALIZATION_FAILED)
+                logger.error(
+                    "EDLI confirmed fill command-link repair failed: command_id=%s "
+                    "position_id=%s reason=%s", command_id, position_id, exc,
+                    exc_info=True,
+                )
+            finally:
+                if bridge_conn is not None:
+                    _close_fill_bridge_write_connection(bridge_conn)
 
     fill_redecision_events = 0
     fill_redecision_error = ""

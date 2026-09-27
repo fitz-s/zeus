@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused/audited: 2026-08-10
+# Last reused/audited: 2026-09-27
 # P3 lift (system_decomposition_plan §8 Step 3): _edli_durable_fill_bridge_scan moved from
 #   src.main to src.ingest.price_channel_ingest (it WRITES the durable bridge in the P3
 #   reconcile cycle; src.main's boot recovery imports the SAME canonical copy). Logic unchanged.
@@ -184,12 +184,292 @@ def _seed_confirmed_fill_aggregate(
     conn.commit()
 
 
+def _seed_interrupted_command_link(conn: sqlite3.Connection, *, conflict: bool = False) -> tuple[str, str]:
+    """Confirmed EDLI fill survived while command-link convergence was interrupted."""
+    from src.events.edli_position_bridge import edli_bridge_position_id
+    from src.state.collateral_ledger import init_collateral_schema
+    from src.state.db import init_schema_trade_only
+    from src.state.venue_command_repo import append_event, append_order_fact, append_trade_fact
+
+    init_schema_trade_only(conn)
+    init_collateral_schema(conn)
+    aggregate_id = "evt-link-retry:intent-link-retry"
+    command_id = "cmd-link-retry"
+    token_id = "token-link-retry"
+    order_id = "order-link-retry"
+    _seed_confirmed_fill_aggregate(
+        conn, aggregate_id=aggregate_id, direction="buy_yes", token_id=token_id,
+        filled_size=7.99, avg_fill_price=0.50,
+        execution_command_id=f"edli_exec_cmd:{aggregate_id}", venue_order_id=order_id,
+    )
+    canonical_id = edli_bridge_position_id(aggregate_id)
+    conn.execute(
+        """INSERT INTO position_current
+           (position_id, phase, trade_id, market_id, city, cluster, target_date,
+            bin_label, direction, unit, size_usd, shares, cost_basis_usd,
+            entry_price, p_posterior, decision_snapshot_id, entry_method,
+            strategy_key, chain_state, token_id, condition_id, order_id,
+            order_status, updated_at, temperature_metric, fill_authority,
+            chain_shares, chain_avg_price, chain_cost_basis_usd)
+           VALUES (?, 'day0_window', ?, '0xCONDITION', 'Tokyo', 'Tokyo',
+                   '2026-06-02', 'high_29_30', 'buy_yes', 'C', 3.995, 7.99,
+                   3.995, 0.50, 0.62, 'snap-MF1', 'qkernel_spine',
+                   'opening_inertia', 'synced', ?, '0xCONDITION', ?, 'filled',
+                   '2026-06-01T00:01:00+00:00', 'high', 'venue_confirmed_full',
+                   7.99, 0.50, 3.995)""",
+        (canonical_id, canonical_id, token_id, order_id),
+    )
+    if conflict:
+        conn.execute(
+            """INSERT INTO position_current
+               (position_id, phase, trade_id, updated_at, temperature_metric)
+               VALUES ('short-link-retry', 'active', 'short-link-retry',
+                       '2026-06-01T00:00:00+00:00', 'high')"""
+        )
+    conn.execute(
+        """INSERT INTO venue_commands
+           (command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size,
+            price, venue_order_id, state, created_at, updated_at)
+           VALUES (?, 'snap-MF1', 'envelope-link-retry', 'short-link-retry', ?,
+                   'idem-link-retry', 'ENTRY', '0xCONDITION', ?, 'BUY', 10, 0.50,
+                   ?, 'ACKED', '2026-06-01T00:00:00+00:00',
+                   '2026-06-01T00:00:00+00:00')""",
+        (command_id, f"edli_exec_cmd:{aggregate_id}", token_id, order_id),
+    )
+    at = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    append_event(conn, command_id=command_id, event_type="CANCEL_REQUESTED",
+                 occurred_at=at.isoformat(), payload={"cancel_reason": "BOOK_MOVED"})
+    append_trade_fact(
+        conn, trade_id="trade-link-retry", venue_order_id=order_id,
+        command_id=command_id, state="CONFIRMED", filled_size="7.99",
+        fill_price="0.50", source="WS_USER", observed_at=at,
+        raw_payload_hash=hashlib.sha256(b"trade-link-retry").hexdigest(),
+        raw_payload_json={"proof": "authenticated_trade"},
+    )
+    append_order_fact(
+        conn, venue_order_id=order_id, command_id=command_id,
+        state="CANCEL_CONFIRMED", remaining_size="2.01", matched_size="7.99",
+        source="WS_USER", observed_at=at,
+        raw_payload_hash=hashlib.sha256(b"order-link-retry").hexdigest(),
+        raw_payload_json={"proof": "venue_cancelled_remainder"},
+    )
+    append_event(conn, command_id=command_id, event_type="CANCEL_ACKED",
+                 occurred_at=at.isoformat(),
+                 payload={"venue_order_id": order_id, "cancel_outcome": {"status": "CANCELED"}})
+    conn.commit()
+    return canonical_id, command_id
+
+
 # ---------------------------------------------------------------------------
 # RED — the orphan reproduction.
 # ---------------------------------------------------------------------------
 
 
 class TestDurableFillBridgeScan:
+    def test_interrupted_link_retries_exact_debt_and_sources_terminal_fill(self):
+        from src.ingest.price_channel_ingest import (
+            _edli_orphaned_command_link_candidates,
+            _edli_repair_orphaned_command_link,
+        )
+        from src.riskguard.riskguard import _portfolio_position_from_loader_row
+        from src.state.db import query_portfolio_loader_view
+
+        conn = _make_conn()
+        position_id, command_id = _seed_interrupted_command_link(conn)
+        assert _edli_orphaned_command_link_candidates(conn, limit=1) == (
+            ("evt-link-retry:intent-link-retry", command_id, position_id),
+        )
+        with pytest.raises(ValueError, match="fill-grade loader row missing"):
+            row = next(row for row in query_portfolio_loader_view(
+                conn, runtime_exposure_only=True,
+            )["positions"] if row["position_id"] == position_id)
+            _portfolio_position_from_loader_row(row)
+
+        assert _edli_repair_orphaned_command_link(
+            conn, aggregate_id="evt-link-retry:intent-link-retry",
+            command_id=command_id, position_id=position_id,
+            now=datetime(2026, 6, 1, 0, 2, tzinfo=timezone.utc),
+        )
+        assert conn.execute(
+            "SELECT position_id FROM venue_commands WHERE command_id = ?", (command_id,)
+        ).fetchone()[0] == position_id
+        fact = conn.execute(
+            "SELECT position_id, shares, fill_price FROM execution_fact WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+        assert fact is not None and fact["position_id"] == position_id
+        assert float(fact["shares"]) == pytest.approx(7.99)
+        assert float(fact["fill_price"]) == pytest.approx(0.5)
+        row = next(row for row in query_portfolio_loader_view(
+            conn, runtime_exposure_only=True,
+        )["positions"] if row["position_id"] == position_id)
+        assert _portfolio_position_from_loader_row(row).trade_id == position_id
+
+        assert _edli_orphaned_command_link_candidates(conn, limit=1) == ()
+        assert not _edli_repair_orphaned_command_link(
+            conn, aggregate_id="evt-link-retry:intent-link-retry",
+            command_id=command_id, position_id=position_id,
+            now=datetime(2026, 6, 1, 0, 3, tzinfo=timezone.utc),
+        )
+        assert conn.execute(
+            "SELECT COUNT(*) FROM execution_fact WHERE command_id = ?", (command_id,)
+        ).fetchone()[0] == 1
+
+    def test_orphaned_link_retry_refuses_real_conflicting_position(self):
+        from src.ingest.price_channel_ingest import (
+            _edli_orphaned_command_link_candidates,
+            _edli_repair_orphaned_command_link,
+        )
+
+        conn = _make_conn()
+        position_id, command_id = _seed_interrupted_command_link(conn, conflict=True)
+        assert _edli_orphaned_command_link_candidates(conn, limit=1) == ()
+        assert not _edli_repair_orphaned_command_link(
+            conn, aggregate_id="evt-link-retry:intent-link-retry",
+            command_id=command_id, position_id=position_id,
+            now=datetime(2026, 6, 1, 0, 2, tzinfo=timezone.utc),
+        )
+        assert conn.execute(
+            "SELECT position_id FROM venue_commands WHERE command_id = ?", (command_id,)
+        ).fetchone()[0] == "short-link-retry"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM execution_fact WHERE position_id = ?", (position_id,)
+        ).fetchone()[0] == 0
+
+    def test_link_repair_failure_rolls_back_and_remains_retryable(self, monkeypatch):
+        from src.execution import exchange_reconcile
+        from src.ingest.price_channel_ingest import (
+            _edli_orphaned_command_link_candidates,
+            _edli_repair_orphaned_command_link,
+        )
+
+        conn = _make_conn()
+        position_id, command_id = _seed_interrupted_command_link(conn)
+
+        def interrupted(*_args, **_kwargs):
+            raise RuntimeError("reconcile interrupted")
+
+        monkeypatch.setattr(exchange_reconcile, "reconcile_persisted_terminal_late_entry_fills", interrupted)
+        with pytest.raises(RuntimeError, match="reconcile interrupted"):
+            _edli_repair_orphaned_command_link(
+                conn, aggregate_id="evt-link-retry:intent-link-retry",
+                command_id=command_id, position_id=position_id,
+                now=datetime(2026, 6, 1, 0, 2, tzinfo=timezone.utc),
+            )
+        assert conn.execute(
+            "SELECT position_id FROM venue_commands WHERE command_id = ?", (command_id,)
+        ).fetchone()[0] == "short-link-retry"
+        assert _edli_orphaned_command_link_candidates(conn, limit=1) == (
+            ("evt-link-retry:intent-link-retry", command_id, position_id),
+        )
+
+    def test_periodic_repair_uses_one_bounded_tranche(self, monkeypatch):
+        import src.ingest.price_channel_ingest as lane
+        import src.events.price_channel_redecision_router as router
+
+        conn = _make_conn()
+        position_id, command_id = _seed_interrupted_command_link(conn)
+        original_cursor = lane._edli_orphaned_command_link_cursor
+        limits = []
+
+        def link_debt(*, limit, after_command_id=None):
+            debt = lane._edli_orphaned_command_link_candidates(
+                conn, limit=limit, after_command_id=after_command_id,
+            )
+            return debt or (lane._edli_orphaned_command_link_candidates(conn, limit=limit)
+                            if after_command_id else ())
+
+        def fresh_debt(*, limit):
+            limits.append(limit)
+            return ()
+
+        class Writer:
+            def __init__(self, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        monkeypatch.setattr(lane, "_edli_trade_fact_bridge_candidates_read_only", lambda: ((), (), ()))
+        monkeypatch.setattr(lane, "_edli_orphaned_command_link_candidates_read_only", link_debt)
+        monkeypatch.setattr(lane, "_edli_durable_fill_bridge_candidate_ids_read_only", fresh_debt)
+        monkeypatch.setattr(lane, "_prepare_fill_bridge_write_connection", lambda *_a, **_k: conn)
+        monkeypatch.setattr(lane, "_bound_fill_bridge_sqlite_wait_remaining", lambda *_a, **_k: None)
+        monkeypatch.setattr(lane, "_PriceChannelWriteGate", Writer)
+        monkeypatch.setattr(lane, "_close_fill_bridge_write_connection", lambda *_a: None)
+        monkeypatch.setattr(router, "_edli_position_fill_redecision_cycle", lambda: 0)
+        try:
+            lane._edli_orphaned_command_link_cursor = ""
+            result = lane._edli_fill_bridge_repair_cycle()
+            assert result["scheduler_failed"] is False, result
+            assert limits == [lane.FILL_BRIDGE_WRITE_TRANCHES_PER_TICK - 1]
+            assert conn.execute(
+                "SELECT position_id FROM venue_commands WHERE command_id = ?", (command_id,)
+            ).fetchone()[0] == position_id
+            assert conn.execute(
+                "SELECT COUNT(*) FROM execution_fact WHERE command_id = ?", (command_id,)
+            ).fetchone()[0] == 1
+            result = lane._edli_fill_bridge_repair_cycle()
+            assert result["scheduler_failed"] is False, result
+            assert limits[-1] == lane.FILL_BRIDGE_WRITE_TRANCHES_PER_TICK
+        finally:
+            lane._edli_orphaned_command_link_cursor = original_cursor
+
+    def test_failed_oldest_link_debt_does_not_starve_next_command(self, monkeypatch):
+        import src.ingest.price_channel_ingest as lane
+        import src.events.price_channel_redecision_router as router
+
+        conn = _make_conn()
+        original_cursor = lane._edli_orphaned_command_link_cursor
+        debts = (("aggregate-a", "command-a", "position-a"),
+                 ("aggregate-b", "command-b", "position-b"))
+        attempts = []
+        fresh_limits = []
+
+        def link_debt(*, limit, after_command_id=None):
+            assert limit == 1
+            later = tuple(row for row in debts if row[1] > (after_command_id or ""))
+            return (later or debts)[:limit]
+
+        def repair(_conn, *, aggregate_id, command_id, position_id, now):
+            attempts.append(command_id)
+            if command_id == "command-a":
+                raise RuntimeError("persistently incomplete proof")
+            return True
+
+        class Writer:
+            def __init__(self, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        monkeypatch.setattr(lane, "_edli_trade_fact_bridge_candidates_read_only", lambda: ((), (), ()))
+        monkeypatch.setattr(lane, "_edli_orphaned_command_link_candidates_read_only", link_debt)
+        monkeypatch.setattr(lane, "_edli_durable_fill_bridge_candidate_ids_read_only",
+                            lambda *, limit: fresh_limits.append(limit) or ())
+        monkeypatch.setattr(lane, "_edli_repair_orphaned_command_link", repair)
+        monkeypatch.setattr(lane, "_prepare_fill_bridge_write_connection", lambda *_a, **_k: conn)
+        monkeypatch.setattr(lane, "_bound_fill_bridge_sqlite_wait_remaining", lambda *_a, **_k: None)
+        monkeypatch.setattr(lane, "_PriceChannelWriteGate", Writer)
+        monkeypatch.setattr(lane, "_close_fill_bridge_write_connection", lambda *_a: None)
+        monkeypatch.setattr(router, "_edli_position_fill_redecision_cycle", lambda: 0)
+        try:
+            lane._edli_orphaned_command_link_cursor = ""
+            results = [lane._edli_fill_bridge_repair_cycle() for _ in range(3)]
+            assert attempts == ["command-a", "command-b", "command-a"]
+            assert [result["scheduler_failed"] for result in results] == [True, False, True]
+            assert fresh_limits == [lane.FILL_BRIDGE_WRITE_TRANCHES_PER_TICK - 1] * 3
+        finally:
+            lane._edli_orphaned_command_link_cursor = original_cursor
+
     def test_orphaned_confirmed_fill_is_bridged_with_empty_in_memory_set(self):
         """ORPHAN WINDOW: a FILL_CONFIRMED aggregate with NO position_current row
         and NO in-memory trigger MUST still be materialised by the durable scan.
