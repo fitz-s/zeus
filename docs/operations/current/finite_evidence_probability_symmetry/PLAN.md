@@ -8,6 +8,56 @@ Status: active
 
 ### Concurrent conditional-HIGH integration acceptance
 
+- Runtime acceptance at 17:25–17:27 UTC is **not complete**. Concurrent
+  official rollout loaded `8bfbe1b53` (including both 85f repairs), main PID
+  1220 generated 17:24:34.945Z, source PID 99474, canonical DB handles verified,
+  entry guard released normally. HK Sep27 HIGH and LOW each have multiple new
+  fresh held receipts. All four WU-fast pinned reads pass, but the actual held
+  consumer then rejects with
+  `GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE`. Cape/Lucknow/
+  Helsinki/Milan each have two new-process failed receipts; cached q is not
+  fresh q. Investigate the underlying revision-model exception and source-type
+  seam, then require complete producer-to-held-probability replay before the
+  next repair rollout. A READY intermediate bundle is not acceptance.
+- The actual four-city repro isolates a second transport defect: conditioning
+  deliberately carries WU-fast `day0_remaining_carrier_likelihood={}`, then
+  the execution-payload mapper copies that placeholder to
+  `_edli_day0_provisional_revision_likelihood`. The carried-likelihood reader
+  treats it as an asserted malformed certificate and raises INVALID, wrapped
+  as UNAVAILABLE, before the canonical attached WORLD source-model query.
+  Direct WORLD queries for the same four scopes can produce valid revision
+  authority. The fast residual mixture and settlement-channel revision model
+  are distinct requirements; existing source-channel selection tests prohibit
+  deleting the generic revision gate or inventing a survival probability.
+- Authorized repair: normalize only the intentional empty-placeholder case
+  for a validated WU-fast current carrier to absence, so the existing canonical
+  source-channel revision computation runs. Preserve rejection of nonempty
+  malformed certificates, non-fast empty mappings, bad nested hash/station/
+  channel/scope/clocks and ENTRY without required empirical authority. Cover
+  both payload transport variants and HIGH/LOW. SCOPE is one exact carrier's
+  absence-vs-invalid representation; DRAIN is normal held redecision querying
+  the existing WORLD evidence; RESET requires actual valid revision authority,
+  never a skipped gate. Before rollout require real carrier-to-held-probability
+  replay for all four current cities, producer-relationship tests and an
+  independent final review; diagnose any further downstream rejection first.
+- Current external-fact recheck at 17:26 UTC: official HKO September monthly
+  dailyExtract XML returns HTTP 200, Last-Modified September 25 02:30:24Z,
+  with September 24 the final actual row. Canonical HK daily observations,
+  settlements and outcomes likewise contain September 24 and no September
+  25/26 final rows. The older five held positions' missing official finality
+  is not a demonstrated missed published record; preserve their physical
+  exposure and normal observation/settlement monitoring without inventing a
+  terminal value or substituting VHHH.
+- Separate live venue check at 17:29 UTC covers all five older HK holdings:
+  their exact CLOB markets and Gamma condition lookups both report active,
+  not closed, accepting orders, no winner / no UMA resolution. Canonical
+  executable snapshots at 17:26–17:27 agree; chain-synced share counts remain
+  positive and no `settled_at` is present. Thus no evidence supports an
+  already-resolved venue being stranded solely by the absent HKO daily final.
+  Gamma IDs are 4872681, 4872682, 4900641, 4900115 and 4900114, respectively
+  for positions 3ddaf2e9-026, 7c27c210-51a, 9c1eb9f7-d28, 1fc89633-3e8 and
+  2ca4ee10-c14. Near-zero marks alone are not final winner or redeem authority.
+
 - Concurrent `8bfbe1b53` landed on top of this repair while the genuine maker
   command drains. Its JIT/book-cache and bounded-auction changes passed static
   interaction review and 14 new reactor cases. A full solve-seam baseline
