@@ -6,6 +6,29 @@ Status: active
 
 ## 2026-09-27 — current-day full causal repair acceptance
 
+### Concurrent conditional-HIGH integration acceptance
+
+- Fixed parent `5f00dcf93` on `316d10e7e` completed 2,275 tests with three
+  pre-existing legacy-schema migration failures described below; no all-green
+  claim or live deployment follows from that result.
+- Concurrent upstream `65d6767fa` introduces observation-conditioned HIGH
+  uncertainty and immutable conditional-shape witnesses. Preserve that landed
+  computation together with this task's land-grid and source-proof corrections.
+  The merge preview is textually clean, but both independent branches assigned
+  Day0 survival v23 / resolver v22 to different mechanisms. This is a semantic
+  collision, not proof of compatibility.
+- Integration plan: rebase onto the pinned upstream commit, then assign the
+  combined mechanism survival v24 / resolver v23. Historical certificates stay
+  losslessly readable; current held/ENTRY/cache/submit consumers must require
+  newly computed current certificates. Never relabel an old probability.
+- Review conditional-HIGH missing-source failures against the typed family
+  BLOCKED drainage contract, preserving genuine computation-error failures.
+  Independently review source migration and executor identity; rerun affected
+  source, conditional-HIGH, cache, receipt and recovery antibodies on the merged
+  head before any deployment. SCOPE is the exact family certificate; DRAIN is
+  existing acquisition/materialization; RESET is newly validated combined
+  source and probability evidence, never a global bypass.
+
 - checked=2026-W39; basis=exact current-case DB/provenance, source code and
   test evidence below; until=recheck-on-use. Point-in-time runtime statements
   retain their explicit UTC timestamps and are not week-long liveness proof.
