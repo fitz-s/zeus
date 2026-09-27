@@ -3316,6 +3316,7 @@ def test_current_target_plan_interrupts_real_sqlite_query_at_deadline(tmp_path) 
     with pytest.raises(TimeoutError, match="query deadline expired"):
         build_replacement_forecast_current_target_plan(
             db,
+            now_utc=datetime(2026, 9, 24, tzinfo=timezone.utc),
             deadline_monotonic=time.monotonic() + 0.02,
         )
 
@@ -4255,14 +4256,18 @@ def test_direct_downloader_reuses_bucket_manifest_across_targets(
     assert manifest_fetches == 1
 
 
-def test_disabled_flag_still_short_circuits(tmp_path, monkeypatch) -> None:
+def test_retired_disabled_flag_cannot_freeze_required_source_acquisition(tmp_path, monkeypatch) -> None:
     db = _make_db(tmp_path, {})
     calls: list = []
     _wire(monkeypatch, plan=_PlanStub(ready=True), calls=calls)
     cfg = _cfg(db, tmp_path)
     cfg["download_current_targets_enabled"] = False
-    assert _download_replacement_forecast_current_targets_if_needed(cfg) is None
-    assert calls == []
+    # The single live source chain removed this optional-mode switch. An old
+    # caller's leftover key must not freeze acquisition of required inputs.
+    result = _download_replacement_forecast_current_targets_if_needed(cfg)
+    assert result["status"] == "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED"
+    assert len(calls) == 1
+    assert calls[0]["cycle"] == AVAILABLE_CYCLE
 
 
 def test_stale_cycle_download_includes_covered_targets(tmp_path, monkeypatch) -> None:
