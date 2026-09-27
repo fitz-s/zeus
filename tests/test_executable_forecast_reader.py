@@ -719,14 +719,15 @@ def test_full_reader_blocks_source_available_after_candidate_readiness() -> None
     assert result.reason_code == "SOURCE_AVAILABLE_AFTER_PRODUCER_READINESS"
 
 
-def _reader_for_metric(conn: sqlite3.Connection, metric: str, *, decision_hour: int = 10):
+def _reader_for_metric(
+    conn: sqlite3.Connection, metric: str, *,
+    decision_hour: int = 10, profile: str = "full",
+):
     if metric == "low":
         fields = {
             "temperature_metric": "low", "physical_quantity": "mn2t6_local_calendar_day_min",
             "observation_field": "low_temp", "dataset_id": ECMWF_OPENDATA_LOW_DATA_VERSION,
             "data_version": ECMWF_OPENDATA_LOW_DATA_VERSION,
-            "track": "mn2t6_low_full_horizon",
-            "release_calendar_key": "ecmwf_open_data:mn2t6_low:full",
         }
         for table in ("ensemble_snapshots", "source_run", "source_run_coverage", "readiness_state"):
             columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
@@ -735,6 +736,12 @@ def _reader_for_metric(conn: sqlite3.Connection, metric: str, *, decision_hour: 
                 f"UPDATE {table} SET " + ", ".join(f"{key}=?" for key in updates),
                 tuple(updates.values()),
             )
+            for key in ("track", "release_calendar_key"):
+                if key in columns:
+                    conn.execute(
+                        f"UPDATE {table} SET {key}=REPLACE({key}, ?, ?)",
+                        ("mx2t6_high", "mn2t6_low"),
+                    )
     return read_executable_forecast(
         conn,
         city_id="LONDON", city_name="London", city_timezone="Europe/London",
@@ -742,7 +749,8 @@ def _reader_for_metric(conn: sqlite3.Connection, metric: str, *, decision_hour: 
         source_id="ecmwf_open_data", source_transport="ensemble_snapshots_db_reader",
         data_version=(ECMWF_OPENDATA_HIGH_DATA_VERSION if metric == "high"
                       else ECMWF_OPENDATA_LOW_DATA_VERSION),
-        track="mx2t6_high_full_horizon" if metric == "high" else "mn2t6_low_full_horizon",
+        track=("mx2t6_high" if metric == "high" else "mn2t6_low")
+              + f"_{profile}_horizon",
         strategy_key="entry_forecast", market_family="family-1",
         condition_id="condition-123", decision_time=_utc(2026, 5, 3, decision_hour),
         require_entry_readiness=False,
@@ -794,7 +802,8 @@ def test_future_candidate_coverage_cannot_authorize_past_decision(metric: str) -
     assert result.reason_code == "PRODUCER_COVERAGE_AFTER_DECISION_TIME"
 
 
-def test_later_short_noncontributor_yields_to_earlier_full_live_candidate() -> None:
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_later_short_noncontributor_yields_to_earlier_full_live_candidate(metric: str) -> None:
     """A blocked later run cannot hide an earlier proved, still-live target day."""
     conn = _conn()
     _insert_full_reader_fixture(conn)
@@ -876,15 +885,7 @@ def test_later_short_noncontributor_yields_to_earlier_full_live_candidate() -> N
         provenance_json={"contract": "LiveEntryForecastTargetContract.v1"},
     )
 
-    result = read_executable_forecast(
-        conn, city_id=scope.city_id, city_name=scope.city_name,
-        city_timezone=scope.city_timezone, target_local_date=scope.target_local_date,
-        temperature_metric="high", source_id="ecmwf_open_data",
-        source_transport="ensemble_snapshots_db_reader", data_version=scope.data_version,
-        track="mx2t6_high_short_horizon", strategy_key="entry_forecast",
-        market_family="family-1", condition_id="condition-123",
-        decision_time=_utc(2026, 5, 3, 10), require_entry_readiness=False,
-    )
+    result = _reader_for_metric(conn, metric, profile="short")
     assert result.ok and result.bundle is not None
     assert result.bundle.evidence.source_run_id == "source-run-1"
     assert result.bundle.snapshot.snapshot_id == 1
