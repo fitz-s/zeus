@@ -86,6 +86,7 @@ test_trust_policy:
     tests/data/test_previous_runs_substitution.py: {created: "2026-06-11", last_used: "2026-09-01", note: "Previous-runs substitution and replacement materialization queue contracts, including pre-admission exact-duplicate seed coalescing, fixed-window exact-input success coalescing without sliding expiry, structured BLOCKED-result coalescing by exact current-input/logic fingerprint, stale held-q debt before broader held/global/never-priced scopes, and one held plus one global-only family kept inside the bounded raw inspection window. Claim-time canonical held-exposure classes keep newest-source-cycle and current same-cycle baseline subtiers before per-request computed-at FIFO, and Day0 seeds older than the current posterior frontier are rejected. A 30-second absolute child deadline has atomic typed stage receipts, VM progress plus an independent SQLite interrupt watchdog, and batch forwarding over a provided connection. Exact held Day0 observation-advance work gets a one-second retry only while q is stale and only for its three-attempt/75-second cumulative budget; fresh q removes the special tier, every retry honors retry_at, and exhausted work returns to ordinary exponential fairness. Retained future-of-ENS producer-owned seed debt preserves exact marker paths until equality-triggered reset; recently verified waiters yield the bounded current-q window and are rechecked within five seconds; JIT request-cycle boundaries stay below and ahead of current eligible ensemble HWM, with bounded concurrency, timeout isolation, and bounded latest-only receipts."}
     tests/test_openmeteo_ecmwf_ifs9_bucket_transport.py: {created: "2026-06-11", last_used: "2026-08-21", note: "Exact-run Open-Meteo bucket transport admission, grid/downscaling parity, pooled reader and point-value reuse lifecycle, and bounded distinct-valid-time fanout that preserves deterministic 24-hour payload ordering and all-or-nothing assembly."}
     tests/test_replacement_forecast_current_target_plan.py: {created: "2026-06-06", last_used: "2026-08-10", note: "Current active-family coverage and seedability, including automatic reseed for probability-semantics drift, qualified fast-station Day0 evidence, and duplicate raw-METAR writer canonicalization that preserves one causal conditioning clock."}
+    tests/test_fmi_airport_temperature.py: {created: "2026-09-27", last_used: "2026-09-27", note: "EFHK FMI WFS station/unit/time validation, causal local fetch, decimal current-state freshness, no settlement absorption, and scoped reseed."}
     tests/test_replacement_download_cycle_currency_gate.py: {created: "2026-06-09", last_used: "2026-08-21", note: "Current-target cycle currency, durable rotation over a dynamic same-cycle target universe including zero-completion head retention and scoped held-slice isolation for timeboxed broad bucket point-cache convergence, direct independent-bucket fallback when metered quota is unavailable with bounded valid-time worker propagation, run-pinned and metadata-stamped anchor fallback, source-clock priority propagation into worker threads, and deadline-bounded worker-width fanout so one maintenance slice cannot multiply its wall-clock budget by queued city/date targets."}
     tests/test_replacement_forecast_materializer.py: {created: "2026-06-06", last_used: "2026-09-25", note: "Replacement live materialization authority and INV-37 connection contract, including complete non-partial source-run admission for current ENS evidence, exact Day0 enqueue ownership, HIGH/LOW absorbing-frontier monotonicity, causal fast-residual likelihood bounds, fail-closed writer races, bounded connection bootstrap under bulk ingest, and sanctioned forecasts+world attached reads."}
     tests/test_forecast_live_daemon.py: {created: "2026-07-30", last_used: "2026-08-02", note: "Held SELL global-auction wake completion: phase-specific canonical chain proof, settlement-only obligation semantics, V1/V2/V3 receipt compatibility, and bounded durable queue drain with multi-exact one-turn fairness that preserves incomplete debt without acknowledging active exposure."}
@@ -895,6 +896,7 @@ categories:
     - tests/test_finite_evidence_probability_symmetry.py
     - tests/test_replacement_forecast_extras_coverage_gate.py
     - tests/test_replacement_forecast_current_target_plan.py
+    - tests/test_fmi_airport_temperature.py
     - tests/test_replacement_forecast_materializer.py
     - tests/test_replacement_forecast_materializer_cycle_policy.py
     - tests/test_replacement_forecast_seed_discovery.py
@@ -3809,6 +3811,18 @@ test_metadata:
       publication clock.
     created: 2026-06-06
     last_reused_or_audited: 2026-07-28
+
+  tests/test_fmi_airport_temperature.py:
+    cohort: law_antibody
+    trust: trusted
+    authority_docs:
+      - docs/authority/replacement_final_form_2026_06_09.md
+    notes: >
+      EFHK-only FMI ten-minute current temperature has verified station, Celsius
+      metadata and causal first possession. It may reprice a current trajectory
+      but cannot become settlement or irreversible Day0 extreme authority.
+    created: 2026-09-27
+    last_reused_or_audited: 2026-09-27
 
   tests/test_replacement_forecast_materializer_cycle_policy.py:
     cohort: law_antibody

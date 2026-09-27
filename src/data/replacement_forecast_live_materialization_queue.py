@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import fcntl
 import sqlite3
@@ -1189,6 +1190,29 @@ def _day0_enqueue_ownership_snapshot(
     return checks
 
 
+def _typed_efhk_current_state(value: object) -> tuple[datetime, float, str] | None:
+    if not isinstance(value, Mapping):
+        return None
+    source = value.get("source")
+    raw_time = value.get("observed_at_utc")
+    raw_value = value.get("value_native")
+    if (
+        source not in {"fmi_airport_temperature", "aviationweather_metar", "ogimet_metar_efhk"}
+        or not isinstance(raw_time, str)
+        or not isinstance(raw_value, (int, float))
+        or isinstance(raw_value, bool)
+        or not math.isfinite(raw_value)
+    ):
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc), float(raw_value), source
+
+
 def _seed_already_covered(
     *,
     forecast_db: Path | str | None,
@@ -1285,6 +1309,30 @@ def _seed_already_covered(
             if not isinstance(conditioning, Mapping) or not _day0_seed_matches_conditioning(
                 seed,
                 conditioning,
+            ):
+                return False
+        requested_current_state = seed.get("day0_current_temperature_state")
+        if requested_current_state is not None:
+            try:
+                actual_provenance = json.loads(str(posterior["provenance_json"] or "{}"))
+            except (TypeError, ValueError):
+                return False
+            if not isinstance(actual_provenance, Mapping):
+                return False
+            actual_state = actual_provenance.get("day0_current_temperature_state")
+            requested_fact = _typed_efhk_current_state(requested_current_state)
+            actual_fact = _typed_efhk_current_state(actual_state)
+            seed_clock = _parse_utc_iso(seed.get("computed_at"))
+            posterior_clock = _parse_utc_iso(posterior["computed_at"])
+            if (
+                city != "Helsinki" or requested_fact is None or actual_fact is None
+                or seed_clock is None or posterior_clock is None
+                or requested_fact[0] > seed_clock or actual_fact[0] > posterior_clock
+            ):
+                return False
+            if actual_state != requested_current_state and not (
+                actual_fact[0] > requested_fact[0]
+                and posterior_clock >= seed_clock
             ):
                 return False
         readiness_columns = {
@@ -2581,6 +2629,7 @@ _REQUEST_DEDUP_KEY_FIELDS: tuple[str, ...] = (
     "openmeteo_source_run_id",
 )
 _DAY0_CONDITIONING_IDENTITY_KEY = "day0_conditioning_identity"
+_CURRENT_TEMPERATURE_IDENTITY_KEY = "day0_current_temperature_state"
 _UNCHANGED_BLOCKED_REASON = "REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"
 _UNCHANGED_BLOCKED_SKIP_REASON = (
     "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_UNCHANGED_BLOCKED_INPUT"
@@ -2775,6 +2824,14 @@ def _request_semantic_key(payload: Mapping[str, object]) -> tuple[str, ...] | No
                 separators=(",", ":"),
             )
         )
+    current_state = payload.get(_CURRENT_TEMPERATURE_IDENTITY_KEY)
+    if current_state is not None:
+        if not isinstance(current_state, Mapping):
+            return None
+        values.append(
+            _CURRENT_TEMPERATURE_IDENTITY_KEY + "="
+            + json.dumps(current_state, sort_keys=True, separators=(",", ":"))
+        )
     return tuple(values)
 
 
@@ -2819,7 +2876,9 @@ def _request_coalescing_key(payload: Mapping[str, object]) -> tuple[str, ...] | 
         return ("ordinary", *semantic_key)
     return (
         "day0",
-        *(value for value in semantic_key if not value.startswith(_DAY0_CONDITIONING_IDENTITY_KEY + "=")),
+        *(value for value in semantic_key if not value.startswith((
+            _DAY0_CONDITIONING_IDENTITY_KEY + "=", _CURRENT_TEMPERATURE_IDENTITY_KEY + "=",
+        ))),
     )
 
 

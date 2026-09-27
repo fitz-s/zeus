@@ -84,6 +84,7 @@ def executor_class_for(spec: SourceJobSpec) -> ExecutorClass:
         if spec.job_id in {
             "ingest_day0_metar_source_clock",
             "ingest_day0_metar_commit_retry",
+            "ingest_day0_fmi_temperature",
         }:
             return "source_clock_db"
         if spec.job_id == "ingest_k2_hko_tick":

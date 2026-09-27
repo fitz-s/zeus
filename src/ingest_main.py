@@ -2059,6 +2059,110 @@ def _day0_metar_source_clock_tick():
     return _commit_or_schedule_day0_metar(origin="source_clock")
 
 
+@_scheduler_job("ingest_day0_fmi_temperature")
+def _day0_fmi_temperature_tick() -> dict[str, object]:
+    """Add EFHK physical current-state prints and queue exact-family redecision."""
+    from src.config import runtime_cities_by_name
+    from src.data.fmi_airport_temperature import (
+        SOURCE_CHANNEL, STATION_ID, fetch_efhk_temperature,
+    )
+    from src.state.db import get_world_connection, world_write_mutex
+    from src.state.schema.observation_prints_schema import append_print
+    from src.state.write_coordinator import DBIdentity, default_runtime_write_coordinator
+
+    city = runtime_cities_by_name().get("Helsinki")
+    if city is None or (
+        str(getattr(city, "wu_station", "")).upper() != STATION_ID
+        or str(getattr(city, "settlement_source_type", "")).lower() != "noaa"
+        or str(getattr(city, "settlement_unit", "")).upper() != "C"
+    ):
+        return {"status": "STATION_NOT_CONFIGURED"}
+    now = datetime.now(timezone.utc)
+    if "Helsinki" not in _active_window_cities(now):
+        return {"status": "OUTSIDE_DAY0_WINDOW"}
+    # A two-hour overlapping window gives each ten-minute grid sample repeated
+    # chances while keeping the one-station WFS response bounded.
+    try:
+        prints = fetch_efhk_temperature(start=now - timedelta(hours=2), end=now)
+    except Exception as exc:  # noqa: BLE001 - this source is optional to other cities
+        logger.warning("FMI_EFHK_FETCH_FAILED error=%s:%s", type(exc).__name__, exc)
+        return {"status": "SOURCE_UNAVAILABLE"}
+    if not prints:
+        return {"status": "NO_NEW_PRINT"}
+
+    mutex = world_write_mutex()
+    if not mutex.acquire(timeout=0.1):
+        return {"status": "WORLD_WRITER_BUSY"}
+    inserted = 0
+    advanced = False
+    try:
+        with default_runtime_write_coordinator().lease(
+            (DBIdentity.WORLD,), owner="day0_fmi_temperature",
+            write_class="live", deadline_ms=200, max_hold_ms=300,
+        ) as lease:
+            conn = get_world_connection(write_class="live")
+            try:
+                conn.execute("PRAGMA busy_timeout = 100")
+                newest_row = conn.execute(
+                    "SELECT publish_ts_utc, value_native FROM observation_prints "
+                    "WHERE city = ? AND station_id = ? AND source_channel = ? "
+                    "ORDER BY publish_ts_utc DESC, id DESC LIMIT 1",
+                    (city.name, STATION_ID, SOURCE_CHANNEL),
+                ).fetchone()
+                newest = str(newest_row[0]) if newest_row else ""
+                newest_value = float(newest_row[1]) if newest_row else None
+                before = conn.total_changes
+                conn.execute("BEGIN IMMEDIATE")
+                for sample in prints:
+                    clock = sample.observed_at.isoformat()
+                    if append_print(
+                        conn, city=city.name, station_id=STATION_ID,
+                        source_channel=SOURCE_CHANNEL, publish_ts_utc=clock,
+                        value_native=sample.temperature_c, unit="C",
+                        fetched_at_utc=sample.fetched_at.isoformat(),
+                        raw_report=sample.raw_report,
+                    ):
+                        inserted += 1
+                        if clock > newest or (clock == newest and sample.temperature_c != newest_value):
+                            advanced = True
+                started = time.monotonic()
+                conn.commit()
+                lease.record_commit(
+                    commit_ms=(time.monotonic() - started) * 1000,
+                    rows_changed=conn.total_changes - before,
+                )
+            except BaseException:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+    except Exception as exc:  # noqa: BLE001 - optional source never blocks other cities
+        logger.warning("FMI_EFHK_WRITE_DEFERRED error=%s:%s", type(exc).__name__, exc)
+        return {"status": "WRITE_DEFERRED"}
+    finally:
+        mutex.release()
+
+    if advanced:
+        from src.data.replacement_forecast_production import (
+            _enqueue_fusion_upgrade_reseeds_if_needed,
+            _replacement_forecast_live_materialization_queue_config,
+        )
+
+        # Read/seed after receipt, never at the pre-request scheduling clock.
+        # The existing fusion input-revision marker owns durable per-family
+        # publication and periodic catch-up if this immediate scoped pass fails.
+        decision_time = datetime.now(timezone.utc)
+        local_day = decision_time.astimezone(ZoneInfo(city.timezone)).date().isoformat()
+        report = _enqueue_fusion_upgrade_reseeds_if_needed(
+            _replacement_forecast_live_materialization_queue_config(),
+            scopes=((city.name, local_day, "high"), (city.name, local_day, "low")),
+            changed_sources=("day0_current_temperature_state",),
+            computed_at=decision_time,
+        )
+        logger.info("FMI_EFHK_REDECISION_SEED status=%s", (report or {}).get("status"))
+    return {"status": "COMMITTED", "inserted": inserted, "advanced": advanced}
+
+
 @_scheduler_job("ingest_day0_metar_commit_retry")
 def _day0_metar_commit_retry_tick():
     """Retry a pending canonical write once without repeating network I/O."""
@@ -5457,6 +5561,9 @@ def _ingest_main_job_specs() -> list[tuple]:
             id="ingest_day0_metar_source_clock", max_instances=1, coalesce=True,
             misfire_grace_time=max(5, int(day0_metar_poll_seconds * 2)),
             next_run_time=now)),
+        (_day0_fmi_temperature_tick, "interval", dict(minutes=5,
+            id="ingest_day0_fmi_temperature", max_instances=1, coalesce=True,
+            misfire_grace_time=120, next_run_time=now)),
         (_day0_oracle_anomaly_tick, "interval", dict(seconds=10,
             id="ingest_day0_oracle_anomaly", max_instances=1, coalesce=True,
             misfire_grace_time=30, next_run_time=now + timedelta(seconds=2.5))),

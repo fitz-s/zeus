@@ -21,6 +21,7 @@ regardless of mathematical correctness.
 |------|-------------|--------------|
 | `daily_obs_append.py` | Settlement-adjacent daily observation writer | CRITICAL — settlement truth enters here |
 | `observation_client.py` | Current observation chain (Day0 monitoring) | HIGH — Day0 truth source |
+| `fmi_airport_temperature.py` | EFHK-only FMI WFS decimal current-temperature transport; no settlement or absorbing extreme authority | HIGH — station/unit/causal availability |
 | `tier_resolver.py` | Source-tier routing (which provider for which role) | HIGH — wrong tier = wrong truth plane |
 | `forecast_source_registry.py` | Forecast-source registry + operator gates | HIGH — source activation/provenance |
 | `forecast_ingest_protocol.py` | Typed forecast bundle protocol | MEDIUM |

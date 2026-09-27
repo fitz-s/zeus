@@ -37,6 +37,7 @@ authoritative machine registry is `architecture/test_topology.yaml`.
 | `conftest.py` | Shared pytest fixtures for R3 T1 fake venue parity tests (created 2026-04-27) |
 | `conftest_connection_pair.py` | Test helper fake_connection_pair() for riskguard/fill_tracker monkeypatching (two-system independence; created 2026-04-30) |
 | `test_attribution_drift.py` | Cross-module antibody: silent attribution drift detector per R3 §1 #2 ATTRIBUTION_DRIFT packet (created 2026-04-28) |
+| `test_fmi_airport_temperature.py` | FMI EFHK-only WFS identity/unit/causality, physical current-state freshness, and no settlement absorption (created 2026-09-27) |
 | `test_attribution_drift_weekly.py` | End-to-end runner antibody for attribution drift batch-3 weekly dispatch (created 2026-04-28) |
 | `test_calibration_observation.py` | Cross-module antibody: Platt parameter drift monitoring per R3 §1 #2 CALIBRATION_HARDENING packet (created 2026-04-29) |
 | `test_calibration_observation_weekly.py` | End-to-end runner antibody for calibration hardening batch-3 weekly dispatch (created 2026-04-29) |

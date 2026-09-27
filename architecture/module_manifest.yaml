@@ -217,6 +217,7 @@ modules:
       - src/data/daily_obs_append.py
       - src/data/daily_observation_writer.py
       - src/data/observation_client.py
+      - src/data/fmi_airport_temperature.py
       - src/data/hourly_instants_append.py
       - src/data/observation_instants_writer.py
       - src/data/tier_resolver.py
@@ -237,6 +238,7 @@ modules:
       - src/data/daily_obs_append.py
       - src/data/daily_observation_writer.py
       - src/data/observation_client.py
+      - src/data/fmi_airport_temperature.py
       - src/data/forecast_source_registry.py
       - src/data/forecast_ingest_protocol.py
       - src/data/tigge_client.py

@@ -47,6 +47,26 @@ when_to_re_audit: "See header WHEN TO RE-AUDIT section above"
 # ============================================================
 
 sources:
+  - id: fmi_efhk_current_temperature
+    display_name: "FMI Helsinki-Vantaa airport current temperature"
+    category: observation
+    publisher: "Finnish Meteorological Institute"
+    authority_urls:
+      - "https://en.ilmatieteenlaitos.fi/open-data-manual-wfs-examples-and-guidelines"
+      - "https://opendata.fmi.fi/meta?observableProperty=observation&param=temperature&language=eng"
+    publication_schedule:
+      description: "Ten-minute observation grid; no per-sample publication timestamp. Real response completion establishes earliest local possession."
+    what_is_published:
+      format: "WFS MultiPointCoverage temperature tuples and UTC Unix grid coordinates"
+      unit: "degC verified against official parameter metadata at each fetch"
+    scope_and_range:
+      cities_using_this_source: ["Helsinki EFHK only, FMI fmisid 100968 / WMO 2974"]
+    zeus_consumption:
+      ingest_path: ["src/data/fmi_airport_temperature.py", "src/ingest_main.py"]
+      target_table: "world.observation_prints"
+      source_tag_code: "fmi_airport_temperature"
+      settlement_authority: "None; physical/statistical current-state only, no irreversible Day0 extreme or settlement."
+      causal_availability: "fetched_at_utc after complete WFS response; publish_ts_utc stores sample observation time, never a claimed FMI publish time."
 
   # ----------------------------------------------------------
   # 1. ECMWF Open Data — IFS-ENS (Live Forecast)

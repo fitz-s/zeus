@@ -4392,6 +4392,7 @@ def _enqueue_fusion_upgrade_reseeds_if_needed(
     changed_sources: Sequence[str] | None = None,
     manifest_snapshot: dict[str, object] | None = None,
     limit: int | None = None,
+    computed_at: datetime | None = None,
 ) -> dict[str, object] | None:
     """Enqueue scopes whose provider set or consumed raw input revision changed.
 
@@ -4404,7 +4405,7 @@ def _enqueue_fusion_upgrade_reseeds_if_needed(
     if forecast_db is None or seed_dir is None or raw_manifest_dir is None:
         return None
     try:
-        computed_at, manifests = _prepared_reseed_manifests(
+        snapshot_at, manifests = _prepared_reseed_manifests(
             raw_manifest_dir,
             manifest_snapshot,
         )
@@ -4423,7 +4424,7 @@ def _enqueue_fusion_upgrade_reseeds_if_needed(
             ),
             scopes=scopes,
             changed_sources=changed_sources,
-            computed_at=computed_at,
+            computed_at=computed_at or snapshot_at,
             manifests=manifests,
         )
     except Exception as exc:  # noqa: BLE001 — fail-soft: the trigger never breaks the poll

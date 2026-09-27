@@ -2748,6 +2748,7 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
     )
     assert provenance["day0_remaining_carrier_content_identity"]
     assert provenance["day0_remaining_carrier_sample_count"] == 500
+    assert provenance["day0_current_temperature_state"] == current_state.identity()
     bootstrap_samples = provenance["q_bootstrap_samples_by_bin"]
     assert set(bootstrap_samples) == set(q)
     assert all(len(samples) == 500 for samples in bootstrap_samples.values())
@@ -2755,6 +2756,31 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
         sum(bootstrap_samples[bin_id][index] for bin_id in q) == pytest.approx(1.0)
         for index in range(500)
     )
+
+    revised_state = Day0CurrentTemperatureState(
+        value_native=85.0,
+        observed_at=computed_at + timedelta(minutes=10),
+        source="aviationweather_metar",
+    )
+    monkeypatch.setattr(
+        "src.data.day0_hourly_vectors.read_day0_current_temperature_state",
+        lambda **_kwargs: revised_state,
+    )
+    revised = materialize_replacement_forecast_live(
+        conn, replace(request, computed_at=computed_at + timedelta(minutes=11)),
+    )
+    assert revised.ok is True
+    revised_row = conn.execute(
+        "SELECT q_json, provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+        (revised.posterior_id,),
+    ).fetchone()
+    revised_q = json.loads(revised_row["q_json"])
+    revised_provenance = json.loads(revised_row["provenance_json"])
+    assert revised_provenance["day0_current_temperature_state"] == revised_state.identity()
+    assert revised_provenance["day0_remaining_carrier_content_identity"] != provenance[
+        "day0_remaining_carrier_content_identity"
+    ]
+    assert revised_q != q
 
 
 def test_wu_fast_residual_is_provisional_while_direct_noaa_fast_is_absorbing() -> None:

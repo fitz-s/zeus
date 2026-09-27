@@ -258,6 +258,7 @@ def build_replacement_forecast_materialization_request(
         "day0_observed_extreme_sample_count",
         "day0_observed_extreme_unit",
         "day0_observation_state",
+        "day0_current_temperature_state",
         # Task #32: honest re-materialization provenance. When the seed was written by the
         # fusion-upgrade trigger it carries upgrade_trigger="instrument_set_expansion"; thread it
         # through verbatim so the materializer can record it in the posterior provenance_json.

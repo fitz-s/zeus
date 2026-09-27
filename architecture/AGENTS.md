@@ -80,7 +80,7 @@ Changes here are architecture or governance changes, never “just docs.”
 | `scope_schema.json` | JSON Schema for Zeus packet scope.yaml sidecar; machine-read by zpkt and pre-commit hook |
 | `digest_profiles.py` | Auto-generated digest profiles for topology_doctor — DO NOT EDIT BY HAND; regenerated from topology.yaml |
 | `paris_station_resolution_2026-05-01.yaml` | Operator decision 2026-05-01: Paris Polymarket settlement station is LFPB (not LFPG) |
-| `data_sources_registry_2026_05_08.yaml` | BINDING authoritative registry of all 12 external data sources Zeus consumes (forecast, observation, settlement, market); created 2026-05-08; includes [VERIFIED]/[INFERRED] tags, forbidden patterns FP-01..FP-10, and cross-references to all binding architecture docs |
+| `data_sources_registry_2026_05_08.yaml` | BINDING registry of external data sources Zeus consumes (forecast, observation, settlement, market); created 2026-05-08; includes provenance and forbidden patterns FP-01..FP-10 |
 | `agent_pr_discipline_2026_05_09.md` | Agent PR discipline: 300-LOC threshold, auto-reviewer cost economics, decision tree, author detection, bypass protocol; hook `.claude/hooks/dispatch.py::_run_advisory_check_pr_create_loc_accumulation` |
 | `admission_severity.yaml` | topology_doctor admission severity overrides; maps issue codes and file patterns to severity levels (created 2026-05-07) |
 | `antibody_specs.yaml` | Machine-readable antibody specs from zeus_agent_runtime_compounding plan W1.2 (created 2026-05-16) |

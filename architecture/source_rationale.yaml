@@ -339,6 +339,13 @@ files:
     downstream:
     - src/ingest_main.py
     - src/events/triggers/day0_extreme_updated.py
+  src/data/fmi_airport_temperature.py:
+    zone: K1_truth
+    authority_role: efhk_current_temperature_physical_clock
+    why: Validates FMI WFS fmisid 100968 / WMO 2974 at EFHK with official degC parameter metadata and UTC sample coordinates. A ten-minute grid sample has no publisher per-sample release clock, so only its real local fetch time establishes causal availability. The isolated Helsinki physical-current channel cannot settle markets, create an absorbing Day0 extreme, or establish residual calibration.
+    downstream:
+    - src/ingest_main.py
+    - src/data/day0_hourly_vectors.py
   src/data/replacement_forecast_live_materialization_queue.py:
     zone: K2_runtime
     authority_role: replacement_live_materialization_queue

@@ -3972,6 +3972,8 @@ def read_day0_current_temperature_state(
         channels = ("hko_rhrread_spot",)
     elif source_type == "noaa":
         channels = (f"ogimet_metar_{station.lower()}", "aviationweather_metar")
+        if city_name == "Helsinki" and station == "EFHK" and unit == "C":
+            channels += ("fmi_airport_temperature",)
     else:
         return None
     try:
@@ -4057,6 +4059,18 @@ def read_day0_current_temperature_state(
         if published > decision_utc or fetched > decision_utc:
             continue
         observation_time = published
+        if channel == "fmi_airport_temperature":
+            from src.data.fmi_airport_temperature import valid_ledger_print
+
+            if (
+                station_raw != "EFHK"
+                or str(unit_raw or "").strip().upper() != "C"
+                or fetched < published
+                or decision_utc - fetched > timedelta(minutes=25)
+                or decision_utc - published > timedelta(minutes=25)
+                or not valid_ledger_print(str(raw_report or ""), observed_at=published, value=value)
+            ):
+                continue
         if channel == "aviationweather_metar":
             from src.data.day0_fast_obs import (
                 _T_GROUP_RE,
@@ -4087,7 +4101,7 @@ def read_day0_current_temperature_state(
             continue
         # Publication can lag physical observation. Delayed older reports
         # cannot roll back the current state used by entry and held paths.
-        clock = (observation_time, published, fetched)
+        clock = (observation_time, int(channel == "fmi_airport_temperature"), published, fetched)
         if latest_clock is None or clock > latest_clock:
             latest_clock = clock
             latest_state = Day0CurrentTemperatureState(

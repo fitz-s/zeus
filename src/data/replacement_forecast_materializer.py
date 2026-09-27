@@ -1556,6 +1556,7 @@ def _day0_noaa_preliminary_carrier(
         resolver_terminal=resolver_terminal,
         remaining_center_bias_native=float(remaining_center_bias_c) * native_scale,
     )
+    carrier["current_path_state"] = current_state.identity()
     return carrier, likelihood
 
 
@@ -7751,6 +7752,11 @@ def _compute_posterior_payload(
             {
                 "day0_remaining_carrier_content_identity": str(
                     _day0_shared_carrier["content_identity"]
+                ),
+                **(
+                    {"day0_current_temperature_state": dict(_day0_shared_carrier["current_path_state"])}
+                    if isinstance(_day0_shared_carrier.get("current_path_state"), Mapping)
+                    else {}
                 ),
                 "day0_remaining_carrier_operator": str(
                     _day0_shared_carrier["operator"]

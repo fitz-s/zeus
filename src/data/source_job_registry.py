@@ -151,6 +151,12 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
                   notes="5s default source-clock batch poll; HTTP precedes the bounded live "
                         "world-writer attempt, unchanged publication identities perform no DB "
                         "work, and committed Day0 extreme events wake the canonical reactor"),
+    SourceJobSpec("ingest_day0_fmi_temperature", "ingest_main", "live", "default", True,
+                  source_id="fmi_airport_temperature",
+                  callable_ref="_day0_fmi_temperature_tick", family="observation",
+                  misfire_grace_time=60,
+                  notes="bounded EFHK current-temperature poll; changed physical prints "
+                        "wake the existing fusion revision and materialization queue"),
     SourceJobSpec("ingest_day0_metar_commit_retry", "ingest_main", "live", "default", True,
                   source_id="aviationweather_metar",
                   callable_ref="_day0_metar_commit_retry_tick", family="observation",

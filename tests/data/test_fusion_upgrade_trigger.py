@@ -1338,6 +1338,164 @@ def _revision_upgrade_kwargs(tmp_path: Path) -> tuple[Path, dict[str, object]]:
     }
 
 
+def test_fmi_current_state_revision_publishes_exact_existing_fusion_seed(
+    tmp_path, monkeypatch,
+) -> None:
+    from src.data import replacement_forecast_production as production
+    from src.data import replacement_forecast_materialization_seed_builder as builder
+    from src.data import replacement_forecast_materialization_request_builder as requests
+    from src.data import replacement_forecast_seed_discovery as discovery
+    from src.data import replacement_cycle_advance_trigger as cycle_advance
+    from src.data.fmi_airport_temperature import SOURCE_CHANNEL, parse_temperature_coverage
+    from src.state.schema.observation_prints_schema import append_print, ensure_table
+    from tests.test_fmi_airport_temperature import coverage
+
+    db, kwargs = _revision_upgrade_kwargs(tmp_path)
+    computed_at = datetime(2026, 9, 27, 12, 25, tzinfo=UTC)
+    cycle = "2026-09-27T09:00:00+00:00"
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        _insert_posterior(
+            conn, city="Helsinki", target_date="2026-09-27", metric="high",
+            cycle_iso=cycle, used_models=[_DWD],
+            computed_at="2026-09-27T12:15:00+00:00",
+        )
+        conn.execute("UPDATE forecast_posteriors SET provenance_json = ?, dependency_source_run_ids_json = ?",
+                     (json.dumps({
+                         "bayes_precision_fusion": {"used_models": [_DWD]},
+                         "day0_remaining_carrier_content_identity": "old-carrier",
+                         "day0_current_temperature_state": {
+                             "source": "aviationweather_metar",
+                             "observed_at_utc": "2026-09-27T11:50:00+00:00",
+                             "value_native": 16.0,
+                         },
+                         "day0_provisional_observation": {
+                             "active": True,
+                             "source": "aviationweather_metar", "observed_extreme_c": 16.0,
+                             "observation_time": "2026-09-27T11:50:00+00:00",
+                             "metric": "high", "unit": "C",
+                         },
+                     }), json.dumps({"baseline_b0": "baseline", "openmeteo_ifs9_anchor": "anchor"})))
+        _insert_single_runs(
+            conn, city="Helsinki", target_date="2026-09-27", metric="high",
+            cycle_iso=cycle, models=[_DWD],
+        )
+        conn.execute("INSERT INTO cycle_advance_enqueues "
+                     "(enqueued_at, city, target_date, metric, consumed_cycle_time, "
+                     "target_cycle_time, held_position, seed_file, reason, "
+                     "day0_observed_extreme_observation_time) "
+                     "VALUES (?, 'Helsinki', '2026-09-27', 'high', ?, ?, 0, ?, ?, ?)",
+                     ("2026-09-27T12:15:00+00:00", cycle, cycle,
+                      str(tmp_path / "old-absorbing-seed.json"), "day0_observation_advanced",
+                      "2026-09-27T11:50:00+00:00"))
+        conn.execute("CREATE TABLE readiness_state (strategy_key TEXT, status TEXT, "
+                     "provenance_json TEXT, dependency_json TEXT)")
+        conn.execute("INSERT INTO readiness_state (strategy_key, status, provenance_json, dependency_json) "
+                     "VALUES (?, 'READY', ?, ?)",
+                     (queue.STRATEGY_KEY,
+                      json.dumps({"city": "Helsinki", "target_date": "2026-09-27", "temperature_metric": "high"}),
+                      json.dumps({"dependencies": [
+                          {"role": "baseline_b0", "source_run_id": "baseline"},
+                          {"role": "openmeteo_ifs9_anchor", "source_run_id": "anchor"},
+                      ]})))
+    world_path = tmp_path / "world.sqlite"
+    with sqlite3.connect(world_path) as world:
+        ensure_table(world)
+        for print_ in parse_temperature_coverage(
+            coverage(), fetched_at=datetime(2026, 9, 27, 12, 24, tzinfo=UTC),
+        ):
+            append_print(world, city="Helsinki", station_id="EFHK", source_channel=SOURCE_CHANNEL,
+                         publish_ts_utc=print_.observed_at.isoformat(),
+                         value_native=print_.temperature_c, unit="C",
+                         fetched_at_utc=print_.fetched_at.isoformat(), raw_report=print_.raw_report)
+    monkeypatch.setattr("src.state.db.get_world_connection_read_only",
+                        lambda: sqlite3.connect(world_path))
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery._day0_observed_extreme_seed_payload",
+        lambda **_: {"day0_observed_extreme_c": 16.0,
+                    "day0_observed_extreme_source": "aviationweather_metar",
+                    "day0_observed_extreme_observation_time": "2026-09-27T11:50:00+00:00",
+                    "day0_observed_extreme_sample_count": 1,
+                    "day0_observed_extreme_unit": "C"},
+    )
+    manifest = SimpleNamespace(
+        source_cycle_time=datetime(2026, 9, 27, 9, tzinfo=UTC),
+        artifact_path=tmp_path / "anchor.json",
+    )
+    (tmp_path / "anchor.json").write_text("{}")
+    (tmp_path / "precision.json").write_text("{}")
+    monkeypatch.setattr(cycle_advance, "_family_manifests_from_db", lambda *_a, **_k: (manifest,))
+    monkeypatch.setattr(discovery, "_latest_manifest", lambda *_a, **_k: manifest)
+    monkeypatch.setattr(discovery, "_manifest_path_value",
+                        lambda _manifest, key: tmp_path / ("precision.json" if key == "precision_metadata_json" else "anchor.json"))
+    monkeypatch.setattr(discovery, "_manifest_base_dir", lambda *_a, **_k: tmp_path)
+    monkeypatch.setattr(discovery, "_resolve_path", lambda path, **_k: path)
+    monkeypatch.setattr(builder, "latest_baseline_coverage_for_replacement_seed",
+                        lambda *_a, **_k: {"baseline": True})
+    monkeypatch.setattr(builder, "market_bins_for_replacement_seed",
+                        lambda *_a, **_k: ({"bin_id": "16"},))
+    monkeypatch.setattr("src.data.replacement_forecast_source_run_identity.expected_replacement_dependency_identity_by_role",
+                        lambda _metric: {"openmeteo_ifs9_anchor": SimpleNamespace(source_id="anchor", data_version="v1")})
+    def fixed_weather_seed(**seed_kwargs):
+        return SimpleNamespace(ok=True, seed={
+            "city": "Helsinki", "target_date": "2026-09-27", "temperature_metric": "high",
+            "city_timezone": "Europe/Helsinki", "source_cycle_time": cycle,
+            "computed_at": seed_kwargs["computed_at"].isoformat(),
+            "expires_at": "2026-09-27T20:00:00+00:00",
+            "baseline_source_run_id": "baseline", "baseline_data_version": "v1",
+            "baseline_source_available_at": cycle,
+            "openmeteo_source_run_id": "anchor", "openmeteo_source_available_at": cycle,
+            "openmeteo_payload_json": str(tmp_path / "anchor.json"),
+            "precision_metadata_json": str(tmp_path / "precision.json"),
+            "bins": [{"bin_id": "16", "lower_c": 16.0, "upper_c": 16.0}],
+            "day0_observed_extreme_c": 16.0,
+            "day0_observed_extreme_source": "aviationweather_metar",
+            "day0_observed_extreme_observation_time": "2026-09-27T11:50:00+00:00",
+            "day0_observed_extreme_unit": "C",
+        })
+    monkeypatch.setattr(builder, "build_replacement_forecast_materialization_seed", fixed_weather_seed)
+    monkeypatch.setattr(requests, "_precision_ready", lambda *_args: ({}, ()))
+    monkeypatch.setattr(requests, "_om9_localday_coverage_ready", lambda *_a, **_k: ())
+    cfg = {"forecast_db": db, "seed_dir": tmp_path / "seeds", "raw_manifest_dir": tmp_path / "raw"}
+    current = {"source": SOURCE_CHANNEL, "observed_at_utc": "2026-09-27T12:20:00+00:00",
+               "value_native": 15.6}
+    first = production._enqueue_fusion_upgrade_reseeds_if_needed(
+        cfg, scopes=(("Helsinki", "2026-09-27", "high"),),
+        changed_sources=("day0_current_temperature_state",), computed_at=computed_at,
+    )
+    second = production._enqueue_fusion_upgrade_reseeds_if_needed(
+        cfg, scopes=(("Helsinki", "2026-09-27", "high"),),
+        changed_sources=("day0_current_temperature_state",), computed_at=computed_at,
+    )
+    assert first is not None and second is not None
+    assert first["seeds_enqueued"] == 1
+    assert second["seeds_enqueued"] == 0 and second["already_enqueued"] == 1
+    visible = list((tmp_path / "seeds").glob("*.json"))
+    assert len(visible) == 1
+    seed = json.loads(visible[0].read_text())
+    assert seed["day0_current_temperature_state"] == current
+    assert seed["day0_observed_extreme_source"] == "aviationweather_metar"
+    with sqlite3.connect(db) as conn:
+        marker = conn.execute("SELECT capturable_family_set FROM fusion_upgrade_enqueues").fetchone()[0]
+        assert "day0_current_temperature_state" in marker
+        assert conn.execute("SELECT COUNT(*) FROM cycle_advance_enqueues WHERE city='Helsinki'").fetchone()[0] == 1
+    monkeypatch.setattr(queue, "tradeable_grade_coverage_sql", lambda **_: "AND 1=1")
+    monkeypatch.setattr(queue, "replacement_live_input_lag_reason", lambda *_a, **_k: None)
+    assert queue._seed_already_covered(forecast_db=db, seed=seed) is False
+    built_request = requests.build_replacement_forecast_materialization_request(
+        seed, base_dir=tmp_path,
+    )
+    assert built_request.ok is True
+    assert built_request.request["day0_current_temperature_state"] == current
+    with sqlite3.connect(db) as conn:
+        prov = json.loads(conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE city='Helsinki'").fetchone()[0])
+        prov["day0_current_temperature_state"] = current
+        conn.execute("UPDATE forecast_posteriors SET provenance_json = ?, computed_at = ?",
+                     (json.dumps(prov), "2026-09-27T12:27:00+00:00"))
+    assert queue._day0_seed_matches_conditioning(seed, prov["day0_provisional_observation"])
+    assert queue._seed_already_covered(forecast_db=db, seed=seed) is True
+
+
 @pytest.mark.parametrize(
     "cycle_time",
     (
@@ -2443,6 +2601,84 @@ def test_no_posterior_is_not_an_upgrade() -> None:
         conn, city="Ghost", target_date="2026-06-13", metric="high"
     )
     assert verdict["is_upgrade"] is False
+
+
+def test_same_cycle_same_extreme_new_current_temperature_revisions_reseed(
+    tmp_path, monkeypatch,
+) -> None:
+    """The physical path revision is independent of absorbing extreme identity."""
+    from src.data.fmi_airport_temperature import parse_temperature_coverage, SOURCE_CHANNEL
+    from src.state.schema.observation_prints_schema import append_print, ensure_table
+    from tests.test_fmi_airport_temperature import coverage
+
+    forecast = _conn()
+    cycle = "2026-09-27T09:00:00+00:00"
+    _insert_posterior(
+        forecast, city="Helsinki", target_date="2026-09-27", metric="high",
+        cycle_iso=cycle, used_models=[_DWD],
+        computed_at="2026-09-27T12:15:00+00:00",
+    )
+    forecast.execute("UPDATE forecast_posteriors SET provenance_json = ? WHERE city = 'Helsinki'",
+                     (json.dumps({"bayes_precision_fusion": {"used_models": [_DWD]},
+                                  "day0_remaining_carrier_content_identity": "old-carrier"}),))
+    forecast.commit()
+    world_path = tmp_path / "world.sqlite"
+    with sqlite3.connect(world_path) as conn:
+        ensure_table(conn)
+        for print_ in parse_temperature_coverage(
+            coverage(), fetched_at=datetime(2026, 9, 27, 12, 24, tzinfo=UTC),
+        ):
+            append_print(conn, city="Helsinki", station_id="EFHK",
+                         source_channel=SOURCE_CHANNEL, publish_ts_utc=print_.observed_at.isoformat(),
+                         value_native=print_.temperature_c, unit="C",
+                         fetched_at_utc=print_.fetched_at.isoformat(), raw_report=print_.raw_report)
+    def world_reader():
+        return sqlite3.connect(world_path)
+    monkeypatch.setattr("src.state.db.get_world_connection_read_only", world_reader)
+    now = datetime(2026, 9, 27, 12, 25, tzinfo=UTC)
+    def verdict(at):
+        return scope_capture_offers_larger_provider_set(
+            forecast, city="Helsinki", target_date="2026-09-27", metric="high",
+            changed_sources=("day0_current_temperature_state",), decision_time=at,
+        )
+    current = verdict(now)
+    assert current["input_revision_changed"] is True
+    assert current["changed_input_sources"] == ["day0_current_temperature_state"]
+    revision = current["changed_input_revisions"]["day0_current_temperature_state"]
+    assert revision == {
+        "source": SOURCE_CHANNEL, "observed_at_utc": "2026-09-27T12:20:00+00:00",
+        "value_native": 15.6,
+    }
+    key = trigger._input_revision_marker_key("dwd", current["changed_input_revisions"])
+    assert trigger._input_revision_marker_key("dwd", verdict(now)["changed_input_revisions"]) == key
+    forecast.execute("UPDATE forecast_posteriors SET provenance_json = ? WHERE city = 'Helsinki'",
+                     (json.dumps({"bayes_precision_fusion": {"used_models": [_DWD]}}),))
+    forecast.commit()
+    assert verdict(now)["input_revision_changed"] is False  # no physical-path carrier to refresh
+    # A committed posterior that consumed the same physical sample resets the
+    # revision even if its Day0 running maximum has not moved.
+    posterior_provenance = {
+        "bayes_precision_fusion": {"used_models": [_DWD]},
+        "day0_remaining_carrier_content_identity": "first-fmi-carrier",
+        "day0_current_temperature_state": revision,
+        "day0_conditioning": {"source": "aviationweather_metar", "observed_extreme_c": 16.0},
+    }
+    forecast.execute("UPDATE forecast_posteriors SET provenance_json = ? WHERE city = 'Helsinki'",
+                     (json.dumps(posterior_provenance),))
+    forecast.commit()
+    assert verdict(now)["input_revision_changed"] is False
+    with sqlite3.connect(world_path) as conn:
+        later = parse_temperature_coverage(
+            coverage(), fetched_at=datetime(2026, 9, 27, 12, 34, tzinfo=UTC),
+        )[-1]
+        append_print(conn, city="Helsinki", station_id="EFHK", source_channel=SOURCE_CHANNEL,
+                     publish_ts_utc="2026-09-27T12:30:00+00:00", value_native=15.5,
+                     unit="C", fetched_at_utc=later.fetched_at.isoformat(),
+                     raw_report=later.raw_report.replace('"2026-09-27T12:20:00+00:00"', '"2026-09-27T12:30:00+00:00"').replace('"value":"15.6"', '"value":"15.5"'))
+    changed = verdict(datetime(2026, 9, 27, 12, 35, tzinfo=UTC))
+    assert changed["input_revision_changed"] is True
+    assert changed["changed_input_revisions"]["day0_current_temperature_state"]["value_native"] == 15.5
+    forecast.close()
 
 
 def test_legacy_gem_global_is_not_cmc_but_gem_hrdps_is() -> None:

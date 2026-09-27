@@ -56,6 +56,31 @@ _PUBLISH_PENDING_PREFIX = "__fusion_upgrade_publish_pending__:"
 _RESERVATION_TTL = timedelta(minutes=5)
 _DAY0_HOURLY_VECTOR_SOURCE = "day0_hourly_vectors"
 _DAY0_CAUSAL_BUNDLE_SOURCE = "day0_causal_evidence_bundle"
+_DAY0_CURRENT_TEMPERATURE_SOURCE = "day0_current_temperature_state"
+
+
+def _capturable_current_temperature_state(
+    *, city: str, target_date: str, decision_time: datetime | None,
+) -> dict[str, object] | None:
+    """Read physical state on WORLD without importing it as an absorbing fact."""
+    if city != "Helsinki" or decision_time is None:
+        return None
+    from src.config import runtime_cities_by_name
+    from src.data.day0_hourly_vectors import read_day0_current_temperature_state
+    from src.state.db import get_world_connection_read_only
+
+    config = runtime_cities_by_name().get(city)
+    if config is None:
+        return None
+    conn = get_world_connection_read_only()
+    try:
+        state = read_day0_current_temperature_state(
+            conn=conn, city=config, target_date=target_date,
+            decision_time=decision_time,
+        )
+        return state.identity() if state is not None else None
+    finally:
+        conn.close()
 
 
 @dataclass(frozen=True)
@@ -333,6 +358,8 @@ def _latest_posterior_inputs(
     tuple[str, ...],
     bool,
     bool,
+    dict[str, object] | None,
+    bool,
 ]:
     """Return cycle, provider inputs, and committed Day0/source-clock state."""
     try:
@@ -347,14 +374,14 @@ def _latest_posterior_inputs(
             (SOURCE_ID, city, target_date, metric),
         ).fetchone()
     except Exception:
-        return None, frozenset(), {}, frozenset(), frozenset(), None, (), False, False
+        return None, frozenset(), {}, frozenset(), frozenset(), None, (), False, False, None, False
     if row is None:
-        return None, frozenset(), {}, frozenset(), frozenset(), None, (), False, False
+        return None, frozenset(), {}, frozenset(), frozenset(), None, (), False, False, None, False
     source_cycle_iso = str(row[0]) if row[0] is not None else None
     try:
         prov = json.loads(row[1]) if row[1] else {}
     except Exception:
-        return source_cycle_iso, frozenset(), {}, frozenset(), frozenset(), None, (), False, False
+        return source_cycle_iso, frozenset(), {}, frozenset(), frozenset(), None, (), False, False, None, False
     fusion = prov.get("bayes_precision_fusion", {}) or {}
     used = fusion.get("used_models") or []
     if not isinstance(used, (list, tuple)):
@@ -409,6 +436,8 @@ def _latest_posterior_inputs(
         day0_expected_models,
         day0_bundle_valid,
         source_clock_scheme_bound,
+        prov.get("day0_current_temperature_state") if isinstance(prov.get("day0_current_temperature_state"), dict) else None,
+        bool(prov.get("day0_remaining_carrier_content_identity")),
     )
 
 
@@ -496,6 +525,8 @@ def scope_capture_offers_larger_provider_set(
         day0_expected_models,
         day0_causal_bundle_valid,
         source_clock_scheme_bound,
+        consumed_current_temperature_state,
+        consumed_current_temperature_carrier,
     ) = _latest_posterior_inputs(conn, city=city, target_date=target_date, metric=metric)
     if source_cycle_iso is None:
         return {
@@ -616,6 +647,26 @@ def scope_capture_offers_larger_provider_set(
             changed_revisions[_DAY0_CAUSAL_BUNDLE_SOURCE] = (
                 current_day0_vector_revision
             )
+    current_requested = requested_sources is None or _DAY0_CURRENT_TEMPERATURE_SOURCE in requested_sources
+    if current_requested and city == "Helsinki" and consumed_current_temperature_carrier:
+        try:
+            current_state = _capturable_current_temperature_state(
+                city=city, target_date=target_date, decision_time=decision_time,
+            )
+        except (OSError, sqlite3.Error):
+            current_state = None
+        if (
+            current_state is not None
+            and (
+                current_state.get("source") == "fmi_airport_temperature"
+                or (consumed_current_temperature_state or {}).get("source")
+                == "fmi_airport_temperature"
+            )
+            and current_state != consumed_current_temperature_state
+        ):
+            changed_inputs.append(_DAY0_CURRENT_TEMPERATURE_SOURCE)
+            changed_inputs.sort()
+            changed_revisions[_DAY0_CURRENT_TEMPERATURE_SOURCE] = current_state
     input_revision_changed = bool(changed_inputs)
     return {
         "is_upgrade": family_upgrade or input_revision_changed,
@@ -1658,6 +1709,9 @@ def enqueue_fusion_upgrade_reseeds(
                         str(source)
                         for source in verdict["changed_input_sources"]
                     ),
+                    current_temperature_state=(
+                        verdict["changed_input_revisions"].get(_DAY0_CURRENT_TEMPERATURE_SOURCE)
+                    ),
                     day0_payload=day0_payload,
                 )
             except Exception as exc:  # noqa: BLE001 — per-scope fail-soft
@@ -1841,6 +1895,7 @@ def _build_and_write_upgrade_seed(
     resolve_path,
     expected_identity,
     input_revision_sources: Sequence[str] = (),
+    current_temperature_state: Mapping[str, object] | None = None,
     day0_payload: Mapping[str, object] | None = None,
 ) -> Path | None:
     """Build one re-materialization seed for a scope using the existing seed-builder pieces and
@@ -1910,6 +1965,8 @@ def _build_and_write_upgrade_seed(
     # posterior records WHY it was produced (instrument-set expansion, not a fresh cycle).
     seed_payload: dict[str, object] = dict(seed_result.seed)
     seed_payload["upgrade_trigger"] = "instrument_set_expansion"
+    if current_temperature_state is not None:
+        seed_payload["day0_current_temperature_state"] = dict(current_temperature_state)
     if input_revision_sources:
         # Keep the causal reason machine-readable through the queue.  Station
         # forecasts publish on their own clock; a changed row must not lose its
