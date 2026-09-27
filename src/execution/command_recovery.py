@@ -12467,6 +12467,14 @@ def reconcile_terminal_order_facts(
                     order_fact=row,
                     occurred_at=occurred_at,
                 )
+                # Projection alone does not discharge the pre-submit capital
+                # obligation. Close it under the same exact terminal proof and
+                # transaction so a later pending_entry-only scan cannot lose it.
+                obligation = reconcile_terminal_entry_exposure_obligations(
+                    conn, command_id=command_id,
+                )
+                if obligation["errors"]:
+                    raise RuntimeError(f"terminal no-fill obligation release failed: {command_id}")
                 continuation = _terminal_no_fill_continuation_from_row(row)
                 emitted = 0
                 if emit_immediate_redecision:
@@ -14117,7 +14125,161 @@ def terminal_entry_no_fill_projection_pending(conn: sqlite3.Connection) -> bool:
     """Request a writer only for a currently proved zero-fill entry candidate."""
     if not all(_table_exists(conn, name) for name in ("venue_commands", "position_current")):
         return False
-    return bool(_terminal_entry_no_fill_priority_command_ids(conn))
+    return bool(
+        _terminal_entry_no_fill_priority_command_ids(conn)
+        or _terminal_voided_entry_obligation_command_ids(conn, limit=1, probe=True)
+        or _terminal_partial_entry_obligation_command_ids(conn, limit=1)
+    )
+
+
+_terminal_voided_entry_obligation_cursor = ""
+
+
+def _terminal_voided_entry_obligation_command_ids(
+    conn: sqlite3.Connection, *, limit: int,
+    after_command_id: str | None = None, command_id: str | None = None,
+    probe: bool = False, advance_cursor: bool = False,
+) -> tuple[str, ...]:
+    """Bound already-voided obligations to exact command/order zero-fill proof."""
+    global _terminal_voided_entry_obligation_cursor
+    if limit <= 0 or not all(
+        _table_exists(conn, table) for table in (
+            "entry_exposure_obligations", "venue_commands", "position_current",
+            "position_events", "venue_command_events", "venue_order_facts",
+            "venue_trade_facts", "execution_fact",
+        )
+    ):
+        return ()
+    states = tuple(sorted(_TERMINAL_NO_FILL_ORDER_FACT_STATES))
+    sources = tuple(sorted(_LIVE_TERMINAL_ORDER_FACT_SOURCES))
+    rows = conn.execute(
+        f"""SELECT command.command_id, fact.matched_size, fact.remaining_size
+              FROM entry_exposure_obligations obligation
+              JOIN venue_commands command ON command.command_id = obligation.command_id
+              JOIN position_current position ON position.position_id = command.position_id
+              JOIN venue_order_facts fact ON fact.command_id = command.command_id
+             WHERE obligation.status = 'OPEN'
+               AND command.intent_kind = 'ENTRY' AND command.side = 'BUY'
+               AND command.state IN ('CANCELLED', 'EXPIRED')
+               AND command.venue_order_id IS NOT NULL
+               AND fact.venue_order_id = command.venue_order_id
+               AND fact.local_sequence = (
+                   SELECT MAX(latest.local_sequence) FROM venue_order_facts latest
+                    WHERE latest.command_id = command.command_id
+               )
+               AND fact.state IN ({','.join('?' for _ in states)})
+               AND fact.source IN ({','.join('?' for _ in sources)})
+               AND (? IS NULL OR command.command_id = ?)
+               AND (? IS NULL OR command.command_id > ?)
+               AND position.phase = 'voided' AND position.chain_state = 'local_only'
+               AND position.shares = 0 AND position.cost_basis_usd = 0
+               AND COALESCE(position.chain_shares, 0) = 0
+               AND COALESCE(position.chain_cost_basis_usd, 0) = 0
+               AND (SELECT COUNT(*) FROM venue_commands owner
+                     WHERE owner.position_id = command.position_id) = 1
+               AND EXISTS (SELECT 1 FROM position_events event
+                            WHERE event.position_id = command.position_id
+                              AND event.command_id = command.command_id
+                              AND event.event_type = 'ENTRY_ORDER_VOIDED'
+                              AND event.order_id = command.venue_order_id
+                              AND event.phase_after = 'voided')
+               AND EXISTS (SELECT 1 FROM venue_command_events event
+                            WHERE event.command_id = command.command_id
+                              AND event.event_type IN ('CANCEL_ACKED', 'EXPIRED')
+                              AND event.state_after = command.state
+                              AND COALESCE(
+                                  CASE WHEN json_valid(event.payload_json)
+                                       THEN json_extract(event.payload_json, '$.venue_order_id')
+                                       END, command.venue_order_id
+                              ) = command.venue_order_id)
+               AND NOT EXISTS (SELECT 1 FROM venue_trade_facts trade
+                                WHERE trade.command_id = command.command_id
+                                  AND trade.state IN ('MATCHED', 'MINED', 'CONFIRMED'))
+               AND NOT EXISTS (SELECT 1 FROM execution_fact execution
+                                WHERE execution.command_id = command.command_id
+                                  AND execution.order_role = 'entry'
+                                  AND execution.voided_at IS NULL
+                                  AND execution.shares > 0)
+             ORDER BY command.command_id LIMIT ?""",
+        (*states, *sources, command_id, command_id, after_command_id, after_command_id,
+         min(max(1, int(limit)), _LIVE_TICK_IDENTITY_BOUND_MAX_CANDIDATES)),
+    ).fetchall()
+    if advance_cursor and rows:
+        _terminal_voided_entry_obligation_cursor = str(rows[-1][0])
+    if probe:
+        return tuple(str(row[0]) for row in rows)
+    return tuple(
+        str(row[0]) for row in rows
+        if _decimal_is_zero(row[1])
+        and (remaining := _decimal_or_none(row[2])) is not None
+        and remaining >= 0
+    )
+
+
+_terminal_partial_entry_obligation_cursor = ""
+
+
+def _terminal_partial_entry_obligation_command_ids(
+    conn: sqlite3.Connection, *, limit: int,
+    after_command_id: str | None = None, command_id: str | None = None,
+    advance_cursor: bool = False,
+) -> tuple[str, ...]:
+    """Hint for already-sourced terminal partial entries; reducer owns proof."""
+    global _terminal_partial_entry_obligation_cursor
+    if limit <= 0 or not all(
+        _table_exists(conn, table) for table in (
+            "entry_exposure_obligations", "venue_commands", "position_current",
+            "position_events", "venue_order_facts", "venue_trade_facts", "execution_fact",
+        )
+    ):
+        return ()
+    rows = conn.execute(
+        """SELECT command.command_id
+              FROM entry_exposure_obligations obligation
+              JOIN venue_commands command ON command.command_id = obligation.command_id
+              JOIN position_current position ON position.position_id = command.position_id
+             WHERE obligation.status = 'OPEN'
+               AND command.intent_kind = 'ENTRY' AND command.side = 'BUY'
+               AND command.state IN ('CANCELLED', 'EXPIRED', 'PARTIAL')
+               AND command.venue_order_id IS NOT NULL
+               AND position.phase IN ('active', 'day0_window', 'pending_exit')
+               AND position.shares > 0 AND position.cost_basis_usd > 0
+               AND position.size_usd > 0 AND position.entry_price > 0
+               AND (? IS NULL OR command.command_id = ?)
+               AND (? IS NULL OR command.command_id > ?)
+               AND EXISTS (SELECT 1 FROM position_events event
+                            WHERE event.position_id = command.position_id
+                              AND event.command_id = command.command_id
+                              AND event.order_id = command.venue_order_id
+                              AND event.event_type = 'ENTRY_ORDER_FILLED')
+               AND EXISTS (SELECT 1 FROM venue_order_facts fact
+                            WHERE fact.command_id = command.command_id
+                              AND fact.venue_order_id = command.venue_order_id
+                              AND fact.state = 'PARTIALLY_MATCHED'
+                              AND fact.source IN ('REST', 'WS_USER', 'WS_MARKET', 'DATA_API', 'CHAIN')
+                              AND json_valid(fact.raw_payload_json)
+                              AND json_extract(fact.raw_payload_json, '$.proof_class')
+                                  = 'terminal_partial_order_fact'
+                              AND CAST(COALESCE(fact.matched_size, '0') AS REAL) > 0
+                              AND CAST(COALESCE(fact.remaining_size, '1') AS REAL) = 0)
+               AND EXISTS (SELECT 1 FROM venue_trade_facts trade
+                            WHERE trade.command_id = command.command_id
+                              AND trade.venue_order_id = command.venue_order_id
+                              AND trade.state = 'CONFIRMED'
+                              AND CAST(COALESCE(trade.filled_size, '0') AS REAL) > 0)
+               AND EXISTS (SELECT 1 FROM execution_fact execution
+                            WHERE execution.command_id = command.command_id
+                              AND execution.position_id = command.position_id
+                              AND execution.order_role = 'entry'
+                              AND execution.voided_at IS NULL
+                              AND execution.shares > 0)
+             ORDER BY command.command_id LIMIT ?""",
+        (command_id, command_id, after_command_id, after_command_id,
+         min(max(1, int(limit)), _LIVE_TICK_IDENTITY_BOUND_MAX_CANDIDATES)),
+    ).fetchall()
+    if advance_cursor and rows:
+        _terminal_partial_entry_obligation_cursor = str(rows[-1][0])
+    return tuple(str(row[0]) for row in rows)
 
 
 def _terminal_entry_no_fill_unmaterialized_command_ids(
@@ -14246,11 +14408,54 @@ def _terminal_entry_no_fill_priority_command_ids(
     return frozenset(command_ids)
 
 
-def _reconcile_terminal_entry_no_fill_priority_pass(conn: sqlite3.Connection) -> dict:
+def _reconcile_terminal_entry_no_fill_priority_pass(
+    conn: sqlite3.Connection, *, obligation_only: bool = False,
+) -> dict:
     """Recheck the entire read hint inside the canonical writer transaction."""
-    command_ids = _terminal_entry_no_fill_priority_command_ids(conn, limit=1)
-    if not command_ids:
+    global _terminal_voided_entry_obligation_cursor, _terminal_partial_entry_obligation_cursor
+    command_ids = (
+        frozenset() if obligation_only
+        else _terminal_entry_no_fill_priority_command_ids(conn, limit=1)
+    )
+    cursor_before = _terminal_voided_entry_obligation_cursor
+    voided_ids = _terminal_voided_entry_obligation_command_ids(
+        conn, limit=2 if command_ids else 3,
+        after_command_id=_terminal_voided_entry_obligation_cursor,
+        advance_cursor=True,
+    )
+    if not voided_ids and cursor_before and _terminal_voided_entry_obligation_cursor == cursor_before:
+        voided_ids = _terminal_voided_entry_obligation_command_ids(
+            conn, limit=2 if command_ids else 3, advance_cursor=True,
+        )
+    partial_cursor_before = _terminal_partial_entry_obligation_cursor
+    partial_ids = _terminal_partial_entry_obligation_command_ids(
+        conn, limit=1, after_command_id=_terminal_partial_entry_obligation_cursor,
+        advance_cursor=True,
+    )
+    if not partial_ids and partial_cursor_before and _terminal_partial_entry_obligation_cursor == partial_cursor_before:
+        partial_ids = _terminal_partial_entry_obligation_command_ids(
+            conn, limit=1, advance_cursor=True,
+        )
+    if not command_ids and not voided_ids and not partial_ids:
         return {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    # Advance even if one candidate fails its final proof; later command IDs
+    # must still get a turn. Every release is revalidated by the existing
+    # obligation reducer on the exact command in this same transaction.
+    for command_id in (*voided_ids, *partial_ids):
+        candidates = (
+            _terminal_voided_entry_obligation_command_ids
+            if command_id in voided_ids else _terminal_partial_entry_obligation_command_ids
+        )
+        if command_id not in candidates(conn, limit=1, command_id=command_id):
+            continue
+        obligation = reconcile_terminal_entry_exposure_obligations(
+            conn, command_id=command_id,
+        )
+        for key in ("scanned", "advanced", "stayed", "errors"):
+            summary[key] += int(obligation.get(key, 0) or 0)
+    if not command_ids:
+        return summary
     # A CANCEL_ACKED/EXPIRED event can be durable before its terminal order
     # fact.  Materialize that exact fact first, then reuse the canonical
     # terminal reducer for the projection/event mutation.  The scoped IDs are
@@ -14269,11 +14474,14 @@ def _reconcile_terminal_entry_no_fill_priority_pass(conn: sqlite3.Connection) ->
     )
     terminal_summary["terminal_no_fill_facts"] = no_fill_facts
     terminal_summary["errors"] += int(no_fill_facts.get("errors", 0) or 0)
-    return terminal_summary
+    for key in ("scanned", "advanced", "stayed", "errors"):
+        summary[key] += int(terminal_summary.get(key, 0) or 0)
+    summary["terminal_no_fill_facts"] = no_fill_facts
+    return summary
 
 
 def reconcile_terminal_entry_no_fill_projections_priority(
-    *, deadline_monotonic: float | None = None,
+    *, deadline_monotonic: float | None = None, obligation_only: bool = False,
 ) -> dict:
     """Drain terminal entry facts before blocker-free maintenance yields.
 
@@ -14296,7 +14504,9 @@ def reconcile_terminal_entry_no_fill_projections_priority(
     result = _run_recovery_pass_with_lock_policy(
         "terminal_entry_no_fill_projection_priority",
         lambda: run_db_only_pass(
-            _reconcile_terminal_entry_no_fill_priority_pass,
+            lambda conn: _reconcile_terminal_entry_no_fill_priority_pass(
+                conn, obligation_only=obligation_only,
+            ),
             conn_factory=apply_factory,
             label="recovery.terminal_entry_no_fill_projection_priority",
         ),
@@ -14445,6 +14655,21 @@ def _reconcile_terminal_exit_residual_priority_pass(
         if rotation_slot is None
         else max(0, int(rotation_slot))
     )
+    # The scheduler invokes EXIT priority before ENTRY priority with one shared
+    # deadline. Alternate which side gets the first bounded writer quantum so
+    # a slow EXIT read cannot indefinitely strand already-terminal entry
+    # obligations, while continuing EXIT attempts under sustained entry debt.
+    if deadline_monotonic is not None and slot % 2 == 0:
+        obligations = _reconcile_terminal_entry_no_fill_priority_pass(
+            conn, obligation_only=True,
+        )
+        if obligations["advanced"] or obligations["errors"]:
+            logger.info("recovery: terminal ENTRY obligation priority: %s", obligations)
+            return {
+                "scanned": 0, "advanced": 0, "stayed": 0,
+                "errors": obligations["errors"],
+                "terminal_entry_obligations": obligations,
+            }
     if priority_limit > 1:
         status_limit = max(1, priority_limit // 2)
     else:

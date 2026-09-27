@@ -42814,6 +42814,151 @@ def test_terminal_entry_no_fill_priority_projects_void_once(conn):
     ).fetchone()[0] == 1
 
 
+def test_terminal_no_fill_projection_resolves_exact_obligation_in_same_transaction(conn):
+    from src.execution import command_recovery as recovery
+    from src.state.venue_command_repo import append_event
+
+    _insert(conn)
+    _open_test_entry_obligation(conn, "cmd-001")
+    _advance_to_cancel_pending(conn, venue_order_id="ord-001")
+    append_event(conn, command_id="cmd-001", event_type="CANCEL_ACKED",
+                 occurred_at="2026-04-26T00:04:00Z")
+    _seed_pending_entry_projection(conn)
+    _append_order_fact(conn, state="CANCEL_CONFIRMED", matched_size="0",
+                       remaining_size="0")
+    conn.commit()
+    conn.execute("BEGIN")
+
+    assert recovery.reconcile_terminal_order_facts(
+        conn, command_ids=frozenset({"cmd-001"}),
+        emit_immediate_redecision=False,
+    )["advanced"] == 1
+    assert conn.execute("SELECT phase FROM position_current WHERE position_id='pos-001'").fetchone()[0] == "voided"
+    assert conn.execute("SELECT status FROM entry_exposure_obligations WHERE command_id='cmd-001'").fetchone()[0] == "RESOLVED"
+    conn.rollback()
+    assert conn.execute("SELECT phase FROM position_current WHERE position_id='pos-001'").fetchone()[0] == "pending_entry"
+    assert conn.execute("SELECT status FROM entry_exposure_obligations WHERE command_id='cmd-001'").fetchone()[0] == "OPEN"
+
+
+def test_legacy_voided_obligations_drain_in_bounded_fair_quanta(conn):
+    from src.execution import command_recovery as recovery
+    from src.state.venue_command_repo import append_event
+
+    old_cursor = recovery._terminal_voided_entry_obligation_cursor
+    try:
+        recovery._terminal_voided_entry_obligation_cursor = ""
+        for i in range(5):
+            command_id, position_id, order_id = (
+                f"cmd-void-{i}", f"pos-void-{i}", f"ord-void-{i}"
+            )
+            token_id = f"tok-void-{i}"
+            _insert(conn, command_id=command_id, position_id=position_id, token_id=token_id)
+            _open_test_entry_obligation(conn, command_id)
+            _advance_to_cancel_pending(conn, command_id=command_id, venue_order_id=order_id)
+            append_event(conn, command_id=command_id, event_type="CANCEL_ACKED",
+                         occurred_at="2026-04-26T00:04:00Z")
+            _seed_pending_entry_projection(conn, position_id=position_id,
+                                           command_id=command_id, order_id=order_id,
+                                           token_id=token_id)
+            _append_order_fact(conn, command_id=command_id, order_id=order_id,
+                               state="CANCEL_CONFIRMED", matched_size="0",
+                               remaining_size="0")
+            assert recovery.reconcile_terminal_order_facts(
+                conn, command_ids=frozenset({command_id}),
+                emit_immediate_redecision=False,
+            )["advanced"] == 1
+            # Model the older binary that committed the void event but left
+            # the pre-submit obligation OPEN.
+            conn.execute("UPDATE entry_exposure_obligations SET status='OPEN', resolved_at=NULL "
+                         "WHERE command_id=?", (command_id,))
+        conn.commit()
+        assert recovery.terminal_entry_no_fill_projection_pending(conn)
+        first = recovery._reconcile_terminal_entry_no_fill_priority_pass(conn, obligation_only=True)
+        second = recovery._reconcile_terminal_entry_no_fill_priority_pass(conn, obligation_only=True)
+        assert [first["advanced"], second["advanced"]] == [3, 2]
+        assert conn.execute("SELECT COUNT(*) FROM entry_exposure_obligations WHERE status='OPEN'").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM position_current WHERE phase='voided'").fetchone()[0] == 5
+        assert not recovery.terminal_entry_no_fill_projection_pending(conn)
+    finally:
+        recovery._terminal_voided_entry_obligation_cursor = old_cursor
+
+
+def test_sourced_terminal_partial_obligation_releases_without_changing_held_position(conn):
+    from src.execution import command_recovery as recovery
+    from src.state.venue_command_repo import append_event
+
+    _insert(conn, size=10.0, price=0.50, order_type="GTC")
+    _open_test_entry_obligation(conn, "cmd-001")
+    _seed_pending_entry_projection(conn)
+    _advance_to_partial(conn, venue_order_id="ord-001")
+    _append_trade_fact(conn, state="CONFIRMED", filled_size="4", fill_price="0.50")
+    _append_order_fact(
+        conn, state="PARTIALLY_MATCHED", matched_size="4", remaining_size="0",
+        raw_payload_json={"proof_class": "terminal_partial_order_fact"},
+    )
+    _insert_decision_log_trade_case_for_recovery(conn)
+    assert recovery.reconcile_filled_entry_projection_repairs(
+        conn, MagicMock(),
+    )["advanced"] == 1
+    conn.execute("UPDATE execution_fact SET terminal_exec_status='partial', "
+                 "venue_status='PARTIAL' WHERE command_id='cmd-001'")
+    append_event(conn, command_id="cmd-001", event_type="CANCEL_REQUESTED",
+                 occurred_at="2026-04-26T00:07:00Z")
+    append_event(conn, command_id="cmd-001", event_type="CANCEL_ACKED",
+                 occurred_at="2026-04-26T00:08:00Z")
+    conn.execute("UPDATE position_current SET phase='pending_exit' WHERE position_id='pos-001'")
+    conn.commit()
+    before = tuple(conn.execute(
+        "SELECT phase, shares, cost_basis_usd FROM position_current WHERE position_id='pos-001'"
+    ).fetchone())
+    old_cursor = recovery._terminal_partial_entry_obligation_cursor
+    try:
+        recovery._terminal_partial_entry_obligation_cursor = ""
+        assert recovery._terminal_partial_entry_obligation_command_ids(conn, limit=1) == ("cmd-001",)
+        result = recovery._reconcile_terminal_entry_no_fill_priority_pass(conn, obligation_only=True)
+        assert result["advanced"] == 1, result
+        assert conn.execute("SELECT status FROM entry_exposure_obligations WHERE command_id='cmd-001'").fetchone()[0] == "RESOLVED"
+        assert tuple(conn.execute(
+            "SELECT phase, shares, cost_basis_usd FROM position_current WHERE position_id='pos-001'"
+        ).fetchone()) == before
+    finally:
+        recovery._terminal_partial_entry_obligation_cursor = old_cursor
+
+
+def test_exit_and_already_terminal_entry_obligations_alternate_first_quantum(conn, monkeypatch):
+    import time
+
+    from src.execution import command_recovery as recovery
+
+    attempts = []
+    zero = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+
+    def entry(_conn, *, obligation_only=False):
+        attempts.append(("entry", obligation_only))
+        return {**zero, "scanned": 1, "advanced": 1}
+
+    def exit_status(_conn, **_kwargs):
+        attempts.append(("exit", False))
+        return ()
+
+    monkeypatch.setattr(recovery, "_reconcile_terminal_entry_no_fill_priority_pass", entry)
+    monkeypatch.setattr(recovery, "_recorded_exit_fill_status_repair_command_ids", exit_status)
+    monkeypatch.setattr(recovery, "_reconcile_terminal_fak_partial_exit_reviews",
+                        lambda *_args, **_kwargs: dict(zero))
+    monkeypatch.setattr(recovery, "reconcile_exit_lifecycle_alignment_repairs",
+                        lambda *_args, **_kwargs: dict(zero))
+
+    first = recovery._reconcile_terminal_exit_residual_priority_pass(
+        conn, rotation_slot=0, deadline_monotonic=time.monotonic() + 2,
+    )
+    second = recovery._reconcile_terminal_exit_residual_priority_pass(
+        conn, rotation_slot=1, deadline_monotonic=time.monotonic() + 2,
+    )
+    assert first["terminal_entry_obligations"]["advanced"] == 1
+    assert "terminal_entry_obligations" not in second
+    assert attempts == [("entry", True), ("exit", False)]
+
+
 def test_terminal_entry_no_fill_priority_materializes_missing_cancel_fact(conn):
     """The priority writer closes a CANCEL_ACKED row whose terminal fact is absent."""
     from src.execution import command_recovery as recovery
