@@ -2706,6 +2706,63 @@ def _edli_orphaned_command_link_candidates_read_only(
         conn.close()
 
 
+def _genuine_cancel_reassert_candidates(
+    conn, *, limit: int, after_command_id: str | None = None,
+) -> tuple[str, ...]:
+    """Find sourced partial commands whose latest event reopened a proven cancel."""
+    if limit <= 0:
+        return ()
+    rows = conn.execute(
+        """SELECT command.command_id
+             FROM venue_commands AS command INDEXED BY idx_venue_commands_state
+            WHERE command.state = 'PARTIAL'
+              AND command.intent_kind = 'ENTRY' AND command.side = 'BUY'
+              AND (? IS NULL OR command.command_id > ?)
+              AND EXISTS (
+                  SELECT 1 FROM venue_command_events AS late
+                   WHERE late.command_id = command.command_id
+                     AND late.sequence_no = (
+                         SELECT MAX(prior.sequence_no)
+                           FROM venue_command_events AS prior
+                          WHERE prior.command_id = command.command_id
+                     )
+                     AND late.event_type = 'PARTIAL_FILL_OBSERVED'
+                     AND late.state_after = 'PARTIAL'
+                     AND json_valid(late.payload_json)
+                     AND json_extract(late.payload_json, '$.reason') =
+                         'authenticated_fill_after_genuine_cancel'
+              )
+              AND EXISTS (
+                  SELECT 1 FROM execution_fact AS sourced
+                   WHERE sourced.command_id = command.command_id
+                     AND sourced.position_id = command.position_id
+                     AND sourced.order_role = 'entry'
+                     AND sourced.voided_at IS NULL
+                     AND sourced.shares > 0 AND sourced.fill_price > 0
+              )
+            ORDER BY command.command_id LIMIT ?""",
+        (after_command_id, after_command_id, int(limit)),
+    ).fetchall()
+    return tuple(str(_row_get(row, "command_id")) for row in rows)
+
+
+def _genuine_cancel_reassert_candidates_read_only(
+    *, limit: int, after_command_id: str | None = None,
+) -> tuple[str, ...]:
+    from src.state.db import get_trade_connection_read_only
+
+    conn = get_trade_connection_read_only()
+    try:
+        ids = _genuine_cancel_reassert_candidates(
+            conn, limit=limit, after_command_id=after_command_id,
+        )
+        if not ids and after_command_id:
+            ids = _genuine_cancel_reassert_candidates(conn, limit=limit)
+        return ids
+    finally:
+        conn.close()
+
+
 def _edli_repair_orphaned_command_link(
     conn, *, aggregate_id: str, command_id: str, position_id: str, now: datetime,
 ) -> bool:
@@ -2752,6 +2809,7 @@ def _edli_durable_fill_bridge_work_exists_read_only() -> bool:
     return bool(
         _edli_durable_fill_bridge_candidate_ids_read_only(limit=1)
         or _edli_orphaned_command_link_candidates_read_only(limit=1)
+        or _genuine_cancel_reassert_candidates_read_only(limit=1)
     )
 
 
@@ -3735,9 +3793,28 @@ def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
         canonical_failure_reasons.append(FILL_BRIDGE_POSITION_MATERIALIZATION_FAILED)
         logger.error("EDLI command-link debt discovery failed: %s", exc, exc_info=True)
     try:
+        cancel_candidates = _genuine_cancel_reassert_candidates_read_only(
+            limit=1, after_command_id=_edli_orphaned_command_link_cursor,
+        )
+    except Exception as exc:  # noqa: BLE001 - exact debt retries next cycle
+        cancel_candidates = ()
+        canonical_failure_reasons.append(FILL_BRIDGE_POSITION_MATERIALIZATION_FAILED)
+        logger.error("EDLI genuine-cancel reassert debt discovery failed: %s", exc, exc_info=True)
+    choices = [(row[1], "link", row) for row in link_candidates]
+    choices.extend((command_id, "cancel", command_id) for command_id in cancel_candidates)
+    selected = min(
+        choices,
+        key=lambda row: (
+            row[0] <= _edli_orphaned_command_link_cursor, row[0],
+        ),
+        default=None,
+    )
+    link_candidates = (selected[2],) if selected and selected[1] == "link" else ()
+    cancel_candidates = (selected[2],) if selected and selected[1] == "cancel" else ()
+    try:
         durable_bridge_candidate_ids = (
             _edli_durable_fill_bridge_candidate_ids_read_only(
-                limit=FILL_BRIDGE_WRITE_TRANCHES_PER_TICK - len(link_candidates)
+                limit=FILL_BRIDGE_WRITE_TRANCHES_PER_TICK - len(link_candidates) - len(cancel_candidates)
             )
         )
     except Exception as exc:  # noqa: BLE001 - durable facts retry next repair cycle
@@ -3811,14 +3888,21 @@ def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
     # temporary venue-command ID still attached. That already-materialized row
     # is absent from the ordinary orphan scan above. Discover only this exact
     # unsourced terminal command debt, then release the writer after each item.
-    if link_candidates:
+    if link_candidates or cancel_candidates:
         from src.state.db import get_trade_connection_with_world_required
+        from src.state.venue_command_repo import reassert_genuine_cancel_after_late_fill
 
         # Advance even on one failed item: an older persistent failure cannot
         # monopolize every bounded tick. Durable debt remains selectable after
         # the cursor wraps, including after a process restart.
-        _edli_orphaned_command_link_cursor = link_candidates[-1][1]
-        for aggregate_id, command_id, position_id in link_candidates:
+        _edli_orphaned_command_link_cursor = selected[0]
+        for repair_kind, evidence in (
+            *(("link", row) for row in link_candidates),
+            *(("cancel", command_id) for command_id in cancel_candidates),
+        ):
+            aggregate_id, command_id, position_id = (
+                evidence if repair_kind == "link" else ("", evidence, "")
+            )
             bridge_conn = None
             deadline_monotonic = _fill_bridge_write_deadline()
             try:
@@ -3851,18 +3935,25 @@ def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
                         if time.monotonic() >= hold_deadline:
                             raise TimeoutError("EDLI command-link writer hold elapsed before transaction")
                         bridge_conn.execute("BEGIN")
-                        repaired = _edli_repair_orphaned_command_link(
-                            bridge_conn, aggregate_id=aggregate_id,
-                            command_id=command_id, position_id=position_id, now=now,
-                        )
+                        if repair_kind == "link":
+                            repaired = _edli_repair_orphaned_command_link(
+                                bridge_conn, aggregate_id=aggregate_id,
+                                command_id=command_id, position_id=position_id, now=now,
+                            )
+                        else:
+                            repaired = reassert_genuine_cancel_after_late_fill(
+                                bridge_conn, command_id=command_id,
+                                observed_at=now.isoformat(),
+                            )
+                        if not repaired:
+                            raise RuntimeError(f"EDLI exact repair proof did not converge: {command_id}")
                         if time.monotonic() >= hold_deadline:
                             raise TimeoutError("EDLI command-link writer hold elapsed before commit")
                         bridge_conn.commit()
-                        if repaired:
-                            logger.warning(
-                                "EDLI confirmed fill command link and execution fact repaired: "
-                                "command_id=%s position_id=%s", command_id, position_id,
-                            )
+                        logger.warning(
+                            "EDLI exact %s debt repaired: command_id=%s position_id=%s",
+                            repair_kind, command_id, position_id,
+                        )
                     finally:
                         bridge_conn.set_progress_handler(None, 0)
             except Exception as exc:  # noqa: BLE001 - exact durable debt retries
@@ -3870,8 +3961,8 @@ def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
                     bridge_conn.rollback()
                 canonical_failure_reasons.append(FILL_BRIDGE_POSITION_MATERIALIZATION_FAILED)
                 logger.error(
-                    "EDLI confirmed fill command-link repair failed: command_id=%s "
-                    "position_id=%s reason=%s", command_id, position_id, exc,
+                    "EDLI exact %s repair failed: command_id=%s "
+                    "position_id=%s reason=%s", repair_kind, command_id, position_id, exc,
                     exc_info=True,
                 )
             finally:

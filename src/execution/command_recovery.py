@@ -771,6 +771,17 @@ _MATCHED_SUBMIT_TRADE_FACT_REVIEW_REASONS = frozenset({
     "matched_submit_missing_trade_id",
     "matched_submit_fill_evidence_review_persistence_failed",
 })
+_GENERIC_AUTHENTICATED_ENTRY_TRADE_FACT_REVIEW_REASONS = frozenset({
+    "partial_remainder_point_order_filled_without_full_trade_fact",
+    # This review follows a WS reducer disagreement before it wrote a
+    # FILL_CONFIRMED event.  It may only re-enter through the generic fold,
+    # which revalidates the bound order, submission envelope, and economics.
+    "ws_trade_lifecycle_regression_or_economic_drift",
+})
+_AUTHENTICATED_ENTRY_TRADE_FACT_REVIEW_REASONS = (
+    _GENERIC_AUTHENTICATED_ENTRY_TRADE_FACT_REVIEW_REASONS
+    | _MATCHED_SUBMIT_TRADE_FACT_REVIEW_REASONS
+)
 _CONFIRMED_TRADE_REVIEW_REASONS = frozenset({
     "recovery_no_venue_order_id",
     "matched_submit_missing_trade_id",
@@ -27894,8 +27905,8 @@ def _authenticated_entry_trade_fact_candidates(
     if str(command_id or "").strip():
         command_clause = " AND cmd.command_id = ?"
         params.append(str(command_id).strip())
-    matched_submit_reason_placeholders = ",\n                               ".join(
-        "?" for _ in sorted(_MATCHED_SUBMIT_TRADE_FACT_REVIEW_REASONS)
+    authenticated_review_reason_placeholders = ",\n                               ".join(
+        "?" for _ in sorted(_AUTHENTICATED_ENTRY_TRADE_FACT_REVIEW_REASONS)
     )
     rows = conn.execute(
         "WITH "
@@ -27905,6 +27916,7 @@ def _authenticated_entry_trade_fact_candidates(
                envelope.order_type AS submission_order_type,
                envelope.price AS submission_price,
                envelope.size AS submission_size,
+               envelope.selected_outcome_token_id AS submission_selected_outcome_token_id,
                pc.phase AS projected_phase,
                pc.shares AS projected_shares,
                pc.cost_basis_usd AS projected_cost_basis_usd
@@ -27938,8 +27950,7 @@ def _authenticated_entry_trade_fact_candidates(
                                    AND latest.event_type = 'REVIEW_REQUIRED'
                            )
                            AND json_extract(review.payload_json, '$.reason') IN (
-                               'partial_remainder_point_order_filled_without_full_trade_fact',
-                               {matched_submit_reason_placeholders}
+                               {authenticated_review_reason_placeholders}
                            )
                     )
                 )
@@ -28005,7 +28016,7 @@ def _authenticated_entry_trade_fact_candidates(
         """
         + command_clause
         + " ORDER BY datetime(cmd.updated_at), cmd.command_id",
-        tuple(sorted(_MATCHED_SUBMIT_TRADE_FACT_REVIEW_REASONS)) + tuple(params),
+        tuple(sorted(_AUTHENTICATED_ENTRY_TRADE_FACT_REVIEW_REASONS)) + tuple(params),
     ).fetchall()
     return [_dict_row(row) for row in rows]
 
@@ -28117,6 +28128,7 @@ def _confirmed_entry_trade_fact_summary(
     trade_ids: list[str] = []
     fact_ids: list[int] = []
     states: list[str] = []
+    economic_facts: list[dict[str, str]] = []
     from src.execution.exchange_reconcile import (
         _json_mapping,
         _taker_buy_trade_economics,
@@ -28152,10 +28164,21 @@ def _confirmed_entry_trade_fact_summary(
         cost += exact_cost
         trade_ids.append(trade_id)
         fact_ids.append(int(fact["trade_fact_id"]))
-        states.append(str(fact.get("state") or "").upper())
-        sources.add(str(fact.get("source") or "").upper())
+        state = str(fact.get("state") or "").upper()
+        source = str(fact.get("source") or "").upper()
+        states.append(state)
+        sources.add(source)
         source_at = str(
             fact.get("venue_timestamp") or fact.get("observed_at") or ""
+        )
+        economic_facts.append(
+            {
+                "trade_id": trade_id,
+                "state": state,
+                "source": source,
+                "filled_size": _decimal_text(size),
+                "fill_price": _decimal_text(price),
+            }
         )
         if _parse_ts(source_at) is not None and source_at > latest_at:
             latest_at = source_at
@@ -28168,7 +28191,67 @@ def _confirmed_entry_trade_fact_summary(
         "trade_ids": trade_ids,
         "trade_fact_ids": fact_ids,
         "states": states,
+        "economic_facts": economic_facts,
     }
+
+
+def _ws_review_has_post_review_rest_confirmation(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    venue_order_id: str,
+    events: list[dict],
+    economic_facts: list[dict[str, str]],
+) -> bool:
+    """Require a later exact REST confirmation for every WS-review fill leg."""
+
+    review_event = next(
+        (
+            event
+            for event in reversed(events)
+            if event.get("event_type") == CommandEventType.REVIEW_REQUIRED.value
+        ),
+        None,
+    )
+    review_at = _parse_ts(
+        str(review_event.get("occurred_at") or "") if review_event else ""
+    )
+    if review_at is None or not economic_facts:
+        return False
+    if any(fact.get("state") != "CONFIRMED" for fact in economic_facts):
+        return False
+    rows = conn.execute(
+        """
+        SELECT trade_id, filled_size, fill_price, observed_at, venue_timestamp
+          FROM venue_trade_facts
+         WHERE command_id = ?
+           AND venue_order_id = ?
+           AND state = 'CONFIRMED'
+           AND source = 'REST'
+        """,
+        (command_id, venue_order_id),
+    ).fetchall()
+    for fact in economic_facts:
+        expected_trade_id = str(fact.get("trade_id") or "").strip()
+        expected_size = _positive_decimal_or_none(fact.get("filled_size"))
+        expected_price = _positive_decimal_or_none(fact.get("fill_price"))
+        if not expected_trade_id or expected_size is None or expected_price is None:
+            return False
+        for row in rows:
+            rest = _dict_row(row)
+            rest_at = _parse_ts(str(rest.get("observed_at") or ""))
+            if (
+                str(rest.get("trade_id") or "").strip().lower()
+                == expected_trade_id.lower()
+                and rest_at is not None
+                and rest_at > review_at
+                and _positive_decimal_or_none(rest.get("filled_size")) == expected_size
+                and _positive_decimal_or_none(rest.get("fill_price")) == expected_price
+            ):
+                break
+        else:
+            return False
+    return True
 
 
 def _latest_order_fact_matched_size(
@@ -28323,11 +28406,11 @@ def _reconcile_authenticated_entry_trade_fact(
     """Atomically fold exact authenticated fill facts into command and position truth."""
 
     command_id = str(command.get("command_id") or "")
+    events = _command_events(conn, command_id)
+    latest_review_reason = _latest_review_required_payload(events).get("reason")
     if (
         str(command.get("state") or "") == CommandState.REVIEW_REQUIRED.value
-        and _latest_review_required_payload(
-            _command_events(conn, command_id)
-        ).get("reason") in _MATCHED_SUBMIT_TRADE_FACT_REVIEW_REASONS
+        and latest_review_reason in _MATCHED_SUBMIT_TRADE_FACT_REVIEW_REASONS
     ):
         return _review_required_matched_submit_trade_fact_recovery(
             conn, VenueCommand.from_row(command)
@@ -28344,6 +28427,10 @@ def _reconcile_authenticated_entry_trade_fact(
     requested = _positive_decimal_or_none(command.get("submission_size"))
     command_price = _positive_decimal_or_none(command.get("price"))
     submitted_price = _positive_decimal_or_none(command.get("submission_price"))
+    command_token_id = str(command.get("token_id") or "").strip()
+    submitted_token_id = str(
+        command.get("submission_selected_outcome_token_id") or ""
+    ).strip()
     if not facts["count"] or any(
         value is None
         for value in (
@@ -28353,6 +28440,21 @@ def _reconcile_authenticated_entry_trade_fact(
             requested,
             command_price,
             submitted_price,
+        )
+    ):
+        return "stayed"
+    if not command_token_id or command_token_id != submitted_token_id:
+        raise ValueError("authenticated entry command/envelope token mismatch")
+    if (
+        str(command.get("state") or "") == CommandState.REVIEW_REQUIRED.value
+        and latest_review_reason
+        == "ws_trade_lifecycle_regression_or_economic_drift"
+        and not _ws_review_has_post_review_rest_confirmation(
+            conn,
+            command_id=command_id,
+            venue_order_id=venue_order_id,
+            events=events,
+            economic_facts=list(facts.get("economic_facts") or ()),
         )
     ):
         return "stayed"

@@ -178,6 +178,9 @@ _TRANSITIONS: dict[tuple[str, str], str] = {
     ("PARTIAL", "PARTIAL_FILL_OBSERVED"):     "PARTIAL",
     ("PARTIAL", "FILL_CONFIRMED"):            "FILLED",
     ("PARTIAL", "CANCEL_REQUESTED"):          "CANCEL_PENDING",
+    # Only a proof-gated reassertion of the *previous* genuine cancel may use
+    # this pair; append_event rejects an ordinary PARTIAL -> CANCEL_ACKED.
+    ("PARTIAL", "CANCEL_ACKED"):              "CANCELLED",
     ("PARTIAL", "EXPIRED"):                   "EXPIRED",
     ("PARTIAL", "REVIEW_REQUIRED"):           "REVIEW_REQUIRED",
 
@@ -2601,6 +2604,221 @@ def _coerce_snapshot_checked_at(
     return datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
 
 
+def _genuine_cancel_reassertion_evidence(
+    conn: sqlite3.Connection, command_id: str,
+) -> dict[str, str] | None:
+    """Prove a sourced partial fill did not undo this order's earlier cancel."""
+    from src.execution.exchange_reconcile import (
+        _canonical_trade_fact_cte, _economic_trade_fact_cte,
+    )
+
+    with _row_factory_as(conn, sqlite3.Row):
+        command = conn.execute(
+            """SELECT position_id, venue_order_id, intent_kind, side, size, state
+                 FROM venue_commands WHERE command_id = ?""", (command_id,),
+        ).fetchone()
+        if command is None or (command["state"], command["intent_kind"], command["side"]) != (
+            "PARTIAL", "ENTRY", "BUY",
+        ):
+            return None
+        position_id = str(command["position_id"] or "")
+        order_id = str(command["venue_order_id"] or "")
+        requested = _decimal_or_none(command["size"])
+        if not position_id or not order_id or requested is None or requested <= 0:
+            return None
+        late = conn.execute(
+            """SELECT event_id, sequence_no, payload_json, occurred_at, state_after, event_type
+                 FROM venue_command_events WHERE command_id = ?
+                 ORDER BY sequence_no DESC LIMIT 1""", (command_id,),
+        ).fetchone()
+        if late is None or (late["event_type"], late["state_after"]) != (
+            "PARTIAL_FILL_OBSERVED", "PARTIAL",
+        ):
+            return None
+        try:
+            late_payload = json.loads(late["payload_json"] or "{}")
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(late_payload, dict) or any((
+            late_payload.get("reason") != "authenticated_fill_after_genuine_cancel",
+            late_payload.get("proof_class") != "terminal_command_late_fill_correction",
+            late_payload.get("terminal_state_before") != "CANCELLED",
+            late_payload.get("command_id") != command_id,
+            late_payload.get("venue_order_id") != order_id,
+        )):
+            return None
+        required = late_payload.get("required_predicates")
+        if (not isinstance(required, dict) or any(required.get(name) is not True for name in (
+            "terminal_event_made_no_fill_claim", "order_ledger_matched_positive",
+            "no_live_execution_fact", "authenticated_confirmed_trade_fact",
+            "bound_venue_order_identity", "order_matched_remainder_arithmetic",
+        ))):
+            return None
+        cancel = conn.execute(
+            """SELECT event_id, occurred_at, payload_json, state_after, event_type
+                 FROM venue_command_events
+                WHERE command_id = ? AND sequence_no = ?""",
+            (command_id, int(late["sequence_no"]) - 1),
+        ).fetchone()
+        if cancel is None or (cancel["event_type"], cancel["state_after"]) != (
+            "CANCEL_ACKED", "CANCELLED",
+        ):
+            return None
+        try:
+            cancel_payload = json.loads(cancel["payload_json"] or "{}")
+        except (TypeError, ValueError):
+            return None
+        try:
+            cancellation_precedes_correction = (
+                _coerce_snapshot_checked_at(str(cancel["occurred_at"]))
+                <= _coerce_snapshot_checked_at(str(late["occurred_at"]))
+            )
+        except ValueError:
+            return None
+        if (
+            not isinstance(cancel_payload, dict)
+            or cancel_payload.get("venue_order_id") != order_id
+            or not isinstance(cancel_payload.get("cancel_outcome"), dict)
+            or str(cancel_payload["cancel_outcome"].get("status") or "").upper()
+                not in {"CANCELED", "CANCELLED"}
+            or not cancellation_precedes_correction
+        ):
+            return None
+        facts = conn.execute(
+            """SELECT fact_id, local_sequence, matched_size, remaining_size, source
+                 FROM venue_order_facts
+                WHERE command_id = ? AND venue_order_id = ?
+                  AND state = 'CANCEL_CONFIRMED'
+                  AND julianday(observed_at) <= julianday(?)
+                ORDER BY local_sequence DESC, fact_id DESC""",
+            (command_id, order_id, cancel["occurred_at"]),
+        ).fetchall()
+        terminal = next((fact for fact in facts if fact["source"] in {"REST", "WS_USER"}
+                         and _decimal_or_none(fact["remaining_size"]) is not None
+                         and _decimal_or_none(fact["remaining_size"]) >= 0
+                         and _decimal_or_none(fact["matched_size"]) is not None
+                         and _decimal_or_none(fact["matched_size"])
+                         + _decimal_or_none(fact["remaining_size"]) <= requested), None)
+        if terminal is None:
+            return None
+        subsequent_orders = conn.execute(
+            """SELECT state, matched_size, remaining_size, source, raw_payload_json
+                 FROM venue_order_facts
+                WHERE command_id = ? AND venue_order_id = ?
+                  AND (local_sequence > ? OR (local_sequence = ? AND fact_id > ?))""",
+            (command_id, order_id, terminal["local_sequence"],
+             terminal["local_sequence"], terminal["fact_id"]),
+        ).fetchall()
+        for subsequent in subsequent_orders:
+            matched = _decimal_or_none(subsequent["matched_size"])
+            remaining = _decimal_or_none(subsequent["remaining_size"])
+            if (subsequent["state"] == "CANCEL_CONFIRMED"
+                and subsequent["source"] in {"REST", "WS_USER"}
+                and matched is not None and remaining is not None
+                and remaining >= 0 and matched + remaining <= requested
+                and _decimal_or_none(terminal["matched_size"]) == matched):
+                continue
+            try:
+                proof = json.loads(subsequent["raw_payload_json"] or "{}")
+            except (TypeError, ValueError):
+                return None
+            if (subsequent["state"] != "PARTIALLY_MATCHED"
+                or subsequent["source"] not in {"REST", "WS_USER"}
+                or remaining != 0
+                or matched != _decimal_or_none(terminal["matched_size"])
+                or not isinstance(proof, dict)
+                or proof.get("proof_class") != "terminal_partial_order_fact"):
+                return None
+        execution = conn.execute(
+            """SELECT position_id, shares, fill_price, filled_at, terminal_exec_status
+                 FROM execution_fact
+                WHERE command_id = ? AND order_role = 'entry' AND voided_at IS NULL""",
+            (command_id,),
+        ).fetchall()
+        economic = conn.execute(
+            "WITH " + _canonical_trade_fact_cte(source_clause_sql="WHERE fact.command_id = ?")
+            + ", " + _economic_trade_fact_cte()
+            + " SELECT state, source, venue_order_id, filled_size, fill_price "
+              "FROM economic_trade_fact WHERE command_id = ?",
+            (command_id, command_id),
+        ).fetchall()
+        if terminal is None or len(execution) != 1 or not economic:
+            return None
+        shares = _decimal_or_none(execution[0]["shares"])
+        price = _decimal_or_none(execution[0]["fill_price"])
+        if (
+            execution[0]["position_id"] != position_id
+            or not execution[0]["filled_at"]
+            or str(execution[0]["terminal_exec_status"] or "").lower() != "partial"
+            or shares is None or price is None or shares <= 0 or price <= 0
+            or shares >= requested
+            or abs(shares - (_decimal_or_none(terminal["matched_size"]) or 0))
+                > Decimal("0.000001")
+            or abs(shares - (_decimal_or_none(late_payload.get("canonical_filled_size")) or 0))
+                > Decimal("0.000001")
+            or abs(price - (_decimal_or_none(late_payload.get("fill_price")) or 0))
+                > Decimal("0.000001")
+        ):
+            return None
+        total_shares = Decimal("0")
+        total_cost = Decimal("0")
+        for fact in economic:
+            size = _decimal_or_none(fact["filled_size"])
+            unit_price = _decimal_or_none(fact["fill_price"])
+            if (fact["state"] != "CONFIRMED" or fact["source"] not in {"REST", "WS_USER"}
+                or fact["venue_order_id"] != order_id or size is None or size <= 0
+                or unit_price is None or unit_price <= 0 or unit_price > 1):
+                return None
+            total_shares += size
+            total_cost += size * unit_price
+        if abs(total_shares - shares) > Decimal("0.000001") or abs(total_cost / total_shares - price) > Decimal("0.000001"):
+            return None
+        reservation = conn.execute(
+            "SELECT released_at FROM collateral_reservations WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+        if reservation is not None and not reservation["released_at"]:
+            return None
+        return {
+            "command_id": command_id,
+            "venue_order_id": order_id,
+            "prior_cancel_event_id": str(cancel["event_id"]),
+            "prior_cancel_occurred_at": str(cancel["occurred_at"]),
+            "late_fill_event_id": str(late["event_id"]),
+            "confirmed_filled_size": str(shares),
+        }
+
+
+def _validate_genuine_cancel_reassertion(
+    conn: sqlite3.Connection, *, command_id: str, payload: Optional[dict],
+    occurred_at: str,
+) -> None:
+    evidence = _genuine_cancel_reassertion_evidence(conn, command_id)
+    if (evidence is None or not isinstance(payload, dict)
+        or payload.get("reason") != "genuine_cancel_terminal_reassertion"
+        or payload.get("proof_class") != "prior_cancel_ack_and_confirmed_entry_fill"
+        or payload.get("reasserted_at") != occurred_at
+        or any(payload.get(key) != value for key, value in evidence.items())):
+        raise ValueError("genuine cancel reassertion lacks exact prior cancel and fill proof")
+
+
+def reassert_genuine_cancel_after_late_fill(
+    conn: sqlite3.Connection, *, command_id: str, observed_at: str,
+) -> bool:
+    """Append a proof-bound reassertion of an earlier cancel, without venue I/O."""
+    evidence = _genuine_cancel_reassertion_evidence(conn, command_id)
+    if evidence is None:
+        return False
+    append_event(
+        conn, command_id=command_id, event_type="CANCEL_ACKED",
+        occurred_at=observed_at,
+        payload={"schema_version": 1, "reason": "genuine_cancel_terminal_reassertion",
+                 "proof_class": "prior_cancel_ack_and_confirmed_entry_fill",
+                 "reasserted_at": observed_at, **evidence},
+    )
+    return True
+
+
 def append_event(
     conn: sqlite3.Connection,
     *,
@@ -2670,6 +2888,11 @@ def append_event(
             "REJECTED",
             "SUBMIT_REJECTED",
         } and event_type in {"PARTIAL_FILL_OBSERVED", "FILL_CONFIRMED"}
+        if current_state == "PARTIAL" and event_type == "CANCEL_ACKED":
+            _validate_genuine_cancel_reassertion(
+                conn, command_id=command_id, payload=payload,
+                occurred_at=occurred_at,
+            )
         if terminal_late_fill:
             from src.state.collateral_ledger import (
                 CollateralInsufficient,
@@ -2709,7 +2932,16 @@ def append_event(
                         "terminal late-fill correction collateral was not restored"
                     )
 
-        state_after = _TRANSITIONS[key]
+        state_after = (
+            "CANCELLED"
+            if current_state == "CANCELLED"
+            and event_type == "PARTIAL_FILL_OBSERVED"
+            and isinstance(payload, dict)
+            and payload.get("reason") == "authenticated_fill_after_genuine_cancel"
+            # The strict terminal-late-fill validator above has already
+            # authenticated this exact cancelled remainder and its economics.
+            else _TRANSITIONS[key]
+        )
 
         with _row_factory_as(conn, None):
             seq_row = conn.execute(

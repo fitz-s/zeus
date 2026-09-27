@@ -1,3 +1,6 @@
+# Created: 2026-09-27
+# Last reused/audited: 2026-09-27
+# Authority basis: genuine cancel remainder confirmed fill and command terminality
 """A command may end by a GENUINE cancel while carrying a real partial fill.
 
 The venue fills 72 of 72.37 and cancels the 0.37 remainder. Such a terminal
@@ -13,6 +16,7 @@ last. These tests pin that, and pin the boundary: no fill on the ledger means no
 scheduling.
 """
 import hashlib
+import json
 from datetime import timedelta
 
 import pytest
@@ -160,6 +164,156 @@ def test_the_reconciler_mints_execution_fact_from_chain_truth(conn):
     assert str(row[0]) == "entry"
     assert float(row[1]) == pytest.approx(72.0)
     assert float(row[2]) == pytest.approx(0.50)
+    assert conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id='cmd-m5'"
+    ).fetchone()[0] == "CANCELLED", "confirmed fill must not reopen a cancelled remainder"
+
+
+def _seed_legacy_reopened_genuine_cancel(
+    conn, *, late_payload_change=None, trade_size="72", cancel_payload=None,
+):
+    """Persist the old binary's PARTIAL regression after a real CANCEL_ACKED."""
+    from src.state.db import log_execution_fact
+
+    cancel_at = _terminal_cancel_with_fill(
+        conn, matched_size="72", remaining_size="0.37", trade_size=trade_size,
+        open_shares=72.0, cancel_payload=cancel_payload,
+    )
+    prior = conn.execute(
+        "SELECT event_id, sequence_no FROM venue_command_events WHERE command_id='cmd-m5' "
+        "ORDER BY sequence_no DESC LIMIT 1"
+    ).fetchone()
+    payload = {
+        "reason": "authenticated_fill_after_genuine_cancel",
+        "proof_class": "terminal_command_late_fill_correction",
+        "command_id": "cmd-m5", "venue_order_id": "ord-m5",
+        "terminal_state_before": "CANCELLED",
+        "canonical_filled_size": "72", "fill_price": "0.50",
+        "required_predicates": {
+            "terminal_event_made_no_fill_claim": True,
+            "order_ledger_matched_positive": True,
+            "no_live_execution_fact": True,
+            "authenticated_confirmed_trade_fact": True,
+            "bound_venue_order_identity": True,
+            "order_matched_remainder_arithmetic": True,
+        },
+    }
+    if late_payload_change:
+        payload.update(late_payload_change)
+    late_at = (cancel_at + timedelta(seconds=1)).isoformat()
+    conn.execute(
+        """INSERT INTO venue_command_events
+           (event_id, command_id, sequence_no, event_type, occurred_at, payload_json, state_after)
+           VALUES ('legacy-genuine-late', 'cmd-m5', ?, 'PARTIAL_FILL_OBSERVED', ?, ?, 'PARTIAL')""",
+        (prior["sequence_no"] + 1, late_at, json.dumps(payload)),
+    )
+    conn.execute(
+        "UPDATE venue_commands SET state='PARTIAL', last_event_id='legacy-genuine-late' "
+        "WHERE command_id='cmd-m5'"
+    )
+    log_execution_fact(
+        conn, intent_id="pos-m5:entry", position_id="pos-m5",
+        command_id="cmd-m5", order_role="entry", posted_at=NOW.isoformat(),
+        filled_at=late_at, submitted_price=0.50, fill_price=0.50,
+        shares=72.0, venue_status="PARTIAL", terminal_exec_status="partial",
+    )
+    return cancel_at, prior["event_id"]
+
+
+def test_reassert_prior_genuine_cancel_after_legacy_partial(conn):
+    from src.state.venue_command_repo import reassert_genuine_cancel_after_late_fill
+
+    cancel_at, original_event = _seed_legacy_reopened_genuine_cancel(conn)
+    at = (cancel_at + timedelta(seconds=2)).isoformat()
+    collateral_before = tuple(conn.execute(
+        "SELECT released_at, release_reason, converted_amount FROM collateral_reservations "
+        "WHERE command_id='cmd-m5'"
+    ).fetchone())
+    unsettled_before = conn.execute(
+        "SELECT direction, amount_micro, settled_at FROM collateral_unsettled_proceeds "
+        "WHERE command_id='cmd-m5'"
+    ).fetchall()
+    assert reassert_genuine_cancel_after_late_fill(conn, command_id="cmd-m5", observed_at=at)
+    assert tuple(conn.execute(
+        "SELECT released_at, release_reason, converted_amount FROM collateral_reservations "
+        "WHERE command_id='cmd-m5'"
+    ).fetchone()) == collateral_before
+    assert [tuple(row) for row in conn.execute(
+        "SELECT direction, amount_micro, settled_at FROM collateral_unsettled_proceeds "
+        "WHERE command_id='cmd-m5'"
+    )] == [tuple(row) for row in unsettled_before]
+    command = conn.execute(
+        "SELECT state, last_event_id FROM venue_commands WHERE command_id='cmd-m5'"
+    ).fetchone()
+    assert command["state"] == "CANCELLED"
+    latest = conn.execute(
+        "SELECT event_type,state_after,payload_json FROM venue_command_events "
+        "WHERE event_id=?", (command["last_event_id"],),
+    ).fetchone()
+    assert (latest["event_type"], latest["state_after"]) == ("CANCEL_ACKED", "CANCELLED")
+    proof = json.loads(latest["payload_json"])
+    assert proof["prior_cancel_event_id"] == original_event
+    assert proof["late_fill_event_id"] == "legacy-genuine-late"
+    assert proof["prior_cancel_occurred_at"] == cancel_at.isoformat()
+    assert not reassert_genuine_cancel_after_late_fill(conn, command_id="cmd-m5", observed_at=at)
+    assert conn.execute("SELECT COUNT(*) FROM execution_fact WHERE command_id='cmd-m5'").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("fault", ["wrong_reason", "wrong_order", "no_confirmed_trade",
+                                    "missing_execution", "live_remainder", "same_clock_later_live", "newer_event",
+                                    "wrong_execution_price", "wrong_execution_shares",
+                                    "unreleased_reservation", "bad_ack_status", "bad_required_predicate"])
+def test_genuine_cancel_reassert_refuses_incomplete_proof(conn, fault):
+    from src.state.venue_command_repo import append_event, reassert_genuine_cancel_after_late_fill
+
+    late_payload_change = {
+        "wrong_reason": {"reason": "ordinary_partial"},
+        "wrong_order": {"venue_order_id": "other-order"},
+        "bad_required_predicate": {"required_predicates": {"no_live_execution_fact": False}},
+    }.get(fault)
+    cancel_payload = (
+        {"venue_order_id": "ord-m5", "cancel_outcome": {"status": "UNKNOWN"}}
+        if fault == "bad_ack_status" else None
+    )
+    cancel_at, _ = _seed_legacy_reopened_genuine_cancel(
+        conn, late_payload_change=late_payload_change,
+        trade_size=None if fault == "no_confirmed_trade" else "72",
+        cancel_payload=cancel_payload,
+    )
+    if fault == "missing_execution":
+        conn.execute("UPDATE execution_fact SET voided_at=? WHERE command_id='cmd-m5'",
+                     (cancel_at.isoformat(),))
+    elif fault in {"live_remainder", "same_clock_later_live"}:
+        # Simulate a contradictory later live venue fact persisted by an older
+        # writer. The current append_order_fact correctly blocks that write.
+        conn.execute(
+            """INSERT INTO venue_order_facts
+               (venue_order_id,command_id,state,remaining_size,matched_size,
+                source,observed_at,local_sequence,raw_payload_hash,raw_payload_json)
+               VALUES ('ord-m5','cmd-m5','LIVE','0.37','72','REST',?,99,?,'{}')""",
+            ((cancel_at if fault == "same_clock_later_live"
+              else cancel_at + timedelta(minutes=1)).isoformat(),
+             hashlib.sha256(b"live-remainder-after-cancel").hexdigest()),
+        )
+    elif fault == "newer_event":
+        append_event(conn, command_id="cmd-m5", event_type="PARTIAL_FILL_OBSERVED",
+                     occurred_at=(cancel_at + timedelta(seconds=3)).isoformat(),
+                     payload={"reason": "different_fill"})
+    elif fault == "wrong_execution_price":
+        conn.execute("UPDATE execution_fact SET fill_price=0.6 WHERE command_id='cmd-m5'")
+    elif fault == "wrong_execution_shares":
+        conn.execute("UPDATE execution_fact SET shares=71 WHERE command_id='cmd-m5'")
+    elif fault == "unreleased_reservation":
+        conn.execute("UPDATE collateral_reservations SET released_at=NULL WHERE command_id='cmd-m5'")
+    assert not reassert_genuine_cancel_after_late_fill(
+        conn, command_id="cmd-m5", observed_at=(cancel_at + timedelta(minutes=2)).isoformat(),
+    )
+    assert conn.execute("SELECT state FROM venue_commands WHERE command_id='cmd-m5'").fetchone()[0] == "PARTIAL"
+    with pytest.raises(ValueError, match="genuine cancel reassertion"):
+        append_event(conn, command_id="cmd-m5", event_type="CANCEL_ACKED",
+                     occurred_at=(cancel_at + timedelta(minutes=3)).isoformat(),
+                     payload={"reason": "genuine_cancel_terminal_reassertion",
+                              "proof_class": "prior_cancel_ack_and_confirmed_entry_fill"})
 
 
 def test_a_second_pass_does_not_double_count_the_same_fill(conn):

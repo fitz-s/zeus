@@ -399,6 +399,8 @@ class TestDurableFillBridgeScan:
 
         monkeypatch.setattr(lane, "_edli_trade_fact_bridge_candidates_read_only", lambda: ((), (), ()))
         monkeypatch.setattr(lane, "_edli_orphaned_command_link_candidates_read_only", link_debt)
+        monkeypatch.setattr(lane, "_genuine_cancel_reassert_candidates_read_only",
+                            lambda *, limit, after_command_id=None: ())
         monkeypatch.setattr(lane, "_edli_durable_fill_bridge_candidate_ids_read_only", fresh_debt)
         monkeypatch.setattr(lane, "_prepare_fill_bridge_write_connection", lambda *_a, **_k: conn)
         monkeypatch.setattr(lane, "_bound_fill_bridge_sqlite_wait_remaining", lambda *_a, **_k: None)
@@ -457,6 +459,8 @@ class TestDurableFillBridgeScan:
 
         monkeypatch.setattr(lane, "_edli_trade_fact_bridge_candidates_read_only", lambda: ((), (), ()))
         monkeypatch.setattr(lane, "_edli_orphaned_command_link_candidates_read_only", link_debt)
+        monkeypatch.setattr(lane, "_genuine_cancel_reassert_candidates_read_only",
+                            lambda *, limit, after_command_id=None: ())
         monkeypatch.setattr(lane, "_edli_durable_fill_bridge_candidate_ids_read_only",
                             lambda *, limit: fresh_limits.append(limit) or ())
         monkeypatch.setattr(lane, "_edli_repair_orphaned_command_link", repair)
@@ -471,6 +475,94 @@ class TestDurableFillBridgeScan:
             assert attempts == ["command-a", "command-b", "command-a"]
             assert [result["scheduler_failed"] for result in results] == [True, False, True]
             assert fresh_limits == [lane.FILL_BRIDGE_WRITE_TRANCHES_PER_TICK - 1] * 3
+        finally:
+            lane._edli_orphaned_command_link_cursor = original_cursor
+
+    @pytest.mark.parametrize("stubborn_link", [False, True])
+    def test_periodic_exact_slot_reasserts_prior_genuine_cancel_once(self, monkeypatch, stubborn_link):
+        import src.ingest.price_channel_ingest as lane
+        import src.events.price_channel_redecision_router as router
+        from src.state.collateral_ledger import init_collateral_schema
+        from src.state.db import init_schema_trade_only
+        from tests.execution.test_genuine_cancel_carrying_a_fill_is_sourced import (
+            _seed_legacy_reopened_genuine_cancel,
+        )
+
+        conn = _make_conn()
+        init_schema_trade_only(conn)
+        init_collateral_schema(conn)
+        if stubborn_link:
+            _seed_interrupted_command_link(conn)
+        _seed_legacy_reopened_genuine_cancel(conn)
+        conn.commit()
+        original_cursor = lane._edli_orphaned_command_link_cursor
+        limits = []
+
+        def cancel_debt(*, limit, after_command_id=None):
+            rows = lane._genuine_cancel_reassert_candidates(
+                conn, limit=limit, after_command_id=after_command_id,
+            )
+            return rows or (lane._genuine_cancel_reassert_candidates(conn, limit=limit)
+                            if after_command_id else ())
+
+        class Writer:
+            def __init__(self, **_kwargs):
+                pass
+
+            def __enter__(self):
+                self.lease = SimpleNamespace(acquired_at=time.monotonic())
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        monkeypatch.setattr(lane, "_edli_trade_fact_bridge_candidates_read_only", lambda: ((), (), ()))
+        monkeypatch.setattr(lane, "_edli_orphaned_command_link_candidates_read_only",
+                            lambda *, limit, after_command_id=None: (
+                                lane._edli_orphaned_command_link_candidates(
+                                    conn, limit=limit, after_command_id=after_command_id,
+                                ) or (lane._edli_orphaned_command_link_candidates(conn, limit=limit)
+                                      if after_command_id else ())
+                            ) if stubborn_link else ())
+        if stubborn_link:
+            monkeypatch.setattr(lane, "_edli_repair_orphaned_command_link",
+                                lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("stubborn link")))
+        monkeypatch.setattr(lane, "_genuine_cancel_reassert_candidates_read_only", cancel_debt)
+        monkeypatch.setattr(lane, "_edli_durable_fill_bridge_candidate_ids_read_only",
+                            lambda *, limit: limits.append(limit) or ())
+        monkeypatch.setattr(lane, "_prepare_fill_bridge_write_connection", lambda *_a, **_k: conn)
+        monkeypatch.setattr(lane, "_bound_fill_bridge_sqlite_wait_remaining", lambda *_a, **_k: None)
+        monkeypatch.setattr(lane, "_PriceChannelWriteGate", Writer)
+        monkeypatch.setattr(lane, "_close_fill_bridge_write_connection", lambda *_a: None)
+        monkeypatch.setattr(router, "_edli_position_fill_redecision_cycle", lambda: 0)
+        try:
+            lane._edli_orphaned_command_link_cursor = ""
+            assert lane._edli_durable_fill_bridge_work_exists_read_only()
+            first = lane._edli_fill_bridge_repair_cycle()
+            assert first["scheduler_failed"] is stubborn_link, first
+            if stubborn_link:
+                assert conn.execute("SELECT state FROM venue_commands WHERE command_id='cmd-m5'").fetchone()[0] == "PARTIAL"
+                assert lane._edli_durable_fill_bridge_work_exists_read_only()
+                second = lane._edli_fill_bridge_repair_cycle()
+                assert second["scheduler_failed"] is False, second
+            assert conn.execute("SELECT state FROM venue_commands WHERE command_id='cmd-m5'").fetchone()[0] == "CANCELLED"
+            assert not lane._genuine_cancel_reassert_candidates(conn, limit=1)
+            if not stubborn_link:
+                assert not lane._edli_durable_fill_bridge_work_exists_read_only()
+                second = lane._edli_fill_bridge_repair_cycle()
+                assert second["scheduler_failed"] is False, second
+            else:
+                third = lane._edli_fill_bridge_repair_cycle()
+                assert third["scheduler_failed"] is True, third
+            assert [limit for limit in limits if limit > 1] == (
+                [lane.FILL_BRIDGE_WRITE_TRANCHES_PER_TICK - 1] * 3
+                if stubborn_link else [lane.FILL_BRIDGE_WRITE_TRANCHES_PER_TICK - 1,
+                                      lane.FILL_BRIDGE_WRITE_TRANCHES_PER_TICK]
+            )
+            assert conn.execute(
+                "SELECT COUNT(*) FROM venue_command_events WHERE command_id='cmd-m5' "
+                "AND event_type='CANCEL_ACKED'"
+            ).fetchone()[0] == 2
         finally:
             lane._edli_orphaned_command_link_cursor = original_cursor
 
@@ -516,6 +608,8 @@ class TestDurableFillBridgeScan:
                             lambda *, limit, after_command_id=None: (
                                 ("evt-link-retry:intent-link-retry", command_id, position_id),
                             ))
+        monkeypatch.setattr(lane, "_genuine_cancel_reassert_candidates_read_only",
+                            lambda *, limit, after_command_id=None: ())
         monkeypatch.setattr(lane, "_edli_durable_fill_bridge_candidate_ids_read_only",
                             lambda *, limit: ())
         monkeypatch.setattr(lane, "_prepare_fill_bridge_write_connection", prepare)
@@ -569,6 +663,8 @@ class TestDurableFillBridgeScan:
                             lambda *, limit, after_command_id=None: (
                                 ("evt-link-retry:intent-link-retry", command_id, position_id),
                             ))
+        monkeypatch.setattr(lane, "_genuine_cancel_reassert_candidates_read_only",
+                            lambda *, limit, after_command_id=None: ())
         monkeypatch.setattr(lane, "_edli_durable_fill_bridge_candidate_ids_read_only",
                             lambda *, limit: ())
         monkeypatch.setattr(lane, "_prepare_fill_bridge_write_connection", lambda *_a, **_k: conn)

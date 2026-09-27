@@ -5590,6 +5590,7 @@ def _append_trade_fact(
     tx_hash: str | None = None,
     source="REST",
     observed_at="2026-04-26T00:06:00Z",
+    venue_timestamp: str | None = None,
 ):
     from src.state.venue_command_repo import append_trade_fact
 
@@ -5603,7 +5604,7 @@ def _append_trade_fact(
         fill_price=fill_price,
         source=source,
         observed_at=observed_at,
-        venue_timestamp=observed_at,
+        venue_timestamp=venue_timestamp or observed_at,
         tx_hash=tx_hash,
         raw_payload_hash=hashlib.sha256(
             f"{command_id}:{order_id}:{trade_id}:{state}:{filled_size}:{fill_price}:{tx_hash}:{source}".encode()
@@ -6177,6 +6178,295 @@ class TestAuthenticatedEntryTradeFactProjection:
             "order_id": order_id,
             "order_status": "filled",
         }
+
+    def test_ws_economic_drift_review_restores_exact_authenticated_fill(
+        self,
+        conn,
+        monkeypatch,
+    ):
+        """A WS lifecycle review may clear only through the generic strict fill fold."""
+        from src.execution.command_recovery import (
+            reconcile_authenticated_entry_trade_facts,
+        )
+        from src.state.venue_command_repo import append_event
+
+        command_id = "cmd-authenticated-ws-economic-drift"
+        position_id = "pos-authenticated-ws-economic-drift"
+        order_id = "ord-authenticated-ws-economic-drift"
+        token_id = "tok-authenticated-ws-economic-drift"
+        _insert(
+            conn,
+            command_id=command_id,
+            position_id=position_id,
+            decision_id="dec-authenticated-ws-economic-drift",
+            token_id=token_id,
+            order_type="FOK",
+            size=1.36,
+            price=0.75,
+        )
+        _advance_to_acked(conn, command_id=command_id, venue_order_id=order_id)
+        _seed_pending_entry_projection(
+            conn,
+            position_id=position_id,
+            command_id=command_id,
+            order_id=order_id,
+            token_id=token_id,
+        )
+        _append_trade_fact(
+            conn,
+            command_id=command_id,
+            order_id=order_id,
+            trade_id="trade-authenticated-ws-economic-drift",
+            state="MATCHED",
+            filled_size="1.378376",
+            fill_price="0.7399998258820525",
+            source="WS_USER",
+            observed_at="2026-04-26T00:07:00Z",
+        )
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "reason": "ws_trade_lifecycle_regression_or_economic_drift",
+                "venue_order_id": order_id,
+            },
+        )
+        _append_trade_fact(
+            conn,
+            command_id=command_id,
+            order_id=order_id,
+            trade_id="trade-authenticated-ws-economic-drift",
+            state="CONFIRMED",
+            filled_size="1.378376",
+            fill_price="0.7399998258820525",
+            source="REST",
+            observed_at="2026-04-26T00:09:00Z",
+            venue_timestamp="2026-04-26T00:07:00Z",
+        )
+        monkeypatch.setattr(
+            "src.execution.command_recovery._decision_log_trade_case_for_command",
+            lambda _conn, _command: ({}, 524132),
+        )
+
+        events_before = _get_events(conn, command_id)
+        assert all(event["event_type"] != "FILL_CONFIRMED" for event in events_before)
+
+        summary = reconcile_authenticated_entry_trade_facts(
+            conn,
+            command_id=command_id,
+        )
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert _get_state(conn, command_id) == "FILLED"
+        fill = _get_events(conn, command_id)[-1]
+        assert fill["event_type"] == "FILL_CONFIRMED"
+        payload = json.loads(fill["payload_json"])
+        assert payload["reason"] == "review_cleared_confirmed_fill"
+        assert payload["proof_class"] == "authenticated_trade_fact_full_fill"
+        assert payload["fill_bound_semantics"] == (
+            "PRICE_IMPROVED_TAKER_NOTIONAL_BOUNDED"
+        )
+        position = conn.execute(
+            "SELECT shares, cost_basis_usd, order_id, order_status "
+            "FROM position_current WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+        assert dict(position) == {
+            "shares": 1.378376,
+            "cost_basis_usd": pytest.approx(1.019998),
+            "order_id": order_id,
+            "order_status": "filled",
+        }
+
+    @pytest.mark.parametrize(
+        "trade_rows",
+        (
+            (("trade-ws-matched", "MATCHED", "WS_USER", "2", "2026-04-26T00:09:00Z"),),
+            (("trade-ws-mined", "MINED", "WS_USER", "2", "2026-04-26T00:09:00Z"),),
+            (("trade-rest-before-review", "CONFIRMED", "REST", "2", "2026-04-26T00:07:00Z"),),
+            (
+                ("trade-rest-covered", "CONFIRMED", "REST", "1", "2026-04-26T00:09:00Z"),
+                ("trade-ws-uncovered", "CONFIRMED", "WS_USER", "1", "2026-04-26T00:09:00Z"),
+            ),
+        ),
+        ids=("matched_only", "mined_only", "rest_before_review", "ws_leg_without_rest"),
+    )
+    def test_ws_economic_drift_review_requires_post_review_rest_confirmation(
+        self,
+        conn,
+        monkeypatch,
+        trade_rows,
+    ):
+        """A WS review cannot promote optimistic or pre-review fill evidence."""
+        from src.execution.command_recovery import (
+            reconcile_authenticated_entry_trade_facts,
+        )
+        from src.state.venue_command_repo import append_event
+
+        command_id = "cmd-authenticated-ws-rest-proof"
+        position_id = "pos-authenticated-ws-rest-proof"
+        order_id = "ord-authenticated-ws-rest-proof"
+        token_id = "tok-authenticated-ws-rest-proof"
+        _insert(
+            conn,
+            command_id=command_id,
+            position_id=position_id,
+            decision_id="dec-authenticated-ws-rest-proof",
+            token_id=token_id,
+            order_type="FOK",
+            size=2.0,
+            price=0.50,
+        )
+        _advance_to_acked(conn, command_id=command_id, venue_order_id=order_id)
+        _seed_pending_entry_projection(
+            conn,
+            position_id=position_id,
+            command_id=command_id,
+            order_id=order_id,
+            token_id=token_id,
+        )
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "reason": "ws_trade_lifecycle_regression_or_economic_drift",
+                "venue_order_id": order_id,
+            },
+        )
+        for trade_id, state, source, filled_size, observed_at in trade_rows:
+            _append_trade_fact(
+                conn,
+                command_id=command_id,
+                order_id=order_id,
+                trade_id=trade_id,
+                state=state,
+                filled_size=filled_size,
+                fill_price="0.50",
+                source=source,
+                observed_at=observed_at,
+            )
+        monkeypatch.setattr(
+            "src.execution.command_recovery._decision_log_trade_case_for_command",
+            lambda _conn, _command: ({}, 524132),
+        )
+
+        summary = reconcile_authenticated_entry_trade_facts(
+            conn,
+            command_id=command_id,
+        )
+
+        assert summary["advanced"] == 0
+        assert _get_state(conn, command_id) == "REVIEW_REQUIRED"
+        assert all(
+            event["event_type"] != "FILL_CONFIRMED"
+            for event in _get_events(conn, command_id)
+        )
+
+    @pytest.mark.parametrize(
+        "fault",
+        ("failed_only", "wrong_order", "missing_envelope", "wrong_token", "wrong_price"),
+    )
+    def test_ws_economic_drift_review_keeps_unbound_or_invalid_fill_in_review(
+        self,
+        conn,
+        fault,
+    ):
+        """WS review eligibility never bypasses trade/envelope identity checks."""
+        from src.execution.command_recovery import (
+            reconcile_authenticated_entry_trade_facts,
+        )
+        from src.state.venue_command_repo import append_event
+
+        command_id = f"cmd-authenticated-ws-invalid-{fault}"
+        position_id = f"pos-authenticated-ws-invalid-{fault}"
+        order_id = f"ord-authenticated-ws-invalid-{fault}"
+        token_id = f"tok-authenticated-ws-invalid-{fault}"
+        _insert(
+            conn,
+            command_id=command_id,
+            position_id=position_id,
+            token_id=token_id,
+            order_type="FOK",
+            size=2.0,
+            price=0.50,
+        )
+        _advance_to_acked(conn, command_id=command_id, venue_order_id=order_id)
+        _seed_pending_entry_projection(
+            conn,
+            position_id=position_id,
+            command_id=command_id,
+            order_id=order_id,
+            token_id=token_id,
+        )
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "reason": "ws_trade_lifecycle_regression_or_economic_drift",
+                "venue_order_id": order_id,
+            },
+        )
+        fact_order_id = order_id if fault != "wrong_order" else f"{order_id}-other"
+        _append_trade_fact(
+            conn,
+            command_id=command_id,
+            order_id=fact_order_id,
+            trade_id=f"trade-authenticated-ws-invalid-{fault}",
+            state="FAILED" if fault == "failed_only" else "CONFIRMED",
+            filled_size="2",
+            fill_price="0.50",
+            source="REST",
+            observed_at="2026-04-26T00:09:00Z",
+        )
+        envelope_id = conn.execute(
+            "SELECT envelope_id FROM venue_commands WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()[0]
+        if fault in {"missing_envelope", "wrong_token", "wrong_price"}:
+            # The writer makes envelopes immutable.  Remove only these test
+            # guards to model legacy/corrupt persisted provenance, which the
+            # recovery reader still has to fail closed.
+            conn.execute("DROP TRIGGER venue_submission_envelopes_no_update")
+            conn.execute("DROP TRIGGER venue_submission_envelopes_no_delete")
+        if fault == "missing_envelope":
+            conn.execute(
+                "DELETE FROM venue_submission_envelopes WHERE envelope_id = ?",
+                (envelope_id,),
+            )
+        elif fault == "wrong_token":
+            conn.execute(
+                "UPDATE venue_submission_envelopes "
+                "SET selected_outcome_token_id = ? WHERE envelope_id = ?",
+                (f"{token_id}-other", envelope_id),
+            )
+        elif fault == "wrong_price":
+            conn.execute(
+                "UPDATE venue_submission_envelopes SET price = '0.49' "
+                "WHERE envelope_id = ?",
+                (envelope_id,),
+            )
+
+        summary = reconcile_authenticated_entry_trade_facts(
+            conn,
+            command_id=command_id,
+        )
+
+        assert summary["advanced"] == 0
+        assert _get_state(conn, command_id) == "REVIEW_REQUIRED"
+        assert all(
+            event["event_type"] != "FILL_CONFIRMED"
+            for event in _get_events(conn, command_id)
+        )
+        assert conn.execute(
+            "SELECT COUNT(*) FROM execution_fact WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()[0] == 0
 
     def test_incomplete_confirmed_prefix_keeps_terminal_fill_review_local(
         self,
