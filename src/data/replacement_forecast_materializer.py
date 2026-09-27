@@ -8710,6 +8710,7 @@ def prepare_replacement_forecast_live(
             if reason in {
                 "DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_MISSING",
                 "DAY0_NOAA_PRELIMINARY_CARRIER_FUTURE_MEMBERS_MISSING",
+                "DAY0_NOAA_PRELIMINARY_CARRIER_CURRENT_TEMPERATURE_STATE_MISSING",
             }:
                 return ReplacementForecastMaterializeResult(
                     status="BLOCKED",
@@ -8739,7 +8740,15 @@ def compute_replacement_posterior_readonly(
         if isinstance(validated, ReplacementForecastMaterializeResult):
             return None
         request, metric = validated
-        return _compute_posterior_payload(conn, request, metric=metric, anchor_id=-1)
+        try:
+            return _compute_posterior_payload(conn, request, metric=metric, anchor_id=-1)
+        except ValueError as exc:
+            if str(exc) != "DAY0_NOAA_PRELIMINARY_CARRIER_CURRENT_TEMPERATURE_STATE_MISSING":
+                raise
+            # The held read-through has no complete current path witness yet.
+            # The monitor keeps its other positions moving and re-reads this
+            # exact family on the next causal observation/vector update.
+            return None
 
 
 def _day0_enqueue_owner_witness_is_current(
@@ -8929,12 +8938,23 @@ def materialize_replacement_forecast_live(
         conn, request, metric=metric
     )
     anchor_id = _insert_anchor(conn, request, metric=metric)
-    posterior = _compute_posterior_payload(
-        conn,
-        request,
-        metric=metric,
-        anchor_id=anchor_id,
-    )
+    try:
+        posterior = _compute_posterior_payload(
+            conn,
+            request,
+            metric=metric,
+            anchor_id=anchor_id,
+        )
+    except ValueError as exc:
+        if str(exc) != "DAY0_NOAA_PRELIMINARY_CARRIER_CURRENT_TEMPERATURE_STATE_MISSING":
+            raise
+        return ReplacementForecastMaterializeResult(
+            status="BLOCKED",
+            reason_codes=(str(exc),),
+            posterior_id=None,
+            anchor_id=None,
+            readiness_id=None,
+        )
     return write_prepared_replacement_forecast_live(
         conn,
         PreparedReplacementForecastMaterialization(

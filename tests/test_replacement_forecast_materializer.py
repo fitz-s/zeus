@@ -1076,6 +1076,113 @@ def test_day0_owner_witness_keeps_newer_fast_residual_over_absorbing_frontier(
     )
 
 
+@pytest.mark.parametrize(("missing_metric", "healthy_metric"), (("high", "low"), ("low", "high")))
+@pytest.mark.parametrize("state", ("absent", "future_unpossessed"))
+def test_noaa_missing_current_state_blocks_only_one_family_and_drains_on_next_cut(
+    monkeypatch: pytest.MonkeyPatch,
+    missing_metric: str,
+    healthy_metric: str,
+    state: str,
+) -> None:
+    """A missing/currently unpossessed print must not abort the next family."""
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    if state == "future_unpossessed":
+        conn.execute("""CREATE TABLE observation_prints (
+            id INTEGER PRIMARY KEY, city TEXT, station_id TEXT, source_channel TEXT,
+            publish_ts_utc TEXT, value_native REAL, unit TEXT,
+            fetched_at_utc TEXT, raw_report TEXT
+        )""")
+        conn.execute(
+            "INSERT INTO observation_prints VALUES (1, ?, 'ZSPD', 'aviationweather_metar', ?, 30, 'C', ?, ?)",
+            ("Shanghai", _dt(18, 15).isoformat(), _dt(18, 15).isoformat(),
+             "METAR ZSPD 061815Z 30/20 T03000200"),
+        )
+    missing = replace(
+        _request(
+            computed_at=_dt(18, 10),
+            expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+            day0_observed_extreme_c=31.0 if missing_metric == "high" else 19.0,
+            day0_observed_extreme_source="aviationweather_metar",
+            day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
+        ),
+        temperature_metric=missing_metric,
+        baseline_data_version=_current_baseline_data_version(missing_metric),
+    )
+    blocked = materialize_replacement_forecast_live(conn, missing)
+    assert blocked.status == "BLOCKED"
+    assert blocked.reason_codes == (
+        "DAY0_NOAA_PRELIMINARY_CARRIER_CURRENT_TEMPERATURE_STATE_MISSING",
+    )
+    assert materializer_mod.compute_replacement_posterior_readonly(conn, missing) is None
+
+    healthy = replace(
+        _request(),
+        temperature_metric=healthy_metric,
+        baseline_data_version=_current_baseline_data_version(healthy_metric),
+    )
+    good = materialize_replacement_forecast_live(conn, healthy)
+    assert good.ok is True
+    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 1
+
+    from src.data.day0_hourly_vectors import Day0HourlyVector
+
+    if state == "absent":
+        conn.execute("""CREATE TABLE observation_prints (
+            id INTEGER PRIMARY KEY, city TEXT, station_id TEXT, source_channel TEXT,
+            publish_ts_utc TEXT, value_native REAL, unit TEXT,
+            fetched_at_utc TEXT, raw_report TEXT
+        )""")
+        conn.execute(
+            "INSERT INTO observation_prints VALUES (1, ?, 'ZSPD', 'aviationweather_metar', ?, 30, 'C', ?, ?)",
+            ("Shanghai", _dt(18, 5).isoformat(), _dt(18, 5).isoformat(),
+             "METAR ZSPD 061805Z 30/20 T03000200"),
+        )
+    else:
+        conn.execute(
+            """UPDATE observation_prints
+               SET publish_ts_utc=?, fetched_at_utc=?, raw_report=? WHERE id=1""",
+            (_dt(18, 5).isoformat(), _dt(18, 5).isoformat(),
+             "METAR ZSPD 061805Z 30/20 T03000200"),
+        )
+    vector = Day0HourlyVector(
+        model="ecmwf_ifs", city="Shanghai", target_date="2026-06-07",
+        timezone_name="Asia/Shanghai", captured_at=_dt(18, 8).isoformat(),
+        times=tuple(f"2026-06-07T{hour:02d}:00" for hour in range(24)),
+        temps_c=tuple(29.0 if hour < 12 else 31.0 for hour in range(24)),
+    )
+    monkeypatch.setattr(
+        "src.data.day0_hourly_vectors.day0_hourly_models_for_city",
+        lambda _city: ["ecmwf_ifs"],
+    )
+    monkeypatch.setattr(
+        "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
+        lambda **_kwargs: [vector],
+    )
+    recovered = materialize_replacement_forecast_live(conn, missing)
+    assert recovered.ok is True
+    assert recovered.posterior_id is not None
+
+
+def test_noaa_missing_state_boundary_does_not_swallow_unexpected_calculation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+
+    def invalid_calculation(*_args, **_kwargs):
+        raise ValueError("UNEXPECTED_CALCULATION_ERROR")
+
+    monkeypatch.setattr(materializer_mod, "_compute_posterior_payload", invalid_calculation)
+    request = _request()
+    with pytest.raises(ValueError, match="UNEXPECTED_CALCULATION_ERROR"):
+        materializer_mod.prepare_replacement_forecast_live(conn, request)
+    with pytest.raises(ValueError, match="UNEXPECTED_CALCULATION_ERROR"):
+        materializer_mod.compute_replacement_posterior_readonly(conn, request)
+    with pytest.raises(ValueError, match="UNEXPECTED_CALCULATION_ERROR"):
+        materialize_replacement_forecast_live(conn, request)
+
+
 @pytest.mark.parametrize(
     ("metric", "baseline_data_version", "absorbing_extreme", "fast_extreme", "bound"),
     [
@@ -1104,7 +1211,7 @@ def test_fast_residual_frontier_fails_closed_when_bound_cannot_cover_history(
             computed_at=_dt(18),
             expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
             day0_observed_extreme_c=absorbing_extreme,
-            day0_observed_extreme_source="wu_icao_history",
+            day0_observed_extreme_source="noaa_wrh_zspd",
             day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
         ),
         temperature_metric=metric,
@@ -1115,7 +1222,7 @@ def test_fast_residual_frontier_fails_closed_when_bound_cannot_cover_history(
         absorbing,
         computed_at=_dt(18, 10),
         day0_observed_extreme_c=fast_extreme,
-        day0_observed_extreme_source="wu_api+same_station_fast_tail",
+        day0_observed_extreme_source="aviationweather_metar",
         day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
     )
     likelihood = (
@@ -1134,7 +1241,7 @@ def test_fast_residual_frontier_fails_closed_when_bound_cannot_cover_history(
 
     assert isinstance(reduced, ReplacementForecastMaterializeRequest)
     assert reduced.day0_observed_extreme_c == absorbing_extreme
-    assert reduced.day0_observed_extreme_source == "wu_icao_history"
+    assert reduced.day0_observed_extreme_source == "noaa_wrh_zspd"
     assert reduced.day0_observed_extreme_observation_time == _dt(17, 55).isoformat()
 
 
@@ -2178,14 +2285,14 @@ def test_materializer_blocks_malformed_day0_frontier_ledger(
         computed_at=_dt(18),
         expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
         day0_observed_extreme_c=31.0,
-        day0_observed_extreme_source="aviationweather_metar",
+        day0_observed_extreme_source="noaa_wrh_zspd",
         day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
     )
     written = materialize_replacement_forecast_live(conn, first)
     assert written.ok is True
     conn.execute(
         "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
-        ("{malformed", written.posterior_id),
+        ("[]", written.posterior_id),  # SQL enforces JSON syntax; reject an invalid JSON shape.
     )
 
     result = materialize_replacement_forecast_live(
@@ -2227,7 +2334,7 @@ def test_materializer_ignores_typed_legacy_provisional_frontier_ledger(
             computed_at=_dt(18),
             expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
             day0_observed_extreme_c=legacy_extreme,
-            day0_observed_extreme_source="aviationweather_metar",
+            day0_observed_extreme_source="noaa_wrh_zspd",
             day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
         ),
         temperature_metric=metric,
@@ -2253,7 +2360,7 @@ def test_materializer_ignores_typed_legacy_provisional_frontier_ledger(
         legacy,
         computed_at=_dt(18, 10),
         day0_observed_extreme_c=current_extreme,
-        day0_observed_extreme_source="aviationweather_metar",
+        day0_observed_extreme_source="noaa_wrh_zspd",
         day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
     )
     result = materialize_replacement_forecast_live(conn, current)
@@ -2269,9 +2376,7 @@ def test_materializer_ignores_typed_legacy_provisional_frontier_ledger(
         current_provenance["day0_conditioning"]["observed_extreme_c"]
         == current_extreme
     )
-    assert current_provenance["day0_conditioning"]["source"] == (
-        "aviationweather_metar"
-    )
+    assert current_provenance["day0_conditioning"]["source"] == "noaa_wrh_zspd"
 
 
 @pytest.mark.parametrize(
@@ -2298,7 +2403,7 @@ def test_materializer_blocks_malformed_typed_provisional_frontier_ledger(
             computed_at=_dt(18),
             expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
             day0_observed_extreme_c=31.0 if metric == "high" else 19.0,
-            day0_observed_extreme_source="aviationweather_metar",
+            day0_observed_extreme_source="noaa_wrh_zspd",
             day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
         ),
         temperature_metric=metric,
@@ -2359,7 +2464,7 @@ def test_materializer_blocks_unknown_frontier_finality(
             computed_at=_dt(18),
             expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
             day0_observed_extreme_c=31.0 if metric == "high" else 19.0,
-            day0_observed_extreme_source="aviationweather_metar",
+            day0_observed_extreme_source="noaa_wrh_zspd",
             day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
         ),
         temperature_metric=metric,
@@ -2423,7 +2528,7 @@ def test_materializer_blocks_unknown_declared_frontier_finality(
             computed_at=_dt(18),
             expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
             day0_observed_extreme_c=31.0 if metric == "high" else 19.0,
-            day0_observed_extreme_source="aviationweather_metar",
+            day0_observed_extreme_source="noaa_wrh_zspd",
             day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
         ),
         temperature_metric=metric,
@@ -2467,7 +2572,7 @@ def test_materializer_blocks_ledger_observation_after_its_own_compute_time(
         computed_at=_dt(18),
         expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
         day0_observed_extreme_c=31.0,
-        day0_observed_extreme_source="aviationweather_metar",
+        day0_observed_extreme_source="noaa_wrh_zspd",
         day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
     )
     written = materialize_replacement_forecast_live(conn, first)
