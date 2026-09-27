@@ -381,6 +381,31 @@ Unavailable inputs preserve DATA_DEGRADED/read-only monitoring; version migratio
 does not authorize liquidation or rewriting historical receipts. Posterior
 identity binds both carrier operator and content, even when numerical q coincides.
 
+WU plus same-station fast-tail evidence (`wu_api+same_station_fast_tail`) is
+provisional current-snapshot evidence for every supported city and both metrics.
+On an open local day, its current temperature conditions the existing remaining-hourly future path;
+the uncertain past extreme is then mapped to the settlement channel by the
+existing fast-residual transport exactly once, on both point q and confidence
+draws. Construct that base carrier with the no-boundary scenario; never make the
+fast extreme an absorbing floor/ceiling or invent NOAA/HKO boundary-survival
+probability for this source. HIGH uses the conditional variance below; LOW
+retains its existing minimum-path and uncertainty operator.
+
+The producer and ENTRY/held/submit readers bind the same source, station,
+metric, local day, observation clocks, current-state value, base-carrier identity
+and residual-likelihood identity. They must reproduce the transported q and
+draws, not just the base-carrier hash. A legacy WU fast-residual posterior missing
+its consumed current-state carrier is uncovered for open-local-day decisions. The existing
+observation/fusion seed loop rebuilds that exact family from current inputs;
+successful complete materialization resets it. Ordinary non-Day0 forecasts and
+other source authorities do not acquire this restriction. Same-extreme updates
+to a newer causal current temperature must also re-seed an already consumed
+carrier, independently of the city name.
+The combined land-grid/current-state construction is identified by
+`day0_settlement_channel_revision_model_v26_land_grid_v3`, or
+`day0_resolver_terminal_composition_v25_land_grid_v3` when that existing
+composition is selected. Older cohorts retain their original attribution.
+
 Once a causal target-day observation and complete unresolved-hour provider
 trajectories exist, Day0 point q is a different conditional random variable from
 the source-clock full-day extreme. The open-local-day, pure-hourly HIGH

@@ -395,6 +395,7 @@ def _target_local_day_has_started(
     city: str,
     target_date: str,
     now: datetime,
+    include_closed: bool = True,
 ) -> bool:
     """Whether an observed extreme can exist for this settlement local day."""
 
@@ -409,7 +410,7 @@ def _target_local_day_has_started(
     except (KeyError, TypeError, ValueError):
         # Unknown time geometry cannot authorize skipping the canonical fact read.
         return True
-    return local_d >= target_d
+    return local_d >= target_d if include_closed else local_d == target_d
 
 
 def _latest_live_input_cycle(
@@ -1009,6 +1010,31 @@ def load_replacement_belief(
     if not isinstance(decoded_provenance, Mapping):
         return None
     provenance = decoded_provenance
+    from src.events.day0_authority import DAY0_WU_FAST_RESIDUAL_SOURCE
+
+    provisional = provenance.get("day0_provisional_observation")
+    if (
+        provenance.get("q_shape") == "fused_day0_fast_residual_likelihood"
+        and isinstance(provisional, Mapping)
+        and provisional.get("source") == DAY0_WU_FAST_RESIDUAL_SOURCE
+        and _target_local_day_has_started(
+            city=city, target_date=target_date, now=now_dt, include_closed=False,
+        )
+        and (
+            not provenance.get("day0_remaining_carrier_content_identity")
+            or not isinstance(provenance.get("day0_current_temperature_state"), Mapping)
+            or not provenance.get("day0_current_temperature_state")
+        )
+    ):
+        # SCOPE: this family's obsolete WU fast-residual posterior only.
+        # DRAIN: existing observation/seed materialization plus monitor reseed.
+        # RESET: the replacement includes its consumed current-state carrier;
+        # a new timestamp alone cannot make the old full-day q authoritative.
+        logger.warning(
+            "position_belief: WU current-state carrier missing for %s/%s/%s",
+            city, target_date, temperature_metric,
+        )
+        return None
     if current_evidence_shape_semantics_mismatch(provenance):
         logger.warning(
             "position_belief: current-evidence semantics mismatch for %s/%s/%s; required=%s",

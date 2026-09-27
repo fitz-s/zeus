@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-12; last_reviewed=2026-09-13; last_reused=2026-09-13
+# Lifecycle: created=2026-06-12; last_reviewed=2026-09-27; last_reused=2026-09-27
 # Purpose: Prove held-position probability authority, freshness, and compact decision lineage.
 # Reuse: pytest tests/engine/test_position_belief_authority.py
 # Authority basis: settlement-losses incident 2026-06-12 (Karachi position:
@@ -208,6 +208,51 @@ def _insert(db_path, *, posterior_id, computed_at, q, city="Karachi",
     conn.commit()
     conn.close()
 
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+@pytest.mark.parametrize("missing", ("carrier", "state", None))
+@pytest.mark.parametrize("closed", (False, True))
+def test_held_wu_probability_requires_consumed_current_state_carrier(
+    forecasts_db, monkeypatch, metric, direction, missing, closed,
+):
+    import src.engine.position_belief as belief_module
+    from src.events.day0_authority import DAY0_WU_FAST_RESIDUAL_SOURCE
+
+    decision_at = NOW + timedelta(days=int(closed))
+    _insert(
+        forecasts_db, posterior_id="wu-current-state",
+        computed_at=(decision_at - timedelta(minutes=1)).isoformat(),
+        source_cycle_time=(decision_at - timedelta(hours=2)).isoformat(),
+        metric=metric, q={BIN: 0.73, OTHER_BIN: 0.27},
+    )
+    with sqlite3.connect(forecasts_db) as conn:
+        provenance = json.loads(conn.execute(
+            "SELECT provenance_json FROM forecast_posteriors"
+        ).fetchone()[0])
+        provenance.update({
+            "q_shape": "fused_day0_fast_residual_likelihood",
+            "day0_provisional_observation": {"source": DAY0_WU_FAST_RESIDUAL_SOURCE},
+        })
+        if missing != "carrier":
+            provenance["day0_remaining_carrier_content_identity"] = "current-carrier"
+        if missing != "state":
+            provenance["day0_current_temperature_state"] = {
+                "source": "aviationweather_metar", "value_native": 37.0,
+                "observed_at": (NOW - timedelta(minutes=2)).isoformat(),
+            }
+        conn.execute("UPDATE forecast_posteriors SET provenance_json=?", (json.dumps(provenance),))
+    monkeypatch.setattr(belief_module, "_observed_running_extreme_native", lambda **_kw: None)
+    belief = load_replacement_belief(
+        city="Karachi", target_date="2026-06-12", temperature_metric=metric,
+        bin_label=BIN, direction=direction, db_path=forecasts_db, now=decision_at,
+    )
+    if missing is not None and not closed:
+        assert belief is None
+    else:
+        assert belief is not None
+        assert belief.held_side_prob == pytest.approx(0.73 if direction == "buy_yes" else 0.27)
 
 def test_stale_absolute_disagreement_is_not_held_monitor_authority(forecasts_db):
     _insert(
