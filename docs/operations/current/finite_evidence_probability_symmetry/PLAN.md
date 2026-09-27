@@ -107,6 +107,31 @@ Status: active
   Do not special-case Hong Kong, change source eligibility, run extra collectors
   or discard other held scopes. Test two cities with different time zones and
   the same local date/priority so the earlier actual deadline receives service.
+- Post-load at 15:29 UTC both correct 26T12 migration jobs finally started,
+  then failed with `CYCLE_DEADLINE_EXCEEDED` after about 60 seconds and zero
+  published rows. The selector incorrectly forwards its 60-second polling
+  deadline into a complete 48-step native-51 collector. The ordinary latest
+  collector runs in the same independent per-track single-flight lane with
+  existing bounded per-step and extraction timeouts, not the selection poll's
+  deadline. Separate those two budgets for held migration too: keep selection
+  bounded and let the selected collector use its existing normal stage limits.
+  Preserve per-track exclusivity, fresh-calendar eligibility, caller-supplied
+  explicit collector deadlines where applicable, HIGH/LOW isolation and pause
+  authority. Test that a short selector budget is not forwarded as the full
+  migration's cycle budget; do not enlarge a freshness tolerance, fabricate
+  missing members or reclassify historical 50-member raw files as native 51.
+  Apply the same correction to the identical failed-prior-cycle retry call
+  site. Explicit collector deadlines remain supported; an expired selection
+  deadline still prevents starting work. Fairness is between completed bounded
+  collector attempts, not a promise to interrupt a valid acquisition every
+  minute. Per-track single-flight prevents duplicate workers while it runs.
+- The two-call-site budget repair passes all 87 scheduling/boot tests on the
+  parent (`3c3a889ab`), including HIGH/LOW completion past the poll clock,
+  expired-selection no-start, explicit collector deadline forwarding and the
+  existing real per-track lock-miss journal preservation tests. Independent
+  review accepts the budget separation. This does not guarantee network
+  completion before target expiry; post-load proof must show a continuing
+  collector across polls and actual source/coverage/posterior convergence.
 - Concurrent scheduler integration exposed a behavioral defect, not just a
   fixture mismatch: a reserved completion cut treats an absent urgent-wake
   revision as cancellation even when the marker has never existed and the
