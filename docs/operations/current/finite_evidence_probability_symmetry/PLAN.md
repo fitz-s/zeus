@@ -25,6 +25,10 @@ Status: active
   fallback twin is covered without stored-clock mutation. Fixed-SHA final
   review is YES at `6ad5e0b32`; post-load receipts remain a separate rollout
   acceptance gate.
+- Additional daemon-suite check has 54 passes / 22 failures on both fixed
+  upstream `89c8430a5` and integrated `2cbde6e5a`; exact JUnit failure-node
+  comparison finds no additions or removals. This extra suite is not the
+  193-pass source scheduling group and is not represented as green.
 
 - Post-rollout all-open-position audit at 16:46 UTC found a separate producer /
   held-reader contract defect in Lucknow, Cape Town, Helsinki and Milan. For
