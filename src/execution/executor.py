@@ -84,6 +84,7 @@ _EXIT_PRE_SUBMIT_WRITE_LEASE_DEADLINE_MS = 250
 _EXIT_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS = 500
 _ENTRY_PRE_SUBMIT_WRITE_LEASE_DEADLINE_MS = 250
 _ENTRY_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS = 500
+_FINAL_SDK_RECEIPT_BUDGET_SECONDS = 20.6
 
 _LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD = 0.05
 _LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY = 0.02
@@ -4864,6 +4865,8 @@ class PreSubmitIdentityBindingError(RuntimeError):
 
 def _signed_identity_persistence_connection(
     conn: sqlite3.Connection,
+    *,
+    deadline_monotonic: float | None = None,
 ) -> tuple[sqlite3.Connection, bool]:
     """Return a fresh file-backed connection for independent envelope writes.
 
@@ -4892,7 +4895,8 @@ def _signed_identity_persistence_connection(
 
     from src.state.db import connect_existing_trade_db_without_journal_bootstrap
 
-    return connect_existing_trade_db_without_journal_bootstrap(Path(path)), True
+    kwargs = {} if deadline_monotonic is None else {"deadline_monotonic": deadline_monotonic}
+    return connect_existing_trade_db_without_journal_bootstrap(Path(path), **kwargs), True
 
 
 def _persist_final_submission_envelope_payload(
@@ -4938,7 +4942,10 @@ def _persist_final_submission_envelope_payload(
             raise _PostSubmitCallerTransactionError(
                 "final SDK receipt requires a separate committed transaction"
             )
-        persist_conn, close_persist_conn = _signed_identity_persistence_connection(conn)
+        deadline = time.monotonic() + _FINAL_SDK_RECEIPT_BUDGET_SECONDS
+        persist_conn, close_persist_conn = _signed_identity_persistence_connection(
+            conn, deadline_monotonic=deadline,
+        )
 
         def persist_receipt() -> None:
             nonlocal envelope_id
@@ -4964,6 +4971,7 @@ def _persist_final_submission_envelope_payload(
                 deadline_ms=5000,
                 max_hold_ms=500,
                 priority=WritePriority.RECOVERY_CRITICAL,
+                deadline_monotonic=deadline,
             )
         finally:
             if close_persist_conn:
@@ -5359,6 +5367,7 @@ def _run_post_submit_ack_persistence(
     deadline_ms: int,
     max_hold_ms: int,
     priority="standard",
+    deadline_monotonic: float | None = None,
 ) -> None:
     """Persist one post-submit ACK or terminal-rejection outcome atomically.
 
@@ -5385,24 +5394,41 @@ def _run_post_submit_ack_persistence(
             )
         conn.commit()
 
+    def remaining_ms(limit: int) -> int:
+        if deadline_monotonic is None:
+            return limit
+        remaining = (deadline_monotonic - time.monotonic()) * 1000.0
+        if not math.isfinite(remaining) or remaining < 1.0:
+            raise TimeoutError("FINAL_RECEIPT_DEADLINE_EXPIRED")
+        return min(limit, int(remaining))
+
     def persist_once() -> None:
         try:
             with _canonical_trade_write_lease(
                 conn,
                 owner=owner,
-                deadline_ms=deadline_ms,
-                max_hold_ms=max_hold_ms,
+                deadline_ms=remaining_ms(deadline_ms),
+                max_hold_ms=remaining_ms(max_hold_ms),
                 priority=priority,
             ) as lease:
                 if lease is None:
-                    conn.execute("BEGIN IMMEDIATE")
-                    persist_fn()
-                    conn.commit()
+                    prior_timeout = None
+                    try:
+                        if deadline_monotonic is not None:
+                            prior_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+                            from src.state.db import _apply_busy_timeout
+                            _apply_busy_timeout(conn, busy_timeout_ms=remaining_ms(max_hold_ms))
+                        conn.execute("BEGIN IMMEDIATE")
+                        persist_fn()
+                        conn.commit()
+                    finally:
+                        if prior_timeout is not None:
+                            _apply_busy_timeout(conn, busy_timeout_ms=int(prior_timeout))
                     return
                 with bounded_sqlite_write(
                     conn,
                     lease,
-                    max_hold_ms=max_hold_ms,
+                    max_hold_ms=remaining_ms(max_hold_ms),
                 ):
                     conn.execute("BEGIN IMMEDIATE")
                     persist_fn()

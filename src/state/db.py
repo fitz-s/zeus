@@ -384,6 +384,8 @@ def _connect(
 
 def _connect_existing_db_without_journal_bootstrap(
     db_path: Path,
+    *,
+    deadline_monotonic: float | None = None,
 ) -> sqlite3.Connection:
     """Open an existing canonical DB without repeating journal bootstrap.
 
@@ -399,18 +401,31 @@ def _connect_existing_db_without_journal_bootstrap(
     timeout_ms = _db_busy_timeout_ms()
     from src.state.db_writer_lock import connect_with_cutover_lease
 
+    def remaining_timeout_ms() -> int:
+        if deadline_monotonic is None:
+            return timeout_ms
+        remaining = float(deadline_monotonic) - time.monotonic()
+        if not math.isfinite(remaining) or remaining <= 0.0:
+            raise TimeoutError("DB_CONNECTION_DEADLINE_EXPIRED")
+        return min(timeout_ms, max(1, math.ceil(remaining * 1000.0)))
+
     conn = connect_with_cutover_lease(
         path.as_uri() + "?mode=rw",
         canonical_db_path=path,
         uri=True,
-        timeout=timeout_ms / 1000.0,
+        timeout=remaining_timeout_ms() / 1000.0,
+        deadline_monotonic=deadline_monotonic,
     )
     try:
         conn.row_factory = sqlite3.Row
-        conn.execute(f"PRAGMA journal_size_limit = {WAL_RETAINED_BYTES}")
-        conn.execute("PRAGMA foreign_keys=ON")
+        for sql in (
+            f"PRAGMA journal_size_limit = {WAL_RETAINED_BYTES}",
+            "PRAGMA foreign_keys=ON",
+        ):
+            _apply_busy_timeout(conn, busy_timeout_ms=remaining_timeout_ms())
+            conn.execute(sql)
         _install_connection_functions(conn)
-        _apply_busy_timeout(conn, busy_timeout_ms=timeout_ms)
+        _apply_busy_timeout(conn, busy_timeout_ms=remaining_timeout_ms())
         return conn
     except BaseException:
         conn.close()
@@ -419,10 +434,14 @@ def _connect_existing_db_without_journal_bootstrap(
 
 def connect_existing_trade_db_without_journal_bootstrap(
     db_path: Path,
+    *,
+    deadline_monotonic: float | None = None,
 ) -> sqlite3.Connection:
     """Open a latency-critical trade writer; the periodic job owns WAL drainage."""
 
-    conn = _connect_existing_db_without_journal_bootstrap(db_path)
+    conn = _connect_existing_db_without_journal_bootstrap(
+        db_path, deadline_monotonic=deadline_monotonic,
+    )
     try:
         conn.execute("PRAGMA wal_autocheckpoint=0")
         return conn

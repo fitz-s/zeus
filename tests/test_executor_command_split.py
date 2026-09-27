@@ -6785,3 +6785,41 @@ def test_submit_strategy_policy_uses_certificate_metric(mem_conn, monkeypatch, m
     result = _entry_strategy_policy_submit_component(mem_conn, intent, payload)
     assert result["allowed"] is True
     assert seen == [{"temperature_metric": metric, "probability_semantics_revision": "current"}]
+
+
+@pytest.mark.parametrize("side", ["BUY", "SELL"])
+def test_final_receipt_connection_obeys_total_deadline_during_cutover(tmp_path, monkeypatch, side):
+    import fcntl
+    import os
+    import threading
+    import time
+    import src.execution.executor as executor
+    from src.state.db import init_schema_trade_only
+    from src.state.db_writer_lock import cutover_lease_path
+
+    path = tmp_path / "receipt-cutover.db"
+    caller = sqlite3.connect(path)
+    init_schema_trade_only(caller)
+    caller.commit()
+    final = _entry_submission_envelope(token_id="cutover-token", side=side).with_updates(
+        order_id="cutover-order", raw_response_json='{"status":"LIVE"}',
+    )
+    fd = os.open(cutover_lease_path(path), os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    release = threading.Timer(0.4, lambda: fcntl.flock(fd, fcntl.LOCK_UN))
+    release.start()
+    monkeypatch.setattr(executor, "_FINAL_SDK_RECEIPT_BUDGET_SECONDS", 0.05, raising=False)
+    started = time.monotonic()
+    try:
+        with pytest.raises(executor.FinalSubmissionEnvelopePersistenceError, match="DEADLINE_EXPIRED"):
+            executor._persist_final_submission_envelope_payload(
+                caller, {"_venue_submission_envelope": final.to_dict()}, command_id="cutover-cmd",
+            )
+        assert time.monotonic() - started < 0.3
+        assert not caller.in_transaction
+        assert caller.execute("SELECT COUNT(*) FROM venue_submission_envelopes").fetchone()[0] == 0
+    finally:
+        release.join(timeout=1)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+        caller.close()
