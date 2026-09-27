@@ -1251,13 +1251,18 @@ def _run_opendata_track_if_due(
             if row is not None and str(row["status"]).upper() in {
                 "SUCCESS", "PARTIAL", "FAILED",
             }:
-                migrated_at = (
-                    _parse_utc_timestamp(row["finished_at"])
-                    if _parse_utc_timestamp(row["lock_acquired_at"]) is not None
-                    else None
-                )
-                if migrated_at is None or migrated_at >= newest_attempted_at:
-                    return None
+                if row["lock_acquired_at"] is not None:
+                    acquired_at = _parse_utc_timestamp(row["lock_acquired_at"])
+                    migrated_at = _parse_utc_timestamp(row["finished_at"])
+                    if (
+                        acquired_at is None or migrated_at is None
+                        or migrated_at < acquired_at
+                        or migrated_at >= newest_attempted_at
+                    ):
+                        return None
+                # A terminal pre-lock error has no collector attempt to rank.
+                # The candidate still needs its own release/window/coverage
+                # proof from _held_revision_migration_identity above.
         result = run_opendata_track(
             track, _locks_dir_override=_locks_dir_override,
             _collector=_collector, _source_paused=_source_paused,

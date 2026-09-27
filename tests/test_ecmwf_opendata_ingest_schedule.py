@@ -295,6 +295,88 @@ def test_prelock_failure_is_not_a_collector_turn(monkeypatch, track):
 
 
 @pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+@pytest.mark.parametrize("migration_status", ("FAILED", "PARTIAL"))
+def test_migration_prelock_failure_does_not_permanently_suppress_held_turn(
+    monkeypatch, track, migration_status,
+):
+    from src.ingest import forecast_live_daemon as daemon
+    from src.data import replacement_forecast_seed_discovery as discovery
+
+    now = datetime(2026, 9, 27, 12, 46, tzinfo=timezone.utc)
+    conn = _job_run_conn()
+    old = _held_revision_coverage(
+        conn, track, now=now, cycle=datetime(2026, 9, 26, 12, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(discovery, "held_position_family_priorities", lambda **_: {
+        ("Hong Kong", "2026-09-27", old["metric"]): 0,
+    })
+    newest = daemon._forecast_work_identity(track, now_utc=now)
+    _insert_job_run(conn, newest, status="FAILED", recorded_at=now - timedelta(seconds=5))
+    migration, _ = daemon._held_revision_migration_identity(
+        conn, track=track, now_utc=now, deadline_monotonic=time.monotonic() + 10,
+    )
+    _insert_job_run(
+        conn, migration, status=migration_status,
+        recorded_at=now - timedelta(seconds=61),
+    )
+    conn.execute(
+        "UPDATE job_run SET lock_acquired_at = NULL WHERE job_run_id = ?",
+        (daemon._job_run_id(migration),),
+    )
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        daemon, "run_opendata_track",
+        lambda _track, **kw: calls.append(kw) or {"status": "ok"},
+    )
+    result = daemon._run_opendata_track_if_due(
+        track, _job_conn=conn, _now_utc=now, _source_paused=lambda _: False,
+        _poll_deadline_monotonic=time.monotonic() + 10,
+    )
+    assert result["revision_migration_debt"]["old_source_run_id"] == old["source_run_id"]
+    assert len(calls) == 1
+    assert calls[0]["_identity"] == migration
+
+
+@pytest.mark.parametrize("bad_field", ("lock_acquired_at", "finished_at"))
+def test_malformed_migration_collector_clock_cannot_order_a_turn(monkeypatch, bad_field):
+    from src.ingest import forecast_live_daemon as daemon
+    from src.data import replacement_forecast_seed_discovery as discovery
+
+    now = datetime(2026, 9, 27, 12, 46, tzinfo=timezone.utc)
+    track = "mx2t6_high"
+    conn = _job_run_conn()
+    _held_revision_coverage(
+        conn, track, now=now, cycle=datetime(2026, 9, 26, 12, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(discovery, "held_position_family_priorities", lambda **_: {
+        ("Hong Kong", "2026-09-27", "high"): 0,
+    })
+    newest = daemon._forecast_work_identity(track, now_utc=now)
+    _insert_job_run(conn, newest, status="FAILED", recorded_at=now - timedelta(seconds=5))
+    migration, _ = daemon._held_revision_migration_identity(
+        conn, track=track, now_utc=now, deadline_monotonic=time.monotonic() + 10,
+    )
+    _insert_job_run(
+        conn, migration, status="FAILED", recorded_at=now - timedelta(seconds=61),
+    )
+    conn.execute(
+        f"UPDATE job_run SET {bad_field} = 'not-a-clock' WHERE job_run_id = ?",
+        (daemon._job_run_id(migration),),
+    )
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        daemon, "run_opendata_track",
+        lambda _track, **kw: calls.append(kw) or {"status": "ok"},
+    )
+    daemon._run_opendata_track_if_due(
+        track, _job_conn=conn, _now_utc=now, _source_paused=lambda _: False,
+        _poll_deadline_monotonic=time.monotonic() + 10,
+    )
+    assert len(calls) == 1
+    assert "_identity" not in calls[0]
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
 def test_held_migration_failure_yields_next_turn_to_latest(monkeypatch, track):
     """Use existing exact job attempts for alternating fairness, not a new latch."""
     from src.ingest import forecast_live_daemon as daemon
