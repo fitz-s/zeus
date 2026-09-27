@@ -490,6 +490,127 @@ def _install_live_fusion(
     monkeypatch.setattr(materializer_mod, "_replacement_bayes_precision_fusion_override", lambda *args, **kwargs: override)
 
 
+def _install_pinned_ready_fusion(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Supply source-clock witness fields through the producer, not a reader mock."""
+
+    _install_live_fusion(monkeypatch)
+    producer = materializer_mod._replacement_bayes_precision_fusion_override
+    override = producer(None)
+    monkeypatch.setattr(
+        materializer_mod,
+        "_replacement_bayes_precision_fusion_override",
+        lambda *_args, **_kwargs: replace(
+            override,
+            current_evidence_shape={
+                **override.current_evidence_shape,
+                "member_values_hash": hashlib.sha256(json.dumps(
+                    override.current_evidence_members_c,
+                ).encode()).hexdigest(),
+            },
+            current_value_serving={
+                "ecmwf_ifs9": {
+                    "raw_model_forecast_id": 101,
+                    "served_via": "single_runs",
+                    "served_cycle": _dt(0).isoformat(),
+                    "captured_at": _dt(1).isoformat(),
+                },
+            },
+        ),
+    )
+
+
+def _assert_wu_fast_pinned_contract(
+    provenance: dict[str, object], *, city: str, target_date: str,
+    metric: str, decision_time: datetime,
+) -> None:
+    """The actual materializer output must pass the held reader, not a mock gate."""
+
+    from copy import deepcopy
+    from src.data.replacement_forecast_bundle_reader import (
+        _held_pinned_provenance_reason,
+    )
+
+    def reason(value: dict[str, object]) -> str | None:
+        return _held_pinned_provenance_reason(
+            value, city=city, target_date=target_date,
+            metric=metric, decision_time=decision_time,
+        )
+
+    assert reason(provenance) is None
+    missing = deepcopy(provenance)
+    missing["day0_provisional_observation"].pop("fast_residual_likelihood")
+    assert reason(missing) == "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_IDENTITY_MISSING"
+    corrupted = deepcopy(provenance)
+    corrupted["day0_provisional_observation"]["fast_residual_likelihood"]["unknown_weight"] = 0.01
+    assert reason(corrupted) == "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_IDENTITY_INVALID"
+
+    def resigned(field: str, value: object) -> dict[str, object]:
+        changed = deepcopy(provenance)
+        likelihood = changed["day0_provisional_observation"]["fast_residual_likelihood"]
+        likelihood[field] = value
+        identity = {key: likelihood[key] for key in (
+            "semantics_revision", "station_id", "settlement_channel", "fast_channel",
+            "unit", "as_of", "window_start", "matched_pairs", "unknown_weight",
+            "settlement_extreme_c",
+        )}
+        identity["residual_weights_c"] = tuple(
+            (row["residual_c"], row["weight"])
+            for row in likelihood["residual_weights_c"]
+        )
+        likelihood["identity_hash"] = hashlib.sha256(json.dumps(
+            identity, sort_keys=True, separators=(",", ":"),
+        ).encode()).hexdigest()
+        return changed
+
+    different_but_valid_hash = resigned(
+        "matched_pairs",
+        provenance["day0_provisional_observation"]["fast_residual_likelihood"]["matched_pairs"] + 1,
+    )
+    assert reason(different_but_valid_hash) == (
+        "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_CARRIER_IDENTITY_MISMATCH"
+    )
+    wrong_carrier = deepcopy(provenance)
+    wrong_carrier["day0_remaining_carrier_content_identity"] = "0" * 64
+    assert reason(wrong_carrier) == (
+        "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_CARRIER_IDENTITY_MISMATCH"
+    )
+    wrong_q = deepcopy(provenance)
+    wrong_q["day0_remaining_carrier_q"][0] += 0.01
+    assert reason(wrong_q) == "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_CARRIER_VALUE_MISMATCH"
+    wrong_sample = deepcopy(provenance)
+    wrong_sample["day0_remaining_carrier_probability_samples"][0][0] += 0.01
+    assert reason(wrong_sample) == "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_CARRIER_VALUE_MISMATCH"
+    assert reason(resigned("station_id", "WRONG")) == (
+        "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_CARRIER_INVALID"
+    )
+    assert reason(resigned("settlement_channel", "noaa_wrh_wrong")) == (
+        "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_IDENTITY_INVALID"
+    )
+    future = resigned("as_of", (decision_time + timedelta(minutes=1)).isoformat())
+    future["day0_provisional_observation"]["observation_time"] = (
+        decision_time + timedelta(minutes=1)
+    ).isoformat()
+    assert reason(future) == "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_CARRIER_INVALID"
+    wrong_metric = deepcopy(provenance)
+    wrong_metric["day0_provisional_observation"]["metric"] = (
+        "low" if metric == "high" else "high"
+    )
+    assert reason(wrong_metric) == "REPLACEMENT_PINNED_DAY0_METRIC_MISMATCH"
+    wrong_unit = deepcopy(provenance)
+    wrong_unit["day0_provisional_observation"]["unit"] = (
+        "F" if provenance["day0_provisional_observation"]["unit"] == "C" else "C"
+    )
+    assert reason(wrong_unit) == "REPLACEMENT_PINNED_DAY0_UNIT_MISMATCH"
+    wrong_shape = deepcopy(provenance)
+    wrong_shape["q_shape"] = "fused_normal_direct"
+    assert reason(wrong_shape) == "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_SHAPE_INVALID"
+    wrong_top_level = deepcopy(provenance)
+    wrong_top_level["day0_preliminary_report_survival_likelihood"] = {
+        "identity_hash": "1" * 64,
+    }
+    assert reason(wrong_top_level) == "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_SHAPE_INVALID"
+
+
 def _request(
     *,
     baseline_data_version: str | None = None,
@@ -3361,7 +3482,7 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
     from src.signal.ensemble_signal import sigma_instrument_for_city
 
     conn = _conn()
-    _install_live_fusion(monkeypatch)
+    _install_pinned_ready_fusion(monkeypatch)
     city = runtime_cities_by_name()["Chicago"]
     semantics = SettlementSemantics.for_city(city)
     assert semantics.measurement_unit == "F"
@@ -3687,6 +3808,11 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
     ).fetchone()
     q = json.loads(row["q_json"])
     provenance = json.loads(row["provenance_json"])
+    if source == "wu_api+same_station_fast_tail":
+        _assert_wu_fast_pinned_contract(
+            provenance, city="Chicago", target_date=target.isoformat(),
+            metric="high", decision_time=computed_at,
+        )
     assert provenance["day0_remaining_carrier_future_extremes_c"] == pytest.approx(
         member_values_c
     )
@@ -3920,7 +4046,7 @@ def test_wu_composite_low_rebuilds_current_path_before_one_residual_update(
     from src.data.day0_hourly_vectors import Day0CurrentTemperatureState
 
     conn = _conn()
-    _install_live_fusion(monkeypatch)
+    _install_pinned_ready_fusion(monkeypatch)
     observed = _dt(17, 55)
     current = {"value": 24.0}
     request = replace(
@@ -3985,6 +4111,10 @@ def test_wu_composite_low_rebuilds_current_path_before_one_residual_update(
         (first.posterior_id,),
     ).fetchone()
     q_first, provenance_first = json.loads(first_row["q_json"]), json.loads(first_row["provenance_json"])
+    _assert_wu_fast_pinned_contract(
+        provenance_first, city="Shanghai", target_date="2026-06-07",
+        metric="low", decision_time=_dt(18),
+    )
     assert provenance_first["q_shape"] == "fused_day0_fast_residual_likelihood"
     assert provenance_first["day0_current_temperature_state"]["value_native"] == 24.0
     assert provenance_first["day0_provisional_observation"]["support_truncation"] is False

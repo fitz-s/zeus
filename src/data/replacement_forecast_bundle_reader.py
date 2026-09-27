@@ -409,6 +409,159 @@ def _held_pinned_carrier_claimed(provenance: Mapping[str, Any]) -> bool:
     )
 
 
+def _wu_fast_pinned_carrier_reason(
+    provenance: Mapping[str, Any],
+    *,
+    city: str,
+    target_date: date | str,
+    metric: str,
+    decision_time: datetime,
+) -> str | None:
+    """Reproduce the fast likelihood's exact source and carrier identity."""
+
+    # SCOPE: this held family's exact pinned WU-fast posterior. DRAIN: normal
+    # materialization writes a new source-bound posterior if this immutable row
+    # is incomplete. RESET: a nested likelihood and full carrier that this
+    # reader reproduces from the persisted evidence, never a synthetic hash.
+
+    from src.config import ensemble_n_mc, settlement_source_type_for_city
+    from src.contracts.settlement_semantics import SettlementSemantics
+    from src.data.day0_fast_obs import (
+        FAST_RESIDUAL_CONDITIONING_SOURCE_ID,
+        validated_fast_residual_day0_conditioning,
+    )
+    from src.data.day0_hourly_vectors import (
+        build_day0_remaining_probability_carrier,
+        day0_remaining_carrier_identity_inputs,
+    )
+    from src.signal.ensemble_signal import sigma_instrument_for_city
+
+    provisional = provenance["day0_provisional_observation"]
+    if (
+        provenance.get("q_shape") != "fused_day0_fast_residual_likelihood"
+        or provisional.get("source") != FAST_RESIDUAL_CONDITIONING_SOURCE_ID
+        or provenance.get("day0_preliminary_report_survival_likelihood") != {}
+    ):
+        return "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_SHAPE_INVALID"
+    try:
+        validated = validated_fast_residual_day0_conditioning(provisional)
+    except (TypeError, ValueError):
+        return "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_IDENTITY_INVALID"
+    if validated is None:
+        return "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_IDENTITY_MISSING"
+    likelihood = validated["fast_residual_likelihood"]
+    city_obj = cities_by_name.get(city)
+    station = str(getattr(city_obj, "wu_station", "") or "").strip().upper()
+    source_type = (
+        settlement_source_type_for_city(city_obj, _date_text(target_date))
+        if city_obj is not None else None
+    )
+    expected_channel = (
+        "wu_icao_history" if source_type == "wu_icao"
+        else f"noaa_wrh_{station.lower()}" if source_type == "noaa"
+        else None
+    )
+    try:
+        observed = _parse_utc(str(provisional["observation_time"]), field_name="observation_time")
+        cutoff = _parse_utc(
+            str(provenance["day0_remaining_carrier_probability_cutoff_utc"]),
+            field_name="day0_remaining_carrier_probability_cutoff_utc",
+        )
+        current_state = provenance["day0_current_temperature_state"]
+        if not isinstance(current_state, Mapping):
+            raise ValueError("current_state_missing")
+        current_path = {
+            "value_native": float(current_state["value_native"]),
+            "observed_at_utc": str(current_state["observed_at_utc"]),
+            "source": str(current_state["source"]),
+        }
+        state_time = _parse_utc(current_path["observed_at_utc"], field_name="current_state_time")
+        if state_time > cutoff:
+            raise ValueError("future_current_state")
+        likelihood_time = _parse_utc(str(likelihood["as_of"]), field_name="likelihood_as_of")
+        if (
+            not station or expected_channel is None
+            or str(likelihood["station_id"]).strip().upper() != station
+            or likelihood["settlement_channel"] != expected_channel
+            or observed != likelihood_time or observed > cutoff or cutoff > decision_time
+            or str(provisional["metric"]).lower() != metric
+            or str(provisional["unit"]).upper()
+            != str(getattr(city_obj, "settlement_unit", "") or "").upper()
+        ):
+            raise ValueError("source_scope_or_clock_mismatch")
+        unit = str(city_obj.settlement_unit).upper()
+        scale, offset = (1.0, 0.0) if unit == "C" else (9.0 / 5.0, 32.0)
+        identity_inputs = day0_remaining_carrier_identity_inputs(
+            city=city, unit=unit, decision_time_utc=cutoff.isoformat(),
+            station_id=station, preliminary_survival_identity=likelihood["identity_hash"],
+        )
+        identity_inputs["current_path_state"] = current_path
+        conditional_identity = provenance.get("day0_conditional_high_shape_identity")
+        conditional_witness = provenance.get("day0_conditional_high_shape_witness")
+        conditional_basis = provenance.get("day0_remaining_variance_basis")
+        if any(value is not None for value in (
+            conditional_identity, conditional_witness, conditional_basis,
+        )):
+            if (
+                not isinstance(conditional_identity, str) or not conditional_identity
+                or not isinstance(conditional_witness, Mapping)
+                or conditional_basis != "conditional_ens_within_plus_provider_center_delta_v1"
+                or conditional_identity != hashlib.sha256(json.dumps(
+                    conditional_witness, sort_keys=True, separators=(",", ":"),
+                ).encode()).hexdigest()
+            ):
+                raise ValueError("conditional_shape_invalid")
+            identity_inputs["conditional_high_shape_identity"] = conditional_identity
+        topology = provenance["bin_topology"]
+        if not isinstance(topology, list) or not topology:
+            raise ValueError("topology_missing")
+        bounds = tuple(
+            (
+                None if row["lower_c"] is None else float(row["lower_c"]) * scale + offset,
+                None if row["upper_c"] is None else float(row["upper_c"]) * scale + offset,
+            ) for row in topology
+        )
+        future = tuple(float(value) * scale + offset for value in
+                       provenance["day0_remaining_carrier_future_extremes_c"])
+        final = tuple(float(value) * scale + offset for value in
+                      provenance.get("day0_remaining_carrier_final_extremes_c", ()))
+        carrier = build_day0_remaining_probability_carrier(
+            future_extremes_c=future, final_extreme_centers_c=final,
+            boundary_scenarios=((None, 1.0),), metric=metric,
+            path_error_sigma_c=float(provenance["day0_remaining_carrier_path_error_sigma_c"]) * scale,
+            instrument_sigma_c=float(sigma_instrument_for_city(city_obj).to(unit).value),
+            bin_bounds_c=bounds, n_point=ensemble_n_mc(), n_samples=500,
+            identity_inputs=identity_inputs,
+            settlement_semantics=SettlementSemantics.for_city(city_obj),
+            operator=str(provenance["day0_remaining_carrier_operator"]),
+            remaining_center_bias_native=float(provenance.get("day0_remaining_center_bias_c") or 0.0) * scale,
+        )
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_CARRIER_INVALID"
+    if provenance.get("day0_remaining_carrier_content_identity") != carrier["content_identity"]:
+        return "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_CARRIER_IDENTITY_MISMATCH"
+    try:
+        persisted_q = tuple(float(value) for value in provenance["day0_remaining_carrier_q"])
+        persisted_samples = day0_remaining_carrier_samples_row_major(provenance)
+        if persisted_samples is None:
+            raise ValueError("samples_missing")
+        persisted_samples = tuple(
+            tuple(float(value) for value in row) for row in persisted_samples
+        )
+    except (KeyError, TypeError, ValueError):
+        return "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_CARRIER_INVALID"
+    if (
+        persisted_q != tuple(float(value) for value in carrier["q"])
+        or persisted_samples != tuple(
+            tuple(float(value) for value in row) for row in carrier["samples"]
+        )
+        or provenance.get("day0_remaining_carrier_operator") != carrier["operator"]
+        or provenance.get("day0_remaining_carrier_sample_count") != carrier["sample_count"]
+    ):
+        return "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_CARRIER_VALUE_MISMATCH"
+    return None
+
+
 def _held_pinned_provenance_reason(
     provenance: Mapping[str, Any],
     *,
@@ -448,6 +601,16 @@ def _held_pinned_provenance_reason(
     likelihood = provenance.get("day0_preliminary_report_survival_likelihood")
     if not isinstance(likelihood, Mapping):
         return "REPLACEMENT_PINNED_DAY0_LIKELIHOOD_MISSING"
+    from src.data.day0_fast_obs import FAST_RESIDUAL_CONDITIONING_SOURCE_ID
+
+    if source == FAST_RESIDUAL_CONDITIONING_SOURCE_ID:
+        fast_reason = _wu_fast_pinned_carrier_reason(
+            provenance, city=city, target_date=target_date, metric=metric,
+            decision_time=decision_time,
+        )
+        if fast_reason is not None:
+            return fast_reason
+        return _held_pinned_carrier_fields_reason(provenance, decision_time=decision_time)
     if not str(likelihood.get("identity_hash") or "").strip():
         return "REPLACEMENT_PINNED_DAY0_LIKELIHOOD_IDENTITY_MISSING"
     hko_provisional = (
@@ -509,6 +672,14 @@ def _held_pinned_provenance_reason(
     ).hexdigest()
     if str(likelihood.get("identity_hash") or "").strip().lower() != expected_identity_hash:
         return "REPLACEMENT_PINNED_DAY0_LIKELIHOOD_IDENTITY_MISMATCH"
+    return _held_pinned_carrier_fields_reason(provenance, decision_time=decision_time)
+
+
+def _held_pinned_carrier_fields_reason(
+    provenance: Mapping[str, Any], *, decision_time: datetime,
+) -> str | None:
+    """Shared structural carrier check after source-specific likelihood proof."""
+
     carrier_fields = (
         "day0_remaining_carrier_content_identity",
         "day0_remaining_carrier_operator",
