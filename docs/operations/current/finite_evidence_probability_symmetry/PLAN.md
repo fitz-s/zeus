@@ -8,6 +8,76 @@ Status: active
 
 ### Concurrent conditional-HIGH integration acceptance
 
+- Follow-up repair `143e95115` passes final independent fixed-SHA review.
+  It preserves source topology as a deep-copied provenance value while
+  publishing the active topology together with rebuilt q and samples in the
+  same current-family order. HKO HIGH/LOW and NOAA C/F HIGH/LOW relationship
+  tests now traverse source/rebuild/strict replay, the production condition
+  mapper, a self-validating probability witness and the actual monitor's
+  held YES/NO point/sample consumers. Reviewer runs 34 such cases successfully.
+  Full pricing plus solve-seam suites have 1,307 passes and the exact same
+  65 baseline failing nodes; parent independently verifies the XML sets.
+  This closes the demonstrated coordinate inconsistency without weakening
+  identity or freshness. Historical failed mutable input cuts remain not
+  fully reconstructible; real new-process HK and WU monitor acceptance is
+  still mandatory after the guarded rollout.
+
+- **2ee951cfe runtime acceptance FAILED; do not close this repair.** The first
+  official attempt stopped before process shutdown on a transient GitHub TLS
+  failure. A successful read-only fetch followed by the same guarded command
+  loaded main PID 43419 at 18:49:12Z and all prerequisites; no bypass was used.
+  The deploy command exits zero, but actual post-load HK28 HIGH 2c606 and LOW
+  f317 have repeated fresh_prob=false despite fresh quotes and READY unexpired
+  posteriors. Helsinki alternates fresh/identity failure. All report the shared
+  DAY0_NOAA_PRELIMINARY_CARRIER_IDENTITY_MISMATCH. Cape/Milan have valid current
+  receipts, but cannot stand in for the failing counterparts. Investigate the
+  complete producer→decision-time rebuilder→strict consumer relationship:
+  a candidate defect is newly rebuilt event-order q/samples retaining the old
+  source-topology order. This is not yet proven; capture actual hash-input
+  differences first. Preserve all identity/price/finality protections, add full
+  normal HK HIGH/LOW and alternate Helsinki branch antibodies before another
+  rollout. Code/tests will be owned by the existing ERA repair lane; no source
+  or canonical DB mutation is authorized by this investigation.
+- Independent tracing confirms the rebuilder inconsistency: it constructs
+  new bounds/q/samples/identity in family.candidates order but retains the
+  previous source carrier's topology order. Authorized minimal repair is to
+  preserve the old topology with the existing source-clock provenance copy,
+  and synchronously publish the active current topology matching the newly
+  rebuilt carrier. Retain strict ID/bound bijection and all hash/q/sample
+  comparisons. Test source producer→decision-time rebuilder→strict consumer
+  with shuffled HKO HIGH/LOW and common NOAA paths, not just a direct replay
+  helper. HK later becomes fresh again in different event/bundle cuts; this
+  intermittency does not refute the demonstrated bad combination. Helsinki
+  also has distinct vector/read-deadline reasons, which require separate
+  current classification rather than assuming every error is this one cause.
+- Restart guard was correctly retired by main's CAS at 18:50:53Z (override
+  history #5073 and DEPLOY_LIVE_RESTART_GUARD_RESET log). At 18:54 the active
+  selector returns None and is_entries_paused is false. A retained historical
+  row's paused=true payload without its expired effective_until was previously
+  misread as active; do not use that stale interpretation. No manual pause or
+  resume was performed, and other entry authority gates remain independent.
+- Helsinki's distinct transient failures have observed drainage: MON670
+  identity failure precedes posterior 689324 commit by 58ms and MON672 vector
+  failure precedes 689331 by 23ms; subsequent MON671/673 consume those rows.
+  A bounded SQLite read-deadline at MON674 is followed by successful MON675;
+  MON676–682 then stay fresh. This proves recovery, not the exact historical
+  interleaving: current mutable rows cannot reconstruct every failed cut.
+  The evidence is consistent with source-event/posterior handoff timing and
+  fail-closed redecision, not a demonstrated persistent wrong selection.
+  Preserve the attribution gap and existing bounds; no speculative timeout,
+  snapshot or freshness relaxation is authorized from these timestamps alone.
+- The newly entered HK28 LOW position f3171735-5b8 is also audited, not omitted:
+  command 56ae400d16c04c53 is an authenticated 10.41-share YES27 maker fill at
+  .16 on 18:39:47Z, chain-synced 18:41:43. Its VERIFIED certificate references
+  posterior 689221 / ENS 1380085, 27T06 LOW land-grid-v3 coverage 40/40 and
+  the current v26 authority. Global decision-time q is .428672, not the raw
+  posterior's .37117. It has mean-positive edge but a zero 5% lower bound and
+  recorded false-edge rate .28144. At 18:54:54 fresh held q is .376484 against
+  bid .09, with HOLD. This is real model/market disagreement and uncertainty,
+  not proof that the corrected source/consumer implementation produces profit.
+  The ordinary mean-action law is not silently replaced with a hindsight
+  lower-bound veto, and this new holding is included in final runtime checks.
+
 - Final source-boundary inspection proves a separate latent identity defect:
   NOAA WRH requests one STID, but `_parse_rows` consumes STATION[0] without
   checking its response STID; downstream atoms/prints are labeled from the
