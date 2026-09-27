@@ -78,6 +78,51 @@ Status: active
   denial. The numeric repair preserves strict confidence and source checks.
   These tests establish decision/retry behavior, not a historical venue fill.
 
+### Recent-case dispositions and remaining runtime acceptance
+
+- Final focused check on `c67207660`: 31 selected tests passed; the independent
+  worker also passed the wrapped typed-denial test. There are 16 new exit tests
+  and 12 new confidence-round-trip cases. Planning-lock, changed-surface map
+  maintenance, compilation and diff checks passed. No schema/index/retention,
+  settlement, price-band, probability formula or global ranking law was changed.
+- September 22 LOW NO28 `2e9a5eed-d9f`: canonical decision logs 830904/830905
+  selected a positive-EV 5-share SELL at 0.87; 830906 recorded stable preflight.
+  At 05:56:34Z the required fresh JIT snapshot write failed with TRADE writer
+  contention. Subsequent WORLD claim attempts bounced 62 and 5 times. At
+  05:58:53Z the fresh actuation snapshot had bid 0.75. No EXIT command exists.
+  This execution failure remains OPEN: the historical logs name waiting owners,
+  not the actual lock holder. Neither the two landed fixes nor an unimplemented
+  extra retry establishes that this failure has been eliminated.
+- A proposed same-wake retry was not implemented: the representative failed
+  epoch had already consumed its 22-second budget, so that change would not
+  address its demonstrated delay. Reusing the preflight book was also rejected:
+  the actuation snapshot is intentionally recaptured after slow probability
+  and inventory checks, and its price had genuinely changed.
+- September 26 HIGH YES31: global receipt 861709 actually evaluated SELL but
+  its current probability made that proposal negative EV. Its flash-crash
+  marker cannot override the current INV-46 global capital law. HKO's subsequent
+  cross-bin observation reached the monitor within eight seconds of becoming
+  available, after the legal bid disappeared. This is not a proven arithmetic
+  or missing-auction defect; changing the mandated probability model requires
+  separate causal validation, not fitting to this loss.
+- Current seven Hong Kong holdings all load authenticated entry identity
+  bindings. The older multi-fill entry-cohort defect is already fixed in the
+  loaded code and was not re-patched. Post-local-day frozen observation/vector
+  certificates are valid restricted held-position evidence under current law;
+  an old observation alone does not justify suppressing all statistical exits.
+- Read-only checks rejected two possible contention explanations: the snapshot
+  retention query is skipped because its prerequisite index is absent (confirmed
+  with WAL-aware mode=ro), and the sampled Hong Kong quote-history reads took
+  5–76 ms. No retention or query patch was made on that insufficient evidence.
+- At the last checked runtime, main PID 8854 still loaded `070a0348`, live
+  checkout was `4412ce9e`, and `origin/live` contained `c67207660`. Recheck on use.
+  Deployment timing is operator-gated by `zeus_current_delivery.md` section 8.1.
+  Runtime acceptance requires the official fast-forward/preflight/restart path,
+  exact loaded SHA, fresh canonical monitor receipts and a new contention-time
+  holder/stage trace. Landing alone does not satisfy the user's loss-prevention
+  objective. Durable promotions: behavioral tests only; local residue: ignored
+  example test settings; topology friction: none_observed on changed surfaces.
+
 ## 2026-09-03 — persistent executable catastrophe不能被global preparation撤销
 
 - **实时反例：** Istanbul Sep-2 HIGH 26C 的 residual 5.0043 shares 在
