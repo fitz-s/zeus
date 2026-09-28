@@ -530,9 +530,14 @@ _MAKER_FILL_BAND_WILSON_Z = 1.959963984540054
 
 
 def _maker_fill_band_wilson_lower_bound(successes: int, trials: int) -> Decimal:
-    """Wilson 95 % lower bound on one band's fill proportion."""
+    """Wilson 95 % lower bound on one band's fill proportion.
 
-    if trials <= 0:
+    With no success the bound is exactly zero (centre == margin == z²/2n / d).
+    Evaluating that difference in floats leaves a ~1e-17 residue that would
+    state a fill probability no rest ever measured.
+    """
+
+    if trials <= 0 or successes <= 0:
         return Decimal("0")
     z = _MAKER_FILL_BAND_WILSON_Z
     p = successes / trials

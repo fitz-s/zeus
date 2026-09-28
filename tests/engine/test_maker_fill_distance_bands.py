@@ -131,3 +131,9 @@ def test_without_a_counterparty_price_the_pooled_bound_still_applies():
     outcomes = _maker_fill_outcomes(sample, limit_price=Decimal("0.50"))
     assert outcomes
     assert sum(row.probability for row in outcomes) == Decimal("1")
+
+
+@pytest.mark.parametrize("trials", [24, 25, 28, 35, 48, 50, 63, 100, 250])
+def test_a_band_with_no_fill_is_exactly_zero_not_float_residue(trials):
+    """0/48 read as 6.938893903907228e-18 live and minted a maker witness from it."""
+    assert _maker_fill_band_wilson_lower_bound(0, trials) == Decimal("0")

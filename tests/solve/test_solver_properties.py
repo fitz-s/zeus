@@ -9146,3 +9146,132 @@ def test_source_identity_sell_redecides_on_current_source(side):
     actual = _global_select((candidate,), payoff_q_correction_resolver=lambda *_: policy)
     assert actual.candidate is candidate
     assert _without_q_provenance(replace(actual, payoff_q_correction=None)) == baseline
+
+
+def _live_residue_maker_pair(prefix):
+    """Taker + maker siblings whose maker witness carries the live 6.9e-18 fill mass.
+
+    2026-09-28 14:25Z: a zero-fill distance band (0/48 rests) read its Wilson
+    bound as float residue 6.938893903907228e-18. The maker proposal passed its
+    BUY admission law, then its fill-weighted common score had EV ~ 1e-17 <=
+    _ROBUST_EV_EPS_USD, and binding it raised inside the cut.
+    """
+
+    taker = _global_candidate(
+        candidate_id=f"{prefix}-taker",
+        family=f"{prefix}-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.50", "100"),),
+    )
+    maker_curve = S.passive_buy_proposal_curve(
+        taker.executable_cost_curve,
+        native_bid_levels=(BookLevel(price=Decimal("0.40"), size=Decimal("100")),),
+    )
+    assert maker_curve is not None
+    asset_epoch = f"{prefix}-asset-epoch"
+    residue = Decimal("6.938893903907228E-18")
+    provisional = replace(
+        taker,
+        candidate_id=f"{prefix}-maker",
+        execution_mode="MAKER_REST",
+        proposal_cost_curve=maker_curve,
+        fill_probability=float(residue),
+        fill_probability_source="provisional",
+        rest_deadline_minutes=20.0,
+        asset_epoch_identity=asset_epoch,
+    )
+    witness = _current_maker_witness(
+        provisional,
+        proposal=maker_curve,
+        asset_epoch=asset_epoch,
+        outcomes=(
+            S.MakerFillOutcome(Decimal("1") - residue, Decimal("0"), Decimal("0")),
+            S.MakerFillOutcome(residue, Decimal("1"), -maker_curve.levels[0].price),
+        ),
+    )
+    maker = replace(
+        provisional,
+        fill_probability=witness.fill_probability,
+        fill_probability_source=witness.witness_identity,
+        maker_fill_witness=witness,
+    )
+    return taker, maker
+
+
+def test_residue_maker_is_rejected_locally_and_the_taker_still_wins():
+    taker, maker = _live_residue_maker_pair("live-residue")
+
+    decision = _global_select(
+        (taker, maker), cap="20", resolution_hours_by_family={taker.family_key: 24.0}
+    )
+
+    assert decision.candidate is taker
+    assert decision.rejection_reasons == {
+        maker.candidate_id: "NON_POSITIVE_EXPECTED_GROWTH"
+    }
+    by_id = {row.candidate_id: row for row in decision.candidate_evaluations}
+    assert by_id[maker.candidate_id].status == "REJECTED"
+    assert by_id[taker.candidate_id].status == "SELECTED"
+
+
+def test_residue_maker_alone_is_a_typed_no_trade_not_a_failed_cut():
+    _taker, maker = _live_residue_maker_pair("live-residue-alone")
+
+    decision = _global_select(
+        (maker,), cap="20", resolution_hours_by_family={maker.family_key: 24.0}
+    )
+
+    assert decision.candidate is None
+    assert decision.no_trade_reason == "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER"
+    assert decision.rejection_reasons == {
+        maker.candidate_id: "NON_POSITIVE_EXPECTED_GROWTH"
+    }
+
+
+def test_selector_and_selected_order_invariant_share_one_predicate():
+    """Structural antibody: every common-axis positivity decision is one call.
+
+    Ranking may read these fields; only a comparison is a second law.
+    """
+
+    import inspect
+    import re
+
+    inline_law = re.compile(
+        r"expected_growth\.(expected_ev_usd|expected_delta_log_wealth"
+        r"|expected_capital_efficiency|ruin_probability_reduction)\s*(<|>|==|!=)"
+    )
+    owners = (
+        S.select_global_single_order,
+        S.GlobalSingleOrderDecision.__post_init__,
+        S.GlobalSingleOrderCandidateEvaluation.__post_init__,
+    )
+    for owner in owners:
+        source = inspect.getsource(owner)
+        assert "_positive_common_expected_growth(" in source, owner.__qualname__
+        assert inline_law.findall(source) == [], owner.__qualname__
+
+
+def test_selector_consults_the_shared_predicate_before_it_binds_an_order(monkeypatch):
+    """Parity: whatever the predicate rejects, the selector neither selects nor raises on."""
+
+    taker, maker = _live_residue_maker_pair("parity")
+    seen = []
+
+    def reject_all(expected_growth, *, capital_lock_hours):
+        seen.append(expected_growth)
+        return False
+
+    monkeypatch.setattr(S, "_positive_common_expected_growth", reject_all)
+
+    decision = _global_select(
+        (taker, maker), cap="20", resolution_hours_by_family={taker.family_key: 24.0}
+    )
+
+    assert seen
+    assert decision.candidate is None
+    assert decision.rejection_reasons == {
+        taker.candidate_id: "NON_POSITIVE_EXPECTED_GROWTH",
+        maker.candidate_id: "NON_POSITIVE_EXPECTED_GROWTH",
+    }

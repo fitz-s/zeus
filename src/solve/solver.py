@@ -2954,6 +2954,39 @@ class ExpectedGrowthComparison:
             raise ValueError("expected-growth comparison is incoherent")
 
 
+# SCOPE: one bound proposal. DRAIN: the next cut rescores it. RESET: a
+# proposal whose common-axis score satisfies _positive_common_expected_growth.
+_NON_POSITIVE_EXPECTED_GROWTH = "NON_POSITIVE_EXPECTED_GROWTH"
+
+
+def _positive_common_expected_growth(
+    expected_growth: ExpectedGrowthComparison | None,
+    *,
+    capital_lock_hours: float | None,
+) -> bool:
+    """The one law a selectable order's common-axis score must satisfy.
+
+    The selector binds and ranks only proposals that pass it, and the selected
+    order and its evaluation enforce it, so the auction cannot choose an order
+    its own validation rejects.
+    """
+
+    return (
+        expected_growth is not None
+        and capital_lock_hours is not None
+        and expected_growth.capital_lock_hours == capital_lock_hours
+        and (
+            expected_growth.ruin_probability_reduction > 0.0
+            or (
+                expected_growth.ruin_probability_reduction == 0.0
+                and expected_growth.expected_delta_log_wealth > 0.0
+                and expected_growth.expected_capital_efficiency > 0.0
+            )
+        )
+        and expected_growth.expected_ev_usd > _ROBUST_EV_EPS_USD
+    )
+
+
 @dataclass(frozen=True)
 class GlobalBuyMinimumMarketableRepair:
     """Legacy receipt shape for the retired minimum-lot BUY exception."""
@@ -3818,16 +3851,6 @@ class GlobalSingleOrderCandidateEvaluation:
             and self.sell_probability_functional
             == "POSTERIOR_PREDICTIVE_MEAN"
         )
-        expected_utility_positive = (
-            self.expected_growth is not None
-            and (
-                self.expected_growth.ruin_probability_reduction > 0.0
-                or (
-                    self.expected_growth.ruin_probability_reduction == 0.0
-                    and self.expected_growth.expected_delta_log_wealth > 0.0
-                )
-            )
-        )
         if (
             self.capital_action_mode != expected_action_mode
             or self.resolution_at_utc is None
@@ -3835,13 +3858,9 @@ class GlobalSingleOrderCandidateEvaluation:
             or self.capital_lock_hours is None
             or not math.isfinite(self.capital_lock_hours)
             or self.capital_lock_hours <= 0.0
-            or self.expected_growth is None
-            or self.expected_growth.capital_lock_hours != self.capital_lock_hours
-            or not expected_utility_positive
-            or self.expected_growth.expected_ev_usd <= _ROBUST_EV_EPS_USD
-            or (
-                self.expected_growth.ruin_probability_reduction == 0.0
-                and self.expected_growth.expected_capital_efficiency <= 0.0
+            or not _positive_common_expected_growth(
+                self.expected_growth,
+                capital_lock_hours=self.capital_lock_hours,
             )
             or (
                 not mean_action
@@ -4127,25 +4146,12 @@ class GlobalSingleOrderDecision:
             return
         if self.buy_rejection_economics is not None:
             raise ValueError("selected global order cannot carry rejection economics")
-        expected_utility_positive = (
-            self.expected_growth is not None
-            and (
-                self.expected_growth.ruin_probability_reduction > 0.0
-                or (
-                    self.expected_growth.ruin_probability_reduction == 0.0
-                    and self.expected_growth.expected_delta_log_wealth > 0.0
-                )
-            )
-        )
-        if not internal_score and not self.rejection_reasons and (
-            self.expected_growth is None
-            or self.capital_lock_hours is None
-            or self.expected_growth.capital_lock_hours != self.capital_lock_hours
-            or not expected_utility_positive
-            or self.expected_growth.expected_ev_usd <= _ROBUST_EV_EPS_USD
-            or (
-                self.expected_growth.ruin_probability_reduction == 0.0
-                and self.expected_growth.expected_capital_efficiency <= 0.0
+        if (
+            not internal_score
+            and not self.rejection_reasons
+            and not _positive_common_expected_growth(
+                self.expected_growth,
+                capital_lock_hours=self.capital_lock_hours,
             )
         ):
             raise ValueError("global order lacks a positive common expected-growth score")
@@ -7701,6 +7707,14 @@ def select_global_single_order(
             "IMMEDIATE_TAKER_SELL",
         ],
     ) -> tuple[GlobalSingleOrderDecision | None, str | None]:
+        """Bind one proposal to the common expected-growth axis.
+
+        ``(bound, None)``: selectable. ``(None, reason)``: epoch authority is
+        lost and the caller supersedes the cut. ``(None, None)``: this proposal
+        fails its own common-axis law; it is recorded in ``rejections`` and
+        leaves the argmax, because an order that cannot pass its own invariant
+        is not in the feasible set.
+        """
         resolution_at = universe_witness.resolution_at_by_family.get(family_key)
         if resolution_at is None:
             return None, "CAPITAL_HORIZON_AUTHORITY_MISSING"
@@ -7726,9 +7740,15 @@ def select_global_single_order(
             )
         except Exception:
             return None, "EXPECTED_COMPARISON_UNAVAILABLE"
+        if not score.rejection_reasons and not _positive_common_expected_growth(
+            expected_growth,
+            capital_lock_hours=expected_growth.capital_lock_hours,
+        ):
+            rejections[candidate.candidate_id] = _NON_POSITIVE_EXPECTED_GROWTH
+            return None, None
         mean_action = score.expected_terminal_wealth is not None
-        return (
-            replace(
+        try:
+            bound = replace(
                 score,
                 capital_action_mode=action_mode,
                 resolution_at_utc=resolution_at,
@@ -7740,9 +7760,13 @@ def select_global_single_order(
                     / expected_growth.capital_lock_hours
                 ),
                 expected_growth=expected_growth,
-            ),
-            None,
-        )
+            )
+        except ValueError as exc:
+            # SCOPE: this proposal's own bound-order invariant. DRAIN: the next
+            # cut rescores it. RESET: a coherent bound order.
+            rejections[candidate.candidate_id] = f"COMMON_SCORE_BINDING_INVALID:{exc}"
+            return None, None
+        return bound, None
 
     if selection_cancelled():
         return cancelled_decision()
@@ -8052,7 +8076,8 @@ def select_global_single_order(
                 ),
             )
             if score is None:
-                assert horizon_reason is not None
+                if horizon_reason is None:
+                    continue
                 return superseded_decision(candidate.candidate_id, horizon_reason)
             if sell_correction is not None and score.candidate is not None:
                 score = replace(score, payoff_q_correction=sell_correction)
@@ -8262,7 +8287,8 @@ def select_global_single_order(
                 ),
             )
             if score is None:
-                assert horizon_reason is not None
+                if horizon_reason is None:
+                    continue
                 return superseded_decision(candidate.candidate_id, horizon_reason)
             scored.append(score)
 
@@ -8271,9 +8297,10 @@ def select_global_single_order(
             score.candidate.candidate_id
             for score in scored
             if isinstance(score.candidate, GlobalSingleOrderCandidate)
-            and score.expected_growth is not None
-            and score.expected_growth.expected_delta_log_wealth > 0.0
-            and score.expected_growth.expected_ev_usd > _ROBUST_EV_EPS_USD
+            and _positive_common_expected_growth(
+                score.expected_growth,
+                capital_lock_hours=score.capital_lock_hours,
+            )
             and score.candidate.candidate_id not in rejections
         }
         joint_positive_candidate_ids.update(
@@ -8427,7 +8454,9 @@ def select_global_single_order(
                         ),
                     )
                     if score is None:
-                        return superseded_decision(candidate_id, str(horizon_reason))
+                        if horizon_reason is None:
+                            continue
+                        return superseded_decision(candidate_id, horizon_reason)
                     scored.append(score)
                 continue
             try:
@@ -8539,9 +8568,8 @@ def select_global_single_order(
                     ),
                 )
                 if fixed is None:
-                    rejections[candidate_id] = str(
-                        horizon_reason or "EXPECTED_COMPARISON_UNAVAILABLE"
-                    )
+                    if horizon_reason is not None:
+                        rejections[candidate_id] = horizon_reason
                     continue
                 scored.append(
                     replace(
@@ -8557,15 +8585,10 @@ def select_global_single_order(
         for score in scored
         if score.candidate is not None
         and score.candidate.candidate_id not in rejections
-        and score.expected_growth is not None
-        and (
-            score.expected_growth.ruin_probability_reduction > 0.0
-            or (
-                score.expected_growth.ruin_probability_reduction == 0.0
-                and score.expected_growth.expected_delta_log_wealth > 0.0
-            )
+        and _positive_common_expected_growth(
+            score.expected_growth,
+            capital_lock_hours=score.capital_lock_hours,
         )
-        and score.expected_growth.expected_ev_usd > _ROBUST_EV_EPS_USD
     )
     if not positive_scored:
         no_trade_reason = (
