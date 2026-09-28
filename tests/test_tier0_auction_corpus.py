@@ -490,19 +490,24 @@ def test_real_sqlite_full_keeps_the_receipt_and_queues_the_cut(tmp_path):
             assert "full" in str(exc)
             conn.rollback()
             size //= 2
-    assert _flush(conn) == 0
+    # One cut per transaction: the one-family cut may still fit in page slack;
+    # the 60-family cut needs fresh pages and hits a real SQLITE_FULL.
+    written = _flush(conn)
+    assert written <= 1
     assert not conn.in_transaction
     # The receipt is committed and durable on a fresh connection.
     fresh = sqlite3.connect(tmp_path / "trade.db")
     assert fresh.execute(
         "SELECT COUNT(*) FROM decision_log WHERE id = ?", (row_id,)
     ).fetchone()[0] == 1
-    assert fresh.execute("SELECT COUNT(*) FROM tier0_auction_cut").fetchone()[0] == 0
+    assert fresh.execute(
+        "SELECT COUNT(*) FROM tier0_auction_cut WHERE decision_log_id IS NULL"
+    ).fetchone()[0] == 0
     fresh.close()
-    # Space returns: both queued cuts are written by the next flush.
-    assert len(corpus.pending_cuts(key)[0]) == 2
+    # Space returns: every still-queued cut is written by the next flush.
+    assert len(corpus.pending_cuts(key)[0]) == 2 - written
     conn.execute("PRAGMA max_page_count = 1073741823")
-    assert _flush(conn) == 2
+    assert _flush(conn) == 2 - written
     assert [row[0] for row in conn.execute(
         "SELECT decision_log_id FROM tier0_auction_cut ORDER BY cut_seq")] == [row_id, None]
     assert _count(conn, "tier0_cut_family") == 61
@@ -911,3 +916,158 @@ def test_retention_run_deletes_nothing_inside_the_window(tmp_path, monkeypatch):
     assert _count(conn, "tier0_cut_family") == 3
     stats = ptc.run_tier0_corpus_retention(now=_dt.datetime(2026, 10, 28, tzinfo=_dt.timezone.utc))
     assert stats["links"] == 3 and _count(conn, "tier0_cut_family") == 0
+
+
+def test_flush_writes_one_cut_per_transaction(tmp_path, monkeypatch):
+    """Lock hold is bounded by construction: every transaction carries exactly
+    one cut, however many are queued."""
+
+    conn = _trade_db(tmp_path)
+    key = gbr._decision_log_connection_key(conn)
+    for index in range(5):
+        gbr._queue_unreceipted_tier0_cut(
+            conn, reason=f"DEFERRED_PREEMPTED:{index}", decision_at_utc=AT,
+            economic_cut_completed=False, event_count=1,
+            fractional_kelly_multiplier=Decimal("0.25"), buy_candidates_enabled=True,
+        )
+    rows_per_transaction = []
+    real = gbr._tier0_corpus_transaction
+
+    def counting(conn_, work_context, write):
+        before = _count(conn_, "tier0_auction_cut")
+        real(conn_, work_context, write)
+        rows_per_transaction.append(_count(conn_, "tier0_auction_cut") - before)
+
+    monkeypatch.setattr(gbr, "_tier0_corpus_transaction", counting)
+    assert _flush(conn) == 5
+    assert rows_per_transaction == [1, 1, 1, 1, 1]
+    assert corpus.pending_cuts(key) == ((), 0)
+
+
+def test_flush_stops_at_its_wall_time_budget_and_keeps_the_rest(tmp_path, monkeypatch):
+    conn = _trade_db(tmp_path)
+    key = gbr._decision_log_connection_key(conn)
+    for index in range(4):
+        gbr._queue_unreceipted_tier0_cut(
+            conn, reason=f"R{index}", decision_at_utc=AT, economic_cut_completed=False,
+            event_count=1, fractional_kelly_multiplier=Decimal("0.25"),
+            buy_candidates_enabled=True,
+        )
+    clock = iter([0.0, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5])
+    monkeypatch.setattr(gbr.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(gbr, "_TIER0_CORPUS_FLUSH_BUDGET_S", 0.25)
+    assert _flush(conn) == 3
+    assert len(corpus.pending_cuts(key)[0]) == 1
+
+
+def test_retention_chunk_deletes_at_most_its_limit_per_table(tmp_path):
+    conn = _trade_db(tmp_path)
+    seqs = _two_families(conn)
+    for seq in seqs.values():
+        _insert_label(conn, seq, "2026-09-27T00:00:00+00:00")
+    conn.commit()
+    step = ptc._tier0_corpus_retention_step(
+        conn, cutoff_iso="2026-10-28T00:00:00+00:00",
+        cut_cutoff_iso="2026-12-31T00:00:00+00:00", limit=2,
+    )
+    assert all(value <= 2 for value in step.values())
+    assert step["links"] == 2
+
+
+def test_retention_cut_probe_is_bounded_by_the_oldest_window(tmp_path):
+    """A pinned (still-linked) oldest prefix costs a fixed probe; cuts beyond
+    the window wait for later chunks instead of forcing a full scan."""
+
+    conn = _trade_db(tmp_path)
+    _two_families(conn)  # 2 linked, unlabelled cuts: seq 1 and 2
+    for index in range(3):
+        corpus.write_cut(conn, corpus.build_unreceipted_cut(
+            reason=f"R{index}", decision_at_utc=AT, selection_policy_identity="p",
+            economic_cut_completed=False, detail={},
+        ), decision_log_id=None)
+    conn.commit()
+    step = ptc._tier0_corpus_retention_step(
+        conn, cutoff_iso="2000-01-01", cut_cutoff_iso="2026-12-31T00:00:00+00:00", limit=2,
+    )
+    assert step["cuts"] == 0  # window = the two linked cuts
+    step = ptc._tier0_corpus_retention_step(
+        conn, cutoff_iso="2000-01-01", cut_cutoff_iso="2026-12-31T00:00:00+00:00", limit=5,
+    )
+    assert step["cuts"] == 3 and _count(conn, "tier0_auction_cut") == 2
+
+
+def test_batch_flush_failure_never_escapes_the_batch(tmp_path, monkeypatch):
+    """Review round 2: the closing flush sits in the batch's finally; if it
+    raised, the batch would not return (or would mask its own exception)."""
+
+    conn = _trade_db(tmp_path)
+    monkeypatch.setattr(gbr, "_flush_tier0_learning_corpus",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("flush boom")))
+    gbr._flush_tier0_learning_corpus_after_batch(conn)  # must not raise
+    monkeypatch.setattr(gbr, "_flush_tier0_learning_corpus",
+                        lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()))
+    with pytest.raises(KeyboardInterrupt):
+        gbr._flush_tier0_learning_corpus_after_batch(conn)
+
+
+def test_batch_flush_contains_a_non_exception_base_exception(tmp_path, monkeypatch):
+    """Any BaseException short of process shutdown is contained, not just
+    Exception subclasses (e.g. a GeneratorExit or a custom BaseException)."""
+
+    class Odd(BaseException):
+        pass
+
+    conn = _trade_db(tmp_path)
+    monkeypatch.setattr(gbr, "_flush_tier0_learning_corpus",
+                        lambda *a, **k: (_ for _ in ()).throw(Odd("odd")))
+    gbr._flush_tier0_learning_corpus_after_batch(conn)  # must not raise
+
+
+
+def test_wide_cut_splits_into_bounded_content_transactions(tmp_path, monkeypatch):
+    """Commit latency tracks bytes committed, so a 60-family cut is written as
+    content chunks of at most _TIER0_CORPUS_ROWS_PER_TRANSACTION new rows, then
+    one publishing transaction; the cut is invisible until that last one."""
+
+    monkeypatch.setattr(gbr, "_TIER0_CORPUS_ROWS_PER_TRANSACTION", 16)
+    conn = _trade_db(tmp_path)
+    key = gbr._decision_log_connection_key(conn)
+    wide = {f"fam-{i}": _witness(family=f"fam-{i}") for i in range(60)}
+    built = gbr._tier0_cut_corpus(
+        selection_epoch_identity="epoch-wide", reason="R", decision_at_utc=AT,
+        scope_family_count=60, probability_witnesses=wide, ineligible_by_family={},
+        excluded_by_family={}, evaluations=(), winner_candidate_id=None,
+        book_epoch=None, family_context_by_key={},
+        fractional_kelly_multiplier=Decimal("0.25"), buy_candidates_enabled=True,
+    )
+    corpus.queue_cut(key, corpus.PendingCut(lambda: (built, ()), None))
+    per_tx = []
+    real = gbr._tier0_corpus_transaction
+    tables = ("tier0_family_snapshot", "tier0_family_topology", "tier0_auction_cut")
+
+    def counting(conn_, work_context, write):
+        before = [_count(conn_, t) for t in tables]
+        real(conn_, work_context, write)
+        per_tx.append(tuple(_count(conn_, t) - b for t, b in zip(tables, before)))
+
+    monkeypatch.setattr(gbr, "_tier0_corpus_transaction", counting)
+    assert _flush(conn) == 1
+    assert len(per_tx) == 5  # ceil(60 / 16) content chunks + 1 publish
+    assert all(states <= 16 and topologies <= 16 for states, topologies, _ in per_tx)
+    assert [cuts for _, _, cuts in per_tx] == [0, 0, 0, 0, 1]
+    assert _count(conn, "tier0_cut_family") == 60
+
+
+def test_corpus_transaction_disables_autocheckpoint_and_restores_it(tmp_path):
+    """No inline WAL checkpoint may run while the corpus holds the write lock
+    (measured up to ~390 ms); the connection's own setting is restored."""
+
+    conn = _trade_db(tmp_path)
+    conn.execute("PRAGMA wal_autocheckpoint=777")
+    seen = []
+    gbr._tier0_corpus_transaction(
+        conn, None,
+        lambda: seen.append(conn.execute("PRAGMA wal_autocheckpoint").fetchone()[0]),
+    )
+    assert seen == [0]
+    assert conn.execute("PRAGMA wal_autocheckpoint").fetchone()[0] == 777

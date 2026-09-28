@@ -85,7 +85,12 @@ _TIER0_CORPUS_RETENTION_DAYS = 30
 # Cut rows with no family left (all expired, or never had one) are audit rows
 # without a label; they go after this age.
 _TIER0_CUT_RETENTION_DAYS = 60
-_TIER0_CORPUS_DELETE_CHUNK = 2_000
+# Sized by measured hold, not row count. On a 5M-link corpus (WAL, NORMAL
+# sync, no autocheckpoint, as the coordinated trade writer runs), measured
+# 2026-09-28: 250 rows -> p50 2.5-2.9 ms, p99 9-32 ms, max 15-106 ms; 1,000
+# rows -> p99 232 ms, max 2.1 s. 25 chunks per five-minute tick drain 1.8M
+# links a day, above the ~0.9M a day that expire.
+_TIER0_CORPUS_DELETE_CHUNK = 250
 _TIER0_CORPUS_DELETE_CHUNKS_PER_TICK = 25
 _TIER0_CORPUS_WAL_BYTES_LIMIT = 256 * 1024 * 1024
 
@@ -723,19 +728,24 @@ def _tier0_corpus_retention_step(
             """,
             tuple(expired),
         ).rowcount
+    # Probe only the ``limit`` oldest cuts (cut_seq order is insertion order).
+    # An old cut whose family is still unlabelled keeps its links and blocks
+    # nothing: the window is bounded, so a pinned prefix costs a fixed probe
+    # rather than a scan of every linked cut.
     cuts = conn.execute(
         """
         DELETE FROM tier0_auction_cut WHERE cut_seq IN (
-            SELECT a.cut_seq FROM tier0_auction_cut a
+            SELECT a.cut_seq FROM (
+                SELECT cut_seq, decision_at_utc FROM tier0_auction_cut
+                 ORDER BY cut_seq LIMIT ?
+            ) a
              WHERE a.decision_at_utc < ?
                AND NOT EXISTS (
                    SELECT 1 FROM tier0_cut_family c WHERE c.cut_seq = a.cut_seq
                )
-             ORDER BY a.decision_at_utc
-             LIMIT ?
         )
         """,
-        (cut_cutoff_iso, limit),
+        (limit, cut_cutoff_iso),
     ).rowcount
     return {
         "links": links,

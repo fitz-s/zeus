@@ -4098,6 +4098,13 @@ def _queue_unreceipted_tier0_cut(
 
 
 _TIER0_CORPUS_WRITE_MAX_HOLD_MS = 250
+# Wall-time budget for one batch's corpus flush. Each cut is its own short
+# transaction; past the budget the rest stays queued for the next batch.
+_TIER0_CORPUS_FLUSH_BUDGET_S = 0.25
+# Commit latency on this host tracks bytes committed (220 x 600 B rows: p99
+# 54-195 ms; 11 rows: p99 < 1 ms), so no corpus transaction writes more than
+# this many new content rows. A median cut adds ~11 new states.
+_TIER0_CORPUS_ROWS_PER_TRANSACTION = 32
 # Evidence yields the volume's last free space to receipts and settlement: the
 # flush writes nothing below this floor (cuts stay queued, oldest dropped and
 # counted once the queue is full). RiskGuard has no storage gate since
@@ -4120,28 +4127,33 @@ def _flush_tier0_learning_corpus(
     connection_key: str,
     work_context: WorkContext | None,
 ) -> int:
-    """Write queued corpus cuts in their own short trade-DB transaction.
+    """Write queued corpus cuts, one cut per short trade-DB transaction.
 
-    Runs only after the auction receipt committed, on the receipt's own
-    connection, which then holds no open transaction. The corpus can therefore
-    never extend, roll back or re-order the receipt; INV-37 holds because this
-    is a separate single-DB transaction. It is best-effort: the write lease is
-    BACKGROUND_RECOVERY (it never waits behind or ahead of MONITOR), and any
-    fault, SQLITE_FULL included, rolls back this transaction alone, is logged
-    at ERROR, and leaves every row queued for the next flush.
+    Runs only after the batch's receipts committed, on the receipt connection,
+    which then holds no open transaction. The corpus therefore never extends,
+    rolls back or re-orders a receipt, and INV-37 holds because each write is
+    a separate single-DB transaction. Every write takes its own
+    BACKGROUND_RECOVERY lease, so it never waits behind or ahead of MONITOR.
 
-    SCOPE: this process's queued cuts. DRAIN: every committed receipt flushes
-    at most ``_FLUSH_LIMIT`` cuts. RESET: rows leave the queue only after their
-    transaction commits. Returns the number of cuts written.
+    The lock hold is bounded by construction, not by a cooperative timer: one
+    transaction writes one cut (a live-sized cut measured about 6-15 ms to
+    write), and the loop stops once ``_TIER0_CORPUS_FLUSH_BUDGET_S`` of wall
+    time has passed, leaving the rest queued. Any fault, SQLITE_FULL included,
+    rolls back only the cut being written, is logged at ERROR, and ends this
+    flush with that cut still queued.
+
+    SCOPE: this process's queued cuts. DRAIN: every batch flushes up to
+    ``_FLUSH_LIMIT`` cuts within the budget. RESET: a cut leaves the queue only
+    after its own transaction commits. Returns the number of cuts written.
     """
 
     from src.engine import tier0_auction_corpus as corpus
-    from src.state.schema.tier0_auction_corpus_schema import ensure_tables
-    from src.state.write_coordinator import bounded_sqlite_write
 
     pending, overflow = corpus.pending_cuts(connection_key)
     if not pending and not overflow:
         return 0
+    started = time.monotonic()
+    written = 0
     try:
         if _tier0_corpus_disk_floor_reached(conn):
             _LOG.warning(
@@ -4151,56 +4163,140 @@ def _flush_tier0_learning_corpus(
                 len(pending),
             )
             return 0
-        # Build outside the write lease (pure CPU, cached per cut).
-        built = [(cut.rows(), cut.decision_log_id) for cut in pending]
-        with _global_auction_trade_write_lease(
-            conn,
-            work_context=work_context,
-            owner="tier0_learning_corpus",
-            priority="background_recovery",
-        ) as lease:
-            fence = (
-                bounded_sqlite_write(
-                    conn, lease, max_hold_ms=_TIER0_CORPUS_WRITE_MAX_HOLD_MS
-                )
-                if lease is not None
-                else nullcontext()
+        for cut in pending:
+            # Build outside the write lease (pure CPU, cached per cut).
+            cut_corpus, candidate_rows = cut.rows()
+            units = corpus.cut_write_units(
+                conn,
+                cut_corpus,
+                decision_log_id=cut.decision_log_id,
+                max_new_rows=_TIER0_CORPUS_ROWS_PER_TRANSACTION,
             )
-            with fence:
-                try:
-                    conn.execute("BEGIN IMMEDIATE")
-                    ensure_tables(conn)
-                    for (cut_corpus, candidate_rows), decision_log_id in built:
-                        corpus.write_cut(
-                            conn, cut_corpus, decision_log_id=decision_log_id
-                        )
-                        _insert_tier0_candidate_rows(conn, candidate_rows)
-                    if overflow:
-                        corpus.write_cut(
-                            conn,
-                            corpus.overflow_cut(
-                                overflow=overflow,
-                                selection_policy_identity=_tier0_selection_policy(
-                                    Decimal("0"), None
-                                )[0],
-                            ),
-                            decision_log_id=None,
-                        )
-                    conn.commit()
-                except BaseException:
-                    if conn.in_transaction:
-                        conn.rollback()
-                    raise
+            # The last unit publishes the cut; candidate rows ride with it.
+            last = units.pop()
+            units.append(
+                lambda last=last, candidate_rows=candidate_rows: (
+                    last(),
+                    _insert_tier0_candidate_rows(conn, candidate_rows),
+                )
+            )
+            for unit in units:
+                if time.monotonic() - started > _TIER0_CORPUS_FLUSH_BUDGET_S:
+                    return written  # rest stays queued; units are idempotent
+                _tier0_corpus_transaction(conn, work_context, unit)
+            corpus.release_cuts(connection_key, (cut,), 0)
+            written += 1
+        if overflow and time.monotonic() - started <= _TIER0_CORPUS_FLUSH_BUDGET_S:
+            _tier0_corpus_transaction(
+                conn,
+                work_context,
+                lambda: corpus.write_cut(
+                    conn,
+                    corpus.overflow_cut(
+                        overflow=overflow,
+                        selection_policy_identity=_tier0_selection_policy(
+                            Decimal("0"), None
+                        )[0],
+                    ),
+                    decision_log_id=None,
+                ),
+            )
+            corpus.release_cuts(connection_key, (), overflow)
     except Exception as exc:  # noqa: BLE001 - evidence never costs the receipt
         _LOG.error(
-            "tier0 learning corpus flush deferred (%d queued): %s: %s",
-            len(pending),
+            "tier0 learning corpus flush deferred after %d cut(s) (%d queued): %s: %s",
+            written,
+            len(pending) - written,
             type(exc).__name__,
             exc,
         )
-        return 0
-    corpus.release_cuts(connection_key, pending, overflow)
-    return len(pending)
+    return written
+
+
+def _flush_tier0_learning_corpus_after_batch(trade_conn: object) -> None:
+    """Batch-closing flush that can never raise out of the batch's ``finally``.
+
+    Anything except process shutdown (KeyboardInterrupt/SystemExit) is caught
+    and logged at ERROR with its cause; the cuts stay queued.
+    """
+
+    try:
+        if not isinstance(trade_conn, sqlite3.Connection) or trade_conn.in_transaction:
+            return
+        started = time.monotonic()
+        flushed = _flush_tier0_learning_corpus(
+            trade_conn,
+            connection_key=_decision_log_connection_key(trade_conn),
+            work_context=None,
+        )
+        if flushed:
+            _LOG.info(
+                "tier0 learning corpus flushed: cuts=%d elapsed_s=%.3f",
+                flushed,
+                time.monotonic() - started,
+            )
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as exc:  # noqa: BLE001 - evidence never costs the batch
+        _LOG.error(
+            "tier0 learning corpus flush failed; cuts stay queued: %s: %s",
+            type(exc).__name__,
+            exc,
+            exc_info=True,
+        )
+
+
+def _tier0_corpus_transaction(
+    conn: sqlite3.Connection,
+    work_context: WorkContext | None,
+    write: Callable[[], None],
+) -> None:
+    """Run ``write`` in one short coordinated BACKGROUND_RECOVERY transaction.
+
+    The commit never runs SQLite's automatic WAL checkpoint while the lease is
+    held: autocheckpoint is off for this transaction only (restored after), as
+    for every latency-critical trade writer
+    (``connect_existing_trade_db_without_journal_bootstrap``). The periodic
+    ``trades_wal_checkpoint`` job owns WAL drainage. Measured on a live-sized
+    cut: the write itself takes ~1.6 ms, while an inline checkpoint added
+    up to ~390 ms to the commit.
+    """
+
+    from src.state.schema.tier0_auction_corpus_schema import ensure_tables
+    from src.state.write_coordinator import bounded_sqlite_write
+
+    autocheckpoint = int(conn.execute("PRAGMA wal_autocheckpoint").fetchone()[0])
+    conn.execute("PRAGMA wal_autocheckpoint=0")
+    try:
+        _tier0_corpus_leased_write(conn, work_context, write, ensure_tables, bounded_sqlite_write)
+    finally:
+        conn.execute(f"PRAGMA wal_autocheckpoint={autocheckpoint}")
+
+
+def _tier0_corpus_leased_write(conn, work_context, write, ensure_tables, bounded_sqlite_write) -> None:
+    with _global_auction_trade_write_lease(
+        conn,
+        work_context=work_context,
+        owner="tier0_learning_corpus",
+        priority="background_recovery",
+    ) as lease:
+        fence = (
+            bounded_sqlite_write(
+                conn, lease, max_hold_ms=_TIER0_CORPUS_WRITE_MAX_HOLD_MS
+            )
+            if lease is not None
+            else nullcontext()
+        )
+        with fence:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                ensure_tables(conn)
+                write()
+                conn.commit()
+            except BaseException:
+                if conn.in_transaction:
+                    conn.rollback()
+                raise
 
 
 def _store_global_auction_receipt(
@@ -11560,17 +11656,7 @@ def process_current_global_batch(
                 len(recorded_alpha_shadow_exit_ids),
             )
         # Learning corpus: after every receipt and venue call of this batch,
-        # in its own transaction, so it can delay no submit and lose no receipt.
-        if isinstance(trade_conn, sqlite3.Connection) and not trade_conn.in_transaction:
-            flush_started = time.monotonic()
-            flushed = _flush_tier0_learning_corpus(
-                trade_conn,
-                connection_key=_decision_log_connection_key(trade_conn),
-                work_context=None,
-            )
-            if flushed:
-                _LOG.info(
-                    "tier0 learning corpus flushed: cuts=%d elapsed_s=%.3f",
-                    flushed,
-                    time.monotonic() - flush_started,
-                )
+        # in its own transactions, so it can delay no submit and lose no
+        # receipt. Nothing it hits may escape this finally: an exception here
+        # would replace the batch's own result or mask its original exception.
+        _flush_tier0_learning_corpus_after_batch(trade_conn)

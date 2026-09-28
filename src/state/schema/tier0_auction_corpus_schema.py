@@ -129,7 +129,7 @@ _DDL = (
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_tier0_cut_family_topology
-        ON tier0_cut_family (topology_seq, cut_seq)
+        ON tier0_cut_family (topology_seq, state_seq, cut_seq)
     """,
     """
     CREATE TABLE IF NOT EXISTS tier0_family_label (

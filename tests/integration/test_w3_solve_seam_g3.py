@@ -47929,3 +47929,116 @@ def test_global_batch_records_an_unreceipted_cut_for_the_learning_corpus(
     finally:
         corpus._PENDING.pop(key, None)
         trade_conn.close()
+
+
+def _unreceipted_batch_harness(monkeypatch, select):
+    """One-family batch whose selection returns ``select()``; no venue call."""
+
+    trade_conn = sqlite3.connect(":memory:")
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    scope = current_global_auction_scope_from_events((event,), captured_at_utc=decision_at)
+    family_key = scope.family_keys[0]
+    witness = SimpleNamespace(
+        family_key=family_key, captured_at_utc=decision_at,
+        posterior_identity_hash="run-a", witness_identity="q-a",
+        bindings=(SimpleNamespace(
+            bin_id="bin-a", condition_id="condition-a",
+            yes_token_id="yes-a", no_token_id="no-a",
+        ),),
+    )
+    asset_states = ((family_key, "bin-a", "condition-a", "YES", "yes-a",
+                     "EXECUTABLE", "book-hash-a", "market-event-a", "gamma-a", "False"),)
+    identity = current_global_book_epoch_identity(asset_states=asset_states, captured_at_utc=decision_at)
+    book_epoch = CurrentGlobalBookEpoch(
+        assets=(), asset_states=asset_states, captured_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=180), witness_identity=identity,
+    )
+    monkeypatch.setattr(global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope)
+    monkeypatch.setattr(
+        global_batch_runtime, "current_portfolio_wealth_witness",
+        lambda *_, **__: _WealthNamespace(
+            spendable_cash_usd=Decimal("10"), witness_identity="wealth-witness",
+            economic_identity="wealth-economic", ledger_snapshot_id="ledger",
+        ),
+    )
+    monkeypatch.setattr(global_batch_runtime, "current_venue_auction_identity", lambda *_, **__: identity)
+    monkeypatch.setattr(global_batch_runtime, "select_prepared_global_auction", lambda *a, **k: select())
+
+    def run():
+        return global_batch_runtime.process_current_global_batch(
+            (event,), decision_time=decision_at, world_conn=object(),
+            forecast_conn=object(), trade_conn=trade_conn,
+            payload_reader=lambda item: json.loads(item.payload_json),
+            prepare_event=lambda item, _at: EventSubmissionReceipt(
+                False, item.event_id, item.causal_snapshot_id,
+                prepared_global_family=bridge.PreparedGlobalFamily(
+                    decision_id=f"decision-{family_key}",
+                    probability_witness=witness, candidate_seeds=(),
+                ),
+            ),
+            actuate_winner=lambda *_: pytest.fail("must not actuate"),
+            stamp_receipt=lambda receipt: receipt,
+            venue_submit_count=lambda: 0,
+            current_execution=lambda *_: object(),
+            current_time_provider=lambda: decision_at,
+            portfolio_state_provider=lambda: object(),
+            current_book_epoch_provider=lambda probabilities, _at: (probabilities, book_epoch),
+        )
+
+    return trade_conn, event, run
+
+
+def test_global_batch_returns_its_result_when_the_corpus_flush_raises(monkeypatch):
+    """Round-2 review: the closing flush sits in the batch's finally, so a
+    raise there would replace the batch's return value."""
+
+    from src.engine import tier0_auction_corpus as corpus
+    import src.engine.global_single_order_auction as gsoa
+
+    trade_conn, event, run = _unreceipted_batch_harness(
+        monkeypatch, lambda: gsoa._no_trade("GLOBAL_BOOK_EPOCH_EXPIRED")
+    )
+    key = global_batch_runtime._decision_log_connection_key(trade_conn)
+    corpus._PENDING.pop(key, None)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("flush boom")
+
+    monkeypatch.setattr(global_batch_runtime, "_flush_tier0_learning_corpus", boom)
+    try:
+        result = run()
+        assert result.receipts[event.event_id].reason == (
+            "GLOBAL_AUCTION_NO_TRADE:GLOBAL_BOOK_EPOCH_EXPIRED"
+        )
+        assert len(corpus.pending_cuts(key)[0]) == 1  # cut stays queued
+    finally:
+        corpus._PENDING.pop(key, None)
+        trade_conn.close()
+
+
+def test_global_batch_original_exception_is_not_masked_by_a_failing_flush(monkeypatch):
+    """A BaseException from the batch body must propagate unchanged even when
+    the closing flush also fails."""
+
+    from src.engine import tier0_auction_corpus as corpus
+
+    class BodyInterrupted(BaseException):
+        pass
+
+    def select():
+        raise BodyInterrupted("original")
+
+    trade_conn, _event, run = _unreceipted_batch_harness(monkeypatch, select)
+    key = global_batch_runtime._decision_log_connection_key(trade_conn)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("flush boom")
+
+    monkeypatch.setattr(global_batch_runtime, "_flush_tier0_learning_corpus", boom)
+    try:
+        with pytest.raises(BodyInterrupted, match="original"):
+            run()
+    finally:
+        corpus._PENDING.pop(key, None)
+        trade_conn.close()

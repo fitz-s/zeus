@@ -621,6 +621,59 @@ def _sequence_ids(
     return found
 
 
+def cut_write_units(
+    conn: sqlite3.Connection,
+    corpus: CutCorpus,
+    *,
+    decision_log_id: int | None,
+    max_new_rows: int,
+) -> list[Callable[[], None]]:
+    """Split one cut into writes of at most ``max_new_rows`` new content rows.
+
+    Each unit runs in its own transaction, so the bytes committed, which is
+    what drives commit latency on this host, stay bounded. The
+    content-addressed topology and snapshot rows go first, in chunks. The final
+    unit writes the cut row and its links, and it is the only unit that makes
+    the cut visible. Every unit is idempotent: a retry after a partial flush
+    finds the earlier chunks already present and writes only what is missing.
+    """
+
+    families = corpus.families
+    units: list[Callable[[], None]] = []
+    for offset in range(0, len(families), max_new_rows):
+        chunk = families[offset : offset + max_new_rows]
+        units.append(lambda chunk=chunk: _write_family_content(conn, chunk))
+    units.append(
+        lambda: write_cut(conn, corpus, decision_log_id=decision_log_id)
+    )
+    return units
+
+
+def _write_family_content(
+    conn: sqlite3.Connection,
+    families: Sequence[FamilyRows],
+) -> tuple[dict[bytes, int], dict[bytes, int]]:
+    topology_seq = _sequence_ids(
+        conn,
+        table="tier0_family_topology",
+        seq="topology_seq",
+        key="topology_id",
+        columns=_TOPOLOGY_COLUMNS,
+        rows={f.topology_id: f.topology for f in families},
+    )
+    state_seq = _sequence_ids(
+        conn,
+        table="tier0_family_snapshot",
+        seq="state_seq",
+        key="family_state_id",
+        columns=_SNAPSHOT_COLUMNS,
+        rows={f.family_state_id: f.snapshot for f in families},
+        extra={f.family_state_id: (topology_seq[f.topology_id],) for f in families},
+        extra_columns=("topology_seq",),
+    )
+    return topology_seq, state_seq
+
+
 def write_cut(
     conn: sqlite3.Connection,
     corpus: CutCorpus,
