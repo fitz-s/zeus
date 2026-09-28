@@ -26,6 +26,26 @@ never disable a market.
    Rejections happen per claim, never per market.
 5. **Maker entries** require an execution-conditioned bound
    P(W|F) ≥ (qL + fL − 1)/fL, or a qualified fill/payoff model.
+6. **Complete-capture corpus** (2026-09-27; review REQ-20260925-223704 §2/§3/§10).
+   Every auction cut writes one `tier0_auction_cut` row, winner or not, with
+   status SELECTED, NO_TRADE, NO_CANDIDATES or INCOMPLETE. Each valid family
+   witness writes one content-addressed `tier0_family_snapshot` holding the
+   complete raw YES simplex, the per-bin YES/NO top of book with reasons and
+   the per-leg outcomes. Candidate `q_raw` is read from the witness, not the
+   correction. Labels come from `tier0_family_label` and `label_available_at`.
+   Winner-only history is a named diagnostic only; it is never repaired with
+   IPW. Fit unit: family bin at the decision instant. Witness column order is
+   not settlement order, so use the label's `settlement_order`.
+   The corpus is written after the batch's receipts commit, in its own
+   fail-soft transaction. It never costs a receipt (review 2026-09-28: the
+   in-transaction version lost receipts on SQLITE_FULL), and it writes nothing
+   below 8 GiB free. Retention evicts a family 30 days after its
+   `label_available_at` and never evicts an unlabelled one. Projected growth is
+   205–541 MB/day, 8–20 GB at steady state; check the daily
+   `tier0 corpus growth 24h` line against this.
+   Acceptance after deploy: 1 cut row per cut; ≥99% of valid witnesses with
+   `simplex_complete=1`; ≥99% of candidate rows with a witness identity carry
+   `q_raw`.
 
 ## Landed 2026-09-25
 - `dbe1b38b3` + `800300db1` Day0 center shift (live, v20).
