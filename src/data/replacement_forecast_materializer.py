@@ -1654,9 +1654,13 @@ def _day0_noaa_future_vector_members(
     request: ReplacementForecastMaterializeRequest,
     *,
     metric: str,
-    physical_representatives: bool = False,
 ) -> tuple[tuple[float, ...], float, str]:
-    """Read the exact complete hourly bundle at the materialization cutoff."""
+    """Read the exact complete hourly bundle at the materialization cutoff.
+
+    One physical provider contributes one path: a regional product supersedes
+    its global sibling. Every consumer rebuild and replay applies this same
+    collapse, so any other member set is a different carrier.
+    """
     observation_time = _day0_observed_extreme_time(request)
     if observation_time is None:
         raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_OBSERVATION_TIME_MISSING")
@@ -1696,10 +1700,8 @@ def _day0_noaa_future_vector_members(
         require_complete_remaining_window=True,
         conn=conn,
     )
-    if physical_representatives:
-        vectors = day0_hourly_provider_representatives(vectors)
     future_values, _innovations = remaining_day_extremes_c_with_current_state(
-        vectors,
+        day0_hourly_provider_representatives(vectors),
         target_date=_date_text(request.target_date),
         decision_time=cutoff,
         metric=metric,
@@ -1755,7 +1757,6 @@ def _day0_noaa_carrier_future_members(
     )
     future, _vector_sigma, cutoff = _day0_noaa_future_vector_members(
         conn, request, metric=metric,
-        physical_representatives=open_hourly_high,
     )
     def unresolved_path_sigma(values: Sequence[float]) -> float:
         from src.config import runtime_cities_by_name

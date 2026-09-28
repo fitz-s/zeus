@@ -2283,6 +2283,154 @@ def test_attached_world_witness_keeps_producer_and_held_paths_identical(
     forecast.close()
 
 
+# Munich LOW 2026-09-28, posterior 694405 (computed 09:54:11Z): the exact
+# target-day hourly paths and 09:50Z METAR it consumed.  DWD's regional
+# icon_d2 and global icon_global are one physical provider.
+_MUNICH_20260928_VECTORS = {
+    "icon_d2": ("2026-09-28T08:00", (
+        4.0, 5.7, 9.6, 16.2, 20.3, 23.2, 24.9, 25.7, 25.8, 25.3, 23.9, 19.3,
+        15.6, 12.7, 10.8, 9.6,
+    )),
+    "ecmwf_ifs": ("2026-09-28T02:00", (
+        9.2, 8.8, 8.1, 7.6, 7.5, 7.3, 8.2, 10.5, 13.4, 16.4, 19.0, 21.1, 22.5,
+        23.3, 23.5, 23.1, 21.0, 18.3, 16.9, 15.7, 14.6, 13.9,
+    )),
+    "icon_global": ("2026-09-28T02:00", (
+        7.2, 6.8, 6.2, 6.5, 6.4, 6.3, 6.4, 9.4, 13.5, 17.4, 20.5, 22.8, 24.2,
+        24.9, 25.1, 24.5, 23.4, 19.3, 16.2, 14.1, 12.7, 11.9,
+    )),
+    "ukmo_global_deterministic_10km": ("2026-09-28T02:00", (
+        8.2, 7.6, 7.2, 6.6, 6.2, 6.1, 8.7, 11.1, 14.0, 17.3, 19.8, 21.7, 22.8,
+        23.4, 23.2, 22.3, 20.4, 17.6, 15.6, 14.2, 12.8, 12.8,
+    )),
+}
+
+
+@pytest.mark.parametrize("metric", ["low", "high"])
+def test_producer_carrier_members_equal_consumer_members_on_real_munich_bundle(
+    metric: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Live 2026-09-27/28: 25 families failed VECTOR_MISMATCH on every cut.
+
+    The producer kept both DWD paths for LOW while every consumer collapsed
+    them to one provider, so the replay compared four persisted members with
+    three current ones.  Producer members must equal the consumer's for both
+    metrics, and the replay must accept its own persisted vector.
+    """
+    import src.data.day0_hourly_vectors as hourly
+    import src.data.replacement_forecast_materializer as materializer
+    import src.engine.event_reactor_adapter as era
+
+    target_date = "2026-09-28"
+    decision_time = datetime(2026, 9, 28, 9, 54, 11, 866339, tzinfo=UTC)
+    vectors = []
+    for model, (start, temps) in _MUNICH_20260928_VECTORS.items():
+        first = int(start[11:13])
+        vectors.append(Day0HourlyVector(
+            model=model, city="Munich", target_date=target_date,
+            timezone_name="Europe/Berlin",
+            captured_at="2026-09-28T09:11:10.027489+00:00",
+            times=tuple(
+                f"{target_date}T{first + index:02d}:00" for index in range(len(temps))
+            ),
+            temps_c=temps,
+        ))
+    monkeypatch.setattr(
+        hourly, "day0_hourly_models_for_city",
+        lambda _city: list(_MUNICH_20260928_VECTORS),
+    )
+    monkeypatch.setattr(
+        hourly, "read_freshest_day0_hourly_vectors", lambda **_kwargs: list(vectors)
+    )
+    world_path = tmp_path / "world.db"
+    world = sqlite3.connect(world_path)
+    world.execute(
+        """CREATE TABLE observation_prints (
+            id INTEGER PRIMARY KEY, city TEXT, station_id TEXT,
+            source_channel TEXT, publish_ts_utc TEXT, value_native REAL,
+            unit TEXT, fetched_at_utc TEXT, raw_report TEXT
+        )"""
+    )
+    world.execute(
+        "INSERT INTO observation_prints VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            40938713, "Munich", "EDDM", "aviationweather_metar",
+            "2026-09-28T09:53:29.798000+00:00", 20.0, "C",
+            "2026-09-28T09:54:10.863448+00:00",
+            "METAR EDDM 280950Z AUTO 06005KT 020V130 CAVOK 20/12 Q1023 NOSIG",
+        ),
+    )
+    world.commit()
+    world.close()
+    forecast = sqlite3.connect(":memory:")
+    forecast.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+
+    def conditional_high_shape(**kwargs):
+        # The 51-member ENS half is out of scope; its provider half is the
+        # same one-path-per-provider collapse both sides must reproduce.
+        state = kwargs["current_state"]
+        centers, _ = hourly.remaining_day_extremes_c_with_current_state(
+            hourly.day0_hourly_provider_representatives(
+                list(kwargs.get("provider_vectors") or vectors)
+            ),
+            target_date=target_date, decision_time=decision_time, metric="high",
+            current_state=state, settlement_unit="C",
+            fallback_window_start=state.observed_at,
+        )
+        return SimpleNamespace(
+            provider_centers_c=tuple(centers), identity="shape", witness={},
+            extra_sigma_c=0.5,
+        )
+
+    monkeypatch.setattr(hourly, "day0_conditional_high_shape", conditional_high_shape)
+    request = SimpleNamespace(
+        city="Munich",
+        city_timezone="Europe/Berlin",
+        target_date=target_date,
+        computed_at=decision_time.isoformat(),
+        day0_observed_extreme_observation_time="2026-09-28T09:50:00+00:00",
+    )
+    producer, *_rest = materializer._day0_noaa_carrier_future_members(
+        forecast, request, metric=metric,
+        fusion=SimpleNamespace(
+            used_models=("ecmwf_ifs", "icon_d2"), predictive_sigma_c=2.681048413410214,
+        ),
+    )
+    monkeypatch.setattr(era, "_day0_current_vector_witness", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        era, "_validate_day0_causal_bundle_successor", lambda **_kwargs: None
+    )
+    monkeypatch.setattr(
+        era, "_pinned_station_extreme_providers_c", lambda **_kwargs: ()
+    )
+    payload = {"metric": metric, "observation_time": "2026-09-28T09:50:00+00:00"}
+    consumer = era._day0_remaining_day_members(
+        payload=payload,
+        family=SimpleNamespace(city="Munich", target_date=target_date, metric=metric),
+        unit="C",
+        decision_time=decision_time,
+        world_conn=forecast,
+        forecast_conn=forecast,
+    )
+    forecast.close()
+    assert consumer is not None
+    assert payload["_edli_day0_provider_representative_models"] == [
+        "icon_d2", "ecmwf_ifs", "ukmo_global_deterministic_10km",
+    ]
+    # Same content, same representation: exact, not tolerance.
+    assert np.array_equal(
+        np.sort(np.asarray(payload["_edli_day0_unclamped_remaining_extrema_native"])),
+        np.sort(np.asarray(producer)),
+    )
+    if metric == "low":
+        # The persisted live LOW carrier kept icon_global's 11.901167... path.
+        assert sorted(producer) == [
+            9.626847555499445, 12.843189545803456, 14.000386511867491,
+        ]
+
+
 @pytest.mark.parametrize(
     ("identity", "bounds", "error"),
     (

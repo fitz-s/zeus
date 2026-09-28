@@ -35733,6 +35733,15 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
             True,
         ),
         (
+            # Live 2026-09-27/28: one Munich LOW carrier darkened every cut.
+            (
+                "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+                "FamilyAuthorityUnavailable:"
+                "DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_MISMATCH"
+            ),
+            True,
+        ),
+        (
             (
                 "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
                 "FamilyAuthorityUnavailable:"

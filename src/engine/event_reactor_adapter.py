@@ -474,8 +474,9 @@ _GLOBAL_PROBABILITY_FAMILY_UNAVAILABLE_REASONS = frozenset(
         "GLOBAL_DAY0_SOURCE_AVAILABLE_AT_INVALID",
         "GLOBAL_DAY0_SOURCE_CYCLE_INVALID",
         # SCOPE: city/date/metric family only. DRAIN: source, posterior, and
-        # current-carrier rebuilds run each cycle. RESET: the exact identity,
-        # q, samples, operator, and sample count all reproduce successfully.
+        # current-carrier rebuilds run each cycle. RESET: the exact vector,
+        # identity, q, samples, operator, and sample count all reproduce.
+        "DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_MISMATCH",
         "DAY0_NOAA_PRELIMINARY_CARRIER_IDENTITY_MISMATCH",
         "DAY0_NOAA_PRELIMINARY_CARRIER_Q_MISMATCH",
         "DAY0_NOAA_PRELIMINARY_CARRIER_SAMPLES_MISMATCH",
