@@ -180,6 +180,13 @@ CANONICAL_OWNER: dict[str, Domain] = {
     'source_run_coverage': Domain.FORECASTS,
     'strategy_health': Domain.TRADE,
     'temp_persistence': Domain.WORLD,
+    # Tier-0 winner-cut candidate provenance and the all-cut learning corpus.
+    'tier0_auction_cut': Domain.TRADE,
+    'tier0_candidate_set_provenance': Domain.TRADE,
+    'tier0_cut_family': Domain.TRADE,
+    'tier0_family_label': Domain.TRADE,
+    'tier0_family_snapshot': Domain.TRADE,
+    'tier0_family_topology': Domain.TRADE,
     'token_price_log': Domain.TRADE,
     'token_suppression': Domain.TRADE,
     'token_suppression_history': Domain.TRADE,

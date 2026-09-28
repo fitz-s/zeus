@@ -1,4 +1,5 @@
 # Created: 2026-09-25
+# Last audited: 2026-09-27
 # Authority basis: reversal_plan_tier0_2026-08-24 item 3b follow-up — the
 #   market-anchored q correction (src/calibration/market_anchored_live_fit.py
 #   _fit_selection, MIN_TRAIN_ROWS=20) trains only on settled confirmed
@@ -395,6 +396,9 @@ def test_persist_writes_q_provenance_equal_to_evaluation_values():
         selection_epoch_identity="epoch-1",
         decision_at_utc=decision_at,
         family_context_by_key={"family-a": {"city": "Denver", "target_date": "2026-09-20"}},
+        # q_raw is the witness-sourced held-side value (2026-09-27), handed
+        # in by the corpus builder; cand-b has no valid witness q.
+        q_raw_by_candidate={"cand-a": 0.4123456789},
     )
     rows = {
         row["candidate_id"]: row

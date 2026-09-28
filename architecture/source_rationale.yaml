@@ -1951,6 +1951,13 @@ files:
     why: Translates the sanctioned executor result into EDLI receipt facts. Explicit executor venue-call and ACK fields outrank generic outcome labels, so a local rejection cannot fabricate venue evidence while a real post-call rejection preserves its exact boundary tuple.
     downstream:
     - src/engine/event_reactor_adapter.py
+  src/engine/tier0_auction_corpus.py:
+    zone: K2_runtime
+    authority_role: auction_learning_corpus_writer
+    why: Builds the complete per-cut learning corpus from the cut's frozen witness/book/evaluation inputs (no I/O), holds it in a bounded in-process queue, and writes it after the batch's receipts commit in its own fail-soft transaction, so the corpus can never cost a receipt or delay a submit; raw q per leg comes from the family witness itself, never a sealed correction, so pre-scoring rejections keep their q. Evidence only; no trading decision reads it.
+    downstream:
+    - src/engine/global_batch_runtime.py
+    - src/execution/post_trade_capital.py
   src/engine/global_single_order_auction.py:
     zone: K2_K3_coordination
     authority_role: global_single_order_auction_coordinator
@@ -3524,6 +3531,10 @@ files:
     zone: K2_runtime
     authority_role: finalized_fill_cash_observer
     why: Bounded finalized receipt and historical collateral RPC capture outside writer leases, with recent-fill priority and fair historical drainage through the existing synchronizer.
+  src/state/schema/tier0_auction_corpus_schema.py:
+    zone: K2_runtime
+    authority_role: auction_learning_corpus_schema_owner
+    why: Additive trade-DB schema for the all-cut learning corpus (cut rows, integer-keyed cut-family links, content-addressed family topology and state, family settlement labels); zstd-3 BLOB payloads with self-describing encoding tags; retention by label reachability runs on the post-trade job.
   src/state/schema/venue_fill_cash_facts_schema.py:
     zone: K2_runtime
     authority_role: fill_cash_schema_owner

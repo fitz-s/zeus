@@ -1,5 +1,5 @@
 # Created: 2026-08-27
-# Last reused/audited: 2026-09-25
+# Last reused/audited: 2026-09-27
 # Authority basis: reversal_plan_tier0_2026-08-24 items 3 and 7;
 #   tier0_selection_lift_preregistration_2026-08-24 frozen data contract;
 #   2026-09-25 fold write-lock hold (read-only diff, coordinated CAS writes).
@@ -23,6 +23,8 @@ from src.state import write_coordinator
 from src.state.write_coordinator import DBIdentity, WriteCoordinator
 
 _ROOT = Path(__file__).resolve().parent.parent
+# max(settled_at, recorded_at) of the fixture's VERIFIED truth rows.
+_AVAILABLE = "2026-08-27T00:10:00+00:00"
 
 
 def _forecast_conn() -> sqlite3.Connection:
@@ -36,7 +38,9 @@ def _forecast_conn() -> sqlite3.Connection:
         );
         CREATE TABLE settlement_outcomes (
             city TEXT, target_date TEXT, temperature_metric TEXT,
-            settlement_value REAL, settlement_unit TEXT, authority TEXT
+            settlement_value REAL, settlement_unit TEXT, authority TEXT,
+            settled_at TEXT DEFAULT '2026-08-27T00:05:00+00:00',
+            recorded_at TEXT DEFAULT '2026-08-27T00:10:00+00:00'
         );
         """
     )
@@ -50,16 +54,32 @@ def _trade_db(tmp_path: Path, rows) -> Path:
     conn.execute(
         """
         CREATE TABLE tier0_candidate_set_provenance (
-            row_id INTEGER PRIMARY KEY, settled_y INTEGER
+            row_id INTEGER PRIMARY KEY, settled_y INTEGER,
+            label_available_at TEXT
         )
         """
     )
     conn.executemany(
-        "INSERT INTO tier0_candidate_set_provenance VALUES (?,?)", rows
+        "INSERT INTO tier0_candidate_set_provenance (row_id, settled_y) VALUES (?,?)",
+        rows,
     )
     conn.commit()
     conn.close()
     return path
+
+
+def _available(path: Path) -> list[str | None]:
+    conn = sqlite3.connect(path)
+    try:
+        return [
+            row[0]
+            for row in conn.execute(
+                "SELECT label_available_at "
+                "FROM tier0_candidate_set_provenance ORDER BY row_id"
+            )
+        ]
+    finally:
+        conn.close()
 
 
 def _settled(path: Path) -> list[tuple[int, int | None]]:
@@ -109,7 +129,7 @@ def fold(monkeypatch, tmp_path):
         }
         for row_id, _ in rows
     ]
-    labels = {"value": [(1, 1), (2, 0), (3, 0)]}
+    labels = {"value": [(1, 1, _AVAILABLE), (2, 0, _AVAILABLE), (3, 0, _AVAILABLE)]}
 
     def _read_only():
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
@@ -118,10 +138,10 @@ def fold(monkeypatch, tmp_path):
 
     def _load(conn):
         return [
-            {**candidate, "settled_y": settled_y}
-            for candidate, (_row_id, settled_y) in zip(
+            {**candidate, "settled_y": settled_y, "label_available_at": available}
+            for candidate, (_row_id, settled_y, available) in zip(
                 candidates, conn.execute(
-                    "SELECT row_id, settled_y "
+                    "SELECT row_id, settled_y, label_available_at "
                     "FROM tier0_candidate_set_provenance ORDER BY row_id"
                 ).fetchall()
             )
@@ -174,7 +194,7 @@ def test_labels_use_verified_point_range_and_shoulder_bounds_for_both_sides():
         ),
     )
     conn.execute(
-        "INSERT INTO settlement_outcomes VALUES (?,?,?,?,?,?)",
+        "INSERT INTO settlement_outcomes (city, target_date, temperature_metric, settlement_value, settlement_unit, authority) VALUES (?,?,?,?,?,?)",
         ("Taipei", "2026-08-26", "high", 30.0, "C", "VERIFIED"),
     )
     candidates = [
@@ -197,7 +217,10 @@ def test_labels_use_verified_point_range_and_shoulder_bounds_for_both_sides():
 
     labels, stats = _tier0_candidate_settlement_labels(conn, candidates)
 
-    assert labels == [(1, 1), (2, 0), (3, 0), (4, 1), (5, 0), (6, 1)]
+    assert labels == [
+        (1, 1, _AVAILABLE), (2, 0, _AVAILABLE), (3, 0, _AVAILABLE),
+        (4, 1, _AVAILABLE), (5, 0, _AVAILABLE), (6, 1, _AVAILABLE),
+    ]
     assert stats == {
         "candidate_rows": 6,
         "verified_market_labels": 3,
@@ -214,7 +237,7 @@ def test_labels_use_verified_point_range_and_shoulder_bounds_for_both_sides():
         ("range", "Austin", "2026-08-26", "high", 64.0, 65.0),
     )
     fahrenheit.execute(
-        "INSERT INTO settlement_outcomes VALUES (?,?,?,?,?,?)",
+        "INSERT INTO settlement_outcomes (city, target_date, temperature_metric, settlement_value, settlement_unit, authority) VALUES (?,?,?,?,?,?)",
         ("Austin", "2026-08-26", "high", 65.0, "F", "VERIFIED"),
     )
     range_candidates = [
@@ -233,7 +256,7 @@ def test_labels_use_verified_point_range_and_shoulder_bounds_for_both_sides():
         range_candidates,
     )
 
-    assert labels == [(7, 1), (8, 0)]
+    assert labels == [(7, 1, _AVAILABLE), (8, 0, _AVAILABLE)]
     assert stats["verified_market_labels"] == 1
     assert stats["invalid_truth_rows"] == 0
 
@@ -248,7 +271,7 @@ def test_unverified_or_unit_inconsistent_truth_never_labels_a_candidate():
         ),
     )
     conn.executemany(
-        "INSERT INTO settlement_outcomes VALUES (?,?,?,?,?,?)",
+        "INSERT INTO settlement_outcomes (city, target_date, temperature_metric, settlement_value, settlement_unit, authority) VALUES (?,?,?,?,?,?)",
         (
             ("Taipei", "2026-08-26", "high", 30.0, "C", "UNVERIFIED"),
             ("Taipei", "2026-08-26", "low", 25.0, "F", "VERIFIED"),
@@ -280,14 +303,26 @@ def test_unverified_or_unit_inconsistent_truth_never_labels_a_candidate():
 
 def test_label_diff_is_computed_from_the_read_only_snapshot():
     candidates = [
-        {"row_id": 1, "settled_y": None},
-        {"row_id": 2, "settled_y": 0},
-        {"row_id": 3, "settled_y": 1},
+        {"row_id": 1, "settled_y": None, "label_available_at": None},
+        {"row_id": 2, "settled_y": 0, "label_available_at": _AVAILABLE},
+        {"row_id": 3, "settled_y": 1, "label_available_at": _AVAILABLE},
+        {"row_id": 4, "settled_y": 1, "label_available_at": None},
     ]
 
+    # Row 2 is unchanged; row 4 keeps its outcome but gains its availability.
     assert _tier0_candidate_label_changes(
-        candidates, ((1, 1), (2, 0), (3, 0))
-    ) == [(1, None, 1), (3, 1, 0)]
+        candidates,
+        (
+            (1, 1, _AVAILABLE),
+            (2, 0, _AVAILABLE),
+            (3, 0, _AVAILABLE),
+            (4, 1, _AVAILABLE),
+        ),
+    ) == [
+        (1, (None, None), (1, _AVAILABLE)),
+        (3, (1, _AVAILABLE), (0, _AVAILABLE)),
+        (4, (1, None), (1, _AVAILABLE)),
+    ]
 
 
 def test_changed_rows_fill_and_correct_and_refold_is_idempotent(fold):
@@ -295,18 +330,22 @@ def test_changed_rows_fill_and_correct_and_refold_is_idempotent(fold):
 
     assert stats == {
         "candidate_rows": 3,
-        "unchanged": 1,
+        # Row 2's outcome already matched; it only gains label_available_at.
+        "unchanged": 0,
         "filled": 1,
         "corrected": 1,
+        "stamped": 1,
         "cas_lost": 0,
     }
     assert _settled(fold.path) == [(1, 1), (2, 0), (3, 0)]
+    assert _available(fold.path) == [_AVAILABLE] * 3
     assert fold.coordinator.transactions == 1
 
     again = ptc.run_tier0_candidate_settlement_fold()
 
     assert again["unchanged"] == 3
-    assert again["filled"] == again["corrected"] == again["cas_lost"] == 0
+    assert again["filled"] == again["corrected"] == again["stamped"] == 0
+    assert again["cas_lost"] == 0
     assert fold.coordinator.transactions == 1
 
 
@@ -314,7 +353,7 @@ def test_unchanged_fold_takes_no_write_transaction(fold):
     """The live incident: 132,451 unchanged labels held the writer 170 s."""
 
     # Row 1 is still pending (no VERIFIED truth), so it carries no label.
-    fold.labels["value"] = [(2, 0), (3, 1)]
+    fold.labels["value"] = [(2, 0, None), (3, 1, None)]
 
     stats = ptc.run_tier0_candidate_settlement_fold()
 
@@ -329,7 +368,7 @@ def test_diff_runs_while_another_writer_holds_the_lock(fold):
     blocker = sqlite3.connect(fold.path, isolation_level=None, timeout=0)
     blocker.execute("BEGIN IMMEDIATE")
     try:
-        fold.labels["value"] = [(2, 0), (3, 1)]
+        fold.labels["value"] = [(2, 0, None), (3, 1, None)]
         stats = ptc.run_tier0_candidate_settlement_fold()
     finally:
         blocker.execute("ROLLBACK")
@@ -358,9 +397,11 @@ def test_concurrent_change_between_read_and_write_is_not_clobbered(tmp_path, mon
     concurrent.commit()
     concurrent.close()
 
-    stats = _apply_tier0_candidate_label_changes([(1, None, 1), (2, 0, 1)])
+    stats = _apply_tier0_candidate_label_changes(
+        [(1, (None, None), (1, _AVAILABLE)), (2, (0, None), (1, _AVAILABLE))]
+    )
 
-    assert stats == {"filled": 0, "corrected": 1, "cas_lost": 1}
+    assert stats == {"filled": 0, "corrected": 1, "stamped": 0, "cas_lost": 1}
     assert _settled(path) == [(1, 0), (2, 1)]
 
 
@@ -369,8 +410,8 @@ def test_label_writes_are_chunked_into_bounded_transactions(fold, monkeypatch):
 
     stats = ptc.run_tier0_candidate_settlement_fold()
 
-    assert stats["filled"] + stats["corrected"] == 2
-    assert fold.coordinator.transactions == 2
+    assert stats["filled"] + stats["corrected"] + stats["stamped"] == 3
+    assert fold.coordinator.transactions == 3
 
 
 def test_post_trade_daemon_runs_fold_every_five_minutes_after_harvester():

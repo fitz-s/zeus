@@ -47843,3 +47843,89 @@ def test_current_buy_jit_still_rejects_missing_ask_or_wrong_token(side, fault, e
             selected, raw_book, captured_at_utc=authority.snapshot.captured_at,
             market_authority=authority,
         )
+
+
+def test_global_batch_records_an_unreceipted_cut_for_the_learning_corpus(
+    monkeypatch,
+):
+    """A cut that ends before its receipt (here the unevaluated book-expired
+    abort) must still be recorded: process_current_global_batch queues an
+    INCOMPLETE cut and its closing flush writes it to the trade DB in its own
+    transaction (src/engine/tier0_auction_corpus.py)."""
+
+    from src.engine import tier0_auction_corpus as corpus
+
+    trade_conn = sqlite3.connect(":memory:")
+    key = global_batch_runtime._decision_log_connection_key(trade_conn)
+    corpus._PENDING.pop(key, None)
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    scope = current_global_auction_scope_from_events(
+        (event,), captured_at_utc=decision_at
+    )
+    family_key = scope.family_keys[0]
+    witness = SimpleNamespace(
+        family_key=family_key, captured_at_utc=decision_at,
+        posterior_identity_hash="run-a", witness_identity="q-a",
+        bindings=(SimpleNamespace(
+            bin_id="bin-a", condition_id="condition-a",
+            yes_token_id="yes-a", no_token_id="no-a",
+        ),),
+    )
+    asset_states = ((family_key, "bin-a", "condition-a", "YES", "yes-a",
+                     "EXECUTABLE", "book-hash-a", "market-event-a", "gamma-a", "False"),)
+    identity = current_global_book_epoch_identity(
+        asset_states=asset_states, captured_at_utc=decision_at
+    )
+    book_epoch = CurrentGlobalBookEpoch(
+        assets=(), asset_states=asset_states, captured_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=180), witness_identity=identity,
+    )
+
+    def select(*_args, **_kwargs):
+        import src.engine.global_single_order_auction as gsoa
+
+        return gsoa._no_trade("GLOBAL_BOOK_EPOCH_EXPIRED")
+
+    monkeypatch.setattr(global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope)
+    monkeypatch.setattr(
+        global_batch_runtime, "current_portfolio_wealth_witness",
+        lambda *_, **__: _WealthNamespace(
+            spendable_cash_usd=Decimal("10"), witness_identity="wealth-witness",
+            economic_identity="wealth-economic", ledger_snapshot_id="ledger",
+        ),
+    )
+    monkeypatch.setattr(global_batch_runtime, "current_venue_auction_identity", lambda *_, **__: identity)
+    monkeypatch.setattr(global_batch_runtime, "select_prepared_global_auction", select)
+    try:
+        result = global_batch_runtime.process_current_global_batch(
+            (event,), decision_time=decision_at, world_conn=object(),
+            forecast_conn=object(), trade_conn=trade_conn,
+            payload_reader=lambda item: json.loads(item.payload_json),
+            prepare_event=lambda item, _at: EventSubmissionReceipt(
+                False, item.event_id, item.causal_snapshot_id,
+                prepared_global_family=bridge.PreparedGlobalFamily(
+                    decision_id=f"decision-{family_key}",
+                    probability_witness=witness, candidate_seeds=(),
+                ),
+            ),
+            actuate_winner=lambda *_: pytest.fail("must not actuate"),
+            stamp_receipt=lambda receipt: receipt,
+            venue_submit_count=lambda: 0,
+            current_execution=lambda *_: object(),
+            current_time_provider=lambda: decision_at,
+            portfolio_state_provider=lambda: object(),
+            current_book_epoch_provider=lambda probabilities, _at: (probabilities, book_epoch),
+        )
+        assert result.receipts[event.event_id].reason == (
+            "GLOBAL_AUCTION_NO_TRADE:GLOBAL_BOOK_EPOCH_EXPIRED"
+        )
+        assert trade_conn.execute(
+            "SELECT status, reason, decision_log_id FROM tier0_auction_cut"
+        ).fetchall() == [
+            ("INCOMPLETE", "GLOBAL_AUCTION_NO_TRADE:GLOBAL_BOOK_EPOCH_EXPIRED", None),
+        ]
+        assert corpus.pending_cuts(key) == ((), 0)
+    finally:
+        corpus._PENDING.pop(key, None)
+        trade_conn.close()

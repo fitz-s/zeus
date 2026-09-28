@@ -66,6 +66,7 @@ import logging
 import os
 import sqlite3
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
@@ -75,6 +76,18 @@ logger = logging.getLogger("zeus.post_trade_capital")
 
 _TIER0_CANDIDATE_QUERY_CHUNK = 400
 _TIER0_LABEL_WRITE_CHUNK = 200
+# A VERIFIED label older than this is final: labels land within 12 days of the
+# target date (measured 2026-09-01..22, p99 12.0 d), so corrections come sooner.
+_TIER0_LABEL_REFOLD_DAYS = 14
+# Corpus rows stay this long after their label became available: the release
+# test's untouched validation window.
+_TIER0_CORPUS_RETENTION_DAYS = 30
+# Cut rows with no family left (all expired, or never had one) are audit rows
+# without a label; they go after this age.
+_TIER0_CUT_RETENTION_DAYS = 60
+_TIER0_CORPUS_DELETE_CHUNK = 2_000
+_TIER0_CORPUS_DELETE_CHUNKS_PER_TICK = 25
+_TIER0_CORPUS_WAL_BYTES_LIMIT = 256 * 1024 * 1024
 
 
 def _load_tier0_candidate_rows(
@@ -86,7 +99,8 @@ def _load_tier0_candidate_rows(
         dict(row)
         for row in trade_conn.execute(
             """
-            SELECT row_id, market_key, city, target_date, side, settled_y
+            SELECT row_id, market_key, city, target_date, side, settled_y,
+                   label_available_at
               FROM tier0_candidate_set_provenance
              ORDER BY row_id
             """
@@ -94,16 +108,70 @@ def _load_tier0_candidate_rows(
     ]
 
 
-def _tier0_candidate_settlement_labels(
-    forecast_conn: sqlite3.Connection,
-    candidates: Sequence[Mapping[str, Any]],
-) -> tuple[list[tuple[int, int]], dict[str, int]]:
-    """Grade candidate sides from VERIFIED settlement truth and market bounds.
+def _tier0_label_schema_ready(trade_conn: sqlite3.Connection) -> bool:
+    """Whether the order daemon's boot migration added ``label_available_at``.
 
-    ``market_key`` is the decision-time condition id. The canonical forecast
-    DB maps it to exact finite/open bin bounds; the family settlement supplies
-    the verified value and unit. No label punctuation or date inference is
-    used. Conflicting truth for one condition is excluded rather than guessed.
+    The fold never runs DDL. SCOPE: this fold only. DRAIN: the order daemon's
+    ``init_schema_trade_only`` adds the column at boot. RESET: the next tick
+    after that migration folds normally.
+    """
+
+    return "label_available_at" in {
+        str(row[1])
+        for row in trade_conn.execute(
+            "PRAGMA table_xinfo(tier0_candidate_set_provenance)"
+        ).fetchall()
+    }
+
+
+def _label_available_at(settled_at: object, recorded_at: object) -> str | None:
+    """When a VERIFIED settlement became knowable to Zeus: the later stamp.
+
+    ``settled_at`` is the source-side settlement time and ``recorded_at`` is
+    when Zeus wrote the truth row. A walk-forward fit may use the label only
+    after both. Unparseable stamps give None, and the label then waits.
+    """
+
+    stamps = []
+    for raw in (settled_at, recorded_at):
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        try:
+            stamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        stamps.append(stamp.astimezone(timezone.utc))
+    return max(stamps).isoformat()
+
+
+@dataclass(frozen=True)
+class _ConditionTruth:
+    """One market condition graded against its family's VERIFIED settlement."""
+
+    low: float | None
+    high: float | None
+    value: float
+    unit: str
+    yes_won: int
+    available_at: str | None
+
+
+def _verified_condition_truth(
+    forecast_conn: sqlite3.Connection,
+    condition_ids: Sequence[str],
+    *,
+    context: str,
+) -> tuple[dict[tuple[str, str, str], _ConditionTruth], int, int]:
+    """Grade conditions from VERIFIED settlement truth and canonical bin bounds.
+
+    Keyed by ``(condition_id, city, target_date)``. The canonical forecast DB
+    maps each condition to exact finite/open bounds, and the family settlement
+    supplies the verified value and unit. No label punctuation or date is
+    inferred. A condition whose truth rows disagree is dropped, not guessed.
+    Returns ``(truth, ambiguous_count, invalid_truth_rows)``.
     """
 
     from src.config import runtime_cities_by_name
@@ -111,27 +179,19 @@ def _tier0_candidate_settlement_labels(
     from src.contracts.settlement_semantics import SettlementSemantics
     from src.types.market import Bin
 
-    market_keys = tuple(
-        sorted(
-            {
-                str(candidate.get("market_key") or "").strip()
-                for candidate in candidates
-                if str(candidate.get("market_key") or "").strip()
-            }
-        )
-    )
-    truth_by_key: dict[tuple[str, str, str], int] = {}
-    ambiguous_keys: set[tuple[str, str, str]] = set()
-    invalid_truth_rows = 0
+    keys = tuple(sorted({str(c or "").strip() for c in condition_ids} - {""}))
+    truth: dict[tuple[str, str, str], _ConditionTruth] = {}
+    ambiguous: set[tuple[str, str, str]] = set()
+    invalid_rows = 0
     cities = runtime_cities_by_name()
-
-    for offset in range(0, len(market_keys), _TIER0_CANDIDATE_QUERY_CHUNK):
-        chunk = market_keys[offset : offset + _TIER0_CANDIDATE_QUERY_CHUNK]
+    for offset in range(0, len(keys), _TIER0_CANDIDATE_QUERY_CHUNK):
+        chunk = keys[offset : offset + _TIER0_CANDIDATE_QUERY_CHUNK]
         for row in forecast_conn.execute(
             """
             SELECT me.condition_id, me.city, me.target_date,
                    me.temperature_metric, me.range_low, me.range_high,
-                   so.settlement_value, so.settlement_unit
+                   so.settlement_value, so.settlement_unit,
+                   so.settled_at, so.recorded_at
               FROM market_events me
               JOIN settlement_outcomes so
                 ON so.city = me.city
@@ -142,10 +202,12 @@ def _tier0_candidate_settlement_labels(
             """,
             (json.dumps(chunk),),
         ).fetchall():
-            condition_id = str(row["condition_id"] or "").strip()
             city = str(row["city"] or "").strip()
-            target_date = str(row["target_date"] or "").strip()
-            key = (condition_id, city, target_date)
+            key = (
+                str(row["condition_id"] or "").strip(),
+                city,
+                str(row["target_date"] or "").strip(),
+            )
             try:
                 unit = str(row["settlement_unit"] or "").strip().upper()
                 city_contract = cities.get(city)
@@ -156,51 +218,70 @@ def _tier0_candidate_settlement_labels(
                     raise ValueError("settlement unit disagrees with city contract")
                 value = semantics.assert_settlement_value(
                     float(row["settlement_value"]),
-                    context="tier0_candidate_settlement_fold",
+                    context=context,
                 )
-                bin_obj = Bin(
-                    low=(
-                        None
-                        if row["range_low"] is None
-                        else float(row["range_low"])
-                    ),
-                    high=(
-                        None
-                        if row["range_high"] is None
-                        else float(row["range_high"])
-                    ),
+                low = None if row["range_low"] is None else float(row["range_low"])
+                high = None if row["range_high"] is None else float(row["range_high"])
+                graded = _ConditionTruth(
+                    low=low,
+                    high=high,
+                    value=float(value),
                     unit=unit,
+                    yes_won=int(Bin(low=low, high=high, unit=unit).contains(value)),
+                    available_at=_label_available_at(
+                        row["settled_at"], row["recorded_at"]
+                    ),
                 )
-                yes_won = int(bin_obj.contains(value))
             except (SettlementPrecisionError, TypeError, ValueError):
-                invalid_truth_rows += 1
+                invalid_rows += 1
                 continue
-            prior = truth_by_key.get(key)
-            if prior is not None and prior != yes_won:
-                ambiguous_keys.add(key)
+            prior = truth.get(key)
+            if prior is not None and prior.yes_won != graded.yes_won:
+                ambiguous.add(key)
                 continue
-            truth_by_key[key] = yes_won
+            truth.setdefault(key, graded)
+    for key in ambiguous:
+        truth.pop(key, None)
+    return truth, len(ambiguous), invalid_rows
 
-    for key in ambiguous_keys:
-        truth_by_key.pop(key, None)
 
-    labels: list[tuple[int, int]] = []
+def _tier0_candidate_settlement_labels(
+    forecast_conn: sqlite3.Connection,
+    candidates: Sequence[Mapping[str, Any]],
+) -> tuple[list[tuple[int, int, str | None]], dict[str, int]]:
+    """Grade candidate sides as ``(row_id, settled_y, label_available_at)``.
+
+    ``market_key`` is the decision-time condition id; see
+    ``_verified_condition_truth`` for the grading law.
+    """
+
+    truth_by_key, ambiguous, invalid_truth_rows = _verified_condition_truth(
+        forecast_conn,
+        [str(candidate.get("market_key") or "") for candidate in candidates],
+        context="tier0_candidate_settlement_fold",
+    )
+    labels: list[tuple[int, int, str | None]] = []
     invalid_candidate_rows = 0
     for candidate in candidates:
-        key = (
-            str(candidate.get("market_key") or "").strip(),
-            str(candidate.get("city") or "").strip(),
-            str(candidate.get("target_date") or "").strip(),
+        truth = truth_by_key.get(
+            (
+                str(candidate.get("market_key") or "").strip(),
+                str(candidate.get("city") or "").strip(),
+                str(candidate.get("target_date") or "").strip(),
+            )
         )
-        yes_won = truth_by_key.get(key)
-        if yes_won is None:
+        if truth is None:
             continue
         side = str(candidate.get("side") or "").strip().upper()
         if side not in {"YES", "NO"}:
             invalid_candidate_rows += 1
             continue
         labels.append(
-            (int(candidate["row_id"]), yes_won if side == "YES" else 1 - yes_won)
+            (
+                int(candidate["row_id"]),
+                truth.yes_won if side == "YES" else 1 - truth.yes_won,
+                truth.available_at,
+            )
         )
 
     return labels, {
@@ -208,7 +289,7 @@ def _tier0_candidate_settlement_labels(
         "verified_market_labels": len(truth_by_key),
         "labels_ready": len(labels),
         "pending_rows": len(candidates) - len(labels),
-        "ambiguous_markets": len(ambiguous_keys),
+        "ambiguous_markets": ambiguous,
         "invalid_truth_rows": invalid_truth_rows,
         "invalid_candidate_rows": invalid_candidate_rows,
     }
@@ -216,10 +297,11 @@ def _tier0_candidate_settlement_labels(
 
 def _tier0_candidate_label_changes(
     candidates: Sequence[Mapping[str, Any]],
-    labels: Sequence[tuple[int, int]],
-) -> list[tuple[int, int | None, int]]:
-    """Return ``(row_id, prior, label)`` for labels that differ from the snapshot.
+    labels: Sequence[tuple[int, int, str | None]],
+) -> list[tuple[int, tuple[int | None, str | None], tuple[int, str | None]]]:
+    """Return ``(row_id, prior, label)`` where the label differs from the snapshot.
 
+    ``prior`` and ``label`` are ``(settled_y, label_available_at)`` pairs.
     ``candidates`` is the read-only snapshot the labels were derived from, so
     every label row_id is present in it.
     """
@@ -228,24 +310,23 @@ def _tier0_candidate_label_changes(
         int(candidate["row_id"]): (
             None
             if candidate.get("settled_y") is None
-            else int(candidate["settled_y"])
+            else int(candidate["settled_y"]),
+            candidate.get("label_available_at"),
         )
         for candidate in candidates
     }
     return [
-        (row_id, prior_by_row[row_id], settled_y)
-        for row_id, settled_y in labels
-        if prior_by_row[row_id] != settled_y
+        (row_id, prior_by_row[row_id], (settled_y, available_at))
+        for row_id, settled_y, available_at in labels
+        if prior_by_row[row_id] != (settled_y, available_at)
     ]
 
 
-def _apply_tier0_candidate_label_changes(
-    changes: Sequence[tuple[int, int | None, int]],
-) -> dict[str, int]:
-    """Compare-and-set changed labels in short coordinated write transactions.
+def _coordinated_trade_writes(owner: str, priority=None):
+    """Yield bounded coordinated TRADE write transactions for a fold.
 
-    A row whose ``settled_y`` moved since the read-only snapshot is left alone
-    and counted ``cas_lost``; the next tick re-diffs it against current truth.
+    STANDARD priority (unless given) / deadline_ms=1_500 / max_hold_ms=500
+    mirror chain_sync_read's coordinated TRADE write in this module.
     """
 
     from src.state.db import connect_existing_trade_db_without_journal_bootstrap
@@ -255,37 +336,257 @@ def _apply_tier0_candidate_label_changes(
         default_runtime_write_coordinator,
     )
 
-    filled = corrected = cas_lost = 0
     coordinator = default_runtime_write_coordinator()
-    for offset in range(0, len(changes), _TIER0_LABEL_WRITE_CHUNK):
-        # STANDARD priority / deadline_ms=1_500 / max_hold_ms=500 mirror
-        # chain_sync_read's coordinated TRADE write in this module.
-        with coordinator.transaction(
+
+    def transaction():
+        return coordinator.transaction(
             (DBIdentity.TRADE,),
-            owner="tier0_candidate_settlement_fold",
+            owner=owner,
             write_class="live",
-            priority=WritePriority.STANDARD,
+            priority=priority or WritePriority.STANDARD,
             deadline_ms=1_500,
             max_hold_ms=500,
             connection_factory=connect_existing_trade_db_without_journal_bootstrap,
-        ) as tx:
-            for row_id, prior, settled_y in changes[
+        )
+
+    return transaction
+
+
+def _apply_tier0_candidate_label_changes(
+    changes: Sequence[
+        tuple[int, tuple[int | None, str | None], tuple[int, str | None]]
+    ],
+) -> dict[str, int]:
+    """Compare-and-set changed labels in short coordinated write transactions.
+
+    A row whose label moved since the read-only snapshot is left alone and
+    counted ``cas_lost``; the next tick re-diffs it against current truth.
+    ``filled`` sets a first label, ``corrected`` replaces the outcome and
+    ``stamped`` only adds or corrects ``label_available_at``.
+    """
+
+    filled = corrected = stamped = cas_lost = 0
+    transaction = _coordinated_trade_writes("tier0_candidate_settlement_fold")
+    for offset in range(0, len(changes), _TIER0_LABEL_WRITE_CHUNK):
+        with transaction() as tx:
+            for row_id, prior, label in changes[
                 offset : offset + _TIER0_LABEL_WRITE_CHUNK
             ]:
                 if not tx.connection.execute(
                     """
                     UPDATE tier0_candidate_set_provenance
-                       SET settled_y = ?
+                       SET settled_y = ?, label_available_at = ?
                      WHERE row_id = ? AND settled_y IS ?
+                       AND label_available_at IS ?
                     """,
-                    (settled_y, row_id, prior),
+                    (*label, row_id, *prior),
                 ).rowcount:
                     cas_lost += 1
-                elif prior is None:
+                elif prior[0] is None:
                     filled += 1
+                elif prior[0] != label[0]:
+                    corrected += 1
+                else:
+                    stamped += 1
+    return {
+        "filled": filled,
+        "corrected": corrected,
+        "stamped": stamped,
+        "cas_lost": cas_lost,
+    }
+
+
+def _load_tier0_family_topologies(
+    trade_conn: sqlite3.Connection,
+) -> tuple[list[dict[str, Any]], dict[int, str]]:
+    """Topologies to (re)grade, and their current label hash when labelled."""
+
+    from src.engine.tier0_auction_corpus import decode_payload
+
+    tables = {
+        str(row[0])
+        for row in trade_conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    if "tier0_family_topology" not in tables:
+        return [], {}
+    # Unlabelled topologies plus labels still inside the correction window:
+    # an older label is final and is not re-graded every tick.
+    cutoff = datetime.fromtimestamp(
+        time.time() - _TIER0_LABEL_REFOLD_DAYS * 86_400, timezone.utc
+    ).isoformat()
+    labelled: dict[int, str] = {}
+    topologies = []
+    for row in trade_conn.execute(
+        """
+        SELECT t.topology_seq, t.city, t.target_date, t.payload,
+               l.payload_sha256
+          FROM tier0_family_topology t
+          LEFT JOIN tier0_family_label l ON l.topology_seq = t.topology_seq
+         WHERE l.topology_seq IS NULL OR l.label_available_at >= ?
+        """,
+        (cutoff,),
+    ).fetchall():
+        topologies.append(
+            {
+                "topology_seq": int(row["topology_seq"]),
+                "city": str(row["city"]),
+                "target_date": str(row["target_date"]),
+                "bindings": decode_payload(row["payload"])["bindings"],
+            }
+        )
+        if row["payload_sha256"] is not None:
+            labelled[int(row["topology_seq"])] = str(row["payload_sha256"])
+    return topologies, labelled
+
+
+def _tier0_family_labels(
+    forecast_conn: sqlite3.Connection,
+    topologies: Sequence[Mapping[str, Any]],
+) -> tuple[list[tuple[object, ...]], dict[str, int]]:
+    """Grade each complete family topology, in witness column order.
+
+    A label needs VERIFIED truth for every column's condition, one settlement
+    value and unit, bounds that form a complete MECE partition, and exactly
+    one winning column. Anything short of that stays pending or invalid.
+    """
+
+    import hashlib
+
+    from src.engine.tier0_auction_corpus import encode_payload
+    from src.state.schema.tier0_auction_corpus_schema import LABEL_ENCODING
+    from src.types.market import Bin, BinTopologyError, validate_bin_topology
+
+    truth_by_key, ambiguous, invalid_truth_rows = _verified_condition_truth(
+        forecast_conn,
+        [
+            str(binding[1])
+            for topology in topologies
+            for binding in topology["bindings"]
+        ],
+        context="tier0_family_settlement_fold",
+    )
+    recorded_at = datetime.now(timezone.utc).isoformat()
+    labels: list[tuple[object, ...]] = []
+    invalid_families = 0
+    for topology in topologies:
+        truths = [
+            truth_by_key.get(
+                (str(binding[1]), topology["city"], topology["target_date"])
+            )
+            for binding in topology["bindings"]
+        ]
+        if not truths or any(truth is None for truth in truths):
+            continue
+        facts = {(t.value, t.unit, t.available_at) for t in truths}
+        winners = [column for column, t in enumerate(truths) if t.yes_won]
+        try:
+            if len(facts) != 1 or len(winners) != 1:
+                raise ValueError("family truth is not one MECE settlement")
+            value, unit, available_at = next(iter(facts))
+            if available_at is None:
+                raise ValueError("label availability time is unknown")
+            bins = [Bin(low=t.low, high=t.high, unit=unit) for t in truths]
+            validate_bin_topology(bins)
+        except (BinTopologyError, ValueError):
+            invalid_families += 1
+            continue
+        order = sorted(
+            range(len(bins)),
+            key=lambda column: (
+                float("-inf") if bins[column].low is None else bins[column].low,
+                float("inf") if bins[column].high is None else bins[column].high,
+            ),
+        )
+        raw = json.dumps(
+            {
+                "column_order": "witness_binding_order",
+                "bounds": [[t.low, t.high] for t in truths],
+                "settlement_order": order,
+                "yes_won": [t.yes_won for t in truths],
+                "settlement_value": value,
+                "settlement_unit": unit,
+                "label_available_at": available_at,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        labels.append(
+            (
+                topology["topology_seq"],
+                value,
+                unit,
+                winners[0],
+                LABEL_ENCODING,
+                hashlib.sha256(raw).hexdigest(),
+                encode_payload(raw),
+                available_at,
+                recorded_at,
+            )
+        )
+    return labels, {
+        "family_topologies": len(topologies),
+        "family_labels_ready": len(labels),
+        "family_pending": len(topologies) - len(labels) - invalid_families,
+        "family_invalid": invalid_families,
+        "family_ambiguous_markets": ambiguous,
+        "family_invalid_truth_rows": invalid_truth_rows,
+    }
+
+
+def _apply_tier0_family_label_changes(
+    labels: Sequence[tuple[object, ...]],
+    labelled: Mapping[int, str],
+) -> dict[str, int]:
+    """CAS-write family labels that differ from the read-only snapshot.
+
+    A new label inserts only if still absent; a correction updates only if
+    the stored hash still equals the snapshot's. Either miss is ``cas_lost``.
+    """
+
+    changes = [label for label in labels if labelled.get(label[0]) != label[5]]
+    written = corrected = cas_lost = 0
+    transaction = _coordinated_trade_writes("tier0_family_settlement_fold")
+    for offset in range(0, len(changes), _TIER0_LABEL_WRITE_CHUNK):
+        with transaction() as tx:
+            for label in changes[offset : offset + _TIER0_LABEL_WRITE_CHUNK]:
+                prior = labelled.get(label[0])
+                if prior is None:
+                    changed = tx.connection.execute(
+                        """
+                        INSERT OR IGNORE INTO tier0_family_label (
+                            topology_seq, settlement_value, settlement_unit,
+                            winning_column, payload_encoding, payload_sha256,
+                            payload, label_available_at, recorded_at
+                        ) VALUES (?,?,?,?,?,?,?,?,?)
+                        """,
+                        label,
+                    ).rowcount
+                else:
+                    changed = tx.connection.execute(
+                        """
+                        UPDATE tier0_family_label
+                           SET settlement_value = ?, settlement_unit = ?,
+                               winning_column = ?, payload_encoding = ?,
+                               payload_sha256 = ?, payload = ?,
+                               label_available_at = ?, recorded_at = ?
+                         WHERE topology_seq = ? AND payload_sha256 = ?
+                        """,
+                        (*label[1:], label[0], prior),
+                    ).rowcount
+                if not changed:
+                    cas_lost += 1
+                elif prior is None:
+                    written += 1
                 else:
                     corrected += 1
-    return {"filled": filled, "corrected": corrected, "cas_lost": cas_lost}
+    return {
+        "family_unchanged": len(labels) - len(changes),
+        "family_written": written,
+        "family_corrected": corrected,
+        "family_cas_lost": cas_lost,
+    }
 
 
 def run_tier0_candidate_settlement_fold() -> dict[str, int]:
@@ -310,6 +611,8 @@ def run_tier0_candidate_settlement_fold() -> dict[str, int]:
 
     trade_read = get_trade_connection_read_only()
     try:
+        if not _tier0_label_schema_ready(trade_read):
+            return {"schema_pending": 1}
         candidates = _load_tier0_candidate_rows(trade_read)
     finally:
         trade_read.close()
@@ -325,6 +628,7 @@ def run_tier0_candidate_settlement_fold() -> dict[str, int]:
             "unchanged": 0,
             "filled": 0,
             "corrected": 0,
+            "stamped": 0,
             "cas_lost": 0,
         }
 
@@ -342,6 +646,282 @@ def run_tier0_candidate_settlement_fold() -> dict[str, int]:
         "unchanged": len(labels) - len(changes),
         **_apply_tier0_candidate_label_changes(changes),
     }
+
+
+def _tier0_corpus_retention_step(
+    conn: sqlite3.Connection,
+    *,
+    cutoff_iso: str,
+    cut_cutoff_iso: str,
+    limit: int,
+) -> dict[str, int]:
+    """Delete one bounded chunk of expired corpus rows by reachability.
+
+    A family (topology) expires only once its label's ``label_available_at``
+    is older than ``cutoff_iso``; an unlabelled family never expires. For the
+    oldest expired families still present, delete their ``tier0_cut_family``
+    links, then the states and topologies no link references. A cut row goes
+    once no family links to it and its decision is older than
+    ``cut_cutoff_iso``; that covers cuts whose families all expired and cuts
+    that never had a family (unreceipted or zero-eligible), which carry no
+    label. Every query is driven by an index on the batch it deletes.
+    """
+
+    expired = [
+        int(row[0])
+        for row in conn.execute(
+            """
+            SELECT l.topology_seq FROM tier0_family_label l
+              JOIN tier0_family_topology t ON t.topology_seq = l.topology_seq
+             WHERE l.label_available_at < ?
+             ORDER BY l.label_available_at
+             LIMIT 50
+            """,
+            (cutoff_iso,),
+        )
+    ]
+    links = states = topologies = 0
+    if expired:
+        marks = ",".join("?" for _ in expired)
+        links = conn.execute(
+            f"""
+            DELETE FROM tier0_cut_family
+             WHERE (topology_seq, cut_seq) IN (
+                SELECT topology_seq, cut_seq FROM tier0_cut_family
+                 WHERE topology_seq IN ({marks}) LIMIT ?
+            )
+            """,
+            (*expired, limit),
+        ).rowcount
+        states = conn.execute(
+            f"""
+            DELETE FROM tier0_family_snapshot WHERE state_seq IN (
+                SELECT s.state_seq FROM tier0_family_snapshot s
+                 WHERE s.topology_seq IN ({marks})
+                   AND NOT EXISTS (
+                       SELECT 1 FROM tier0_cut_family c
+                        WHERE c.topology_seq = s.topology_seq
+                          AND c.state_seq = s.state_seq
+                   )
+                 LIMIT ?
+            )
+            """,
+            (*expired, limit),
+        ).rowcount
+        topologies = conn.execute(
+            f"""
+            DELETE FROM tier0_family_topology
+             WHERE topology_seq IN ({marks})
+               AND NOT EXISTS (
+                   SELECT 1 FROM tier0_cut_family c
+                    WHERE c.topology_seq = tier0_family_topology.topology_seq
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM tier0_family_snapshot s
+                    WHERE s.topology_seq = tier0_family_topology.topology_seq
+               )
+            """,
+            tuple(expired),
+        ).rowcount
+    cuts = conn.execute(
+        """
+        DELETE FROM tier0_auction_cut WHERE cut_seq IN (
+            SELECT a.cut_seq FROM tier0_auction_cut a
+             WHERE a.decision_at_utc < ?
+               AND NOT EXISTS (
+                   SELECT 1 FROM tier0_cut_family c WHERE c.cut_seq = a.cut_seq
+               )
+             ORDER BY a.decision_at_utc
+             LIMIT ?
+        )
+        """,
+        (cut_cutoff_iso, limit),
+    ).rowcount
+    return {
+        "links": links,
+        "states": states,
+        "topologies": topologies,
+        "cuts": cuts,
+    }
+
+
+def _wal_bytes(db_path: str) -> int:
+    try:
+        return os.stat(f"{db_path}-wal").st_size
+    except OSError:
+        return 0
+
+
+def run_tier0_corpus_retention(*, now: datetime | None = None) -> dict[str, int]:
+    """Evict corpus rows by reachability, in bounded WAL-bounded chunks.
+
+    SCOPE: ``tier0_auction_cut``, ``tier0_cut_family``,
+    ``tier0_family_snapshot`` and ``tier0_family_topology`` rows of families
+    whose VERIFIED label became available more than
+    ``_TIER0_CORPUS_RETENTION_DAYS`` ago, plus cut rows with no family left
+    that are older than ``_TIER0_CUT_RETENTION_DAYS``.
+    ``tier0_family_label`` rows are kept (tiny, and the fold's final answer).
+    An unlabelled family is never deleted. DRAIN: the post-trade job runs this
+    every five minutes; each tick deletes at most
+    ``_TIER0_CORPUS_DELETE_CHUNKS_PER_TICK`` chunks of at most
+    ``_TIER0_CORPUS_DELETE_CHUNK`` rows per table, each in its own short
+    coordinated BACKGROUND_RECOVERY transaction, and stops early once the WAL
+    exceeds ``_TIER0_CORPUS_WAL_BYTES_LIMIT`` or a chunk deletes nothing.
+    RESET: the next tick resumes where this one stopped.
+    """
+
+    from src.state.db import _zeus_trade_db_path
+    from src.state.write_coordinator import WritePriority, WriteLeaseTimeout
+
+    now = now or datetime.now(timezone.utc)
+    cutoff_iso = datetime.fromtimestamp(
+        now.timestamp() - _TIER0_CORPUS_RETENTION_DAYS * 86_400, timezone.utc
+    ).isoformat()
+    cut_cutoff_iso = datetime.fromtimestamp(
+        now.timestamp() - _TIER0_CUT_RETENTION_DAYS * 86_400, timezone.utc
+    ).isoformat()
+    db_path = str(_zeus_trade_db_path())
+    totals = {"links": 0, "states": 0, "topologies": 0, "cuts": 0, "chunks": 0}
+    transaction = _coordinated_trade_writes(
+        "tier0_corpus_retention", priority=WritePriority.BACKGROUND_RECOVERY
+    )
+    for _ in range(_TIER0_CORPUS_DELETE_CHUNKS_PER_TICK):
+        if _wal_bytes(db_path) > _TIER0_CORPUS_WAL_BYTES_LIMIT:
+            totals["wal_paused"] = 1
+            break
+        try:
+            with transaction() as tx:
+                deleted = _tier0_corpus_retention_step(
+                    tx.connection,
+                    cutoff_iso=cutoff_iso,
+                    cut_cutoff_iso=cut_cutoff_iso,
+                    limit=_TIER0_CORPUS_DELETE_CHUNK,
+                )
+        except (WriteLeaseTimeout, sqlite3.OperationalError) as exc:
+            totals["deferred"] = 1
+            logger.info("tier0 corpus retention deferred: %s", type(exc).__name__)
+            break
+        totals["chunks"] += 1
+        for key, value in deleted.items():
+            totals[key] += value
+        if not any(deleted.values()):
+            break
+    return totals
+
+
+_TIER0_CORPUS_TABLES = (
+    "tier0_auction_cut",
+    "tier0_cut_family",
+    "tier0_family_snapshot",
+    "tier0_family_topology",
+    "tier0_family_label",
+)
+
+
+def tier0_corpus_growth(trade_conn: sqlite3.Connection, *, since_iso: str) -> dict[str, dict[str, int]]:
+    """Rows and payload bytes per corpus table: in total, and written since.
+
+    Payload bytes are the stored BLOB lengths, the dominant term of each row.
+    ``tier0_cut_family`` has no payload; its rows are counted through the cuts
+    they belong to.
+    """
+
+    out: dict[str, dict[str, int]] = {}
+    for table, time_column, payload in (
+        ("tier0_auction_cut", "decision_at_utc", "payload"),
+        ("tier0_family_snapshot", "first_seen_at_utc", "payload"),
+        ("tier0_family_topology", "first_seen_at_utc", "payload"),
+        ("tier0_family_label", "recorded_at", "payload"),
+    ):
+        total_rows, total_bytes = trade_conn.execute(
+            f"SELECT COUNT(*), COALESCE(SUM(LENGTH({payload})), 0) FROM {table}"
+        ).fetchone()
+        new_rows, new_bytes = trade_conn.execute(
+            f"SELECT COUNT(*), COALESCE(SUM(LENGTH({payload})), 0) FROM {table} "
+            f"WHERE {time_column} >= ?",
+            (since_iso,),
+        ).fetchone()
+        out[table] = {
+            "rows": int(total_rows),
+            "payload_bytes": int(total_bytes),
+            "new_rows": int(new_rows),
+            "new_payload_bytes": int(new_bytes),
+        }
+    links, new_links = trade_conn.execute(
+        """
+        SELECT COUNT(*),
+               SUM(a.decision_at_utc >= ?)
+          FROM tier0_cut_family c
+          JOIN tier0_auction_cut a ON a.cut_seq = c.cut_seq
+        """,
+        (since_iso,),
+    ).fetchone()
+    out["tier0_cut_family"] = {"rows": int(links), "new_rows": int(new_links or 0)}
+    return out
+
+
+def run_tier0_corpus_growth_report() -> dict[str, dict[str, int]]:
+    """Log one line of 24 h corpus growth per table (read-only)."""
+
+    from src.state.db import get_trade_connection_read_only
+
+    since = datetime.fromtimestamp(time.time() - 86_400, timezone.utc).isoformat()
+    trade_read = get_trade_connection_read_only()
+    try:
+        tables = {
+            str(row[0])
+            for row in trade_read.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        if not set(_TIER0_CORPUS_TABLES) <= tables:
+            return {}
+        growth = tier0_corpus_growth(trade_read, since_iso=since)
+    finally:
+        trade_read.close()
+    logger.info(
+        "tier0 corpus growth 24h: %s",
+        " ".join(
+            f"{table}=+{stats['new_rows']}rows/+{stats.get('new_payload_bytes', 0)}B"
+            f"(total {stats['rows']}rows/{stats.get('payload_bytes', 0)}B)"
+            for table, stats in growth.items()
+        ),
+    )
+    return growth
+
+
+def run_tier0_family_settlement_fold() -> dict[str, int]:
+    """Label corpus family topologies: read-only diff, then CAS writes.
+
+    Same shape as ``run_tier0_candidate_settlement_fold``: no transaction spans
+    two DBs, and an unchanged fold takes no trade-DB write lock.
+
+    SCOPE: ``tier0_family_label`` rows for corpus topologies whose every
+    condition has VERIFIED canonical truth forming one MECE settlement. DRAIN:
+    the post-trade five-minute job re-diffs every topology and writes changed
+    labels in coordinated transactions of at most ``_TIER0_LABEL_WRITE_CHUNK``;
+    a lost lease or CAS retries next tick. RESET: a canonical correction
+    replaces the label on the next tick.
+    """
+
+    from src.state.db import (
+        get_forecasts_connection_read_only,
+        get_trade_connection_read_only,
+    )
+
+    trade_read = get_trade_connection_read_only()
+    try:
+        topologies, labelled = _load_tier0_family_topologies(trade_read)
+    finally:
+        trade_read.close()
+    if not topologies:
+        return {"family_topologies": 0}
+    forecast_read = get_forecasts_connection_read_only()
+    try:
+        labels, stats = _tier0_family_labels(forecast_read, topologies)
+    finally:
+        forecast_read.close()
+    return {**stats, **_apply_tier0_family_label_changes(labels, labelled)}
 
 
 class CollateralSnapshotDegraded(RuntimeError):

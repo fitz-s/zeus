@@ -7332,6 +7332,11 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     # same trade connection/transaction as the existing global auction receipt.
     from src.state.schema.tier0_candidate_set_provenance_schema import ensure_table as _ensure_tier0_candidate_set_provenance_table
     _ensure_tier0_candidate_set_provenance_table(conn)
+    # Complete auction learning corpus (every cut, every family simplex).
+    # Sole writer: src.engine.tier0_auction_corpus inside the receipt transaction;
+    # labels: src.execution.post_trade_capital family settlement fold.
+    from src.state.schema.tier0_auction_corpus_schema import ensure_tables as _ensure_tier0_auction_corpus_tables
+    _ensure_tier0_auction_corpus_tables(conn)
     try:
         conn.execute("ALTER TABLE trade_decisions ADD COLUMN env TEXT NOT NULL DEFAULT 'live';")
     except sqlite3.OperationalError:

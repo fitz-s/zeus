@@ -863,7 +863,79 @@ tables:
       (nullable, forward-only ADD COLUMN via ensure_table's
       _COLUMN_MIGRATIONS) so the market-anchored q correction can train on
       every evaluated candidate, not only settled fills. Existing rows stay
-      NULL; no backfill.
+      NULL; no backfill. 2026-09-27: q_raw comes from the candidate's own
+      family witness (held side), not the sealed correction; label_available_at
+      TEXT (nullable, forward-only) is set by the settlement fold with
+      settled_y. 2026-09-28: the winner-cut rows are written by the post-commit
+      corpus flush (own transaction), never inside the receipt.
+
+  - name: tier0_auction_cut
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: cut_seq
+    notes: >
+      Complete auction learning corpus: one row per global auction cut, winner
+      or not (status SELECTED | NO_TRADE | NO_CANDIDATES | INCOMPLETE), with
+      universe counts, selection-policy identity, decision time and a zstd-3
+      payload. Every cut is queued in-process and written by
+      src/engine/global_batch_runtime.py::_flush_tier0_learning_corpus in its
+      own short BACKGROUND_RECOVERY trade-DB transaction after the batch's
+      receipts commit (single-DB, INV-37), so it can never roll back a receipt;
+      a failed flush (e.g. SQLITE_FULL) keeps the cuts queued. Schema owner:
+      src/state/schema/tier0_auction_corpus_schema.py. Idempotent on cut_id; a
+      conflicting payload fails. Retention (post-trade job): a cut row goes
+      once no tier0_cut_family link reaches it and it is > 60 days old.
+
+  - name: tier0_cut_family
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+    notes: >
+      (cut_seq, topology_seq) link, WITHOUT ROWID: which family state and raw
+      32-byte witness identity each cut saw. Same writer and transaction as
+      tier0_auction_cut. Retention deletes a family's links only once its
+      label_available_at is > 30 days old; an unlabelled family is never
+      deleted.
+
+  - name: tier0_family_topology
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: topology_seq
+    notes: >
+      Content-addressed (128-bit topology_id, UNIQUE) family bin/condition/token bindings in
+      witness column order plus native unit. Same writer and transaction as
+      tier0_auction_cut.
+
+  - name: tier0_family_snapshot
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: state_seq
+    notes: >
+      Content-addressed (128-bit family_state_id, UNIQUE) family state:
+      complete raw YES simplex, per-bin native YES/NO top of book with
+      status/mid-unavailable reasons, and per-leg outcomes. Deduplicated across
+      cuts; referenced from tier0_cut_family. Same writer and transaction as
+      tier0_auction_cut. Deleted with its family's last link.
+
+  - name: tier0_family_label
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: topology_seq
+    notes: >
+      VERIFIED settlement label per corpus topology (winning witness column,
+      settlement order, bounds) with label_available_at. Written only by
+      src/execution/post_trade_capital.py::run_tier0_family_settlement_fold
+      (read-only diff, compare-and-set coordinated writes).
 
   - name: forecasts
     db: world

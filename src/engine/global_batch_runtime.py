@@ -3825,17 +3825,19 @@ def _persist_tier0_candidate_set(
     selection_epoch_identity: str,
     decision_at_utc: datetime,
     family_context_by_key: Mapping[str, Mapping[str, str]] | None,
+    q_raw_by_candidate: Mapping[str, float] | None = None,
 ) -> None:
     """reversal_plan_tier0_2026-08-24 item 3b: append-only per-candidate
     provenance for one winner-producing auction cut.
 
-    Caller-gated: fires only from the mode='global_single_order_auction'
-    completed-auction write inside _store_global_auction_receipt when
-    decision.no_trade_reason is None (a real winner was selected) -- never
-    from the compact delta/duplicate persist branch of the same function,
-    which fires far more often and would blow the "~dozens/day" volume
-    budget. Same trade-DB connection and transaction as the auction receipt
-    write itself (K1/INV-37 single-DB write).
+    Caller-gated: fires only for a full ('global_single_order_auction') receipt
+    whose decision has a real winner. The selection-lift preregistration froze
+    that population; the all-cut learning population is
+    ``tier0_auction_cut``/``tier0_family_snapshot`` instead
+    (src.engine.tier0_auction_corpus), which keeps this table at its
+    "~dozens/day" budget. The live path writes these rows through the
+    post-commit corpus flush (``_flush_tier0_learning_corpus``), in its own
+    single trade-DB transaction, never inside the receipt.
 
     One row per evaluated candidate (selected and rejected alike), keyed by
     (selection_epoch_identity, candidate_id) with INSERT OR IGNORE so a
@@ -3844,22 +3846,46 @@ def _persist_tier0_candidate_set(
     entirely rather than written with a fabricated/empty grouping key --
     fail-closed, matching decision_p0's own "never guess" law.
 
-    2026-09-25: also carries each candidate's own q_raw/q_served/
-    probability_semantics_revision/probability_witness_identity, read
-    straight off the evaluation object (never recomputed here) so the
-    market-anchored q correction can train on every evaluated candidate, not
-    only settled fills. NULL wherever the evaluation itself carries no
-    sealed correction for that leg.
+    2026-09-25: also carries each candidate's q_served/
+    probability_semantics_revision/probability_witness_identity from the
+    evaluation. 2026-09-27: ``q_raw`` is the held-side raw point probability
+    from the candidate's own family witness (``q_raw_by_candidate``, built by
+    ``tier0_auction_corpus.candidate_raw_q``), so a leg rejected before
+    scoring keeps the raw q it was rejected against. The sealed correction
+    exists only for scored legs and left 98.7% of rows NULL.
     """
 
     if not evaluations:
         return
-    from src.calibration.lead_bucket import lead_bucket
     from src.state.schema.tier0_candidate_set_provenance_schema import (
         ensure_table as _ensure_tier0_candidate_set_table,
     )
 
     _ensure_tier0_candidate_set_table(conn)
+    _insert_tier0_candidate_rows(
+        conn,
+        _tier0_candidate_rows(
+            evaluations=evaluations,
+            selection_epoch_identity=selection_epoch_identity,
+            decision_at_utc=decision_at_utc,
+            family_context_by_key=family_context_by_key,
+            q_raw_by_candidate=q_raw_by_candidate,
+        ),
+    )
+
+
+def _tier0_candidate_rows(
+    *,
+    evaluations: Sequence[object],
+    selection_epoch_identity: str,
+    decision_at_utc: datetime,
+    family_context_by_key: Mapping[str, Mapping[str, str]] | None,
+    q_raw_by_candidate: Mapping[str, float] | None,
+) -> tuple[tuple[object, ...], ...]:
+    """Rows for ``_persist_tier0_candidate_set``; pure, no I/O."""
+
+    from src.calibration.lead_bucket import lead_bucket
+
     context_by_key = family_context_by_key or {}
     created_at = datetime.now(timezone.utc).isoformat()
     decision_at_iso = decision_at_utc.isoformat()
@@ -3881,7 +3907,7 @@ def _persist_tier0_candidate_set(
                 bucket = lead_bucket(lead_hours)
         decision_p0 = getattr(evaluation, "decision_p0", None)
         status = str(getattr(evaluation, "status", "") or "")
-        q_raw = getattr(evaluation, "q_raw", None)
+        q_raw = (q_raw_by_candidate or {}).get(str(evaluation.candidate_id))
         q_served = getattr(evaluation, "q_served", None)
         probability_semantics_revision = getattr(
             evaluation, "probability_semantics_revision", None
@@ -3924,8 +3950,20 @@ def _persist_tier0_candidate_set(
                 ),
             )
         )
+    return tuple(rows)
+
+
+def _insert_tier0_candidate_rows(
+    conn: sqlite3.Connection,
+    rows: Sequence[tuple[object, ...]],
+) -> None:
     if not rows:
         return
+    from src.state.schema.tier0_candidate_set_provenance_schema import (
+        ensure_table as _ensure_tier0_candidate_set_table,
+    )
+
+    _ensure_tier0_candidate_set_table(conn)
     conn.executemany(
         """
         INSERT OR IGNORE INTO tier0_candidate_set_provenance (
@@ -3939,6 +3977,230 @@ def _persist_tier0_candidate_set(
         """,
         rows,
     )
+
+
+def _tier0_selection_policy(
+    fractional_kelly_multiplier: Decimal,
+    buy_candidates_enabled: bool | None,
+) -> tuple[str, dict[str, object]]:
+    """(identity, policy) of the selection law that produced a cut."""
+
+    policy = {
+        "global_selection_revision": CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
+        "fractional_kelly_multiplier": str(fractional_kelly_multiplier),
+        "buy_candidates_enabled": buy_candidates_enabled,
+    }
+    return hashlib.sha256(_canonical_json_bytes(policy)).hexdigest(), policy
+
+
+def _tier0_cut_corpus(
+    *,
+    selection_epoch_identity: str,
+    reason: str | None,
+    decision_at_utc: datetime,
+    scope_family_count: int,
+    probability_witnesses: Mapping[str, object],
+    ineligible_by_family: Mapping[str, str],
+    excluded_by_family: Mapping[str, str],
+    evaluations: Sequence[object],
+    winner_candidate_id: str | None,
+    book_epoch: object | None,
+    family_context_by_key: Mapping[str, Mapping[str, str]],
+    fractional_kelly_multiplier: Decimal,
+    buy_candidates_enabled: bool | None,
+):
+    """Build one cut's corpus rows (runs in the post-commit flush).
+
+    A build fault still records the cut, with the fault in its reason and no
+    family rows.
+    """
+
+    from src.config import runtime_cities_by_name
+    from src.engine import tier0_auction_corpus as corpus
+
+    identity, policy = _tier0_selection_policy(
+        fractional_kelly_multiplier, buy_candidates_enabled
+    )
+    common = dict(
+        selection_epoch_identity=selection_epoch_identity,
+        decision_at_utc=decision_at_utc,
+        selection_policy_identity=identity,
+        full_scope_family_count=scope_family_count,
+        ineligible_by_family=ineligible_by_family,
+        excluded_by_family=excluded_by_family,
+        evaluations=evaluations,
+        winner_candidate_id=winner_candidate_id,
+        policy=policy,
+    )
+    try:
+        return corpus.build_cut_corpus(
+            **common,
+            reason=reason,
+            probability_witnesses=probability_witnesses,
+            book_epoch=book_epoch,
+            family_context_by_key=family_context_by_key,
+            native_unit_by_city={
+                name: str(getattr(city, "settlement_unit", "") or "") or None
+                for name, city in runtime_cities_by_name().items()
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 - evidence cannot block the receipt
+        _LOG.error(
+            "tier0 corpus build failed; recording the bare cut: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
+        return corpus.build_cut_corpus(
+            **common,
+            reason=f"{reason or ''}|CORPUS_BUILD_FAILED:{type(exc).__name__}",
+            probability_witnesses={},
+            book_epoch=None,
+            family_context_by_key={},
+            native_unit_by_city={},
+        )
+
+
+def _queue_unreceipted_tier0_cut(
+    trade_conn: object,
+    *,
+    reason: str,
+    decision_at_utc: datetime,
+    economic_cut_completed: bool,
+    event_count: int,
+    fractional_kelly_multiplier: Decimal,
+    buy_candidates_enabled: bool,
+) -> None:
+    """Queue a cut that ended before its receipt; a later flush writes it."""
+
+    if not isinstance(trade_conn, sqlite3.Connection):
+        return
+    try:
+        from src.engine import tier0_auction_corpus as corpus
+
+        identity, _ = _tier0_selection_policy(
+            fractional_kelly_multiplier, buy_candidates_enabled
+        )
+        built = corpus.build_unreceipted_cut(
+            reason=reason,
+            decision_at_utc=decision_at_utc,
+            selection_policy_identity=identity,
+            economic_cut_completed=economic_cut_completed,
+            detail={"event_count": event_count},
+        )
+        corpus.queue_cut(
+            _decision_log_connection_key(trade_conn),
+            corpus.PendingCut(lambda: (built, ()), None),
+        )
+    except Exception as exc:  # noqa: BLE001 - evidence cannot alter the reject
+        _LOG.error(
+            "tier0 unreceipted cut not queued: %s: %s", type(exc).__name__, exc
+        )
+
+
+_TIER0_CORPUS_WRITE_MAX_HOLD_MS = 250
+# Evidence yields the volume's last free space to receipts and settlement: the
+# flush writes nothing below this floor (cuts stay queued, oldest dropped and
+# counted once the queue is full). RiskGuard has no storage gate since
+# 8a50b8fc9, so nothing else stops a disk-filling writer.
+_TIER0_CORPUS_MIN_FREE_BYTES = 8 * 1024**3
+
+
+def _tier0_corpus_disk_floor_reached(conn: sqlite3.Connection) -> bool:
+    import shutil
+
+    for _seq, name, path in conn.execute("PRAGMA database_list").fetchall():
+        if name == "main" and path:
+            return shutil.disk_usage(Path(path).parent).free < _TIER0_CORPUS_MIN_FREE_BYTES
+    return False
+
+
+def _flush_tier0_learning_corpus(
+    conn: sqlite3.Connection,
+    *,
+    connection_key: str,
+    work_context: WorkContext | None,
+) -> int:
+    """Write queued corpus cuts in their own short trade-DB transaction.
+
+    Runs only after the auction receipt committed, on the receipt's own
+    connection, which then holds no open transaction. The corpus can therefore
+    never extend, roll back or re-order the receipt; INV-37 holds because this
+    is a separate single-DB transaction. It is best-effort: the write lease is
+    BACKGROUND_RECOVERY (it never waits behind or ahead of MONITOR), and any
+    fault, SQLITE_FULL included, rolls back this transaction alone, is logged
+    at ERROR, and leaves every row queued for the next flush.
+
+    SCOPE: this process's queued cuts. DRAIN: every committed receipt flushes
+    at most ``_FLUSH_LIMIT`` cuts. RESET: rows leave the queue only after their
+    transaction commits. Returns the number of cuts written.
+    """
+
+    from src.engine import tier0_auction_corpus as corpus
+    from src.state.schema.tier0_auction_corpus_schema import ensure_tables
+    from src.state.write_coordinator import bounded_sqlite_write
+
+    pending, overflow = corpus.pending_cuts(connection_key)
+    if not pending and not overflow:
+        return 0
+    try:
+        if _tier0_corpus_disk_floor_reached(conn):
+            _LOG.warning(
+                "tier0 learning corpus flush skipped: free disk below %d GiB "
+                "(%d cuts queued)",
+                _TIER0_CORPUS_MIN_FREE_BYTES // 1024**3,
+                len(pending),
+            )
+            return 0
+        # Build outside the write lease (pure CPU, cached per cut).
+        built = [(cut.rows(), cut.decision_log_id) for cut in pending]
+        with _global_auction_trade_write_lease(
+            conn,
+            work_context=work_context,
+            owner="tier0_learning_corpus",
+            priority="background_recovery",
+        ) as lease:
+            fence = (
+                bounded_sqlite_write(
+                    conn, lease, max_hold_ms=_TIER0_CORPUS_WRITE_MAX_HOLD_MS
+                )
+                if lease is not None
+                else nullcontext()
+            )
+            with fence:
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    ensure_tables(conn)
+                    for (cut_corpus, candidate_rows), decision_log_id in built:
+                        corpus.write_cut(
+                            conn, cut_corpus, decision_log_id=decision_log_id
+                        )
+                        _insert_tier0_candidate_rows(conn, candidate_rows)
+                    if overflow:
+                        corpus.write_cut(
+                            conn,
+                            corpus.overflow_cut(
+                                overflow=overflow,
+                                selection_policy_identity=_tier0_selection_policy(
+                                    Decimal("0"), None
+                                )[0],
+                            ),
+                            decision_log_id=None,
+                        )
+                    conn.commit()
+                except BaseException:
+                    if conn.in_transaction:
+                        conn.rollback()
+                    raise
+    except Exception as exc:  # noqa: BLE001 - evidence never costs the receipt
+        _LOG.error(
+            "tier0 learning corpus flush deferred (%d queued): %s: %s",
+            len(pending),
+            type(exc).__name__,
+            exc,
+        )
+        return 0
+    corpus.release_cuts(connection_key, pending, overflow)
+    return len(pending)
 
 
 def _store_global_auction_receipt(
@@ -3984,8 +4246,19 @@ def _store_global_auction_receipt(
     family_context_by_key: Mapping[str, Mapping[str, str]] | None = None,
     market_anchored_fit_artifact_audit: Mapping[str, object] | None = None,
     persist_artifact: Callable[[object], int | None] | None = None,
+    probability_witnesses: Mapping[str, object] | None = None,
+    book_epoch: object | None = None,
+    buy_candidates_enabled: bool | None = None,
 ) -> int | None:
-    """Persist one complete auction comparison before any venue side effect."""
+    """Persist one complete auction comparison before any venue side effect.
+
+    Once the receipt is stored, the cut is queued for the learning corpus
+    (``tier0_auction_cut`` and its family snapshots), whether it produced a
+    winner or not. The caller flushes that queue in a separate transaction
+    after the receipt commits (``_flush_tier0_learning_corpus``).
+    ``probability_witnesses``/``book_epoch`` are the cut's frozen inputs;
+    without them the cut row still records the cut, with no family rows.
+    """
 
     if not isinstance(conn, sqlite3.Connection):
         return None
@@ -4633,6 +4906,58 @@ def _store_global_auction_receipt(
         else ()
     )
     connection_key = _decision_log_connection_key(conn)
+    winner_candidate_set = (
+        evaluations if getattr(decision, "no_trade_reason", None) is None else ()
+    )
+
+    def queue_learning_corpus(row_id: int, *, full_receipt: bool) -> None:
+        # Runs only after the receipt unit returned (committed), and only
+        # queues a builder over the frozen inputs: the corpus is built and
+        # written by ``_flush_tier0_learning_corpus`` after the batch, so it
+        # adds no work to the pre-submit receipt stage and cannot reach the
+        # receipt transaction. A full-receipt winner also carries
+        # reversal_plan_tier0_2026-08-24 item 3b's frozen candidate rows.
+        from src.engine import tier0_auction_corpus as corpus
+
+        candidate_set = winner_candidate_set if full_receipt else ()
+        frozen_ineligible = dict(ineligible)
+        frozen_excluded = dict(excluded_by_family or {})
+        frozen_witnesses = dict(probability_witnesses or {})
+        frozen_context = dict(family_context_by_key or {})
+
+        def build():
+            cut_corpus = _tier0_cut_corpus(
+                selection_epoch_identity=selection_epoch_identity,
+                reason=getattr(decision, "no_trade_reason", None),
+                decision_at_utc=decision_at_utc,
+                scope_family_count=len(scope_keys),
+                probability_witnesses=frozen_witnesses,
+                ineligible_by_family=frozen_ineligible,
+                excluded_by_family=frozen_excluded,
+                evaluations=evaluations,
+                winner_candidate_id=winner_id or None,
+                book_epoch=book_epoch,
+                family_context_by_key=frozen_context,
+                fractional_kelly_multiplier=fractional_kelly_multiplier,
+                buy_candidates_enabled=buy_candidates_enabled,
+            )
+            return cut_corpus, _tier0_candidate_rows(
+                evaluations=candidate_set,
+                selection_epoch_identity=selection_epoch_identity,
+                decision_at_utc=decision_at_utc,
+                family_context_by_key=frozen_context,
+                q_raw_by_candidate=cut_corpus.q_raw_by_candidate,
+            )
+
+        try:
+            corpus.queue_cut(connection_key, corpus.PendingCut(build, row_id))
+        except Exception as exc:  # noqa: BLE001 - evidence never costs the receipt
+            _LOG.error(
+                "tier0 learning corpus cut not queued: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+
     with _GLOBAL_AUCTION_PAYLOAD_REFS_LOCK:
         # Winner identity, economics, selection epoch, and receipt hash remain
         # inline. The large candidate/holding/book components are equally
@@ -4988,6 +5313,7 @@ def _store_global_auction_receipt(
                     )
                 if row_id is None:
                     raise RuntimeError("GLOBAL_AUCTION_RECEIPT_ID_MISSING")
+                queue_learning_corpus(row_id, full_receipt=False)
                 current_receipt_hash = str(receipt["receipt_hash"])
 
                 def component_ref(
@@ -5096,20 +5422,8 @@ def _store_global_auction_receipt(
                     summary=receipt,
                 ),
             )
-        if row_id is not None and getattr(decision, "no_trade_reason", None) is None:
-            # reversal_plan_tier0_2026-08-24 item 3b: candidate-set provenance
-            # only for a real winner, only on the full (non-delta,
-            # non-duplicate) completed-auction write -- see
-            # _persist_tier0_candidate_set docstring for the volume-control
-            # rationale.
-            _persist_tier0_candidate_set(
-                conn,
-                evaluations=evaluations,
-                selection_epoch_identity=selection_epoch_identity,
-                decision_at_utc=decision_at_utc,
-                family_context_by_key=family_context_by_key,
-            )
         if row_id is not None:
+            queue_learning_corpus(row_id, full_receipt=True)
             mode = "global_single_order_auction"
             current_receipt_hash = str(receipt["receipt_hash"])
             _GLOBAL_AUCTION_PAYLOAD_REFS[connection_key] = _GlobalAuctionPayloadRef(
@@ -7999,6 +8313,9 @@ def process_current_global_batch(
     pending_alpha_shadow_exit_events: dict[str, object] = {}
     prepared_loser_receipts: dict[str, EventSubmissionReceipt] = {}
     preflight_rejection_receipts: dict[str, EventSubmissionReceipt] = {}
+    # True once the current selection attempt's receipt (and its corpus cut
+    # row) committed; a reject before that records an unreceipted cut instead.
+    cut_receipt_written = False
     batch_started = time.monotonic()
     stage_started = batch_started
 
@@ -8477,6 +8794,16 @@ def process_current_global_batch(
             and effective_next_claim is None
             and not deadline_expired
         )
+        if not cut_receipt_written:
+            _queue_unreceipted_tier0_cut(
+                trade_conn,
+                reason=reason,
+                decision_at_utc=decision_time,
+                economic_cut_completed=terminal_cut_completed,
+                event_count=len(event_tuple),
+                fractional_kelly_multiplier=fractional_kelly_multiplier,
+                buy_candidates_enabled=buy_candidates_enabled,
+            )
         release_selection_snapshot()
         receipts: dict[str, EventSubmissionReceipt] = {}
         for event in event_tuple:
@@ -9331,7 +9658,7 @@ def process_current_global_batch(
             | None = None,
             wealth_reauction_audit: _WealthReauctionAudit | None = None,
         ):
-            nonlocal last_selection_receipt_row_id
+            nonlocal last_selection_receipt_row_id, cut_receipt_written
             # One ephemeral cache is shared by the actual and side-effect-free
             # proof selections in this cut.  A retry invokes ``select_once``
             # again and therefore receives a fresh cache.
@@ -9936,6 +10263,9 @@ def process_current_global_batch(
                 proof_counterfactual=proof_counterfactual,
                 family_context_by_key=family_context_by_key,
                 market_anchored_fit_artifact_audit=entry_fit_artifact_audit,
+                probability_witnesses=attempt_probabilities,
+                book_epoch=attempt_book_epoch,
+                buy_candidates_enabled=buy_candidates_enabled,
                     persist_artifact=_global_auction_artifact_persister(
                         trade_conn,
                         work_context=work_context,
@@ -9961,6 +10291,7 @@ def process_current_global_batch(
             finally:
                 _receipt_stages_end()
             last_selection_receipt_row_id = receipt_row_id
+            cut_receipt_written = True
             # stages= attributes the elapsed_s this line already reported. The
             # decomposition (2026-09-17) accounted for only ~138 ms of a 516 ms
             # median and left ~73% in these builders, so the residual is
@@ -11228,3 +11559,18 @@ def process_current_global_batch(
                 len(alpha_shadow_exit_events),
                 len(recorded_alpha_shadow_exit_ids),
             )
+        # Learning corpus: after every receipt and venue call of this batch,
+        # in its own transaction, so it can delay no submit and lose no receipt.
+        if isinstance(trade_conn, sqlite3.Connection) and not trade_conn.in_transaction:
+            flush_started = time.monotonic()
+            flushed = _flush_tier0_learning_corpus(
+                trade_conn,
+                connection_key=_decision_log_connection_key(trade_conn),
+                work_context=None,
+            )
+            if flushed:
+                _LOG.info(
+                    "tier0 learning corpus flushed: cuts=%d elapsed_s=%.3f",
+                    flushed,
+                    time.monotonic() - flush_started,
+                )

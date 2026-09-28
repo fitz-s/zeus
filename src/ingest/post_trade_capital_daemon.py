@@ -540,6 +540,35 @@ def _tier0_candidate_settlement_fold_cycle() -> dict[str, int]:
     return stats
 
 
+def _tier0_family_settlement_fold_cycle() -> dict[str, int]:
+    """Refresh corpus family labels without touching order authority."""
+
+    from src.execution.post_trade_capital import run_tier0_family_settlement_fold
+
+    stats = run_tier0_family_settlement_fold()
+    logger.info("tier0 family settlement fold: %s", stats)
+    return stats
+
+
+def _tier0_corpus_retention_cycle() -> dict[str, int]:
+    """Evict labelled, aged corpus rows by reachability (bounded, WAL-bounded)."""
+
+    from src.execution.post_trade_capital import run_tier0_corpus_retention
+
+    stats = run_tier0_corpus_retention()
+    if stats.get("chunks") or stats.get("wal_paused") or stats.get("deferred"):
+        logger.info("tier0 corpus retention: %s", stats)
+    return stats
+
+
+def _tier0_corpus_growth_cycle() -> None:
+    """Daily per-table corpus growth line (read-only)."""
+
+    from src.execution.post_trade_capital import run_tier0_corpus_growth_report
+
+    run_tier0_corpus_growth_report()
+
+
 def _realized_fee_evidence_refit_cycle() -> None:
     """Daily refit of state/fee_reconciliation.json (the taker-fee EV authority evidence).
 
@@ -844,6 +873,32 @@ def main() -> None:
         "interval", minutes=5, id="tier0_candidate_settlement_fold",
         max_instances=1, coalesce=True,
         next_run_time=(datetime.now(timezone.utc) + timedelta(seconds=45)),
+    )
+    _scheduler.add_job(
+        _scheduler_job("tier0_family_settlement_fold")(
+            _tier0_family_settlement_fold_cycle
+        ),
+        # SCOPE: derived labels for corpus family topologies only.
+        # DRAIN: every five-minute tick re-diffs all topologies after harvester truth.
+        # RESET: canonical settlement corrections are refolded on the next tick.
+        "interval", minutes=5, id="tier0_family_settlement_fold",
+        max_instances=1, coalesce=True,
+        next_run_time=(datetime.now(timezone.utc) + timedelta(seconds=75)),
+    )
+    _scheduler.add_job(
+        _scheduler_job("tier0_corpus_retention")(_tier0_corpus_retention_cycle),
+        # SCOPE: corpus rows of families labelled more than 30 days ago only.
+        # DRAIN: bounded WAL-checked chunks every five minutes.
+        # RESET: the next tick resumes after a WAL pause or deferred lease.
+        "interval", minutes=5, id="tier0_corpus_retention",
+        max_instances=1, coalesce=True,
+        next_run_time=(datetime.now(timezone.utc) + timedelta(seconds=105)),
+    )
+    _scheduler.add_job(
+        _scheduler_job("tier0_corpus_growth")(_tier0_corpus_growth_cycle),
+        "interval", hours=24, id="tier0_corpus_growth",
+        max_instances=1, coalesce=True,
+        next_run_time=(datetime.now(timezone.utc) + timedelta(seconds=135)),
     )
     # Daily realized-fee evidence refit (fee_authority.py incident 2026-06-12,
     # recurrence 2026-07-12 -> 2026-08-24: the artifact went stale and nobody reran the

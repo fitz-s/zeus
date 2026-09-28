@@ -1,5 +1,5 @@
 # Created: 2026-08-24
-# Last reused or audited: 2026-09-25
+# Last reused or audited: 2026-09-27
 # Authority basis: docs/operations/current/plans/reversal_plan_tier0_2026-08-24.md item 3
 #   (candidate-set provenance) + tier0_selection_lift_preregistration_2026-08-24.md
 #   (frozen consumer — the data requirements section this table satisfies).
@@ -31,13 +31,12 @@ decision time); a later settlement-join process, not part of this table's
 writer, is responsible for ever populating it. Its presence and NULL default
 matches the frozen preregistration's "NULL if unsettled" contract.
 
-``q_raw``/``q_served``/``probability_semantics_revision``/
-``probability_witness_identity`` are likewise nullable and fail-closed: the
-writer never recomputes or guesses a q — a row whose candidate carried no
-sealed correction (never scored, or a proven exact/settlement-locked payoff)
-writes NULL for the three q-provenance columns. ``probability_witness_identity``
-is always populated (required on every candidate object). Existing live rows
-predating this column set stay NULL forever; no backfill.
+``q_raw`` is the held-side raw point probability read from the candidate's own
+family witness (the solver's ``family_payoff_point_q``), so a candidate rejected
+before scoring still carries it. ``q_served``/``probability_semantics_revision``
+come from the sealed correction and stay NULL for an unscored leg. A
+deterministic Day0 witness leaves ``q_raw`` NULL for an unproved bin; nothing is
+guessed. Existing live rows predating a column stay NULL forever; no backfill.
 """
 
 from __future__ import annotations
@@ -72,6 +71,7 @@ CREATE TABLE IF NOT EXISTS tier0_candidate_set_provenance (
     q_served REAL,
     probability_semantics_revision TEXT,
     probability_witness_identity TEXT,
+    label_available_at TEXT,
     UNIQUE (selection_epoch_identity, candidate_id)
 )
 """
@@ -104,6 +104,13 @@ _COLUMN_MIGRATIONS: dict[str, str] = {
     "probability_witness_identity": (
         "ALTER TABLE tier0_candidate_set_provenance "
         "ADD COLUMN probability_witness_identity TEXT"
+    ),
+    # 2026-09-27: when the verified settlement behind ``settled_y`` became
+    # knowable, so a walk-forward fit can drop labels unavailable at its
+    # cutoff. Written only by the settlement fold, together with ``settled_y``.
+    "label_available_at": (
+        "ALTER TABLE tier0_candidate_set_provenance "
+        "ADD COLUMN label_available_at TEXT"
     ),
 }
 
