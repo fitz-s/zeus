@@ -3663,6 +3663,60 @@ def _ensure_restart_world_schemas(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _ensure_restart_trade_schemas(conn: sqlite3.Connection) -> None:
+    """Atomically materialize trade schemas required by the deployed HEAD.
+
+    Additive, idempotent ``CREATE TABLE/INDEX IF NOT EXISTS`` (plus forward-only
+    ``ALTER TABLE ADD COLUMN`` for an already-live table) on a 200GB live trade
+    DB: the write hold must stay short, so this is one ``BEGIN IMMEDIATE`` /
+    commit around calls that do no scans and touch no existing rows.
+    """
+
+    from src.state.schema.tier0_auction_corpus_schema import (
+        ensure_tables as ensure_tier0_auction_corpus_tables,
+    )
+    from src.state.schema.tier0_candidate_set_provenance_schema import (
+        ensure_table as ensure_tier0_candidate_set_table,
+    )
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        ensure_tier0_auction_corpus_tables(conn)
+        ensure_tier0_candidate_set_table(conn)
+    except Exception:
+        conn.rollback()
+        raise
+    conn.commit()
+
+
+def _ensure_restart_trade_schemas_before_warm_preflight() -> tuple[bool, str]:
+    """Materialize trade schema on its own short lease before the warm preflight.
+
+    The warm-restart cutover path (``continuous_monitor_cutover``) skips
+    ``_run_restart_recovery_if_needed`` entirely once the migration ledger is
+    current, so that recovery function's ``_ensure_restart_trade_schemas`` call
+    never runs on this path. This is the only call site standing between the
+    still-running old ``main`` and the warm preflight's ``src.main
+    --validate-boot`` subprocess, which asserts the new HEAD's trade registry
+    against disk (``trade_registry`` guard) — without this, the new tables
+    never exist and that guard fails every time, chicken-and-egg.
+    """
+
+    from src.state.db import get_trade_connection
+
+    try:
+        conn = get_trade_connection(write_class='live')
+    except Exception as exc:  # noqa: BLE001 -- fail closed before a blind preflight.
+        return False, f"trade schema materialization could not open trade DB: {exc}"
+    try:
+        _ensure_restart_trade_schemas(conn)
+    except Exception as exc:  # noqa: BLE001 -- fail closed; do not run the preflight blind.
+        return False, f"trade schema materialization failed: {type(exc).__name__}: {exc}"
+    finally:
+        conn.close()
+    return True, "trade schema materialized before warm restart preflight"
+
+
 def _assert_restart_trade_schema_ready(conn: sqlite3.Connection) -> None:
     """Fail closed on restart unless trade schema metadata is already complete."""
 
@@ -3740,6 +3794,7 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
             RESTART_TRADE_MIGRATION_TARGETS,
             RESTART_WORLD_MIGRATION_TARGETS,
             _assert_restart_trade_schema_ready,
+            _ensure_restart_trade_schemas,
             _ensure_restart_world_schemas,
         )
         from src.state.db import (
@@ -3803,6 +3858,7 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
 
         trade_conn = get_trade_connection(write_class='live')
         try:
+            _ensure_restart_trade_schemas(trade_conn)
             for result_key, target in RESTART_TRADE_MIGRATION_TARGETS:
                 applied[result_key] = apply_migrations(
                     trade_conn,
@@ -4457,6 +4513,28 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
             migrations_current, migration_detail = _restart_migration_targets_current()
             print(migration_detail)
             if migrations_current:
+                # The cutover path below skips ``_run_restart_recovery_if_needed``
+                # entirely (see ``continuous_monitor_cutover``), so this is the
+                # only call site that can materialize trade schema before the
+                # warm preflight's ``src.main --validate-boot`` subprocess reads
+                # the trade DB against the deployed HEAD's registry.
+                trade_schema_ok, trade_schema_detail = (
+                    _ensure_restart_trade_schemas_before_warm_preflight()
+                )
+                print(trade_schema_detail)
+                if not trade_schema_ok:
+                    print(
+                        "REFUSING to stop live-trading — trade schema "
+                        "materialization failed before the warm restart preflight:"
+                    )
+                    print(
+                        _release_unused_live_restart_guard(
+                            labels,
+                            expected_sha=expected_live_sha,
+                            issued_at=restart_guard_issued_at,
+                        )
+                    )
+                    return 1
                 warm_ok, warm_detail = _run_restart_preflight_if_needed(
                     labels,
                     expected_live_process_state="running",

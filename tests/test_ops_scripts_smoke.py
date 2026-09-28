@@ -2776,6 +2776,7 @@ def test_deploy_live_trading_restart_runs_recovery(monkeypatch, tmp_path):
     assert "world_active_redecision_backfill_notnull" in calls[0][2]
     assert "EDLI_BACKFILL_RECEIPT_CONSUMER_NOTNULL_REQUIRED" in calls[0][2]
     assert "EDLI_ACTIVE_REDECISION_PROJECTION_UNSEEDED" in calls[0][2]
+    assert "_ensure_restart_trade_schemas(trade_conn)" in calls[0][2]
     assert "_assert_restart_trade_schema_ready(trade_conn)" in calls[0][2]
     assert "init_schema_trade_only" not in calls[0][2]
     assert dl.RESTART_TRADE_MIGRATION_TARGETS == (
@@ -2804,6 +2805,8 @@ def test_deploy_live_trading_restart_runs_recovery(monkeypatch, tmp_path):
         "PRAGMA table_info(opportunity_event_processing_type_backfill)"
     )
     assert recovery_script.index(
+        "_ensure_restart_trade_schemas(trade_conn)"
+    ) < recovery_script.index(
         "for result_key, target in RESTART_TRADE_MIGRATION_TARGETS"
     ) < recovery_script.index(
         "_assert_restart_trade_schema_ready(trade_conn)"
@@ -2983,6 +2986,148 @@ def test_deploy_live_restart_world_schema_failure_rolls_back(tmp_path):
     conn.close()
     assert "edli_live_profit_audit_supersessions" not in tables
     assert "settlement_attribution_supersessions" not in tables
+
+
+def test_deploy_live_restart_trade_schemas_are_atomic_and_idempotent(tmp_path):
+    dl = _load("deploy_live_restart_trade_schema", "deploy_live.py")
+    conn = sqlite3.connect(tmp_path / "zeus_trades.db")
+
+    dl._ensure_restart_trade_schemas(conn)
+    dl._ensure_restart_trade_schemas(conn)
+
+    tables = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    assert {
+        "tier0_auction_cut",
+        "tier0_cut_family",
+        "tier0_family_label",
+        "tier0_family_snapshot",
+        "tier0_family_topology",
+        "tier0_candidate_set_provenance",
+    } <= tables
+    columns = {
+        str(row[1])
+        for row in conn.execute(
+            "PRAGMA table_xinfo(tier0_candidate_set_provenance)"
+        ).fetchall()
+    }
+    conn.close()
+    assert "label_available_at" in columns
+
+
+def test_deploy_live_ensure_restart_trade_schemas_satisfies_registry_assertion(tmp_path):
+    """End-to-end proof of the reported chicken-and-egg: a trade DB that boot
+    would materialize (``init_schema_trade_only``) but that lost the corpus
+    tables must fail ``assert_db_matches_registry`` before the fix and pass
+    after it, on both the first and a second (idempotent) call.
+    """
+    dl = _load("deploy_live_restart_trade_schema_registry", "deploy_live.py")
+    from src.state.db import init_schema_trade_only
+    from src.state.table_registry import (
+        DBIdentity,
+        RegistryAssertionError,
+        assert_db_matches_registry,
+    )
+
+    conn = sqlite3.connect(tmp_path / "zeus_trades.db")
+    init_schema_trade_only(conn)
+    conn.commit()
+    for table in (
+        "tier0_auction_cut",
+        "tier0_cut_family",
+        "tier0_family_label",
+        "tier0_family_snapshot",
+        "tier0_family_topology",
+    ):
+        conn.execute(f"DROP TABLE IF EXISTS {table}")
+    conn.commit()
+
+    with pytest.raises(RegistryAssertionError, match="tier0_auction_cut"):
+        assert_db_matches_registry(conn, DBIdentity.TRADE)
+
+    dl._ensure_restart_trade_schemas(conn)
+    assert_db_matches_registry(conn, DBIdentity.TRADE)  # first call: no raise
+
+    dl._ensure_restart_trade_schemas(conn)
+    assert_db_matches_registry(conn, DBIdentity.TRADE)  # second call: idempotent, no raise
+
+    conn.close()
+
+
+def test_deploy_live_restart_trade_schema_failure_rolls_back(tmp_path):
+    dl = _load("deploy_live_restart_trade_schema_rollback", "deploy_live.py")
+    conn = sqlite3.connect(tmp_path / "zeus_trades.db")
+
+    def deny_family_label_table(action, arg1, _arg2, _db_name, _trigger):
+        if action == sqlite3.SQLITE_CREATE_TABLE and arg1 == "tier0_family_label":
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    conn.set_authorizer(deny_family_label_table)
+    with pytest.raises(sqlite3.DatabaseError):
+        dl._ensure_restart_trade_schemas(conn)
+    conn.set_authorizer(None)
+
+    tables = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    conn.close()
+    # tier0_auction_cut is created (and committed only at the end) before the
+    # denied tier0_family_label DDL in the same _ensure_restart_trade_schemas
+    # transaction; its absence here proves the whole BEGIN IMMEDIATE rolled
+    # back rather than partially landing.
+    assert "tier0_auction_cut" not in tables
+    assert "tier0_family_label" not in tables
+
+
+def test_deploy_live_ensure_restart_trade_schemas_before_warm_preflight_opens_and_closes_live_trade_connection(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_ensure_trade_schemas_warm_wrapper", "deploy_live.py")
+    db_path = tmp_path / "zeus_trades.db"
+    calls = []
+
+    class _TrackedConnection:
+        def __init__(self, path):
+            self._conn = sqlite3.connect(path)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+        def close(self):
+            calls.append("closed")
+            self._conn.close()
+
+    def _fake_get_trade_connection(*, write_class):
+        calls.append(("opened", write_class))
+        return _TrackedConnection(db_path)
+
+    import src.state.db as db_mod
+
+    monkeypatch.setattr(db_mod, "get_trade_connection", _fake_get_trade_connection)
+
+    ok, detail = dl._ensure_restart_trade_schemas_before_warm_preflight()
+
+    assert ok is True
+    assert "trade schema" in detail
+    assert calls[0] == ("opened", "live")
+    assert calls[-1] == "closed"
+    conn = sqlite3.connect(db_path)
+    tables = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    conn.close()
+    assert "tier0_auction_cut" in tables
 
 
 @pytest.mark.parametrize("failure", [None, "rollback", "wrong_type"])
@@ -8167,6 +8312,14 @@ def test_deploy_live_warm_preflight_failure_releases_guard_without_stopping_main
         "_restart_migration_targets_current",
         lambda: (True, "migrations current"),
     )
+    monkeypatch.setattr(
+        dl,
+        "_ensure_restart_trade_schemas_before_warm_preflight",
+        lambda: (
+            calls.append(("trade_schema",))
+            or (True, "trade schema materialized before warm restart preflight")
+        ),
+    )
 
     def _preflight(labels, **kwargs):
         calls.append(
@@ -8208,6 +8361,7 @@ def test_deploy_live_warm_preflight_failure_releases_guard_without_stopping_main
         "running",
         True,
     )
+    assert calls.index(("trade_schema",)) < calls.index(calls[-1])
     output = capsys.readouterr().out
     assert "warm restart preflight is not green" in output
     assert "restart_refused" in output
@@ -8234,6 +8388,14 @@ def test_deploy_live_current_migrations_keep_main_until_warm_preflight(monkeypat
         dl,
         "_restart_migration_targets_current",
         lambda: (True, "migrations current"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_ensure_restart_trade_schemas_before_warm_preflight",
+        lambda: (
+            calls.append(("trade_schema",))
+            or (True, "trade schema materialized before warm restart preflight")
+        ),
     )
     monkeypatch.setattr(
         dl,
@@ -8301,13 +8463,16 @@ def test_deploy_live_current_migrations_keep_main_until_warm_preflight(monkeypat
 
     assert dl.main(["restart", "live-trading"]) == 0
 
+    trade_schema = calls.index(("trade_schema",))
     warm = calls.index(("preflight", "running", False, True))
     handoff = next(i for i, call in enumerate(calls) if call[0] == "handoff")
     one_main = calls.index(("preflight", "running", True, False))
     stop_main = calls.index(("stop", dl.LIVE_TRADING_LABEL))
     zero_main = calls.index(("preflight", "absent", True, False))
     launch_main = calls.index(("launch", dl.LIVE_TRADING_LABEL))
-    assert warm < handoff < one_main < stop_main < zero_main < launch_main
+    assert (
+        trade_schema < warm < handoff < one_main < stop_main < zero_main < launch_main
+    )
 
 
 def test_deploy_live_failed_zero_main_witness_never_bootstraps_second_main(
@@ -8330,6 +8495,11 @@ def test_deploy_live_failed_zero_main_witness_never_bootstraps_second_main(
         lambda *_args, **_kwargs: (True, "pause armed"),
     )
     monkeypatch.setattr(dl, "_restart_migration_targets_current", lambda: (True, "current"))
+    monkeypatch.setattr(
+        dl,
+        "_ensure_restart_trade_schemas_before_warm_preflight",
+        lambda: (True, "trade schema materialized before warm restart preflight"),
+    )
     monkeypatch.setattr(
         dl,
         "_wait_for_prerequisite_code_identity",
