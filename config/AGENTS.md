@@ -8,8 +8,9 @@ Runtime parameters — all configuration that controls Zeus behavior at runtime.
 |------|---------|
 | `settings.json` | Tunable runtime parameters — cycle intervals, thresholds, Kelly multipliers, risk limits |
 | `cities.json` | 46 cities: coordinates (= settlement station lat/lon), station id, `settlement_source_type`, timezone, unit, peak hour, cluster; `_source_contract_pending_conversions` blocks config-only source migrations until release evidence exists. **Routine check needed** — see discipline note below |
-| `station_precise_coords.json` | Per-city station/reference coordinates and elevation; its optional typed `station_ground_proof` is exact source-ground metadata, not sensor AGL or a blanket precision-PASS grant |
+| `station_precise_coords.json` | Per-city station/reference coordinates and elevation; its optional typed `station_ground_proof` is exact HKO/HOMR source-ground metadata, not sensor AGL or a blanket precision-PASS grant |
 | `hko_station_metadata.html` | Original official HKO station-table response body referenced only by a content-hash-bound `station_ground_proof`; do not execute or normalize this source HTML |
+| `noaa_homr_kord_station.json` | Original official NOAA HOMR response body referenced only by Chicago's content-hash-bound primary-DCP `station_ground_proof`; do not normalize or treat airport/barometric elevations as ground |
 | `city_monthly_bounds.json` | Generated monthly physical bounds used by ingestion guard; generated config, not hand-edited |
 | `city_correlation_matrix.json` | Generated city correlation matrix for risk/data-rebuild work; generated config, not hand-edited |
 | `provenance_registry.yaml` | INV-13 constant registration for Kelly cascade — every magic number traced to source |

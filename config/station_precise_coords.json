@@ -85,7 +85,29 @@
   "lat": "41.9786",
   "lon": "-87.9048",
   "source": "OurAirports",
-  "station": "KORD"
+  "station": "KORD",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "noaa_homr_primary_dcp_snapshot_v1",
+   "station_id": "KORD",
+   "source_station_id": "10003214",
+   "wmo_station_id": "72530",
+   "wban_station_id": "94846",
+   "height_role": "ground_msl",
+   "quantity": "location.elevations.GROUND",
+   "elevation_m": 204.8,
+   "site_lat": 41.96017,
+   "site_lon": -87.93164,
+   "temperature_station": true,
+   "location_role": "primary_temperature_dcp",
+   "coordinate_source": "ASOS CM",
+   "source_url": "https://www.ncei.noaa.gov/access/homr/services/station/search",
+   "artifact_ref": "config/noaa_homr_kord_station.json",
+   "body_sha256": "3c95677db4c091cb4c01a027b7276b7053dbe945c764803f1cd166c7e5a25aac",
+   "checked_at": "2026-09-29T21:50:23Z",
+   "query_date": "2026-09-29",
+   "query_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?qid=ICAO%3AKORD&date=2026-09-29&phrData=false"
+  }
  },
  "Chongqing": {
   "distance_from_citiesjson_m": 1400,

@@ -1,2 +1,3 @@
 config/hko_station_metadata.html -text whitespace=cr-at-eol
 docs/operations/current/evidence/hko_station_metadata_20260929.html -text whitespace=cr-at-eol
+config/noaa_homr_kord_station.json -text

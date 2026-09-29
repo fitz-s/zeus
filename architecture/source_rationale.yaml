@@ -546,7 +546,7 @@ files:
   src/config.py:
     zone: K2_runtime
     authority_role: runtime_config_seed
-    why: Loads settings, cities, state paths, and live-only runtime configuration. The station-coordinate seed may carry an optional typed station-ground proof reference; physical consumers must validate the exact station/source/quantity/site facts and SHA256-pinned body before using it as ground evidence. HKO ground-above-MSL evidence does not imply sensor AGL or grant proof to other stations. A pytest-only state marker is validated at import time and redirects test STATE_DIR without changing ZEUS_PRIMARY_ROOT production semantics.
+    why: Loads settings, cities, state paths, and live-only runtime configuration. The station-coordinate seed may carry an optional typed station-ground proof reference; physical consumers must validate the exact station/source/quantity/site facts and SHA256-pinned original body before using it as ground evidence. The approved HKO station-table and NOAA HOMR primary-DCP records prove only their named site's ground role; neither implies sensor AGL nor grants proof to other stations. A pytest-only state marker is validated at import time and redirects test STATE_DIR without changing ZEUS_PRIMARY_ROOT production semantics.
     downstream:
     - src/calibration/effective_sample_size.py
     - src/calibration/manager.py
