@@ -32,6 +32,18 @@ def _trade_db(path: Path) -> Path:
             ("p2", "settled", "Paris", OLD, "high"),
         ],
     )
+    conn.execute(
+        "CREATE TABLE venue_commands (command_id TEXT, position_id TEXT, venue_order_id TEXT,"
+        " token_id TEXT, snapshot_id TEXT, state TEXT, intent_kind TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE venue_order_facts (venue_order_id TEXT, state TEXT, remaining_size REAL,"
+        " local_sequence INTEGER)"
+    )
+    conn.execute(
+        "CREATE TABLE executable_market_snapshots (snapshot_id TEXT, event_slug TEXT,"
+        " selected_outcome_token_id TEXT, captured_at TEXT)"
+    )
     conn.commit()
     conn.close()
     return path
@@ -299,3 +311,58 @@ def test_forecast_live_daemon_registers_retention_job(monkeypatch):
     assert job[0] is daemon._forecast_retention_job
     assert job[2]["executor"] == daemon.FORECAST_RETENTION_EXECUTOR_LANE
     assert job[2]["max_instances"] == 1
+
+
+def _add_position(trade: Path, pid: str, phase: str, city, date, metric) -> None:
+    conn = sqlite3.connect(trade)
+    conn.execute("INSERT INTO position_current VALUES (?,?,?,?,?)", (pid, phase, city, date, metric))
+    conn.commit()
+    conn.close()
+
+
+@pytest.mark.parametrize("missing", ["city", "target_date", "temperature_metric"])
+def test_unnamed_open_position_evicts_nothing(env, missing):
+    state, trade, forecast = env
+    files = _queue_files(state)
+    values = {"city": "Paris", "target_date": OLD, "temperature_metric": "high"}
+    values[missing] = None
+    _add_position(trade, "p9", "pending_exit", values["city"], values["target_date"], values["temperature_metric"])
+    before = _provenance(forecast)
+    summary = _run(state, trade, forecast, apply=True)
+    assert summary["status"] == "REACHABILITY_UNAVAILABLE"
+    assert all(p.exists() for p in files.values())
+    assert _provenance(forecast) == before
+
+
+def test_unnamed_terminal_position_does_not_block(env):
+    state, trade, forecast = env
+    _add_position(trade, "p9", "voided", None, None, None)
+    assert _run(state, trade, forecast, apply=False)["status"] == "DRY_RUN"
+
+
+def test_economically_closed_family_is_kept(env):
+    state, trade, forecast = env
+    _add_position(trade, "p9", "economically_closed", "Paris", OLD, "high")
+    files = _queue_files(state)
+    _run(state, trade, forecast, apply=True)
+    assert files["old"].exists()
+    assert "q_bootstrap_samples_by_bin" in _provenance(forecast)[("Paris", OLD)]
+
+
+def test_open_entry_rest_without_position_row_is_kept(env):
+    state, trade, forecast = env
+    conn = sqlite3.connect(trade)
+    conn.execute(
+        "INSERT INTO venue_commands VALUES ('c1', '', 'o1', 'tok', 'snap', 'ACKED', 'ENTRY')"
+    )
+    conn.execute("INSERT INTO venue_order_facts VALUES ('o1', 'LIVE', 5.0, 1)")
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES"
+        " ('snap', 'highest-temperature-in-paris-on-september-20-2026', 'tok', '2026-09-19')"
+    )
+    conn.commit()
+    conn.close()
+    files = _queue_files(state)
+    _run(state, trade, forecast, apply=True)
+    assert files["old"].exists()
+    assert "q_bootstrap_samples_by_bin" in _provenance(forecast)[("Paris", OLD)]

@@ -16,7 +16,20 @@ decoded, materialized, traded, monitored or read by id:
   reaches it after that), or
 * a position on that family is not terminal (``position_current.phase`` outside
   settled/voided/admin_closed): held-belief and settlement readers dereference its
-  posterior and seeds by id until the position closes.
+  posterior and seeds by id until the position closes. ``economically_closed`` is
+  deliberately non-terminal (still settleable), so its family is kept, or
+* an ENTRY rest is still open on the venue (the Day0 admission's exposure families,
+  resolved by the reactor's own ``_open_rest_family_rows_for_refresh``, which can name
+  a family from the market slug before any position row exists).
+
+Day0 readers are covered: the observation-instant scan floors target dates at UTC
+today-1 (``day0_extreme_updated._local_target_date_scan_floor``), inside
+``REACHABLE_TARGET_LAG_DAYS``; the authority-row catch-up scan has no date floor but
+its only caller admits just current-local-day market families plus held and
+open-rest families, all of which are reachable above.
+
+Unknown reachability evicts nothing: a trade-DB read failure, or a non-terminal
+position with NULL city/target_date/metric, makes the whole pass a no-op.
 
 Every other item is unreachable and evicted. Stores and what eviction removes:
 
@@ -125,8 +138,24 @@ def _read_only(db_path: Path) -> sqlite3.Connection:
     return _connect_read_only(db_path)
 
 
+class ReachabilityUnknown(RuntimeError):
+    """A family some reader can reach cannot be named; evict nothing."""
+
+
+def _open_rest_families(conn: sqlite3.Connection) -> list[tuple[str, str, str]]:
+    # Probe first: the reactor resolver swallows read errors as "no rests".
+    conn.execute("SELECT count(*) FROM venue_commands").fetchone()
+    from src.events.reactor import _open_rest_family_rows_for_refresh  # noqa: PLC0415
+
+    return _open_rest_family_rows_for_refresh(conn)
+
+
 def open_position_families(trade_db: Path) -> frozenset[Family]:
-    """Families with a non-terminal position. Raises on any read failure (fail closed)."""
+    """Families with a non-terminal position or an open ENTRY rest.
+
+    Raises on any read failure and ``ReachabilityUnknown`` on a non-terminal position
+    whose family is not fully named (fail closed).
+    """
 
     conn = _read_only(Path(trade_db))
     try:
@@ -136,14 +165,16 @@ def open_position_families(trade_db: Path) -> frozenset[Family]:
             SELECT DISTINCT city, target_date, temperature_metric
               FROM position_current
              WHERE phase NOT IN ({placeholders})
-               AND city IS NOT NULL AND target_date IS NOT NULL
-               AND temperature_metric IS NOT NULL
             """,
             tuple(sorted(TERMINAL_PHASES)),
         ).fetchall()
+        rests = _open_rest_families(conn)
     finally:
         conn.close()
-    return frozenset(_family(*row) for row in rows)
+    unnamed = [row for row in rows if any(v is None or str(v).strip() == "" for v in row)]
+    if unnamed:
+        raise ReachabilityUnknown(f"{len(unnamed)} non-terminal position family(ies) not named")
+    return frozenset(_family(*row) for row in [*rows, *rests])
 
 
 def build_reachability(*, now: datetime, trade_db: Path) -> Reachability:
