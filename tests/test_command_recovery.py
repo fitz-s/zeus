@@ -22371,92 +22371,7 @@ class TestRecoveryResolutionTable:
         conn,
     ):
         """A terminal FAK BUY keeps its exact fill without inventing a live tail."""
-        _insert(
-            conn,
-            command_id="cmd-entry-fak-partial",
-            position_id="pos-entry-fak-partial",
-            order_type="FAK",
-            size=6.0,
-            price=0.31,
-        )
-        from src.state.entry_exposure_obligation import (
-            open_entry_exposure_obligation,
-        )
-
-        open_entry_exposure_obligation(
-            conn,
-            command_id="cmd-entry-fak-partial",
-            owner_domain="trade",
-            token_id="tok-001",
-            condition_id="condition-test",
-            shares=6.0,
-            cost_basis_usd=1.86,
-            now="2026-04-26T00:00:00Z",
-        )
-        _advance_to_acked(
-            conn,
-            command_id="cmd-entry-fak-partial",
-            venue_order_id="ord-entry-fak-partial",
-        )
-        _seed_pending_entry_projection(
-            conn,
-            command_id="cmd-entry-fak-partial",
-            position_id="pos-entry-fak-partial",
-            order_id="ord-entry-fak-partial",
-        )
-        from src.state.venue_command_repo import append_event
-
-        append_event(
-            conn,
-            command_id="cmd-entry-fak-partial",
-            event_type="PARTIAL_FILL_OBSERVED",
-            occurred_at="2026-04-26T00:05:00Z",
-            payload={
-                "venue_order_id": "ord-entry-fak-partial",
-                "trade_id": "trade-entry-fak-partial",
-                "filled_size": "4",
-                "fill_price": "0.31",
-            },
-        )
-        _append_order_fact(
-            conn,
-            command_id="cmd-entry-fak-partial",
-            order_id="ord-entry-fak-partial",
-            state="PARTIALLY_MATCHED",
-            matched_size="4",
-            remaining_size="2",
-        )
-        _append_trade_fact(
-            conn,
-            command_id="cmd-entry-fak-partial",
-            order_id="ord-entry-fak-partial",
-            trade_id="trade-entry-fak-partial",
-            state="CONFIRMED",
-            filled_size="4",
-            fill_price="0.31",
-            tx_hash="0xentry-terminal-partial",
-        )
-        append_event(
-            conn,
-            command_id="cmd-entry-fak-partial",
-            event_type="REVIEW_REQUIRED",
-            occurred_at="2026-04-26T00:08:00Z",
-            payload={
-                "reason": "partial_remainder_point_order_filled_without_full_trade_fact",
-                "venue_order_id": "ord-entry-fak-partial",
-                "point_order_status": "MATCHED",
-                "point_order": {
-                    "orderID": "ord-entry-fak-partial",
-                    "status": "MATCHED",
-                    "order_type": "FAK",
-                    "side": "BUY",
-                    "asset_id": "tok-001",
-                    "original_size": "6",
-                    "size_matched": "4",
-                    "price": "0.31",
-                },
-            },
-        )
+        _seed_terminal_partial_entry_review(conn)
 
         from src.execution.command_recovery import (
             reconcile_matched_cancel_review_required_entries,
@@ -44703,6 +44618,96 @@ def test_live_tick_closed_entry_fill_review_precedes_expired_maintenance(conn, t
     assert scoped_calls == [frozenset({"cmd-001"})]
 
 
+def _seed_terminal_partial_entry_review(conn, *, order_type="FAK"):
+    """REVIEW_REQUIRED ENTRY: point order MATCHED 4/6, CONFIRMED trades cover 4."""
+    _insert(
+        conn,
+        command_id="cmd-entry-fak-partial",
+        position_id="pos-entry-fak-partial",
+        order_type=order_type,
+        size=6.0,
+        price=0.31,
+    )
+    from src.state.entry_exposure_obligation import (
+        open_entry_exposure_obligation,
+    )
+
+    open_entry_exposure_obligation(
+        conn,
+        command_id="cmd-entry-fak-partial",
+        owner_domain="trade",
+        token_id="tok-001",
+        condition_id="condition-test",
+        shares=6.0,
+        cost_basis_usd=1.86,
+        now="2026-04-26T00:00:00Z",
+    )
+    _advance_to_acked(
+        conn,
+        command_id="cmd-entry-fak-partial",
+        venue_order_id="ord-entry-fak-partial",
+    )
+    _seed_pending_entry_projection(
+        conn,
+        command_id="cmd-entry-fak-partial",
+        position_id="pos-entry-fak-partial",
+        order_id="ord-entry-fak-partial",
+    )
+    from src.state.venue_command_repo import append_event
+
+    append_event(
+        conn,
+        command_id="cmd-entry-fak-partial",
+        event_type="PARTIAL_FILL_OBSERVED",
+        occurred_at="2026-04-26T00:05:00Z",
+        payload={
+            "venue_order_id": "ord-entry-fak-partial",
+            "trade_id": "trade-entry-fak-partial",
+            "filled_size": "4",
+            "fill_price": "0.31",
+        },
+    )
+    _append_order_fact(
+        conn,
+        command_id="cmd-entry-fak-partial",
+        order_id="ord-entry-fak-partial",
+        state="PARTIALLY_MATCHED",
+        matched_size="4",
+        remaining_size="2",
+    )
+    _append_trade_fact(
+        conn,
+        command_id="cmd-entry-fak-partial",
+        order_id="ord-entry-fak-partial",
+        trade_id="trade-entry-fak-partial",
+        state="CONFIRMED",
+        filled_size="4",
+        fill_price="0.31",
+        tx_hash="0xentry-terminal-partial",
+    )
+    append_event(
+        conn,
+        command_id="cmd-entry-fak-partial",
+        event_type="REVIEW_REQUIRED",
+        occurred_at="2026-04-26T00:08:00Z",
+        payload={
+            "reason": "partial_remainder_point_order_filled_without_full_trade_fact",
+            "venue_order_id": "ord-entry-fak-partial",
+            "point_order_status": "MATCHED",
+            "point_order": {
+                "orderID": "ord-entry-fak-partial",
+                "status": "MATCHED",
+                "order_type": order_type,
+                "side": "BUY",
+                "asset_id": "tok-001",
+                "original_size": "6",
+                "size_matched": "4",
+                "price": "0.31",
+            },
+        },
+    )
+
+
 def _seed_post_ack_persistence_review(conn, *, command_id, order_id, intent_kind="ENTRY"):
     from src.state.venue_command_repo import append_event
 
@@ -45108,3 +45113,68 @@ def test_live_tick_post_ack_snapshot_failure_leaves_review_unmodified(
     assert summary["post_ack_review_snapshot_deferred"] == 1
     with factory() as persisted:
         assert _get_state(persisted, "cmd-post-ack-snapshot-failure") == "REVIEW_REQUIRED"
+
+
+@pytest.mark.parametrize("order_type", ["GTC", "FAK"])
+def test_live_tick_terminal_partial_entry_review_projects_fill_before_expired_maintenance(
+    conn, tmp_path, monkeypatch, order_type,
+):
+    """A MATCHED partial point order resolves on live_tick, not only the full sweep.
+
+    Live 2026-09-29 a7d459611a2f4e1c: CONFIRMED trades covered 5.379991 of 5.39,
+    the fast lane routed the review to the authenticated fold (which never sees a
+    partial as complete), the full sweep was starved, and the position stayed
+    fill-grade without an execution_fact -> RiskGuard DATA_DEGRADED.
+    """
+    from src.execution import command_recovery, venue_sync_contract
+
+    _seed_terminal_partial_entry_review(conn, order_type=order_type)
+    conn.commit()
+    path = tmp_path / "terminal-partial-entry-fast.db"
+    with sqlite3.connect(path) as target:
+        conn.backup(target)
+    now = [0.0]
+
+    def factory():
+        db = sqlite3.connect(path)
+        db.row_factory = sqlite3.Row
+        return db
+
+    def expire_maintenance(_conn):
+        now[0] = 1.0
+        raise sqlite3.OperationalError("interrupted")
+
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_review_required_matched_submit_trade_facts",
+        expire_maintenance,
+    )
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    command_recovery._reconcile_passes_short_conn(
+        MagicMock(), summary, "2026-04-26T00:09:00Z", scope="live_tick",
+    )
+
+    assert summary["authenticated_terminal_fill_review_fast"]["advanced"] == 1
+    with factory() as persisted:
+        assert _get_state(persisted, "cmd-entry-fak-partial") == "EXPIRED"
+        fact = persisted.execute(
+            """
+            SELECT shares, filled_at, intent_id
+              FROM execution_fact
+             WHERE position_id = 'pos-entry-fak-partial'
+               AND order_role = 'entry'
+            """
+        ).fetchone()
+        assert fact is not None
+        assert fact["shares"] == pytest.approx(4.0)
+        assert fact["filled_at"]
+        assert fact["intent_id"]
+        assert persisted.execute(
+            """
+            SELECT COUNT(*) FROM position_events
+             WHERE position_id = 'pos-entry-fak-partial'
+               AND event_type = 'ENTRY_ORDER_FILLED'
+            """
+        ).fetchone()[0] == 1

@@ -14877,9 +14877,19 @@ def _matched_cancel_review_required_candidates(
 
 def _terminal_partial_entry_review_candidates(
     conn: sqlite3.Connection,
+    *,
+    command_ids: frozenset[str] | None = None,
 ) -> list[dict]:
     if not _table_exists(conn, "venue_commands"):
         return []
+    if command_ids is not None and not command_ids:
+        return []
+    scoped_ids = tuple(sorted(command_ids)) if command_ids is not None else ()
+    scope_clause = (
+        f" AND command.command_id IN ({','.join('?' for _ in scoped_ids)})"
+        if command_ids is not None
+        else ""
+    )
     rows = conn.execute(
         """
         SELECT command.*,
@@ -14907,10 +14917,58 @@ def _terminal_partial_entry_review_candidates(
                    AND json_extract(review.payload_json, '$.reason') =
                        'partial_remainder_point_order_filled_without_full_trade_fact'
            )
+        """ + scope_clause + """
          ORDER BY command.updated_at, command.command_id
-        """
+        """,
+        scoped_ids,
     ).fetchall()
     return [_dict_row(row) for row in rows]
+
+
+def reconcile_terminal_partial_entry_reviews(
+    conn: sqlite3.Connection,
+    *,
+    command_ids: frozenset[str] | None = None,
+) -> dict:
+    """Reduce terminal partial ENTRY reviews through their one exact reducer.
+
+    SCOPE: REVIEW_REQUIRED ENTRY/BUY commands whose latest review is the
+    point-order MATCHED partial-remainder shape, optionally one exact id set.
+    DRAIN: ``_clear_review_required_terminal_partial_entry`` proves the point
+    order and CONFIRMED trade facts agree, projects that fill with its
+    execution_fact, and expires the remainder. RESET: an unproven shape stays.
+    """
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    for command in _terminal_partial_entry_review_candidates(
+        conn, command_ids=command_ids,
+    ):
+        summary["scanned"] += 1
+        command_id = str(command.get("command_id") or "")
+        venue_order_id = str(command.get("venue_order_id") or "")
+        try:
+            trade_summary = _confirmed_bound_trade_fact_summary(
+                conn,
+                command_id=command_id,
+                venue_order_id=venue_order_id,
+            )
+            if _clear_review_required_terminal_partial_entry(
+                conn,
+                command=command,
+                trade_summary=trade_summary,
+            ):
+                summary["advanced"] += 1
+            else:
+                summary["stayed"] += 1
+        except Exception as exc:
+            logger.error(
+                "recovery: terminal FAK partial ENTRY review recovery failed "
+                "for command %s: %s",
+                command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
 
 
 def _terminal_fak_partial_exit_review_command_ids(
@@ -16142,32 +16200,10 @@ def reconcile_matched_cancel_review_required_entries(
         if full_fill_command_ids is not None
         else terminal_positive_command_ids
     )
-    for command in (() if scoped_command_ids is not None else _terminal_partial_entry_review_candidates(conn)):
-        summary["scanned"] += 1
-        command_id = str(command.get("command_id") or "")
-        venue_order_id = str(command.get("venue_order_id") or "")
-        try:
-            trade_summary = _confirmed_bound_trade_fact_summary(
-                conn,
-                command_id=command_id,
-                venue_order_id=venue_order_id,
-            )
-            if _clear_review_required_terminal_partial_entry(
-                conn,
-                command=command,
-                trade_summary=trade_summary,
-            ):
-                summary["advanced"] += 1
-            else:
-                summary["stayed"] += 1
-        except Exception as exc:
-            logger.error(
-                "recovery: terminal FAK partial ENTRY review recovery failed "
-                "for command %s: %s",
-                command_id,
-                exc,
-            )
-            summary["errors"] += 1
+    if scoped_command_ids is None:
+        partial_summary = reconcile_terminal_partial_entry_reviews(conn)
+        for key in ("scanned", "advanced", "stayed", "errors"):
+            summary[key] += partial_summary[key]
 
     if scoped_command_ids is None:
         terminal_summary = _reconcile_terminal_fak_partial_exit_reviews(conn)
@@ -33749,10 +33785,18 @@ def _reconcile_passes_short_conn(
                 if str(row["command_id"]) in terminal_fill_review_command_ids
                 and _terminal_positive_review_has_exact_held_proof(conn, row)
             }
+            # A MATCHED point order whose CONFIRMED trades cover a genuine
+            # partial never becomes "complete" for the authenticated fold; its
+            # one reducer is the terminal-partial clearance.
+            terminal_partial_review_command_ids = frozenset(
+                str(row["command_id"])
+                for row in _terminal_partial_entry_review_candidates(conn)
+            )
             review_ids = sorted(
                 terminal_fill_review_command_ids
                 | point_full_fill_review_command_ids
                 | terminal_positive_review_command_ids
+                | terminal_partial_review_command_ids
             )
             all_review_command_ids = frozenset(review_ids)
             if review_ids:
@@ -33862,9 +33906,18 @@ def _reconcile_passes_short_conn(
                             conn, terminal_positive_command_ids=frozenset({command_id}),
                         )
                     else:
-                        result = reconcile_authenticated_entry_trade_facts(
-                            conn, command_id=command_id,
-                        )
+                        result = None
+                        if command_id in terminal_partial_review_command_ids:
+                            result = reconcile_terminal_partial_entry_reviews(
+                                conn, command_ids=frozenset({command_id}),
+                            )
+                        if result is None or not (
+                            result.get("advanced")
+                            or _recovery_result_has_errors(result)
+                        ):
+                            result = reconcile_authenticated_entry_trade_facts(
+                                conn, command_id=command_id,
+                            )
                     if _recovery_result_has_errors(result):
                         raise RuntimeError(
                             f"terminal fill review failed for command {command_id}"
