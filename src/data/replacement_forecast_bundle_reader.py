@@ -581,6 +581,21 @@ def _hko_current_temperature_clock_reason(
         raw = evidence["raw_report"]
         if not isinstance(raw, str) or hashlib.sha256(raw.encode("utf-8")).hexdigest() != evidence["raw_report_sha256"]:
             raise ValueError("raw clock evidence mismatch")
+        if state.get("source") == "hko_current_1min_mean":
+            from src.data.day0_hourly_vectors import replay_hko_current_temperature_print
+
+            cutoff = _parse_utc(str(provenance["day0_remaining_carrier_probability_cutoff_utc"]),field_name="carrier_cutoff")
+            reproduced = replay_hko_current_temperature_print(raw,
+                representation_updated_at=_parse_utc(str(evidence["representation_updated_at_utc"]),field_name="representation_updated_at_utc"),
+                available_at=_parse_utc(str(evidence["available_at_utc"]),field_name="available_at_utc"),decision_time=cutoff)
+            if (
+                evidence != reproduced.clock_evidence
+                or state.get("observed_at_utc") != reproduced.observed_at.isoformat()
+                or isinstance(state.get("value_native"),bool)
+                or state.get("value_native") != reproduced.value_native
+            ):
+                raise ValueError("HKO minute-mean current state mismatch")
+            return None
         temperature = json.loads(raw)
         published = _parse_utc(str(evidence["published_at_utc"]), field_name="published_at_utc")
         available = _parse_utc(str(evidence["available_at_utc"]), field_name="available_at_utc")

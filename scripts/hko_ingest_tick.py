@@ -52,6 +52,7 @@ import logging
 import math
 import sqlite3
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as _FutureTimeoutError
 from dataclasses import dataclass
@@ -115,6 +116,15 @@ class HkoExtremaPrefetch:
     last_modified: str | None
 
 
+@dataclass(frozen=True)
+class HkoCurrentTemperaturePrefetch:
+    body: bytes
+    fetched_at: datetime
+    last_modified: str
+    etag: str | None
+    response_headers: dict[str, str] | None = None
+
+
 class HkoPrefetchTimeoutError(httpx.TimeoutException):
     """An HKO prefetch exceeded its absolute total-duration budget.
 
@@ -140,6 +150,59 @@ class HkoExtremaPoller:
         self._total_budget_s = float(total_budget_s)
         self._etag: str | None = None
         self._last_modified: str | None = None
+        self._current_etag: str | None = None
+        self._current_last_modified: str | None = None
+
+    def prefetch_products(self) -> tuple[HkoExtremaPrefetch | None, HkoCurrentTemperaturePrefetch | None]:
+        """Independent products within one absolute source-I/O deadline.
+
+        A 304 or invalid sibling does not erase a valid product. Validators
+        advance individually only after the caller's canonical commit.
+        """
+        from src.data.day0_hourly_vectors import (
+            HKO_CURRENT_TEMPERATURE_URL, hko_current_temperature_evidence,
+        )
+        deadline = time.monotonic()+self._total_budget_s
+        executor = ThreadPoolExecutor(max_workers=2)
+        jobs = []
+        def fetch(url, headers):
+            response = self._client.get(url,headers=headers)
+            return response,datetime.now(timezone.utc)
+        for url, etag, modified in (
+            (HKO_EXTREMA_URL,self._etag,self._last_modified),
+            (HKO_CURRENT_TEMPERATURE_URL,self._current_etag,self._current_last_modified),
+        ):
+            headers = {}
+            if etag: headers["If-None-Match"] = etag
+            if modified: headers["If-Modified-Since"] = modified
+            jobs.append(executor.submit(fetch,url,headers))
+        values = [None,None]
+        try:
+            for index, future in enumerate(jobs):
+                try:
+                    response, fetched = future.result(timeout=max(0,deadline-time.monotonic()))
+                    if response.status_code == 304:
+                        continue
+                    response.raise_for_status()
+                    if index == 0:
+                        values[index] = HkoExtremaPrefetch(
+                            _parse_hko_extrema_csv(response.text,fetched_at_utc=fetched.isoformat()),
+                            response.headers.get("etag"),response.headers.get("last-modified"))
+                    else:
+                        modified = response.headers.get("last-modified")
+                        hko_current_temperature_evidence(response.content,last_modified=modified,
+                            fetched_at=fetched,written_at=fetched,response_headers=response.headers)
+                        values[index] = HkoCurrentTemperaturePrefetch(
+                            response.content,fetched,modified,response.headers.get("etag"),dict(response.headers))
+                except (httpx.HTTPError, _FutureTimeoutError, TypeError, ValueError, UnicodeError) as exc:
+                    logger.warning("HKO product unavailable product=%s reason=%s",index,type(exc).__name__)
+        finally:
+            executor.shutdown(wait=False)
+        return values[0],values[1]
+
+    def acknowledge_current(self, prefetch: HkoCurrentTemperaturePrefetch) -> None:
+        self._current_etag = prefetch.etag
+        self._current_last_modified = prefetch.last_modified
 
     def prefetch(self) -> HkoExtremaPrefetch | None:
         headers: dict[str, str] = {}
@@ -197,6 +260,32 @@ class HkoExtremaPoller:
     def close(self) -> None:
         if self._owns_client:
             self._client.close()
+
+
+def append_hko_current_temperature_print(
+    conn: sqlite3.Connection, *, body: bytes, last_modified: str,
+    fetched_at: datetime, written_at: datetime,
+    response_headers: dict[str, str] | None = None,
+) -> bool:
+    """Append CURRENT_ONLY exact-body evidence inside the caller's transaction.
+
+    The legacy publish column holds the typed HTTP representation clock, not
+    an invented formal issue time. No accumulator, extrema, or event is written.
+    Re-serving the same physical row never renews its first possession clock.
+    """
+    from src.data.day0_hourly_vectors import hko_current_temperature_evidence
+    from src.state.schema.observation_prints_schema import append_print
+    proof = hko_current_temperature_evidence(body,last_modified=last_modified,
+        fetched_at=fetched_at,written_at=written_at,response_headers=response_headers)
+    exists = conn.execute("""SELECT 1 FROM observation_prints WHERE city=? AND station_id=?
+        AND source_channel=? AND value_native=?
+        AND json_extract(raw_report,'$.observed_at_utc')=? LIMIT 1""",
+        (HK_CITY_NAME,"HKO",proof["source"],proof["value_native"],proof["observed_at_utc"])).fetchone()
+    if exists:
+        return False
+    return append_print(conn,city=HK_CITY_NAME,station_id="HKO",source_channel=proof["source"],
+        publish_ts_utc=proof["representation_updated_at_utc"],value_native=proof["value_native"],unit="C",
+        fetched_at_utc=proof["available_at_utc"],raw_report=json.dumps(proof,sort_keys=True,separators=(",",":")))
 
 
 def _append_log(log_path: Path, entry: dict) -> None:

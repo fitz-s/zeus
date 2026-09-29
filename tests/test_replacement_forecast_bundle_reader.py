@@ -3990,6 +3990,51 @@ def test_current_ensemble_snapshot_rejects_intrinsic_valid_but_blocked_target_co
     assert reason == "REPLACEMENT_CURRENT_ENSEMBLE_SNAPSHOT_COVERAGE_BLOCKED"
 
 
+@pytest.mark.parametrize("damage", [None,"body_sha","state_value","clock_role","station","old_cut","naive_clock"])
+def test_hko_minute_mean_clock_gate_replays_exact_current_only_body(damage):
+    """Only the clock boundary; complete normal authority is covered in W3."""
+    import copy
+    from scripts.hko_ingest_tick import append_hko_current_temperature_print
+    from src.config import cities_by_name
+    from src.data.day0_hourly_vectors import read_day0_current_temperature_state
+    from src.state.schema.observation_prints_schema import ensure_table
+    conn = _conn()
+    ensure_table(conn)
+    observed = datetime(2026,9,29,22,30,tzinfo=timezone.utc)
+    available = observed+timedelta(minutes=12,seconds=51)
+    decision = available+timedelta(seconds=2)
+    body = (b"Date time,Automatic Weather Station,Air Temperature(degree Celsius)\n"
+            b"202609300630,HK Observatory,28.8\n")
+    assert append_hko_current_temperature_print(conn,body=body,
+        last_modified="Tue, 29 Sep 2026 22:38:57 GMT",fetched_at=available,
+        written_at=available+timedelta(seconds=1))
+    state = read_day0_current_temperature_state(conn=conn,city=cities_by_name["Hong Kong"],
+        target_date="2026-09-30",decision_time=decision)
+    provenance = {"day0_current_temperature_state":state.identity(),
+        "day0_current_temperature_clock_evidence":copy.deepcopy(state.clock_evidence),
+        "day0_preliminary_report_survival_likelihood":{},"day0_remaining_vector_witness":{},
+        "day0_remaining_carrier_content_identity":"clock-test-only",
+        "day0_remaining_carrier_operator":"clock-test-only","day0_remaining_carrier_q":[.5,.5],
+        "day0_remaining_carrier_sample_count":1,"day0_remaining_carrier_future_extremes_c":[29],
+        "day0_remaining_carrier_path_error_sigma_c":.3,
+        "day0_remaining_carrier_probability_cutoff_utc":decision.isoformat(),
+        "day0_remaining_carrier_probability_samples":[[.5,.5]]}
+    evidence = provenance["day0_current_temperature_clock_evidence"]
+    if damage == "body_sha":
+        raw = json.loads(evidence["raw_report"])
+        raw["body_sha256"] = "0"*64
+        evidence["raw_report"] = json.dumps(raw)
+        evidence["raw_report_sha256"] = hashlib.sha256(evidence["raw_report"].encode()).hexdigest()
+    elif damage == "state_value":provenance["day0_current_temperature_state"]["value_native"] = 29
+    elif damage == "clock_role":evidence["publication_clock_role"] = "FORMAL_BULLETIN_ISSUED"
+    elif damage == "station":evidence["station_id"] = "HK_AIRPORT"
+    elif damage == "old_cut":provenance["day0_remaining_carrier_probability_cutoff_utc"] = observed.isoformat()
+    elif damage == "naive_clock":evidence["representation_updated_at_utc"] = "2026-09-29T22:38:57"
+    reason = reader._hko_current_temperature_clock_reason(provenance,city="Hong Kong")
+    assert (reason is None) is (damage is None)
+    assert reader._hko_current_temperature_clock_reason(provenance,city="Paris") is None
+
+
 @pytest.mark.parametrize("damage", [None, "missing", "old_clock", "raw_hash", "wrong_value", "future_record"])
 def test_hko_clock_read_gate_reproduces_raw_record_not_revision_label(damage):
     """This is the clock gate only, not a fabricated complete pin authority."""

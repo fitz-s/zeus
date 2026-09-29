@@ -43,6 +43,75 @@ from src.data.day0_observation_reader import (
 )
 
 
+def test_hko_minute_mean_normal_writer_selects_observed_clock_and_preserves_raw_body():
+    from scripts.hko_ingest_tick import append_hko_current_temperature_print
+    from src.config import cities_by_name
+    from src.data.day0_hourly_vectors import read_day0_current_temperature_state
+    from src.state.schema.observation_prints_schema import ensure_table
+
+    body = (b"Date time,Automatic Weather Station,Air Temperature(degree Celsius)\n"
+            b"202609300630,HK Observatory,28.8\n"
+            b"202609300640,HK Airport,29.2\n")
+    conn = sqlite3.connect(":memory:")
+    ensure_table(conn)
+    available = datetime(2026, 9, 29, 22, 42, 51, tzinfo=timezone.utc)
+    assert append_hko_current_temperature_print(conn, body=body,
+        last_modified="Tue, 29 Sep 2026 22:38:57 GMT", fetched_at=available,
+        written_at=available + timedelta(seconds=1))
+    state = read_day0_current_temperature_state(conn=conn,city=cities_by_name["Hong Kong"],
+        target_date="2026-09-30",decision_time=available+timedelta(seconds=2))
+    assert state is not None and state.source == "hko_current_1min_mean"
+    assert state.value_native == 28.8
+    assert state.observed_at == datetime(2026,9,29,22,30,tzinfo=timezone.utc)
+    proof = state.clock_evidence
+    assert proof["publication_clock_role"] == "HTTP_REPRESENTATION_LAST_MODIFIED"
+    assert proof["averaging_window_seconds"] == 60
+    assert proof["station_id"] == "HKO_HQ"
+    import base64
+    assert base64.b64decode(json.loads(proof["raw_report"])["body_base64"]) == body
+    # A repeated physical row cannot renew possession when HTTP validators change.
+    assert not append_hko_current_temperature_print(conn,body=body,
+        last_modified="Tue, 29 Sep 2026 22:40:00 GMT",fetched_at=available+timedelta(seconds=3),
+        written_at=available+timedelta(seconds=4))
+    assert conn.execute("SELECT COUNT(*) FROM observation_prints").fetchone()[0] == 1
+    assert read_day0_current_temperature_state(conn=conn,city=cities_by_name["Hong Kong"],
+        target_date="2026-09-30",decision_time=available-timedelta(seconds=1)) is None
+    conn.close()
+
+
+@pytest.mark.parametrize("case", ["missing_lm","future_lm","stale_observed","wrong_station","wrong_unit","duplicate_hq","nan"])
+def test_hko_minute_mean_bad_source_keeps_legal_rhr_current_state(case):
+    from scripts.hko_ingest_tick import append_hko_current_temperature_print
+    from src.config import cities_by_name
+    from src.data.day0_hourly_vectors import read_day0_current_temperature_state
+    from src.state.schema.observation_prints_schema import append_print,ensure_table
+    conn = sqlite3.connect(":memory:")
+    ensure_table(conn)
+    available = datetime(2026,9,29,22,42,51,tzinfo=timezone.utc)
+    raw = json.dumps({"recordTime":"2026-09-29T22:00:00+00:00","data":[
+        {"place":"Hong Kong Observatory","value":29,"unit":"C"}]})
+    append_print(conn,city="Hong Kong",station_id="HKO",source_channel="hko_rhrread_spot",
+        publish_ts_utc="2026-09-29T22:02:00+00:00",fetched_at_utc="2026-09-29T22:03:00+00:00",
+        value_native=29,unit="C",raw_report=raw)
+    row = "202609300630,HK Observatory,28.8\n"
+    if case == "stale_observed":row = row.replace("0630","0600")
+    if case == "wrong_station":row = row.replace("HK Observatory","HK Airport")
+    if case == "duplicate_hq":row += row
+    if case == "nan":row = row.replace("28.8","NaN")
+    header = "Date time,Automatic Weather Station,Air Temperature(degree Celsius)\n"
+    if case == "wrong_unit":header = header.replace("Celsius","Fahrenheit")
+    lm = None if case == "missing_lm" else (
+        "Tue, 29 Sep 2026 22:50:00 GMT" if case == "future_lm" else "Tue, 29 Sep 2026 22:38:57 GMT")
+    with pytest.raises((ValueError,TypeError)):
+        append_hko_current_temperature_print(conn,body=(header+row).encode(),last_modified=lm,
+            fetched_at=available,written_at=available+timedelta(seconds=1))
+    state = read_day0_current_temperature_state(conn=conn,city=cities_by_name["Hong Kong"],
+        target_date="2026-09-30",decision_time=available+timedelta(seconds=2))
+    assert state is not None and state.source == "hko_rhrread_spot" and state.value_native == 29
+    assert conn.execute("SELECT COUNT(*) FROM observation_prints").fetchone()[0] == 1
+    conn.close()
+
+
 @pytest.mark.parametrize(
     "record_time, expected",
     [

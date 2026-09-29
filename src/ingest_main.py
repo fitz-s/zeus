@@ -2499,12 +2499,14 @@ def _replay_hko_station_day0_events() -> dict[str, object]:
 
 @_scheduler_job("ingest_k2_hko_tick")
 def _k2_hko_tick():
-    """Poll HKO extrema conditionally and publish changed facts after commit."""
+    """Commit independent HKO extreme and CURRENT_ONLY source products."""
 
     import sqlite3
 
     from src.data.job_lock import acquire_lock
-    from scripts.hko_ingest_tick import DEFAULT_LOG_PATH, project_accumulator_to_v2
+    from scripts.hko_ingest_tick import (
+        DEFAULT_LOG_PATH, project_accumulator_to_v2, append_hko_current_temperature_print,
+    )
     from src.config import runtime_cities_by_name
     from src.contracts.settlement_semantics import SettlementSemantics
     from src.events.event_writer import EventWriter
@@ -2517,14 +2519,17 @@ def _k2_hko_tick():
     )
 
     poller = _day0_hko_poller()
-    prefetch = poller.prefetch()
-    if prefetch is None:
+    # No network under the canonical write lease. Both products share one
+    # absolute prefetch deadline but retain independent HTTP validators.
+    prefetch, current_prefetch = poller.prefetch_products()
+    if prefetch is None and current_prefetch is None:
+        _replay_hko_current_temperature_redecision()
         return _replay_hko_station_day0_events()
 
-    snapshot = prefetch.snapshot
+    snapshot = prefetch.snapshot if prefetch is not None else None
     hko_city = runtime_cities_by_name()["Hong Kong"]
     family_admission = _day0_family_admission_for_scopes(
-        (("Hong Kong", snapshot.target_date),)
+        (("Hong Kong", snapshot.target_date),) if snapshot is not None else ()
     )
     write_budget_s = _day0_metar_write_budget_seconds()
     write_deadline = time.monotonic() + write_budget_s
@@ -2533,6 +2538,10 @@ def _k2_hko_tick():
     acquired = False
     inserted_event_ids: tuple[str, ...] = ()
     inserted_families: tuple[tuple[str, str, str], ...] = ()
+    current_written = False
+    current_written_at = None
+    current_redecision = ()
+    project_result = {"written":0}
     try:
         with acquire_lock("hko_tick") as source_acquired:
             if not source_acquired:
@@ -2556,13 +2565,24 @@ def _k2_hko_tick():
                 conn.execute(f"PRAGMA busy_timeout = {remaining_ms}")
                 before_changes = int(conn.total_changes)
                 commit_started = time.monotonic()
-                project_result = project_accumulator_to_v2(
-                    conn,
-                    "v1.wu-native",
-                    DEFAULT_LOG_PATH,
-                    snapshot=snapshot,
-                )
+                if snapshot is not None:
+                    project_result = project_accumulator_to_v2(
+                        conn,"v1.wu-native",DEFAULT_LOG_PATH,snapshot=snapshot,
+                    )
                 decision_time = datetime.now(timezone.utc)
+                if current_prefetch is not None:
+                    current_written_at = decision_time
+                    try:
+                        current_written = append_hko_current_temperature_print(conn,
+                            body=current_prefetch.body,last_modified=current_prefetch.last_modified,
+                            fetched_at=current_prefetch.fetched_at,written_at=current_written_at,
+                            response_headers=current_prefetch.response_headers)
+                    except (ValueError, TypeError, UnicodeError):
+                        # SCOPE: one invalid CURRENT_ONLY representation. DRAIN:
+                        # next source tick. RESET: valid clocks/body; extrema and
+                        # other lawful current sources remain usable.
+                        current_prefetch = None
+                        logger.warning("HKO CURRENT_ONLY source unavailable",exc_info=True)
                 trigger = Day0ExtremeUpdatedTrigger(
                     EventWriter(conn),
                     family_admission=family_admission,
@@ -2574,7 +2594,7 @@ def _k2_hko_tick():
                     decision_time=decision_time,
                     received_at=decision_time.isoformat(),
                     limit=4,
-                )
+                ) if snapshot is not None else ()
                 inserted_event_ids = tuple(
                     result.event_id for result in results if result.inserted
                 )
@@ -2605,7 +2625,10 @@ def _k2_hko_tick():
                         int(conn.total_changes) - before_changes,
                     ),
                 )
-                poller.acknowledge(prefetch)
+                if prefetch is not None:
+                    poller.acknowledge(prefetch)
+                if current_prefetch is not None:
+                    poller.acknowledge_current(current_prefetch)
     except WriteLeaseTimeout:
         return {"status": "WRITE_CONTENDED"}
     except sqlite3.OperationalError as exc:
@@ -2625,11 +2648,20 @@ def _k2_hko_tick():
         event_ids=inserted_event_ids,
         families=inserted_families,
     )
+    if current_written:
+        from src.data.day0_hourly_vectors import hko_current_temperature_evidence
+
+        proof = hko_current_temperature_evidence(current_prefetch.body,
+            last_modified=current_prefetch.last_modified,fetched_at=current_prefetch.fetched_at,
+            written_at=current_written_at,response_headers=current_prefetch.response_headers)
+        target_date = datetime.fromisoformat(proof["observed_at_utc"]).astimezone(
+            ZoneInfo("Asia/Hong_Kong")).date().isoformat()
+        current_redecision = _bridge_committed_hko_current_temperature(target_date=target_date,written_at=current_written_at)
     logger.info(
         "K2 hko_source_clock: observed_at=%s target_date=%s written=%s "
         "events_emitted=%d",
-        snapshot.observed_at_utc,
-        snapshot.target_date,
+        snapshot.observed_at_utc if snapshot is not None else None,
+        snapshot.target_date if snapshot is not None else None,
         project_result.get("written"),
         len(inserted_event_ids),
     )
@@ -2637,7 +2669,89 @@ def _k2_hko_tick():
         **project_result,
         "status": "COMMITTED",
         "events_emitted": len(inserted_event_ids),
+        "current_print_written": current_written,
+        "current_redecision": current_redecision,
     }
+
+
+def _bridge_committed_hko_current_temperature(*, target_date: str, written_at: datetime) -> tuple[dict, ...]:
+    """Reprice unchanged extrema through the existing same-cycle seed transport.
+
+    Current-only mean never emits DAY0_EXTREME_UPDATED. The real possession cut
+    requires a successor computation even when the absorbing boundary is the
+    same. ``held_position`` here selects existing repair queue priority, not
+    trading authority (the existing ENTRY mismatch caller uses this same API).
+    """
+    from src.data.replacement_cycle_advance_trigger import (
+        enqueue_single_family_cycle_advance_reseed, _DAY0_STATION_RESEED_DEADLINE_SECONDS,
+    )
+    from src.data.replacement_forecast_production import _replacement_forecast_live_materialization_queue_config
+    from src.runtime.reactor_wake import publish_reactor_wake
+
+    try:
+        cfg = _replacement_forecast_live_materialization_queue_config()
+    except Exception:
+        logger.warning("HKO current redecision config unavailable",exc_info=True)
+        return ({"status":"HKO_CURRENT_RESEED_UNAVAILABLE"},)
+    if any(cfg.get(key) is None for key in ("forecast_db","seed_dir","raw_manifest_dir")):
+        return ({"status":"HKO_CURRENT_RESEED_NOT_CONFIGURED"},)
+    families = tuple(("Hong Kong",target_date,metric) for metric in ("high","low"))
+    deadline = time.monotonic()+_DAY0_STATION_RESEED_DEADLINE_SECONDS
+    reports = []
+    for city, target, metric in families:
+        try:
+            reports.append(enqueue_single_family_cycle_advance_reseed(
+                forecast_db=Path(str(cfg["forecast_db"])),seed_dir=Path(str(cfg["seed_dir"])),
+                raw_manifest_dir=Path(str(cfg["raw_manifest_dir"])),city=city,target_date=target,metric=metric,
+                computed_at=datetime.now(timezone.utc),held_position=True,
+                minimum_posterior_computed_at=written_at,deadline_monotonic=deadline))
+        except Exception:
+            logger.warning("HKO current redecision seed unavailable metric=%s",metric,exc_info=True)
+            reports.append({"status":"HKO_CURRENT_RESEED_UNAVAILABLE","metric":metric})
+    try:
+        publish_reactor_wake(source="hko_current_1min_mean",reason="current_temperature_print_committed",
+            event_ids=(),forecast_families=families)
+    except Exception:
+        logger.warning("HKO current redecision wake unavailable; periodic recompute remains",exc_info=True)
+    return tuple(reports)
+
+
+def _replay_hko_current_temperature_redecision() -> tuple[dict, ...]:
+    """A 304/restart retries a possessed fresh current print, without new clocks.
+
+    SCOPE: one current local-day HQ print. DRAIN: the existing exact seed/owner
+    marker, queue and materializer. RESET: a posterior computed after possession
+    makes the same-cycle request a no-op. Stale/malformed source remains absent.
+    """
+    from src.state.db import get_world_connection_read_only
+    from src.data.day0_hourly_vectors import replay_hko_current_temperature_print
+
+    now = datetime.now(timezone.utc)
+    conn = None
+    try:
+        conn = get_world_connection_read_only()
+        rows = conn.execute("""SELECT publish_ts_utc,fetched_at_utc,raw_report FROM observation_prints
+            WHERE city=? AND source_channel=? AND julianday(fetched_at_utc)<=julianday(?)
+            ORDER BY publish_ts_utc DESC,id DESC LIMIT 4""",
+            ("Hong Kong","hko_current_1min_mean",now.isoformat())).fetchall()
+    except Exception:
+        logger.warning("HKO current redecision replay unavailable",exc_info=True)
+        return ()
+    finally:
+        if conn is not None:
+            conn.close()
+    for published,available,raw in rows:
+        try:
+            state = replay_hko_current_temperature_print(raw,
+                representation_updated_at=datetime.fromisoformat(published),
+                available_at=datetime.fromisoformat(available),decision_time=now)
+            proof = state.clock_evidence
+        except (KeyError,TypeError,ValueError,UnicodeError):
+            continue
+        return _bridge_committed_hko_current_temperature(
+            target_date=state.observed_at.astimezone(ZoneInfo("Asia/Hong_Kong")).date().isoformat(),
+            written_at=datetime.fromisoformat(proof["written_at_utc"]))
+    return ()
 
 
 # Staleness threshold for boot-time force-fetch.  A once-per-day cron

@@ -38,8 +38,11 @@ bayes_precision_fusion lane: convert at the consumption seam, never store mixed 
 from __future__ import annotations
 
 import contextlib
+import base64
+import csv
 import fcntl
 import hashlib
+import io
 import json
 import logging
 import math
@@ -52,6 +55,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from functools import lru_cache
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -3987,6 +3991,102 @@ def remaining_day_extremes_c(
     return out
 
 
+HKO_CURRENT_TEMPERATURE_URL = (
+    "https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/"
+    "latest_1min_temperature.csv"
+)
+HKO_CURRENT_TEMPERATURE_CHANNEL = "hko_current_1min_mean"
+HKO_CURRENT_TEMPERATURE_MAX_AGE = timedelta(minutes=25)
+
+
+def hko_current_temperature_evidence(
+    body: bytes, *, last_modified: str, fetched_at: datetime, written_at: datetime,
+    response_headers: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Retain the provisional one-minute mean, not an extreme or hard fact.
+
+    HTTP Last-Modified dates this representation, not a formal bulletin issue.
+    The CSV row supplies the physical observation clock. Reported decimal
+    precision does not assert a rounding interval or change instrument noise.
+    """
+    if not isinstance(body, bytes) or not body or len(body) > 65_536:
+        raise ValueError("HKO current body unavailable or oversized")
+    updated = parsedate_to_datetime(last_modified)
+    if any(clock.tzinfo is None for clock in (updated, fetched_at, written_at)):
+        raise ValueError("HKO current clocks must be aware")
+    updated, fetched, written = (clock.astimezone(UTC) for clock in (updated, fetched_at, written_at))
+    reader = csv.DictReader(io.StringIO(body.decode("utf-8-sig")))
+    if reader.fieldnames != ["Date time", "Automatic Weather Station", "Air Temperature(degree Celsius)"]:
+        raise ValueError("HKO current Celsius quantity header unavailable")
+    rows = [row for row in reader if row.get("Automatic Weather Station") == "HK Observatory"]
+    if len(rows) != 1:
+        raise ValueError("HKO current exact HQ row unavailable")
+    row = rows[0]
+    observed = datetime.strptime(row["Date time"], "%Y%m%d%H%M").replace(
+        tzinfo=ZoneInfo("Asia/Hong_Kong")
+    ).astimezone(UTC)
+    value = float(row["Air Temperature(degree Celsius)"])
+    if (
+        not math.isfinite(value)
+        or not observed <= updated <= fetched <= written
+        or fetched-observed > HKO_CURRENT_TEMPERATURE_MAX_AGE
+        or fetched-updated > HKO_CURRENT_TEMPERATURE_MAX_AGE
+    ):
+        raise ValueError("HKO current value/causal clock unavailable")
+    headers = {str(key).lower():str(value) for key,value in (response_headers or {}).items()
+        if str(key).lower() in {"last-modified","date","etag","content-type"}}
+    if headers.get("last-modified",last_modified) != last_modified:
+        raise ValueError("HKO current representation header mismatch")
+    headers["last-modified"] = last_modified
+    if "date" in headers:
+        response_date = parsedate_to_datetime(headers["date"])
+        if response_date.tzinfo is None or not updated <= response_date <= fetched:
+            raise ValueError("HKO current HTTP response clock unavailable")
+    return {
+        "source": HKO_CURRENT_TEMPERATURE_CHANNEL,
+        "source_endpoint": HKO_CURRENT_TEMPERATURE_URL,
+        "station_id": "HKO_HQ", "station_alias": "HK Observatory",
+        "quantity": "one_minute_mean_air_temperature",
+        "authority": "CURRENT_ONLY", "averaging_window_seconds": 60,
+        "reported_precision_c": 0.1, "unit": "C", "value_native": value,
+        "observed_at_utc": observed.isoformat(),
+        "publication_clock_role": "HTTP_REPRESENTATION_LAST_MODIFIED",
+        "representation_updated_at_utc": updated.isoformat(),
+        "last_modified": last_modified, "available_at_utc": fetched.isoformat(),
+        "http_response_headers": headers,
+        "written_at_utc": written.isoformat(),
+        "body_base64": base64.b64encode(body).decode("ascii"),
+        "body_sha256": hashlib.sha256(body).hexdigest(),
+    }
+
+
+def replay_hko_current_temperature_print(
+    raw_report: str, *, representation_updated_at: datetime,
+    available_at: datetime, decision_time: datetime,
+) -> Day0CurrentTemperatureState:
+    """Pure replay of a possessed CSV print; no HTTP, no authority upgrade."""
+    if representation_updated_at.tzinfo is None:
+        raise ValueError("HKO representation clock must be aware")
+    proof = json.loads(raw_report)
+    body = base64.b64decode(proof["body_base64"], validate=True)
+    written = datetime.fromisoformat(proof["written_at_utc"])
+    reproduced = hko_current_temperature_evidence(body,last_modified=proof["last_modified"],
+        fetched_at=available_at,written_at=written,response_headers=proof.get("http_response_headers"))
+    if (
+        proof != reproduced or decision_time.tzinfo is None
+        or representation_updated_at.astimezone(UTC).isoformat() != proof["representation_updated_at_utc"]
+        or written > decision_time or decision_time-available_at > HKO_CURRENT_TEMPERATURE_MAX_AGE
+        or decision_time-datetime.fromisoformat(proof["observed_at_utc"]) > HKO_CURRENT_TEMPERATURE_MAX_AGE
+    ):
+        raise ValueError("HKO current immutable print/cutoff mismatch")
+    return Day0CurrentTemperatureState(
+        value_native=proof["value_native"], observed_at=datetime.fromisoformat(proof["observed_at_utc"]),
+        source=HKO_CURRENT_TEMPERATURE_CHANNEL,
+        clock_evidence={**proof, "raw_report": raw_report,
+            "raw_report_sha256": hashlib.sha256(raw_report.encode("utf-8")).hexdigest()},
+    )
+
+
 def day0_current_temperature_channels(city: Any) -> tuple[str, tuple[str, ...]] | None:
     """Return the station and physical-current channels admitted for a city."""
 
@@ -4000,7 +4100,7 @@ def day0_current_temperature_channels(city: Any) -> tuple[str, tuple[str, ...]] 
     if source_type == "wu_icao":
         channels = ("wu_icao_history", "aviationweather_metar")
     elif source_type == "hko":
-        channels = ("hko_rhrread_spot",)
+        channels = ("hko_rhrread_spot", HKO_CURRENT_TEMPERATURE_CHANNEL)
     elif source_type == "noaa":
         channels = (f"noaa_wrh_{station.lower()}", f"ogimet_metar_{station.lower()}", "aviationweather_metar")
     else:
@@ -4195,6 +4295,19 @@ def read_day0_current_temperature_state(
                 "published_at_utc": published.isoformat(),
                 "available_at_utc": fetched.isoformat(),
             }
+        elif channel == HKO_CURRENT_TEMPERATURE_CHANNEL:
+            try:
+                if station_raw != "HKO":
+                    continue
+                state = replay_hko_current_temperature_print(str(raw_report or ""),
+                    representation_updated_at=published,available_at=fetched,decision_time=decision_utc)
+                if state.value_native != value or unit != "C":
+                    continue
+            except (KeyError, TypeError, ValueError, UnicodeError):
+                # SCOPE: this CURRENT_ONLY print. DRAIN/RESET: the next valid
+                # HQ representation; other lawful observation sources survive.
+                continue
+            observation_time, clock_evidence = state.observed_at, state.clock_evidence
         observation_time = observation_time.astimezone(UTC)
         if (
             observation_time > decision_utc
@@ -4204,14 +4317,19 @@ def read_day0_current_temperature_state(
             continue
         # Publication can lag physical observation. Delayed older reports
         # cannot roll back the current state used by entry and held paths.
-        # At the SAME physical instant, value-identity-proven settlement-grade
-        # channels outrank physical-only channels. Never special-case a provider:
-        # Helsinki FMI is deliberately physical-only after observed mismatches.
+        # At the SAME physical instant, preserve verified native precision.
+        # The HKO native path above has already replayed its body and clocks;
+        # FMI remains physical-only unless actual value identity proves grade.
         settlement_grade = (
             channel in base_settlement_channels
             or bool(route is not None and route.settlement_grade)
         )
-        clock = (observation_time, int(settlement_grade), published, fetched)
+        clock = (
+            observation_time,
+            int(settlement_grade or channel == HKO_CURRENT_TEMPERATURE_CHANNEL),
+            published,
+            fetched,
+        )
         if latest_clock is None or clock > latest_clock:
             latest_clock = clock
             latest_state = Day0CurrentTemperatureState(

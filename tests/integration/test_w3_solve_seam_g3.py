@@ -48380,6 +48380,7 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric):
     cut = datetime(2026, 9, 30, 6, 20, tzinfo=utc)
     target = date(2026, 9, 30)
     city = runtime_cities_by_name()["Hong Kong"]
+    city_id = city.name.upper().replace(" ","_")
     station = runtime_station_geometry_for_city(city)
     db = tmp_path / f"hko-{metric}.db"
     conn = _hourly_schema_conn(db)
@@ -48395,8 +48396,9 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric):
     release = f"ecmwf_open_data:{track}"
     write_source_run(conn, source_run_id=run_id, source_id="ecmwf_open_data", track=track,
         release_calendar_key=release, source_cycle_time=cycle, source_available_at=issued,
+        source_release_time=issued,
         fetch_finished_at=issued, captured_at=issued, imported_at=issued,
-        target_local_date=target.isoformat(), city_id=city.name, city_timezone=city.timezone,
+        target_local_date=target.isoformat(), city_id=city_id, city_timezone=city.timezone,
         temperature_metric=metric, physical_quantity=identity.physical_quantity,
         observation_field=identity.observation_field, data_version=identity.data_version,
         expected_members=51, observed_members=51, expected_steps_json=[0, 3, 6],
@@ -48410,7 +48412,7 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric):
         completeness_status,readiness_status,computed_at,expires_at,recorded_at)
         VALUES (?,?, 'ecmwf_open_data','native_grib',?,?,?,?,?,?,?,?,?,?,51,51,
         '[0,3,6]','[0,3,6]','[1]','2026-09-29T16:00:00+00:00','2026-09-30T16:00:00+00:00',
-        'COMPLETE','LIVE_ELIGIBLE',?,?,?)""", (run_id,run_id,release,track,city.name,city.name,
+        'COMPLETE','LIVE_ELIGIBLE',?,?,?)""", (run_id,run_id,release,track,city_id,city.name,
         city.timezone,target.isoformat(),metric,identity.physical_quantity,identity.observation_field,
         identity.data_version,issued.isoformat(),(cut+timedelta(days=1)).isoformat(),issued.isoformat()))
     neighbors = [dict(flat_index=100+i, lat=station["lat"]+dy, lon=station["lon"]+dx,
@@ -48437,12 +48439,15 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric):
         issue_time,available_at,fetch_time,lead_hours,members_json,model_version,dataset_id,
         source_id,source_run_id,source_cycle_time,source_available_at,authority,causality_status,
         boundary_ambiguous,forecast_window_attribution_status,contributes_to_target_extrema,
-        members_unit,recorded_at,provenance_json) VALUES (1,?,?,?,?,?,?,?,?,24,?,'ecmwf_ens',?,
-        'ecmwf_open_data',?,?,?,'VERIFIED','OK',0,'FULLY_INSIDE_TARGET_LOCAL_DAY',1,'degC',?,?)""",
+        members_unit,recorded_at,provenance_json,source_transport,release_calendar_key,source_release_time,
+        city_timezone,local_day_start_utc)
+        VALUES (1,?,?,?,?,?,?,?,?,24,?,'ecmwf_ens',?,
+        'ecmwf_open_data',?,?,?,'VERIFIED','OK',0,'FULLY_INSIDE_TARGET_LOCAL_DAY',1,'degC',?,?,'native_grib',?,?,?,
+        '2026-09-29T16:00:00+00:00')""",
         (city.name,target.isoformat(),metric,identity.physical_quantity,identity.observation_field,
          cycle.isoformat(),issued.isoformat(),issued.isoformat(),
          json.dumps([center+(i-25)*.02 for i in range(51)]),identity.data_version,run_id,
-         cycle.isoformat(),issued.isoformat(),issued.isoformat(),json.dumps(ens_provenance)))
+         cycle.isoformat(),issued.isoformat(),issued.isoformat(),json.dumps(ens_provenance),release,issued.isoformat(),city.timezone))
     _station_grid_cohort(monkeypatch, conn, db, city.name, target_dates=(target.isoformat(),),
                          cycle=cycle, captured=captured)
     class RawClock(datetime):
@@ -48524,7 +48529,6 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric):
     manifest = build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(artifact_path,request=anchor_request,
         metric=metric,source_available_at=captured,captured_at=captured,
         product_metadata={"city":city.name,"target_date":target.isoformat()})
-    artifact_id = write_manifest_to_db(conn,manifest)
     geometry = {"revision":"openmeteo_ifs9_o1280_source_cell_v1","static_hsurf_sha256":"b"*64,
         "selected_flat_index":100,"selected_grid_lat":station["lat"],"selected_grid_lon":station["lon"],
         "raw_grid_elevation_m":station["elevation_m"],"effective_grid_elevation_m":station["elevation_m"],
@@ -48554,6 +48558,20 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric):
     metadata = OpenMeteoIfs9PrecisionMetadata(**_precision_metadata(
         city.name, target.isoformat(), anchor_sigma_c=3, raw_payload_bytes=raw_bytes
     ))
+    # Normal seed transport needs the producer's retained metadata paths, not
+    # a test-only reconstruction of probability authority after the fact.
+    from dataclasses import asdict,replace
+    from src.data.raw_forecast_artifact_manifest import write_manifest
+    precision_path = tmp_path / f"hko-precision-{metric}.json"
+    precision_path.write_text(json.dumps(asdict(metadata)),encoding="utf-8")
+    manifest_dir = tmp_path / "hko-manifests"
+    manifest_path = manifest_dir / f"hko-{metric}.manifest.json"
+    manifest = replace(manifest,product_metadata={**manifest.product_metadata,
+        "openmeteo_payload_json":str(artifact_path),"precision_metadata_json":str(precision_path),
+        "manifest_json":str(manifest_path)})
+    artifact_id = write_manifest_to_db(conn,manifest)
+    manifest = replace(manifest,product_metadata={**manifest.product_metadata,"artifact_id":artifact_id})
+    write_manifest(manifest,manifest_path)
     assert metadata.source_geometry_proof["station_ground_proof"]["facts"] == station["ground_facts"]
     assert datetime.fromisoformat(station["ground_audit"]["checked_at"].replace("Z", "+00:00")) <= cut
     guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(metadata,raw_payload_bytes=raw_bytes)
@@ -48569,7 +48587,7 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric):
             condition_id,token_id,range_label,range_low,range_high,created_at,recorded_at)
             VALUES (?,?,?,?,?,?,?,?,?,?,?)""", (f"hko-{metric}-{i}",city.name,target.isoformat(),metric,
             condition,f"yes-{i}",item.bin_id,item.lower_c,item.upper_c,cut.isoformat(),cut.isoformat()))
-    request = ReplacementForecastMaterializeRequest(city=city.name,city_id=city.name,city_timezone=city.timezone,
+    request = ReplacementForecastMaterializeRequest(city=city.name,city_id=city_id,city_timezone=city.timezone,
         target_date=target,temperature_metric=metric,baseline_source_run_id=run_id,baseline_data_version=identity.data_version,
         baseline_source_available_at=issued,openmeteo_anchor=anchor,openmeteo_source_run_id="hko-om9",
         openmeteo_source_available_at=captured,bins=bins,source_cycle_time=cycle,computed_at=cut,
@@ -48580,8 +48598,22 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric):
         day0_observed_extreme_sample_count=2,day0_observed_extreme_unit="C")
     result = materialize_replacement_forecast_live(conn,request)
     assert result.ok, result.reason_codes
+    from src.data.producer_readiness import build_producer_readiness_for_scope
+    from src.data.forecast_target_contract import ForecastTargetScope,compute_target_local_day_window_utc
+    window = compute_target_local_day_window_utc(city_timezone=city.timezone,target_local_date=target)
+    # This is the producer's public writer, fed the fixture's explicit toy
+    # coverage receipt, not a mocked READY decision or SQL readiness stamp.
+    producer = build_producer_readiness_for_scope(conn,
+        scope=ForecastTargetScope(city_id=city_id,city_name=city.name,city_timezone=city.timezone,
+            target_local_date=target,temperature_metric=metric,source_cycle_time=cycle,
+            data_version=identity.data_version,target_window_start_utc=window.start_utc,
+            target_window_end_utc=window.end_utc,required_step_hours=(0,3,6),market_refs=()),
+        source_id="ecmwf_open_data",source_transport="native_grib",track=track,
+        computed_at=issued,release_calendar_key=release)
+    assert producer.status == "LIVE_ELIGIBLE", producer.reason_codes
+    conn.commit()
     return SimpleNamespace(conn=conn,db=db,city=city,request=request,result=result,cut=cut,bins=bins,
-                           anchor_request=anchor_request,artifact_path=artifact_path)
+                           anchor_request=anchor_request,artifact_path=artifact_path,manifest_dir=manifest_dir)
 
 
 @pytest.mark.parametrize("metric",("high","low"))
@@ -48763,5 +48795,129 @@ def test_hko_normal_writer_clock_proof_reaches_legal_pin_and_same_cut_consumers(
             decision_time=new_capture+_dt.timedelta(minutes=1)) is None
         assert fixture.conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_id=?",
                                     (fixture.result.posterior_id,)).fetchone()[0] == json.dumps(obsolete)
+    finally:
+        fixture.conn.close()
+
+
+@pytest.mark.parametrize("metric",("high","low"))
+def test_hko_minute_mean_normal_tick_wakes_real_seed_without_changing_extreme(tmp_path,monkeypatch,metric):
+    """Actual source tick and seed transport, with only private routing/HTTP clocks.
+
+    Controlled ENS/HSURF receipts remain the existing fixture's declared toy
+    inputs. No current reader, seed builder, readiness or q authority is mocked.
+    """
+    fixture = _hko_clock_normal_materializer_fixture(tmp_path,monkeypatch,metric)
+    try:
+        from pathlib import Path
+        import src.ingest_main as im
+        import scripts.hko_ingest_tick as hko
+        import src.state.db as db
+        import src.data.replacement_forecast_seed_discovery as discovery
+        import src.data.replacement_forecast_production as production
+        from src.data.day0_hourly_vectors import HKO_CURRENT_TEMPERATURE_URL
+        from email.utils import format_datetime
+        observed = fixture.cut+_dt.timedelta(minutes=1)
+        available = observed+_dt.timedelta(minutes=1)
+        written = available+_dt.timedelta(seconds=1)
+        value = 31.8 if metric == "high" else 25.8
+        body = ("Date time,Automatic Weather Station,Air Temperature(degree Celsius)\n"
+            f"{observed.astimezone(ZoneInfo('Asia/Hong_Kong')).strftime('%Y%m%d%H%M')},HK Observatory,{value}\n").encode()
+        class ClockType(type):
+            def __instancecheck__(cls,value): return isinstance(value,_dt.datetime)
+        class FetchClock(_dt.datetime,metaclass=ClockType):
+            @classmethod
+            def now(cls,tz=None): return available.astimezone(tz) if tz else available.replace(tzinfo=None)
+        class WriteClock(_dt.datetime,metaclass=ClockType):
+            @classmethod
+            def now(cls,tz=None): return written.astimezone(tz) if tz else written.replace(tzinfo=None)
+        class Client:
+            def get(self,url,*,headers):
+                import httpx
+                request = httpx.Request("GET",url)
+                if url != HKO_CURRENT_TEMPERATURE_URL or headers.get("If-None-Match"):
+                    return httpx.Response(304,request=request)
+                return httpx.Response(200,content=body,request=request,
+                    headers={"etag":"one-minute-body","last-modified":format_datetime(observed,usegmt=True)})
+        def private_conn():
+            conn = sqlite3.connect(fixture.db)
+            conn.row_factory = sqlite3.Row
+            return conn
+        cfg = {"forecast_db":fixture.db,"seed_dir":tmp_path/"hko-seeds",
+            "raw_manifest_dir":fixture.manifest_dir}
+        cfg["seed_dir"].mkdir()
+        monkeypatch.setattr(production,"_replacement_forecast_live_materialization_queue_config",lambda:cfg)
+        monkeypatch.setattr(discovery,"get_world_connection_read_only",private_conn)
+        monkeypatch.setattr(db,"get_world_connection",lambda **_kw:private_conn())
+        monkeypatch.setattr(db,"get_world_connection_read_only",private_conn)
+        monkeypatch.setattr(db,"ZEUS_FORECASTS_DB_PATH",fixture.db)
+        monkeypatch.setattr(hko,"datetime",FetchClock)
+        monkeypatch.setattr(im,"datetime",WriteClock)
+        poller = hko.HkoExtremaPoller(client=Client())
+        monkeypatch.setattr(im,"_day0_hko_poller",lambda:poller)
+        before = [tuple(row) for row in fixture.conn.execute(
+            "SELECT utc_timestamp,running_max,running_min FROM observation_instants ORDER BY utc_timestamp")]
+        result = im._k2_hko_tick.__wrapped__()
+        assert result["status"] == "COMMITTED" and result["current_print_written"]
+        assert result["events_emitted"] == 0
+        assert [tuple(row) for row in fixture.conn.execute(
+            "SELECT utc_timestamp,running_max,running_min FROM observation_instants ORDER BY utc_timestamp")] == before
+        report = next(row for row in result["current_redecision"] if row.get("metric") == metric)
+        assert report.get("enqueued"), json.dumps(report,sort_keys=True)
+        seed = json.loads(Path(report["seed_file"]).read_text())
+        assert _dt.datetime.fromisoformat(seed["computed_at"]) >= written
+        assert seed["day0_observed_extreme_c"] == fixture.request.day0_observed_extreme_c
+        assert poller._current_etag == "one-minute-body" and poller._etag is None
+        from scripts import materialize_replacement_forecast_live as materializer_script
+        monkeypatch.setattr(materializer_script,"datetime",WriteClock)
+        code,out,logs = materializer_script._run_one(Path(report["seed_file"]),commit=True,
+            init_schema=False,conn=fixture.conn,capture_logs=True,publish_wake=True,schema_ready=True,
+            writer_lock=materializer_script._forecast_writer_lock)
+        assert code == 0, (out,logs)
+        latest = dict(fixture.conn.execute("SELECT * FROM forecast_posteriors ORDER BY posterior_id DESC LIMIT 1").fetchone())
+        proof = json.loads(latest["provenance_json"])
+        assert latest["posterior_id"] != fixture.result.posterior_id
+        assert proof["day0_current_temperature_state"] == {
+            "source":"hko_current_1min_mean","observed_at_utc":observed.isoformat(),"value_native":value}
+        assert proof["day0_current_temperature_clock_evidence"]["publication_clock_role"] == "HTTP_REPRESENTATION_LAST_MODIFIED"
+        assert proof["day0_current_temperature_clock_evidence"]["raw_report"]
+        assert proof["day0_provisional_observation"]["observed_extreme_c"] == fixture.request.day0_observed_extreme_c
+        from src.contracts.settlement_semantics import SettlementSemantics
+        from src.events.triggers.day0_extreme_updated import (
+            build_day0_extreme_updated_event,observation_instant_row_to_day0_observation,
+        )
+        from src.engine.monitor_refresh import _current_global_held_point_probability
+        from src.data import replacement_forecast_bundle_reader as reader
+        from src.data.day0_hourly_vectors import read_day0_current_temperature_state
+        old_state = read_day0_current_temperature_state(conn=fixture.conn,city=fixture.city,
+            target_date="2026-09-30",decision_time=fixture.cut)
+        assert old_state.source == "hko_rhrread_spot" and old_state.value_native == 33
+        monkeypatch.setattr(reader,"datetime",WriteClock)
+        current_row = dict(latest)
+        for purpose in (reader.ReplacementForecastAuthorityPurpose.ENTRY,reader.ReplacementForecastAuthorityPurpose.HELD_REDECISION):
+            assert reader._live_grade_provenance(current_row,authority_purpose=purpose) is not None
+        row = dict(fixture.conn.execute("SELECT * FROM observation_instants ORDER BY utc_timestamp DESC LIMIT 1").fetchone())
+        observation = observation_instant_row_to_day0_observation(row,metric=metric)
+        event = build_day0_extreme_updated_event(observation=observation,
+            settlement_semantics=SettlementSemantics.for_city(fixture.city),decision_time=written,
+            received_at=written.isoformat())
+        def prepare(use):
+            return era._prepare_current_global_probability_family(event,forecast_conn=fixture.conn,
+                topology_conn=fixture.conn,observation_conn=fixture.conn,decision_time=written,
+                max_age=_dt.timedelta(seconds=30),allow_unobserved_day0_replacement=False,
+                allow_provisional_day0_replacement=True,probability_use=use,raw_input_hwm_conn=fixture.conn)
+        held = prepare(era._CurrentProbabilityUse.HELD_MONITOR)
+        exited = prepare(era._CurrentProbabilityUse.REDUCE_ONLY_EXIT)
+        assert isinstance(held.probability_witness,JointOutcomeProbabilityWitness)
+        assert held.probability_witness.witness_identity == exited.probability_witness.witness_identity
+        np.testing.assert_array_equal(held.probability_witness.yes_point_q,exited.probability_witness.yes_point_q)
+        for binding in held.probability_witness.bindings:
+            for direction,side in (("buy_yes","YES"),("buy_no","NO")):
+                position = SimpleNamespace(condition_id=binding.condition_id,direction=direction)
+                assert _current_global_held_point_probability(position,held.probability_witness) == pytest.approx(
+                    family_payoff_point_q(exited.probability_witness,bin_id=binding.bin_id,side=side),abs=1e-12)
+        count = fixture.conn.execute("SELECT COUNT(*) FROM observation_prints WHERE source_channel='hko_current_1min_mean'").fetchone()[0]
+        replay = im._replay_hko_current_temperature_redecision()
+        assert next(item for item in replay if item.get("metric")==metric)["enqueued"] is False
+        assert fixture.conn.execute("SELECT COUNT(*) FROM observation_prints WHERE source_channel='hko_current_1min_mean'").fetchone()[0] == count
     finally:
         fixture.conn.close()

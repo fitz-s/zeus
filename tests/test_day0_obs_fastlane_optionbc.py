@@ -52,6 +52,88 @@ import httpx
 UTC = timezone.utc
 
 
+def test_hko_two_products_share_deadline_and_keep_completed_sibling(monkeypatch):
+    import scripts.hko_ingest_tick as hko
+    from src.data.day0_hourly_vectors import HKO_CURRENT_TEMPERATURE_URL
+
+    observed = datetime.now(UTC).replace(second=0,microsecond=0)
+    from email.utils import format_datetime
+    body = ("Date time,Automatic Weather Station,Air Temperature(degree Celsius)\n"
+        f"{observed.astimezone(ZoneInfo('Asia/Hong_Kong')).strftime('%Y%m%d%H%M')},HK Observatory,28.8\n").encode()
+    class Client:
+        def get(self,url,*,headers):
+            if url != HKO_CURRENT_TEMPERATURE_URL:
+                time.sleep(.5)
+                return httpx.Response(304,request=httpx.Request("GET",url))
+            return httpx.Response(200,content=body,
+                headers={"last-modified":format_datetime(observed,usegmt=True),"etag":"current-1"},
+                request=httpx.Request("GET",url))
+    poller = hko.HkoExtremaPoller(client=Client(),total_budget_s=.1)
+    started = time.monotonic()
+    extreme,current = poller.prefetch_products()
+    assert time.monotonic()-started < .35
+    assert extreme is None and current is not None
+    assert poller._etag is None and poller._current_etag is None
+    poller.acknowledge_current(current)
+    assert poller._current_etag == "current-1" and poller._etag is None
+
+
+@pytest.mark.parametrize("bad_product", ["extrema","current"])
+def test_hko_independent_304_and_bad_product_do_not_poison_sibling(bad_product):
+    from scripts.hko_ingest_tick import HkoExtremaPoller,HKO_EXTREMA_URL
+    from src.data.day0_hourly_vectors import HKO_CURRENT_TEMPERATURE_URL
+    from email.utils import format_datetime
+    observed = datetime.now(UTC).replace(second=0,microsecond=0)
+    timestamp = observed.astimezone(ZoneInfo("Asia/Hong_Kong")).strftime("%Y%m%d%H%M")
+    bodies = {
+        HKO_EXTREMA_URL:("Date time,Automatic Weather Station,Maximum Air Temperature Since Midnight(degree Celsius),"
+            f"Minimum Air Temperature Since Midnight(degree Celsius)\n{timestamp},HK Observatory,30.1,27.0\n"),
+        HKO_CURRENT_TEMPERATURE_URL:("Date time,Automatic Weather Station,Air Temperature(degree Celsius)\n"
+            f"{timestamp},HK Observatory,28.8\n"),
+    }
+    bad_url = HKO_EXTREMA_URL if bad_product == "extrema" else HKO_CURRENT_TEMPERATURE_URL
+    calls = []
+    class Client:
+        def get(self,url,*,headers):
+            calls.append((url,dict(headers)))
+            request = httpx.Request("GET",url)
+            if headers.get("If-None-Match"): return httpx.Response(304,request=request)
+            return httpx.Response(200,text="bad" if url==bad_url else bodies[url],
+                headers={"etag":url,"last-modified":format_datetime(observed,usegmt=True)},request=request)
+    poller = HkoExtremaPoller(client=Client())
+    extreme,current = poller.prefetch_products()
+    if bad_product == "extrema":
+        assert extreme is None and current is not None
+        poller.acknowledge_current(current)
+    else:
+        assert extreme is not None and current is None
+        poller.acknowledge(extreme)
+    assert poller.prefetch_products() == (None,None)
+    last = dict(calls[-2:])
+    assert last[bad_url] == {}  # no ack for an invalid/uncommitted product
+
+
+def test_hko_current_commit_wake_requires_successor_computation_without_fake_extreme(monkeypatch):
+    import src.ingest_main as im
+    import src.data.replacement_forecast_production as production
+    import src.data.replacement_cycle_advance_trigger as trigger
+    import src.runtime.reactor_wake as wake
+    written = datetime(2026,9,30,6,18,tzinfo=UTC)
+    calls = []
+    monkeypatch.setattr(production,"_replacement_forecast_live_materialization_queue_config",
+        lambda:{"forecast_db":"private.db","seed_dir":"private-seeds","raw_manifest_dir":"private-raw"})
+    monkeypatch.setattr(trigger,"enqueue_single_family_cycle_advance_reseed",
+        lambda **kwargs: calls.append(kwargs) or {"status":"CYCLE_ADVANCE_ENQUEUED"})
+    wakes = []
+    monkeypatch.setattr(wake,"publish_reactor_wake",lambda **kwargs:wakes.append(kwargs))
+    im._bridge_committed_hko_current_temperature(target_date="2026-09-30",written_at=written)
+    assert [call["metric"] for call in calls] == ["high","low"]
+    assert all(call["minimum_posterior_computed_at"] == written for call in calls)
+    assert all("day0_observed_extreme_c" not in call for call in calls)
+    assert wakes[0]["event_ids"] == ()
+    assert wakes[0]["reason"] == "current_temperature_print_committed"
+
+
 # ---------------------------------------------------------------------------
 # Shared fixtures
 # ---------------------------------------------------------------------------
@@ -965,7 +1047,6 @@ class TestObsFastTickSchedulerRegistration:
         import scripts.hko_ingest_tick as hko_tick
         import src.config as config
         import src.data.job_lock as job_lock
-        import src.events.event_priority as event_priority
         import src.events.event_writer as event_writer
         import src.events.triggers.day0_extreme_updated as day0_trigger
         import src.ingest_main as im
@@ -987,8 +1068,8 @@ class TestObsFastTickSchedulerRegistration:
         )
 
         class _Poller:
-            def prefetch(self):
-                return prefetch
+            def prefetch_products(self):
+                return prefetch, None
 
             def acknowledge(self, value):
                 assert value is prefetch
@@ -1088,11 +1169,6 @@ class TestObsFastTickSchedulerRegistration:
                     "day0_extreme_trigger_enabled": True,
                 }
             },
-        )
-        monkeypatch.setattr(
-            event_priority,
-            "day0_is_tradeable_for_scope",
-            lambda _scope: True,
         )
         monkeypatch.setattr(event_writer, "EventWriter", lambda _conn: object())
         monkeypatch.setattr(day0_trigger, "Day0ExtremeUpdatedTrigger", _Trigger)
