@@ -20,11 +20,9 @@ Contracts:
        causal observation contribute; the just-elapsed hourly point may anchor
        its terminal sub-hour for at most one hour. A decision after local
        midnight keeps only an observation-uncovered tail, never the whole day.
-  R11. POST-PEAK REPRICING: with all remaining-hours temps at/below the
-       running max, the pooled members clamp to the floor — the floor bin
-      gets ~all q mass and bins above get ~none (the exact category the
-      full-day-masked q got wrong). Flag default OFF; flag OFF leaves the
-      legacy path untouched; flag ON must not fall back to it.
+  R11. POST-PEAK REPRICING: a typed absorbing resolver boundary clamps
+       remaining members; a preliminary station print cannot hard-clamp them.
+       Remaining-day mode is required and cannot fall back to full-day q.
 """
 from __future__ import annotations
 
@@ -65,6 +63,23 @@ from src.data.day0_hourly_vectors import (
 from src.types.market import Bin
 
 UTC = timezone.utc
+
+
+def _assert_noaa_likelihood_v2_identity(likelihood):
+    """v2 seals causal confirmation rows, not just v1 aggregate counts."""
+    import hashlib
+
+    assert isinstance(likelihood["successes"], list)
+    assert isinstance(likelihood["failures"], list)
+    for row in (*likelihood["successes"], *likelihood["failures"]):
+        assert set(row) == {"awc_id", "ogimet_id", "observed_at", "awc_hash", "ogimet_hash"}
+        assert row["awc_id"] != row["ogimet_id"]
+        assert row["awc_hash"] and row["ogimet_hash"]
+    identity = {key: value for key, value in likelihood.items()
+                if key not in {"identity_hash", "boundary_survival_probability"}}
+    assert likelihood["identity_hash"] == hashlib.sha256(json.dumps(
+        identity, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
 
 
 @pytest.mark.parametrize(
@@ -1871,14 +1886,15 @@ def test_recapture_outer_caller_uses_committed_original_without_new_successor(
         posterior_id INTEGER, city TEXT, target_date TEXT, temperature_metric TEXT,
         source_id TEXT, product_id TEXT, data_version TEXT, training_allowed INTEGER,
         runtime_layer TEXT, source_available_at TEXT, computed_at TEXT,
-        posterior_identity_hash TEXT, provenance_json TEXT
+        posterior_identity_hash TEXT, provenance_json TEXT, bundle_identity TEXT
     )""")
     if original_visible:
-        conn.execute("INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+        conn.execute("INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
             1, "Paris", "2026-06-10", metric, reader.SOURCE_ID, reader.PRODUCT_ID,
             reader._data_version_for_metric(metric), 0, reader.LIVE_RUNTIME_LAYER,
             "2026-06-10T09:00:00+00:00", expected["cutoff_utc"], "sealed-original-posterior",
             json.dumps({"day0_causal_evidence_bundle": expected}),
+            expected["bundle_identity"],
         ))
     moment = datetime(2026, 6, 10, 11, 0, tzinfo=UTC)
     assert reader.day0_causal_bundle_successor_materialized(
@@ -1942,13 +1958,14 @@ def test_recapture_real_members_preserve_q_and_samples_but_observations_reprice(
         posterior_id INTEGER, city TEXT, target_date TEXT, temperature_metric TEXT,
         source_id TEXT, product_id TEXT, data_version TEXT, training_allowed INTEGER,
         runtime_layer TEXT, source_available_at TEXT, computed_at TEXT,
-        posterior_identity_hash TEXT, provenance_json TEXT
+        posterior_identity_hash TEXT, provenance_json TEXT, bundle_identity TEXT
     )""")
-    conn.execute("INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+    conn.execute("INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
         1, "Paris", "2026-06-10", metric, reader.SOURCE_ID, reader.PRODUCT_ID,
         reader._data_version_for_metric(metric), 0, reader.LIVE_RUNTIME_LAYER,
         "2026-06-10T09:00:00+00:00", original["cutoff_utc"], "original-identity",
         json.dumps({"day0_causal_evidence_bundle": original}),
+        original["bundle_identity"],
     ))
     new_id = recaptured["carrier_vector_ids_by_model"]["icon_d2"]
     new_row = conn.execute("SELECT * FROM day0_hourly_vectors WHERE vector_id = ?", (new_id,)).fetchone()
@@ -3210,7 +3227,9 @@ def test_noaa_adapter_replays_materialized_carrier_identity_and_samples(operator
             )
         missing_likelihood = dict(payload)
         missing_likelihood.pop("_edli_day0_provisional_revision_likelihood")
-        with pytest.raises(ValueError, match="DAY0_NOAA_PRELIMINARY_CARRIER_LIKELIHOOD_MISSING"):
+        # Missing mapping is INVALID; absent scalar survival is UNAVAILABLE.
+        # Both omissions must reject before persisted q can be replayed.
+        with pytest.raises(ValueError, match="DAY0_NOAA_PRELIMINARY_CARRIER_LIKELIHOOD_INVALID"):
             era._day0_remaining_p_raw_vector(
                 np.asarray(future),
                 city=city,
@@ -3268,14 +3287,16 @@ def test_noaa_adapter_replays_materialized_carrier_identity_and_samples(operator
             ("_edli_day0_remaining_carrier_probability_cutoff_utc", "CUTOFF"),
             ("_edli_day0_remaining_carrier_future_extremes_c", "VECTOR"),
             ("_edli_day0_remaining_carrier_path_error_sigma_c", "PATH_SIGMA"),
-            ("_edli_day0_provisional_revision_likelihood", "LIKELIHOOD"),
+            ("_edli_day0_provisional_boundary_survival_probability", "LIKELIHOOD"),
             ("_edli_day0_probability_operator", "OPERATOR"),
         ):
             missing = dict(payload)
             missing.pop(field, None)
             with pytest.raises(
                 ValueError,
-                match=f"DAY0_NOAA_PRELIMINARY_CARRIER_{label}_MISSING",
+                match=("DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE"
+                       if field == "_edli_day0_provisional_boundary_survival_probability"
+                       else f"DAY0_NOAA_PRELIMINARY_CARRIER_{label}_MISSING"),
             ):
                 era._day0_remaining_p_raw_vector(
                     np.asarray(future),
@@ -3962,12 +3983,13 @@ def test_tel_aviv_no_confirmed_prior_uses_real_jeffreys_carrier(
     assert cutoff == "2026-08-24T09:30:00+00:00"
     assert likelihood["semantics"] == (
         "same_station_preliminary_report_survival_likelihood_"
-        "jeffreys_prior_only_v1"
+        "jeffreys_prior_only_v2"
     )
     assert likelihood["alpha"] == pytest.approx(0.5)
     assert likelihood["beta"] == pytest.approx(0.5)
     assert likelihood["boundary_survival_probability"] == pytest.approx(0.5)
     assert likelihood["unconfirmed_awc_ids"] == []
+    _assert_noaa_likelihood_v2_identity(likelihood)
     assert len(str(likelihood["identity_hash"])) == 64
     assert carrier["sample_count"] == 500
     assert len(carrier["samples"]) == 500
@@ -4006,9 +4028,10 @@ def test_noaa_prior_only_is_entry_blocked_but_held_allowed():
     )
     assert held["semantics"] == (
         "same_station_preliminary_report_survival_likelihood_"
-        "jeffreys_prior_only_v1"
+        "jeffreys_prior_only_v2"
     )
     assert held["boundary_survival_probability"] == pytest.approx(0.5)
+    _assert_noaa_likelihood_v2_identity(held)
     conn.close()
 
 
@@ -4779,12 +4802,13 @@ def test_tel_aviv_ogimet_publish_clock_uses_real_pair_history(
         path_error_sigma_c=path_sigma,
     )
     assert likelihood["semantics"] == (
-        "same_station_preliminary_report_survival_likelihood_v1"
+        "same_station_preliminary_report_survival_likelihood_v2"
     )
     assert likelihood["boundary_survival_probability"] == pytest.approx(
         16.5 / 17.0
     )
     assert len(likelihood["unconfirmed_awc_ids"]) == 15
+    _assert_noaa_likelihood_v2_identity(likelihood)
     assert carrier["sample_count"] == 500
     assert sum(carrier["q"]) == pytest.approx(1.0)
     assert all(sum(row) == pytest.approx(1.0) for row in carrier["samples"])
@@ -5123,13 +5147,14 @@ def test_canonical_entry_seam_rebuilds_changed_current_state_carrier(monkeypatch
         times=tuple(f"2026-08-24T{hour:02d}:00" for hour in range(24)),
         temps_c=tuple(29.0 + hour * 0.05 for hour in range(24)),
     )
+    vectors = [vector, replace(vector, model="icon_global")]
     monkeypatch.setattr(
         "src.data.day0_hourly_vectors.day0_hourly_models_for_city",
         lambda _city: ["ecmwf_ifs"],
     )
     monkeypatch.setattr(
         "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
-        lambda **_kwargs: [vector],
+        lambda **_kwargs: vectors,
     )
     monkeypatch.setattr(
         era,
@@ -5139,11 +5164,6 @@ def test_canonical_entry_seam_rebuilds_changed_current_state_carrier(monkeypatch
             datetime(2026, 8, 24, 12, 0, tzinfo=UTC),
             "aviationweather_metar",
         ),
-    )
-    monkeypatch.setattr(
-        era,
-        "_day0_current_vector_witness",
-        lambda **_kwargs: witness,
     )
     monkeypatch.setattr(
         era,
@@ -5160,13 +5180,12 @@ def test_canonical_entry_seam_rebuilds_changed_current_state_carrier(monkeypatch
 
     def market_analysis_spy(**kwargs):
         assert kwargs["entry_authority"] is True
-        members = era._day0_remaining_day_members(
+        members = TestRemainingDayMembers()._members(monkeypatch, vectors=vectors,
             payload=kwargs["payload"],
             family=kwargs["family"],
             unit="C",
             decision_time=decision_time,
             world_conn=object(),
-            forecast_conn=object(),
             entry_authority=kwargs["entry_authority"],
         )
         assert members is not None
@@ -9194,6 +9213,96 @@ class TestRemainingDayMembers:
     def _family(self):
         return SimpleNamespace(city="Paris", target_date="2026-06-10", metric="high")
 
+    def _members(self, monkeypatch, *, vectors, **kwargs):
+        """Exercise the actual witness/bundle reader, not a fabricated proof."""
+        import src.data.day0_hourly_vectors as hourly
+        import src.engine.event_reactor_adapter as era
+
+        conn = _conn()
+        qualified = []
+        for vector in vectors:
+            captured = vector.captured_at
+            request_hash = "sha256:fixture-" + vector.model
+            meta = {
+                "fetch_started_at": captured, "fetch_finished_at": captured,
+                "provider_source_cycle_time_utc": captured,
+                "provider_source_available_at_utc": captured,
+                "provider_source_modified_at_utc": captured,
+                "provider_run_id": vector.model + ":" + captured,
+                "model_api_id": vector.model,
+                "source_run_id": "day0_hourly:" + request_hash,
+                "source_run_authority": "run_pinned_single_runs",
+                "endpoint_mode": "single_runs", "request_hash": request_hash,
+            }
+            qualified.append(replace(vector, source_run_meta_json=json.dumps(meta)))
+            persist_day0_hourly_vectors(
+                [qualified[-1]], target_date=vector.target_date, conn=conn,
+                request_hash=request_hash,
+                endpoint="https://single-runs-api.open-meteo.com/v1/forecast",
+                now=datetime.fromisoformat(captured),
+            )
+        vectors[:] = qualified
+        monkeypatch.setattr(hourly, "day0_hourly_models_for_city", lambda _city: tuple(
+            vector.model for vector in vectors
+        ))
+        if kwargs.get("world_conn") is not None:
+            ensemble_models = hourly.day0_source_clock_ensemble_member_models()
+            ensemble = []
+            for index, model in enumerate(ensemble_models):
+                meta = dict(json.loads(vectors[0].source_run_meta_json),
+                            request_hash="sha256:fixture-ensemble", provider_run_id="fixture-ensemble")
+                ensemble.append(replace(
+                    vectors[0], model=model, source_run_meta_json=json.dumps(meta),
+                    temps_c=tuple(value + (index - 25) * .01 for value in vectors[0].temps_c),
+                ))
+            original_read = hourly.read_freshest_day0_hourly_vectors
+            monkeypatch.setattr(hourly, "read_freshest_day0_hourly_vectors", lambda **kw: (
+                ensemble if tuple(kw["expected_models"]) == ensemble_models
+                else [next(v for v in vectors if v.model == old.model) for old in original_read(**kw)]
+            ))
+        family = kwargs["family"]
+        witness = era._day0_current_vector_witness(
+            conn=conn, vectors=vectors, family=family,
+            expected_models=[vector.model for vector in vectors],
+            decision_time=kwargs["decision_time"],
+        )
+        assert witness is not None
+        kwargs["payload"]["_edli_day0_causal_evidence_bundle"] = build_day0_causal_evidence_bundle(
+            city=family.city, target_date=family.target_date, metric=family.metric,
+            observation_context={"observation_time": kwargs["payload"].get("observation_time")},
+            cutoff_utc=kwargs["decision_time"].isoformat(), vector_witness=witness,
+        )
+        import src.data.replacement_forecast_bundle_reader as reader
+        bundle = kwargs["payload"]["_edli_day0_causal_evidence_bundle"]
+        conn.execute("""CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER, city TEXT, target_date TEXT, temperature_metric TEXT,
+            source_id TEXT, product_id TEXT, data_version TEXT, training_allowed INTEGER,
+            runtime_layer TEXT, source_available_at TEXT, computed_at TEXT,
+            posterior_identity_hash TEXT, provenance_json TEXT, bundle_identity TEXT
+        )""")
+        binding = kwargs["payload"].get("_edli_global_day0_binding", {})
+        conn.execute("INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+            binding.get("posterior_id", 1), family.city, family.target_date, family.metric, reader.SOURCE_ID,
+            reader.PRODUCT_ID, reader._data_version_for_metric(family.metric), 0,
+            reader.LIVE_RUNTIME_LAYER, bundle["cutoff_utc"], bundle["cutoff_utc"],
+            "sealed-member-fixture", json.dumps({
+                "day0_causal_evidence_bundle": bundle,
+                "bayes_precision_fusion": {"used_models": [v.model for v in vectors], "current_value_serving": {}},
+            }),
+            bundle["bundle_identity"],
+        ))
+        try:
+            result = era._day0_remaining_day_members(forecast_conn=conn, **kwargs)
+            assert kwargs["payload"]["_edli_day0_causal_evidence_bundle_validation"]["reason"] is None
+            if kwargs.get("world_conn") is not None:
+                shape = kwargs["payload"]["_edli_day0_conditional_high_shape"]
+                assert len(shape.witness["ensemble_vector_ids"]) == 51
+                assert len(shape.provider_centers_c) == len(vectors)
+                assert kwargs["payload"]["_edli_day0_conditional_high_shape_identity"] == shape.identity
+            return result
+        finally:
+            conn.close()
+
     def test_common_causal_grid_aligns_24_21_24_without_interpolation(self):
         full_times = tuple(f"2026-06-10T{hour:02d}:00" for hour in range(24))
         short_times = tuple(f"2026-06-10T{hour:02d}:00" for hour in range(15, 24))
@@ -9425,7 +9534,7 @@ class TestRemainingDayMembers:
             "observation_time": "2026-06-10T13:00:00+00:00",
         }
 
-        members = era._day0_remaining_day_members(
+        members = self._members(monkeypatch, vectors=vectors,
             payload=payload,
             family=self._family(),
             unit="C",
@@ -10617,9 +10726,10 @@ class TestRemainingDayMembers:
             "aviationweather_metar",
         )
 
-    def test_post_peak_members_clamp_to_running_max_floor(self, monkeypatch):
-        """All remaining-hours extremes BELOW the running max -> every pooled
-        member clamps to the floor -> the floor bin owns ~all probability mass.
+    @pytest.mark.parametrize("source", ("noaa_wrh_daily", "aviationweather_metar"))
+    def test_post_peak_members_clamp_to_running_max_floor(self, monkeypatch, source):
+        """Only a resolver-owned running max absorbs the below-peak paths.
+        An AWC provisional print retains statistical, unclamped support.
         This is precisely the post-peak overpricing the full-day q got wrong."""
         import src.engine.event_reactor_adapter as era
 
@@ -10634,15 +10744,18 @@ class TestRemainingDayMembers:
         payload = {
             "metric": "high",
             "rounded_value": 25.0,
-            "settlement_source": "aviationweather_metar",
+            "settlement_source": source,
         }
-        members = era._day0_remaining_day_members(
+        members = self._members(monkeypatch, vectors=vectors,
             payload=payload, family=self._family(), unit="C",
             decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
         )
         assert members is not None
         # every member clamped UP to the running max (absorbing physical law)
-        assert np.all(members == 25.0)
+        if source == "noaa_wrh_daily":
+            assert np.all(members == 25.0)
+        else:
+            assert members.tolist() == [20.0, 21.0]
         assert payload["_edli_day0_unclamped_remaining_extrema_native"] == [
             20.0,
             21.0,
@@ -10704,7 +10817,7 @@ class TestRemainingDayMembers:
             metric=metric,
         )
 
-        members = era._day0_remaining_day_members(
+        members = self._members(monkeypatch, vectors=vectors,
             payload=payload,
             family=family,
             unit="C",
@@ -10777,7 +10890,7 @@ class TestRemainingDayMembers:
         )
         exact = datetime(2026, 6, 10, 15, 0, 59, 900000, tzinfo=UTC)
         probability_cut = era._day0_probability_clock(exact)
-        members = era._day0_remaining_day_members(
+        members = self._members(monkeypatch, vectors=vectors,
             payload={
                 "metric": "high",
                 "rounded_value": 25.0,
@@ -10901,7 +11014,9 @@ class TestRemainingDayMembers:
                 extra_member_sigma=0.0,
             )
 
-    def test_members_use_observation_time_after_local_midnight(self, monkeypatch):
+    @pytest.mark.parametrize("source", ("noaa_wrh_daily", "aviationweather_metar"))
+    def test_members_use_observation_time_after_local_midnight(self, monkeypatch, source):
+        """Target-day uncovered tail survives; only resolver truth clamps it."""
         import src.engine.event_reactor_adapter as era
 
         vector = Day0HourlyVector(
@@ -10922,10 +11037,10 @@ class TestRemainingDayMembers:
             "metric": "high",
             "rounded_value": 25.0,
             "observation_time": "2026-06-10T21:20:00+00:00",
-            "settlement_source": "aviationweather_metar",
+            "settlement_source": source,
         }
 
-        members = era._day0_remaining_day_members(
+        members = self._members(monkeypatch, vectors=[vector],
             payload=payload,
             family=self._family(),
             unit="C",
@@ -10933,7 +11048,7 @@ class TestRemainingDayMembers:
         )
 
         assert members is not None
-        assert members.tolist() == [25.0]
+        assert members.tolist() == ([25.0] if source == "noaa_wrh_daily" else [22.1])
         assert payload["_edli_day0_remaining_window_start_utc"] == (
             "2026-06-10T21:20:00+00:00"
         )
@@ -11321,7 +11436,9 @@ class TestRemainingDayMembers:
         assert np.all(samples <= 1.0)
         assert np.allclose(samples.sum(axis=1), 1.0)
 
-    def test_excursion_still_possible_keeps_above_floor_members(self, monkeypatch):
+    @pytest.mark.parametrize("source", ("noaa_wrh_daily", "aviationweather_metar"))
+    def test_excursion_still_possible_keeps_above_floor_members(self, monkeypatch, source):
+        """Absorption keeps real upside; preliminary prints do not absorb."""
         vectors = [
             _vector(model="icon_d2", temps=[27.5] * 24),
             _vector(model="meteofrance_arome_france_hd", temps=[24.0] * 24),
@@ -11332,21 +11449,22 @@ class TestRemainingDayMembers:
         )
         import src.engine.event_reactor_adapter as era
 
-        members = era._day0_remaining_day_members(
+        members = self._members(monkeypatch, vectors=vectors,
             payload={
                 "metric": "high",
                 "rounded_value": 25.0,
-                "settlement_source": "aviationweather_metar",
+                "settlement_source": source,
             },
             family=self._family(),
             unit="C", decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
         )
-        assert sorted(members.tolist()) == [25.0, 27.5]
+        assert sorted(members.tolist()) == ([25.0, 27.5] if source == "noaa_wrh_daily" else [24.0, 27.5])
 
+    @pytest.mark.parametrize("source", ("noaa_wrh_daily", "aviationweather_metar"))
     def test_live_members_transport_current_error_with_validated_decay(
-        self, monkeypatch
+        self, monkeypatch, source
     ):
-        """Current error moves near hours strongly and distant hours weakly."""
+        """Current error decays causally; resolver/provisional boundaries differ."""
         import src.engine.event_reactor_adapter as era
 
         vector = Day0HourlyVector(
@@ -11362,9 +11480,12 @@ class TestRemainingDayMembers:
             ),
         )
         monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Paris": _paris()})
+        # Current HIGH law requires a provider bundle plus ENS, not a lone
+        # deterministic trajectory. A twin path preserves the original decay.
+        vectors = [vector, replace(vector, model="icon_global")]
         monkeypatch.setattr(
             "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
-            lambda **kw: [vector],
+            lambda **kw: vectors,
         )
         monkeypatch.setattr(
             era,
@@ -11379,10 +11500,10 @@ class TestRemainingDayMembers:
             "metric": "high",
             "rounded_value": 24.0,
             "observation_time": "2026-06-10T13:00:00+00:00",
-            "settlement_source": "aviationweather_metar",
+            "settlement_source": source,
         }
 
-        members = era._day0_remaining_day_members(
+        members = self._members(monkeypatch, vectors=vectors,
             payload=payload,
             family=self._family(),
             unit="C",
@@ -11393,10 +11514,10 @@ class TestRemainingDayMembers:
         assert members is not None
         expected = 24.0 - 3.0 * np.exp(-7.0 / 4.2)
         assert payload["_edli_day0_unclamped_remaining_extrema_native"] == (
-            pytest.approx([expected])
+            pytest.approx([expected, expected])
         )
-        assert members.tolist() == [24.0]
-        assert payload["_edli_day0_model_innovations_c"] == {"ecmwf_ifs": -3.0}
+        assert members.tolist() == pytest.approx([24.0, 24.0] if source == "noaa_wrh_daily" else [expected, expected])
+        assert payload["_edli_day0_model_innovations_c"] == {"ecmwf_ifs": -3.0, "icon_global": -3.0}
         assert payload["_edli_day0_trajectory_conditioning_basis"] == (
             "current_state_exponential_residual_decay_v1"
         )
@@ -11561,7 +11682,7 @@ class TestRemainingDayMembers:
         )
         import src.engine.event_reactor_adapter as era
 
-        members = era._day0_remaining_day_members(
+        members = self._members(monkeypatch, vectors=vectors,
             payload={"metric": "high", "rounded_value": 70.0}, family=self._family(),
             unit="F", decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
         )
@@ -12122,6 +12243,19 @@ class TestRemainingDayMembers:
 # ===========================================================================
 
 class TestRequestHashProvenance:
+    def _ready_vectors(self, city, now, models):
+        """Possessed deterministic/ENS rows for the real run-proof consumer."""
+        return [replace(
+            _refresh_vector(city, model, now),
+            source_run_meta_json=json.dumps({
+                "provider_source_cycle_time_utc": now.isoformat(),
+                "provider_source_available_at_utc": now.isoformat(),
+                "fetch_finished_at": now.isoformat(),
+                "request_hash": "sha256:priority-proof",
+                "provider_run_id": "priority-proof-run",
+            }),
+        ) for model in models]
+
     @pytest.fixture(autouse=True)
     def _isolate_refresh_state(self, monkeypatch):
         import src.data.day0_hourly_vectors as hv
@@ -13445,15 +13579,8 @@ class TestRequestHashProvenance:
         now = datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
         target_date = "2026-06-10"
 
-        class _Conn:
-            def __init__(self, role):
-                self.role = role
-
-            def close(self):
-                pass
-
-        world_conn = _Conn("world")
-        forecast_conn = _Conn("forecasts")
+        world_conn = _conn()
+        forecast_conn = _conn()
         persisted = {"ready": False}
         monkeypatch.setattr(
             config_module,
@@ -13481,7 +13608,7 @@ class TestRequestHashProvenance:
             assert kwargs.get("conn") is forecast_conn, (
                 "Day0 vectors must come from the forecasts DB"
             )
-            return [object()] if persisted["ready"] else []
+            return self._ready_vectors(city, now, kwargs["expected_models"]) if persisted["ready"] else []
 
         monkeypatch.setattr(
             target_plan,
@@ -13504,6 +13631,9 @@ class TestRequestHashProvenance:
         )
 
         persisted["ready"] = True
+        # The priority reader closes each owned connection after a probe.
+        world_conn = _conn()
+        forecast_conn = _conn()
         ready = reactor._edli_day0_hourly_refresh_due_families(
             cities=[city], decision_time=now
         )
@@ -13523,20 +13653,16 @@ class TestRequestHashProvenance:
         city = _paris()
         now = datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
 
-        class _Conn:
-            def close(self):
-                pass
-
         monkeypatch.setattr(
             config_module,
             "runtime_cities_by_name",
             lambda: {"Paris": city},
         )
         monkeypatch.setattr(
-            db_module, "get_world_connection_read_only", lambda **_kwargs: _Conn()
+            db_module, "get_world_connection_read_only", lambda **_kwargs: _conn()
         )
         monkeypatch.setattr(
-            db_module, "get_forecasts_connection_read_only", lambda **_kwargs: _Conn()
+            db_module, "get_forecasts_connection_read_only", lambda **_kwargs: _conn()
         )
         monkeypatch.setattr(
             target_plan,
@@ -13556,7 +13682,7 @@ class TestRequestHashProvenance:
             observed_max_ages.append(kwargs["max_age_hours"])
             # A 2.5h bundle remains valid for the 3h consumer contract but is
             # intentionally due for producer refresh inside the 1h headroom.
-            return [object()] if kwargs["max_age_hours"] >= 2.5 else []
+            return self._ready_vectors(city, now, kwargs["expected_models"]) if kwargs["max_age_hours"] >= 2.5 else []
 
         monkeypatch.setattr(
             vectors_module,
@@ -13781,13 +13907,6 @@ class TestRequestHashProvenance:
         clock = {"now": 0.0}
         vector_reads = {"count": 0}
 
-        class Connection:
-            def set_progress_handler(self, _callback, _steps):
-                pass
-
-            def close(self):
-                pass
-
         monkeypatch.setattr(reactor.time, "monotonic", lambda: clock["now"])
         monkeypatch.setattr(
             config_module,
@@ -13797,12 +13916,12 @@ class TestRequestHashProvenance:
         monkeypatch.setattr(
             db_module,
             "get_world_connection_read_only",
-            lambda **_kwargs: Connection(),
+            lambda **_kwargs: _conn(),
         )
         monkeypatch.setattr(
             db_module,
             "get_forecasts_connection_read_only",
-            lambda **_kwargs: Connection(),
+            lambda **_kwargs: _conn(),
         )
         monkeypatch.setattr(
             vectors_module,
@@ -14222,11 +14341,14 @@ class TestRequestHashProvenance:
             assert fetch_calls == [True]
             assert captured["timeout_s"] == pytest.approx(expected_timeout)
 
-    def test_provider_release_edge_gives_two_held_slots_and_one_priority_slot(
-        self, monkeypatch
+    @pytest.mark.parametrize("debt", ("urgent_held", "priority", "release_only"))
+    def test_authority_debt_and_release_refresh_preserve_held_and_discovery_slots(
+        self, monkeypatch, debt
     ):
         import src.config as config_module
         import src.data.day0_hourly_vectors as vectors_module
+        import src.state.db as db_module
+        from contextlib import contextmanager
         from src.events import reactor
 
         held_cities = [
@@ -14244,6 +14366,23 @@ class TestRequestHashProvenance:
         )
         captured = {}
         order_calls = 0
+        hwm_calls = []
+        strict_due = (
+            frozenset() if debt == "release_only"
+            else frozenset({priority_family, ("Held A", "2026-06-10", "high")})
+            if debt == "urgent_held" else frozenset({priority_family})
+        )
+
+        @contextmanager
+        def boundary_connection(**_kwargs):
+            conn = _conn()
+            try:
+                yield conn
+            finally:
+                conn.close()
+
+        monkeypatch.setattr(db_module, "get_forecasts_connection_with_world_read_only", boundary_connection)
+        monkeypatch.setattr(reactor.time, "monotonic", lambda: 10.0)
 
         monkeypatch.setattr(config_module, "runtime_cities", lambda: cities)
         monkeypatch.setattr(
@@ -14255,14 +14394,14 @@ class TestRequestHashProvenance:
             reactor,
             "_edli_day0_hourly_refresh_due_families",
             lambda **_kwargs: reactor._Day0HourlyPriorityProbe(
-                refresh_due_families=frozenset({priority_family}),
+                refresh_due_families=strict_due,
                 proved=True,
             ),
         )
         monkeypatch.setattr(
             vectors_module,
             "probe_day0_provider_run_hwm",
-            lambda *_args, **_kwargs: {"ecmwf_ifs": object()},
+            lambda *_args, **_kwargs: hwm_calls.append(True) or {"ecmwf_ifs": object()},
         )
         monkeypatch.setattr(
             vectors_module,
@@ -14273,7 +14412,7 @@ class TestRequestHashProvenance:
         def order(_cities, **_kwargs):
             nonlocal order_calls
             order_calls += 1
-            return (list(cities), 4 if order_calls == 1 else 3)
+            return (list(cities), 4 if order_calls == 1 and debt != "release_only" else 3)
 
         monkeypatch.setattr(reactor, "_edli_order_day0_hourly_refresh_cities", order)
         monkeypatch.setattr(
@@ -14303,10 +14442,22 @@ class TestRequestHashProvenance:
         monkeypatch.setattr(vectors_module, "maybe_refresh_day0_hourly_vectors", refresh)
         reactor.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
 
-        assert captured["cities"] == ["Held A", "Held B", "Priority"]
-        assert captured["quota_critical_cities"] == 2
-        assert captured["quota_priority_cities"] == 1
-        assert captured["release_due_city_dates"] == due_scopes
+        if debt == "urgent_held":
+            # Preserve the original capital-debt/discovery reservation law.
+            assert captured["cities"] == ["Held A", "Held B", "Priority"]
+            assert captured["quota_critical_cities"] == 2
+            assert captured["quota_priority_cities"] == 1
+        elif debt == "priority":
+            # Still-valid held authority cannot monopolize discovery's slot.
+            assert captured["cities"] == ["Held A", "Priority", "Held B"]
+            assert captured["quota_critical_cities"] == 1
+            assert captured["quota_priority_cities"] == 1
+        else:
+            assert captured["cities"] == ["Held A", "Held B", "Held C"]
+            assert captured["quota_critical_cities"] == 3
+            assert captured["quota_priority_cities"] == 0
+        assert hwm_calls == ([True] if debt == "release_only" else [])
+        assert captured["release_due_city_dates"] == (due_scopes if debt == "release_only" else frozenset())
 
     def test_scheduler_day0_hourly_refresh_defaults_to_microbatch(self, monkeypatch):
         # R4-b2: the microbatch sizing helpers moved to src.events.reactor with the
