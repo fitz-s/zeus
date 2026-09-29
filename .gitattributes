@@ -1,3 +1,12 @@
 config/hko_station_metadata.html -text whitespace=cr-at-eol
 docs/operations/current/evidence/hko_station_metadata_20260929.html -text whitespace=cr-at-eol
 config/noaa_homr_kord_station.json -text
+config/noaa_homr_katl_station.json -text
+config/noaa_homr_kaus_station.json -text
+config/noaa_homr_kdal_station.json -text
+config/noaa_homr_khou_station.json -text
+config/noaa_homr_klax_station.json -text
+config/noaa_homr_kmia_station.json -text
+config/noaa_homr_klga_station.json -text
+config/noaa_homr_ksfo_station.json -text
+config/noaa_homr_ksea_station.json -text

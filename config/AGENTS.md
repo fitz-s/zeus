@@ -11,6 +11,15 @@ Runtime parameters — all configuration that controls Zeus behavior at runtime.
 | `station_precise_coords.json` | Per-city station/reference coordinates and elevation; its optional typed `station_ground_proof` is exact HKO/HOMR source-ground metadata, not sensor AGL or a blanket precision-PASS grant |
 | `hko_station_metadata.html` | Original official HKO station-table response body referenced only by a content-hash-bound `station_ground_proof`; do not execute or normalize this source HTML |
 | `noaa_homr_kord_station.json` | Original official NOAA HOMR response body referenced only by Chicago's content-hash-bound primary-DCP `station_ground_proof`; do not normalize or treat airport/barometric elevations as ground |
+| `noaa_homr_katl_station.json` | Original official current NOAA HOMR KATL primary-temperature-DCP ground entity; Atlanta-only content-bound proof, never airport/barometric height or historical possession |
+| `noaa_homr_kaus_station.json` | Original official current NOAA HOMR KAUS primary-temperature-DCP ground entity; Austin-only proof keeps DCP and forecast-query coordinates distinct |
+| `noaa_homr_kdal_station.json` | Original official current NOAA HOMR KDAL primary-temperature-DCP ground entity; Dallas-only content-bound proof |
+| `noaa_homr_khou_station.json` | Original official current NOAA HOMR KHOU primary-temperature-DCP ground entity; Houston-only proof requires actual ASOS DCP/GIS-ground binding, not a PLCD publication label |
+| `noaa_homr_klax_station.json` | Original official current NOAA HOMR KLAX primary-temperature-DCP ground entity; Los Angeles-only content-bound proof |
+| `noaa_homr_kmia_station.json` | Original official current NOAA HOMR KMIA primary-temperature-DCP ground entity; Miami-only content-bound proof |
+| `noaa_homr_klga_station.json` | Original official current NOAA HOMR KLGA primary-temperature-DCP ground entity; NYC-only content-bound proof |
+| `noaa_homr_ksfo_station.json` | Original official current NOAA HOMR KSFO primary-temperature-DCP ground entity; San Francisco-only content-bound proof |
+| `noaa_homr_ksea_station.json` | Original official current NOAA HOMR KSEA primary-temperature-DCP ground entity; Seattle-only content-bound proof |
 | `city_monthly_bounds.json` | Generated monthly physical bounds used by ingestion guard; generated config, not hand-edited |
 | `city_correlation_matrix.json` | Generated city correlation matrix for risk/data-rebuild work; generated config, not hand-edited |
 | `provenance_registry.yaml` | INV-13 constant registration for Kelly cascade — every magic number traced to source |
