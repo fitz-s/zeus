@@ -34,6 +34,23 @@ def _conn() -> sqlite3.Connection:
     return conn
 
 
+def _install_metar_measurement_fixture(tmp_path, monkeypatch, *, faithful, threshold):
+    """Freeze a measured-mode input, not a claim about current city config."""
+    from src.data import day0_oracle_anomaly
+
+    path = tmp_path / "metar_measurement.json"
+    path.write_text(json.dumps({"cities": {
+        city: {
+            "empirical_threshold": threshold,
+            "threshold_provenance": "empirical",
+            "settlement_faithful": faithful,
+        }
+        for city in ("NYC", "Seoul")
+    }}))
+    monkeypatch.setattr(day0_oracle_anomaly, "_divergence_model_path", lambda: path)
+    return day0_oracle_anomaly
+
+
 # ---------------------------------------------------------------------------
 # (i) append + dedup + append-only
 # ---------------------------------------------------------------------------
@@ -349,7 +366,20 @@ class TestParisTypeSpecimenThroughLedger:
         assert fact["observation_time"] == "2026-07-14T15:00:00+00:00"
         assert fact["observation_available_at"] == "2026-07-14T15:04:00+00:00"
 
-    def test_fahrenheit_fast_fact_uses_precise_t_group_value(self):
+    def test_fahrenheit_fast_fact_uses_precise_t_group_value(self, tmp_path, monkeypatch):
+        from decimal import Decimal
+        from src.data.metar_temperature import metar_temperature_c
+
+        measurement = _install_metar_measurement_fixture(
+            tmp_path, monkeypatch, faithful=False, threshold=2.0
+        )
+        raw_report = "METAR KLGA 101930Z 18008KT 10SM CLR 26/16 A2998 T02560161"
+        # The source T-group is +25.6 C, not the whole-degree body 26 C.
+        # Keep raw physical temperature distinct from the conservative bound.
+        assert metar_temperature_c(raw_report) == 25.6
+        raw_f = Decimal("25.6") * Decimal(9) / Decimal(5) + Decimal(32)
+        assert raw_f == Decimal("78.08")
+        assert measurement.metar_margin_units_for_city("NYC", "F") == 2.0
         conn = _conn()
         append_print(
             conn,
@@ -360,9 +390,7 @@ class TestParisTypeSpecimenThroughLedger:
             value_native=26.0,
             unit="C",
             fetched_at_utc="2026-07-10T19:34:00+00:00",
-            raw_report=(
-                "METAR KLGA 101930Z 18008KT 10SM CLR 26/16 A2998 T02560161"
-            ),
+            raw_report=raw_report,
         )
 
         fact = _latest_authorized_day0_fact(
@@ -378,6 +406,7 @@ class TestParisTypeSpecimenThroughLedger:
         margin = metar_margin_units_for_city("NYC", "F")
         assert margin is not None
         assert fact["observed_extreme_native"] == pytest.approx(78.08 - margin)
+        assert conn.execute("SELECT value_native, raw_report FROM observation_prints").fetchone()[:] == (26.0, raw_report)
 
     def test_ledger_fact_reaches_35_even_when_instants_says_34_and_events_says_31(self):
         conn = _conn()
@@ -489,7 +518,11 @@ class TestParisTypeSpecimenThroughLedger:
 
 
 class TestSeoulMarginThroughLedger:
-    def test_rksi_print_30_enters_ledger_fact_at_28(self):
+    def test_rksi_print_30_enters_ledger_fact_at_28(self, tmp_path, monkeypatch):
+        measurement = _install_metar_measurement_fixture(
+            tmp_path, monkeypatch, faithful=False, threshold=2.0
+        )
+        assert measurement.metar_margin_units_for_city("Seoul", "C") == 2.0
         conn = _conn()
         append_print(
             conn, city="Seoul", station_id="RKSI", source_channel="aviationweather_metar",
@@ -507,7 +540,11 @@ class TestSeoulMarginThroughLedger:
         assert fact["observed_extreme_native"] == 30.0 - margin
         assert fact["source"] == "observation_prints:aviationweather_metar"
 
-    def test_low_metric_mirror_margin_direction_flips(self):
+    def test_low_metric_mirror_margin_direction_flips(self, tmp_path, monkeypatch):
+        measurement = _install_metar_measurement_fixture(
+            tmp_path, monkeypatch, faithful=False, threshold=2.0
+        )
+        assert measurement.metar_margin_units_for_city("Seoul", "C") == 2.0
         conn = _conn()
         # 2026-06-09T20:00Z = 2026-06-10T05:00 KST (Seoul is UTC+9, no DST) --
         # inside the 2026-06-10 Seoul local day.
@@ -525,6 +562,28 @@ class TestSeoulMarginThroughLedger:
         margin = metar_margin_units_for_city("Seoul", "C")
         assert margin is not None
         assert fact["observed_extreme_native"] == 10.0 + margin
+
+    @pytest.mark.parametrize(("metric", "value"), (("high", 30.0), ("low", 10.0)))
+    def test_faithful_measurement_keeps_zero_margin_twin(
+        self, tmp_path, monkeypatch, metric, value
+    ):
+        measurement = _install_metar_measurement_fixture(
+            tmp_path, monkeypatch, faithful=True, threshold=1.0
+        )
+        assert measurement.metar_margin_units_for_city("Seoul", "C") == 0.0
+        conn = _conn()
+        append_print(
+            conn, city="Seoul", station_id="RKSI", source_channel="aviationweather_metar",
+            publish_ts_utc="2026-06-10T05:00:00+00:00", value_native=value, unit="C",
+            fetched_at_utc="2026-06-10T05:04:00+00:00", raw_report=f"METAR RKSI {int(value)}/05",
+        )
+        fact = _latest_authorized_day0_fact(
+            conn, city="Seoul", target_date="2026-06-10", temperature_metric=metric,
+            decision_time=datetime(2026, 6, 10, 6, 0, tzinfo=UTC),
+        )
+        assert fact is not None
+        assert fact["observed_extreme_native"] == value
+        assert conn.execute("SELECT value_native FROM observation_prints").fetchone()[0] == value
 
 
 # ---------------------------------------------------------------------------
