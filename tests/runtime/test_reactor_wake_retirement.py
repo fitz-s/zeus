@@ -192,6 +192,11 @@ def test_retirement_is_bounded_per_call(tmp_path, trade):
     assert len(_queued_ids(path)) == 3
 
 
+_CUT_DEPENDENCY = reactor_wake.CutDependency(
+    published=True, hard_family_keys=None, belief_family_keys=None
+)
+
+
 @pytest.mark.parametrize(
     "reason",
     (
@@ -201,25 +206,53 @@ def test_retirement_is_bounded_per_call(tmp_path, trade):
         "money_path_substrate_refreshed",
         "position_fill_projected",
         reactor_wake.COLLATERAL_AUTHORITY_REFRESHED_WAKE_REASON,
+        reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
         "a_reason_no_table_names",
     ),
 )
-def test_every_wake_that_can_invalidate_a_cut_advances_the_revision(tmp_path, reason):
-    """One table: a wake the predicate could count against a cut always moves
-    the urgent-marker revision, so a revision-keyed verdict cannot go stale."""
+def test_revision_advances_exactly_for_wakes_that_can_invalidate_a_cut(tmp_path, reason):
+    """One table: a wake the predicate can count against an auction cut
+    (which rebinds books and wealth) moves the urgent-marker revision, so a
+    revision-keyed verdict cannot go stale; any other wake leaves it alone."""
 
     path = tmp_path / reactor_wake.REACTOR_WAKE_FILENAME
-    before = reactor_wake.reactor_urgent_wake_revision(path=path)
-    _publish(path, reason, (CURRENT,), at=NOW)
-    assert reactor_wake.reactor_urgent_wake_revision(path=path) != before
-    assert reactor_wake.reactor_urgent_wake_identity(path=path)[1] == reason
+    wake = _publish(path, reason, (CURRENT,), at=NOW)
+    verdict = reactor_wake.cut_invalidating_wakes((wake,), _CUT_DEPENDENCY)
+    can_invalidate = bool(verdict.hard or verdict.epoch)
+    advanced = reactor_wake.reactor_urgent_wake_revision(path=path) is not None
+    assert advanced is can_invalidate
+    assert can_invalidate is (
+        reason
+        not in {
+            "market_price_advanced",
+            "money_path_substrate_refreshed",
+            reactor_wake.COLLATERAL_AUTHORITY_REFRESHED_WAKE_REASON,
+            reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        }
+    )
 
 
-def test_only_a_request_leaves_the_revision_alone(tmp_path):
-    path = tmp_path / reactor_wake.REACTOR_WAKE_FILENAME
-    _publish(path, reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON, (CURRENT,), at=NOW)
-    assert reactor_wake.reactor_urgent_wake_revision(path=path) is None
-    for reason in (*reactor_wake._WAKE_KIND_BY_REASON, "unknown"):
-        assert reactor_wake.wake_advances_revision(
-            SimpleNamespace(reason=reason, held_sell_reauction_requests=())
-        ) is (reactor_wake.wake_kind(SimpleNamespace(reason=reason)) != "request")
+def test_retirement_runs_at_most_once_per_interval(monkeypatch):
+    """The listener polls on every notification; the reachability read and
+    queue scan run once per interval."""
+
+    import src.data.forecast_retention as fr
+
+    calls = []
+    monkeypatch.setattr(
+        fr, "build_reachability", lambda **kwargs: calls.append(kwargs) or fr.Reachability("9999", frozenset())
+    )
+    monkeypatch.setattr(reactor_wake, "_queued_wakes", lambda *_a, **_k: [])
+    monkeypatch.setattr(reactor_wake, "_RETIRE_LAST_RUN_MONOTONIC", [None])
+    clock = [1000.0]
+
+    def poll():
+        return reactor_wake.retire_served_wakes_if_due(monotonic=lambda: clock[0])
+
+    poll()
+    clock[0] += 1.0
+    poll()
+    assert len(calls) == 1
+    clock[0] += reactor_wake.RETIRE_SERVED_WAKES_INTERVAL_S
+    poll()
+    assert len(calls) == 2

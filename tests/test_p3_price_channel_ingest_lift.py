@@ -4086,13 +4086,13 @@ def test_market_channel_reloader_deadline_interrupts_blocked_broad_hydration(
 
 def test_price_channel_redecision_wake_is_targeted_urgent_fast_path():
     from src.events import reactor
-    from types import SimpleNamespace
-
-    from src.runtime.reactor_wake import wake_advances_revision
+    from src.runtime.reactor_wake import WAKE_KIND_REBOUND, reason_kind
 
     source = inspect.getsource(reactor.run_edli_event_reactor_cycle)
 
-    assert wake_advances_revision(SimpleNamespace(reason="market_price_advanced"))
+    # A price fact is JIT-rebound at actuation; it wakes the listener but
+    # never invalidates a running auction cut.
+    assert reason_kind("market_price_advanced") == WAKE_KIND_REBOUND
     assert 'producer_wake_reason == "market_price_advanced"' in source
     assert "committed_event_wake" in source
     assert "targeted_only=producer_fast_path and bool(targeted_event_ids)" in source

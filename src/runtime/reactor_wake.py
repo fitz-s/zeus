@@ -2924,9 +2924,12 @@ def acknowledge_reactor_wakes(
 #            cut at any checkpoint, through final actuation.
 # A family-scoped wake defers until the cut publishes what it values: the cut
 # reads current truth afterwards, and publishing re-judges every wake.
-# Every kind that can invalidate some running cut advances the urgent-marker
-# revision on publish, so a revision-keyed verdict can never go stale. Only a
-# REQUEST (which invalidates nothing) leaves the marker alone.
+# A kind that can invalidate an auction cut (every such cut rebinds books and
+# wealth at actuation) advances the urgent-marker revision on publish, so a
+# revision-keyed verdict can never go stale. REBOUND and REQUEST cannot, so
+# they leave the marker alone: a REBOUND fact reaches the one consumer that
+# freezes a book-bound decision without a rebind (a paused no-submit carrier)
+# on its next queue read.
 WAKE_KIND_REBOUND = "rebound"
 WAKE_KIND_REQUEST = "request"
 WAKE_KIND_BELIEF = "belief"
@@ -2962,11 +2965,14 @@ def wake_kind(wake: object) -> str:
     )
 
 
+_REVISION_KINDS = frozenset({WAKE_KIND_BELIEF, WAKE_KIND_HARD, WAKE_KIND_CAPITAL})
+
+
 def wake_advances_revision(wake: object) -> bool:
     """Whether publishing ``wake`` must advance the urgent-marker revision:
-    exactly when its kind can invalidate some running cut."""
+    exactly when its kind can invalidate an auction cut."""
 
-    return wake_kind(wake) != WAKE_KIND_REQUEST
+    return wake_kind(wake) in _REVISION_KINDS
 
 
 @dataclass(frozen=True)
@@ -3155,6 +3161,10 @@ RETIRABLE_WAKE_REASONS = frozenset(
 )
 CUT_SERVED_WAKE_REASONS = frozenset({"forecast_posterior_advanced"})
 RETIRE_SERVED_WAKES_LIMIT = 500
+# One reachability read (a trade-DB open plus the open-rest resolver, ~0.8 s
+# live) and one queue scan per interval, never per listener poll.
+RETIRE_SERVED_WAKES_INTERVAL_S = 60.0
+_RETIRE_LAST_RUN_MONOTONIC: list[float | None] = [None]
 # (city, target_date, metric) -> scope-scan instant of the latest completed
 # cut that valued the family. Process-local: a restart only delays retirement
 # until the next completed cut. Entries leave once their target date is below
@@ -3278,6 +3288,27 @@ def retire_served_wakes(
     if not served or not acknowledge_reactor_wakes(served, path=path):
         return 0
     return len(served)
+
+
+def retire_served_wakes_if_due(
+    *,
+    monotonic: Callable[[], float] = time.monotonic,
+    interval_s: float = RETIRE_SERVED_WAKES_INTERVAL_S,
+) -> int:
+    """Run ``retire_served_wakes`` at most once per ``interval_s``.
+
+    SCOPE: the wake listener's hot loop. DRAIN: the first call after the
+    interval pays one reachability read and one queue scan. RESET: a process
+    restart retires on its first poll. An unknown reachability still retires
+    nothing (inside ``retire_served_wakes``).
+    """
+
+    now = monotonic()
+    last = _RETIRE_LAST_RUN_MONOTONIC[0]
+    if last is not None and now - last < interval_s:
+        return 0
+    _RETIRE_LAST_RUN_MONOTONIC[0] = now
+    return retire_served_wakes()
 
 
 def reactor_wake_revision(
