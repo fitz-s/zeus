@@ -166,6 +166,17 @@ class VenueOrderTruthReducer:
                 TERMINAL_PARTIAL,
                 source_state=source_state,
             )
+        if matched > 0 and terminal_zero_no_fill is not None:
+            # Independent fill proof repairs the terminal fact's zero matched
+            # count; it cannot resurrect its already-closed venue remainder.
+            # Command sizing still distinguishes a complete fill from a partial.
+            if _covers_command(matched, command_size_dec):
+                return CanonicalOrderTruth("MATCHED", Decimal("0"), matched, TERMINAL_FILLED)
+            terminal_state = _state(terminal_zero_no_fill)
+            return CanonicalOrderTruth(
+                terminal_state, Decimal("0"), matched, TERMINAL_PARTIAL,
+                source_state=terminal_state,
+            )
         if matched > 0:
             if command_size_dec is not None:
                 remaining = max(Decimal("0"), command_size_dec - matched)

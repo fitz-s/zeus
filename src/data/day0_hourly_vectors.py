@@ -4002,11 +4002,11 @@ def day0_current_temperature_channels(city: Any) -> tuple[str, tuple[str, ...]] 
         channels = ("hko_rhrread_spot",)
     elif source_type == "noaa":
         channels = (f"ogimet_metar_{station.lower()}", "aviationweather_metar")
-        if str(getattr(city, "name", "") or "") == "Helsinki" and station == "EFHK" and unit == "C":
-            channels += ("fmi_airport_temperature",)
     else:
         return None
-    return station, channels
+    from src.data.physical_current_sources import physical_current_sources_for_city
+    channels += tuple(route.source_channel for route in physical_current_sources_for_city(city))
+    return station, tuple(dict.fromkeys(channels))
 
 
 def read_day0_current_temperature_state(
@@ -4120,14 +4120,18 @@ def read_day0_current_temperature_state(
         observation_time = published
         if channel == "fmi_airport_temperature":
             from src.data.fmi_airport_temperature import valid_ledger_print
+            from src.data.physical_current_sources import physical_current_sources_for_city
 
+            route = next((r for r in physical_current_sources_for_city(city)
+                          if r.source_channel == channel and r.station_id == station_raw), None)
             if (
-                station_raw != "EFHK"
+                route is None
                 or str(unit_raw or "").strip().upper() != "C"
                 or fetched < published
                 or decision_utc - fetched > timedelta(minutes=25)
                 or decision_utc - published > timedelta(minutes=25)
-                or not valid_ledger_print(str(raw_report or ""), observed_at=published, value=value)
+                or not valid_ledger_print(str(raw_report or ""), observed_at=published,
+                                          value=value, station=route.station)
             ):
                 continue
         if channel == "aviationweather_metar":

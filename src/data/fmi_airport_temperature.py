@@ -34,6 +34,19 @@ NS = {
 
 
 @dataclass(frozen=True)
+class FmiStation:
+    station_id: str
+    fmisid: str
+    wmo: str
+    name: str
+    latitude: float
+    longitude: float
+
+
+DEFAULT_STATION = FmiStation(STATION_ID, FMISID, WMO, STATION_NAME, 60.32937, 24.97274)
+
+
+@dataclass(frozen=True)
 class FmiTemperaturePrint:
     observed_at: datetime
     fetched_at: datetime
@@ -52,7 +65,7 @@ def parse_temperature_metadata(payload: str) -> None:
 
 
 def parse_temperature_coverage(
-    payload: str, *, fetched_at: datetime,
+    payload: str, *, fetched_at: datetime, station: FmiStation = DEFAULT_STATION,
 ) -> tuple[FmiTemperaturePrint, ...]:
     if fetched_at.tzinfo is None:
         raise ValueError("FMI_FETCH_TIME_NAIVE")
@@ -68,10 +81,10 @@ def parse_temperature_coverage(
     names = location.findall("gml:name", NS)
     if (
         len(identifiers) != 1
-        or identifiers[0].text != FMISID
+        or identifiers[0].text != station.fmisid
         or identifiers[0].get("codeSpace", "").split("/")[-1] != "fmisid"
-        or not any(n.text == STATION_NAME for n in names)
-        or not any(n.text == WMO and n.get("codeSpace", "").endswith("/wmo") for n in names)
+        or not any(n.text == station.name for n in names)
+        or not any(n.text == station.wmo and n.get("codeSpace", "").endswith("/wmo") for n in names)
     ):
         raise ValueError("FMI_STATION_IDENTITY_MISMATCH")
     properties = root.findall(".//om:observedProperty", NS)
@@ -96,7 +109,7 @@ def parse_temperature_coverage(
     prints = []
     for i, raw_value in enumerate(readings):
         latitude, longitude, stamp = map(float, coordinates[3 * i:3 * i + 3])
-        if not (abs(latitude - 60.32937) < 0.0001 and abs(longitude - 24.97274) < 0.0001):
+        if not (abs(latitude - station.latitude) < 0.0001 and abs(longitude - station.longitude) < 0.0001):
             raise ValueError("FMI_STATION_COORDINATES_MISMATCH")
         if not math.isfinite(stamp):
             raise ValueError("FMI_OBSERVATION_TIME_INVALID")
@@ -109,23 +122,27 @@ def parse_temperature_coverage(
             fetched_at=now,
             temperature_c=value,
             raw_report=json.dumps({
-                "fmisid": FMISID, "wmo": WMO, "station": STATION_NAME,
+                "fmisid": station.fmisid, "wmo": station.wmo, "station": station.name,
                 "property": TEMPERATURE_PROPERTY, "unit": "degC",
                 "observed_at": observed.isoformat(), "value": raw_value,
                 "availability": "local_fetch_only",
+                "provider_observed_at_ms": int(observed.timestamp() * 1000),
+                "received_at_ms": int(now.timestamp() * 1000),
+                "provider_published_at_ms": None,  # Not exposed by WFS.
             }, sort_keys=True, separators=(",", ":")),
         ))
     return tuple(prints)
 
 
-def valid_ledger_print(raw_report: str, *, observed_at: datetime, value: float) -> bool:
+def valid_ledger_print(raw_report: str, *, observed_at: datetime, value: float,
+                       station: FmiStation = DEFAULT_STATION) -> bool:
     """Reject a manually mistagged print on the physical current-state read."""
     try:
         record = json.loads(raw_report)
         return (
-            record["fmisid"] == FMISID
-            and record["wmo"] == WMO
-            and record["station"] == STATION_NAME
+            record["fmisid"] == station.fmisid
+            and record["wmo"] == station.wmo
+            and record["station"] == station.name
             and record["property"] == TEMPERATURE_PROPERTY
             and record["unit"] == "degC"
             and record["availability"] == "local_fetch_only"
@@ -137,8 +154,9 @@ def valid_ledger_print(raw_report: str, *, observed_at: datetime, value: float) 
         return False
 
 
-def fetch_efhk_temperature(
-    *, start: datetime, end: datetime, client: Any = httpx,
+def fetch_temperature(
+    *, start: datetime, end: datetime, station: FmiStation = DEFAULT_STATION,
+    client: Any = httpx,
 ) -> tuple[FmiTemperaturePrint, ...]:
     """One bounded ten-minute-grid request; receipt is captured after response."""
     if start.tzinfo is None or end.tzinfo is None or end <= start:
@@ -149,12 +167,17 @@ def fetch_efhk_temperature(
     response = client.get(ENDPOINT, params={
         "service": "WFS", "version": "2.0.0", "request": "getFeature",
         "storedquery_id": "fmi::observations::weather::multipointcoverage",
-        "fmisid": FMISID,
+        "fmisid": station.fmisid,
         "starttime": start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "endtime": end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "parameters": "temperature", "timestep": "10",
     }, timeout=6.0)
     response.raise_for_status()
     fetched_at = datetime.now(timezone.utc)
-    return tuple(p for p in parse_temperature_coverage(response.text, fetched_at=fetched_at)
+    return tuple(p for p in parse_temperature_coverage(response.text, fetched_at=fetched_at, station=station)
                  if start <= p.observed_at <= end)
+
+
+def fetch_efhk_temperature(*, start: datetime, end: datetime, client: Any = httpx) -> tuple[FmiTemperaturePrint, ...]:
+    """Compatibility entry point; all stations share fetch_temperature."""
+    return fetch_temperature(start=start, end=end, client=client)

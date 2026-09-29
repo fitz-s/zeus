@@ -224,13 +224,10 @@ def _source_matches_settlement_family(source: str, settlement_source_type: str) 
     return False
 
 
-def _station_matches_city(station_id, city: City) -> bool:
-    if not station_id:
-        return True
-    city_station = getattr(city, "station_id", None) or getattr(city, "icao", None)
-    if not city_station:
-        return True
-    return str(station_id).upper() == str(city_station).upper()
+# Reuse the same pure identity law as the execution-side harvester.
+from src.contracts.settlement_semantics import (
+    settlement_station_matches_city as _station_matches_city,
+)
 
 
 def _lookup_settlement_obs(

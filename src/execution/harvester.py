@@ -776,20 +776,11 @@ def _source_matches_settlement_family(source: str, source_type: str) -> bool:
     return False
 
 
-def _expected_settlement_station_id(city: City) -> str:
-    if city.settlement_source_type == "hko":
-        return "HKO"
-    return str(city.wu_station or "").strip().upper()
-
-
-def _station_matches_city(row_station: object, city: City) -> bool:
-    expected = _expected_settlement_station_id(city)
-    if not expected:
-        return city.settlement_source_type == "hko"
-    station = str(row_station or "").strip().upper()
-    if not station:
-        return False
-    return station == expected or station.startswith(f"{expected}:")
+# Compatibility names share the contract with the ingest-side truth writer.
+from src.contracts.settlement_semantics import (
+    expected_settlement_station_id as _expected_settlement_station_id,
+    settlement_station_matches_city as _station_matches_city,
+)
 
 
 def _lookup_settlement_obs(

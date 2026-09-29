@@ -339,10 +339,17 @@ files:
     downstream:
     - src/ingest_main.py
     - src/events/triggers/day0_extreme_updated.py
+  src/data/physical_current_sources.py:
+    zone: K1_truth
+    authority_role: physical_current_station_route_registry
+    why: Loads a process-lifetime typed station/provider/identity registry and computes one bounded provider-wide polling period. No city-name dispatch, arbitrary URL, code import, settlement promotion, or belief-serving dependency is introduced. Optional configuration errors keep the existing belief serving and identify unavailable evidence. The registry and scheduler restart together so adding stations cannot inherit an over-budget cadence.
+    downstream:
+    - src/ingest_main.py
+    - src/data/day0_hourly_vectors.py
   src/data/fmi_airport_temperature.py:
     zone: K1_truth
-    authority_role: efhk_current_temperature_physical_clock
-    why: Validates FMI WFS fmisid 100968 / WMO 2974 at EFHK with official degC parameter metadata and UTC sample coordinates. A ten-minute grid sample has no publisher per-sample release clock, so only its real local fetch time establishes causal availability. The isolated Helsinki physical-current channel cannot settle markets, create an absorbing Day0 extreme, or establish residual calibration.
+    authority_role: fmi_station_current_temperature_physical_clock
+    why: Validates FMI WFS fmisid 100968 / WMO 2974 at EFHK with official degC parameter metadata and UTC sample coordinates. A ten-minute grid sample has no publisher per-sample release clock, so only its real local fetch time establishes causal availability. Configured station identities share one fixed-endpoint client. The physical-current channel cannot settle markets, create an absorbing Day0 extreme, or establish residual calibration. Provider observation, unavailable publication clock, and actual local response receipt remain distinct millisecond provenance.
     downstream:
     - src/ingest_main.py
     - src/data/day0_hourly_vectors.py
@@ -373,7 +380,8 @@ files:
     authority_role: day0_remaining_window_forecast_vectors
     why: The current V2 carrier computes exact Gaussian-mixture settlement-bin expectations while retaining the V1 confidence draws; explicit V1 remains historical replay only, with operator/content-bound identities. Persists fresh target-day hourly forecast vectors in zeus-forecasts.db and derives only the interval not yet covered by the latest causal settlement-channel observation. Vector freshness stays bound to decision time; the observation clock only defines the remaining stochastic window, including a terminal tail after local midnight. Decision/cutoff clocks remain causal provenance but are excluded from the carrier economic content hash and deterministic sampling seed once the selected future vector, observation likelihood, sigma, bins, and source identities are unchanged, so a no-new-information refresh cannot manufacture a new q or starve held-SELL coverage. The current global bundle retains ECMWF, ICON, JMA, and UKMO hourly paths so a city outside regional-model domains cannot collapse Day0 probability to one deterministic provider. The Day0 carrier validates complete settlement coverage in thermal order but emits q in the venue candidate order, so a valid family cannot lose probability authority merely because Gamma presents its bins non-monotonically.
     hazards:
-    - SOURCE_TRUTH_PLANE_COLLAPSE The shared probability carrier distinguishes remaining-hourly extrema from final-daily station forecasts: V3 censors only remaining paths and conditions final-daily Gaussian components on the surviving observed boundary, preserving source-current sigma and component weights without creating a false boundary atom. Both analytic bin masses and confidence draws use the same typed distribution; no-final-provider V1/V2 results remain unchanged.
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    # The shared probability carrier distinguishes remaining-hourly extrema from final-daily station forecasts: V3 censors only remaining paths and conditions final-daily Gaussian components on the surviving observed boundary, preserving source-current sigma and component weights without creating a false boundary atom. Both analytic bin masses and confidence draws use the same typed distribution; no-final-provider V1/V2 results remain unchanged.
     downstream:
     - src/events/reactor.py
     - src/engine/event_reactor_adapter.py

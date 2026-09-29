@@ -1,0 +1,32 @@
+# Fast observation receipt and terminal-order correctness
+
+Status: approved by operator request REQ-20260929-170443-dd6d0b for isolated implementation, not production deployment.
+Base: cb4ab1c5d4cf66b7aa03ed046bac5ef2c9a9ab9d. Branch: feat/fast-obs-best-source.
+
+## Hard contract
+Preserve the resolver station/product/view/rounding. National decimal temperature remains physical-current evidence, never settlement certainty. An order terminal remainder cannot become live because an independently confirmed fill arrives. Live processing cuts follow actual HTTP receipt; explicit historical cuts remain unchanged. Only committed WORLD facts may wake FORECAST work; TRADE is untouched. No live daemon, settings, production DB, or deployment writes.
+
+## Scope and execution plan
+1. Reproduce terminal-zero-plus-positive-fill inconsistency and HTTP-receipt pre-cut exclusion, then fix the existing pure reducer and live-ingest seam. Test stale later open facts and historical replay.
+2. Replace the existing city-name FMI admission with a typed, configuration-driven station route, reuse the strict official WFS parser, remove the HIGH daylight mask from physical-current acquisition, and poll on a documented-budget-compatible computed 11-second station clock (two requests per poll, 80% of the published quota; scales with station count). Preserve ten-minute native observations, millisecond receipt precision and both HIGH/LOW reseeds; do not pretend a one-minute request creates one-minute observations.
+3. Repair local-date bounds across DST. Keep failed writes pending through existing overlapping fetch/commit machinery; record the remaining crash-to-durable-wake limitation explicitly rather than claim exactly-once end-to-end delivery.
+4. Keep audit-only per-command and per-position classifications separate, preserving unknown witness/fill/settlement evidence. No live accounting repair.
+   The read-only probe also reproduced the ingest harvester accepting KDEN for Denver/KBKF. Move the existing execution harvester's strict station predicate into the shared settlement contract and reuse it in both writers. Missing/wrong station evidence must not become settlement truth; preserve station suffix and HKO identity behavior. No change to source precedence or rounding.
+5. Run deterministic tests, registry/planning gates and diff checks. Produce a feature commit and full diff; deployment is operator-only.
+
+## Invariants, security and concurrency
+INV-01/06/08/37: no lifecycle phase invention, no change to settlement preimages, no cross-DB unsanctioned writes. HTTP occurs outside canonical write locks. Fixed official endpoints, schema/identity/units/causal timestamps validated. No credential or private settings in evidence or git. Deduplication remains append-only. No q/market gate, confidence haircut or alternate serving authority.
+
+## Acceptance
+Terminal cancel/expire/wipe + positive sub-command fill => TERMINAL_PARTIAL, remaining zero; no terminal proof stays PARTIAL_WITH_REMAINDER. Live receipt after request admits only reports available by receipt; replay at the request clock stays unchanged. Civil-day selection is 23/24/25 hours as appropriate. FMI route has no city-name literal, no nighttime dropout, and no authority promotion. Poll budget remains within published FMI daily and five-minute limits for the configured scope. Existing scoped suites pass or a pre-existing failure is demonstrated from the pinned baseline.
+
+## Rollback and residual scope
+No DB migration or historical rewrite. Revert the isolated feature commit to roll back code. Restoring a slower poll does not erase persisted evidence. Full national-provider superiority, production end-to-end p99, exact sensor equivalence and every historical fill-time probability are claims only where directly measured; otherwise unknown. Navigation initially fails on a pre-existing unhashable hazard mapping; inspect/repair only the malformed manifest scalar if necessary.
+
+## Executed validation and retained evidence
+The final eight-module run completed with 331 passed and 6 failed (19.03 seconds). Five Day0-lane failures were reproduced on the untouched cb4ab1c5d baseline; the sixth, the missing backfill_noaa_wrh.py script-manifest entry, was separately reproduced there. The new station predicate negative control failed four cases before the fix; those cases pass after sharing the execution-side contract. Map-maintenance precommit validation returned ok=true and git diff --check passed. Full navigation is not certified: a later navigation invocation was blocked by the tool safety layer, and was not bypassed.
+
+Private audit evidence remains outside git under artifacts/fast_obs_audit/: every_command.csv, every_position.csv, classification_summary.json, probe.json, wrh_probe.json, national_probe.json, gamma_contracts.json, fmi_first_availability.json, and final_combined_tests.xml. The read-only command/position snapshot was taken at 2026-09-29T22:27:37.457765+00:00 and contains 4,916 commands and 3,187 positions. Classifications are as-of evidence classes, not fabricated future terminal outcomes; historical fill-time q freshness remains unknown where not reconstructed. No production database, daemon, or live branch write was performed.
+
+## Explicitly unfinished acceptance criteria
+This patch reaches committed physical-current evidence and an immediate existing reseed attempt, not a measured q-ready/venue-ack chain. The existing fusion trigger compares current-temperature state only for incumbent current-temperature carriers or the legacy WU residual path (replacement_fusion_upgrade_trigger.py:781-799); new or otherwise ineligible families are not guaranteed an immediate seed. The caller scopes to the current local day, not every ended-day held family. WORLD commit and seed publication are not one atomic transaction: in-process pending hints retry, and eligible periodic revision comparison supplies catch-up, but crash recovery is not a proven millisecond bound. Prior-day corrections, durable end-to-end trace joining, a resident warm materializer, provider Retry-After handling and aggregate quotas shared with other processes remain unimplemented. No universal best-source or every-publisher survey claim is made. FMI website/WFS equality in overlapping samples is not proof of sensor/value identity with the NOAA resolver. The source registry intentionally implements only the already-supported FMI physical-current adapter; other countries' candidate adapters remain research, not production code.

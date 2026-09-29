@@ -1,0 +1,34 @@
+schema_version: 1
+packet: task_2026-09-29_fast_obs_best_source
+status: in_progress
+branch: feat/fast-obs-best-source
+worktree: /Users/leofitz/zeus/.claude/worktrees/fast-obs-best-source
+in_scope:
+- src/data/day0_fast_obs.py
+- src/data/fmi_airport_temperature.py
+- src/data/day0_hourly_vectors.py
+- src/data/physical_current_sources.py
+- config/physical_current_sources.json
+- src/ingest_main.py
+- src/execution/order_truth_reducer.py
+- src/contracts/settlement_semantics.py
+- src/execution/harvester.py
+- src/ingest/harvester_truth_writer.py
+- tests/test_order_truth_reducer.py
+- tests/test_fmi_airport_temperature.py
+- tests/test_fast_obs_receipt_chain.py
+allow_companions:
+- config/AGENTS.md
+- architecture/source_rationale.yaml
+- architecture/test_topology.yaml
+- architecture/zones.yaml
+- architecture/docs_registry.yaml
+- architecture/money_path_objects.yaml
+- docs/operations/current/plans/task_2026-09-29_fast_obs_best_source.md
+- docs/operations/current/plans/task_2026-09-29_fast_obs_best_source/scope.yaml
+out_of_scope:
+- live branch
+- production DB writes
+- daemon deployment
+- settlement-source promotion
+- probability formula changes

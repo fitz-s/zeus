@@ -168,7 +168,8 @@ def test_late_first_fetch_of_old_sample_falls_back_to_legal_source():
     conn.close()
 
 
-def test_new_print_uses_world_coordinator_and_wakes_only_helsinki(monkeypatch, tmp_path):
+@pytest.mark.parametrize("retry_wake", [False, True])
+def test_new_print_uses_world_coordinator_and_wakes_only_helsinki(monkeypatch, tmp_path, retry_wake):
     import src.ingest_main as ingest
     import src.data.fmi_airport_temperature as fmi
     import src.data.replacement_forecast_production as production
@@ -196,19 +197,34 @@ def test_new_print_uses_world_coordinator_and_wakes_only_helsinki(monkeypatch, t
         def record_commit(self, **kwargs): lease_calls.append(kwargs["rows_changed"])
 
     monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {"Helsinki": CITY})
-    monkeypatch.setattr(ingest, "_active_window_cities", lambda _: ["Helsinki"])
-    monkeypatch.setattr(fmi, "fetch_efhk_temperature", lambda **_: (sample,))
+    # Empty HIGH daytime mask must not disable physical-current observations.
+    monkeypatch.setattr(ingest, "_active_window_cities", lambda _: [])
+    monkeypatch.setattr(ingest, "_physical_current_pending_wakes", set())
+    monkeypatch.setattr(fmi, "fetch_temperature", lambda **_: (sample,))
     monkeypatch.setattr(db, "world_write_mutex", lambda: threading.Lock())
     monkeypatch.setattr(db, "get_world_connection", lambda **_: sqlite3.connect(path))
     monkeypatch.setattr(coordinator, "default_runtime_write_coordinator",
                         lambda: SimpleNamespace(lease=lambda *_args, **_kwargs: Lease()))
     monkeypatch.setattr(production, "_replacement_forecast_live_materialization_queue_config",
                         lambda: {"seed_dir": str(tmp_path)})
-    monkeypatch.setattr(production, "_enqueue_fusion_upgrade_reseeds_if_needed",
-                        lambda _cfg, **kwargs: wake_calls.append(kwargs) or {"status": "FUSION_UPGRADE_TRIGGER"})
+    def enqueue(_cfg, **kwargs):
+        # A separate connection sees the print only after WORLD commit.
+        with sqlite3.connect(path) as check:
+            assert check.execute("SELECT count(*) FROM observation_prints").fetchone()[0] == 1
+        wake_calls.append(kwargs)
+        return {"status": "FUSION_UPGRADE_TRIGGER_FAILSOFT_SKIPPED" if retry_wake and len(wake_calls)==1
+                else "FUSION_UPGRADE_TRIGGER"}
+    monkeypatch.setattr(production, "_enqueue_fusion_upgrade_reseeds_if_needed", enqueue)
 
     report = ingest._day0_fmi_temperature_tick()
-    assert report == {"status": "COMMITTED", "inserted": 1, "advanced": True}
+    assert {key: report[key] for key in ("status", "inserted", "advanced")} == {"status": "COMMITTED", "inserted": 1, "advanced": True}
+    trace = report["clock_trace"]
+    assert trace["provider_observed_at_ms"] == int(sample.observed_at.timestamp()*1000)
+    assert trace["response_received_at_ms"] == int(sample.fetched_at.timestamp()*1000)
+    assert trace["provider_published_at_ms"] is None
+    assert trace["source_http_ms"] >= 0 and trace["receipt_to_world_ms"] >= 0
+    assert trace["world_to_enqueue_return_ms"] >= 0
+    assert trace["q_served_at_ms"] is None and trace["venue_ack_at_ms"] is None
     assert lease_calls == ["entered", 1]
     assert len(wake_calls) == 1
     local_day = now.astimezone(ZoneInfo("Europe/Helsinki")).date().isoformat()
@@ -220,7 +236,10 @@ def test_new_print_uses_world_coordinator_and_wakes_only_helsinki(monkeypatch, t
         row = conn.execute("SELECT source_channel, value_native, fetched_at_utc FROM observation_prints").fetchone()
         assert row == (SOURCE_CHANNEL, 15.8, now.isoformat())
     assert ingest._day0_fmi_temperature_tick()["advanced"] is False
-    assert len(wake_calls) == 1
+    assert len(wake_calls) == (2 if retry_wake else 1)
+    assert not ingest._physical_current_pending_wakes
+    ingest._day0_fmi_temperature_tick()
+    assert len(wake_calls) == (2 if retry_wake else 1)
 
 
 def test_fmi_transport_failure_leaves_world_unchanged(monkeypatch):
@@ -231,7 +250,7 @@ def test_fmi_transport_failure_leaves_world_unchanged(monkeypatch):
     monkeypatch.setattr(ingest, "_active_window_cities", lambda _: ["Helsinki"])
     def fail(**_):
         raise ValueError("bad WFS shape")
-    monkeypatch.setattr(fmi, "fetch_efhk_temperature", fail)
+    monkeypatch.setattr(fmi, "fetch_temperature", fail)
     assert ingest._day0_fmi_temperature_tick() == {"status": "SOURCE_UNAVAILABLE"}
 
 

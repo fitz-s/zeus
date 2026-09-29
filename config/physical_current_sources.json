@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "role": "physical_current_only",
+  "providers": {
+    "fmi_wfs": {
+      "requests_per_poll": 2,
+      "requests_per_day": 20000,
+      "requests_per_five_minutes": 600,
+      "budget_fraction": 0.8
+    }
+  },
+  "sources": [
+    {
+      "provider": "fmi_wfs",
+      "source_channel": "fmi_airport_temperature",
+      "station_id": "EFHK",
+      "settlement_source_types": ["noaa"],
+      "unit": "C",
+      "minimum_poll_seconds": 1,
+      "native_cadence_seconds": 600,
+      "identity": {
+        "fmisid": "100968",
+        "wmo": "2974",
+        "name": "Vantaa Helsinki-Vantaan lentoasema",
+        "latitude": 60.32937,
+        "longitude": 24.97274
+      },
+      "authority_note": "Existing physical-current mapping only. Not proof that the WFS sensor is the NOAA resolver sensor. No settlement promotion."
+    }
+  ]
+}

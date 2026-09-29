@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-21; last_reviewed=2026-07-04; last_reused=2026-07-04
+# Lifecycle: created=2026-05-21; last_reviewed=2026-09-29; last_reused=2026-09-29
 # Purpose: Relationship antibody for monotonic venue order truth reduction.
 # Reuse: Run when changing venue order fact precedence, command recovery,
 #        exchange reconciliation, or terminal/no-fill projection semantics.
@@ -61,9 +61,10 @@ def test_positive_trade_fact_cannot_reduce_to_terminal_no_fill() -> None:
         command_size="5",
     )
 
-    assert reduced.state == "PARTIALLY_MATCHED"
-    assert reduced.proof_class == PARTIAL_WITH_REMAINDER
-    assert reduced.remaining_size == Decimal("3")
+    # A later fill changes exposure, not the venue's already-terminal remainder.
+    assert reduced.state == "EXPIRED"
+    assert reduced.proof_class == TERMINAL_PARTIAL
+    assert reduced.remaining_size == Decimal("0")
     assert reduced.matched_size == Decimal("2")
 
 

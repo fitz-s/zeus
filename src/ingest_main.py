@@ -2013,6 +2013,11 @@ def _day0_metar_source_clock_tick():
         priority_scopes=_day0_priority_scopes(),
         anomaly_check=None,
     )
+    # The HTTP phase may complete after a locally witnessed report becomes
+    # available. Keeping the pre-request cut can reject that very report as
+    # future evidence and then acknowledge its event identity without a wake.
+    received_at = datetime.now(timezone.utc)
+    prefetch = prefetch.with_live_receipt(received_at)
     pending_reports = tuple(prefetch.ledger_reports or ())
     pending_events = bool(
         getattr(prefetch, "event_reports", ())
@@ -2053,40 +2058,69 @@ def _day0_metar_source_clock_tick():
                 read_conn.close()
     _stage_day0_metar_commit(
         prefetch,
-        received_at=decision_time.isoformat(),
+        received_at=received_at.isoformat(),
         family_admission=family_admission,
     )
     return _commit_or_schedule_day0_metar(origin="source_clock")
 
 
+def _physical_current_poll_seconds() -> float:
+    from src.data.physical_current_sources import physical_current_poll_seconds
+    return physical_current_poll_seconds()
+
+
+_physical_current_pending_wakes: set[tuple[str, str, str]] = set()
+
+
 @_scheduler_job("ingest_day0_fmi_temperature")
 def _day0_fmi_temperature_tick() -> dict[str, object]:
-    """Add EFHK physical current-state prints and queue exact-family redecision."""
+    """Legacy scheduler ID; station routes share one physical-current pipeline."""
     from src.config import runtime_cities_by_name
-    from src.data.fmi_airport_temperature import (
-        SOURCE_CHANNEL, STATION_ID, fetch_efhk_temperature,
-    )
+    from src.data.physical_current_sources import physical_current_sources_for_city
+
+    reports = []
+    # One physical request per station per round, even if multiple city aliases
+    # own different market families for that station. Failures are shared too.
+    fetch_cache: dict[tuple[str, str, str], tuple[tuple, str]] = {}
+    for city in runtime_cities_by_name().values():
+        for route in physical_current_sources_for_city(city):
+            reports.append(_day0_current_temperature_source_tick(city, route, fetch_cache=fetch_cache))
+    if not reports:
+        return {"status": "STATION_NOT_CONFIGURED"}
+    return reports[0] if len(reports) == 1 else {"status": "SOURCE_ROUND", "reports": reports}
+
+
+def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> dict[str, object]:
+    """HTTP before WORLD lease; committed physical evidence before any reseed."""
+    from src.data.fmi_airport_temperature import fetch_temperature
     from src.state.db import get_world_connection, world_write_mutex
     from src.state.schema.observation_prints_schema import append_print
     from src.state.write_coordinator import DBIdentity, default_runtime_write_coordinator
 
-    city = runtime_cities_by_name().get("Helsinki")
-    if city is None or (
-        str(getattr(city, "wu_station", "")).upper() != STATION_ID
-        or str(getattr(city, "settlement_source_type", "")).lower() != "noaa"
-        or str(getattr(city, "settlement_unit", "")).upper() != "C"
-    ):
-        return {"status": "STATION_NOT_CONFIGURED"}
+    station_id, source_channel = route.station_id, route.source_channel
+    chain_started_ns = time.monotonic_ns()
     now = datetime.now(timezone.utc)
-    if "Helsinki" not in _active_window_cities(now):
-        return {"status": "OUTSIDE_DAY0_WINDOW"}
+    # Physical-current evidence matters overnight and for LOW as well as HIGH.
     # A two-hour overlapping window gives each ten-minute grid sample repeated
     # chances while keeping the one-station WFS response bounded.
-    try:
-        prints = fetch_efhk_temperature(start=now - timedelta(hours=2), end=now)
-    except Exception as exc:  # noqa: BLE001 - this source is optional to other cities
-        logger.warning("FMI_EFHK_FETCH_FAILED error=%s:%s", type(exc).__name__, exc)
-        return {"status": "SOURCE_UNAVAILABLE"}
+    cache_key = (route.provider, station_id, source_channel)
+    cached = (fetch_cache or {}).get(cache_key)
+    if cached is not None:
+        prints, error_class = cached
+        if error_class:
+            return {"status": "SOURCE_UNAVAILABLE"}
+        source_received_ns = time.monotonic_ns()
+    else:
+        try:
+            prints = fetch_temperature(start=now - timedelta(hours=2), end=now, station=route.station)
+            source_received_ns = time.monotonic_ns()
+            if fetch_cache is not None:
+                fetch_cache[cache_key] = (prints, "")
+        except Exception as exc:  # noqa: BLE001 - optional source cannot stop other cities
+            if fetch_cache is not None:
+                fetch_cache[cache_key] = ((), type(exc).__name__)
+            logger.warning("PHYSICAL_CURRENT_FETCH_FAILED station=%s error=%s", station_id, type(exc).__name__)
+            return {"status": "SOURCE_UNAVAILABLE"}
     if not prints:
         return {"status": "NO_NEW_PRINT"}
 
@@ -2107,7 +2141,7 @@ def _day0_fmi_temperature_tick() -> dict[str, object]:
                     "SELECT publish_ts_utc, value_native FROM observation_prints "
                     "WHERE city = ? AND station_id = ? AND source_channel = ? "
                     "ORDER BY publish_ts_utc DESC, id DESC LIMIT 1",
-                    (city.name, STATION_ID, SOURCE_CHANNEL),
+                    (city.name, station_id, source_channel),
                 ).fetchone()
                 newest = str(newest_row[0]) if newest_row else ""
                 newest_value = float(newest_row[1]) if newest_row else None
@@ -2116,8 +2150,8 @@ def _day0_fmi_temperature_tick() -> dict[str, object]:
                 for sample in prints:
                     clock = sample.observed_at.isoformat()
                     if append_print(
-                        conn, city=city.name, station_id=STATION_ID,
-                        source_channel=SOURCE_CHANNEL, publish_ts_utc=clock,
+                        conn, city=city.name, station_id=station_id,
+                        source_channel=source_channel, publish_ts_utc=clock,
                         value_native=sample.temperature_c, unit="C",
                         fetched_at_utc=sample.fetched_at.isoformat(),
                         raw_report=sample.raw_report,
@@ -2137,12 +2171,18 @@ def _day0_fmi_temperature_tick() -> dict[str, object]:
             finally:
                 conn.close()
     except Exception as exc:  # noqa: BLE001 - optional source never blocks other cities
-        logger.warning("FMI_EFHK_WRITE_DEFERRED error=%s:%s", type(exc).__name__, exc)
+        logger.warning("PHYSICAL_CURRENT_WRITE_DEFERRED station=%s error=%s", station_id, type(exc).__name__)
         return {"status": "WRITE_DEFERRED"}
     finally:
         mutex.release()
 
+    world_committed_ns = time.monotonic_ns()
+    world_committed_at_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    wake_status = "NO_NEW_SOURCE_REVISION"
+    wake_key = (city.name, station_id, source_channel)
     if advanced:
+        _physical_current_pending_wakes.add(wake_key)
+    if wake_key in _physical_current_pending_wakes:
         from src.data.replacement_forecast_production import (
             _enqueue_fusion_upgrade_reseeds_if_needed,
             _replacement_forecast_live_materialization_queue_config,
@@ -2159,8 +2199,30 @@ def _day0_fmi_temperature_tick() -> dict[str, object]:
             changed_sources=("day0_current_temperature_state",),
             computed_at=decision_time,
         )
-        logger.info("FMI_EFHK_REDECISION_SEED status=%s", (report or {}).get("status"))
-    return {"status": "COMMITTED", "inserted": inserted, "advanced": advanced}
+        status = (report or {}).get("status")
+        wake_status = status or "ENQUEUE_UNAVAILABLE"
+        if report is not None and status != "FUSION_UPGRADE_TRIGGER_FAILSOFT_SKIPPED":
+            _physical_current_pending_wakes.discard(wake_key)
+        logger.info("PHYSICAL_CURRENT_REDECISION_SEED city=%s station=%s status=%s",
+                    city.name, station_id, status)
+    sample = max(prints, key=lambda item: item.observed_at)
+    trace = {
+        "city": city.name, "station_id": station_id, "source_channel": source_channel,
+        "provider_observed_at_ms": int(sample.observed_at.timestamp() * 1000),
+        "provider_published_at_ms": None,
+        "response_received_at_ms": int(sample.fetched_at.timestamp() * 1000),
+        "world_committed_at_ms": world_committed_at_ms,
+        "source_http_ms": (source_received_ns - chain_started_ns) / 1_000_000,
+        "source_round_cache_hit": cached is not None,
+        "receipt_to_world_ms": (world_committed_ns - source_received_ns) / 1_000_000,
+        "world_to_enqueue_return_ms": (time.monotonic_ns() - world_committed_ns) / 1_000_000,
+        "enqueue_status": wake_status,
+        "q_served_at_ms": None,  # Asynchronous producer owns this later fact.
+        "venue_ack_at_ms": None,  # Enqueue is not a market reaction.
+    }
+    if advanced or wake_status != "NO_NEW_SOURCE_REVISION":
+        logger.info("PHYSICAL_CURRENT_CHAIN_TRACE %s", json.dumps(trace, sort_keys=True))
+    return {"status": "COMMITTED", "inserted": inserted, "advanced": advanced, "clock_trace": trace}
 
 
 @_scheduler_job("ingest_day0_metar_commit_retry")
@@ -5596,7 +5658,7 @@ def _ingest_main_job_specs() -> list[tuple]:
             id="ingest_day0_metar_source_clock", max_instances=1, coalesce=True,
             misfire_grace_time=max(5, int(day0_metar_poll_seconds * 2)),
             next_run_time=now)),
-        (_day0_fmi_temperature_tick, "interval", dict(minutes=5,
+        (_day0_fmi_temperature_tick, "interval", dict(seconds=_physical_current_poll_seconds(),
             id="ingest_day0_fmi_temperature", max_instances=1, coalesce=True,
             misfire_grace_time=120, next_run_time=now)),
         (_day0_oracle_anomaly_tick, "interval", dict(seconds=10,

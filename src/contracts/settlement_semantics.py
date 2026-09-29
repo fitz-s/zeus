@@ -54,6 +54,26 @@ logger = logging.getLogger(__name__)
 RoundingRule = Literal["wmo_half_up", "floor", "ceil", "oracle_truncate"]
 
 
+def expected_settlement_station_id(city: Any) -> str:
+    """One station identity for both settlement writers; no airport substitution."""
+    if city.settlement_source_type == "hko":
+        return "HKO"
+    return str(city.wu_station or "").strip().upper()
+
+
+def settlement_station_matches_city(row_station: object, city: Any) -> bool:
+    """Require the configured identity, preserving canonical station suffixes.
+
+    Extracted from the execution harvester so the ingest writer cannot silently
+    admit a different station through a nonexistent City.station_id attribute.
+    """
+    expected = expected_settlement_station_id(city)
+    if not expected:
+        return False
+    station = str(row_station or "").strip().upper()
+    return bool(station) and (station == expected or station.startswith(f"{expected}:"))
+
+
 def settlement_preimage_offsets(
     rounding_rule: str, *, half_step: float = 0.5
 ) -> tuple[float, float]:

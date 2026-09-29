@@ -52,7 +52,7 @@ import threading
 import time
 from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Iterable, Mapping, Optional
@@ -492,7 +492,9 @@ def latest_fast_station_extreme_c(
     local_start = datetime.combine(
         target_day, datetime.min.time(), tzinfo=tz
     ).astimezone(UTC)
-    local_end = local_start + timedelta(days=1)
+    local_end = datetime.combine(
+        target_day + timedelta(days=1), datetime.min.time(), tzinfo=tz
+    ).astimezone(UTC)
     # KMA event windows are the canonical same-station raw carrier.  Do not
     # let the legacy fast publication projection mask a correction or reintroduce
     # an Ogimet row that the canonical window rejected.
@@ -1139,7 +1141,7 @@ def _normalized_raw_report_identity(raw: object) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
-def parse_metar_api_payload(payload: object) -> list[MetarReport]:
+def parse_metar_api_payload(payload: object, *, first_seen_at: datetime | None = None) -> list[MetarReport]:
     """Parse the aviationweather.gov JSON payload into typed reports.
 
     Tolerant per-row (a malformed row is skipped with a debug log), strict on
@@ -1174,6 +1176,7 @@ def parse_metar_api_payload(payload: object) -> list[MetarReport]:
                     temp_c=temp_c,
                     metar_type=str(row.get("metarType") or ""),
                     raw=str(row.get("rawOb") or ""),
+                    first_seen_at=first_seen_at,
                 )
             )
         except (TypeError, ValueError, OSError, OverflowError) as exc:
@@ -1186,6 +1189,7 @@ def parse_noaa_metar_cycle_payload(
     *,
     stations: Iterable[str],
     published_at: datetime,
+    first_seen_at: datetime | None = None,
 ) -> list[MetarReport]:
     """Parse one append-only NOAA cycle-file segment for selected stations."""
 
@@ -1228,6 +1232,7 @@ def parse_noaa_metar_cycle_payload(
             temp_c=temp_c,
             metar_type="SPECI" if tokens[0] == "SPECI" else "METAR",
             raw=raw,
+            first_seen_at=first_seen_at,
         )
         reports[(station, observed, raw)] = report
     return list(reports.values())
@@ -1630,6 +1635,7 @@ class NoaaMetarCycleCursor:
             delta,
             stations=stations,
             published_at=published,
+            first_seen_at=datetime.now(UTC),
         )
         if offset == 0:
             cutoff = now - timedelta(minutes=10)
@@ -1710,6 +1716,7 @@ class NoaaMetarStationCursor:
                 response.content,
                 stations=(station,),
                 published_at=published,
+                first_seen_at=datetime.now(UTC),
             ),
             True,
             modified,
@@ -1845,7 +1852,9 @@ def fetch_metar_reports(
         if resp.status_code != 200:
             logger.warning("METAR_FAST_LANE_HTTP_%s ids=%s", resp.status_code, ids[:120])
             return []
-        return parse_metar_api_payload(resp.json())
+        # httpx reads the complete response body before get returns.
+        first_seen_at = datetime.now(UTC)
+        return parse_metar_api_payload(resp.json(), first_seen_at=first_seen_at)
     except (httpx.HTTPError, json.JSONDecodeError, ValueError) as exc:
         logger.warning("METAR_FAST_LANE_FETCH_FAILED ids=%s exc=%s: %s", ids[:120], type(exc).__name__, exc)
         return []
@@ -2709,6 +2718,24 @@ class FastObsPrefetch:
     event_reports: tuple[MetarReport, ...] = ()
     kma_conflicts: tuple[tuple[str, KmaObservationConflict], ...] = ()
 
+    def with_live_receipt(self, received_at: datetime) -> "FastObsPrefetch":
+        """Advance only a live HTTP result to its completed-response cut.
+
+        Never call this on a historical replay. Report identities and their
+        provider/local availability clocks stay unchanged; only the serving cut
+        and each city's civil target date move forward after network I/O.
+        """
+        if received_at.tzinfo is None or received_at.utcoffset() is None:
+            raise ValueError("FAST_OBS_RECEIPT_NAIVE")
+        receipt = received_at.astimezone(UTC)
+        if receipt < self.decision_time:
+            raise ValueError("FAST_OBS_RECEIPT_REGRESSION")
+        eligible = tuple(
+            (city, source, receipt.astimezone(ZoneInfo(city.timezone)).date().isoformat())
+            for city, source, _target_date in self.eligible
+        )
+        return replace(self, decision_time=receipt, eligible=eligible)
+
 
 def _report_publication_key(report: MetarReport) -> tuple[str, str, float] | None:
     if report.temp_c is None or report.transport_id == KMA_METAR_TRANSPORT_ID:
@@ -3141,7 +3168,8 @@ def _append_metar_prints_to_ledger(
                     publish_ts_utc=publish_ts.isoformat(),
                     value_native=float(report.temp_c),
                     unit="C",
-                    fetched_at_utc=fetched_at,
+                    fetched_at_utc=(report.first_seen_at.isoformat()
+                                    if report.first_seen_at is not None else fetched_at),
                     raw_report=report.raw,
                 ):
                     appended += 1
