@@ -205,7 +205,7 @@ def test_tradeable_posterior_with_fresh_readiness_is_covered(tmp_path) -> None:
 def test_coverage_gate_preserves_indexed_computed_at_order(
     tmp_path, monkeypatch
 ) -> None:
-    import src.state.db as state_db
+    import src.data.replacement_forecast_live_materialization_queue as queue
 
     db_path = _db(tmp_path)
     _insert_posterior(db_path, q_lcb_json=json.dumps({"cold": 0.1, "warm": 0.7}))
@@ -218,7 +218,7 @@ def test_coverage_gate_preserves_indexed_computed_at_order(
         conn.set_trace_callback(trace.append)
         return conn
 
-    monkeypatch.setattr(state_db, "_connect", _connect)
+    monkeypatch.setattr(queue, "_queue_read_only_connection", _connect)
 
     assert _seed_already_covered(forecast_db=db_path, seed=_seed()) is True
     posterior_query = next(
@@ -545,7 +545,7 @@ def test_consumed_regional_clock_newer_than_anchor_cycle_is_covered(tmp_path) ->
                 {
                     "q_lcb_basis": "fused_center_bootstrap_p05",
                     "bayes_precision_fusion": {
-                        "used_models": ["gfs_global", "regional_clock"],
+                        "used_models": ["gfs_global", "ukmo_global_deterministic_10km"],
                         "current_evidence_shape": {
                             **_current_geometry_fixture(),
                             "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
@@ -559,8 +559,8 @@ def test_consumed_regional_clock_newer_than_anchor_cycle_is_covered(tmp_path) ->
                                 "served_cycle": "2026-06-06T00:00:00+00:00",
                                 "captured_at": "2026-06-06T08:00:00+00:00",
                             },
-                            "regional_clock": {
-                                "served_cycle": "2026-06-06T08:30:00+00:00",
+                            "ukmo_global_deterministic_10km": {
+                                "served_cycle": "2026-06-06T06:00:00+00:00",
                                 "captured_at": "2026-06-06T09:00:00+00:00",
                             },
                         },
@@ -571,30 +571,17 @@ def test_consumed_regional_clock_newer_than_anchor_cycle_is_covered(tmp_path) ->
     )
     for model, cycle, captured in (
         ("gfs_global", "2026-06-06T00:00:00+00:00", "2026-06-06T08:00:00+00:00"),
-        ("regional_clock", "2026-06-06T08:30:00+00:00", "2026-06-06T09:00:00+00:00"),
+        ("ukmo_global_deterministic_10km", "2026-06-06T06:00:00+00:00", "2026-06-06T09:00:00+00:00"),
     ):
-        conn.execute(
-            """
-            INSERT INTO raw_model_forecasts (
-                model, city, target_date, metric, source_cycle_time,
-                source_available_at, captured_at, lead_days, forecast_value_c,
-                endpoint, coverage_status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                model,
-                _CITY,
-                _TARGET_DATE,
-                _METRIC,
-                cycle,
-                captured,
-                captured,
-                1,
-                24.0,
-                "single_runs",
-                "COVERED",
-            ),
-        )
+        from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _persist_exact_provider_body
+        _persist_exact_provider_body(conn, tmp_path,city=_CITY,metric=_METRIC,target_date=_TARGET_DATE,
+            model=model,cycle=cycle,captured=captured,value=24.0)
+    from src.data.replacement_current_value_serving import read_current_instrument_values
+    served = read_current_instrument_values(conn,city=_CITY,metric=_METRIC,target_date=_TARGET_DATE,
+        source_cycle_time_iso="2026-06-06T00:00:00+00:00",decision_time_iso="2026-06-06T11:00:00+00:00")
+    provenance = json.loads(conn.execute("SELECT provenance_json FROM forecast_posteriors").fetchone()[0])
+    provenance["bayes_precision_fusion"]["current_value_serving"] = {model: value.as_provenance() for model,value in served.items()}
+    conn.execute("UPDATE forecast_posteriors SET provenance_json=?",(json.dumps(provenance),))
     conn.commit()
     conn.close()
     seed = {**_seed(), "computed_at": "2026-06-06T11:00:00+00:00"}
@@ -783,23 +770,15 @@ def test_global_frozen_artifact_prime_matches_scalar_selector(monkeypatch) -> No
     _raw_artifact_cycles_for_frozen_target.cache_clear()
     fallback_trace: list[str] = []
     conn.set_trace_callback(fallback_trace.append)
-    release = prime_frozen_replacement_artifact_hwm(
-        conn,
-        requests=requests,
-        decision_time=decision_time,
-    )
-    fallback = read_cycles()
-    release()
+    # A failed canonical snapshot read is UNKNOWN, not permission to switch
+    # authorities mid-plan. Keep the valid scalar/batch equality above.
+    with pytest.raises(sqlite3.OperationalError, match="forced prime failure"):
+        prime_frozen_replacement_artifact_hwm(conn,requests=requests,decision_time=decision_time)
     conn.set_trace_callback(None)
     conn.rollback()
     _raw_artifact_cycles_for_frozen_target.cache_clear()
 
-    assert fallback == scalar
     assert input_hwm._FROZEN_INPUT_HWM.get() is None
-    assert any(
-        "FROM RAW_FORECAST_ARTIFACTS" in statement.upper()
-        for statement in fallback_trace
-    )
 
 
 def test_global_frozen_artifact_prime_uses_product_cycle_partition() -> None:

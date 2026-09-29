@@ -2406,26 +2406,18 @@ def _create_db(path) -> None:
                 product_id TEXT NOT NULL,
                 data_version TEXT NOT NULL,
                 artifact_path TEXT NOT NULL,
-                product_metadata_json TEXT NOT NULL
+                product_metadata_json TEXT NOT NULL DEFAULT '{}',
+                source_cycle_time TEXT,source_available_at TEXT,captured_at TEXT,recorded_at TEXT,
+                sha256 TEXT,byte_size INTEGER,request_url TEXT,request_params_json TEXT,
+                artifact_metadata_json TEXT,training_allowed INTEGER,
+                UNIQUE(source_id,product_id,data_version,source_cycle_time,sha256)
             )
             """
         )
-        conn.execute(
-            """
-            CREATE TABLE raw_model_forecasts (
-                raw_model_forecast_id INTEGER PRIMARY KEY,
-                city TEXT NOT NULL,
-                metric TEXT NOT NULL,
-                target_date TEXT NOT NULL,
-                model TEXT NOT NULL,
-                forecast_value_c REAL NOT NULL,
-                lead_days INTEGER,
-                source_cycle_time TEXT NOT NULL,
-                captured_at TEXT,
-                endpoint TEXT NOT NULL
-            )
-            """
-        )
+        from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
+        with sqlite3.connect(":memory:") as template:
+            ensure_replacement_forecast_live_schema(template)
+            conn.execute(template.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='raw_model_forecasts'").fetchone()[0])
         for city in ("Madrid", "London", "Paris"):
             conn.execute(
                 """
@@ -2567,17 +2559,22 @@ def _create_db(path) -> None:
         present_artifact = Path(path).parent / "present_artifact.grib2"
         present_artifact.write_bytes(b"GRIB")
         for city in ("London", "Paris"):
+            city_body = b"GRIB" if city == "London" else b"GRIBParis"
+            city_artifact = present_artifact if city == "London" else present_artifact.with_name("present_Paris.grib2")
+            city_artifact.write_bytes(city_body)
             conn.execute(
                 """
                 INSERT INTO raw_forecast_artifacts (
                     source_id, product_id, data_version, artifact_path, product_metadata_json
-                ) VALUES (?, ?, ?, ?, ?)
+                    ,source_cycle_time,source_available_at,captured_at,recorded_at,sha256,byte_size
+                ) VALUES (?, ?, ?, ?, ?, '2026-06-07T06:00:00+00:00','2026-06-07T08:00:00+00:00',
+                    '2026-06-07T08:00:00+00:00','2026-06-07T08:00:00+00:00',?,?)
                 """,
                 (
                     "openmeteo_ecmwf_ifs_9km",
                     "openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
                     "openmeteo_ecmwf_ifs9_anchor_localday_high",
-                    str(present_artifact),
+                    str(city_artifact),
                     json.dumps(
                         {
                             "city": city,
@@ -2588,21 +2585,13 @@ def _create_db(path) -> None:
                             "source_run_id": f"openmeteo-current-{city}",
                         }
                     ),
+                    hashlib.sha256(city_body).hexdigest(),len(city_body),
                 ),
             )
             if city in {"London", "Paris"}:
-                conn.execute(
-                    """
-                    INSERT INTO raw_model_forecasts (
-                        city, metric, target_date, model, forecast_value_c, lead_days,
-                        source_cycle_time, captured_at, endpoint
-                    ) VALUES (?, 'high', '2026-06-09', 'gfs_global', 21.0, 2,
-                        '2026-06-07T06:00:00+00:00',
-                        '2026-06-07T08:00:00+00:00',
-                        'single_runs')
-                    """,
-                    (city,),
-                )
+                from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _persist_exact_provider_body
+                _persist_exact_provider_body(conn, Path(path).parent, city=city,metric="high",target_date="2026-06-09",
+                    model="gfs_global",value=21.0,cycle="2026-06-07T06:00:00+00:00",captured="2026-06-07T08:00:00+00:00")
         conn.commit()
     finally:
         conn.close()
@@ -2884,7 +2873,7 @@ def test_current_target_plan_reseeds_old_probability_semantics(tmp_path) -> None
         provenance = json.loads(conn.execute(
             "SELECT provenance_json FROM forecast_posteriors WHERE city='Paris'"
         ).fetchone()[0])
-        provenance["bayes_precision_fusion"]["current_evidence_shape"]["semantics_revision"] = "older-law"
+        provenance["bayes_precision_fusion"]["current_evidence_shape"]["semantics_revision"] = "ensemble_center_scenarios_v5"
         conn.execute(
             """
             UPDATE forecast_posteriors
@@ -2935,6 +2924,44 @@ def test_current_target_plan_reseeds_old_probability_semantics(tmp_path) -> None
     current = next(row for row in current_plan.rows if row.city == "Paris")
     assert current.covered is True
     assert current.can_seed is False
+
+
+@pytest.mark.parametrize("damage", ("hash64", "empty", "malformed"))
+def test_coarse_geometry_candidate_cannot_mask_normal_plan_or_queue_reset(tmp_path, damage):
+    from src.data.replacement_forecast_live_materialization_queue import _seed_already_covered
+    db = tmp_path / "forecasts.db"
+    _create_db(db)
+    now = datetime(2026,6,7,12,tzinfo=timezone.utc)
+    seed = dict(city="Paris",target_date="2026-06-09",temperature_metric="high",computed_at=now.isoformat(),
+        baseline_source_run_id="baseline-current-Paris",openmeteo_source_run_id="openmeteo-current-Paris")
+    assert _seed_already_covered(forecast_db=db,seed=seed)
+    with sqlite3.connect(db) as conn:
+        valid = json.loads(conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE city='Paris'").fetchone()[0])
+        damaged = json.loads(json.dumps(valid))
+        shape = damaged["bayes_precision_fusion"]["current_evidence_shape"]
+        if damage == "hash64":
+            shape["provider_geometry_identity_hash"] = "0"*64
+        elif damage == "empty":
+            shape["provider_geometry_evidence"]["providers"] = {}
+        else:
+            shape["provider_geometry_evidence"] = "not-an-object"
+        conn.execute("UPDATE forecast_posteriors SET provenance_json=? WHERE city='Paris'",(json.dumps(damaged),))
+    stale = next(row for row in build_replacement_forecast_current_target_plan(db,now_utc=now).rows if row.city=="Paris")
+    assert stale.covered is False and stale.can_seed is True
+    assert _seed_already_covered(forecast_db=db,seed=seed) is False
+    # A newly appended valid certificate, not repairing the immutable damaged row,
+    # resets both normal skip seams. The materializer writer relationship is tested
+    # by its owner using this same actual raw/artifact schema.
+    with sqlite3.connect(db) as conn:
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(forecast_posteriors)") if row[1]!="posterior_id"]
+        values = list(conn.execute(f"SELECT {','.join(columns)} FROM forecast_posteriors WHERE city='Paris'").fetchone())
+        values[columns.index("provenance_json")] = json.dumps(valid)
+        values[columns.index("computed_at")] = "2026-06-07T11:00:00+00:00"
+        conn.execute(f"INSERT INTO forecast_posteriors ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",values)
+        assert json.loads(conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE city='Paris' ORDER BY posterior_id LIMIT 1").fetchone()[0]) == damaged
+    reset = next(row for row in build_replacement_forecast_current_target_plan(db,now_utc=now).rows if row.city=="Paris")
+    assert reset.covered is True and reset.can_seed is False
+    assert _seed_already_covered(forecast_db=db,seed=seed) is True
 
 
 def test_current_target_plan_reseeds_same_cycle_late_used_model_input(tmp_path) -> None:
@@ -3039,20 +3066,13 @@ def test_current_target_plan_seeds_when_openmeteo_cycle_outruns_lagging_baseline
                 ),
             ),
         )
+        conn.execute("UPDATE raw_forecast_artifacts SET source_cycle_time='2026-06-07T18:00:00+00:00' WHERE product_metadata_json LIKE '%London%'")
         # The captured fusion current-value row exists ONLY at the newer 18Z cycle -- the
         # baseline's 06Z cycle (the pre-fix ceiling) has nothing at or before it.
         conn.execute("DELETE FROM raw_model_forecasts WHERE city = 'London'")
-        conn.execute(
-            """
-            INSERT INTO raw_model_forecasts (
-                city, metric, target_date, model, forecast_value_c, lead_days,
-                source_cycle_time, captured_at, endpoint
-            ) VALUES ('London', 'high', '2026-06-09', 'gfs_global', 21.0, 0,
-                '2026-06-07T18:00:00+00:00',
-                '2026-06-07T19:00:00+00:00',
-                'single_runs')
-            """
-        )
+        from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _persist_exact_provider_body
+        _persist_exact_provider_body(conn,tmp_path,city="London",metric="high",target_date="2026-06-09",
+            model="gfs_global",value=21.0,cycle="2026-06-07T18:00:00+00:00",captured="2026-06-07T19:00:00+00:00")
         conn.commit()
     finally:
         conn.close()
@@ -3103,17 +3123,9 @@ def test_current_target_plan_still_blocks_when_no_row_at_openmeteo_resolved_cycl
         # strictly newer than the ceiling under either the old (baseline) or new (manifest)
         # resolved cycle, so it must not be servable under the ceiling semantics either way.
         conn.execute("DELETE FROM raw_model_forecasts WHERE city = 'London'")
-        conn.execute(
-            """
-            INSERT INTO raw_model_forecasts (
-                city, metric, target_date, model, forecast_value_c, lead_days,
-                source_cycle_time, captured_at, endpoint
-            ) VALUES ('London', 'high', '2026-06-09', 'gfs_global', 21.0, 0,
-                '2026-06-08T00:00:00+00:00',
-                '2026-06-08T01:00:00+00:00',
-                'single_runs')
-            """
-        )
+        from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _persist_exact_provider_body
+        _persist_exact_provider_body(conn,tmp_path,city="London",metric="high",target_date="2026-06-09",
+            model="gfs_global",value=21.0,cycle="2026-06-08T00:00:00+00:00",captured="2026-06-08T01:00:00+00:00")
         conn.commit()
     finally:
         conn.close()
@@ -3489,7 +3501,9 @@ def test_current_target_plan_reseeds_when_openmeteo_anchor_advances_under_same_b
             """
             INSERT INTO raw_forecast_artifacts (
                 source_id, product_id, data_version, artifact_path, product_metadata_json
-            ) VALUES (?, ?, ?, ?, ?)
+                ,source_cycle_time,source_available_at,captured_at,recorded_at,sha256,byte_size
+            ) VALUES (?, ?, ?, ?, ?, '2026-06-07T06:00:00+00:00','2026-06-07T12:00:00+00:00',
+                '2026-06-07T12:00:00+00:00','2026-06-07T12:00:00+00:00',?,2)
             """,
             (
                 "openmeteo_ecmwf_ifs_9km",
@@ -3507,6 +3521,7 @@ def test_current_target_plan_reseeds_when_openmeteo_anchor_advances_under_same_b
                         "source_run_id": "openmeteo-newer-Paris",
                     }
                 ),
+                hashlib.sha256(b"{}").hexdigest(),
             ),
         )
         conn.commit()

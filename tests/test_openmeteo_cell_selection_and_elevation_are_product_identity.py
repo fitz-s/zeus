@@ -141,6 +141,40 @@ def _download_time(monkeypatch, module, when):
     monkeypatch.setattr(module, "datetime", Clock)
 
 
+def _persist_exact_provider_body(conn, tmp_path, *, city, metric, target_date, model, cycle, captured, value, expected_written=1):
+    """Real entity parser/artifact/raw writer fixture, with causal original clocks."""
+    from src.config import runtime_cities_by_name
+    from src.data import bayes_precision_fusion_download as dl
+    from src.data.openmeteo_ecmwf_ifs9_anchor import SINGLE_RUNS_FORECAST_URL
+    cfg = runtime_cities_by_name()[city]
+    run = datetime.fromisoformat(cycle)
+    stamp = datetime.fromisoformat(captured)
+    target = dl.BayesPrecisionFusionDownloadTarget(city=city, metric=metric, target_date=target_date,
+        lead_days=max(0, (datetime.fromisoformat(target_date).date() - run.date()).days),
+        latitude=float(cfg.lat), longitude=float(cfg.lon), timezone_name=str(cfg.timezone))
+    params = {"latitude": target.latitude, "longitude": target.longitude,
+        "timezone": target.timezone_name, "models": dl.OPENMETEO_MODEL_IDS.get(model, model),
+        "hourly":"temperature_2m", "temperature_unit":"celsius", "cell_selection":"land",
+        "run":run.replace(tzinfo=None).isoformat()}
+    day = datetime.fromisoformat(target_date)
+    payload = {"latitude":target.latitude, "longitude":target.longitude, "elevation":45,
+        "timezone":target.timezone_name, "hourly_units":{"temperature_2m":"°C"},
+        "hourly":{"time":[(day+timedelta(hours=i)).isoformat(timespec="minutes") for i in range(24)],
+                  "temperature_2m":[value]*24}}
+    body = (json.dumps(payload, indent=2)+"\n").encode()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("src.config.state_path", lambda filename: Path(tmp_path)/"state"/filename)
+        _download_time(patch, dl, stamp)
+        bound = dl._bind_physical_response(json.loads(body), model=model, url=SINGLE_RUNS_FORECAST_URL,
+            params=params, run=run, captures=[(body, stamp.timestamp())])
+        row = dict(model=model,city=city,metric=metric,target_date=target_date,source_cycle_time=cycle,
+            source_available_at=captured,captured_at=captured,lead_days=target.lead_days,
+            forecast_value_c=value,endpoint="single_runs",_physical_response=bound[dl._BATCH_PHYSICAL_RESPONSE_KEY],
+            **dl._bayes_precision_fusion_product_identity(model,"single_runs",target))
+        assert dl._persist_rows(conn, [row]) == expected_written
+    return int(row["artifact_id"])
+
+
 @pytest.mark.parametrize("metric", ("high", "low"))
 @pytest.mark.parametrize("column,value", (
     ("latitude_requested", 0.0), ("longitude_requested", 0.0),
@@ -316,6 +350,7 @@ def test_physical_manifest_redacts_request_credentials(tmp_path, monkeypatch):
     payload = {"latitude": 1, "longitude": 2, "elevation": 3}
     body = json.dumps(payload).encode()
     params = {"models":"icon_global","hourly":"temperature_2m", "latitude":1,"longitude":2,
+              "timezone":"UTC",
               "api_key":"secret-key","token":"secret-token","authorization":"secret-header"}
     bound = dl._bind_physical_response(json.loads(body), model="icon_global",
         url="https://username:password@example.com/v1/forecast?api_key=secret-key",
@@ -323,3 +358,211 @@ def test_physical_manifest_redacts_request_credentials(tmp_path, monkeypatch):
     evidence = json.dumps(bound[dl._BATCH_PHYSICAL_RESPONSE_KEY])
     for secret in ("secret-key","secret-token","secret-header","username","password"):
         assert secret not in evidence
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_same_issued_archive_appends_proof_without_rewriting_legacy_raw(tmp_path, monkeypatch, metric):
+    from src.data import bayes_precision_fusion_download as dl
+    from src.data.replacement_current_value_serving import read_current_instrument_values
+    conn, target, cycle = _current_rows(tmp_path, monkeypatch, metric=metric)
+    for model, in conn.execute("SELECT model FROM raw_model_forecasts").fetchall():
+        old_hash = dl._model_domain_hash(provider=dl.OPENMETEO_PROVIDER,
+            model_name=dl.OPENMETEO_MODEL_IDS.get(model, model), cell_selection="land",
+            elevation_param="requested", downscaling_policy="none", endpoint_mode="single_runs")
+        conn.execute("UPDATE raw_model_forecasts SET artifact_id=NULL,raw_sha256=NULL,elevation_param='requested',"
+            "downscaling_policy='none',model_domain_hash=?,recorded_at=? WHERE model=?",
+            (old_hash, cycle.replace(hour=4).isoformat(), model))
+    conn.execute("DELETE FROM raw_forecast_artifacts")
+    conn.commit()
+    original = conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall()
+    scope = dict(city=target.city, metric=metric, target_date=target.target_date)
+    assert read_current_instrument_values(conn, **scope, source_cycle_time_iso=cycle.isoformat(),
+        decision_time_iso=cycle.replace(hour=5).isoformat()) == {}
+    _download_time(monkeypatch, dl, cycle.replace(hour=8))
+    _mock_single_model_http(monkeypatch, dl, value=20.0)
+    report = dl.download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=Path(conn.execute("PRAGMA database_list").fetchone()[2]), cycle=cycle,
+        targets=[target], models=("icon_global", "ukmo_global_deterministic_10km"),
+        frozen_source_runs={model: dl._DerivedOffGridSingleRunsRun(run=cycle)
+            for model in ("icon_global", "ukmo_global_deterministic_10km")},
+        include_previous_runs=False, prune_after=False, revalidate_legacy_capture=True,
+    )
+    assert report["written_row_count"] == 0
+    assert conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall() == original
+    assert conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts").fetchone()[0] == 2
+    assert read_current_instrument_values(conn, **scope, source_cycle_time_iso=cycle.isoformat(),
+        decision_time_iso=cycle.replace(hour=5).isoformat()) == {}
+    served = read_current_instrument_values(conn, **scope, source_cycle_time_iso=cycle.isoformat(),
+        decision_time_iso=cycle.replace(hour=9).isoformat())
+    assert set(served) == {"icon_global", "ukmo_global_deterministic_10km"}
+    for value in served.values():
+        assert value.value_c == 20.0
+        assert value.served_cycle == cycle.isoformat()
+        assert value.captured_at == cycle.replace(hour=4).isoformat()
+        assert value.physical_response["revalidated_legacy_product"] is True
+        assert value.physical_response["raw_model_forecast_id"] == value.raw_model_forecast_id
+        assert value.physical_response["proof_captured_at"] == cycle.replace(hour=8).isoformat()
+    assert read_current_instrument_values(conn, **scope, source_cycle_time_iso=cycle.isoformat()) == {}
+    assert read_current_instrument_values(conn, **scope, source_cycle_time_iso=cycle.isoformat(),
+        decision_time_iso=(cycle + timedelta(hours=31)).isoformat()) == {}
+    _persist_exact_provider_body(conn,tmp_path,city=target.city,metric=metric,target_date=target.target_date,
+        model="icon_global",cycle=cycle.isoformat(),captured=cycle.replace(hour=10).isoformat(),
+        value=21.0,expected_written=0)
+    conn.commit()
+    # Latest same-family bytes differ from immutable value: do not hide this
+    # mismatch behind the older valid derived witness.
+    changed=read_current_instrument_values(conn,**scope,source_cycle_time_iso=cycle.isoformat(),
+        decision_time_iso=cycle.replace(hour=11).isoformat())
+    assert set(changed)=={"ukmo_global_deterministic_10km"}
+    assert conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall()==original
+    conn.close()
+
+
+@pytest.mark.parametrize("damage", (None,"wrong_first_site"))
+def test_single_model_location_batch_persists_and_serves_second_city_both_metrics(tmp_path,monkeypatch,damage):
+    from src.data import bayes_precision_fusion_download as dl
+    from src.data.replacement_current_value_serving import read_current_instrument_values
+    from datetime import date
+    run=datetime(2026,6,8,tzinfo=UTC)
+    captured=run.replace(hour=4)
+    db=_forecast_db(tmp_path)
+    monkeypatch.setattr("src.config.state_path",lambda filename:tmp_path/"state"/filename)
+    points={"Paris":SimpleNamespace(lat=48.967,lon=2.428,timezone="Europe/Paris"),
+        "London":SimpleNamespace(lat=51.51,lon=-0.01,timezone="Europe/London")}
+    monkeypatch.setattr("src.config.runtime_cities_by_name",lambda:points)
+    _download_time(monkeypatch,dl,captured)
+    dl._SINGLE_RUNS_PAYLOAD_CACHE.clear()
+    dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEX.clear()
+    def fetch(_url,params,**kwargs):
+        assert params["models"]=="icon_global"
+        payload=[]
+        for lat,lon,tz in zip(str(params["latitude"]).split(","),str(params["longitude"]).split(","),str(params["timezone"]).split(","),strict=True):
+            day=datetime(2026,6,9)
+            latitude,longitude=float(lat),float(lon)
+            if damage=="wrong_first_site" and tz=="Europe/Paris":
+                latitude,longitude=0,0
+            payload.append({"latitude":latitude,"longitude":longitude,"elevation":100,
+                "timezone":tz,"hourly_units":{"temperature_2m":"°C"},
+                "hourly":{"time":[(day+timedelta(hours=i)).isoformat(timespec="minutes") for i in range(24)],
+                          "temperature_2m":[15+i%7 for i in range(24)]}})
+        body=(json.dumps(payload,indent=2)+"\n").encode()
+        kwargs["capture_entity_body"](body,captured.timestamp())
+        return json.loads(body)
+    monkeypatch.setattr("src.data.openmeteo_client.fetch",fetch)
+    targets=[dl.BayesPrecisionFusionDownloadTarget(city=city,metric=metric,target_date="2026-06-09",lead_days=1,
+        latitude=point.lat,longitude=point.lon,timezone_name=point.timezone)
+        for city,point in points.items() for metric in ("high","low")]
+    report=dl.download_bayes_precision_fusion_extra_raw_inputs(forecast_db=db,cycle=run,targets=targets,
+        models=("icon_global",),frozen_source_runs={"icon_global":dl._DerivedOffGridSingleRunsRun(run=run)},
+        include_previous_runs=False,prune_after=False,allow_single_runs_fallback=False)
+    assert report["written_row_count"]==4
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT COUNT(DISTINCT artifact_id) FROM raw_model_forecasts").fetchone()[0]==1
+        for city in points:
+            for metric,expected in (("high",21),("low",15)):
+                served=read_current_instrument_values(conn,city=city,metric=metric,target_date="2026-06-09",
+                    source_cycle_time_iso=run.isoformat(),decision_time_iso=run.replace(hour=5).isoformat())
+                if city=="Paris" and damage:
+                    assert served=={}
+                else:
+                    assert served["icon_global"].value_c==expected
+                    assert served["icon_global"].physical_response["requested_latitude"]==points[city].lat
+        metadata,params=conn.execute("SELECT artifact_metadata_json,request_params_json FROM raw_forecast_artifacts").fetchone()
+        metadata,params=json.loads(metadata),json.loads(params)
+        for key in ("latitude","longitude","timezone"):
+            params[key]=",".join([str(params[key]).split(",")[0]]*2)
+        metadata["physical_response"]["request_params"]=params
+        conn.execute("UPDATE raw_forecast_artifacts SET artifact_metadata_json=?,request_params_json=?",
+            (json.dumps(metadata),json.dumps(params)))
+        # Ambiguous duplicate requested locations cannot bind either row to
+        # a unique response location, even with an intact entity-body hash.
+        for city in points:
+            assert read_current_instrument_values(conn,city=city,metric="high",target_date="2026-06-09",
+                source_cycle_time_iso=run.isoformat(),decision_time_iso=run.replace(hour=5).isoformat())=={}
+
+
+@pytest.mark.parametrize("provider",("hko","cwa"))
+@pytest.mark.parametrize("layer",("raw","artifact","proof"))
+def test_station_availability_clock_cannot_be_replaced_with_earlier_publish_clock(tmp_path,monkeypatch,provider,layer):
+    from tests.test_station_forecast_live_ingest_wiring import _station_body_writer
+    from src.data.replacement_current_value_serving import read_current_instrument_values
+    monkeypatch.setattr("src.config.state_path",lambda filename:tmp_path/"state"/filename)
+    conn,_body,city,models=_station_body_writer(monkeypatch,provider)
+    scope=dict(city=city,metric="high",target_date="2026-07-24",
+        source_cycle_time_iso="2026-07-23T06:00:00+00:00",decision_time_iso="2026-07-23T10:16:00+00:00",
+        include_station_sources=True)
+    assert models["high"] in read_current_instrument_values(conn,**scope)
+    if layer=="raw":
+        conn.execute("UPDATE raw_model_forecasts SET source_available_at=source_cycle_time")
+    elif layer=="artifact":
+        conn.execute("UPDATE raw_forecast_artifacts SET source_available_at=source_cycle_time")
+    else:
+        for artifact_id,raw in conn.execute("SELECT artifact_id,artifact_metadata_json FROM raw_forecast_artifacts").fetchall():
+            evidence=json.loads(raw)
+            for proof in evidence["station_response"]["items"]:
+                proof["source_available_at"]=proof["source_cycle_time"]
+            conn.execute("UPDATE raw_forecast_artifacts SET artifact_metadata_json=? WHERE artifact_id=?",(json.dumps(evidence),artifact_id))
+    assert read_current_instrument_values(conn,**scope)=={}
+    conn.close()
+
+
+@pytest.mark.parametrize("metric",("high","low"))
+def test_registered_cwa_quantity_cannot_be_served_as_its_opposite_metric(tmp_path,monkeypatch,metric):
+    from tests.test_station_forecast_live_ingest_wiring import _station_body_writer
+    from src.data.replacement_current_value_serving import read_current_instrument_values
+    monkeypatch.setattr("src.config.state_path",lambda filename:tmp_path/"state"/filename)
+    conn,_body,city,models=_station_body_writer(monkeypatch,"cwa")
+    wrong="low" if metric=="high" else "high"
+    conn.execute("UPDATE raw_model_forecasts SET metric=? WHERE model=?",(wrong,models[metric]))
+    served=read_current_instrument_values(conn,city=city,metric=wrong,target_date="2026-07-24",
+        source_cycle_time_iso="2026-07-23T06:00:00+00:00",decision_time_iso="2026-07-23T10:16:00+00:00",
+        include_station_sources=True)
+    assert set(served)=={models[wrong]}
+    conn.close()
+
+
+def test_normal_held_revision_missing_producer_recaptures_original_archive_cycle(tmp_path, monkeypatch):
+    from src.data import bayes_precision_fusion_download as dl, replacement_forecast_production as production
+    from src.data.replacement_current_value_serving import read_current_instrument_values
+    conn,target,_cycle = _current_rows(tmp_path,monkeypatch)
+    cycle = datetime(2026,6,9,tzinfo=UTC)
+    now = datetime(2026,6,10,2,tzinfo=UTC)
+    for model, in conn.execute("SELECT model FROM raw_model_forecasts").fetchall():
+        domain = dl._model_domain_hash(provider=dl.OPENMETEO_PROVIDER,model_name=dl.OPENMETEO_MODEL_IDS.get(model,model),
+            cell_selection="land",elevation_param="requested",downscaling_policy="none",endpoint_mode="single_runs")
+        conn.execute("UPDATE raw_model_forecasts SET artifact_id=NULL,raw_sha256=NULL,elevation_param='requested',"
+            "downscaling_policy='none',model_domain_hash=?,source_cycle_time=?,source_available_at=?,captured_at=?,recorded_at=? WHERE model=?",
+            (domain,cycle.isoformat(),*(cycle.replace(hour=4).isoformat(),)*3,model))
+    conn.execute("DELETE FROM raw_forecast_artifacts")
+    old_provenance={"bayes_precision_fusion":{"current_evidence_shape":{"semantics_revision":"ensemble_center_scenarios_v5"}}}
+    conn.execute("INSERT INTO forecast_posteriors (source_id,product_id,data_version,city,target_date,temperature_metric,"
+        "source_cycle_time,source_available_at,computed_at,q_json,posterior_method,provenance_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("openmeteo_ecmwf_ifs9_bayes_fusion","test","test",target.city,target.target_date,target.metric,
+         cycle.isoformat(),cycle.replace(hour=4).isoformat(),cycle.replace(hour=5).isoformat(),'{}',"test",json.dumps(old_provenance)))
+    conn.commit()
+    original=conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall()
+    original_cert=conn.execute("SELECT * FROM forecast_posteriors").fetchall()
+    db=Path(conn.execute("PRAGMA database_list").fetchone()[2])
+    _download_time(monkeypatch,dl,now)
+    _download_time(monkeypatch,production,now)
+    _mock_single_model_http(monkeypatch,dl,value=20)
+    monkeypatch.setattr(dl,"_read_source_clock_single_runs_requests",lambda **_: {})
+    monkeypatch.setattr("src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
+        lambda **_: {(target.city,target.target_date,target.metric):0})
+    monkeypatch.setattr("src.data.replacement_forecast_current_target_plan.replacement_forecast_current_target_keys",lambda *_a,**_: ())
+    monkeypatch.setattr("src.config.cities_by_name",{target.city:SimpleNamespace(lat=target.latitude,
+        lon=target.longitude,timezone=target.timezone_name)})
+    cfg={"forecast_db":db,"raw_manifest_dir":tmp_path/"raw_manifests","seed_dir":tmp_path/"seeds"}
+    report=production._download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg,
+        planning_cycle=now.replace(hour=0),max_wall_clock_seconds=5,include_previous_runs=False,prune_after=False)
+    assert "coherent_archive_capture" in report, report
+    assert report["coherent_archive_capture"]["attempted_target_group_count"] == 1
+    assert report["written_row_count"] == 0
+    assert report["committed_families"] == ((target.city,target.target_date,target.metric),)
+    assert conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall()==original
+    assert conn.execute("SELECT * FROM forecast_posteriors").fetchall()==original_cert
+    assert conn.execute("SELECT DISTINCT source_cycle_time FROM raw_forecast_artifacts").fetchall()==[(cycle.isoformat(),)]
+    served=read_current_instrument_values(conn,city=target.city,metric=target.metric,target_date=target.target_date,
+        source_cycle_time_iso=cycle.isoformat(),decision_time_iso=now.isoformat())
+    assert len(served)==1 and all(value.physical_response["revalidated_legacy_product"] for value in served.values())
+    conn.close()

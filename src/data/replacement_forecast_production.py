@@ -1178,6 +1178,102 @@ def _download_replacement_forecast_current_targets_if_needed(
     return result
 
 
+def _held_legacy_physical_proof_recovery_candidates(
+    forecast_db: Path, held_priority: Mapping[tuple[str, str, str], int], *,
+    decision_time: datetime, deadline_monotonic: float | None,
+) -> dict[tuple[str, str, str], tuple[str, datetime]]:
+    """One exact eligible archive witness per revision-missing held family.
+
+    SCOPE: immutable legacy single-runs rows in that held family. DRAIN:
+    ordinary producer captures the same issued archive under its quota/deadline.
+    RESET: exact body/value revalidation, never a rewritten raw row or new expiry.
+    """
+    from src.config import cities_by_name
+    from src.state.db import _connect_read_only
+    from src.data.replacement_forecast_cycle_policy import (
+        current_evidence_shape_has_held_authority, cycle_age_outside_bound,
+    )
+    from src.data.replacement_current_value_serving import (
+        current_value_serving_schema, _product_identity_select, _source_clock_product_has_authority,
+    )
+    from src.data.bayes_precision_fusion_download import (
+        BAYES_PRECISION_FUSION_ELEVATION_PARAM, BAYES_PRECISION_FUSION_DOWNSCALING_POLICY, _model_domain_hash,
+    )
+    from src.data.bayes_precision_fusion_history_provider import raw_product_matches_live_source
+
+    candidates: dict[tuple[str, str, str], tuple[str, datetime]] = {}
+    conn = _connect_read_only(forecast_db, deadline_monotonic=deadline_monotonic)
+    try:
+        conn.row_factory = sqlite3.Row
+        if deadline_monotonic is not None:
+            conn.set_progress_handler(lambda: int(time.monotonic() >= deadline_monotonic), 1000)
+        schema = current_value_serving_schema(conn)
+        if not schema.has_artifacts or not set(("artifact_id", "model_domain_hash", "recorded_at")).issubset(schema.product_identity_columns):
+            return candidates
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='forecast_posteriors'").fetchone() is None:
+            return candidates
+        identity = _product_identity_select(schema, decision_iso=decision_time.isoformat())
+        for scope, priority in sorted(held_priority.items()):
+            _check_source_preflight_deadline(deadline_monotonic)
+            if priority >= 2:
+                continue
+            city, target_date, metric = scope
+            city_cfg = cities_by_name.get(city)
+            if city_cfg is None:
+                continue
+            posterior = conn.execute(
+                "SELECT provenance_json FROM forecast_posteriors WHERE city=? AND target_date=?"
+                " AND temperature_metric=? AND runtime_layer='live'"
+                " ORDER BY computed_at DESC,posterior_id DESC LIMIT 1", scope,
+            ).fetchone()
+            try:
+                provenance = json.loads(str(posterior[0])) if posterior is not None else {}
+                fusion = provenance.get("bayes_precision_fusion")
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(fusion, Mapping) or not isinstance(fusion.get("current_evidence_shape"), Mapping) or current_evidence_shape_has_held_authority(provenance):
+                continue
+            rows = conn.execute(
+                f"SELECT {identity} FROM raw_model_forecasts WHERE city=? AND target_date=? AND metric=?"
+                " AND endpoint='single_runs' AND endpoint_mode='single_runs' AND artifact_id IS NULL"
+                " AND elevation_param='requested' AND downscaling_policy='none'"
+                " ORDER BY source_cycle_time DESC,model,raw_model_forecast_id DESC LIMIT 64", scope,
+            ).fetchall()
+            for candidate in rows:
+                raw = json.loads(str(candidate[0]))
+                if _source_clock_product_has_authority(candidate[0], lead_days=int(raw["lead_days"])):
+                    continue
+                try:
+                    cycle = datetime.fromisoformat(str(raw["source_cycle_time"]).replace("Z", "+00:00"))
+                    if cycle.tzinfo is None or cycle_age_outside_bound(decision_time, cycle):
+                        continue
+                    clocks = [datetime.fromisoformat(str(raw[key]).replace("Z", "+00:00"))
+                        for key in ("source_available_at", "captured_at", "recorded_at")]
+                    clocks[-1] = clocks[-1].replace(tzinfo=timezone.utc) if clocks[-1].tzinfo is None else clocks[-1]
+                    if any(stamp.tzinfo is None or stamp > decision_time for stamp in clocks):
+                        continue
+                    if not _source_cycle_can_cover_local_decision_window(cycle=cycle, target_date=target_date,
+                        timezone_name=str(city_cfg.timezone), decision_time=decision_time):
+                        continue
+                    basis = dict(provider=str(raw["provider"]), model_name=str(raw["model_name"]),
+                        cell_selection=str(raw["cell_selection"]), endpoint_mode="single_runs")
+                    if raw["model_domain_hash"] != _model_domain_hash(**basis, elevation_param="requested", downscaling_policy="none"):
+                        continue
+                    view = {**raw, "elevation_param": BAYES_PRECISION_FUSION_ELEVATION_PARAM,
+                        "downscaling_policy": BAYES_PRECISION_FUSION_DOWNSCALING_POLICY,
+                        "model_domain_hash": _model_domain_hash(**basis, elevation_param=BAYES_PRECISION_FUSION_ELEVATION_PARAM,
+                            downscaling_policy=BAYES_PRECISION_FUSION_DOWNSCALING_POLICY)}
+                    if not raw_product_matches_live_source(view, city_cfg, lead_days=int(raw["lead_days"])):
+                        continue
+                except (KeyError, TypeError, ValueError):
+                    continue
+                candidates[scope] = (str(raw["model"]), cycle)
+                break
+        return candidates
+    finally:
+        conn.close()
+
+
 def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
     cfg: dict[str, object],
     *,
@@ -1287,6 +1383,12 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
             raise
         except Exception:
             held_priority = {}
+        held_legacy_candidates = (
+            _held_legacy_physical_proof_recovery_candidates(Path(str(forecast_db)), held_priority,
+                decision_time=decision_time, deadline_monotonic=deadline_monotonic)
+            if held_priority and not capture_when_covered and frozen_source_runs is None and models is None
+            else {}
+        )
         # Raw acquisition needs current market identities, not posterior,
         # manifest and readiness joins. The latter remain materialization
         # authority; spending this bounded capture lane on them stranded every
@@ -1349,9 +1451,11 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                 capture_when_covered
                 or missing_scopes is None
                 or (row.city, row.temperature_metric, row.target_date) in missing_scopes
+                or (row.city, row.target_date, row.temperature_metric) in held_legacy_candidates
             )
             and (
                 (city_cfg := cities_by_name.get(row.city)) is None
+                or (row.city, row.target_date, row.temperature_metric) in held_legacy_candidates
                 or _source_cycle_can_cover_local_decision_window(
                     cycle=cycle,
                     target_date=row.target_date,
@@ -1499,14 +1603,12 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                     ):
                         candidate = next(
                             (
-                                cohort_backtrack_candidates.get(
-                                    (target.city, target.metric, target.target_date)
-                                )
+                                held_legacy_candidates.get((target.city, target.target_date, target.metric))
+                                or cohort_backtrack_candidates.get((target.city, target.metric, target.target_date))
                                 for target in rotated_targets
                                 if (target.city, target.target_date) == first_group
-                                and cohort_backtrack_candidates.get(
-                                    (target.city, target.metric, target.target_date)
-                                ) is not None
+                                and (held_legacy_candidates.get((target.city, target.target_date, target.metric))
+                                    or cohort_backtrack_candidates.get((target.city, target.metric, target.target_date))) is not None
                             ),
                             None,
                         )
@@ -1516,12 +1618,13 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                             )
 
                             archive_model, archive_cycle = candidate
+                            from dataclasses import replace
                             archive_targets = tuple(
-                                target for target in rotated_targets
+                                replace(target, lead_days=max(0, (date.fromisoformat(target.target_date) - archive_cycle.date()).days))
+                                for target in rotated_targets
                                 if (target.city, target.target_date) == first_group
-                                and cohort_backtrack_candidates.get(
-                                    (target.city, target.metric, target.target_date)
-                                ) == candidate
+                                and (held_legacy_candidates.get((target.city, target.target_date, target.metric))
+                                    or cohort_backtrack_candidates.get((target.city, target.metric, target.target_date))) == candidate
                             )
                             archive_budget = max(
                                 0.0, deadline_monotonic - time.monotonic()
@@ -1543,6 +1646,9 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                                         },
                                         include_previous_runs=False,
                                         prune_after=False,
+                                        revalidate_legacy_capture=any(
+                                            (target.city, target.target_date, target.metric) in held_legacy_candidates
+                                            for target in archive_targets),
                                     )
                                 except Exception as exc:
                                     # Optional between-cohort repair cannot strand
@@ -1563,7 +1669,10 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                             # Exact single_runs source identity remains per-model
                             # frozen metadata, never this planning watermark.
                             "cycle": cycle,
-                            "targets": rotated_targets,
+                            "targets": [target for target in rotated_targets
+                                if _source_cycle_can_cover_local_decision_window(cycle=cycle,
+                                    target_date=target.target_date, timezone_name=target.timezone_name,
+                                    decision_time=decision_time)],
                             "release_lag_hours": release_lag_hours,
                             "max_wall_clock_seconds": remaining_seconds,
                         }

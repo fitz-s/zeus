@@ -3331,12 +3331,16 @@ def _bind_provider_geometry_identity(
         "native_variable", "temperature_unit", "aggregation", "selected_latitude",
         "selected_longitude", "target_dem_elevation_m", "native_grid_elevation_m",
         "native_surface", "representativeness_status", "source_cell_geometry_proof",
+        "city", "station_id", "quantity", "selection",
     )
     for model, value in sorted(served.items()):
         proof = getattr(value, "physical_response", None)
         if isinstance(proof, Mapping):
             stable = {key: proof[key] for key in stable_keys if key in proof}
             stable["product_id"] = str(stable.get("product_id", "")).split("::run=")[0]
+            if isinstance(stable.get("selection"), Mapping):
+                stable["selection"] = {key: value for key, value in stable["selection"].items()
+                    if key != "forecast_date"}
             projection[str(model)] = stable
     if anchor_metadata is not None:
         metadata = asdict(anchor_metadata)
@@ -3347,7 +3351,7 @@ def _bind_provider_geometry_identity(
         proof = anchor.get("source_geometry_proof")
         if isinstance(proof, Mapping):
             anchor["source_geometry_proof"] = {key: value for key, value in proof.items()
-                if not any(clock in key for clock in ("fetched", "captured", "payload_sha", "manifest_sha", "recorded", "cycle", "available"))}
+                if key != "station_registry_sha256" and not any(clock in key for clock in ("fetched", "captured", "payload_sha", "manifest_sha", "recorded", "cycle", "available"))}
         projection["__anchor_ifs9__"] = anchor
     if not projection:
         raise ValueError("current provider actual geometry evidence missing")

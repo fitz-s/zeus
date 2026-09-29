@@ -1807,8 +1807,11 @@ def _bind_physical_response(
         raise ValueError("physical response shape invalid")
     geometries = [{"selected_latitude": item.get("latitude"),
                    "selected_longitude": item.get("longitude"),
-                   "target_dem_elevation_m": item.get("elevation")}
-                  for item in items if isinstance(item, Mapping)]
+                   "target_dem_elevation_m": item.get("elevation"),
+                   "requested_latitude": float(str(clean_params["latitude"]).split(",")[index]),
+                   "requested_longitude": float(str(clean_params["longitude"]).split(",")[index]),
+                   "timezone": str(clean_params["timezone"]).split(",")[index]}
+                  for index, item in enumerate(items) if isinstance(item, Mapping)]
     if model == "ecmwf_ifs" and params.get("models") == "ecmwf_ifs":
         from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
         for geometry in geometries:
@@ -2789,7 +2792,7 @@ _RMF_INSERT_COLUMNS = (
     "source_id", "source_family", "product_id", "provider", "model_name",
     "request_params_json", "request_url_hash", "latitude_requested", "longitude_requested",
     "timezone_requested", "cell_selection", "elevation_param", "downscaling_policy",
-    "endpoint_mode", "model_domain_hash", "coverage_status", "raw_sha256", "artifact_id",
+    "endpoint_mode", "model_domain_hash", "coverage_status", "raw_sha256", "artifact_id", "recorded_at",
 )
 
 
@@ -2937,8 +2940,9 @@ def _persist_rows(
             _write_request_conflict_audit(conn, row, conflict)
             raise _request_conflict_error(row, conflict)
     for row in rows:
-        capture = row.pop("_physical_response", None)
-        station_capture = row.pop("_station_response", None)
+        row.setdefault("recorded_at", datetime.now(UTC).isoformat())
+        capture = row.get("_physical_response")
+        station_capture = row.get("_station_response")
         station = isinstance(station_capture, Mapping)
         if station:
             capture = station_capture
@@ -2954,14 +2958,14 @@ def _persist_rows(
             """INSERT INTO raw_forecast_artifacts
                (source_id,product_id,data_version,source_cycle_time,source_available_at,
                 captured_at,artifact_path,sha256,byte_size,request_url,request_params_json,
-                artifact_metadata_json,training_allowed) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0)
+                artifact_metadata_json,recorded_at,training_allowed) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0)
                ON CONFLICT(source_id,product_id,data_version,source_cycle_time,sha256)
                DO NOTHING""",
             (row["source_id"], row["product_id"], data_version,
              row["source_cycle_time"], row["source_available_at"], capture["captured_at"],
              capture["artifact_path"], capture["sha256"], capture["byte_size"],
              capture["request_url"], json.dumps(params, sort_keys=True),
-             json.dumps(metadata, sort_keys=True)),
+             json.dumps(metadata, sort_keys=True), datetime.now(UTC).isoformat()),
         )
         artifact = conn.execute(
             "SELECT artifact_id,captured_at,source_available_at FROM raw_forecast_artifacts WHERE source_id=? AND product_id=? "
@@ -3144,6 +3148,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         str, tuple[datetime, datetime] | _DerivedOffGridSingleRunsRun
     ] | None = None,
     quota_lane: str = "source_clock",
+    revalidate_legacy_capture: bool = False,
 ) -> dict[str, object]:
     """Capture (forward single_runs + fixed-lead previous_runs) the 8 extra OM models for each
     current target and persist into raw_model_forecasts on a SINGLE zeus-forecasts.db connection
@@ -3370,6 +3375,23 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                         ),
                     )
                 }
+                if revalidate_legacy_capture:
+                    from src.data.replacement_current_value_serving import (
+                        current_value_serving_schema, _product_identity_select,
+                        _source_clock_product_has_authority,
+                    )
+                    schema = current_value_serving_schema(_ro)
+                    identity = _product_identity_select(schema, decision_iso=datetime.now(UTC).isoformat())
+                    for candidate in _ro.execute(
+                        f"SELECT model,city,target_date,metric,source_cycle_time,endpoint,lead_days,{identity}"
+                        " FROM raw_model_forecasts WHERE artifact_id IS NULL"
+                        " AND elevation_param='requested' AND downscaling_policy='none'"
+                        f" AND model IN ({model_marks}) AND city IN ({city_marks})"
+                        f" AND target_date IN ({date_marks}) AND source_cycle_time IN ({cycle_marks})",
+                        (*requested_models, *target_cities, *target_dates, *request_cycles),
+                    ):
+                        if not _source_clock_product_has_authority(candidate[-1], lead_days=int(candidate[-2])):
+                            persisted_cycle_keys.discard(tuple(candidate[:6]))
                 persisted_keys = {
                     (model, city, target_date, metric, endpoint)
                     for model, city, target_date, metric, source_cycle_time, endpoint
@@ -4060,7 +4082,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                 break
             persist_schema_ready = True
             total_written += chunk_written
-            if chunk_written > 0:
+            if chunk_written > 0 or (revalidate_legacy_capture and any(row.get("artifact_id") is not None for row in rows)):
                 committed_families.update(pending_families)
                 # This normal path prefilters persisted identities; an
                 # independent writer could still win INSERT OR IGNORE while

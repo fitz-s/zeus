@@ -205,11 +205,13 @@ class CurrentValueServingSchema:
 
 
 _PRODUCT_IDENTITY_COLUMNS = (
+    "raw_model_forecast_id",
     "model", "city", "target_date", "endpoint", "endpoint_mode", "source_cycle_time",
     "source_id", "source_family", "product_id", "provider", "model_name",
     "request_params_json", "request_url_hash", "latitude_requested", "longitude_requested",
     "timezone_requested", "cell_selection", "elevation_param", "downscaling_policy",
     "model_domain_hash", "metric", "forecast_value_c", "artifact_id", "raw_sha256", "captured_at", "lead_days",
+    "source_available_at", "recorded_at",
 )
 
 
@@ -235,20 +237,44 @@ def current_value_serving_schema(
     )
 
 
-def _product_identity_select(schema: CurrentValueServingSchema) -> str:
+def _product_identity_select(schema: CurrentValueServingSchema, *, decision_iso: str | None = None) -> str:
     fields = ", ".join(
         f"'{name}', {name if name in schema.product_identity_columns else 'NULL'}"
         for name in _PRODUCT_IDENTITY_COLUMNS
     )
     artifact = "NULL"
     if schema.has_artifacts and "artifact_id" in schema.product_identity_columns:
-        artifact = """(SELECT json_object('source_id',a.source_id,'product_id',a.product_id,
+        # A derived proof is an append-only, same-issued capture. Only causal
+        # readers may use it; carrier-only callers cannot invent its cutoff.
+        derived = ""
+        cutoff = "NULL" if decision_iso is None else "'" + decision_iso.replace("'", "''") + "'"
+        if decision_iso is not None:
+            derived = f""" OR (raw_model_forecasts.artifact_id IS NULL
+                AND raw_model_forecasts.elevation_param='requested'
+                AND raw_model_forecasts.downscaling_policy='none'
+                AND raw_model_forecasts.endpoint_mode='single_runs'
+                AND a.source_id=raw_model_forecasts.source_id
+                AND a.product_id=raw_model_forecasts.product_id
+                AND a.source_cycle_time=raw_model_forecasts.source_cycle_time
+                AND a.data_version='openmeteo_single_model_entity_body_v1'
+                AND datetime(a.captured_at)<=datetime({cutoff})
+                AND datetime(a.source_available_at)<=datetime({cutoff})
+                AND datetime(a.recorded_at)<=datetime({cutoff})
+                AND EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(a.artifact_metadata_json)
+                    THEN json_extract(a.artifact_metadata_json,'$.physical_response.locations') END) loc
+                    WHERE json_extract(loc.value,'$.requested_latitude')=raw_model_forecasts.latitude_requested
+                      AND json_extract(loc.value,'$.requested_longitude')=raw_model_forecasts.longitude_requested
+                      AND json_extract(loc.value,'$.timezone')=raw_model_forecasts.timezone_requested))"""
+        artifact = f"""(SELECT json_object('artifact_id',a.artifact_id,'source_id',a.source_id,'product_id',a.product_id,
             'source_cycle_time',a.source_cycle_time,'captured_at',a.captured_at,
+            'source_available_at',a.source_available_at,'recorded_at',a.recorded_at,'data_version',a.data_version,
             'artifact_path',a.artifact_path,'sha256',a.sha256,'byte_size',a.byte_size,
             'request_url',a.request_url,'request_params_json',a.request_params_json,
             'metadata',a.artifact_metadata_json) FROM raw_forecast_artifacts a
-            WHERE a.artifact_id=raw_model_forecasts.artifact_id)"""
-    return f"json_object({fields}, 'physical_artifact', json({artifact}))"
+            WHERE a.artifact_id=raw_model_forecasts.artifact_id {derived}
+            ORDER BY a.artifact_id DESC LIMIT 1)"""
+    cutoff = "NULL" if decision_iso is None else "'" + decision_iso.replace("'", "''") + "'"
+    return f"json_object({fields}, 'physical_proof_cutoff', {cutoff}, 'physical_artifact', json({artifact}))"
 
 
 def read_current_instrument_family_latest_id(
@@ -333,6 +359,7 @@ def _source_clock_rows_query(
         if schema.has_source_available_at and schema.has_captured_at
         else ""
     )
+    recorded_guard = "AND recorded_at IS NOT NULL AND datetime(recorded_at)<=datetime(?)" if schema.has_recorded_at else ""
     previous_age_guard = ""
     if schema.has_captured_at:
         previous_age_guard = """
@@ -362,6 +389,8 @@ def _source_clock_rows_query(
     params.extend((decision_iso, decision_iso))
     if source_available_guard:
         params.append(decision_iso)
+    if recorded_guard:
+        params.append(decision_iso)
     if previous_age_guard:
         params.extend((SERVED_VIA_PREVIOUS_RUNS, max_substitution_age_hours))
     if single_runs_only:
@@ -369,7 +398,7 @@ def _source_clock_rows_query(
     else:
         params.extend((SERVED_VIA_SINGLE_RUNS, SERVED_VIA_PREVIOUS_RUNS))
     # Missing physical proof remains NULL, including stripped/legacy schemas.
-    product_select = _product_identity_select(schema)
+    product_select = _product_identity_select(schema, decision_iso=decision_iso)
     return (
         f"""
         SELECT raw_model_forecast_id, model, forecast_value_c, lead_days,
@@ -379,6 +408,7 @@ def _source_clock_rows_query(
            AND datetime(source_cycle_time) <= datetime(?)
            AND {possession_predicate}
            {source_available_guard}
+           {recorded_guard}
            {previous_age_guard}
            {strict_guard}
            AND endpoint {'= ?' if single_runs_only else 'IN (?, ?)'}
@@ -432,10 +462,68 @@ def _source_clock_product_has_authority(raw: object, *, lead_days: int | None) -
         from src.data.bayes_precision_fusion_history_provider import raw_product_matches_live_source
 
         city = runtime_cities_by_name().get(str(row["city"] or ""))
-        if city is None or lead_days is None or not raw_product_matches_live_source(row, city, lead_days=lead_days):
+        if city is None or lead_days is None:
+            return False
+        row = _revalidated_legacy_product_row(row)
+        if row is None or not raw_product_matches_live_source(row, city, lead_days=lead_days):
             return False
         return _physical_response_has_authority(row)
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def _revalidated_legacy_product_row(row: Mapping[str, object]) -> dict[str, object] | None:
+    """A typed view over immutable raw, never a legacy-label compatibility gate."""
+    result = dict(row)
+    if row.get("artifact_id") is not None:
+        return result
+    artifact = row.get("physical_artifact")
+    if not isinstance(artifact, dict) or row.get("physical_proof_cutoff") is None:
+        return None
+    from src.data.bayes_precision_fusion_download import (
+        BAYES_PRECISION_FUSION_ELEVATION_PARAM, BAYES_PRECISION_FUSION_DOWNSCALING_POLICY,
+        _model_domain_hash,
+    )
+    if row.get("endpoint_mode") != "single_runs" or row.get("elevation_param") != "requested" or row.get("downscaling_policy") != "none":
+        return None
+    basis = dict(provider=str(row["provider"]), model_name=str(row["model_name"]),
+        cell_selection=str(row["cell_selection"]), endpoint_mode="single_runs")
+    if row.get("model_domain_hash") != _model_domain_hash(**basis, elevation_param="requested", downscaling_policy="none"):
+        return None
+    result.update(elevation_param=BAYES_PRECISION_FUSION_ELEVATION_PARAM,
+        downscaling_policy=BAYES_PRECISION_FUSION_DOWNSCALING_POLICY,
+        model_domain_hash=_model_domain_hash(**basis, elevation_param=BAYES_PRECISION_FUSION_ELEVATION_PARAM,
+            downscaling_policy=BAYES_PRECISION_FUSION_DOWNSCALING_POLICY),
+        artifact_id=artifact["artifact_id"], raw_sha256=artifact["sha256"],
+        revalidated_legacy_product=True,
+        recorded_product_policy={key: row[key] for key in ("elevation_param", "downscaling_policy", "model_domain_hash")})
+    return result
+
+
+def _physical_proof_clocks_have_authority(row: Mapping[str, object], artifact: Mapping[str, object]) -> bool:
+    cutoff = row.get("physical_proof_cutoff")
+    if cutoff is None:
+        return not row.get("revalidated_legacy_product", False)
+    try:
+        decision = datetime.fromisoformat(str(cutoff).replace("Z", "+00:00"))
+        clocks = [datetime.fromisoformat(str(artifact[key]).replace("Z", "+00:00"))
+            for key in ("source_cycle_time", "source_available_at", "captured_at", "recorded_at")]
+        if any(stamp.tzinfo is None or stamp > decision for stamp in clocks):
+            return False
+        if not clocks[0] <= clocks[1] <= clocks[2] <= clocks[3]:
+            return False
+        if row.get("revalidated_legacy_product", False):
+            from src.data.replacement_forecast_cycle_policy import cycle_age_outside_bound
+            if cycle_age_outside_bound(decision, clocks[0]):
+                return False
+            for key in ("source_available_at", "captured_at", "recorded_at"):
+                raw_clock = datetime.fromisoformat(str(row[key]).replace("Z", "+00:00"))
+                if raw_clock.tzinfo is None and key == "recorded_at":
+                    raw_clock = raw_clock.replace(tzinfo=timezone.utc)
+                if raw_clock.tzinfo is None or raw_clock > decision:
+                    return False
+        return True
+    except (KeyError, TypeError, ValueError):
         return False
 
 
@@ -448,7 +536,23 @@ def _station_response_has_authority(row: Mapping[str, object]) -> bool:
         artifact = row.get("physical_artifact")
         if not isinstance(artifact, dict) or artifact["sha256"] != row["raw_sha256"]:
             return False
-        if any(artifact[key] != row[key] for key in ("source_id", "product_id", "source_cycle_time", "captured_at")):
+        if not _physical_proof_clocks_have_authority(row, artifact):
+            return False
+        if any(artifact[key] != row[key] for key in ("source_id", "product_id", "source_cycle_time", "source_available_at", "captured_at")):
+            return False
+        from urllib.parse import parse_qs, urlsplit
+        endpoint = urlsplit(str(artifact["request_url"]))
+        if endpoint.scheme != "https" or endpoint.username is not None or endpoint.password is not None:
+            return False
+        params = json.loads(str(artifact["request_params_json"]))
+        if row["provider"] == "hong_kong_observatory":
+            query = {**{key: values[-1] for key, values in parse_qs(endpoint.query).items()}, **params}
+            if endpoint.hostname != "data.weather.gov.hk" or endpoint.path != "/weatherAPI/opendata/weather.php" or query.get("dataType") != "fnd" or query.get("lang") != "en":
+                return False
+        elif row["provider"] == "cwa_taiwan":
+            if endpoint.hostname != "opendata.cwa.gov.tw" or endpoint.path != "/fileapi/v1/opendataapi/F-D0047-061":
+                return False
+        else:
             return False
         body = Path(str(artifact["artifact_path"])).read_bytes()
         if len(body) != artifact["byte_size"] or hashlib.sha256(body).hexdigest() != artifact["sha256"]:
@@ -457,7 +561,7 @@ def _station_response_has_authority(row: Mapping[str, object]) -> bool:
         if evidence["revision"] != "station_forecast_entity_body_v1":
             return False
         matching = [proof for proof in evidence["items"] if all(proof.get(key) == row[key]
-            for key in ("model", "city", "metric", "target_date", "source_cycle_time", "provider"))]
+            for key in ("model", "city", "metric", "target_date", "source_cycle_time", "source_available_at", "captured_at", "provider"))]
         if len(matching) != 1:
             return False
         city = runtime_cities_by_name().get(str(row["city"]))
@@ -479,8 +583,17 @@ def _physical_response_has_authority(row: Mapping[str, object]) -> bool:
         import hashlib
         from src.data.bayes_precision_fusion_download import _parse_batched_single_runs_payload
         from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS
+        from src.data.openmeteo_ecmwf_ifs9_anchor import SINGLE_RUNS_FORECAST_URL, STANDARD_FORECAST_URL
+        from src.data.openmeteo_client import PREVIOUS_RUNS_URL
         artifact = row["physical_artifact"]
         if not isinstance(artifact, dict) or artifact["sha256"] != row["raw_sha256"]:
+            return False
+        if not _physical_proof_clocks_have_authority(row, artifact):
+            return False
+        expected_url = {"single_runs": SINGLE_RUNS_FORECAST_URL,
+            "standard_api_meta_stamped": STANDARD_FORECAST_URL,
+            "previous_runs": PREVIOUS_RUNS_URL}.get(str(row["endpoint_mode"]))
+        if artifact.get("data_version") != "openmeteo_single_model_entity_body_v1" or artifact["request_url"] != expected_url:
             return False
         if any(artifact[key] != row[key] for key in ("source_id", "product_id", "source_cycle_time")):
             return False
@@ -549,7 +662,8 @@ def _physical_response_has_authority(row: Mapping[str, object]) -> bool:
             payload = {**payload, "hourly": {**payload["hourly"], "temperature_2m": payload["hourly"].get(variable) or payload["hourly"].get(keyed)},
                        "hourly_units": {**payload["hourly_units"], "temperature_2m": "°C"}}
         values = _parse_batched_single_runs_payload(payload, [model],
-            datetime.fromisoformat(str(row["target_date"])).date(), str(row["timezone_requested"]))
+            datetime.fromisoformat(str(row["target_date"])).date(), str(row["timezone_requested"]),
+            decision_at=str(row.get("physical_proof_cutoff") or row["captured_at"]))
         high_c, low_c = values[model]
         expected = high_c if row["metric"] == "high" else low_c if row["metric"] == "low" else None
         return expected is not None and math.isclose(float(expected), float(row["forecast_value_c"]), abs_tol=1e-9)
@@ -558,6 +672,10 @@ def _physical_response_has_authority(row: Mapping[str, object]) -> bool:
 
 
 def _physical_response_provenance(row: Mapping[str, object]) -> Mapping[str, object] | None:
+    if not _is_station_model(str(row["model"])):
+        row = _revalidated_legacy_product_row(row)
+        if row is None:
+            return None
     artifact = row.get("physical_artifact")
     if not isinstance(artifact, dict):
         return None
@@ -577,6 +695,12 @@ def _physical_response_provenance(row: Mapping[str, object]) -> Mapping[str, obj
     return {"revision": metadata["revision"], "model": row["model"],
         "product_id": row["product_id"], "artifact_id": row["artifact_id"],
         "entity_body_sha256": artifact["sha256"],
+        "raw_model_forecast_id": row["raw_model_forecast_id"],
+        "revalidated_legacy_product": bool(row.get("revalidated_legacy_product", False)),
+        "recorded_product_policy": row.get("recorded_product_policy"),
+        "proof_captured_at": artifact["captured_at"],
+        "proof_available_at": artifact["source_available_at"],
+        "proof_recorded_at": artifact["recorded_at"],
         "requested_latitude": row["latitude_requested"],
         "requested_longitude": row["longitude_requested"],
         "timezone": row["timezone_requested"],
