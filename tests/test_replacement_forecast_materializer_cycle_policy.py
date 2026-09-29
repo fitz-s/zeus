@@ -771,8 +771,8 @@ def test_day0_v1_coverage_drains_seed_and_v2_coverage_stops_reenqueue(tmp_path, 
     apply_canonical_schema(conn, forecast_tables=True)
     _create_readiness_state(conn)
     now = datetime.now(UTC).replace(microsecond=0)
-    city = "Shanghai"
-    target_date = "2026-06-07"
+    city = "Hong Kong"
+    target_date = "2026-10-01"
     metric = "high"
     baseline_run = "baseline-v1"
     openmeteo_run = "openmeteo-v1"
@@ -875,7 +875,7 @@ def test_day0_v1_coverage_drains_seed_and_v2_coverage_stops_reenqueue(tmp_path, 
     failed_dir = tmp_path / "failed"
     request_dir = tmp_path / "requests"
     seed_dir.mkdir()
-    seed_path = seed_dir / "Shanghai.2026-06-07.high.station-input-revision.1.json"
+    seed_path = seed_dir / "Hong Kong.2026-10-01.high.station-input-revision.1.json"
     seed_path.write_text(json.dumps(seed), encoding="utf-8")
     fake_result = SimpleNamespace(
         status="READY",
@@ -912,7 +912,7 @@ def test_day0_v1_coverage_drains_seed_and_v2_coverage_stops_reenqueue(tmp_path, 
     writer.close()
     assert queue._seed_already_covered(forecast_db=db_path, seed=seed)
 
-    seed_path_v2 = seed_dir / "Shanghai.2026-06-07.high.station-input-revision.2.json"
+    seed_path_v2 = seed_dir / "Hong Kong.2026-10-01.high.station-input-revision.2.json"
     seed_path_v2.write_text(json.dumps(seed), encoding="utf-8")
     monkeypatch.setattr(
         queue,

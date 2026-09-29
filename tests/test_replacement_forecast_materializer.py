@@ -4142,25 +4142,13 @@ def test_materializer_ignores_malformed_pre_day0_frontier_ledger(
     assert provenance["day0_conditioning"]["observed_extreme_c"] == 31.0
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_materializer_hko_provisional_observation_does_not_truncate_support(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import src.config as config_mod
     import src.data.day0_observation_reader as day0_reader
 
     conn = _conn()
-    _install_live_fusion(monkeypatch)
-    shanghai = config_mod.runtime_cities_by_name()["Shanghai"]
-    monkeypatch.setattr(
-        config_mod,
-        "runtime_cities_by_name",
-        lambda: {
-            "Shanghai": replace(
-                shanghai,
-                settlement_source_type="hko",
-            )
-        },
-    )
     conn.execute("""CREATE TABLE observation_prints (
         id INTEGER PRIMARY KEY, city TEXT, station_id TEXT, source_channel TEXT,
         publish_ts_utc TEXT, value_native REAL, unit TEXT,
@@ -4168,13 +4156,16 @@ def test_materializer_hko_provisional_observation_does_not_truncate_support(
     )""")
     conn.execute(
         """INSERT INTO observation_prints VALUES
-           (1, 'Shanghai', 'HKO', 'hko_rhrread_spot', ?, 25.7, 'C', ?, '')""",
-        (_dt(17, 55).isoformat(), _dt(17, 55).isoformat()),
+           (1, 'Hong Kong', 'HKO', 'hko_rhrread_spot', ?, 25.7, 'C', ?, ?)""",
+        (_hko_dt(17, 55).isoformat(), _hko_dt(17, 55).isoformat(), json.dumps({
+            "recordTime": _hko_dt(17,55).isoformat(),
+            "data": [{"place": "Hong Kong Observatory", "unit": "C", "value": 25.7}],
+        })),
     )
     likelihood_identity = {
         "semantics": "hko_provisional_monotonic_survival_beta_jeffreys_v1",
-        "lookback_start": "2026-05-31",
-        "lookback_end": "2026-06-07",
+        "lookback_start": "2026-09-24",
+        "lookback_end": "2026-10-01",
         "transition_count": 100,
         "retraction_count": 1,
         "median_update_seconds": 600.0,
@@ -4196,18 +4187,18 @@ def test_materializer_hko_provisional_observation_does_not_truncate_support(
         lambda *_args, **_kwargs: (
             (25.2, 25.5, 28.3),
             0.5,
-            _dt(18).isoformat(),
+            _hko_dt(18).isoformat(),
             (),
             None,
         ),
     )
     request = replace(
-        _request(
-            computed_at=_dt(18),
-            expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+        _hko_request(
+            computed_at=_hko_dt(18),
+            expires_at=_hko_dt(2)+timedelta(days=1),
             day0_observed_extreme_c=25.7,
             day0_observed_extreme_source="hko_hourly_accumulator",
-            day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
+            day0_observed_extreme_observation_time=_hko_dt(17, 55).isoformat(),
             day0_observed_extreme_sample_count=12,
         ),
         temperature_metric="low",
@@ -4227,6 +4218,7 @@ def test_materializer_hko_provisional_observation_does_not_truncate_support(
             ),
         ),
     )
+    _install_hko_live_fusion(monkeypatch, request=request)
     result = materialize_replacement_forecast_live(
         conn,
         request,
@@ -4264,21 +4256,16 @@ def test_materializer_hko_provisional_observation_does_not_truncate_support(
         "metric": "low",
         "observed_extreme_c": 25.7,
         "source": "hko_hourly_accumulator",
-        "observation_time": _dt(17, 55).isoformat(),
+        "observation_time": _hko_dt(17, 55).isoformat(),
         "sample_count": 12,
         "unit": "C",
         "support_truncation": False,
     }
 
-    revised = materialize_replacement_forecast_live(
-        conn,
-        replace(
-            request,
-            computed_at=_dt(18, 10),
-            day0_observed_extreme_c=25.6,
-            day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
-        ),
-    )
+    revised_request = replace(request, computed_at=_hko_dt(18,10), day0_observed_extreme_c=25.6,
+                              day0_observed_extreme_observation_time=_hko_dt(18,5).isoformat())
+    _install_hko_live_fusion(monkeypatch, request=revised_request)
+    revised = materialize_replacement_forecast_live(conn, revised_request)
     assert revised.ok is True
     assert revised.posterior_id != result.posterior_id
     hashes = conn.execute(
@@ -8249,23 +8236,26 @@ def test_materialize_script_dry_run_compute_does_not_hold_writer_lock(
     assert statements.index("ROLLBACK") < statements.index("BEGIN IMMEDIATE")
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_materialize_script_dry_run_matches_readiness_cert_regression(
     monkeypatch,
 ) -> None:
     import scripts.materialize_replacement_forecast_live as cli
 
     conn = _conn()
-    _install_live_fusion(monkeypatch)
+    first_request = _hko_request(computed_at=_hko_dt(11), expires_at=_hko_dt(13))
+    _install_hko_live_fusion(monkeypatch, request=first_request)
     incumbent = materialize_replacement_forecast_live(
         conn,
-        _request(computed_at=_dt(11), expires_at=_dt(13)),
+        first_request,
     )
     conn.commit()
     before = conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0]
-
+    older_request = _hko_request(computed_at=_hko_dt(9), expires_at=_hko_dt(13))
+    _install_hko_live_fusion(monkeypatch, request=older_request)
     result = cli._dry_run_from_read_snapshot(
         conn,
-        _request(computed_at=_dt(9), expires_at=_dt(13)),
+        older_request,
     )
     after = conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0]
     conn.close()
@@ -9355,6 +9345,8 @@ def test_normal_current_writer_rebuilds_v6_posterior_after_literal_v5_refusal(tm
                        "temperature_2m": [value]*24}}
         body = (json.dumps(payload, indent=2)+"\n").encode()
         kwargs["capture_entity_body"](body, _hko_dt(12, 10).timestamp())
+        if "capture_network_response" in kwargs:
+            kwargs["capture_network_response"](body, _hko_dt(12,10).timestamp(), {"content-type": "application/json"})
         return json.loads(body)
     monkeypatch.setattr("src.data.openmeteo_client.fetch", fetch)
     dl.download_bayes_precision_fusion_extra_raw_inputs(
