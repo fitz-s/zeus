@@ -9159,7 +9159,6 @@ def event_bound_live_adapter_from_trade_conn(
             cached = _judged[0]
             if (
                 cached is not None
-                and revision is not None
                 and cached[0] == revision
                 and cached[1] == dependency
             ):
