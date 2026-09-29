@@ -9140,7 +9140,9 @@ def test_normal_current_writer_rebuilds_v6_posterior_after_literal_v5_refusal(tm
     monkeypatch.setattr(dl, "datetime", Clock)
     def fetch(url, params, **kwargs):
         value = 22.0 if params["models"] == "icon_global" else 24.0
-        payload = {"latitude": city.lat, "longitude": city.lon, "elevation": 8.0,
+        is_ifs = params["models"] == "ecmwf_ifs"
+        payload = {"latitude": 31.14 if is_ifs else city.lat,
+            "longitude": 121.80 if is_ifs else city.lon, "elevation": 8.0,
             "timezone": city.timezone, "hourly_units": {"temperature_2m": "°C"},
             "hourly": {"time": [f"2026-06-07T{hour:02d}:00" for hour in range(24)],
                        "temperature_2m": [value]*24}}
@@ -9153,7 +9155,7 @@ def test_normal_current_writer_rebuilds_v6_posterior_after_literal_v5_refusal(tm
         targets=[dl.BayesPrecisionFusionDownloadTarget(
             city="Shanghai", metric="low", target_date="2026-06-07", lead_days=1,
             latitude=city.lat, longitude=city.lon, timezone_name=city.timezone)],
-        models=("icon_global", "ukmo_global_deterministic_10km"),
+        models=("ecmwf_ifs", "icon_global", "ukmo_global_deterministic_10km"),
         include_previous_runs=False, prune_after=False,
     )
     request = _low_revision_request()
@@ -9191,6 +9193,84 @@ def test_normal_current_writer_rebuilds_v6_posterior_after_literal_v5_refusal(tm
         captured = conn.execute("SELECT * FROM raw_model_forecasts WHERE raw_model_forecast_id=?",
                                 (serving[model]["raw_model_forecast_id"],)).fetchone()
         assert captured["model"] == model and captured["raw_sha256"]
+    from src.data.replacement_forecast_readiness import ReplacementForecastReadinessDecision
+    from src.data import replacement_forecast_bundle_reader as bundle_reader
+    from src.data.replacement_forecast_bundle_reader import (
+        ReplacementForecastAuthorityPurpose, read_replacement_forecast_bundle,
+    )
+    cert = conn.execute("SELECT * FROM readiness_state WHERE readiness_id=?",
+                        (rebuilt.readiness_id,)).fetchone()
+    posterior = conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+                             (rebuilt.posterior_id,)).fetchone()
+    class ReaderClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            cut = _dt(20, 1)
+            return cut.astimezone(tz) if tz else cut.replace(tzinfo=None)
+    monkeypatch.setattr(bundle_reader, "datetime", ReaderClock)
+    readiness = ReplacementForecastReadinessDecision(
+        readiness_id=cert["readiness_id"], status=cert["status"],
+        reason_codes=tuple(json.loads(cert["reason_codes_json"])),
+        dependency_json=json.loads(cert["dependency_json"]),
+        provenance_json=json.loads(cert["provenance_json"]),
+        expires_at=datetime.fromisoformat(cert["expires_at"]),
+    )
+    for purpose in ReplacementForecastAuthorityPurpose:
+        served = read_replacement_forecast_bundle(
+            conn, baseline_bundle=_BaselineBundle(_Evidence("new12")), readiness=readiness,
+            city="Shanghai", target_date=request.target_date, temperature_metric="low",
+            decision_time=_dt(20, 1).isoformat(),
+            current_bin_topology_hash=posterior["bin_topology_hash"], enforce_raw_input_hwm=True,
+            authority_purpose=purpose,
+        )
+        assert served.ok, (purpose, served.reason_code)
+        assert served.bundle.posterior_id == rebuilt.posterior_id
+        assert dict(served.bundle.q) == pytest.approx(q, abs=1e-12)
+        from src.engine import event_reactor_adapter as era, monitor_refresh
+        from src.solve.solver import JointOutcomeProbabilityWitness, OutcomeTokenBinding, joint_probability_witness_identity
+        # Reorder conditions relative to stored bin order to disprove a positional
+        # coincidence. Tokens are a bounded probability fixture, not venue facts.
+        candidates = tuple(SimpleNamespace(condition_id="0x"+hashlib.sha256(item.bin_id.encode()).hexdigest(),
+            bin=SimpleNamespace(unit="C", low=item.lower_c, high=item.upper_c))
+            for item in reversed(request.bins))
+        bindings = tuple(OutcomeTokenBinding(bin_id=item.bin_id,
+            condition_id=candidate.condition_id, yes_token_id=str(1000+index*2),
+            no_token_id=str(1001+index*2))
+            for index,(item,candidate) in enumerate(zip(reversed(request.bins), candidates, strict=True)))
+        components = era._replacement_global_probability_components(
+            served.bundle, candidates=candidates, bindings=bindings)
+        assert components is not None
+        samples, point, basis = components
+        assert point == pytest.approx([q[item.bin_id] for item in reversed(request.bins)])
+        identity = dict(family_key=served.bundle.family_id, bindings=bindings,
+            q_version=served.bundle.posterior_identity_hash,
+            resolution_identity="Shanghai:ZSPD:noaa:C:low:2026-06-07",
+            topology_identity=served.bundle.bin_topology_hash,
+            posterior_identity_hash=served.bundle.posterior_identity_hash,
+            source_truth_identity=served.bundle.dependency_hash,
+            authority_certificate_hash=hashlib.sha256(cert["provenance_json"].encode()).hexdigest(),
+            band_alpha=.05, band_basis=basis, yes_point_q=point, yes_q_samples=samples,
+            captured_at_utc=_dt(20, 1))
+        witness = JointOutcomeProbabilityWitness(**identity, max_age=timedelta(minutes=5),
+            witness_identity=joint_probability_witness_identity(**identity))
+        for index,binding in enumerate(bindings):
+            points, means = [], []
+            for direction,side in (("buy_yes", "YES"), ("buy_no", "NO")):
+                held = SimpleNamespace(condition_id=binding.condition_id, direction=direction,
+                    token_id=binding.yes_token_id, no_token_id=binding.no_token_id)
+                held_point = monitor_refresh._current_global_held_point_probability(held, witness)
+                held_samples = monitor_refresh._current_global_held_samples(
+                    held, witness, current_token_pair=(binding.yes_token_id, binding.no_token_id))
+                expected_point = q[binding.bin_id] if side == "YES" else 1-q[binding.bin_id]
+                assert held_point == pytest.approx(expected_point, abs=1e-12)
+                assert held_samples == pytest.approx(samples[:, index] if side == "YES" else 1-samples[:, index])
+                sell_mean = era._global_sell_held_probability(
+                    SimpleNamespace(bin_id=binding.bin_id, side=side), witness)
+                assert sell_mean == pytest.approx(float(held_samples.mean()))
+                points.append(held_point)
+                means.append(sell_mean)
+            assert sum(points) == pytest.approx(1.0)
+            assert sum(means) == pytest.approx(1.0)
     conn.close()
 
 
