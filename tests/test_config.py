@@ -873,3 +873,29 @@ def test_official_kord_audit_is_not_stable_ground_or_ens_identity(tmp_path, monk
     assert after["ground_facts"] == before["ground_facts"]
     assert after["ground_audit"] != before["ground_audit"]
     assert config.runtime_coordinate_manifest_json() == manifest
+
+
+@pytest.mark.parametrize("feet,metres,verified", [
+    (True, .3048, False), (1 / .3048, True, False),
+    (0, 0, True), (-1, -.3048, True), (672, 204.8, True), ("672", "204.8", True),
+])
+def test_official_kord_ground_measurements_reject_booleans_not_zero_or_negative(
+    tmp_path, monkeypatch, feet, metres, verified,
+):
+    import hashlib
+    import src.config as config
+    registry, artifact, rows = _official_kord_registry(tmp_path, monkeypatch)
+    payload = json.loads(artifact.read_bytes())
+    elevation = payload["stationCollection"]["stations"][0]["location"]["elevations"][0]
+    elevation.update(elevationFeet=feet, elevationMeters=metres)
+    artifact.write_bytes(json.dumps(payload).encode())
+    # Rebind both quantity/unit values and claimed facts: rejection cannot be
+    # credited to the old 204.8 claim differing from the malformed source.
+    rows["Chicago"]["station_ground_proof"].update(
+        body_sha256=hashlib.sha256(artifact.read_bytes()).hexdigest(), elevation_m=float(metres),
+    )
+    registry.write_text(json.dumps(rows))
+    ground = config.runtime_station_geometry_for_city(config.cities_by_name["Chicago"])
+    assert ground["ground_status"] == ("VERIFIED" if verified else "UNPROVEN")
+    if verified:
+        assert ground["ground_elevation_m"] == float(metres)

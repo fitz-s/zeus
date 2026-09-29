@@ -626,6 +626,15 @@ def _homr_kord_ground_facts(raw: bytes, station_id: str) -> dict[str, object]:
     """
     if station_id != "KORD":
         raise ValueError("approved HOMR snapshot is only KORD")
+
+    def number(value: object) -> float:
+        if isinstance(value, bool):
+            raise ValueError("boolean is not a physical measurement")
+        converted = float(value)
+        if not math.isfinite(converted):
+            raise ValueError("non-finite physical measurement")
+        return converted
+
     collection = json.loads(raw)["stationCollection"]
     definitions = [row for row in collection["definitions"]
                    if row.get("defType") == "elevations" and row.get("abbr") == "GROUND"]
@@ -659,17 +668,17 @@ def _homr_kord_ground_facts(raw: bytes, station_id: str) -> dict[str, object]:
     coordinates = location["latLonPairs"]
     if len(coordinates) != 1 or coordinates[0]["source"] != "ASOS CM":
         raise ValueError("primary observation coordinate ambiguous")
-    lat, lon = float(coordinates[0]["latitude_dec"]), float(coordinates[0]["longitude_dec"])
-    if not (math.isfinite(lat) and math.isfinite(lon) and -90 <= lat <= 90 and -180 <= lon <= 180):
+    lat, lon = number(coordinates[0]["latitude_dec"]), number(coordinates[0]["longitude_dec"])
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         raise ValueError("primary observation coordinate invalid")
-    if lat != float(station["header"]["latitude_dec"]) or lon != float(station["header"]["longitude_dec"]):
+    if lat != number(station["header"]["latitude_dec"]) or lon != number(station["header"]["longitude_dec"]):
         raise ValueError("header and primary observation coordinate differ")
     elevations = [row for row in location["elevations"] if row.get("elevationType") == "GROUND"]
     if len(elevations) != 1:
         raise ValueError("primary observation ground ambiguous or missing")
-    elevation = float(elevations[0]["elevationMeters"])
-    feet = float(elevations[0]["elevationFeet"])
-    if not all(math.isfinite(v) for v in (elevation, feet)) or not math.isclose(elevation, feet * .3048, abs_tol=.05):
+    elevation = number(elevations[0]["elevationMeters"])
+    feet = number(elevations[0]["elevationFeet"])
+    if not math.isclose(elevation, feet * .3048, abs_tol=.05):
         raise ValueError("official ground units inconsistent")
     return {
         "revision": STATION_GROUND_PROOF_REVISION,
