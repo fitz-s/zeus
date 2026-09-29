@@ -189,6 +189,7 @@ from src.contracts.day0_payoff_truth import (
     classify_day0_payoff_truth,
 )
 from src.contracts.execution_intent import ExecutableCostBasis
+from src.contracts.probability_arithmetic import wilson_lower_bound
 from src.contracts.family_fault_scope import (
     FAMILY_AUTHORITY_UNAVAILABLE,
     TRANSIENT_FAMILY_AUTHORITY_UNAVAILABLE,
@@ -38165,18 +38166,6 @@ def _replacement_calibration_payload_from_credential(
         "authority": authority,
     }
 
-def _wilson_lower_bound(successes: float, trials: float, *, z: float = 1.645) -> float:
-    if trials <= 0.0:
-        return 0.0
-    successes = min(max(float(successes), 0.0), float(trials))
-    p_hat = successes / float(trials)
-    z2 = z * z
-    denom = 1.0 + z2 / float(trials)
-    center = p_hat + z2 / (2.0 * float(trials))
-    margin = z * float(np.sqrt((p_hat - (p_hat * p_hat) + z2 / (4.0 * float(trials))) / float(trials)))
-    return max(0.0, min(1.0, (center - margin) / denom))
-
-
 def _candidate_replacement_bin_id(candidate: object, replacement_bundle: object) -> str | None:
     provenance = getattr(replacement_bundle, "provenance_json", None) or {}
     if not isinstance(provenance, Mapping):
@@ -51928,6 +51917,10 @@ def _p_fill_lcb_for_direction(book, *, direction: str, shares: Decimal) -> float
     if sized <= 0.0:
         return 0.0
     available = float(sum((level.size for level in levels), Decimal("0")))
+    # The depth cushion (available / sized) is the evidence count n and the
+    # covered fraction the observed rate: a thicker book tightens the bound
+    # toward coverage but never reaches 1 (visible depth is not a fill).
+    z = float(settings["edli"].get("no_submit_visible_depth_fill_z", 1.645))
     if available <= 0.0:
         # No crossable visible book on this side -> no executable quote.
         return 0.0
@@ -51935,40 +51928,13 @@ def _p_fill_lcb_for_direction(book, *, direction: str, shares: Decimal) -> float
         # Genuinely thin: the visible book cannot cover the sized order.
         # Honest, low (sub-floor) fill probability — correctly penalized.
         coverage = available / sized
-        return max(0.0, min(1.0, _wilson_depth_fill_lcb(coverage=coverage, depth_cushion=coverage)))
+        return wilson_lower_bound(coverage * coverage, coverage, z=z)
     # Book fully covers the sized order. The fill-probability lower bound is the
     # Wilson LCB on a fully-covered crossing (p_hat = 1.0) with the depth cushion
     # (available / sized) as the evidence count: deeper books -> tighter LCB -> ~1.0.
     depth_cushion = available / sized
     floor = max(0.0, min(1.0, float(settings["edli"].get("no_submit_visible_depth_fill_lcb", 0.05))))
-    return max(floor, min(1.0, _wilson_depth_fill_lcb(coverage=1.0, depth_cushion=depth_cushion)))
-
-
-def _wilson_depth_fill_lcb(*, coverage: float, depth_cushion: float) -> float:
-    """Conservative Wilson lower-confidence bound on a depth-coverage proportion.
-
-    ``coverage`` is the observed fill proportion of the sized order against the
-    visible crossing depth (= 1.0 when the book holds >= the sized size). The
-    ``depth_cushion`` (available_depth / sized_size, >= 0) is treated as the
-    binomial evidence count ``n``: a thicker book is stronger evidence that a
-    min-size taker order fills, so the lower bound tightens toward ``coverage``.
-
-    A Wilson interval is used (not Wald) because it is well-behaved at the
-    p_hat -> 1 boundary, returning a value strictly < 1.0 for any finite cushion
-    (honest: the visible book is feasibility evidence, never a fill guarantee) and
-    degrading smoothly as the cushion shrinks.
-    """
-    p_hat = max(0.0, min(1.0, coverage))
-    n = max(0.0, depth_cushion)
-    if n <= 0.0:
-        return 0.0
-    z = float(settings["edli"].get("no_submit_visible_depth_fill_z", 1.645))
-    z2 = z * z
-    denom = 1.0 + z2 / n
-    center = p_hat + z2 / (2.0 * n)
-    margin = z * float(np.sqrt(((p_hat - (p_hat * p_hat)) / n) + (z2 / (4.0 * n * n))))
-    lower = (center - margin) / denom
-    return max(0.0, min(1.0, lower))
+    return max(floor, wilson_lower_bound(depth_cushion, depth_cushion, z=z))
 
 
 def _robust_trade_score_from_generated_inputs(

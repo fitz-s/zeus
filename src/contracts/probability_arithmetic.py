@@ -24,6 +24,8 @@ named semantic boundary.
 
 from __future__ import annotations
 
+import math
+
 
 def one_minus(x: float) -> float:
     """Return the complement-of-one scalar ``1 - x``.
@@ -49,3 +51,33 @@ def payout_odds(price: float) -> float:
     if p <= 0.0 or p >= 1.0:
         raise ValueError("payout_odds requires price in the open interval (0, 1)")
     return (1.0 - p) / p
+
+
+# z quantiles of the standard normal used by the Wilson lower bound.
+Z_ONE_SIDED_95 = 1.6448536269514722
+Z_TWO_SIDED_95 = 1.959963984540054
+
+
+def wilson_lower_bound(successes: float, trials: float, *, z: float) -> float:
+    """Wilson score lower bound on a binomial proportion ``successes / trials``.
+
+    ``successes`` is clamped into ``[0, trials]`` and the bound into
+    ``[0, successes / trials]``, so with no success it is exactly zero.  The
+    closed form alone is ``centre - margin`` with ``centre == margin`` there,
+    and that float difference leaves a ~7e-18 residue for many ``trials`` (3,
+    6, 7, 12, 24, 48, ...): a rate nothing ever measured.  Live 2026-09-28 that
+    residue minted a maker fill witness and failed every auction cut.
+    ``trials`` may be fractional (a depth cushion as evidence count).
+    """
+
+    n = float(trials)
+    if not n > 0.0 or not math.isfinite(n) or not z > 0.0:
+        return 0.0
+    p_hat = min(max(float(successes), 0.0), n) / n
+    z2 = z * z
+    centre = p_hat + z2 / (2.0 * n)
+    margin = z * math.sqrt(p_hat * (1.0 - p_hat) / n + z2 / (4.0 * n * n))
+    lower = (centre - margin) / (1.0 + z2 / n)
+    if not math.isfinite(lower):
+        return 0.0
+    return min(max(lower, 0.0), p_hat)

@@ -24,6 +24,7 @@ import numpy as np
 
 from src.contracts.executable_cost_curve import ExecutableCostCurve
 from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+from src.contracts.probability_arithmetic import Z_TWO_SIDED_95, wilson_lower_bound
 from src.contracts.family_fault_scope import (
     FAMILY_AUTHORITY_UNAVAILABLE,
     TRANSIENT_FAMILY_AUTHORITY_UNAVAILABLE,
@@ -530,30 +531,6 @@ _MAKER_FILL_BAND_MIN_SAMPLE_SIZE = 20
 # and preserves the ordering: 0.180 / 0.156 / 0.068 / 0.008 / 0.000. The furthest band reaching
 # zero is a measurement, not an artefact: 62 rests, no fills. Same 95 % basis as the
 # OOF_WILSON_95 bounds already used elsewhere in the decision path.
-_MAKER_FILL_BAND_WILSON_Z = 1.959963984540054
-
-
-def _maker_fill_band_wilson_lower_bound(successes: int, trials: int) -> Decimal:
-    """Wilson 95 % lower bound on one band's fill proportion.
-
-    With no success the bound is exactly zero (centre == margin == z²/2n / d).
-    Evaluating that difference in floats leaves a ~1e-17 residue that would
-    state a fill probability no rest ever measured.
-    """
-
-    if trials <= 0 or successes <= 0:
-        return Decimal("0")
-    z = _MAKER_FILL_BAND_WILSON_Z
-    p = successes / trials
-    denominator = 1.0 + z * z / trials
-    centre = (p + z * z / (2.0 * trials)) / denominator
-    margin = (
-        z * math.sqrt(p * (1.0 - p) / trials + z * z / (4.0 * trials * trials))
-    ) / denominator
-    lower = centre - margin
-    if not math.isfinite(lower) or lower <= 0.0:
-        return Decimal("0")
-    return Decimal(str(min(lower, 1.0)))
 
 
 def _maker_fill_distance_band(distance_to_ask: Decimal) -> int:
@@ -2118,9 +2095,14 @@ def _load_current_maker_fill_samples(
             band_bounds.append(
                 (
                     band,
-                    _maker_fill_band_wilson_lower_bound(
-                        sum(1 for fraction in fractions if fraction > 0),
-                        len(fractions),
+                    Decimal(
+                        str(
+                            wilson_lower_bound(
+                                sum(1 for fraction in fractions if fraction > 0),
+                                len(fractions),
+                                z=Z_TWO_SIDED_95,
+                            )
+                        )
                     ),
                 )
             )

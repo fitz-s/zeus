@@ -26,6 +26,7 @@ import json
 import pytest
 
 import scripts.fit_selection_calibrator as fsc
+from src.contracts.probability_arithmetic import Z_ONE_SIDED_95, Z_TWO_SIDED_95, wilson_lower_bound
 from src.decision import selection_calibrator as sc
 
 
@@ -89,7 +90,7 @@ def test_persisted_bound_is_conservative_below_point():
     live_key = sc.cell_key(side="NO", lead_days=1.0, bin_class="nonmodal", raw_side_prob=0.87)
     cell = artifact["cells"][live_key]
     assert abs(cell["hit_rate"] - (40 / 60)) < 1e-6
-    served = sc.beta_lower_bound_95(int(round(cell["hit_rate"] * cell["n"])), cell["n"])
+    served = wilson_lower_bound(int(round(cell["hit_rate"] * cell["n"])), cell["n"], z=Z_ONE_SIDED_95)
     assert served < cell["hit_rate"]
 
 

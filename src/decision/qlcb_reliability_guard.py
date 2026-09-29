@@ -67,6 +67,8 @@ import os
 from dataclasses import dataclass
 from typing import Mapping, Optional
 
+from src.contracts.probability_arithmetic import Z_ONE_SIDED_95, wilson_lower_bound
+
 from src.data.replacement_forecast_cycle_policy import (
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
 )
@@ -103,9 +105,6 @@ EPS: float = 0.02
 # cells inside an active artifact also abstain. The OOF builder imports THIS tuple (single source)
 # so the table cells are keyed by the same grid the live guard buckets into.
 QLCB_BUCKET_EDGES: tuple[float, ...] = tuple(round(0.05 * i, 2) for i in range(21))
-
-# Wilson interval z for a one-sided 95% lower bound (z_{0.95}).
-_WILSON_Z_95: float = 1.6448536269514722
 
 # The OOF reliability artifact path (gitignored generated file; INERT unless active-valid).
 _QLCB_OOF_RELIABILITY_PATH: str = "state/qlcb_oof_reliability.json"
@@ -290,29 +289,6 @@ def cell_key(
         f"{str(metric).lower()}|{lead_bucket(lead_days)}|"
         f"{clean_side}|{bin_position}|qb{bucket_idx}|{clean_precision}"
     )
-
-
-def wilson_lower_bound_95(hits: int, n: int) -> float:
-    """One-sided Wilson 95% LOWER bound of a binomial hit-rate (hits / n).
-
-    The Wilson score interval is well-behaved at the extremes (unlike the normal approximation
-    which can go below 0), so a cell with a high but thin realized hit-rate gets a conservatively
-    LOW bound — exactly the "don't trust a thin cell" posture the guard needs. Returns 0.0 for a
-    degenerate (n <= 0) cell. ``hits`` is clamped into [0, n].
-    """
-    if n <= 0:
-        return 0.0
-    k = min(max(int(hits), 0), int(n))
-    z = _WILSON_Z_95
-    p_hat = k / n
-    z2 = z * z
-    denom = 1.0 + z2 / n
-    center = (p_hat + z2 / (2.0 * n)) / denom
-    margin = (z / denom) * math.sqrt(p_hat * (1.0 - p_hat) / n + z2 / (4.0 * n * n))
-    lo = center - margin
-    if not math.isfinite(lo):
-        return 0.0
-    return float(min(max(lo, 0.0), 1.0))
 
 
 # ---------------------------------------------------------------------------
@@ -523,7 +499,7 @@ def _coarsened_tail_cell(
                 floor_idx,
                 n_total,
                 hit_rate,
-                wilson_lower_bound_95(hits_total, n_total),
+                wilson_lower_bound(hits_total, n_total, z=Z_ONE_SIDED_95),
             )
     return None
 
@@ -550,7 +526,7 @@ def apply_guard(
       3. INERT path — no active-valid artifact: serves ``band_q_lcb`` unchanged, ``trade=True``,
          ``basis="INERT"`` (pass-through, no abstain; the conservative edge_lcb>0 gate
          downstream is still the trade authority).
-      4. ACTIVE path — cell known: ``L_g = wilson_lower_bound_95(hits, N_g)`` where
+      4. ACTIVE path — cell known: ``L_g = wilson_lower_bound(hits, N_g, z=Z_ONE_SIDED_95)`` where
          ``hits = round(hit_rate_g * N_g)``. If ``N_g >= N_MIN``, serve the continuous
          calibrated lower bound ``q_safe = min(band_q_lcb, L_g)``. The after-cost
          ``q_safe − price − cost > EDGE_FLOOR`` check is the caller's (it has the route
@@ -632,7 +608,7 @@ def apply_guard(
 
     n_g, hit_rate_g = cell
     hits = int(round(float(hit_rate_g) * int(n_g)))
-    L_g = wilson_lower_bound_95(hits, int(n_g))
+    L_g = wilson_lower_bound(hits, int(n_g), z=Z_ONE_SIDED_95)
 
     if int(n_g) >= N_MIN:
         q_safe = min(float(band_q_lcb), float(L_g))

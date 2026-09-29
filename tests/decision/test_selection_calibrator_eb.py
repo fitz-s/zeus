@@ -25,6 +25,7 @@ import math
 
 import pytest
 
+from src.contracts.probability_arithmetic import Z_ONE_SIDED_95, Z_TWO_SIDED_95, wilson_lower_bound
 from src.decision import selection_calibrator as sc
 
 
@@ -89,7 +90,7 @@ def test_eb_lower_bound_matches_wilson_shape_at_tau_zero():
     # At tau=0 the beta lower bound should be in the same ballpark as the Wilson LB (both are
     # one-sided 5% lower bounds of the same binomial). Not identical (Beta vs Wilson) but close.
     beta_lb = sc.eb_lower_bound(p0=0.5, tau=0.0, wins=70, n=104, alpha_quantile=0.05)
-    wilson_lb = sc.beta_lower_bound_95(70, 104)
+    wilson_lb = wilson_lower_bound(70, 104, z=Z_ONE_SIDED_95)
     assert abs(beta_lb - wilson_lb) < 0.06
 
 

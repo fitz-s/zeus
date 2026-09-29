@@ -38,6 +38,7 @@ import math
 
 import pytest
 
+from src.contracts.probability_arithmetic import Z_ONE_SIDED_95, Z_TWO_SIDED_95, wilson_lower_bound
 from src.decision import selection_calibrator as sc
 
 
@@ -65,13 +66,13 @@ def test_lead_bucket_matches_spine_grouping():
 def test_beta_lower_bound_is_conservative_and_tightens_with_n():
     # A cell with realized hit-rate 0.70: a thin sample gets a much lower 95% lower bound than a
     # deep sample at the SAME rate (conservative on thin evidence).
-    lo_thin = sc.beta_lower_bound_95(hits=7, n=10)
-    lo_deep = sc.beta_lower_bound_95(hits=700, n=1000)
+    lo_thin = wilson_lower_bound(7, 10, z=Z_ONE_SIDED_95)
+    lo_deep = wilson_lower_bound(700, 1000, z=Z_ONE_SIDED_95)
     assert 0.0 <= lo_thin < 0.70
     assert lo_deep > lo_thin
     assert lo_deep <= 0.70 + 1e-9  # lower bound never exceeds the point
     # Degenerate cell.
-    assert sc.beta_lower_bound_95(hits=0, n=0) == 0.0
+    assert wilson_lower_bound(0, 0, z=Z_ONE_SIDED_95) == 0.0
 
 
 def test_isotonic_lower_bound_is_monotone_nondecreasing():

@@ -40,6 +40,7 @@ import sqlite3
 
 import scripts.fit_selection_calibrator as fsc
 import scripts.fit_sigma_scale as fs
+from src.contracts.probability_arithmetic import Z_ONE_SIDED_95, wilson_lower_bound
 from src.decision import selection_calibrator as sc
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -52,7 +53,7 @@ OUT_DEFAULT = os.path.join(
 
 
 def _wilson_lo(hits: int, n: int) -> float:
-    return sc.beta_lower_bound_95(hits, n)
+    return wilson_lower_bound(hits, n, z=Z_ONE_SIDED_95)
 
 
 def _dist_class(i, items, mode_i, step) -> str:

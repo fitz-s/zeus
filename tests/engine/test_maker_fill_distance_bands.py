@@ -11,10 +11,10 @@ from decimal import Decimal
 
 import pytest
 
+from src.contracts.probability_arithmetic import Z_ONE_SIDED_95, Z_TWO_SIDED_95, wilson_lower_bound
 from src.engine.global_batch_runtime import (
     _MAKER_FILL_BAND_MIN_SAMPLE_SIZE,
     _CurrentMakerFillSample,
-    _maker_fill_band_wilson_lower_bound,
     _maker_fill_distance_band,
 )
 
@@ -31,15 +31,15 @@ def test_bands_order_by_distance():
 def test_wilson_preserves_the_ordering_dkw_erased():
     """The measured band counts, whose ordering the pooled DKW radius destroyed."""
     bounds = [
-        _maker_fill_band_wilson_lower_bound(43, 182),
-        _maker_fill_band_wilson_lower_bound(25, 112),
-        _maker_fill_band_wilson_lower_bound(7, 51),
-        _maker_fill_band_wilson_lower_bound(2, 71),
-        _maker_fill_band_wilson_lower_bound(0, 62),
+        wilson_lower_bound(43, 182, z=Z_TWO_SIDED_95),
+        wilson_lower_bound(25, 112, z=Z_TWO_SIDED_95),
+        wilson_lower_bound(7, 51, z=Z_TWO_SIDED_95),
+        wilson_lower_bound(2, 71, z=Z_TWO_SIDED_95),
+        wilson_lower_bound(0, 62, z=Z_TWO_SIDED_95),
     ]
     assert bounds == sorted(bounds, reverse=True), bounds
-    assert bounds[0] > Decimal("0.1"), "the nearest band must keep a usable rate"
-    assert bounds[-1] == Decimal("0"), "62 rests with no fill is a measurement, not noise"
+    assert bounds[0] > 0.1, "the nearest band must keep a usable rate"
+    assert bounds[-1] == 0.0, "62 rests with no fill is a measurement, not noise"
 
 
 def test_a_band_that_never_filled_reads_as_zero_not_as_the_pooled_rate():
@@ -76,7 +76,7 @@ def test_a_band_without_its_own_evidence_falls_back_to_the_pooled_bound():
 
 @pytest.mark.parametrize("trials", [0, -1])
 def test_no_trials_is_no_bound(trials):
-    assert _maker_fill_band_wilson_lower_bound(0, trials) == Decimal("0")
+    assert wilson_lower_bound(0, trials, z=Z_TWO_SIDED_95) == 0.0
 
 
 def test_min_band_sample_size_is_enforced_as_a_constant():
@@ -136,4 +136,4 @@ def test_without_a_counterparty_price_the_pooled_bound_still_applies():
 @pytest.mark.parametrize("trials", [24, 25, 28, 35, 48, 50, 63, 100, 250])
 def test_a_band_with_no_fill_is_exactly_zero_not_float_residue(trials):
     """0/48 read as 6.938893903907228e-18 live and minted a maker witness from it."""
-    assert _maker_fill_band_wilson_lower_bound(0, trials) == Decimal("0")
+    assert wilson_lower_bound(0, trials, z=Z_TWO_SIDED_95) == 0.0

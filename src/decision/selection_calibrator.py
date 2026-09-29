@@ -23,7 +23,7 @@ not actually conservative for trading.
 THE FIX: serve, as the admission lower bound, an EMPIRICAL CONSERVATIVE lower bound on the realized
 SETTLEMENT hit-rate of the candidate's SIDE, learned WALK-FORWARD on settled rows ONLY:
 
-    q_safe[side, cell] = beta_lower_bound_95( realized_hits_g, N_g )
+    q_safe[side, cell] = wilson_lower_bound(realized_hits_g, N_g, z=Z_ONE_SIDED_95)
 
 where the cell ``g = (side, lead_bucket, bin_class, raw_prob_bucket)``. ``side`` is the executable
 claim (YES = the bin hits / NO = the bin does NOT hit). ``raw_prob_bucket`` is the bucket of the RAW
@@ -57,6 +57,8 @@ import os
 from dataclasses import dataclass
 from typing import Mapping, Optional, Sequence
 
+from src.contracts.probability_arithmetic import Z_ONE_SIDED_95, wilson_lower_bound
+
 from src.data.replacement_forecast_cycle_policy import (
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
 )
@@ -78,9 +80,6 @@ EDGE_FLOOR: float = 0.0
 # (q_yes for YES, 1-q_yes for NO) so the over-confident tail lands in its own cell. Uniform 0.05
 # grid across [0, 1] — same granularity as the OOF guard's q_lcb buckets so cells accrue evidence.
 RAW_PROB_BUCKET_EDGES: tuple[float, ...] = tuple(round(0.05 * i, 2) for i in range(21))
-
-# z for a one-sided 95% lower bound.
-_Z_95: float = 1.6448536269514722
 
 # The artifact path (gitignored generated file; FAIL-CLOSED when absent).
 _SELECTION_CALIBRATOR_PATH: str = "state/selection_calibrator.json"
@@ -163,33 +162,6 @@ def cell_key(*, side: str, lead_days: float, bin_class: str, raw_side_prob: floa
     clean_side = "NO" if str(side).upper() == "NO" else "YES"
     clean_class = str(bin_class).strip().lower() or "nonmodal"
     return f"{clean_side}|{lead_bucket(lead_days)}|{clean_class}|pb{bucket_idx}"
-
-
-def beta_lower_bound_95(hits: int, n: int) -> float:
-    """One-sided 95% LOWER bound of a binomial hit-rate (hits / n) via the Wilson score interval.
-
-    The Wilson interval is well-behaved at the extremes (unlike the normal approximation which can
-    go below 0), so a thin high-rate cell gets a conservatively LOW bound — exactly the "don't trust
-    a thin cell" posture the calibrator needs. The lower bound never exceeds the point hits/n.
-    Returns 0.0 for a degenerate (n <= 0) cell. ``hits`` is clamped into [0, n].
-
-    Named ``beta_lower_bound_95`` for the conservative-lower-interval contract; the Wilson score
-    interval is the closed-form, numerically-stable realization of that lower interval and is the
-    SAME bound the OOF reliability guard uses (single math source, no second convention).
-    """
-    if n <= 0:
-        return 0.0
-    k = min(max(int(hits), 0), int(n))
-    z = _Z_95
-    p_hat = k / n
-    z2 = z * z
-    denom = 1.0 + z2 / n
-    center = (p_hat + z2 / (2.0 * n)) / denom
-    margin = (z / denom) * math.sqrt(p_hat * (1.0 - p_hat) / n + z2 / (4.0 * n * n))
-    lo = center - margin
-    if not math.isfinite(lo):
-        return 0.0
-    return float(min(max(lo, 0.0), p_hat))
 
 
 def isotonic_nondecreasing(xs: Sequence[float], ys: Sequence[float]) -> list[float]:
@@ -632,10 +604,10 @@ def _thin_cell_pooled_lower_bound(
         if basis == "POOL_GLOBAL":
             global_pool = (w, n)
         if n >= min_n:
-            return (beta_lower_bound_95(w, n), n, basis)
+            return (wilson_lower_bound(w, n, z=Z_ONE_SIDED_95), n, basis)
     if global_pool is not None and global_pool[1] > 0:
         w, n = global_pool
-        return (beta_lower_bound_95(w, n), n, "POOL_GLOBAL")
+        return (wilson_lower_bound(w, n, z=Z_ONE_SIDED_95), n, "POOL_GLOBAL")
     return None
 
 
@@ -766,7 +738,7 @@ def apply_selection_calibrator(
 
     # Deep cell: serve the conservative lower bound of the realized settlement hit-rate.
     hits = int(round(hit_rate * n_g))
-    L_g = beta_lower_bound_95(hits, n_g)
+    L_g = wilson_lower_bound(hits, n_g, z=Z_ONE_SIDED_95)
     # The lower bound never exceeds the raw side point (a probability lower bound <= its point).
     q_safe = float(min(max(L_g, 0.0), max(min(raw_side_prob, 1.0), 0.0)))
     return CalibratorVerdict(

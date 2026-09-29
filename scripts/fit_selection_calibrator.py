@@ -44,7 +44,7 @@ AGGREGATE -> CELL:
 
 CONSERVATIVE BOUND:
   The artifact persists the realized (n, hit_rate); the runtime serves
-  ``beta_lower_bound_95(round(hit_rate*n), n)`` — the one-sided Wilson 95% LOWER bound (the SAME bound
+  ``wilson_lower_bound(round(hit_rate*n), n, z=Z_ONE_SIDED_95)`` — the one-sided Wilson 95% LOWER bound (the SAME bound
   the OOF reliability guard uses). Persisting (n, hit_rate) keeps the artifact a pure data record and
   the lower-bound math single-sourced in the serving module.
 
@@ -67,6 +67,7 @@ from dataclasses import dataclass
 # 3-pass winning-bin match + lead-hour computation) so this fitter and the σ-scale fit grade the
 # SAME settled cells the same way.
 import scripts.fit_sigma_scale as fs
+from src.contracts.probability_arithmetic import Z_ONE_SIDED_95, wilson_lower_bound
 from src.decision import selection_calibrator as sc
 from src.data.replacement_forecast_cycle_policy import (
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
@@ -248,7 +249,7 @@ def fit_cells(
             "created": fitted_at,
             "cell_key_schema": "side|lead_bucket|bin_class|raw_prob_bucket",
             "method": "walk_forward_settled_hit_rate_isotonic_in_raw_prob",
-            "lower_bound": "beta_lower_bound_95 (Wilson one-sided 95% LB) served at runtime",
+            "lower_bound": "wilson_lower_bound z=Z_ONE_SIDED_95 (Wilson one-sided 95% LB) served at runtime",
             "monotone": bool(enforce_monotone),
             "source": "forecast_posteriors ⋈ settlement_outcomes(authority=VERIFIED), high metric, freshest-per-lead",
             "source_query_hash": qhash,
@@ -518,7 +519,7 @@ def main() -> int:
     for key in sorted(cells):
         if key.startswith("NO|L1|nonmodal|pb1"):
             c = cells[key]
-            lb = sc.beta_lower_bound_95(int(round(c["hit_rate"] * c["n"])), c["n"])
+            lb = wilson_lower_bound(int(round(c["hit_rate"] * c["n"])), c["n"], z=Z_ONE_SIDED_95)
             print(f"    {key}: n={c['n']} hit_rate={c['hit_rate']:.3f} served_LB={lb:.3f}")
     return 0
 

@@ -25,22 +25,22 @@ from __future__ import annotations
 import json
 import math
 
+from src.contracts.probability_arithmetic import Z_ONE_SIDED_95, Z_TWO_SIDED_95, wilson_lower_bound
 from src.decision import qlcb_reliability_guard as guard_mod
 from src.decision.qlcb_reliability_guard import (
     N_MIN,
     apply_guard,
     qlcb_bucket,
-    wilson_lower_bound_95,
 )
 
 
 def test_wilson_lower_bound_is_conservative_on_thin_samples():
     # 9/10 = 0.9 point, but the 95% Wilson lower bound is well below 0.9 (thin sample).
-    lo_thin = wilson_lower_bound_95(9, 10)
-    lo_deep = wilson_lower_bound_95(900, 1000)
+    lo_thin = wilson_lower_bound(9, 10, z=Z_ONE_SIDED_95)
+    lo_deep = wilson_lower_bound(900, 1000, z=Z_ONE_SIDED_95)
     assert 0.0 <= lo_thin < 0.9
     assert lo_deep > lo_thin  # the deep sample at the same rate has a TIGHTER lower bound
-    assert wilson_lower_bound_95(5, 0) == 0.0  # degenerate n
+    assert wilson_lower_bound(5, 0, z=Z_ONE_SIDED_95) == 0.0  # degenerate n
 
 
 def test_well_calibrated_cell_serves_min_band_and_Lg():
