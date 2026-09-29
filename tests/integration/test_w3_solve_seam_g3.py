@@ -8102,17 +8102,73 @@ def _day0_partial_exact_fixture(
     )
 
 
+def _day0_qualified_exact_fixture(*, metric="high", observed=30.0):
+    """EGLC's configured WRH product through the normal print writer/reader.
+
+    The retained official response establishes the wire/station/unit contract;
+    dates and 29/30/31C values below are controlled relationship-test inputs,
+    not a claim about London's actual weather. No METAR mirror becomes an
+    absorbing source merely by changing its name.
+    """
+    from pathlib import Path
+    from src.config import runtime_cities_by_name
+    from src.data.daily_obs_append import _append_noaa_wrh_prints
+    from src.data.noaa_wrh_timeseries import rows_from_payload
+    from src.state.schema.observation_prints_schema import ensure_table
+    from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
+    from src.events.day0_authority import DAY0_MONOTONE_SETTLEMENT_BOUND, day0_evidence_finality
+
+    fixture = _day0_partial_exact_fixture(metric=metric, observed=observed)
+    fixture.city_name = "London"
+    fixture.city = runtime_cities_by_name()[fixture.city_name]
+    # London changed resolver products on Aug24; a July WRH fixture would
+    # silently test the wrong historical settlement contract.
+    fixture.decision_at = _dt.datetime(2026, 9, 11, 12, tzinfo=_dt.timezone.utc)
+    fixture.forecast.execute("UPDATE market_events SET city='London', target_date='2026-09-11'")
+    payload = json.loads(fixture.event.payload_json)
+    payload.update(city="London", city_timezone=fixture.city.timezone,
+                   target_date="2026-09-11", station_id="EGLC", settlement_source="noaa_wrh_eglc",
+                   observation_time="2026-09-11T09:00:00+00:00", observation_available_at="2026-09-11T09:05:00+00:00")
+    fixture.event = make_opportunity_event(
+        event_type="DAY0_EXTREME_UPDATED", entity_key=f"London|2026-09-11|{payload['metric']}|EGLC",
+        source="qualified-wrh-current-source", observed_at=payload["observation_time"],
+        available_at=payload["observation_available_at"], received_at=payload["observation_available_at"],
+        payload=payload, causal_snapshot_id=str(payload["snapshot_id"]))
+    raw = json.loads((Path(__file__).parents[1] / "fixtures/noaa_wrh/syn_EGLC.json").read_text())
+    raw["STATION"][0]["OBSERVATIONS"] = {
+        "date_time": [f"2026-09-11T09:{minute:02d}:00+0100" for minute in (0, 15, 30, 45)] + ["2026-09-11T10:00:00+0100"],
+        "air_temp_set_1": [payload["raw_value"]] * 5,
+        "metar_set_1": [f"METAR EGLC 110900Z {payload['raw_value']}"] * 5,
+        "sea_level_pressure_set_1": [1015.] * 5,
+    }
+    rows = rows_from_payload(raw, "EGLC")
+    ensure_table(fixture.observations)
+    assert _append_noaa_wrh_prints(fixture.observations, city_name="London", station="EGLC", unit="C",
+        rows=rows, target_date_local=_dt.date(2026, 9, 11), view=fixture.city.settlement_page_view,
+        fetch_utc=_dt.datetime(2026, 9, 11, 9, 5, tzinfo=_dt.timezone.utc)) == 5
+    assert _latest_authorized_day0_fact(fixture.observations, city="London", target_date="2026-09-11",
+        temperature_metric=payload["metric"], decision_time=_dt.datetime(2026, 9, 11, 9, 4, tzinfo=_dt.timezone.utc),
+        require_settlement_channel=True) is None
+    fixture.fact = _latest_authorized_day0_fact(fixture.observations, city="London", target_date="2026-09-11",
+        temperature_metric=payload["metric"], decision_time=fixture.decision_at, require_settlement_channel=True)
+    assert fixture.fact is not None
+    assert fixture.fact["observation_source"] == "noaa_wrh_eglc"
+    assert fixture.fact["unit"] == "C" and fixture.fact["station_id"] == "EGLC"
+    assert fixture.fact["raw_payload_sha256"] != "a" * 64
+    assert _dt.datetime.fromisoformat(fixture.fact["observation_time"]) <= _dt.datetime.fromisoformat(
+        fixture.fact["observation_available_at"]) <= fixture.decision_at
+    assert day0_evidence_finality({"settlement_source": fixture.fact["observation_source"]}) == DAY0_MONOTONE_SETTLEMENT_BOUND
+    return fixture
+
+
 def _patch_day0_exact_runtime(monkeypatch, fixture):
     import src.data.replacement_forecast_bundle_reader as bundle_reader
     import src.data.replacement_forecast_current_target_plan as target_plan
     import src.data.replacement_forecast_readiness as readiness_reader
 
-    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Istanbul": fixture.city})
-    monkeypatch.setattr(
-        target_plan,
-        "_latest_authorized_day0_fact",
-        lambda *_args, **_kwargs: fixture.fact,
-    )
+    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {getattr(fixture, "city_name", "Istanbul"): fixture.city})
+    if not hasattr(fixture, "city_name"):
+        monkeypatch.setattr(target_plan, "_latest_authorized_day0_fact", lambda *_args, **_kwargs: fixture.fact)
     monkeypatch.setattr(readiness_reader, "latest_replacement_readiness", lambda *_a, **_k: None)
     monkeypatch.setattr(
         bundle_reader,
@@ -8123,13 +8179,14 @@ def _patch_day0_exact_runtime(monkeypatch, fixture):
 
 def _day0_ready_bundle(fixture):
     probabilities = [0.2, 0.5, 0.3][: len(fixture.bins)]
+    target_date = json.loads(fixture.event.payload_json)["target_date"]
     return SimpleNamespace(
         posterior_id=31,
         posterior_identity_hash="posterior-day0-statistical",
         dependency_hash="dependency-day0-statistical",
         posterior_config_hash="config-day0-statistical",
-        source_cycle_time="2026-07-11T00:00:00+00:00",
-        source_available_at="2026-07-11T06:00:00+00:00",
+        source_cycle_time=f"{target_date}T00:00:00+00:00",
+        source_available_at=f"{target_date}T06:00:00+00:00",
         q={condition_id: probability for (condition_id, *_), probability in zip(fixture.bins, probabilities, strict=True)},
         provenance_json={
             "bayes_precision_fusion": {"predictive_sigma_c": 1.2},
@@ -8147,7 +8204,7 @@ def _day0_ready_bundle(fixture):
 
 
 def test_day0_entry_partial_exact_witness_from_missing_readiness(monkeypatch):
-    fixture = _day0_partial_exact_fixture()
+    fixture = _day0_qualified_exact_fixture()
     _patch_day0_exact_runtime(monkeypatch, fixture)
     payload: dict[str, object] = {}
     try:
@@ -8180,11 +8237,28 @@ def test_day0_entry_partial_exact_witness_from_missing_readiness(monkeypatch):
         fixture.forecast.close()
         fixture.observations.close()
 
+    # Keep the original same-station mirror as the negative twin: possession
+    # and monotone-looking numbers cannot change its provisional product role.
+    from src.events.day0_authority import DAY0_PROVISIONAL_CURRENT_SNAPSHOT, day0_evidence_finality
+    for metric in ("high", "low"):
+        provisional = _day0_partial_exact_fixture(metric=metric)
+        _patch_day0_exact_runtime(monkeypatch, provisional)
+        try:
+            assert day0_evidence_finality({"settlement_source": provisional.fact["observation_source"]}) == DAY0_PROVISIONAL_CURRENT_SNAPSHOT
+            with pytest.raises(ValueError, match="GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING"):
+                era._prepare_current_global_probability_family(
+                    provisional.event, forecast_conn=provisional.forecast, topology_conn=provisional.forecast,
+                    observation_conn=provisional.observations, decision_time=provisional.decision_at,
+                    max_age=_dt.timedelta(seconds=30), allow_partial_deterministic=True)
+        finally:
+            provisional.forecast.close()
+            provisional.observations.close()
+
 
 def test_day0_low_partial_exact_proves_dead_yes_and_live_no_while_sibling_stays_unknown(
     monkeypatch,
 ):
-    fixture = _day0_partial_exact_fixture(metric="low")
+    fixture = _day0_qualified_exact_fixture(metric="low")
     _patch_day0_exact_runtime(monkeypatch, fixture)
     try:
         prepared = era._prepare_current_global_probability_family(
@@ -8301,7 +8375,7 @@ def test_day0_partial_exact_fallback_emits_its_actual_telemetry_context(
 
 
 def test_day0_exact_source_truth_identity_excludes_event_carrier_id(monkeypatch):
-    fixture = _day0_partial_exact_fixture()
+    fixture = _day0_qualified_exact_fixture()
     _patch_day0_exact_runtime(monkeypatch, fixture)
     second_event = replace(fixture.event, event_id="different-carrier-event-id")
     try:
@@ -8350,9 +8424,8 @@ def test_day0_entry_partial_exact_allows_only_typed_bundle_blocks(
     import src.data.replacement_forecast_current_target_plan as target_plan
     import src.data.replacement_forecast_readiness as readiness_reader
 
-    fixture = _day0_partial_exact_fixture()
-    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Istanbul": fixture.city})
-    monkeypatch.setattr(target_plan, "_latest_authorized_day0_fact", lambda *_a, **_k: fixture.fact)
+    fixture = _day0_qualified_exact_fixture()
+    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {fixture.city_name: fixture.city})
     monkeypatch.setattr(readiness_reader, "latest_replacement_readiness", lambda *_a, **_k: object())
     monkeypatch.setattr(
         bundle_reader,
@@ -8410,9 +8483,8 @@ def test_day0_entry_partial_exact_is_rebuilt_for_jit_even_when_forecast_ready(mo
     import src.data.replacement_forecast_current_target_plan as target_plan
     import src.data.replacement_forecast_readiness as readiness_reader
 
-    fixture = _day0_partial_exact_fixture()
-    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Istanbul": fixture.city})
-    monkeypatch.setattr(target_plan, "_latest_authorized_day0_fact", lambda *_a, **_k: fixture.fact)
+    fixture = _day0_qualified_exact_fixture()
+    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {fixture.city_name: fixture.city})
     monkeypatch.setattr(readiness_reader, "latest_replacement_readiness", lambda *_a, **_k: object())
     bundle_reads = []
     monkeypatch.setattr(
@@ -8491,13 +8563,12 @@ def test_day0_entry_unknown_required_bin_is_invalid_before_forecast_fallback(mon
     import src.data.replacement_forecast_current_target_plan as target_plan
     import src.data.replacement_forecast_readiness as readiness_reader
 
-    fixture = _day0_partial_exact_fixture()
-    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Istanbul": fixture.city})
-    monkeypatch.setattr(target_plan, "_latest_authorized_day0_fact", lambda *_a, **_k: fixture.fact)
+    fixture = _day0_qualified_exact_fixture()
+    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {fixture.city_name: fixture.city})
     monkeypatch.setattr(readiness_reader, "latest_replacement_readiness", lambda *_a, **_k: object())
     monkeypatch.setattr(bundle_reader, "read_replacement_forecast_bundle", lambda *_a, **_k: SimpleNamespace(ok=True, bundle=_day0_ready_bundle(fixture), reason_code="READY"))
     monkeypatch.setattr(era, "_day0_replacement_conditioning", lambda *_a, **_k: {
-        "metric": "high", "source": "ogimet_metar_ltfm",
+        "metric": "high", "source": fixture.fact["observation_source"],
         "observation_time": fixture.fact["observation_time"],
         "observed_extreme_c": fixture.fact["observed_extreme_native"], "unit": "C",
     })
@@ -8534,14 +8605,14 @@ def test_complete_day0_fact_preserves_exact_payoff_with_ready_forecast(
     import tests.solve.test_solver_properties as solver_tests
     from src.solve.solver import global_candidate_from_native
 
-    fixture = _day0_partial_exact_fixture(metric=metric, observed=observed)
+    fixture = _day0_qualified_exact_fixture(metric=metric, observed=observed)
     _patch_day0_exact_runtime(monkeypatch, fixture)
     monkeypatch.setattr(readiness_reader, "latest_replacement_readiness", lambda *_a, **_k: object())
-    monkeypatch.setattr(bundle_reader, "read_replacement_forecast_bundle", lambda *_a, **_k: SimpleNamespace(
-        ok=True, bundle=_day0_ready_bundle(fixture), reason_code="READY",
-    ))
+    bundle_reads = []
+    monkeypatch.setattr(bundle_reader, "read_replacement_forecast_bundle", lambda *_a, **_k:
+        bundle_reads.append(True) or SimpleNamespace(ok=True, bundle=_day0_ready_bundle(fixture), reason_code="READY"))
     monkeypatch.setattr(era, "_day0_replacement_conditioning", lambda *_a, **_k: {
-        "metric": metric, "source": "ogimet_metar_ltfm",
+        "metric": metric, "source": fixture.fact["observation_source"],
         "observation_time": fixture.fact["observation_time"],
         "observed_extreme_c": observed, "unit": "C",
     })
@@ -8555,6 +8626,7 @@ def test_complete_day0_fact_preserves_exact_payoff_with_ready_forecast(
         )
         witness = prepared.probability_witness
         assert isinstance(witness, DeterministicBinPayoffWitness)
+        assert bundle_reads == []  # Complete hard truth precedes all forecast q.
         assert len(witness.exact_yes_payoffs) == len(witness.bindings)
         assert {b.condition_id: witness.exact_yes_payoff(b.bin_id) for b in witness.bindings} == {
             condition: int(condition == winner_condition) for condition, *_ in fixture.bins
@@ -8750,14 +8822,29 @@ def test_day0_unqualified_sources_cannot_create_exact_entry_authority(
 def test_day0_invalid_fact_identity_time_or_local_day_cannot_create_exact_authority(
     monkeypatch, kwargs, expected,
 ):
-    fixture = _day0_partial_exact_fixture(**kwargs)
-    if "decision_at" in kwargs:
-        fixture.fact["observation_available_at"] = "2026-07-11T11:00:00+00:00"
+    fixture = (_day0_partial_exact_fixture(**kwargs) if "target_date" in kwargs
+               else _day0_qualified_exact_fixture())
     if "target_date" in kwargs:
         fixture.fact["observation_time"] = "2026-07-10T09:00:00+00:00"
         fixture.fact["observation_available_at"] = "2026-07-10T09:05:00+00:00"
     _patch_day0_exact_runtime(monkeypatch, fixture)
     try:
+        if "target_date" not in kwargs:
+            positive = era._prepare_current_global_probability_family(
+                fixture.event, forecast_conn=fixture.forecast, topology_conn=fixture.forecast,
+                observation_conn=fixture.observations, decision_time=fixture.decision_at,
+                max_age=_dt.timedelta(seconds=30), allow_partial_deterministic=True)
+            assert isinstance(positive.probability_witness, DeterministicBinPayoffWitness)
+            from src.data import replacement_forecast_current_target_plan as target_plan
+            # Probe the defensive consumer against one corrupted field in an
+            # otherwise writer/reader-qualified fact, after its positive twin.
+            monkeypatch.setattr(target_plan, "_latest_authorized_day0_fact", lambda *_a, **_k: fixture.fact)
+            if "unit" in kwargs:
+                fixture.fact["unit"] = kwargs["unit"]
+            elif "station_id" in kwargs:
+                fixture.fact["station_id"] = kwargs["station_id"]
+            else:
+                fixture.fact["observation_available_at"] = "2026-09-11T13:00:00+00:00"
         with pytest.raises(ValueError, match=expected):
             era._prepare_current_global_probability_family(
                 fixture.event,
@@ -8774,10 +8861,17 @@ def test_day0_invalid_fact_identity_time_or_local_day_cannot_create_exact_author
 
 
 def test_day0_invalid_hash_and_missing_exact_bin_cannot_create_exact_authority(monkeypatch):
-    fixture = _day0_partial_exact_fixture()
-    fixture.fact["raw_payload_sha256"] = "not-a-sha256"
+    fixture = _day0_qualified_exact_fixture()
     _patch_day0_exact_runtime(monkeypatch, fixture)
     try:
+        positive = era._prepare_current_global_probability_family(
+            fixture.event, forecast_conn=fixture.forecast, topology_conn=fixture.forecast,
+            observation_conn=fixture.observations, decision_time=fixture.decision_at,
+            max_age=_dt.timedelta(seconds=30), allow_partial_deterministic=True)
+        assert isinstance(positive.probability_witness, DeterministicBinPayoffWitness)
+        from src.data import replacement_forecast_current_target_plan as target_plan
+        monkeypatch.setattr(target_plan, "_latest_authorized_day0_fact", lambda *_a, **_k: fixture.fact)
+        fixture.fact["raw_payload_sha256"] = "not-a-sha256"
         with pytest.raises(ValueError, match="GLOBAL_DAY0_RAW_PROVENANCE_MISSING"):
             era._prepare_current_global_probability_family(
                 fixture.event,
@@ -8792,9 +8886,20 @@ def test_day0_invalid_hash_and_missing_exact_bin_cannot_create_exact_authority(m
         fixture.forecast.close()
         fixture.observations.close()
 
-    fixture = _day0_partial_exact_fixture(two_bins=True)
+    # The same observed30C proves the <=29 bin dead, but it proves neither
+    # <=30 nor >=31. Changing only market topology must not invent exactness.
+    monkeypatch.undo()
+    fixture = _day0_qualified_exact_fixture()
     _patch_day0_exact_runtime(monkeypatch, fixture)
     try:
+        positive = era._prepare_current_global_probability_family(
+            fixture.event, forecast_conn=fixture.forecast, topology_conn=fixture.forecast,
+            observation_conn=fixture.observations, decision_time=fixture.decision_at,
+            max_age=_dt.timedelta(seconds=30), allow_partial_deterministic=True)
+        assert isinstance(positive.probability_witness, DeterministicBinPayoffWitness)
+        fixture.forecast.execute("DELETE FROM market_events WHERE condition_id='c2'")
+        fixture.forecast.execute("UPDATE market_events SET range_label='30C or below',range_low=NULL,range_high=30 WHERE condition_id='c0'")
+        fixture.forecast.execute("UPDATE market_events SET range_label='31C or above',range_low=31,range_high=NULL WHERE condition_id='c1'")
         with pytest.raises(ValueError, match="GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING"):
             era._prepare_current_global_probability_family(
                 fixture.event,
