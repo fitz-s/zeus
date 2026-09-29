@@ -35,6 +35,7 @@ test_trust_policy:
     tests/test_station_temperature_adapters.py: {created: "2026-09-29", last_used: "2026-09-29", note: "Round-2 causal current-observation, source identity, delivery and failure regression."}
     tests/test_warm_materializer.py: {created: "2026-09-29", last_used: "2026-09-29", note: "Round-2 causal current-observation, source identity, delivery and failure regression."}
     tests/test_fast_obs_receipt_chain.py: {created: "2026-09-29", last_used: "2026-09-29", note: "Terminal remainder monotonicity; actual live HTTP receipt cut without replay lookahead; civil-day DST bounds; optional physical station routing and shared FMI budget."}
+    tests/test_station_forecast_live_ingest_wiring.py: {created: "2026-06-29", last_used: "2026-09-29", note: "Audited official station original entity-body writer, separate provider/availability clocks, typed HIGH/LOW quantity and actual shared current/frontier readers."}
     tests/test_day0_observation_reader.py: {created: "2026-05-22", last_used: "2026-09-29", note: "Audited HKO reported observation/publication/availability clocks, invalid source unavailability and observation-order reader relationships."}
     tests/test_observation_prints_ledger.py: {created: "2026-07-16", last_used: "2026-09-29", note: "Audited HKO source transaction and append-only three-clock writer relationships."}
     tests/events/test_redemption_forecast_day0_authority.py: {created: "2026-05-24", last_used: "2026-09-29", note: "Audited Day0 authority and immutable old/current semantics revision boundaries."}
@@ -1199,6 +1200,7 @@ categories:
     - tests/engine/test_monitor_held_belief_readthrough.py
 
   useful_regression:
+    - tests/test_station_forecast_live_ingest_wiring.py
     - tests/test_day0_observation_reader.py
     - tests/test_observation_prints_ledger.py
     - tests/test_replacement_forecast_bundle_reader.py
@@ -1870,6 +1872,21 @@ test_metadata:
     - docs/authority/zeus_current_architecture.md
     notes: Terminal cancellation cannot be reopened by late fill evidence; live receipt follows HTTP but replay remains causal; source routes and poll budgets stay one process snapshot; local day lengths survive DST.
     created: 2026-09-29
+    last_reused_or_audited: 2026-09-29
+  tests/test_station_forecast_live_ingest_wiring.py:
+    modules: [data]
+    category: useful_regression
+    kind: antibody
+    profile: station_forecast_entity_body
+    blocks_commit: true
+    asserted_invariants: [INV-14, INV-37, INV-47]
+    source_under_test:
+      - src/data/station_forecast_adapter.py
+      - src/data/bayes_precision_fusion_download.py
+      - src/data/replacement_current_value_serving.py
+    law_dependencies: [AGENTS.md]
+    notes: Actual provider bytes bind native station forecast quantities to current selector and frontier without acquiring settlement or trade authority.
+    created: 2026-06-29
     last_reused_or_audited: 2026-09-29
   tests/test_total_loss_loop.py:
     modules: [execution, events, ingest]

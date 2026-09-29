@@ -1,5 +1,5 @@
 # Created: 2026-06-28
-# Last reused/audited: 2026-06-28
+# Last reused/audited: 2026-09-29
 # Authority basis: docs/evidence/hko_station_forecast/2026-06-28_hko_hk_integration.md (HKO 9-day
 #   official forecast → HK served center, settlement-graded walk-forward). DATA-PRECISION external
 #   station-forecast ingest (an INDEPENDENT published forecast), NOT a de-bias/fitted offset.
@@ -57,6 +57,14 @@ class StationForecastRow:
 
 
 @dataclass(frozen=True)
+class HkoFndProduct:
+    """Original HKO response entity bytes and a separate possession clock."""
+
+    raw_json: bytes
+    captured_at: str
+
+
+@dataclass(frozen=True)
 class CwaHourlyProduct:
     """Authenticated CWA F-D0047-061 raw XML and its publisher clocks.
 
@@ -107,6 +115,7 @@ def parse_hko_fnd_payload(
     metric: str = "high",
     city_timezone: str = "Asia/Hong_Kong",
     model: str = "hko_fnd",
+    captured_at: str | None = None,
 ) -> tuple[StationForecastRow, ...]:
     """Pure parser for the HKO Nine-Day Forecast (``dataType=fnd``) JSON.
 
@@ -114,8 +123,9 @@ def parse_hko_fnd_payload(
     (``target_date − issue_local_date`` in the city-local calendar — the SAME lead convention as
     ``_bayes_precision_fusion_city_local_lead_days``: the first day, forecastDate == issue date, is
     lead 0). Reads ``forecastMaxtemp.value`` (degC) for ``metric='high'`` (or ``forecastMintemp``
-    for 'low'). ``updateTime`` is the provider issue instant = the cycle clock AND the
-    proof-of-possession ``source_available_at`` (the forecast exists once HKO published it).
+    for 'low'). ``updateTime`` is the provider issue/cycle clock. Possession is
+    the caller's separate ``captured_at``; a pure parsed value without that
+    clock does not establish source availability or live artifact authority.
 
     NETWORK-FREE. Raises ValueError on a structurally invalid payload (missing updateTime /
     weatherForecast). Individual malformed day entries are skipped (fail-soft per row) so a single
@@ -132,8 +142,12 @@ def parse_hko_fnd_payload(
     if cycle_dt.tzinfo is None:
         raise ValueError("HKO updateTime must be timezone-aware")
     source_cycle_time = cycle_dt.astimezone(UTC).isoformat()
-    # Proof of possession: the forecast is possessed the instant HKO published it (updateTime).
-    source_available_at = source_cycle_time
+    source_available_at = ""
+    if captured_at is not None:
+        captured = _cwa_aware_time(captured_at, field="HKO captured_at").astimezone(UTC)
+        if captured < cycle_dt.astimezone(UTC):
+            raise ValueError("HKO updateTime must not follow captured_at")
+        source_available_at = captured.isoformat()
     issue_local_date = cycle_dt.astimezone(ZoneInfo(city_timezone)).date()
 
     days = payload.get("weatherForecast")
@@ -176,16 +190,138 @@ def parse_hko_fnd_payload(
     return tuple(rows)
 
 
-def fetch_hko_fnd_payload(
+def fetch_hko_fnd_product(
     *, endpoint: str = _HKO_ENDPOINT, timeout_s: float = 20.0
-) -> Mapping[str, object]:
-    """Live HTTPS GET of the HKO Nine-Day Forecast JSON. NETWORK — never called from tests."""
+) -> HkoFndProduct:
+    """GET the original HKO entity body; do not replace it with re-encoded JSON."""
     import urllib.request  # noqa: PLC0415
 
     req = urllib.request.Request(endpoint, headers={"User-Agent": "zeus-station-forecast/1.0"})
     with urllib.request.urlopen(req, timeout=timeout_s) as resp:  # noqa: S310 (https only)
         raw = resp.read()
-    return json.loads(raw.decode("utf-8"))
+    return HkoFndProduct(raw_json=raw, captured_at=datetime.now(tz=UTC).isoformat())
+
+
+def reextract_station_response_value(raw_body: bytes, proof: Mapping[str, object]) -> float | None:
+    """Reproduce a typed station forecast value from original provider bytes.
+
+    The caller separately binds the artifact hash and row identity. This parser
+    checks the provider product, target station/family, metric, issued/available
+    clocks, native quantity and unambiguous selection; it grants no trade authority.
+    """
+    try:
+        if proof["revision"] != "station_forecast_entity_body_v1":
+            return None
+        metric = str(proof["metric"])
+        if metric not in {"high", "low"}:
+            return None
+        cycle = _cwa_aware_time(str(proof["source_cycle_time"]), field="source_cycle_time").astimezone(UTC)
+        available = _cwa_aware_time(str(proof["source_available_at"]), field="source_available_at").astimezone(UTC)
+        captured = _cwa_aware_time(str(proof["captured_at"]), field="captured_at").astimezone(UTC)
+        if not cycle <= available <= captured:
+            return None
+        selection = proof["selection"]
+        if not isinstance(selection, Mapping):
+            return None
+        model = str(proof["model"])
+        if model == "hko_fnd":
+            field = "forecastMaxtemp" if metric == "high" else "forecastMintemp"
+            target = date.fromisoformat(str(proof["target_date"]))
+            if (
+                proof["city"] != "Hong Kong" or proof["station_id"] != "HKO"
+                or proof["provider"] != "hong_kong_observatory"
+                or proof["quantity"] != f"agency_daily_forecast_{metric}"
+                or dict(selection) != {"product": "HKO_FND", "city_timezone": "Asia/Hong_Kong",
+                    "forecast_date": target.strftime("%Y%m%d"), "temperature_field": field}
+            ):
+                return None
+            payload = json.loads(raw_body)
+            rows = parse_hko_fnd_payload(payload, metric=metric, captured_at=captured.isoformat())
+            entries = [entry for entry in payload["weatherForecast"]
+                       if isinstance(entry, Mapping) and entry.get("forecastDate") == target.strftime("%Y%m%d")]
+            if (len(entries) != 1 or entries[0][field].get("unit") != "C"
+                    or isinstance(entries[0][field].get("value"), bool)):
+                return None
+        elif model == f"cwa_township_hourly_{metric}":
+            if (
+                proof["city"] != "Taipei" or proof["station_id"] != "RCSS"
+                or proof["provider"] != "cwa_taiwan"
+                or proof["quantity"] != f"township_hourly_sample_{'max' if metric == 'high' else 'min'}"
+                or dict(selection) != {"product": "F-D0047-061", "city_timezone": "Asia/Taipei",
+                    "location_name": "松山區", "location_geocode": "63000010",
+                    "latitude": 25.051608, "longitude": 121.568983, "element_name": "溫度",
+                    "aggregation": f"{'max' if metric == 'high' else 'min'}_complete_24_unique_hourly_temperature_samples"}
+            ):
+                return None
+            product = parse_cwa_township_hourly_product(raw_body, captured_at=captured.isoformat())
+            rows = parse_cwa_township_hourly_extreme_product(product, metric=metric, model=model)
+        else:
+            return None
+        matches = [row for row in rows if row.target_date == proof["target_date"]
+                   and row.source_cycle_time == cycle.isoformat()
+                   and row.source_available_at == available.isoformat()]
+        if len(matches) != 1:
+            return None
+        value = matches[0].forecast_value_c
+        expected = proof["forecast_value_c"]
+        if isinstance(expected, bool) or not math.isfinite(value) or not math.isfinite(float(expected)):
+            return None
+        return value if math.isclose(value, float(expected), rel_tol=0.0, abs_tol=1e-9) else None
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+
+
+def _station_response_proof(
+    row: StationForecastRow, *, provider: str, captured_at: str, selection: Mapping[str, object],
+) -> dict[str, object]:
+    return {
+        "revision": "station_forecast_entity_body_v1", "model": row.model,
+        "city": row.city, "station_id": {"Hong Kong": "HKO", "Taipei": "RCSS"}.get(row.city),
+        "metric": row.metric, "target_date": row.target_date,
+        "source_cycle_time": row.source_cycle_time, "source_available_at": row.source_available_at,
+        "captured_at": captured_at, "forecast_value_c": row.forecast_value_c, "provider": provider,
+        "quantity": (f"agency_daily_forecast_{row.metric}" if row.model == "hko_fnd"
+                     else f"township_hourly_sample_{'max' if row.metric == 'high' else 'min'}"),
+        "selection": dict(selection),
+    }
+
+
+def _station_response_capture(
+    raw_body: bytes, *, rows: Sequence[StationForecastRow], items: Sequence[Mapping[str, object]],
+    endpoint: str, request_params: Mapping[str, object], captured_at: str,
+) -> dict[str, object]:
+    from src.config import state_path
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+    if not isinstance(raw_body, bytes) or not raw_body:
+        raise ValueError("station response entity bytes unavailable")
+    # SCOPE: this exact station product/capture. DRAIN: normal source polling
+    # captures a legal successor. RESET: original bytes reproduce every typed
+    # row; historical parsed-only values never acquire fresh authority here.
+    for row in rows:
+        matches = [item for item in items if all(item.get(key) == getattr(row, key)
+                   for key in ("model", "city", "metric", "target_date", "source_cycle_time"))]
+        if len(matches) != 1 or reextract_station_response_value(raw_body, matches[0]) != row.forecast_value_c:
+            raise ValueError("station response does not reproduce the typed forecast row")
+    parts = urlsplit(endpoint)
+    safe = lambda key: not any(secret in key.lower() for secret in ("key", "token", "auth", "password"))
+    clean_url = urlunsplit((parts.scheme, parts.netloc.split("@")[-1], parts.path,
+                           urlencode([(k, v) for k, v in parse_qsl(parts.query) if safe(k)]), ""))
+    params = {str(key): value for key, value in request_params.items() if safe(str(key))}
+    digest = hashlib.sha256(raw_body).hexdigest()
+    path = state_path(str(Path("replacement_forecast_live") / "raw_manifests" /
+                          f"station_forecast_response_{digest}.body"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if path.read_bytes() != raw_body:
+            raise ValueError("immutable station response artifact changed")
+    else:
+        with path.open("xb") as handle:
+            handle.write(raw_body)
+    return {"artifact_path": str(path), "sha256": digest, "byte_size": len(raw_body),
+            "request_url": clean_url, "request_params": params, "captured_at": captured_at,
+            "station_response": {"revision": "station_forecast_entity_body_v1",
+                                 "items": [dict(item) for item in items]}}
 
 
 def _row_to_rmf_dict(
@@ -315,6 +451,8 @@ def persist_station_forecast_rows(
     elevation_param: str = "station",
     downscaling_policy: str = "agency_mos",
     raw_sha256: str | None = None,
+    raw_body: bytes | None = None,
+    station_response_items: Sequence[Mapping[str, object]] = (),
 ) -> int:
     """Persist station rows into raw_model_forecasts via the SAME idempotent writer the Open-Meteo
     capture uses (_persist_rows: B4 logical-key conflict guard + INSERT OR IGNORE). Returns rows
@@ -335,29 +473,20 @@ def persist_station_forecast_rows(
     )
     if not rmf_rows:
         return 0
-    written = _persist_rows(conn, rmf_rows)
-    if raw_sha256 is not None:
+    if raw_body is not None:
+        capture = _station_response_capture(
+            raw_body, rows=rows, items=station_response_items, endpoint=endpoint,
+            request_params=json.loads(str(rmf_rows[0]["request_params_json"])),
+            captured_at=str(rmf_rows[0]["captured_at"]),
+        )
+        if raw_sha256 is not None and raw_sha256 != capture["sha256"]:
+            raise ValueError("station response hash mismatch")
         for row in rmf_rows:
-            conn.execute(
-                """
-                UPDATE raw_model_forecasts
-                   SET raw_sha256 = ?
-                 WHERE model = ? AND city = ? AND target_date = ? AND metric = ?
-                   AND source_cycle_time = ? AND endpoint = ?
-                   AND request_url_hash = ?
-                """,
-                (
-                    raw_sha256,
-                    row["model"],
-                    row["city"],
-                    row["target_date"],
-                    row["metric"],
-                    row["source_cycle_time"],
-                    row["endpoint"],
-                    row["request_url_hash"],
-                ),
-            )
-    return written
+            row["_station_response"] = capture
+    elif raw_sha256 is not None:
+        for row in rmf_rows:
+            row["raw_sha256"] = raw_sha256
+    return _persist_rows(conn, rmf_rows)
 
 
 def ingest_hko_fnd_live(
@@ -386,7 +515,8 @@ def ingest_hko_fnd_live(
     if any(value not in {"high", "low"} for value in selected):
         raise ValueError("metrics must contain only 'high' or 'low'")
 
-    payload = fetch_hko_fnd_payload(endpoint=endpoint)
+    product = fetch_hko_fnd_product(endpoint=endpoint)
+    payload = json.loads(product.raw_json)
     rows = tuple(
         row
         for value in selected
@@ -395,8 +525,15 @@ def ingest_hko_fnd_live(
             city=city,
             metric=value,
             city_timezone=city_timezone,
+            captured_at=product.captured_at,
         )
     )
+    items = [_station_response_proof(
+        row, provider="hong_kong_observatory", captured_at=product.captured_at,
+        selection={"product": "HKO_FND", "city_timezone": city_timezone,
+                   "forecast_date": row.target_date.replace("-", ""),
+                   "temperature_field": "forecastMaxtemp" if row.metric == "high" else "forecastMintemp"},
+    ) for row in rows]
     return persist_station_forecast_rows(
         conn,
         rows,
@@ -405,6 +542,10 @@ def ingest_hko_fnd_live(
         city_timezone=city_timezone,
         latitude=latitude,
         longitude=longitude,
+        captured_at=product.captured_at,
+        request_params={"dataType": "fnd", "lang": "en", "city": city, "timezone": city_timezone,
+                        "response_sha256": hashlib.sha256(product.raw_json).hexdigest()},
+        raw_body=product.raw_json, station_response_items=items,
     )
 
 
@@ -901,15 +1042,25 @@ def _ingest_cwa_township_hourly_extrema_by_metric(
     if not key:
         return {metric: 0 for metric in selected}
     product = fetch_cwa_township_hourly_product(api_key=key, endpoint=endpoint)
-    written: dict[str, int] = {}
-    for metric in selected:
-        model = f"cwa_township_hourly_{metric}"
-        rows = parse_cwa_township_hourly_extreme_product(
+    rows_by_metric = {
+        metric: parse_cwa_township_hourly_extreme_product(
             product, city=city, city_timezone=city_timezone,
             location_name=location_name, location_geocode=location_geocode,
             location_latitude=location_latitude, location_longitude=location_longitude,
-            metric=metric, model=model,
-        )
+            metric=metric, model=f"cwa_township_hourly_{metric}",
+        ) for metric in selected
+    }
+    items = [_station_response_proof(
+        row, provider="cwa_taiwan", captured_at=product.captured_at,
+        selection={"product": "F-D0047-061", "city_timezone": city_timezone,
+                   "location_name": location_name, "location_geocode": location_geocode,
+                   "latitude": location_latitude, "longitude": location_longitude,
+                   "element_name": "溫度",
+                   "aggregation": f"{'max' if row.metric == 'high' else 'min'}_complete_24_unique_hourly_temperature_samples"},
+    ) for rows in rows_by_metric.values() for row in rows]
+    written: dict[str, int] = {}
+    for metric in selected:
+        rows = rows_by_metric[metric]
         request_params = {
             "dataset": "F-D0047-061", "format": "XML", "downloadType": "WEB",
             "LocationName": location_name, "Geocode": location_geocode,
@@ -930,6 +1081,7 @@ def _ingest_cwa_township_hourly_extrema_by_metric(
             elevation_param="township_area",
             downscaling_policy="cwa_operational_township_forecast",
             raw_sha256=product.raw_sha256,
+            raw_body=product.raw_xml, station_response_items=items,
         )
     return written
 

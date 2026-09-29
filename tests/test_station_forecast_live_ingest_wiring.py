@@ -1,8 +1,8 @@
 # Created: 2026-06-29
-# Lifecycle: created=2026-06-29; last_reviewed=2026-09-03; last_reused=2026-09-03
+# Lifecycle: created=2026-06-29; last_reviewed=2026-09-29; last_reused=2026-09-29
 # Purpose: Lock config-driven station forecast ingest, dual-metric HKO capture, and reseed wiring.
 # Reuse: Run for station forecast source, dispatcher, cadence, or replacement reseed changes.
-# Last reused/audited: 2026-09-03
+# Last reused/audited: 2026-09-29
 # Authority basis: operator directive "加数据" (add CWA/HKO station-forecast data to the
 #   live forecast cycle); src/data/station_forecast_adapter.py single_runs persist contract;
 #   config/station_forecast_sources.json adapter_kind dispatch seam.
@@ -191,13 +191,13 @@ def test_hko_multi_metric_ingest_fetches_once_and_persists_both(monkeypatch):
 
     def _fetch(**_kwargs):
         fetches["count"] += 1
-        return payload
+        return adapter.HkoFndProduct(json.dumps(payload).encode(), "2026-07-23T03:35:00+00:00")
 
     def _persist(_conn, rows, **_kwargs):
         captured.extend(rows)
         return len(rows)
 
-    monkeypatch.setattr(adapter, "fetch_hko_fnd_payload", _fetch)
+    monkeypatch.setattr(adapter, "fetch_hko_fnd_product", _fetch)
     monkeypatch.setattr(adapter, "persist_station_forecast_rows", _persist)
 
     written = adapter.ingest_hko_fnd_live(
@@ -234,7 +234,7 @@ def test_hko_multi_metric_ingest_rejects_invalid_metrics_before_fetch(
 ):
     monkeypatch.setattr(
         adapter,
-        "fetch_hko_fnd_payload",
+        "fetch_hko_fnd_product",
         lambda **_kwargs: pytest.fail("invalid metrics must fail before network I/O"),
     )
 
@@ -374,12 +374,216 @@ def test_hourly_low_rejects_unexpected_township_coordinates():
         )
 
 
-def _hourly_schema_conn() -> sqlite3.Connection:
+def _hourly_schema_conn(db_path=None) -> sqlite3.Connection:
     from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
 
-    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect(":memory:" if db_path is None else db_path)
     ensure_replacement_forecast_live_schema(conn)
     return conn
+
+
+def _station_body_writer(monkeypatch, provider, db_path=None):
+    """Only HTTP and wall clock are fake; producer and authority readers are real."""
+    import urllib.request
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 7, 23, 10, 15, tzinfo=timezone.utc)
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+
+    if provider == "hko":
+        body = (json.dumps({"updateTime": "2026-07-23T18:14:00+08:00", "weatherForecast": [
+            {"forecastDate": "20260724", "forecastMaxtemp": {"value": 33, "unit": "C"},
+             "forecastMintemp": {"value": 27, "unit": "C"}},
+            {"forecastDate": "20260725", "forecastMaxtemp": {"value": 34, "unit": "C"},
+             "forecastMintemp": {"value": 28, "unit": "C"}},
+        ]}, indent=2) + "\n").encode()
+    else:
+        body = _hourly_low_xml()
+    requests = []
+    class Response:
+        def __enter__(self):
+            return self
+        def __exit__(self, *_args):
+            pass
+        def read(self):
+            return body
+    def http(request, **_kwargs):
+        requests.append(request.full_url)
+        return Response()
+    monkeypatch.setattr(urllib.request, "urlopen", http)
+    monkeypatch.setattr(adapter, "datetime", Clock)
+    conn = _hourly_schema_conn(db_path)
+    if provider == "hko":
+        assert adapter.ingest_hko_fnd_live(conn, metrics=("high", "low")) == 4
+        city, models = "Hong Kong", {"high": "hko_fnd", "low": "hko_fnd"}
+    else:
+        assert adapter.ingest_cwa_township_hourly_extrema_live(conn, api_key="private-test-key") == 2
+        city, models = "Taipei", {metric: f"cwa_township_hourly_{metric}" for metric in ("high", "low")}
+    assert len(requests) == 1
+    return conn, body, city, models
+
+
+def _station_grid_cohort(monkeypatch, conn, db_path, city):
+    """Actual grid producer supplies the second provider family for a cohort."""
+    from datetime import datetime, timedelta, timezone
+    from src.config import runtime_cities_by_name
+    from src.data import bayes_precision_fusion_download as dl
+
+    captured = datetime(2026, 7, 23, 10, 15, tzinfo=timezone.utc)
+    cycle = captured.replace(hour=6, minute=0)
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return captured.astimezone(tz) if tz else captured.replace(tzinfo=None)
+    def fetch(_url, params, **kwargs):
+        start = datetime(2026, 7, 24)
+        payload = {"latitude": float(str(params["latitude"]).split(",")[0]),
+                   "longitude": float(str(params["longitude"]).split(",")[0]), "elevation": 32.0,
+                   "timezone": str(params["timezone"]).split(",")[0],
+                   "hourly_units": {"temperature_2m": "°C"},
+                   "hourly": {"time": [(start + timedelta(hours=i)).isoformat(timespec="minutes") for i in range(48)],
+                              "temperature_2m": [26.0 + i % 7 for i in range(48)]}}
+        body = (json.dumps(payload, indent=2) + "\n").encode()
+        kwargs["capture_entity_body"](body, captured.timestamp())
+        return json.loads(body)
+    dl._SINGLE_RUNS_PAYLOAD_CACHE.clear()
+    dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEX.clear()
+    monkeypatch.setattr(dl, "datetime", Clock)
+    monkeypatch.setattr("src.data.openmeteo_client.fetch", fetch)
+    point = runtime_cities_by_name()[city]
+    models = ("icon_global", "ukmo_global_deterministic_10km")
+    targets = [dl.BayesPrecisionFusionDownloadTarget(
+        city=city, target_date=target, metric=metric, latitude=point.lat,
+        longitude=point.lon, timezone_name=point.timezone, lead_days=int(target[-2:]) - 23,
+    ) for target in ("2026-07-24", "2026-07-25") for metric in ("high", "low")]
+    conn.commit()
+    report = dl.download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=db_path, cycle=cycle, targets=targets, models=models,
+        frozen_source_runs={model: (cycle, captured) for model in models},
+        include_previous_runs=False, prune_after=False,
+    )
+    assert report["written_row_count"] == 8
+    return models
+
+
+@pytest.mark.parametrize("provider", ("hko", "cwa"))
+def test_actual_station_http_body_writer_serves_both_typed_metrics_and_frontier(monkeypatch, tmp_path, provider):
+    import hashlib
+    from src.data.replacement_current_value_serving import (
+        current_value_serving_schema, read_current_instrument_values,
+        read_current_instrument_frontier_identity, read_freshest_coherent_instrument_values,
+    )
+
+    db_path = tmp_path / "forecast.db"
+    conn, body, city, models = _station_body_writer(monkeypatch, provider, db_path)
+    digest = hashlib.sha256(body).hexdigest()
+    artifacts = conn.execute(
+        "SELECT artifact_path, sha256, data_version, source_cycle_time, source_available_at, "
+        "captured_at, request_url, request_params_json, artifact_metadata_json FROM raw_forecast_artifacts"
+    ).fetchall()
+    assert len(artifacts) == (1 if provider == "hko" else 2)
+    for row in artifacts:
+        assert Path(row[0]).read_bytes() == body and row[1] == digest
+        assert row[2:6] == ("station_forecast_entity_body_v1", "2026-07-23T10:14:00+00:00",
+                             "2026-07-23T10:15:00+00:00", "2026-07-23T10:15:00+00:00")
+        assert "private-test-key" not in row[6] + row[7] + row[8]
+        evidence = json.loads(row[8])["station_response"]
+        assert len(evidence["items"]) == (4 if provider == "hko" else 2)
+        for item in evidence["items"]:
+            assert adapter.reextract_station_response_value(body, item) == item["forecast_value_c"]
+    grid_models = _station_grid_cohort(monkeypatch, conn, db_path, city)
+    for metric, model in models.items():
+        dates = ("2026-07-24", "2026-07-25") if provider == "hko" else ("2026-07-24",)
+        for target_date in dates:
+            scope = dict(city=city, metric=metric, target_date=target_date)
+            timing = dict(source_cycle_time_iso="2026-07-23T10:14:00+00:00",
+                          decision_time_iso="2026-07-23T10:16:00+00:00")
+            served = read_current_instrument_values(conn, **scope, **timing, include_station_sources=True)
+            assert set(served) == {model, *grid_models}
+            coherent = read_freshest_coherent_instrument_values(
+                conn, **scope, decision_time_iso=timing["decision_time_iso"], models=(model, *grid_models), cohort_window_hours=6,
+                include_station_sources=True,
+            )
+            assert set(coherent) == {model, *grid_models}
+            frontier = dict(read_current_instrument_frontier_identity(
+                conn, **scope, decision_time_iso=timing["decision_time_iso"], models=(model,),
+                schema=current_value_serving_schema(conn),
+            ))
+            assert frontier[model] == served[model].raw_model_forecast_id
+    conn.close()
+
+
+@pytest.mark.parametrize("provider", ("hko", "cwa"))
+@pytest.mark.parametrize("damage", ("city", "station_id", "metric", "quantity", "source_cycle_time", "source_available_at"))
+def test_original_station_body_cannot_reproduce_foreign_product_or_reissued_clock(monkeypatch, provider, damage):
+    conn, body, _city, _models = _station_body_writer(monkeypatch, provider)
+    metadata = json.loads(conn.execute("SELECT artifact_metadata_json FROM raw_forecast_artifacts LIMIT 1").fetchone()[0])
+    proof = dict(metadata["station_response"]["items"][0])
+    assert adapter.reextract_station_response_value(body, proof) is not None
+    proof[damage] = {"city": "Shanghai", "station_id": "OTHER", "metric": "low" if proof["metric"] == "high" else "high",
+                     "quantity": "settlement_daily_extreme", "source_cycle_time": "2026-07-23T10:16:00+00:00",
+                     "source_available_at": "2026-07-23T10:16:00+00:00"}[damage]
+    assert adapter.reextract_station_response_value(body, proof) is None
+    conn.close()
+
+
+@pytest.mark.parametrize("provider", ("hko", "cwa"))
+def test_same_station_body_recapture_does_not_renew_possession_or_source_clock(monkeypatch, provider):
+    from datetime import datetime, timezone
+
+    conn, _body, _city, _models = _station_body_writer(monkeypatch, provider)
+    before = conn.execute(
+        "SELECT model,metric,source_cycle_time,source_available_at,captured_at,raw_sha256,artifact_id "
+        "FROM raw_model_forecasts ORDER BY model,metric,target_date"
+    ).fetchall()
+    class Later(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = datetime(2026, 7, 23, 11, 15, tzinfo=timezone.utc)
+            return value.astimezone(tz) if tz else value.replace(tzinfo=None)
+    monkeypatch.setattr(adapter, "datetime", Later)
+    written = (adapter.ingest_hko_fnd_live(conn, metrics=("high", "low")) if provider == "hko"
+               else adapter.ingest_cwa_township_hourly_extrema_live(conn, api_key="private-test-key"))
+    assert written == 0
+    assert conn.execute(
+        "SELECT model,metric,source_cycle_time,source_available_at,captured_at,raw_sha256,artifact_id "
+        "FROM raw_model_forecasts ORDER BY model,metric,target_date"
+    ).fetchall() == before
+    assert {row[0] for row in conn.execute("SELECT captured_at FROM raw_forecast_artifacts")} == {
+        "2026-07-23T10:15:00+00:00"
+    }
+    conn.close()
+
+
+@pytest.mark.parametrize("provider", ("hko", "cwa"))
+def test_shared_station_selector_and_frontier_reject_corrupt_body_without_hiding_sibling(monkeypatch, provider):
+    from src.data.replacement_current_value_serving import (
+        current_value_serving_schema, read_current_instrument_values, read_current_instrument_frontier_identity,
+    )
+
+    conn, _body, city, models = _station_body_writer(monkeypatch, provider)
+    scope = dict(city=city, metric="high", target_date="2026-07-24")
+    timing = dict(source_cycle_time_iso="2026-07-23T10:14:00+00:00", decision_time_iso="2026-07-23T10:16:00+00:00")
+    assert models["high"] in read_current_instrument_values(conn, **scope, **timing, include_station_sources=True)
+    artifact_id = conn.execute("SELECT artifact_id FROM raw_model_forecasts WHERE metric='high' LIMIT 1").fetchone()[0]
+    raw = conn.execute("SELECT artifact_metadata_json FROM raw_forecast_artifacts WHERE artifact_id=?", (artifact_id,)).fetchone()[0]
+    metadata = json.loads(raw)
+    for item in metadata["station_response"]["items"]:
+        if item["metric"] == "high":
+            item["quantity"] = "township_hourly_sample_min" if provider == "cwa" else "agency_daily_forecast_low"
+    conn.execute("UPDATE raw_forecast_artifacts SET artifact_metadata_json=? WHERE artifact_id=?", (json.dumps(metadata), artifact_id))
+    assert read_current_instrument_values(conn, **scope, **timing, include_station_sources=True) == {}
+    assert dict(read_current_instrument_frontier_identity(
+        conn, **scope, decision_time_iso=timing["decision_time_iso"], models=(models["high"],),
+        schema=current_value_serving_schema(conn),
+    ))[models["high"]] is None
+    assert models["low"] in read_current_instrument_values(
+        conn, city=city, metric="low", target_date="2026-07-24", **timing, include_station_sources=True,
+    )
+    conn.close()
 
 
 def test_hourly_low_same_publisher_revision_is_idempotent_and_retains_raw_hash(monkeypatch):
