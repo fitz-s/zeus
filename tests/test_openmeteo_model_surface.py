@@ -36,6 +36,9 @@ def ordinary_static_http(tmp_path, monkeypatch):
             entity["calls"].append(dict(self.headers))
             if not entity.get("force_200") and self.headers.get("If-None-Match") == entity["etag"]:
                 self.send_response(304)
+                if not entity.get("omit_304_headers"):
+                    self.send_header("ETag", entity["etag"])
+                    self.send_header("Last-Modified", entity["last_modified"])
                 self.end_headers()
                 return
             self.send_response(200)
@@ -325,3 +328,26 @@ def test_read_only_missing_asset_does_not_fetch_or_create_cache(ordinary_static_
     assert result.reason == "MODEL_SURFACE_ASSET_MISSING"
     assert not entity["calls"]
     assert not (tmp_path / "static").exists()
+
+
+@pytest.mark.parametrize("changed_epoch", [False, True])
+def test_304_without_exact_epoch_identity_requires_full_entity_get(ordinary_static_http, changed_epoch):
+    entity, clock, _ = ordinary_static_http
+    first = surface.ensure_model_surface("icon_global")
+    clock[0] += timedelta(minutes=2)
+    if changed_epoch:
+        # Normal S3 samebytes republish: ETag stays unchanged, LM changes.
+        entity["last_modified"] = "Tue, 29 Sep 2026 12:01:00 GMT"
+    else:
+        entity["omit_304_headers"] = True
+    next_capture = surface.ensure_model_surface("icon_global")
+    assert next_capture.status == "READY"
+    assert len(entity["calls"]) == 3  # first200, conditional304, unconditional200
+    assert "If-None-Match" not in entity["calls"][-1]
+    assert next_capture.asset["whole_sha256"] == first.asset["whole_sha256"]
+    if changed_epoch:
+        assert next_capture.asset["manifest_path"] != first.asset["manifest_path"]
+        assert next_capture.asset["captured_at"] == clock[0].isoformat()
+        assert _proof(next_capture)["reason"] == "MODEL_SURFACE_EPOCH_MISMATCH"
+    else:
+        assert next_capture.as_payload() == first.as_payload()

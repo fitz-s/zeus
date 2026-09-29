@@ -12,6 +12,7 @@ Official profiles/sentinels: open-meteo/open-meteo b06f4760fd1f997e5559bb380f64c
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -329,6 +330,38 @@ def _persist_capture(manifest: dict[str, object], body: bytes,
     return _capture(manifest, raw)
 
 
+@contextmanager
+def _static_response(url: str, prior: SurfaceAssetCapture | None, deadline: float):
+    headers = {"If-None-Match": str(prior.asset["etag"])} if prior else {}
+    with httpx.stream("GET", url, headers=headers, timeout=min(20, deadline-time.monotonic()),
+                      follow_redirects=False) as response:
+        if response.status_code != 304:
+            yield response
+            return
+        same_version = False
+        if prior is not None:
+            try:
+                lm = parsedate_to_datetime(response.headers["last-modified"])
+                same_version = (lm.tzinfo is not None and lm.astimezone(UTC) == _utc(prior.asset["last_modified"])
+                    and response.headers["etag"] == prior.asset["etag"]
+                    and response.headers.get("x-amz-version-id") == prior.asset["s3_version_id"])
+            except (KeyError, ValueError, TypeError):
+                pass
+        if same_version:
+            yield response
+            return
+        # Equal bytes/ETag do not imply the same publication epoch. A 304
+        # missing identity headers is likewise insufficient for that claim.
+        response.close()
+    remaining = deadline-time.monotonic()
+    if remaining <= 0:
+        raise _Invalid("MODEL_SURFACE_DEADLINE")
+    with httpx.stream("GET", url, timeout=min(20, remaining), follow_redirects=False) as response:
+        if response.status_code == 304:
+            raise _Invalid("MODEL_SURFACE_UNEXPECTED_304")
+        yield response
+
+
 def ensure_model_surface(model: str, *, deadline: float | None = None) -> SurfaceAssetCapture:
     """Normal producer-only conditional/full GET. Cache hits never renew possession."""
     try:
@@ -341,9 +374,7 @@ def ensure_model_surface(model: str, *, deadline: float | None = None) -> Surfac
         timeout = min(20.0, deadline - time.monotonic())
         if timeout <= 0:
             raise _Invalid("MODEL_SURFACE_DEADLINE")
-        headers = {"If-None-Match": str(prior.asset["etag"])} if prior else {}
-        with httpx.stream("GET", _asset_url(str(profile["domain"])), headers=headers,
-                          timeout=timeout, follow_redirects=False) as response:
+        with _static_response(_asset_url(str(profile["domain"])), prior, deadline) as response:
             if response.status_code == 304:
                 if prior is None:
                     raise _Invalid("MODEL_SURFACE_UNEXPECTED_304")
