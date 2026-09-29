@@ -91,7 +91,7 @@ def test_entry_held_and_sql_coverage_require_same_land_grid_identity() -> None:
         ({"grid_surface_evidence_identity_hash": "a" * 63}, False),
         ({"grid_surface_evidence_identity_hash": "z" * 64}, False),
         ({"grid_surface_evidence_revision": "old-grid"}, False),
-        ({"semantics_revision": "ensemble_center_scenarios_v4"}, False),
+        ({"semantics_revision": "ensemble_center_scenarios_v5"}, False),
     ):
         candidate = {**shape, **changed}
         provenance = {

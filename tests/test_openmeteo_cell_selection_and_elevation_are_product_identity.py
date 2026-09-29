@@ -18,8 +18,13 @@ model_domain_hash) so a residual history never mixes two physical cells.
 from __future__ import annotations
 
 import sqlite3
+import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
 
@@ -83,3 +88,127 @@ def test_different_cell_selection_yields_different_model_domain_hash(tmp_path) -
     assert h_nearest != h_elev, "elevation must change the domain hash"
     # Deterministic + stable for the same inputs.
     assert h_nearest == _model_domain_hash(**base)
+
+
+def _current_rows(tmp_path, monkeypatch, *, metric="high"):
+    from src.data import bayes_precision_fusion_download as dl
+
+    target = replace(_target(), metric=metric)
+    monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {
+        target.city: SimpleNamespace(
+            name=target.city, lat=target.latitude, lon=target.longitude,
+            timezone=target.timezone_name,
+        ),
+    })
+    db = _forecast_db(tmp_path)
+    cycle = datetime(2026, 6, 8, tzinfo=UTC)
+    _download_time(monkeypatch, dl, cycle.replace(hour=4))
+    dl.download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=db, cycle=cycle, targets=[target],
+        models=("icon_global", "ukmo_global_deterministic_10km"),
+        single_runs_fetch=lambda **_: 20.0, previous_runs_fetch=lambda **_: 19.5,
+        include_previous_runs=False, prune_after=False,
+    )
+    conn = sqlite3.connect(db)
+    return conn, target, cycle
+
+
+def _download_time(monkeypatch, module, when):
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return when.astimezone(tz) if tz else when.replace(tzinfo=None)
+
+    monkeypatch.setattr(module, "datetime", Clock)
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("column,value", (
+    ("latitude_requested", 0.0), ("longitude_requested", 0.0),
+    ("timezone_requested", "UTC"), ("model_name", "ecmwf_ifs025"),
+    ("provider", "other"), ("source_family", "other"),
+    ("product_id", "other"), ("cell_selection", "nearest"),
+    ("elevation_param", "nan"), ("downscaling_policy", "none"),
+    ("model_domain_hash", "bad-domain"), ("request_url_hash", "bad-request"),
+    ("request_params_json", '{"elevation":"nan"}'),
+))
+def test_wrong_provider_product_cannot_serve_current_cohort_or_frontier(
+    tmp_path, monkeypatch, metric, column, value,
+):
+    from src.data.replacement_current_value_serving import (
+        current_value_serving_schema, read_current_instrument_values,
+        read_current_instrument_frontier_identity, read_freshest_coherent_instrument_values,
+    )
+
+    conn, target, cycle = _current_rows(tmp_path, monkeypatch, metric=metric)
+    conn.execute(f"UPDATE raw_model_forecasts SET {column}=? WHERE model='icon_global'", (value,))
+    decision = cycle.replace(hour=5).isoformat()
+    scope = dict(city=target.city, metric=metric, target_date=target.target_date)
+    served = read_current_instrument_values(
+        conn, **scope, source_cycle_time_iso=cycle.isoformat(), decision_time_iso=decision,
+    )
+    assert set(served) == {"ukmo_global_deterministic_10km"}
+    models = ("icon_global", "ukmo_global_deterministic_10km")
+    assert read_freshest_coherent_instrument_values(
+        conn, **scope, decision_time_iso=decision, models=models, cohort_window_hours=6,
+    ) == {}
+    frontier = dict(read_current_instrument_frontier_identity(
+        conn, **scope, decision_time_iso=decision, models=models,
+        schema=current_value_serving_schema(conn),
+    ))
+    assert frontier["icon_global"] is None
+    assert frontier["ukmo_global_deterministic_10km"] == served["ukmo_global_deterministic_10km"].raw_model_forecast_id
+    conn.close()
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_ordinary_new_cycle_drains_superseded_default_dem_label(tmp_path, monkeypatch, metric):
+    from src.data import bayes_precision_fusion_download as dl
+    from src.data.replacement_current_value_serving import read_current_instrument_values
+
+    conn, target, cycle = _current_rows(tmp_path, monkeypatch, metric=metric)
+    conn.execute("UPDATE raw_model_forecasts SET elevation_param='requested', downscaling_policy='none'")
+    conn.commit()
+    scope = dict(city=target.city, metric=metric, target_date=target.target_date)
+    assert read_current_instrument_values(
+        conn, **scope, source_cycle_time_iso=cycle.isoformat(),
+        decision_time_iso=cycle.replace(hour=5).isoformat(),
+    ) == {}
+    for run in (cycle, cycle.replace(hour=6)):
+        _download_time(monkeypatch, dl, run.replace(hour=run.hour + 4))
+        report = dl.download_bayes_precision_fusion_extra_raw_inputs(
+            forecast_db=Path(conn.execute("PRAGMA database_list").fetchone()[2]),
+            cycle=run, targets=[target],
+            models=("icon_global", "ukmo_global_deterministic_10km"),
+            single_runs_fetch=lambda **_: 21.0, previous_runs_fetch=lambda **_: 19.5,
+            include_previous_runs=False, prune_after=False,
+        )
+        assert report["written_row_count"] == (0 if run == cycle else 2)
+    served = read_current_instrument_values(
+        conn, **scope, source_cycle_time_iso=cycle.replace(hour=6).isoformat(),
+        decision_time_iso=cycle.replace(hour=11).isoformat(),
+    )
+    assert set(served) == {"icon_global", "ukmo_global_deterministic_10km"}
+    assert {row.served_cycle for row in served.values()} == {cycle.replace(hour=6).isoformat()}
+    old = conn.execute("SELECT downscaling_policy FROM raw_model_forecasts WHERE source_cycle_time=?", (cycle.isoformat(),)).fetchall()
+    assert old == [("none",), ("none",)]
+    conn.close()
+
+
+def test_registered_station_products_keep_their_agency_authority(monkeypatch):
+    from src.data.replacement_current_value_serving import _source_clock_product_has_authority
+
+    for model, provider in (
+        ("hko_fnd", "hong_kong_observatory"),
+        ("cwa_township_hourly_high", "cwa_taiwan"),
+        ("cwa_township_hourly_low", "cwa_taiwan"),
+    ):
+        row = dict(
+            model=model, provider=provider, source_family="station_official_forecast",
+            source_id=f"{model}_single_runs", model_name=model,
+            product_id=f"{model}::single_runs", endpoint="single_runs", endpoint_mode="single_runs",
+            downscaling_policy="agency_mos", elevation_param="station",
+        )
+        assert _source_clock_product_has_authority(json.dumps(row), lead_days=1)
+        assert not _source_clock_product_has_authority(json.dumps({**row, "product_id": "other"}), lead_days=1)
+        assert not _source_clock_product_has_authority(json.dumps({**row, "model": "hko_unregistered"}), lead_days=1)

@@ -102,25 +102,19 @@ _RMF_LOGICAL_KEY_COLUMNS = (
 # BLOCKER 4 (product identity): the provider + per-endpoint physical-product constants that the
 # download stamps onto every raw_model_forecasts row so a stored forecast_value_c is
 # reconstructable to its exact Open-Meteo product. cell_selection / elevation / downscaling are
-# the OM grid choices the BAYES_PRECISION_FUSION fetchers use (the single-runs anchor pattern: nearest gridpoint,
-# requested elevation, no extra downscaling). endpoint_mode is the physical endpoint family.
+# the OM grid choices the BAYES_PRECISION_FUSION fetchers use. Omitted elevation
+# selects its 90 m DEM target and provider elevation correction; elevation=nan
+# is the distinct product that disables that correction.
+# Official semantics: https://open-meteo.com/en/docs#api-documentation
 OPENMETEO_PROVIDER = "open-meteo"
 SINGLE_RUNS_SOURCE_FAMILY = "openmeteo_single_runs"
 PREVIOUS_RUNS_SOURCE_FAMILY = "openmeteo_previous_runs"
 STANDARD_META_STAMPED_SOURCE_FAMILY = "openmeteo_standard_meta_stamped"
-# 2026-06-17 CELL-SELECTION FIX (operator "fix the math, not a hardcoded value"): the prior
-# "nearest" pick snapped coastal airports to the nearest OFFSHORE grid cell, so the model
-# returned the SEA-surface temperature (cold by day) instead of the airport's land surface — the
-# systematic cold drag. "land" picks the nearest LAND gridpoint (OM prefers >50%-land cells), i.e.
-# the model's value AT the airport, not over water. This is a DATA-precision fix (finer data
-# closer to the airport), NOT a de-bias / fitted offset. Settlement-graded proof (ecmwf_ifs, all
-# cities, high+low, last 10 settled days, n=452): pooled MAE 1.121 -> 0.996 (-0.125, -11%); cold
-# bias -0.595 -> -0.423; worst offender Tokyo high -4.09 -> -1.34. Inland airports are unaffected
-# (nearest IS land there). cell_selection is part of the BLOCKER-4 product identity, so the land
-# captures accumulate their OWN de-bias history (never mixed with the legacy nearest history).
-BAYES_PRECISION_FUSION_CELL_SELECTION = "land"             # nearest LAND gridpoint (airport surface, not offshore sea cell).
-BAYES_PRECISION_FUSION_ELEVATION_PARAM = "requested"       # OM elevation = requested point (no override).
-BAYES_PRECISION_FUSION_DOWNSCALING_POLICY = "none"         # no statistical downscaling applied to the raw value.
+# Land selection is terrain optimized around the requested point. It is not
+# evidence that the chosen model surface is identical to the settlement station.
+BAYES_PRECISION_FUSION_CELL_SELECTION = "land"
+BAYES_PRECISION_FUSION_ELEVATION_PARAM = "default_90m_dem"
+BAYES_PRECISION_FUSION_DOWNSCALING_POLICY = "provider_default_elevation_correction_v1"
 
 # Per-model OM previous-runs source_id (the WHICH-feed identity). Keyed by STORED model identity.
 # The anchor is stored model='ecmwf_ifs' but its OM previous-runs source is ecmwf_previous_runs

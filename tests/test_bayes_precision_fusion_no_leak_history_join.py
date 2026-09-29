@@ -38,11 +38,14 @@ from src.forecast.bayes_precision_fusion import MIN_TRAIN
 from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS
 from src.data.bayes_precision_fusion_download import (
     BAYES_PRECISION_FUSION_CELL_SELECTION,
+    BAYES_PRECISION_FUSION_DOWNSCALING_POLICY,
+    BAYES_PRECISION_FUSION_ELEVATION_PARAM,
     OPENMETEO_PREVIOUS_RUNS_SOURCE_ID,
     OPENMETEO_PROVIDER,
     PREVIOUS_RUNS_SOURCE_FAMILY,
     SINGLE_RUNS_SOURCE_FAMILY,
     STANDARD_META_STAMPED_SOURCE_FAMILY,
+    _model_domain_hash,
 )
 from src.data.openmeteo_client import PREVIOUS_RUNS_URL
 from src.data.openmeteo_ecmwf_ifs9_anchor import SINGLE_RUNS_FORECAST_URL, STANDARD_FORECAST_URL
@@ -149,8 +152,9 @@ def _insert_raw(
              captured_at, lead_days, forecast_value_c, endpoint, recorded_at,
              source_id, source_family, product_id, provider, model_name,
              request_params_json, request_url_hash, latitude_requested,
-             longitude_requested, timezone_requested, endpoint_mode, coverage_status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             longitude_requested, timezone_requested, endpoint_mode, coverage_status,
+             cell_selection, elevation_param, downscaling_policy, model_domain_hash)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             model, city, target_date, metric,
@@ -162,6 +166,16 @@ def _insert_raw(
             OPENMETEO_PROVIDER, expected_model, canonical_params,
             request_url_hash or default_hash, city_config.lat, city_config.lon,
             city_config.timezone, endpoint_mode, coverage_status,
+            BAYES_PRECISION_FUSION_CELL_SELECTION,
+            BAYES_PRECISION_FUSION_ELEVATION_PARAM,
+            BAYES_PRECISION_FUSION_DOWNSCALING_POLICY,
+            _model_domain_hash(
+                provider=OPENMETEO_PROVIDER, model_name=expected_model,
+                cell_selection=BAYES_PRECISION_FUSION_CELL_SELECTION,
+                elevation_param=BAYES_PRECISION_FUSION_ELEVATION_PARAM,
+                downscaling_policy=BAYES_PRECISION_FUSION_DOWNSCALING_POLICY,
+                endpoint_mode=endpoint_mode,
+            ),
         ),
     )
 

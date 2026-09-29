@@ -100,9 +100,10 @@ _STRICT_AWARE_ISO_RE = re.compile(
 #   (event_reactor_adapter._FUSED_BOOTSTRAP_QLCB_BASIS). Defining it ONCE here (the module both the
 #   materializer and the readers already import, no cycle) makes all four sites share one definition.
 TRADEABLE_GRADE_QLCB_BASIS = "fused_center_bootstrap_p05"
-# v5 binds the selected ENS land-cell and mask evidence into the source-clock
-# probability identity. The existing coverage/seed loop regenerates old rows.
-CURRENT_EVIDENCE_SEMANTICS_REVISION = "ensemble_center_scenarios_v5"
+# v6 also requires current provider physical-product identity, including its
+# default DEM correction. The existing coverage/seed loop regenerates old rows
+# after ordinary producer cycles supply this revision's provider inputs.
+CURRENT_EVIDENCE_SEMANTICS_REVISION = "ensemble_center_scenarios_v6"
 
 # A bounded older ENS shape retains its raw absolute members and the full
 # ENS/provider-center disagreement. This identity supersedes every anomaly-

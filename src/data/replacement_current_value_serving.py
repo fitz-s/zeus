@@ -54,6 +54,7 @@ its cycle); every live capture lands within hours of its cycle.
 """
 from __future__ import annotations
 
+import json
 import math
 import sqlite3
 from dataclasses import dataclass
@@ -197,6 +198,16 @@ class CurrentValueServingSchema:
     has_source_available_at: bool
     has_recorded_at: bool
     has_coverage_status: bool
+    product_identity_columns: tuple[str, ...] = ()
+
+
+_PRODUCT_IDENTITY_COLUMNS = (
+    "model", "city", "target_date", "endpoint", "endpoint_mode", "source_cycle_time",
+    "source_id", "source_family", "product_id", "provider", "model_name",
+    "request_params_json", "request_url_hash", "latitude_requested", "longitude_requested",
+    "timezone_requested", "cell_selection", "elevation_param", "downscaling_policy",
+    "model_domain_hash",
+)
 
 
 def current_value_serving_schema(
@@ -216,6 +227,7 @@ def current_value_serving_schema(
         has_source_available_at="source_available_at" in columns,
         has_recorded_at="recorded_at" in columns,
         has_coverage_status="coverage_status" in columns,
+        product_identity_columns=tuple(name for name in _PRODUCT_IDENTITY_COLUMNS if name in columns),
     )
 
 
@@ -336,10 +348,15 @@ def _source_clock_rows_query(
         params.extend((decision_iso, decision_iso, SERVED_VIA_SINGLE_RUNS))
     else:
         params.extend((SERVED_VIA_SINGLE_RUNS, SERVED_VIA_PREVIOUS_RUNS))
+    # Missing physical proof remains NULL, including stripped/legacy schemas.
+    product_select = "json_object(" + ", ".join(
+        f"'{name}', {name if name in schema.product_identity_columns else 'NULL'}"
+        for name in _PRODUCT_IDENTITY_COLUMNS
+    ) + ")"
     return (
         f"""
         SELECT raw_model_forecast_id, model, forecast_value_c, lead_days,
-               source_cycle_time, endpoint{captured_select}
+               source_cycle_time, endpoint{captured_select}, {product_select}
          FROM raw_model_forecasts
          WHERE city = ? AND target_date = ? AND metric = ?
            AND datetime(source_cycle_time) <= datetime(?)
@@ -358,6 +375,50 @@ def _source_clock_rows_query(
     )
 
 
+def _source_clock_product_has_authority(raw: object, *, lead_days: int | None) -> bool:
+    """Bind one current provider row to its actual runtime physical product.
+
+    SCOPE: this city/date/provider candidate, shared by current, cohort and
+    frontier winners. DRAIN: ordinary producer captures a new provider cycle;
+    the existing seed loop recomputes its family. Same-cycle INSERT OR IGNORE
+    cannot repair old labels. RESET: a possessed row with the exact current
+    product identity. Missing held evidence remains read-only until then.
+    """
+    try:
+        row = json.loads(str(raw))
+        if not isinstance(row, dict):
+            return False
+        model = str(row["model"] or "")
+        if _is_station_model(model):
+            # Agency forecasts have their own physical product, never DEM
+            # correction. A known prefix alone is not a source exemption.
+            providers = {
+                "hko_fnd": "hong_kong_observatory",
+                "cwa_township": "cwa_taiwan",
+                "cwa_township_hourly_high": "cwa_taiwan",
+                "cwa_township_hourly_low": "cwa_taiwan",
+            }
+            return bool(
+                _station_model_has_entry_authority(model)
+                and row["provider"] == providers.get(model)
+                and row["source_family"] == "station_official_forecast"
+                and row["source_id"] == f"{model}_single_runs"
+                and row["model_name"] == model
+                and row["product_id"] == f"{model}::single_runs"
+                and row["endpoint"] == "single_runs"
+                and row["endpoint_mode"] == "single_runs"
+            )
+        from src.config import runtime_cities_by_name
+        from src.data.bayes_precision_fusion_history_provider import raw_product_matches_live_source
+
+        city = runtime_cities_by_name().get(str(row["city"] or ""))
+        return city is not None and lead_days is not None and raw_product_matches_live_source(
+            row, city, lead_days=lead_days,
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
 def _served_source_clock_row(
     row: sqlite3.Row | tuple[object, ...],
     *,
@@ -374,6 +435,8 @@ def _served_source_clock_row(
         if parsed is None:
             return None
         value, lead = parsed
+        if not _source_clock_product_has_authority(row[-1], lead_days=lead):
+            return None
         served_cycle = str(row[4])
         endpoint = str(row[5])
         captured = (

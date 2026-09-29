@@ -16,11 +16,14 @@ from src.data.bayes_precision_fusion_capture import (
 )
 from src.data.bayes_precision_fusion_download import (
     BAYES_PRECISION_FUSION_CELL_SELECTION,
+    BAYES_PRECISION_FUSION_DOWNSCALING_POLICY,
+    BAYES_PRECISION_FUSION_ELEVATION_PARAM,
     OPENMETEO_PREVIOUS_RUNS_SOURCE_ID,
     OPENMETEO_PROVIDER,
     PREVIOUS_RUNS_SOURCE_FAMILY,
     SINGLE_RUNS_SOURCE_FAMILY,
     STANDARD_META_STAMPED_SOURCE_FAMILY,
+    _model_domain_hash,
 )
 from src.data.openmeteo_client import PREVIOUS_RUNS_URL
 from src.data.openmeteo_ecmwf_ifs9_anchor import (
@@ -117,7 +120,7 @@ def _request_params_match_current_live_product(
 
 
 def raw_product_matches_live_source(
-    row: sqlite3.Row, city: Any, *, lead_days: int,
+    row: Mapping[str, Any] | sqlite3.Row, city: Any, *, lead_days: int,
 ) -> bool:
     """Whether a gridded raw row is the live-equivalent physical product.
 
@@ -158,6 +161,14 @@ def raw_product_matches_live_source(
         )
     except (AttributeError, TypeError, ValueError):
         return False
+    expected_domain_hash = _model_domain_hash(
+        provider=OPENMETEO_PROVIDER,
+        model_name=expected_model,
+        cell_selection=BAYES_PRECISION_FUSION_CELL_SELECTION,
+        elevation_param=BAYES_PRECISION_FUSION_ELEVATION_PARAM,
+        downscaling_policy=BAYES_PRECISION_FUSION_DOWNSCALING_POLICY,
+        endpoint_mode=endpoint_mode,
+    )
     return bool(
         coordinates_match
         and str(row["timezone_requested"] or "").strip() == str(city.timezone)
@@ -165,6 +176,10 @@ def raw_product_matches_live_source(
         and str(row["source_id"] or "").strip() == source_id
         and str(row["source_family"] or "").strip() == source_family
         and str(row["model_name"] or "").strip() == expected_model
+        and str(row["cell_selection"] or "").strip() == BAYES_PRECISION_FUSION_CELL_SELECTION
+        and str(row["elevation_param"] or "").strip() == BAYES_PRECISION_FUSION_ELEVATION_PARAM
+        and str(row["downscaling_policy"] or "").strip() == BAYES_PRECISION_FUSION_DOWNSCALING_POLICY
+        and str(row["model_domain_hash"] or "").strip() == expected_domain_hash
         and product_matches
         and _request_params_match_current_live_product(
             row, city, expected_model_name=expected_model, lead_days=lead_days,
@@ -288,7 +303,8 @@ class BayesPrecisionFusionHistoryProvider:
                        product_id, model_name, provider, endpoint_mode,
                        request_params_json, request_url_hash,
                        latitude_requested, longitude_requested,
-                       timezone_requested
+                       timezone_requested, cell_selection, elevation_param,
+                       downscaling_policy, model_domain_hash
                   FROM raw_model_forecasts INDEXED BY idx_raw_model_forecasts_history_join
                  WHERE city = ? AND metric = ? AND lead_days = ?
                    AND endpoint = 'single_runs'
