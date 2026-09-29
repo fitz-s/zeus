@@ -7864,6 +7864,26 @@ def test_global_day0_current_band_accepts_only_bound_absorbing_certainty():
         )
 
 
+def _fake_urgent_marker(monkeypatch, reactor_wake, reason_box):
+    """Serve the urgent marker record the cut predicate reads, with a fixed
+    reason box; the queue itself stays empty."""
+
+    real_read = reactor_wake._read_reactor_wake_path
+
+    def read(path, **kwargs):
+        if str(path).endswith(reactor_wake.REACTOR_URGENT_WAKE_SUFFIX):
+            reason = reason_box()
+            return reactor_wake.ReactorWake(
+                wake_id=f"urgent-{reason}",
+                published_at="2999-01-01T00:00:00+00:00",
+                source="test",
+                reason=reason,
+            )
+        return real_read(path, **kwargs)
+
+    monkeypatch.setattr(reactor_wake, "_read_reactor_wake_path", read)
+
+
 def _global_scope_event(
     *,
     city: str,
@@ -14920,6 +14940,7 @@ def test_live_adapter_urgent_day0_preempts_parallel_book_prefetch(monkeypatch):
         "reactor_urgent_wake_reason",
         lambda: reason["value"],
     )
+    _fake_urgent_marker(monkeypatch, reactor_wake, lambda: reason["value"])
     monkeypatch.setattr(
         global_batch_runtime,
         "process_current_global_batch",
@@ -34588,6 +34609,7 @@ def test_live_adapter_sell_preflight_skips_entry_checks_and_survives_monitor_han
         "reactor_urgent_wake_reason",
         lambda: wake_reason[0],
     )
+    _fake_urgent_marker(monkeypatch, reactor_wake, lambda: wake_reason[0])
     stable_receipt = EventSubmissionReceipt(
         False,
         "event-1",
@@ -34671,7 +34693,7 @@ def test_live_adapter_sell_preflight_skips_entry_checks_and_survives_monitor_han
     )
     wake_revision[0] += 1
     wake_reason[0] = "day0_extreme_event_committed"
-    assert cancelled() == "day0_hard_fact:marker_without_record"
+    assert cancelled() == "wake:day0_extreme_event_committed"
 
     wake_revision[0] = 1
     wake_reason[0] = "held_position_monitor_pending"
@@ -34733,6 +34755,7 @@ def test_live_adapter_buy_preflight_survives_routine_monitor_handoff(monkeypatch
         "reactor_urgent_wake_reason",
         lambda: wake_reason[0],
     )
+    _fake_urgent_marker(monkeypatch, reactor_wake, lambda: wake_reason[0])
     monkeypatch.setattr(
         era,
         "_global_preflight_candidate_receipt",
@@ -34785,7 +34808,7 @@ def test_live_adapter_buy_preflight_survives_routine_monitor_handoff(monkeypatch
 
     wake_revision[0] += 1
     wake_reason[0] = "day0_extreme_event_committed"
-    assert cancelled() == "day0_hard_fact:marker_without_record"
+    assert cancelled() == "wake:day0_extreme_event_committed"
 
 
 def test_live_adapter_does_not_turn_entry_capital_gate_into_forced_hold(

@@ -17,7 +17,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, replace as dataclass_replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Collection, Iterator, Mapping
 
@@ -2914,6 +2914,231 @@ def acknowledge_reactor_wakes(
     except (OSError, ValueError):
         return False
     return True
+
+
+# The one cut-invalidation law. A running global auction cut reads queued
+# wakes published at or after its own decision time and asks one question:
+# does any of them change a fact this cut still depends on? Every wake reason
+# has one kind; the kind alone decides how the cut's dependency is consulted.
+#   BOOK     JIT-rebound at actuation: never invalidates.
+#   REQUEST  a generic completion marker asks for a cut; a running cut is one.
+#   BELIEF   a posterior for the named families: supersedes the epoch while
+#            the cut still reads belief for one of them (grace-eligible).
+#   CAPITAL  fill, exact held-SELL debt, or any unknown reason: supersedes the
+#            epoch (wealth and books are re-validated again at actuation).
+#   HARD     a committed Day0 fact for a family the cut values: cancels the
+#            cut at any checkpoint, through final actuation.
+# A family-scoped wake defers until the cut publishes what it values: the cut
+# reads current truth afterwards, and publishing re-judges every wake.
+WAKE_KIND_BOOK = "book"
+WAKE_KIND_REQUEST = "request"
+WAKE_KIND_BELIEF = "belief"
+WAKE_KIND_HARD = "hard"
+WAKE_KIND_CAPITAL = "capital"
+_WAKE_KIND_BY_REASON = {
+    "market_price_advanced": WAKE_KIND_BOOK,
+    "money_path_substrate_refreshed": WAKE_KIND_BOOK,
+    "forecast_posterior_advanced": WAKE_KIND_BELIEF,
+    "day0_extreme_event_committed": WAKE_KIND_HARD,
+    "position_fill_projected": WAKE_KIND_CAPITAL,
+}
+
+
+def reason_kind(reason: object, *, carries_held_sell_requests: bool = False) -> str:
+    """The invalidation kind of a wake reason (see the law above)."""
+
+    reason = str(reason or "")
+    if reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON:
+        return WAKE_KIND_CAPITAL if carries_held_sell_requests else WAKE_KIND_REQUEST
+    return _WAKE_KIND_BY_REASON.get(reason, WAKE_KIND_CAPITAL)
+
+
+def wake_kind(wake: object) -> str:
+    """The invalidation kind of one wake (see the law above)."""
+
+    return reason_kind(
+        getattr(wake, "reason", ""),
+        carries_held_sell_requests=bool(
+            getattr(wake, "held_sell_reauction_requests", ())
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class CutScope:
+    """The families a running cut values, published by the runtime.
+
+    ``q_frozen``: every scoped family's q is prepared; a later posterior can
+    no longer change this cut (the JIT preflight re-derives the winner's q).
+    ``winner_frozen``: selection froze a winner; the cut now values only that
+    winner's family and holdings.
+    """
+
+    family_keys: frozenset[str]
+    q_frozen: bool = False
+    winner_frozen: bool = False
+
+
+@dataclass(frozen=True)
+class CutDependency:
+    """What one running cut still depends on.
+
+    ``published`` is False until the cut has read any family (before its scope
+    scan): a well-formed wake then defers, because the cut reads current truth
+    afterwards and republishes its scope. Once published, a key set names the
+    families whose fact of that kind changes the cut; None means every family.
+    ``hard_family_keys``: families it values (scope plus holdings; winner plus
+    holdings once selection froze). ``belief_family_keys``: families whose
+    posterior it still reads; empty once q is frozen (the JIT preflight
+    re-derives the winner's q) or when the cut defers belief, and then no
+    posterior invalidates it. ``rebinds_books`` is False only for work that
+    freezes a book-bound no-submit decision without a JIT rebind; a book
+    wake then invalidates it.
+    """
+
+    published: bool
+    hard_family_keys: frozenset[str] | None
+    belief_family_keys: frozenset[str] | None
+    rebinds_books: bool = True
+
+
+def _wake_family_key_set(wake: object) -> frozenset[str] | None:
+    """Family keys a wake names; None when it names none or any is malformed."""
+
+    from src.events.candidate_binding import weather_family_id
+
+    raw_families = tuple(getattr(wake, "forecast_families", ()) or ())
+    if not raw_families:
+        return None
+    keys: set[str] = set()
+    for raw in raw_families:
+        if not isinstance(raw, (tuple, list)) or len(raw) != 3:
+            return None
+        city, target_date, metric = (str(value or "").strip() for value in raw)
+        metric = metric.lower()
+        if not city or not target_date or metric not in {"high", "low"}:
+            return None
+        try:
+            if date.fromisoformat(target_date).isoformat() != target_date:
+                return None
+        except ValueError:
+            return None
+        keys.add(weather_family_id(city=city, target_date=target_date, metric=metric))
+    return frozenset(keys)
+
+
+@dataclass(frozen=True)
+class CutInvalidation:
+    """The verdict of ``cut_invalidating_wakes`` for one running cut."""
+
+    hard: tuple[object, ...] = ()  # cancel at any checkpoint
+    epoch: tuple[object, ...] = ()  # supersede the epoch (belief: grace-eligible)
+
+    @property
+    def epoch_grace_eligible(self) -> bool:
+        """Grace applies to belief only: any other epoch fact aborts."""
+
+        return all(wake_kind(wake) == WAKE_KIND_BELIEF for wake in self.epoch)
+
+
+def cut_invalidating_wakes(
+    wakes: Collection[object],
+    dependency: CutDependency,
+) -> CutInvalidation:
+    """The single cancel predicate for a running cut (see the law above).
+
+    Every wake that is neither hard nor epoch stays queued for the next cut.
+    """
+
+    hard: list[object] = []
+    epoch: list[object] = []
+    for wake in wakes:
+        kind = wake_kind(wake)
+        if kind == WAKE_KIND_REQUEST:
+            continue
+        if kind == WAKE_KIND_BOOK:
+            if not dependency.rebinds_books:
+                epoch.append(wake)
+            continue
+        if kind == WAKE_KIND_CAPITAL:
+            epoch.append(wake)
+            continue
+        if kind == WAKE_KIND_BELIEF and dependency.belief_family_keys == frozenset():
+            continue  # the cut reads no posterior
+        keys = _wake_family_key_set(wake)
+        bucket = hard if kind == WAKE_KIND_HARD else epoch
+        if keys is None:
+            bucket.append(wake)  # a fact naming no family keeps its veto
+            continue
+        if not dependency.published:
+            continue  # read afterwards as current truth; re-judged on publish
+        scope = (
+            dependency.hard_family_keys
+            if kind == WAKE_KIND_HARD
+            else dependency.belief_family_keys
+        )
+        if scope is None or keys & scope:
+            bucket.append(wake)
+    return CutInvalidation(hard=tuple(hard), epoch=tuple(epoch))
+
+
+def wake_invalidation_label(wakes: Collection[object]) -> str:
+    """Attribution label naming the reasons of the invalidating wakes."""
+
+    reasons = sorted(
+        {str(getattr(wake, "reason", "") or "") or "unknown" for wake in wakes}
+    )
+    return "wake:" + (",".join(reasons) if reasons else "unknown")
+
+
+def wakes_after_cutoff(
+    cutoff: str,
+    *,
+    exclude_wake_ids: Collection[str],
+    path: Path | None = None,
+) -> tuple[object, ...]:
+    """Queued wakes published at or after ``cutoff``, plus the urgent marker.
+
+    The marker is the full wake record, judged by the same predicate as a
+    queued wake; it matters only when its queue record is not yet visible
+    (publish writes the queue record first, then the marker).
+    """
+
+    wakes = reactor_wakes_since(
+        cutoff, exclude_wake_ids=exclude_wake_ids, path=path
+    )
+    try:
+        marker = _read_reactor_wake_path(_urgent_wake_path(path), fail_on_error=True)
+    except (OSError, ValueError):
+        # An unreadable marker cannot prove the new fact harmless; its
+        # unknown reason is CAPITAL-kind and invalidates.
+        marker = ReactorWake(
+            wake_id="urgent-marker-unreadable",
+            published_at=datetime.now(timezone.utc).isoformat(),
+            source="reactor_wake",
+            reason="urgent_marker_unreadable",
+        )
+    if (
+        marker is not None
+        and marker.wake_id not in {str(wake_id) for wake_id in exclude_wake_ids}
+        and marker.wake_id not in {wake.wake_id for wake in wakes}
+        and _published_at_or_after(marker, cutoff)
+    ):
+        wakes = (*wakes, marker)
+    return tuple(wakes)
+
+
+def _published_at_or_after(wake: ReactorWake, cutoff: str) -> bool:
+    try:
+        at = datetime.fromisoformat(wake.published_at.replace("Z", "+00:00"))
+        floor = datetime.fromisoformat(str(cutoff).replace("Z", "+00:00"))
+    except ValueError:
+        return True  # an unparseable time cannot prove the fact is old
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    if floor.tzinfo is None:
+        floor = floor.replace(tzinfo=timezone.utc)
+    return at >= floor
 
 
 # Reasons whose wake only asks for a re-read of committed truth: no capital

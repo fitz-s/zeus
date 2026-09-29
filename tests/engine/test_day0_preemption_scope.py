@@ -8,7 +8,8 @@
 The live adapter's cancellation closures are exercised the same way production
 calls them: ``process_current_global_batch`` is captured, the real
 ``src.runtime.reactor_wake`` queue is written under the test state root, and the
-captured ``day0_scope_observer`` stands in for the runtime's publications.
+captured ``cut_scope_observer`` stands in for the runtime's publications
+(``CutScope``); ``src.runtime.reactor_wake.cut_invalidating_wakes`` judges.
 """
 
 from __future__ import annotations
@@ -133,11 +134,23 @@ def _build_cut(monkeypatch, tmp_path, **adapter_kwargs):
             forecast_families=families,
         )
 
-    return SimpleNamespace(captured=captured, publish_day0=publish_day0)
+    def observe(family_keys, **flags):
+        captured["cut_scope_observer"](
+            None
+            if family_keys is None
+            else reactor_wake.CutScope(family_keys=frozenset(family_keys), **flags)
+        )
+
+    return SimpleNamespace(
+        captured=captured, publish_day0=publish_day0, observe=observe
+    )
+
+
+_DAY0 = "wake:day0_extreme_event_committed"
 
 
 def test_out_of_scope_day0_commit_does_not_cancel_the_cut(cut):
-    cut.captured["day0_scope_observer"](frozenset({_IN_KEY}))
+    cut.observe({_IN_KEY})
     cut.publish_day0(_OUT)
 
     assert cut.captured["selection_cancelled"]() is False
@@ -146,30 +159,33 @@ def test_out_of_scope_day0_commit_does_not_cancel_the_cut(cut):
 
 
 def test_in_scope_day0_commit_cancels_the_cut(cut):
-    cut.captured["day0_scope_observer"](frozenset({_IN_KEY}))
+    cut.observe({_IN_KEY})
     cut.publish_day0(_IN)
 
-    assert cut.captured["selection_cancelled"]() == "day0_hard_fact:in_scope"
-    assert cut.captured["final_actuation_cancelled"]() == "day0_hard_fact:in_scope"
-    assert (
-        cut.captured["epoch_superseded"]() == "wake:day0_extreme_event_committed"
-    )
+    assert cut.captured["selection_cancelled"]() == _DAY0
+    assert cut.captured["final_actuation_cancelled"]() == _DAY0
+    assert cut.captured["epoch_superseded"]() == _DAY0
 
 
-def test_day0_commit_before_the_scope_is_known_cancels(cut):
-    """Until the runtime publishes a scope, every Day0 fact keeps its veto."""
+def test_day0_commit_before_the_scope_is_known_defers_then_rejudges(cut):
+    """(a) Before its scope scan the cut has read no family: a well-formed
+    Day0 fact is read as current truth, and publishing the scope re-judges."""
 
-    cut.captured["day0_scope_observer"](None)
+    cut.observe(None)
     cut.publish_day0(_OUT)
+    assert cut.captured["selection_cancelled"]() is False
 
-    assert cut.captured["selection_cancelled"]() == "day0_hard_fact:scope_unknown"
+    cut.observe({_IN_KEY})
+    assert cut.captured["selection_cancelled"]() is False
+    cut.observe({_IN_KEY, _OUT_KEY})
+    assert cut.captured["selection_cancelled"]() == _DAY0
 
 
-def test_day0_wake_without_families_cancels(cut):
-    cut.captured["day0_scope_observer"](frozenset({_IN_KEY}))
+def test_day0_wake_without_families_cancels_even_before_the_scope(cut):
+    cut.observe(None)
     cut.publish_day0()
 
-    assert cut.captured["selection_cancelled"]() == "day0_hard_fact:in_scope"
+    assert cut.captured["selection_cancelled"]() == _DAY0
 
 
 def test_receipt_stage_keeps_selection_for_out_of_scope_day0(cut):
@@ -179,28 +195,41 @@ def test_receipt_stage_keeps_selection_for_out_of_scope_day0(cut):
     a Moscow Day0 commit no longer reaches this cut's receipt or actuation.
     """
 
-    observe = cut.captured["day0_scope_observer"]
-    observe(frozenset({_IN_KEY, _OUT_KEY}))
-    observe(frozenset({_IN_KEY}))
+    cut.observe({_IN_KEY, _OUT_KEY})
+    cut.observe({_IN_KEY}, q_frozen=True, winner_frozen=True)
     cut.publish_day0(_OUT)
 
     assert cut.captured["selection_cancelled"]() is False
     assert cut.captured["final_actuation_cancelled"]() is False
     cut.publish_day0(_IN)
-    assert cut.captured["final_actuation_cancelled"]() == "day0_hard_fact:in_scope"
+    assert cut.captured["final_actuation_cancelled"]() == _DAY0
 
 
 def test_widened_scope_rereads_an_absorbed_day0_wake(cut):
     """A fallthrough winner in a family whose fact was absorbed must cancel."""
 
-    observe = cut.captured["day0_scope_observer"]
-    observe(frozenset({_IN_KEY}))
+    cut.observe({_IN_KEY})
     cut.publish_day0(_OUT)
     assert cut.captured["selection_cancelled"]() is False
 
-    observe(frozenset({_IN_KEY, _OUT_KEY}))
+    cut.observe({_IN_KEY, _OUT_KEY})
 
-    assert cut.captured["selection_cancelled"]() == "day0_hard_fact:in_scope"
+    assert cut.captured["selection_cancelled"]() == _DAY0
+
+
+def test_winner_frozen_cut_ignores_routine_monitor_fairness(monkeypatch, tmp_path):
+    """(e) Once the winner is selected, routine selection pressure no longer
+    preempts the cut; a fact its winner rests on still does."""
+
+    routine = ["monitor_handoff"]
+    cut = _build_cut(monkeypatch, tmp_path, selection_cancelled=lambda: routine[0])
+    cut.observe({_IN_KEY})
+    assert cut.captured["selection_cancelled"]() == "monitor_handoff"
+
+    cut.observe({_IN_KEY}, q_frozen=True, winner_frozen=True)
+    assert cut.captured["selection_cancelled"]() is False
+    cut.publish_day0(_IN)
+    assert cut.captured["selection_cancelled"]() == _DAY0
 
 
 @pytest.mark.parametrize("family", (_IN, _OUT))
@@ -212,11 +241,11 @@ def test_reserved_completion_cut_scopes_its_day0_supersession(
     reserved = _build_cut(
         monkeypatch, tmp_path, selection_completion_fairness_reserved=True
     )
-    reserved.captured["day0_scope_observer"](frozenset({_IN_KEY}))
+    reserved.observe({_IN_KEY})
     reserved.publish_day0(family)
 
     assert reserved.captured["epoch_superseded"]() == (
-        "wake:day0_extreme_event_committed" if family == _IN else False
+        _DAY0 if family == _IN else False
     )
 
 
@@ -243,7 +272,7 @@ def test_runtime_publishes_scan_scope_then_winner_scope(monkeypatch):
             wealth_witness_identity="wealth-1",
         ),
     )
-    published: list[frozenset[str] | None] = []
+    published: list[object] = []
 
     monkeypatch.setattr(
         global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
@@ -320,10 +349,17 @@ def test_runtime_publishes_scan_scope_then_winner_scope(monkeypatch):
                 assets=(),
             ),
         ),
-        day0_scope_observer=published.append,
+        cut_scope_observer=published.append,
     )
 
     assert published[0] is None
-    assert published[1] == frozenset({_IN_KEY, _OUT_KEY})
-    assert published[2] == frozenset({_IN_KEY})
-    assert published[3] == "receipt"
+    assert published[1] == reactor_wake.CutScope(
+        family_keys=frozenset({_IN_KEY, _OUT_KEY})
+    )
+    assert published[2] == reactor_wake.CutScope(
+        family_keys=frozenset({_IN_KEY, _OUT_KEY}), q_frozen=True
+    )
+    assert published[3] == reactor_wake.CutScope(
+        family_keys=frozenset({_IN_KEY}), q_frozen=True, winner_frozen=True
+    )
+    assert published[4] == "receipt"

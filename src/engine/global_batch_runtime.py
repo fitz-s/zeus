@@ -8299,7 +8299,7 @@ def process_current_global_batch(
     final_actuation_cancelled: Callable[[], bool] | None = None,
     dependency_scope_observer: Callable[[frozenset[str] | None], None]
     | None = None,
-    day0_scope_observer: Callable[[frozenset[str] | None], None] | None = None,
+    cut_scope_observer: Callable[[object], None] | None = None,
     held_sell_reauction_requests: tuple[object, ...] = (),
     required_held_family_keys: frozenset[str] = frozenset(),
     restrict_to_family_keys: frozenset[str] | None = None,
@@ -8323,14 +8323,40 @@ def process_current_global_batch(
         # prior scope can never remain actionable.
         dependency_scope_observer(family_keys)
 
-    def _observe_day0_scope(family_keys: frozenset[str] | None) -> None:
-        if day0_scope_observer is not None:
-            day0_scope_observer(family_keys)
+    # The families this cut values, published to the caller's single cancel
+    # predicate (src.runtime.reactor_wake.cut_invalidating_wakes).
+    cut_scope_state: dict[str, object] = {"family_keys": None, "q_frozen": False}
+
+    def _observe_cut_scope(
+        family_keys: frozenset[str] | None = None,
+        *,
+        q_frozen: bool = False,
+        winner_frozen: bool = False,
+    ) -> None:
+        if family_keys is not None:
+            cut_scope_state["family_keys"] = frozenset(family_keys)
+        if q_frozen:
+            cut_scope_state["q_frozen"] = True
+        if cut_scope_observer is None:
+            return
+        keys = cut_scope_state["family_keys"]
+        if keys is None:
+            cut_scope_observer(None)
+            return
+        from src.runtime.reactor_wake import CutScope
+
+        cut_scope_observer(
+            CutScope(
+                family_keys=keys,
+                q_frozen=bool(cut_scope_state["q_frozen"]),
+                winner_frozen=winner_frozen,
+            )
+        )
 
     # Each recursive/reauction cut owns a fresh scope witness.  Reset before
     # any work so a prior cut can never authorize an unrelated wake.
     _observe_dependency_scope(None)
-    _observe_day0_scope(None)
+    _observe_cut_scope(None)
 
     if decision_time.tzinfo is None:
         raise ValueError("GLOBAL_AUCTION_DECISION_TIME_NAIVE")
@@ -9362,9 +9388,9 @@ def process_current_global_batch(
                 ),
             )
         ]
-        # Day0 facts reach this cut only through the families it prepares
-        # and the holdings its wealth values.
-        _observe_day0_scope(
+        # A fact reaches this cut only through the families it prepares and
+        # the holdings its wealth values.
+        _observe_cut_scope(
             frozenset(decision_scope.family_keys)
             | held_family_keys
             | held_obligation_family_keys
@@ -9503,6 +9529,9 @@ def process_current_global_batch(
             return reject("GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED")
         if superseded("prepare_families"):
             return reject("GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT")
+        # Every scoped family's q is prepared; a later posterior no longer
+        # changes this cut (the JIT preflight re-derives the winner's q).
+        _observe_cut_scope(q_frozen=True)
         log_stage("prepare_families", families=len(prepared_by_event))
         if not prepared_by_event:
             if not holding_obligations and len(event_tuple) == 1 and ineligible_by_event:
@@ -10296,10 +10325,11 @@ def process_current_global_batch(
                 # Selection is frozen. From here the cut consumes only the
                 # winner's q (rebuilt again at JIT preflight) and holdings;
                 # a Day0 fact for any other family belongs to the next cut.
-                _observe_day0_scope(
+                _observe_cut_scope(
                     frozenset({winner_family_key})
                     | held_family_keys
-                    | {obligation.family_key for obligation in holding_obligations}
+                    | {obligation.family_key for obligation in holding_obligations},
+                    winner_frozen=True,
                 )
             receipt_store_started = time.monotonic()
             if held_completion_expired():
@@ -11077,7 +11107,7 @@ def process_current_global_batch(
                         selection_cancelled=selection_cancelled,
                         final_actuation_cancelled=final_actuation_cancelled,
                         dependency_scope_observer=dependency_scope_observer,
-                        day0_scope_observer=day0_scope_observer,
+                        cut_scope_observer=cut_scope_observer,
                         work_context=work_context,
                         required_held_family_keys=required_held_family_keys,
                         restrict_to_family_keys=restrict_to_family_keys,

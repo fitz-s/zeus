@@ -7748,11 +7748,17 @@ def _reactor_wake_cancellation_probe(
     The work deadline and submit-time current probability/book gates are unchanged.
     """
 
+    from src.events.candidate_binding import weather_family_id
     from src.runtime.reactor_wake import (
+        WAKE_KIND_BELIEF,
+        WAKE_KIND_BOOK,
+        CutDependency,
         _urgent_wake_path,
+        cut_invalidating_wakes,
         reactor_urgent_wake_identity,
         reactor_urgent_wake_revision,
         reactor_wakes_since,
+        reason_kind,
     )
 
     def read_wakes(cutoff, *, exclude_wake_ids=()):
@@ -7784,8 +7790,29 @@ def _reactor_wake_cancellation_probe(
         if (wake_id := str(raw_wake_id or "").strip())
     ) | preexisting_wake_ids
     targeted_forecast = (
-        producer_wake_reason == "forecast_posterior_advanced"
+        reason_kind(producer_wake_reason) == WAKE_KIND_BELIEF
         and bool(forecast_wake_families)
+    )
+    # What this reactor cycle depends on, judged by the one cut predicate.
+    # A reserved full comparison defers newer posteriors; a targeted forecast
+    # cycle reads only its own families' posteriors (a paused no-submit
+    # carrier absorbs even those, but freezes a book-bound decision); any
+    # other cycle depends on every fact.
+    paused_carrier = targeted_forecast and allow_paused_forecast_snapshot_completion
+    if defer_forecast_revisions or paused_carrier:
+        belief_scope: frozenset[str] | None = frozenset()
+    elif targeted_forecast:
+        belief_scope = frozenset(
+            weather_family_id(city=city, target_date=target_date, metric=metric.lower())
+            for city, target_date, metric in forecast_wake_families
+        )
+    else:
+        belief_scope = None
+    dependency = CutDependency(
+        published=True,
+        hard_family_keys=None,
+        belief_family_keys=belief_scope,
+        rebinds_books=not paused_carrier,
     )
     superseded = False
 
@@ -7807,11 +7834,8 @@ def _reactor_wake_cancellation_probe(
             nonphysical_marker = (
                 defer_forecast_revisions
                 and current_urgent_identity is not None
-                and current_urgent_identity[1] in {
-                    "forecast_posterior_advanced",
-                    "market_price_advanced",
-                    "money_path_substrate_refreshed",
-                }
+                and reason_kind(current_urgent_identity[1])
+                in {WAKE_KIND_BELIEF, WAKE_KIND_BOOK}
             )
             # A nonphysical marker may follow a Day0 fact in the same revision
             # window. Inspect all new queued wakes below before accepting it;
@@ -7855,43 +7879,10 @@ def _reactor_wake_cancellation_probe(
         if not pending_wakes:
             observed_revision = current_revision
             return False
-        for wake in pending_wakes:
-            if defer_forecast_revisions and wake.reason == "forecast_posterior_advanced":
-                # SCOPE: one reserved, bounded full comparison. DRAIN: leave
-                # the newer forecast queued for the next cut. RESET: completion
-                # clears the reservation; JIT still rebinds the selected action.
-                continue
-            if wake.reason in {
-                "market_price_advanced",
-                "money_path_substrate_refreshed",
-            }:
-                if targeted_forecast and allow_paused_forecast_snapshot_completion:
-                    superseded = True
-                    return True
-                # Book producers do not invalidate probability work. The global
-                # auction independently rebinds current books at its JIT fence,
-                # so restarting the whole decision cannot make that evidence
-                # fresher and can starve a hot price stream. The paused snapshot
-                # exception is narrower: a newer executable-substrate input ends
-                # that cycle before its frozen no-submit decision.
-                continue
-            if not targeted_forecast:
-                superseded = True
-                return True
-            if wake.reason == "day0_extreme_event_committed":
-                superseded = True
-                return True
-            if wake.reason != "forecast_posterior_advanced":
-                superseded = True
-                return True
-            if not wake.forecast_families:
-                superseded = True
-                return True
-            if set(wake.forecast_families) & forecast_wake_families:
-                if allow_paused_forecast_snapshot_completion:
-                    continue
-                superseded = True
-                return True
+        verdict = cut_invalidating_wakes(pending_wakes, dependency)
+        if verdict.hard or verdict.epoch:
+            superseded = True
+            return True
 
         # Every pending wake was either a book-substrate refresh or a posterior
         # for an independent family. Leave it queued and absorb this revision so

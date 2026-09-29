@@ -1023,10 +1023,23 @@ def test_generic_held_completion_latch_applies_to_selection_until_deadline(
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
 
-def test_generic_held_completion_wake_supersession_truth_table():
-    from src.engine.event_reactor_adapter import (
-        _generic_held_completion_wakes_supersede,
+def _generic_completion_invalidates(wakes, *, valuation_family_keys=None):
+    """A strict generic completion's verdict, through the one predicate."""
+
+    from src.runtime.reactor_wake import CutDependency, cut_invalidating_wakes
+
+    verdict = cut_invalidating_wakes(
+        wakes,
+        CutDependency(
+            published=True,
+            hard_family_keys=valuation_family_keys,
+            belief_family_keys=valuation_family_keys,
+        ),
     )
+    return bool(verdict.hard or verdict.epoch)
+
+
+def test_generic_held_completion_wake_supersession_truth_table():
     from src.runtime.reactor_wake import GLOBAL_AUCTION_COMPLETION_WAKE_REASON
 
     def wake(reason, requests=()):
@@ -1035,10 +1048,10 @@ def test_generic_held_completion_wake_supersession_truth_table():
             held_sell_reauction_requests=requests,
         )
 
-    assert not _generic_held_completion_wakes_supersede(
+    assert not _generic_completion_invalidates(
         (wake("market_price_advanced"), wake("money_path_substrate_refreshed"))
     )
-    assert not _generic_held_completion_wakes_supersede(
+    assert not _generic_completion_invalidates(
         (wake(GLOBAL_AUCTION_COMPLETION_WAKE_REASON),)
     )
     for superseding in (
@@ -1047,13 +1060,10 @@ def test_generic_held_completion_wake_supersession_truth_table():
         wake(GLOBAL_AUCTION_COMPLETION_WAKE_REASON, (object(),)),
         wake("unknown_producer_fact"),
     ):
-        assert _generic_held_completion_wakes_supersede((superseding,))
+        assert _generic_completion_invalidates((superseding,))
 
 
 def test_generic_held_completion_wake_scope_ignores_only_valid_outside_families():
-    from src.engine.event_reactor_adapter import (
-        _generic_held_completion_wakes_supersede,
-    )
     from src.events.candidate_binding import weather_family_id
 
     outside = SimpleNamespace(
@@ -1077,15 +1087,11 @@ def test_generic_held_completion_wake_scope_ignores_only_valid_outside_families(
         }
     )
 
-    assert not _generic_held_completion_wakes_supersede(
-        (outside,), valuation_family_keys=scope
-    )
-    assert not _generic_held_completion_wakes_supersede(
+    assert not _generic_completion_invalidates((outside,), valuation_family_keys=scope)
+    assert not _generic_completion_invalidates(
         (day0_outside,), valuation_family_keys=scope
     )
-    assert _generic_held_completion_wakes_supersede(
-        (inside,), valuation_family_keys=scope
-    )
+    assert _generic_completion_invalidates((inside,), valuation_family_keys=scope)
     for malformed in (
         SimpleNamespace(**{**vars(outside), "forecast_families": ()}),
         SimpleNamespace(
@@ -1101,12 +1107,10 @@ def test_generic_held_completion_wake_scope_ignores_only_valid_outside_families(
             }
         ),
     ):
-        assert _generic_held_completion_wakes_supersede(
+        assert _generic_completion_invalidates(
             (malformed,), valuation_family_keys=scope
         )
-    assert _generic_held_completion_wakes_supersede(
-        (outside,), valuation_family_keys=None
-    )
+    assert _generic_completion_invalidates((outside,), valuation_family_keys=None)
 
 
 def test_global_dependency_scope_requires_complete_native_identity():

@@ -137,16 +137,21 @@ def harness(monkeypatch):
     monkeypatch.setattr(
         reactor_wake, "reactor_urgent_wake_reason", lambda: urgent_reason["value"]
     )
+    # Each revision bump is one newly published fact with its own identity.
     monkeypatch.setattr(
         reactor_wake,
         "reactor_wakes_since",
         lambda *args, **kwargs: (
             SimpleNamespace(
-                wake_id="new-wake",
+                wake_id=f"new-wake-{urgent_revision['value']}",
                 reason=urgent_reason["value"],
                 forecast_families=wake_families["value"],
+                held_sell_reauction_requests=(),
             ),
         ),
+    )
+    monkeypatch.setattr(
+        reactor_wake, "_read_reactor_wake_path", lambda *_args, **_kwargs: None
     )
 
     def fake_process(events, **kwargs):
@@ -348,6 +353,8 @@ def test_generic_dependency_scope_reset_rechecks_unchanged_wake(harness, monkeyp
     held = weather_family_id(city="Dallas", target_date="2026-07-11", metric="high")
     outside = weather_family_id(city="Moscow", target_date="2026-07-11", metric="high")
     monkeypatch.setattr(reactor_wake, "exact_held_sell_completion_wake_ids", lambda **_kwargs: ())
+    # Grace is uniform for belief facts; spend it so the verdict is visible.
+    monkeypatch.setattr(era, "GLOBAL_AUCTION_PREEMPTION_GRACE_MAX_SUPERSESSIONS", 0)
     harness.urgent_reason["value"] = reason
     harness.wake_families["value"] = (("Moscow", "2026-07-11", "high"),)
     epoch = harness.run_one_batch(
@@ -356,13 +363,14 @@ def test_generic_dependency_scope_reset_rechecks_unchanged_wake(harness, monkeyp
         required_held_family_keys=frozenset({held}),
     )
     observe = harness.captured["dependency_scope_observer"]
-    # Initial reset preserves the captured revision; no new fact has arrived.
-    observe(None)
-    assert epoch() is False
+    publish_cut = harness.captured["cut_scope_observer"]
+    publish_cut(reactor_wake.CutScope(family_keys=frozenset({held})))
     observe(frozenset({held}))
     _bump_revision(harness, 1)
+    # The Moscow fact lies outside the published valuation superset.
     assert epoch() is False
-    # A new cut must not reuse that ignored wake cursor or the old scope.
+    # An ambiguous (None) superset means every family: the same wake is
+    # re-judged, never skipped by a stale cursor.
     observe(None)
     assert epoch() == f"wake:{reason}"
     observe(frozenset({held, outside}))

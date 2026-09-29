@@ -44,8 +44,26 @@ from src.engine.event_reactor_adapter import (
     _snapshot_unit,
     _probability_vector_hash,
     _forecast_authority_payload_from_posterior,
-    _global_batch_wakes_supersede,
 )
+from src.runtime.reactor_wake import CutDependency, cut_invalidating_wakes
+
+
+def _global_batch_wakes_supersede(
+    wakes, *, day0_urgent_batch, delta_scope_family_keys
+):
+    """The cut's verdict for an ordinary scoped cut, through the one predicate."""
+
+    verdict = cut_invalidating_wakes(
+        wakes,
+        CutDependency(
+            published=True,
+            hard_family_keys=delta_scope_family_keys,
+            belief_family_keys=(
+                frozenset() if day0_urgent_batch else delta_scope_family_keys
+            ),
+        ),
+    )
+    return bool(verdict.hard or verdict.epoch)
 from src.config import runtime_cities_by_name
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.events.opportunity_event import Day0ExtremeUpdatedPayload, ForecastSnapshotReadyPayload, make_day0_extreme_updated_event, make_opportunity_event
@@ -5299,7 +5317,9 @@ def test_global_batch_wake_supersession_is_scoped_to_invalidated_truth():
     )
 
     def wake(reason, families=()):
-        return SimpleNamespace(reason=reason, forecast_families=families)
+        return SimpleNamespace(
+            reason=reason, forecast_families=families, held_sell_reauction_requests=()
+        )
 
     scope = frozenset({paris_key})
     assert not _global_batch_wakes_supersede(
@@ -5338,7 +5358,9 @@ def test_day0_batch_ignores_lower_authority_wakes_but_not_new_day0():
     )
 
     def wake(reason, families=()):
-        return SimpleNamespace(reason=reason, forecast_families=families)
+        return SimpleNamespace(
+            reason=reason, forecast_families=families, held_sell_reauction_requests=()
+        )
 
     scope = frozenset({paris_key})
     assert not _global_batch_wakes_supersede(
@@ -5367,6 +5389,7 @@ def test_forecast_wake_without_comparable_scope_supersedes(families, scope):
     wake = SimpleNamespace(
         reason="forecast_posterior_advanced",
         forecast_families=families,
+        held_sell_reauction_requests=(),
     )
 
     assert _global_batch_wakes_supersede(
@@ -5386,11 +5409,9 @@ def test_live_adapter_wires_scope_aware_wake_supersession_probe():
 
     reactor_source = inspect.getsource(run_edli_event_reactor_cycle)
 
-    assert "pending_wakes = reactor_wakes_since(" in source
+    assert "cut_invalidating_wakes(" in source
+    assert "wakes_after_cutoff(" in source
     assert "exclude_wake_ids=_global_batch_owned_wake_ids" in source
-    assert "marker = reactor_urgent_wake_identity()" in source
-    assert "marker_wake_id not in _global_batch_owned_wake_ids" in source
-    assert "_global_batch_wakes_supersede(" in source
     assert "producer_wake_ids=producer_wake_ids" in reactor_source
     assert "producer_wake_published_at=producer_wake_published_at" in reactor_source
 
