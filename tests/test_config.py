@@ -929,3 +929,67 @@ def test_pure_ground_parser_uses_frozen_bytes_not_current_file_or_publication_la
     assert config.station_ground_source_artifact_ref(**kwargs) == "config/noaa_homr_kord_station.json"
     assert config.station_ground_source_artifact_ref(source_kind=kwargs["source_kind"], station_id="KATL") == "config/noaa_homr_katl_station.json"
     assert config.station_ground_source_artifact_ref(source_kind="hko_station_table_v1", station_id="KORD") is None
+
+
+_US_GROUND_ENTITIES = (
+    ("Atlanta", "KATL", 308.2, "19e0b72444a86e5862100dc15dad4e36a02de3e6c82c8d53274f17bdadda3819"),
+    ("Austin", "KAUS", 146.5, "d33c148d61ef0834d0a0e0d0eafbc4789d9786c966cfbdeb09d3fe14485197d3"),
+    ("Dallas", "KDAL", 147.6, "48145615d6799f04b1aa2aa899c8799085f6a3c9a5d018260ff10c50a22f3db3"),
+    ("Houston", "KHOU", 13.2, "fafc9580cddd11e3d2432308ae863653dada9734ec834748cc38832b83bfbd57"),
+    ("Los Angeles", "KLAX", 29.7, "359eda39ea6bd315e0201a678d51b6a3a7403ab41fe91d8d7f205be1ee64c8c8"),
+    ("Miami", "KMIA", 1.4, "44367b7c019b8a2bb2d81fe5c2d6f6cee5aa4ddf188be7b7724c617d211716f6"),
+    ("NYC", "KLGA", 3.0, "739196cc9251325880f41eab280047a6cd3d0c3fa427d7ebc3841f79db495f6a"),
+    ("San Francisco", "KSFO", 3.2, "f88da267cd77d902455a5ded817ee6237dcb5a06d8dc93a4843add1857009fb2"),
+    ("Seattle", "KSEA", 112.5, "3691641e6b31385561f43826872c1b49101adc57020e8911455ea1736ac42c2e"),
+)
+
+
+def _official_us_ground_registry(tmp_path, monkeypatch, city_name):
+    import hashlib
+    import src.config as config
+    _, station_id, height, expected_hash = next(row for row in _US_GROUND_ENTITIES if row[0] == city_name)
+    artifact_ref = config.station_ground_source_artifact_ref(
+        source_kind="noaa_homr_primary_dcp_snapshot_v1", station_id=station_id,
+    )
+    raw = (config.PROJECT_ROOT / artifact_ref).read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == expected_hash
+    facts = config.station_ground_facts_from_bytes(
+        source_kind="noaa_homr_primary_dcp_snapshot_v1", station_id=station_id, raw_body=raw,
+    )
+    assert facts["elevation_m"] == height
+    artifact = tmp_path / Path(artifact_ref).name
+    artifact.write_bytes(raw)
+    rows = json.loads((config.CONFIG_DIR / "station_precise_coords.json").read_text())
+    rows[city_name]["station_ground_proof"] = {
+        **facts, "artifact_ref": artifact_ref, "body_sha256": expected_hash,
+        "checked_at": "2026-09-29T23:30:00Z", "query_date": "2026-09-29",
+        "query_url": f"{config.HOMR_GROUND_SOURCE_URL}?current=true&qid=ICAO%3A{station_id}&date=2026-09-29&phrData=false",
+    }
+    registry = tmp_path / "station_precise_coords.json"
+    registry.write_text(json.dumps(rows))
+    (tmp_path / "cities.json").write_bytes((config.CONFIG_DIR / "cities.json").read_bytes())
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
+    return registry, artifact, rows
+
+
+@pytest.mark.parametrize("city_name,station_id,height,expected_hash", _US_GROUND_ENTITIES)
+def test_current_us_ground_entities_are_independent_not_kord_fallback(
+    tmp_path, monkeypatch, city_name, station_id, height, expected_hash,
+):
+    import src.config as config
+    registry, artifact, rows = _official_us_ground_registry(tmp_path, monkeypatch, city_name)
+    city = config.cities_by_name[city_name]
+    geometry = config.runtime_station_geometry_for_city(city)
+    assert geometry["ground_status"] == "VERIFIED"
+    assert geometry["ground_facts"]["station_id"] == station_id
+    assert geometry["ground_elevation_m"] == height
+    assert geometry["station_surface"] == "UNKNOWN"
+    assert geometry["lat"] == float(rows[city_name]["lat"])
+    assert geometry["ground_audit"]["body_sha256"] == expected_hash
+    assert config.station_ground_facts_from_bytes(
+        source_kind="noaa_homr_primary_dcp_snapshot_v1", station_id="KORD", raw_body=artifact.read_bytes(),
+    ) is None
+    assert config.runtime_station_geometry_for_city(config.cities_by_name["Denver"])["ground_status"] == "UNPROVEN"
+    rows[city_name]["station_ground_proof"]["artifact_ref"] = "config/noaa_homr_kord_station.json"
+    registry.write_text(json.dumps(rows))
+    assert config.runtime_station_geometry_for_city(city)["ground_status"] == "UNPROVEN"
