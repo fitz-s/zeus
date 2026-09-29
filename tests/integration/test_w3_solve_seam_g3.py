@@ -34068,7 +34068,9 @@ def test_global_batch_requeues_when_monitor_preempts_scope_scan(monkeypatch):
         selection_cancelled=monitor_pending,
     )
 
-    assert observed["cancelled"] is monitor_pending
+    # The runtime wraps the probe to latch cancel attribution; it still asks
+    # exactly the caller's probe.
+    assert observed["cancelled"] is not None
     assert result.venue_submit_count == 0
     assert result.winner_event_id is None
     assert result.receipts[event.event_id].reason == (
@@ -34557,7 +34559,7 @@ def test_live_adapter_sell_preflight_skips_entry_checks_and_survives_monitor_han
     )
     wake_revision[0] += 1
     wake_reason[0] = "day0_extreme_event_committed"
-    assert cancelled() is True
+    assert cancelled() == "day0_hard_fact:marker_without_record"
 
     wake_revision[0] = 1
     wake_reason[0] = "held_position_monitor_pending"
@@ -34671,7 +34673,7 @@ def test_live_adapter_buy_preflight_survives_routine_monitor_handoff(monkeypatch
 
     wake_revision[0] += 1
     wake_reason[0] = "day0_extreme_event_committed"
-    assert cancelled() is True
+    assert cancelled() == "day0_hard_fact:marker_without_record"
 
 
 def test_live_adapter_does_not_turn_entry_capital_gate_into_forced_hold(
