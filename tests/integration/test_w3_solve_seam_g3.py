@@ -48247,10 +48247,10 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric):
     from tests.test_station_forecast_live_ingest_wiring import _hourly_schema_conn, _station_grid_cohort
 
     utc = timezone.utc
-    cycle = datetime(2026, 6, 6, 12, tzinfo=utc)
+    cycle = datetime(2026, 9, 29, 12, tzinfo=utc)
     issued, captured = cycle + timedelta(minutes=5), cycle + timedelta(minutes=10)
-    cut = datetime(2026, 6, 7, 6, 20, tzinfo=utc)
-    target = date(2026, 6, 7)
+    cut = datetime(2026, 9, 30, 6, 20, tzinfo=utc)
+    target = date(2026, 9, 30)
     city = runtime_cities_by_name()["Hong Kong"]
     station = runtime_station_geometry_for_city(city)
     db = tmp_path / f"hko-{metric}.db"
@@ -48281,7 +48281,7 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric):
         observed_steps_json,snapshot_ids_json,target_window_start_utc,target_window_end_utc,
         completeness_status,readiness_status,computed_at,expires_at,recorded_at)
         VALUES (?,?, 'ecmwf_open_data','native_grib',?,?,?,?,?,?,?,?,?,?,51,51,
-        '[0,3,6]','[0,3,6]','[1]','2026-06-06T16:00:00+00:00','2026-06-07T16:00:00+00:00',
+        '[0,3,6]','[0,3,6]','[1]','2026-09-29T16:00:00+00:00','2026-09-30T16:00:00+00:00',
         'COMPLETE','LIVE_ELIGIBLE',?,?,?)""", (run_id,run_id,release,track,city.name,city.name,
         city.timezone,target.isoformat(),metric,identity.physical_quantity,identity.observation_field,
         identity.data_version,issued.isoformat(),(cut+timedelta(days=1)).isoformat(),issued.isoformat()))
@@ -48322,7 +48322,7 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric):
         def now(cls, tz=None):
             return captured.astimezone(tz) if tz else captured.replace(tzinfo=None)
     body = json.dumps({"updateTime":issued.isoformat(),"weatherForecast":[{
-        "forecastDate":"20260607","forecastMaxtemp":{"value":33,"unit":"C"},
+        "forecastDate":"20260930","forecastMaxtemp":{"value":33,"unit":"C"},
         "forecastMintemp":{"value":27,"unit":"C"}}]}, indent=2).encode()
     class Response:
         def __enter__(self): return self
@@ -48349,8 +48349,8 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric):
         fetch.setattr(daily_obs_append.httpx,"get",lambda *_a,**_k: SpotResponse())
         fetch.setattr(daily_obs_append,"datetime",SpotClock)
         assert daily_obs_append._accumulate_hko_reading(conn)
-    for clock, high, low in (("2026-06-07T00:10:00+00:00",30.1,27.2),
-                              ("2026-06-07T06:10:00+00:00",32.9,27.0)):
+    for clock, high, low in (("2026-09-30T00:10:00+00:00",30.1,27.2),
+                              ("2026-09-30T06:10:00+00:00",32.9,27.0)):
         stamp = datetime.fromisoformat(clock)
         fetched = (stamp+timedelta(seconds=5)).isoformat()
         csv_body = ("Date time,Automatic Weather Station,Maximum Air Temperature Since Midnight(degree Celsius),"
@@ -48362,7 +48362,7 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric):
             data_version="v1.wu-native",imported_at=fetched)
         assert insert_rows(conn,[row]) == 1
         conn.commit()
-    times = [f"2026-06-07T{hour:02d}:00" for hour in range(24)]
+    times = [f"2026-09-30T{hour:02d}:00" for hour in range(24)]
     vector_at = cut-timedelta(minutes=2)
     vector_cycle = cut.replace(hour=0,minute=0)
     for i, model in enumerate((*hourly.day0_hourly_models_for_city(city),
@@ -48420,15 +48420,14 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric):
         models=("ecmwf_ifs",),frozen_source_runs={"ecmwf_ifs":(cycle,captured)},
         include_previous_runs=False,prune_after=False)
     assert anchor_capture["written_row_count"] == 1
-    metadata = OpenMeteoIfs9PrecisionMetadata(city=city.name,station_id=station["station_id"],city_lat=city.lat,city_lon=city.lon,
-        station_lat=station["lat"],station_lon=station["lon"],requested_lat=station["lat"],requested_lon=station["lon"],
-        requested_coordinate_precision_decimals=4,nearest_grid_lat=station["lat"],nearest_grid_lon=station["lon"],
-        nearest_grid_distance_km=0,native_grid="openmeteo_ecmwf_ifs_9km",delivery_grid_resolution="0p1",
-        interpolation_method="nearest_gridpoint",endpoint_mode="hourly_zeus_aggregated",
-        local_day_start_utc=cycle.replace(hour=16),local_day_end_utc=cut.replace(hour=16,minute=0),
-        timezone_name=city.timezone,target_local_date=target,temperature_unit="C",anchor_sigma_c=3,
-        grid_elevation_m=station["elevation_m"],station_elevation_m=station["elevation_m"],land_sea_mask="land",
-        city_class="standard",station_mapping_policy="settlement_station",source_geometry_proof=geometry)
+    from scripts.download_replacement_forecast_current_targets import _precision_metadata
+    # The real producer parses the retained official HKO ground entity body;
+    # this September cut is after its immutable possession time, unlike June.
+    metadata = OpenMeteoIfs9PrecisionMetadata(**_precision_metadata(
+        city.name, target.isoformat(), anchor_sigma_c=3, raw_payload_bytes=raw_bytes
+    ))
+    assert metadata.source_geometry_proof["station_ground_proof"]["facts"] == station["ground_facts"]
+    assert datetime.fromisoformat(station["ground_audit"]["checked_at"].replace("Z", "+00:00")) <= cut
     guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(metadata,raw_payload_bytes=raw_bytes)
     anchor = extract_openmeteo_ecmwf_ifs9_localday_anchor(raw,city_timezone=city.timezone,
         target_local_date=target,source_cycle_time=cycle,require_full_localday=True)
@@ -48449,7 +48448,7 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric):
         expires_at=cut+timedelta(hours=1),openmeteo_precision_guard=guard,openmeteo_raw_payload_bytes=raw_bytes,
         anchor_artifact_id=artifact_id,
         day0_observed_extreme_c=32.9 if metric=="high" else 27.0,day0_observed_extreme_source="hko_hourly_accumulator",
-        day0_observed_extreme_observation_time="2026-06-07T06:10:00+00:00",
+        day0_observed_extreme_observation_time="2026-09-30T06:10:00+00:00",
         day0_observed_extreme_sample_count=2,day0_observed_extreme_unit="C")
     result = materialize_replacement_forecast_live(conn,request)
     assert result.ok, result.reason_codes
@@ -48465,11 +48464,34 @@ def test_hko_normal_writer_clock_proof_reaches_legal_pin_and_same_cut_consumers(
         row = fixture.conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_id=?",
                                    (fixture.result.posterior_id,)).fetchone()
         provenance = json.loads(row[0])
-        assert provenance["day0_current_temperature_state"]["observed_at_utc"] == "2026-06-07T06:00:00+00:00"
+        assert provenance["day0_current_temperature_state"]["observed_at_utc"] == "2026-09-30T06:00:00+00:00"
         proof = provenance["day0_current_temperature_clock_evidence"]
-        assert proof["published_at_utc"] == "2026-06-07T06:02:00+00:00"
-        assert proof["available_at_utc"] == "2026-06-07T06:05:00+00:00"
-        assert reader._held_pinned_provenance_reason(provenance,city="Hong Kong",target_date="2026-06-07",
+        assert proof["published_at_utc"] == "2026-09-30T06:02:00+00:00"
+        assert proof["available_at_utc"] == "2026-09-30T06:05:00+00:00"
+        current_row = dict(fixture.conn.execute(
+            "SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+            (fixture.result.posterior_id,),
+        ).fetchone())
+        ground_checked = _dt.datetime.fromisoformat(
+            provenance["bayes_precision_fusion"]["current_evidence_shape"]
+            ["provider_geometry_audit"]["anchor_station_ground"]["checked_at"].replace("Z", "+00:00")
+        )
+        # A current audit claim cannot retroactively authorize an older DB q.
+        # Keep the actual normal producer's proof untouched; change only the
+        # negative fixture's immutable materialization timestamp at the reader.
+        for purpose in (
+            reader.ReplacementForecastAuthorityPurpose.ENTRY,
+            reader.ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+        ):
+            assert reader._live_grade_provenance(current_row, authority_purpose=purpose) is not None
+            assert reader._live_grade_provenance(
+                {**current_row, "computed_at": (ground_checked-_dt.timedelta(seconds=1)).isoformat()},
+                authority_purpose=purpose,
+            ) is None
+            assert reader._live_grade_provenance(
+                {**current_row, "computed_at": None}, authority_purpose=purpose,
+            ) is None
+        assert reader._held_pinned_provenance_reason(provenance,city="Hong Kong",target_date="2026-09-30",
             metric=metric,decision_time=fixture.cut) is None
         # The normal complete wave resets to the ordinary current-cycle path.
         class ClockType(type):
@@ -48479,7 +48501,7 @@ def test_hko_normal_writer_clock_proof_reaches_legal_pin_and_same_cut_consumers(
             def now(cls,tz=None): return fixture.cut.astimezone(tz) if tz else fixture.cut.replace(tzinfo=None)
         monkeypatch.setattr(reader,"datetime",DecisionClock)
         selected = reader.read_prior_complete_replacement_forecast_bundle(fixture.conn,city="Hong Kong",
-            target_date="2026-06-07",temperature_metric=metric,decision_time=fixture.cut,
+            target_date="2026-09-30",temperature_metric=metric,decision_time=fixture.cut,
             raw_input_hwm_conn=fixture.conn)
         assert selected.status == "NOT_APPLICABLE" and selected.reason_code == "REPLACEMENT_PINNED_COMPLETE_CYCLE_RESET", selected.reason_code
         # Publish a real newer deterministic wave while its ENS shape is absent.
@@ -48490,11 +48512,11 @@ def test_hko_normal_writer_clock_proof_reaches_legal_pin_and_same_cut_consumers(
         incomplete = build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(fixture.artifact_path,
             request=replace(fixture.anchor_request,run=fixture.cut.replace(hour=0,minute=0)),metric=metric,
             source_available_at=capture,captured_at=capture,
-            product_metadata={"city":"Hong Kong","target_date":"2026-06-07"})
+            product_metadata={"city":"Hong Kong","target_date":"2026-09-30"})
         incomplete_artifact_id = write_manifest_to_db(fixture.conn,incomplete)
         decision = fixture.cut+_dt.timedelta(minutes=2)
         selected = reader.read_prior_complete_replacement_forecast_bundle(fixture.conn,city="Hong Kong",
-            target_date="2026-06-07",temperature_metric=metric,decision_time=decision,
+            target_date="2026-09-30",temperature_metric=metric,decision_time=decision,
             raw_input_hwm_conn=fixture.conn)
         assert selected.ok, selected.reason_code
         assert selected.bundle.posterior_id == fixture.result.posterior_id
@@ -48542,11 +48564,11 @@ def test_hko_normal_writer_clock_proof_reaches_legal_pin_and_same_cut_consumers(
         # publication-clock carrier. The read gate must reset, never re-stamp q.
         obsolete = copy.deepcopy(provenance)
         obsolete.pop("day0_current_temperature_clock_evidence")
-        obsolete["day0_current_temperature_state"]["observed_at_utc"] = "2026-06-07T06:02:00+00:00"
+        obsolete["day0_current_temperature_state"]["observed_at_utc"] = "2026-09-30T06:02:00+00:00"
         fixture.conn.execute("UPDATE forecast_posteriors SET provenance_json=? WHERE posterior_id=?",
             (json.dumps(obsolete),fixture.result.posterior_id))
         missing = reader.read_prior_complete_replacement_forecast_bundle(fixture.conn,city="Hong Kong",
-            target_date="2026-06-07",temperature_metric=metric,decision_time=decision,raw_input_hwm_conn=fixture.conn)
+            target_date="2026-09-30",temperature_metric=metric,decision_time=decision,raw_input_hwm_conn=fixture.conn)
         assert missing.status == "NOT_APPLICABLE" and missing.reason_code == "REPLACEMENT_PINNED_HKO_CURRENT_TEMPERATURE_CLOCK_UNAVAILABLE"
 
         # Supply a new causal toy ENS receipt through the source-run writer and
@@ -48583,7 +48605,7 @@ def test_hko_normal_writer_clock_proof_reaches_legal_pin_and_same_cut_consumers(
         columns = tuple(snapshot)
         fixture.conn.execute("INSERT INTO ensemble_snapshots ("+",".join(columns)+") VALUES ("+
             ",".join("?" for _ in columns)+")",tuple(snapshot[name] for name in columns))
-        _station_grid_cohort(monkeypatch,fixture.conn,fixture.db,"Hong Kong",target_dates=("2026-06-07",),
+        _station_grid_cohort(monkeypatch,fixture.conn,fixture.db,"Hong Kong",target_dates=("2026-09-30",),
                              cycle=new_cycle,captured=new_capture)
         raw_body = fixture.artifact_path.read_bytes()
         def current_anchor_http(_url,params,**kwargs):
@@ -48591,7 +48613,7 @@ def test_hko_normal_writer_clock_proof_reaches_legal_pin_and_same_cut_consumers(
             return json.loads(raw_body)
         monkeypatch.setattr("src.data.openmeteo_client.fetch",current_anchor_http)
         assert dl.download_bayes_precision_fusion_extra_raw_inputs(forecast_db=fixture.db,cycle=new_cycle,
-            targets=[dl.BayesPrecisionFusionDownloadTarget(city="Hong Kong",target_date="2026-06-07",metric=metric,
+            targets=[dl.BayesPrecisionFusionDownloadTarget(city="Hong Kong",target_date="2026-09-30",metric=metric,
                 latitude=fixture.anchor_request.latitude,longitude=fixture.anchor_request.longitude,
                 timezone_name=fixture.city.timezone,lead_days=0)],models=("ecmwf_ifs",),
             frozen_source_runs={"ecmwf_ifs":(new_cycle,new_capture)},include_previous_runs=False,
@@ -48604,12 +48626,12 @@ def test_hko_normal_writer_clock_proof_reaches_legal_pin_and_same_cut_consumers(
         assert normal.ok, normal.reason_codes
         assert normal.posterior_id != fixture.result.posterior_id
         reset = reader.read_prior_complete_replacement_forecast_bundle(fixture.conn,city="Hong Kong",
-            target_date="2026-06-07",temperature_metric=metric,decision_time=new_capture+_dt.timedelta(minutes=1),
+            target_date="2026-09-30",temperature_metric=metric,decision_time=new_capture+_dt.timedelta(minutes=1),
             raw_input_hwm_conn=fixture.conn)
         assert reset.status == "NOT_APPLICABLE" and reset.reason_code == "REPLACEMENT_PINNED_COMPLETE_CYCLE_RESET", reset.reason_code
         final = json.loads(fixture.conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_id=?",
                                                (normal.posterior_id,)).fetchone()[0])
-        assert reader._held_pinned_provenance_reason(final,city="Hong Kong",target_date="2026-06-07",metric=metric,
+        assert reader._held_pinned_provenance_reason(final,city="Hong Kong",target_date="2026-09-30",metric=metric,
             decision_time=new_capture+_dt.timedelta(minutes=1)) is None
         assert fixture.conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_id=?",
                                     (fixture.result.posterior_id,)).fetchone()[0] == json.dumps(obsolete)
