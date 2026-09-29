@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-09-27
-# Lifecycle: created=2026-06-10; last_reviewed=2026-09-27; last_reused=2026-09-27
+# Last reused or audited: 2026-09-29
+# Lifecycle: created=2026-06-10; last_reviewed=2026-09-29; last_reused=2026-09-29
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -444,6 +444,63 @@ def _assert_rebuilt_day0_held_token_binding(
 
     point = np.asarray(q, dtype=float)
     samples = np.asarray(payload["_edli_day0_remaining_probability_samples"], dtype=float)
+    # The served q now passes the diurnal finalizer after strict carrier replay.
+    # Keep shuffled HKO H/L and NOAA C/F coordinates bound across that seam too.
+    from src.calibration import day0_diurnal_residual as diurnal
+
+    city = runtime_cities_by_name()[family.city]
+    unit = city.settlement_unit
+    bins = [candidate.bin for candidate in family.candidates]
+    analysis_family = SimpleNamespace(**{
+        **vars(family), "bins": bins, "event_type": "DAY0_EXTREME_UPDATED",
+    })
+    native_members = np.sort(np.asarray([
+        *payload["_edli_day0_remaining_carrier_future_extremes_c"],
+        *payload.get("_edli_day0_remaining_carrier_final_extremes_c", ()),
+    ], dtype=float))
+    if unit == "F":
+        native_members = native_members * 9.0 / 5.0 + 32.0
+    snapshot = {
+        "settlement_unit": unit, "temperature_metric": family.metric,
+        "members_json": json.dumps(native_members.tolist()),
+        "members_precision": 1.0, "source_id": "relationship-fixture",
+        "issue_time": decision_time.isoformat(), "dataset_id": "fixture",
+        "data_version": "fixture",
+    }
+    weights = np.arange(1, len(bins) + 1, dtype=float)
+    mixture = diurnal.Day0DiurnalMixture(
+        weight=0.4, pi=tuple(weights / weights.sum()),
+        dead=(False,) * len(bins), k=1, anchor=0.0,
+        fit_date=decision_time.date().isoformat(), artifact="relationship-fixture",
+    )
+
+    def analyze(active_mixture):
+        with monkeypatch.context() as patch:
+            patch.setattr(era, "_day0_remaining_day_members", lambda **_: native_members)
+            patch.setattr(diurnal, "day0_diurnal_mixture", lambda **_: (
+                (None, {"day0_diurnal_mixture_status": "artifact_unavailable"})
+                if active_mixture is None
+                else (active_mixture, active_mixture.provenance())
+            ))
+            conn = sqlite3.connect(":memory:")
+            try:
+                analysis = era._market_analysis_from_event_snapshot(
+                    calibration_conn=conn, snapshot=snapshot, family=analysis_family,
+                    native_costs={}, payload=dict(payload), decision_time=decision_time,
+                )
+                if active_mixture is not None:
+                    inner = analysis._bootstrap_probability_sampler.inner
+                    if isinstance(inner, era._Day0BootstrapSampler):
+                        assert inner.fallback_q == pytest.approx(q)
+                return analysis.p_posterior, analysis.forecast_yes_probability_sample_matrix(500)
+            finally:
+                conn.close()
+
+    base_point, base_samples = analyze(None)
+    point, samples = analyze(mixture)
+    assert base_point == pytest.approx(q)
+    assert point == pytest.approx(mixture.apply(base_point))
+    assert samples == pytest.approx(np.asarray([mixture.apply(row) for row in base_samples]))
     bindings = tuple(
         OutcomeTokenBinding(
             bin_id=candidate.bin.label,
@@ -7613,6 +7670,52 @@ def test_reactor_day0_q_and_every_draw_carry_the_diurnal_mixture(monkeypatch):
     assert seen["running_extreme"] == 30.0
     assert seen["bin_bounds"] == [(None, 31.0), (32.0, 32.0), (33.0, None)]
     assert seen["decision_time"] == decision_time.replace(second=0)
+
+
+@pytest.mark.parametrize("batch", (False, True))
+def test_diurnal_draw_equal_to_mixed_point_is_still_transformed(batch):
+    """A raw draw's value is not provenance that it already passed the operator."""
+    import src.engine.event_reactor_adapter as era
+    from src.calibration.day0_diurnal_residual import Day0DiurnalMixture
+
+    mixture = Day0DiurnalMixture(
+        weight=0.5, pi=(1.0, 0.0), dead=(False, False), k=0,
+        anchor=30.0, fit_date="2026-09-28", artifact="fixture",
+    )
+    analysis = SimpleNamespace(
+        p_cal=np.asarray(mixture.apply((0.0, 1.0))), _rng=np.random.default_rng(1),
+    )
+    inner = era._Day0CarrierRowSampler(rows=np.asarray([[0.5, 0.5], [0.5, 0.5]]))
+    sampler = era._Day0DiurnalMixedSampler(inner=inner, mixture=mixture)
+    result = sampler.sample_matrix(analysis, 2, 2) if batch else sampler(analysis, 2)
+    expected = [[0.75, 0.25], [0.75, 0.25]] if batch else [0.75, 0.25]
+    assert np.asarray(result) == pytest.approx(np.asarray(expected))
+
+
+@pytest.mark.parametrize("batch", (False, True))
+def test_diurnal_degenerate_bootstrap_uses_explicit_raw_fallback_once(batch):
+    """No-support rows fall back before mixing, in scalar and batch execution."""
+    import src.engine.event_reactor_adapter as era
+    from src.calibration.day0_diurnal_residual import Day0DiurnalMixture
+
+    mixture = Day0DiurnalMixture(
+        weight=0.5, pi=(1.0, 0.0), dead=(False, False), k=0,
+        anchor=30.0, fit_date="2026-09-28", artifact="fixture",
+    )
+    raw_point = (0.0, 1.0)
+    inner = era._Day0BootstrapSampler(
+        members=np.asarray([100.0]), rounded=None, boundary_survival_probability=0.0,
+        metric="high", sigma=0.0, mask=np.asarray([1.0, 1.0]), fallback_q=raw_point,
+    )
+    analysis = SimpleNamespace(
+        p_cal=np.asarray(mixture.apply(raw_point)), _rng=np.random.default_rng(1),
+        bins=[Bin(30, 30, "C", "30C"), Bin(31, 31, "C", "31C")],
+        _settle=lambda values: np.asarray(values),
+    )
+    sampler = era._Day0DiurnalMixedSampler(inner=inner, mixture=mixture)
+    result = sampler.sample_matrix(analysis, 2, 1) if batch else sampler(analysis, 1)
+    expected = [[0.5, 0.5], [0.5, 0.5]] if batch else [0.5, 0.5]
+    assert np.asarray(result) == pytest.approx(np.asarray(expected))
 
 
 def test_day0_analysis_probability_content_is_stable_across_recapture_order(

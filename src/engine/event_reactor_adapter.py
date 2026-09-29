@@ -44953,8 +44953,8 @@ def _day0_diurnal_mixture_for_family(
 class _Day0DiurnalMixedSampler:
     """Every bootstrap row through the same diurnal-residual operator as the point q.
 
-    A degenerate inner row falls back to ``analysis.p_cal``, which is already
-    mixed; that row passes through unchanged so no row is mixed twice.
+    The inner sampler carries an explicit unmixed fallback. Numerical equality
+    with the mixed point cannot establish whether a draw has been transformed.
     """
 
     inner: object
@@ -44962,8 +44962,6 @@ class _Day0DiurnalMixedSampler:
 
     def _mix(self, analysis, row) -> np.ndarray:
         row = np.asarray(row, dtype=float)
-        if np.array_equal(row, np.asarray(analysis.p_cal, dtype=float)):
-            return row
         return np.asarray(self.mixture.apply(row), dtype=float)
 
     def __call__(self, analysis, n_members):
@@ -44993,6 +44991,13 @@ class _Day0BootstrapSampler:
     peak_set_probability: float | None = None
     peak_set_atom: float | None = None
     boundary_scenarios: tuple[tuple[float, float], ...] = ()
+    fallback_q: tuple[float, ...] | None = None
+
+    def _fallback(self, analysis) -> np.ndarray:
+        return np.asarray(
+            self.fallback_q if self.fallback_q is not None else analysis.p_cal,
+            dtype=float,
+        )
 
     def _sample_member_draws(
         self,
@@ -45075,10 +45080,10 @@ class _Day0BootstrapSampler:
         if vec.shape == self.mask.shape:
             vec = vec * self.mask
         if not np.all(np.isfinite(vec)):
-            return np.asarray(analysis.p_cal, dtype=float)
+            return self._fallback(analysis)
         total = float(vec.sum())
         if total <= 0.0:
-            return np.asarray(analysis.p_cal, dtype=float)
+            return self._fallback(analysis)
         return vec / total
 
     def sample_matrix(self, analysis, n_samples: int, n_members: int) -> np.ndarray:
@@ -45138,7 +45143,7 @@ class _Day0BootstrapSampler:
         totals = probabilities.sum(axis=1)
         valid = np.all(np.isfinite(probabilities), axis=1) & (totals > 0.0)
         probabilities[valid] /= totals[valid, None]
-        probabilities[~valid] = np.asarray(analysis.p_cal, dtype=np.float64)
+        probabilities[~valid] = self._fallback(analysis)
         return probabilities
 
 
@@ -45472,6 +45477,7 @@ def _market_analysis_from_event_snapshot(
     _emos_q = None
     _emos_sampler = None
     _day0_mixture = None
+    _day0_unmixed_q = None
     # ONE-CALIBRATOR REGIME (#110 universal, operator 2026-06-05): for non-day0 cells, the cell
     # is served by EXACTLY one of {EMOS predictive, do-no-harm-VALIDATED honest raw N(xbar,S^2)};
     # served=raw / EMOS-miss / serve-fail routes to honest raw.
@@ -45702,6 +45708,7 @@ def _market_analysis_from_event_snapshot(
                 probability_time=day0_probability_time,
             )
             if _day0_mixture is not None:
+                _day0_unmixed_q = tuple(float(value) for value in p_cal)
                 p_raw = np.asarray(_day0_mixture.apply(p_raw), dtype=float)
                 p_cal = np.asarray(_day0_mixture.apply(p_cal), dtype=float)
     p_market_yes: list[float] = []
@@ -45752,6 +45759,8 @@ def _market_analysis_from_event_snapshot(
             )
         )
         if _day0_sampler is not None:
+            if _day0_mixture is not None and isinstance(_day0_sampler, _Day0BootstrapSampler):
+                _day0_sampler = dataclass_replace(_day0_sampler, fallback_q=_day0_unmixed_q)
             sampler = (
                 _day0_sampler
                 if _day0_mixture is None
