@@ -31,6 +31,7 @@ encode the invariant in shared structure, not in N parallel checks):
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 import re
@@ -235,6 +236,12 @@ def _current_evidence_shape_has_probability_authority(
         or any(char not in "0123456789abcdef" for char in proof_hash)
     ):
         return False
+    geometry = shape.get("provider_geometry_evidence")
+    if not isinstance(geometry, Mapping) or geometry.get("revision") != "openmeteo_current_provider_geometry_v1" or not geometry.get("providers"):
+        return False
+    geometry_hash = hashlib.sha256(json.dumps(geometry, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+    if shape.get("provider_geometry_identity_hash") != geometry_hash:
+        return False
     return (
         str(shape.get("semantics_revision") or "")
         in LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS
@@ -386,6 +393,9 @@ def tradeable_grade_coverage_sql(
         f"{surface_hash_type} = 'text' AND "
         f"length({surface_hash_value}) = 64 AND "
         f"{surface_hash_value} NOT GLOB '*[^0-9a-f]*' AND "
+        f"json_extract({provenance_expr}, '{shape_path}.provider_geometry_evidence.revision') = 'openmeteo_current_provider_geometry_v1' AND "
+        f"json_type({provenance_expr}, '{shape_path}.provider_geometry_evidence.providers') = 'object' AND "
+        f"length(json_extract({provenance_expr}, '{shape_path}.provider_geometry_identity_hash')) = 64 AND "
         f"{revision_value} = "
         f"'{CURRENT_EVIDENCE_SEMANTICS_REVISION}')"
     )

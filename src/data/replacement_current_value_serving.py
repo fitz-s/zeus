@@ -176,6 +176,7 @@ class ServedInstrumentValue:
     captured_at: str | None    # the served row's capture timestamp (None on stripped schemas)
     age_hours: float           # captured_at − source_cycle_time, hours (0.0 when unknowable)
     lead_days: int | None      # the served row's lead bucket — the SAME bucket its history uses
+    physical_response: Mapping[str, object] | None = None
 
     def as_provenance(self) -> dict[str, object]:
         """The per-instrument provenance payload recorded in bayes_precision_fusion.current_value_serving."""
@@ -187,6 +188,7 @@ class ServedInstrumentValue:
             "captured_at": self.captured_at,
             "age_hours": round(float(self.age_hours), 3),
             "lead_days": self.lead_days,
+            "physical_response": dict(self.physical_response) if self.physical_response else None,
         }
 
 
@@ -199,6 +201,7 @@ class CurrentValueServingSchema:
     has_recorded_at: bool
     has_coverage_status: bool
     product_identity_columns: tuple[str, ...] = ()
+    has_artifacts: bool = False
 
 
 _PRODUCT_IDENTITY_COLUMNS = (
@@ -206,7 +209,7 @@ _PRODUCT_IDENTITY_COLUMNS = (
     "source_id", "source_family", "product_id", "provider", "model_name",
     "request_params_json", "request_url_hash", "latitude_requested", "longitude_requested",
     "timezone_requested", "cell_selection", "elevation_param", "downscaling_policy",
-    "model_domain_hash",
+    "model_domain_hash", "metric", "forecast_value_c", "artifact_id", "raw_sha256",
 )
 
 
@@ -228,7 +231,24 @@ def current_value_serving_schema(
         has_recorded_at="recorded_at" in columns,
         has_coverage_status="coverage_status" in columns,
         product_identity_columns=tuple(name for name in _PRODUCT_IDENTITY_COLUMNS if name in columns),
+        has_artifacts=conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='raw_forecast_artifacts'").fetchone() is not None,
     )
+
+
+def _product_identity_select(schema: CurrentValueServingSchema) -> str:
+    fields = ", ".join(
+        f"'{name}', {name if name in schema.product_identity_columns else 'NULL'}"
+        for name in _PRODUCT_IDENTITY_COLUMNS
+    )
+    artifact = "NULL"
+    if schema.has_artifacts and "artifact_id" in schema.product_identity_columns:
+        artifact = """(SELECT json_object('source_id',a.source_id,'product_id',a.product_id,
+            'source_cycle_time',a.source_cycle_time,'captured_at',a.captured_at,
+            'artifact_path',a.artifact_path,'sha256',a.sha256,'byte_size',a.byte_size,
+            'request_url',a.request_url,'request_params_json',a.request_params_json,
+            'metadata',a.artifact_metadata_json) FROM raw_forecast_artifacts a
+            WHERE a.artifact_id=raw_model_forecasts.artifact_id)"""
+    return f"json_object({fields}, 'physical_artifact', json({artifact}))"
 
 
 def read_current_instrument_family_latest_id(
@@ -349,10 +369,7 @@ def _source_clock_rows_query(
     else:
         params.extend((SERVED_VIA_SINGLE_RUNS, SERVED_VIA_PREVIOUS_RUNS))
     # Missing physical proof remains NULL, including stripped/legacy schemas.
-    product_select = "json_object(" + ", ".join(
-        f"'{name}', {name if name in schema.product_identity_columns else 'NULL'}"
-        for name in _PRODUCT_IDENTITY_COLUMNS
-    ) + ")"
+    product_select = _product_identity_select(schema)
     return (
         f"""
         SELECT raw_model_forecast_id, model, forecast_value_c, lead_days,
@@ -407,16 +424,125 @@ def _source_clock_product_has_authority(raw: object, *, lead_days: int | None) -
                 and row["product_id"] == f"{model}::single_runs"
                 and row["endpoint"] == "single_runs"
                 and row["endpoint_mode"] == "single_runs"
+                and (model != "cwa_township_hourly_high" or row.get("metric") == "high")
+                and (model != "cwa_township_hourly_low" or row.get("metric") == "low")
             )
         from src.config import runtime_cities_by_name
         from src.data.bayes_precision_fusion_history_provider import raw_product_matches_live_source
 
         city = runtime_cities_by_name().get(str(row["city"] or ""))
-        return city is not None and lead_days is not None and raw_product_matches_live_source(
-            row, city, lead_days=lead_days,
-        )
+        if city is None or lead_days is None or not raw_product_matches_live_source(row, city, lead_days=lead_days):
+            return False
+        return _physical_response_has_authority(row)
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         return False
+
+
+def _physical_response_has_authority(row: Mapping[str, object]) -> bool:
+    """Verify actual single-model product and exact hourly/local-day value, not request intention."""
+    try:
+        from pathlib import Path
+        import hashlib
+        from src.data.bayes_precision_fusion_download import _parse_batched_single_runs_payload
+        from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS
+        artifact = row["physical_artifact"]
+        if not isinstance(artifact, dict) or artifact["sha256"] != row["raw_sha256"]:
+            return False
+        if any(artifact[key] != row[key] for key in ("source_id", "product_id", "source_cycle_time")):
+            return False
+        metadata = json.loads(str(artifact["metadata"]))["physical_response"]
+        params = json.loads(str(artifact["request_params_json"]))
+        if metadata["revision"] != "openmeteo_single_model_entity_body_v1" or params != metadata["request_params"]:
+            return False
+        model = str(row["model"])
+        if metadata["model"] != model or params["models"] != OPENMETEO_MODEL_IDS.get(model, model):
+            return False
+        if params.get("elevation") is not None or params.get("cell_selection", "land") != "land":
+            return False
+        if params.get("temperature_unit") != "celsius" or params.get("hourly") != "temperature_2m":
+            return False
+        indices = [index for index, (latitude, longitude, tz) in enumerate(zip(
+            str(params["latitude"]).split(","), str(params["longitude"]).split(","),
+            str(params["timezone"]).split(","), strict=True))
+            if math.isclose(float(latitude), float(row["latitude_requested"]), abs_tol=1e-6)
+            and math.isclose(float(longitude), float(row["longitude_requested"]), abs_tol=1e-6)
+            and tz == row["timezone_requested"]]
+        if len(indices) != 1:
+            return False
+        index = indices[0]
+        geometry = metadata["locations"][index]
+        for key, expected in (("latitude", row["latitude_requested"]), ("longitude", row["longitude_requested"])):
+            if not math.isclose(float(str(params[key]).split(",")[index]), float(expected), abs_tol=1e-6):
+                return False
+        if str(params["timezone"]).split(",")[index] != row["timezone_requested"]:
+            return False
+        if row["endpoint_mode"] == "single_runs":
+            if datetime.fromisoformat(str(params["run"])) != datetime.fromisoformat(str(row["source_cycle_time"])).replace(tzinfo=None):
+                return False
+        body = Path(str(artifact["artifact_path"])).read_bytes()
+        if len(body) != artifact["byte_size"] or hashlib.sha256(body).hexdigest() != artifact["sha256"]:
+            return False
+        decoded = json.loads(body)
+        payload = decoded if isinstance(decoded, dict) and index == 0 else decoded[index]
+        if payload["timezone"] != row["timezone_requested"]:
+            return False
+        for key, proofkey, low, high in (
+            ("latitude", "selected_latitude", -90, 90),
+            ("longitude", "selected_longitude", -180, 180),
+            ("elevation", "target_dem_elevation_m", -500, 9000),
+        ):
+            actual = float(payload[key])
+            if not math.isfinite(actual) or not low <= actual <= high or actual != float(geometry[proofkey]):
+                return False
+        # Official Gridable/GaussianGrid land search is <50km; registered
+        # temperature domains' nearest-center half diagonal is also <50km.
+        # This is a wrong-site transport bound, NOT surface/representativeness proof.
+        lat1, lat2 = math.radians(float(row["latitude_requested"])), math.radians(float(payload["latitude"]))
+        dlat = lat2 - lat1
+        dlon = math.radians(float(payload["longitude"]) - float(row["longitude_requested"]))
+        hav = math.sin(dlat/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin(dlon/2)**2
+        if 2 * 6371.0088 * math.asin(math.sqrt(min(1.0, hav))) >= 50.0:
+            return False
+        variable = "temperature_2m"
+        keyed = f"{variable}_{OPENMETEO_MODEL_IDS.get(model, model)}"
+        units = payload["hourly_units"]
+        if units.get(keyed, units.get(variable)) != "°C":
+            return False
+        if metadata["aggregation"] != "max_min_of_local_day_hourly_samples":
+            return False
+        values = _parse_batched_single_runs_payload(payload, [model],
+            datetime.fromisoformat(str(row["target_date"])).date(), str(row["timezone_requested"]))
+        high_c, low_c = values[model]
+        expected = high_c if row["metric"] == "high" else low_c if row["metric"] == "low" else None
+        return expected is not None and math.isclose(float(expected), float(row["forecast_value_c"]), abs_tol=1e-9)
+    except (KeyError, IndexError, TypeError, ValueError, OSError, json.JSONDecodeError):
+        return False
+
+
+def _physical_response_provenance(row: Mapping[str, object]) -> Mapping[str, object] | None:
+    artifact = row.get("physical_artifact")
+    if not isinstance(artifact, dict):
+        return None
+    metadata = json.loads(str(artifact["metadata"]))["physical_response"]
+    params = metadata["request_params"]
+    index = next(i for i, (lat, lon, tz) in enumerate(zip(
+        str(params["latitude"]).split(","), str(params["longitude"]).split(","),
+        str(params["timezone"]).split(","), strict=True))
+        if math.isclose(float(lat), float(row["latitude_requested"]), abs_tol=1e-6)
+        and math.isclose(float(lon), float(row["longitude_requested"]), abs_tol=1e-6)
+        and tz == row["timezone_requested"])
+    return {"revision": metadata["revision"], "model": row["model"],
+        "product_id": row["product_id"], "artifact_id": row["artifact_id"],
+        "entity_body_sha256": artifact["sha256"],
+        "requested_latitude": row["latitude_requested"],
+        "requested_longitude": row["longitude_requested"],
+        "timezone": row["timezone_requested"],
+        "cell_selection": row["cell_selection"], "elevation_param": row["elevation_param"],
+        "downscaling_policy": row["downscaling_policy"],
+        "native_variable": metadata["native_variable"],
+        "temperature_unit": metadata["temperature_unit"], "aggregation": metadata["aggregation"],
+        "native_grid_elevation_m": None, "native_surface": "UNKNOWN",
+        "representativeness_status": "UNPROVEN", **metadata["locations"][index]}
 
 
 def _served_source_clock_row(
@@ -483,6 +609,7 @@ def _served_source_clock_row(
         captured_at=captured,
         age_hours=0.0 if age is None else age,
         lead_days=lead,
+        physical_response=_physical_response_provenance(json.loads(str(row[-1]))),
     )
 
 
@@ -646,7 +773,7 @@ def read_current_instrument_values(
             return conn.execute(
                 f"""
                 SELECT raw_model_forecast_id, model, forecast_value_c, lead_days,
-                       source_cycle_time{captured_select}
+                       source_cycle_time{captured_select}, {_product_identity_select(schema)}
                 FROM raw_model_forecasts
                 WHERE city = ? AND metric = ? AND target_date = ?
                   AND {cycle_predicate} AND endpoint = ?
@@ -721,6 +848,8 @@ def read_current_instrument_values(
                 if parsed is None:
                     continue
                 value, lead = parsed
+                if not _source_clock_product_has_authority(row[-1], lead_days=lead):
+                    continue
                 served_cycle = str(row[4])
                 captured = str(row[5]) if has_captured_at and row[5] is not None else None
             except Exception:
@@ -740,6 +869,7 @@ def read_current_instrument_values(
                 value_c=value, raw_model_forecast_id=rid, served_via=endpoint,
                 served_cycle=served_cycle, captured_at=captured,
                 age_hours=0.0 if age is None else age, lead_days=lead,
+                physical_response=_physical_response_provenance(json.loads(str(row[-1]))),
             )
 
     # Priority is about possession time first, then endpoint quality:
@@ -762,7 +892,7 @@ def read_current_instrument_values(
             station_rows = conn.execute(
                 f"""
                 SELECT raw_model_forecast_id, model, forecast_value_c, lead_days,
-                       source_cycle_time{captured_select}
+                       source_cycle_time{captured_select}, {_product_identity_select(schema)}
                 FROM raw_model_forecasts
                 WHERE city = ? AND metric = ? AND target_date = ? AND endpoint = ?
                   AND (model LIKE 'cwa%' OR model LIKE 'hko%')
@@ -788,6 +918,8 @@ def read_current_instrument_values(
                 if parsed is None:
                     continue
                 value, lead = parsed
+                if not _source_clock_product_has_authority(row[-1], lead_days=lead):
+                    continue
                 served_cycle = str(row[4])
                 captured = str(row[5]) if has_captured_at and row[5] is not None else None
             except Exception:

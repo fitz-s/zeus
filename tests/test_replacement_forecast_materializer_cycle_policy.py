@@ -66,9 +66,13 @@ _SURFACE_HASH = hashlib.sha256(b"selected-land-cell-proof").hexdigest()
 
 
 def _surface_identity() -> dict[str, str]:
+    geometry = {"revision": "openmeteo_current_provider_geometry_v1",
+                "providers": {"icon_global": {"selected_latitude": 31.2, "selected_longitude": 121.4}}}
     return {
         "grid_surface_evidence_revision": GRID_SURFACE_EVIDENCE_REVISION,
         "grid_surface_evidence_identity_hash": _SURFACE_HASH,
+        "provider_geometry_evidence": geometry,
+        "provider_geometry_identity_hash": hashlib.sha256(json.dumps(geometry, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
     }
 
 

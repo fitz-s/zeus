@@ -20,7 +20,7 @@ from __future__ import annotations
 import sqlite3
 import json
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -103,14 +103,32 @@ def _current_rows(tmp_path, monkeypatch, *, metric="high"):
     db = _forecast_db(tmp_path)
     cycle = datetime(2026, 6, 8, tzinfo=UTC)
     _download_time(monkeypatch, dl, cycle.replace(hour=4))
+    _mock_single_model_http(monkeypatch, dl, value=20.0)
     dl.download_bayes_precision_fusion_extra_raw_inputs(
         forecast_db=db, cycle=cycle, targets=[target],
         models=("icon_global", "ukmo_global_deterministic_10km"),
-        single_runs_fetch=lambda **_: 20.0, previous_runs_fetch=lambda **_: 19.5,
         include_previous_runs=False, prune_after=False,
     )
     conn = sqlite3.connect(db)
     return conn, target, cycle
+
+
+def _mock_single_model_http(monkeypatch, dl, *, value):
+    dl._SINGLE_RUNS_PAYLOAD_CACHE.clear()
+    dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEX.clear()
+
+    def fetch(url, params, **kwargs):
+        assert "," not in params["models"]
+        day = datetime(2026, 6, 9)
+        payload = {"latitude": 48.95, "longitude": 2.45, "elevation": 123,
+            "timezone": "Europe/Paris", "hourly_units": {"temperature_2m": "°C"},
+            "hourly": {"time": [(day + timedelta(hours=i)).isoformat(timespec="minutes") for i in range(24)],
+                       "temperature_2m": [value] * 24}}
+        body = (json.dumps(payload, indent=2) + "\n").encode()
+        kwargs["capture_entity_body"](body, dl.datetime.now(UTC).timestamp())
+        return json.loads(body)
+
+    monkeypatch.setattr("src.data.openmeteo_client.fetch", fetch)
 
 
 def _download_time(monkeypatch, module, when):
@@ -176,11 +194,11 @@ def test_ordinary_new_cycle_drains_superseded_default_dem_label(tmp_path, monkey
     ) == {}
     for run in (cycle, cycle.replace(hour=6)):
         _download_time(monkeypatch, dl, run.replace(hour=run.hour + 4))
+        _mock_single_model_http(monkeypatch, dl, value=21.0)
         report = dl.download_bayes_precision_fusion_extra_raw_inputs(
             forecast_db=Path(conn.execute("PRAGMA database_list").fetchone()[2]),
             cycle=run, targets=[target],
             models=("icon_global", "ukmo_global_deterministic_10km"),
-            single_runs_fetch=lambda **_: 21.0, previous_runs_fetch=lambda **_: 19.5,
             include_previous_runs=False, prune_after=False,
         )
         assert report["written_row_count"] == (0 if run == cycle else 2)

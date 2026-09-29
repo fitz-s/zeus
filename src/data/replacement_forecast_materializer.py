@@ -1634,6 +1634,9 @@ def _day0_noaa_preliminary_carrier(
         remaining_center_bias_native=float(remaining_center_bias_c) * native_scale,
     )
     carrier["current_path_state"] = current_state.identity()
+    clock_evidence = getattr(current_state, "clock_evidence", None)
+    if isinstance(clock_evidence, Mapping):
+        carrier["current_temperature_clock_evidence"] = dict(clock_evidence)
     return carrier, likelihood
 
 
@@ -3292,6 +3295,8 @@ class _CurrentEvidenceShape:
     # finite-evidence hit counts use the bounds, never those values as points.
     member_bounds_c: tuple[tuple[float, float], ...] | None = None
     interval_censored_member_count: int | None = None
+    provider_geometry_evidence: Mapping[str, object] | None = None
+    provider_geometry_identity_hash: str | None = None
 
     def as_payload(self) -> dict[str, object]:
         payload = asdict(self)
@@ -3311,6 +3316,46 @@ class _CurrentEvidenceShape:
         if payload.get("shape_age_sigma_term_c2") is None:
             payload.pop("shape_age_sigma_term_c2", None)
         return payload
+
+
+def _bind_provider_geometry_identity(
+    shape: _CurrentEvidenceShape, served: Mapping[str, object],
+    *, anchor_metadata: object | None = None,
+) -> _CurrentEvidenceShape:
+    """Stable actual provider geometry, independent of capture IDs/clocks/batch shape."""
+    from dataclasses import replace
+    projection: dict[str, object] = {}
+    stable_keys = (
+        "revision", "model", "product_id", "requested_latitude", "requested_longitude",
+        "timezone", "cell_selection", "elevation_param", "downscaling_policy",
+        "native_variable", "temperature_unit", "aggregation", "selected_latitude",
+        "selected_longitude", "target_dem_elevation_m", "native_grid_elevation_m",
+        "native_surface", "representativeness_status", "source_cell_geometry_proof",
+    )
+    for model, value in sorted(served.items()):
+        proof = getattr(value, "physical_response", None)
+        if isinstance(proof, Mapping):
+            stable = {key: proof[key] for key in stable_keys if key in proof}
+            stable["product_id"] = str(stable.get("product_id", "")).split("::run=")[0]
+            projection[str(model)] = stable
+    if anchor_metadata is not None:
+        metadata = asdict(anchor_metadata)
+        keys = ("requested_lat", "requested_lon", "nearest_grid_lat", "nearest_grid_lon",
+                "grid_elevation_m", "station_elevation_m", "timezone_name", "native_grid",
+                "delivery_grid_resolution", "temperature_unit", "source_geometry_proof")
+        anchor = {key: metadata[key] for key in keys if key in metadata}
+        proof = anchor.get("source_geometry_proof")
+        if isinstance(proof, Mapping):
+            anchor["source_geometry_proof"] = {key: value for key, value in proof.items()
+                if not any(clock in key for clock in ("fetched", "captured", "payload_sha", "manifest_sha", "recorded", "cycle", "available"))}
+        projection["__anchor_ifs9__"] = anchor
+    if not projection:
+        raise ValueError("current provider actual geometry evidence missing")
+    evidence = {"revision": "openmeteo_current_provider_geometry_v1", "providers": projection}
+    digest = _json_hash(evidence)
+    return replace(shape, provider_geometry_evidence=evidence,
+        provider_geometry_identity_hash=digest,
+        shape_hash=_json_hash({"current_shape_hash": shape.shape_hash, "provider_geometry_identity_hash": digest}))
 
 
 # Freshest-coherent-cohort window for the between term (consult v2 (b), 2026-07-17):
@@ -4586,9 +4631,10 @@ def _replacement_bayes_precision_fusion_override(
         # count). This is LIVE-DIRECT: the warming is active wherever the table has a cell;
         # rollout is controlled by populating config/grid_representativeness.json + the
         # deploy commit, never by a dormant code flag (operator no-blocked law).
-        _sigma_repr_by_model = _build_sigma_repr_by_model(
-            request.city, list(_raw_m2_and_n.keys()), anchor_model=_ANCHOR
-        )
+        # The legacy table records default-downscaled target DEM, not the
+        # model's native height. Its dz penalty has no current physical authority.
+        # Absence here means NOT_APPLICABLE, never verified zero native error.
+        _sigma_repr_by_model: dict[str, float] = {}
         _weights, _mu_from_center = _raw_center(
             _center_m2_and_n, _z_by_model, unit=_serving_unit,
             repr_m2_by_model=_sigma_repr_by_model,
@@ -5120,6 +5166,15 @@ def _replacement_bayes_precision_fusion_override(
             except Exception:
                 pass
             return None
+
+        _source_clock_current_shape = _bind_provider_geometry_identity(
+            _source_clock_current_shape,
+            {model: value for model, value in served_current.items()
+             if model in (_source_clock_used_models or _weights)},
+            anchor_metadata=getattr(request.openmeteo_precision_guard, "metadata", None),
+        )
+        if _source_clock_payload is not None:
+            _source_clock_payload["current_evidence_shape"] = _source_clock_current_shape.as_payload()
 
         used_models = _source_clock_used_models or tuple(
             dict.fromkeys((*tuple(fused.used_models), *_station_entry_models_added))
@@ -7247,12 +7302,9 @@ def _compute_posterior_payload(
                 # computation, city-local target-end, strict artifact validation) is wrapped in ONE
                 # neutralizing try/except inside _resolve_sigma_tau_calibration (FIX 6) so a
                 # malformed request field can never escape as an exception here.
-                (
-                    _k,
-                    _uniform_w,
-                    _floor_steps,
-                    sigma_tau_artifact_hash,
-                ) = _resolve_sigma_tau_calibration(request, _city_unit, metric)
+                # Current evidence is the live width itself, not an input to a
+                # fitted k(tau), floor or mixture. Offline artifacts have no role.
+                _k, _uniform_w, _floor_steps, sigma_tau_artifact_hash = 1.0, 0.0, 0.0, None
             else:
                 _k, _uniform_w, _floor_steps = _effective_unit_sigma_scale(
                     _city_unit
@@ -7265,12 +7317,11 @@ def _compute_posterior_payload(
             # integrate ONE corrected center — the day0 delta below composes on top of
             # it and needs no compensation. None (LOW, thin evidence, unreadable DB) is
             # the uncorrected center, byte-identical to before this change.
-            _center_debias = center_debias_live_fit.PROVIDER.correction(
-                conn,
-                city=request.city,
-                metric=metric,
-                now=_to_utc(request.computed_at, field_name="computed_at"),
-            )
+            _center_debias = (None if _current_shape is not None else
+                center_debias_live_fit.PROVIDER.correction(
+                    conn, city=request.city, metric=metric,
+                    now=_to_utc(request.computed_at, field_name="computed_at"),
+                ))
             _center_debias_c = (
                 None if _center_debias is None else float(_center_debias.shift_c)
             )
@@ -7368,9 +7419,14 @@ def _compute_posterior_payload(
             # cluster-robust, 14 days / 556 city×day clusters) shows the bypass under-disperses every
             # served shape (cov80 0.787 vs 0.80 nominal) with 52.6% of post-cutover rows served a sigma
             # below their own live floor. The lookup now runs unconditionally for every shape.
-            _floor_c, _floor_reason = _replacement_settlement_sigma_floor_lookup(
-                request, metric=metric
-            )
+            if bayes_precision_fusion_override.current_evidence_shape is not None:
+                # Single-q law: current within + ENS-center disagreement + between
+                # is the actual integrated width, not a pre-floor diagnostic width.
+                _floor_c, _floor_reason = None, "CURRENT_EVIDENCE_SHAPE_NO_HISTORICAL_FLOOR"
+            else:
+                _floor_c, _floor_reason = _replacement_settlement_sigma_floor_lookup(
+                    request, metric=metric
+                )
             if _floor_c is not None:
                 settlement_sigma_floor_c = float(_floor_c)
                 settlement_sigma_floor_applied = True
@@ -8159,6 +8215,8 @@ def _compute_posterior_payload(
                     if isinstance(_day0_shared_carrier.get("current_path_state"), Mapping)
                     else {}
                 ),
+                **({"day0_current_temperature_clock_evidence": dict(_day0_shared_carrier["current_temperature_clock_evidence"])}
+                   if isinstance(_day0_shared_carrier.get("current_temperature_clock_evidence"), Mapping) else {}),
                 "day0_remaining_carrier_operator": str(
                     _day0_shared_carrier["operator"]
                 ),
@@ -8480,6 +8538,11 @@ def _compute_posterior_payload(
         provenance_payload["upgrade_trigger"] = str(request.upgrade_trigger)
     if bayes_precision_fusion_override is not None:
         provenance_payload["bayes_precision_fusion"] = {
+            "grid_representativeness": {
+                "status": "NOT_APPLICABLE_DOWNSCALED",
+                "reason": "DEFAULT_DEM_IS_NOT_NATIVE_MODEL_HEIGHT",
+                "penalty_applied": False, "native_geometry_status": "UNPROVEN",
+            },
             "method": bayes_precision_fusion_override.method,
             "used_models": list(bayes_precision_fusion_override.used_models),
             "model_set_hash": bayes_precision_fusion_override.model_set_hash,

@@ -48,6 +48,7 @@ and never serves an answer it cannot prove.
 from __future__ import annotations
 
 import functools
+import base64
 import json
 import logging
 import os
@@ -512,7 +513,35 @@ class OpenMeteoResponseStore:
             self._holds(req, slug, proofs[slug], now, float(row[3])) for slug in req.slugs
         ):
             return None
-        return int(row[1]), json.loads(zstandard.ZstdDecompressor().decompress(row[2]))
+        body = json.loads(zstandard.ZstdDecompressor().decompress(row[2]))
+        if isinstance(body, dict) and body.get("_entity_body_capture_v1") is True:
+            body = body["payload"]
+        return int(row[1]), body
+
+    @_fail_soft(None)
+    def entity_body_capture(
+        self, request_id: str, req: ExactRequest, expected_payload: object
+    ) -> tuple[bytes, float] | None:
+        """Original decoded HTTP entity bytes and original capture clock, never re-serialized JSON."""
+        row = self._db().execute(
+            "SELECT payload, fetched_at, proofs, status, expires_at FROM responses "
+            "WHERE request_id = ?", (request_id,)
+        ).fetchone()
+        now = time.time()
+        if row is None or int(row[3]) >= 400 or float(row[4]) <= now:
+            return None
+        proofs = json.loads(row[2])
+        if not isinstance(proofs, dict) or set(proofs) != set(req.slugs) or not all(
+            self._holds(req, slug, proofs[slug], now, float(row[1])) for slug in req.slugs
+        ):
+            return None
+        body = json.loads(zstandard.ZstdDecompressor().decompress(row[0]))
+        if not isinstance(body, dict) or body.get("_entity_body_capture_v1") is not True:
+            return None  # Older canonical-JSON cache is not original response evidence.
+        raw = base64.b64decode(body["entity_body_base64"], validate=True)
+        if json.loads(raw) != expected_payload or body["payload"] != expected_payload:
+            return None
+        return raw, float(row[1])
 
     @_fail_soft(None)
     def put(
@@ -523,12 +552,19 @@ class OpenMeteoResponseStore:
         payload: object,
         status: int = 200,
         now: float | None = None,
+        entity_body: bytes | None = None,
     ) -> None:
         """Hold a 200 body, or a provider's typed "run not published" refusal."""
 
         now = time.time() if now is None else now
+        stored = payload
+        if entity_body is not None:
+            if json.loads(entity_body) != payload:
+                raise ValueError("entity body does not match parsed response")
+            stored = {"_entity_body_capture_v1": True, "payload": payload,
+                      "entity_body_base64": base64.b64encode(entity_body).decode("ascii")}
         blob = zstandard.ZstdCompressor(level=3).compress(
-            json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            json.dumps(stored, separators=(",", ":")).encode("utf-8")
         )
         self._db().execute(
             "INSERT OR REPLACE INTO responses VALUES (?, ?, ?, ?, ?, ?)",

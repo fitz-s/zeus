@@ -19,6 +19,7 @@ All fetchers are injected (NO network).
 from __future__ import annotations
 
 import sqlite3
+import json
 import time
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -2023,6 +2024,10 @@ def test_bpf_batched_fetch_uses_injected_quota_tracker(monkeypatch) -> None:
         status_code = 200
         headers: dict[str, str] = {}
 
+        @property
+        def content(self):
+            return json.dumps(self.json()).encode()
+
         def raise_for_status(self) -> None:
             return None
 
@@ -2066,6 +2071,10 @@ def test_default_previous_runs_batched_uses_comma_model_param(monkeypatch) -> No
     class _Resp:
         status_code = 200
         headers: dict[str, str] = {}
+
+        @property
+        def content(self):
+            return json.dumps(self.json()).encode()
 
         def raise_for_status(self) -> None:
             return None
@@ -2148,11 +2157,10 @@ def test_default_single_runs_batched_400_falls_back_per_model(monkeypatch) -> No
         forecast_hours=120,
     )
 
-    assert requested_models == ["icon_global,ecmwf_ifs", "icon_global", "ecmwf_ifs"]
+    assert requested_models == ["icon_global", "ecmwf_ifs"]
     assert got["icon_global"] == (22.0, 19.0)
     assert got["ecmwf_ifs"] == (24.0, 21.0)
-    assert dl._BATCH_TRANSPORT_ERROR_KEY in got
-    assert "400 Bad Request" in got[dl._BATCH_TRANSPORT_ERROR_KEY][0]
+    assert dl._BATCH_TRANSPORT_ERROR_KEY not in got
 
 
 def test_default_previous_runs_fetch_uses_om_ecmwf_id_for_anchor(monkeypatch) -> None:
@@ -2536,6 +2544,8 @@ def test_previous_runs_unservable_models_are_dropped_from_the_legacy_leg(
 def _two_day_single_runs_payload() -> dict:
     """A forecast_hours=120 single-runs payload genuinely covering two local days."""
     return {
+        "latitude": 1.35019, "longitude": 103.994003, "elevation": 10.0,
+        "timezone": "Asia/Singapore",
         "hourly": {
             "time": [
                 "2026-09-06T00:00", "2026-09-06T03:00", "2026-09-06T12:00", "2026-09-06T21:00",
@@ -2545,6 +2555,15 @@ def _two_day_single_runs_payload() -> dict:
         },
         "hourly_units": {"temperature_2m": "°C"},
     }
+
+
+def _http_fixture_payload(payload, kwargs):
+    """Mock HTTP exposes entity bytes as the production boundary does."""
+    body = json.dumps(payload).encode()
+    callback = kwargs.get("capture_entity_body")
+    if callback:
+        callback(body, datetime.now(UTC).timestamp())
+    return json.loads(body)
 
 
 def test_shared_single_runs_cache_retries_an_internal_hourly_hole(monkeypatch) -> None:
@@ -2679,7 +2698,7 @@ def test_single_runs_payload_cache_serves_second_target_date_without_http(
 
     def _fetch(_url, params, **kwargs):
         calls.append(dict(params))
-        return _two_day_single_runs_payload()
+        return _http_fixture_payload(_two_day_single_runs_payload(), kwargs)
 
     monkeypatch.setattr(client, "fetch", _fetch)
 
@@ -2713,7 +2732,7 @@ def test_single_runs_payload_cache_shared_between_locations_batched_and_single_c
 
     def _fetch(_url, params, **kwargs):
         calls.append(dict(params))
-        return _two_day_single_runs_payload()
+        return _http_fixture_payload(_two_day_single_runs_payload(), kwargs)
 
     monkeypatch.setattr(client, "fetch", _fetch)
 
@@ -2752,7 +2771,7 @@ def test_single_runs_payload_cache_persists_across_process_restart(
 
     def _fetch(_url, params, **kwargs):
         calls.append(dict(params))
-        return _two_day_single_runs_payload()
+        return _http_fixture_payload(_two_day_single_runs_payload(), kwargs)
 
     monkeypatch.setattr(client, "fetch", _fetch)
 
@@ -2897,7 +2916,7 @@ def test_single_runs_superset_slice_is_byte_identical_to_native_small_payload(
 
     def _fetch(_url, params, **kwargs):
         calls.append(dict(params))
-        return _KOLKATA_120H_PAYLOAD
+        return _http_fixture_payload(_KOLKATA_120H_PAYLOAD, kwargs)
 
     monkeypatch.setattr(client, "fetch", _fetch)
 
@@ -2924,7 +2943,7 @@ def test_single_runs_superset_slice_is_byte_identical_to_native_small_payload(
 
     expected = _KOLKATA_72H_PAYLOAD
     all_keys = set(sliced) | set(expected)
-    differing_fields = {k for k in all_keys if sliced.get(k) != expected.get(k)}
+    differing_fields = {k for k in all_keys if k != dl._BATCH_PHYSICAL_RESPONSE_KEY and sliced.get(k) != expected.get(k)}
     assert differing_fields == {"generationtime_ms"}, (
         f"unexpected field differences between the superset slice and the native "
         f"72-h payload: {differing_fields}"
@@ -2949,8 +2968,8 @@ def test_single_runs_superset_never_served_from_a_smaller_cached_window(
     def _fetch(_url, params, **kwargs):
         calls.append(dict(params))
         if int(params.get("forecast_hours", 0)) == 72:
-            return _KOLKATA_72H_PAYLOAD
-        return _KOLKATA_120H_PAYLOAD
+            return _http_fixture_payload(_KOLKATA_72H_PAYLOAD, kwargs)
+        return _http_fixture_payload(_KOLKATA_120H_PAYLOAD, kwargs)
 
     monkeypatch.setattr(client, "fetch", _fetch)
 
@@ -2980,7 +2999,7 @@ def test_single_runs_superset_hit_does_not_create_a_new_cache_entry(monkeypatch)
     import src.data.bayes_precision_fusion_download as dl
     import src.data.openmeteo_client as client
 
-    monkeypatch.setattr(client, "fetch", lambda *_a, **_k: _KOLKATA_120H_PAYLOAD)
+    monkeypatch.setattr(client, "fetch", lambda *_a, **_k: _http_fixture_payload(_KOLKATA_120H_PAYLOAD, _k))
 
     dl._fetch_single_runs_hourly_payloads_batched(
         models=["ecmwf_ifs"], locations=[_KOLKATA_LOCATION], run=_KOLKATA_RUN, forecast_hours=120,
@@ -3011,7 +3030,7 @@ def test_single_runs_payload_cache_persisted_format_unchanged_by_superset(
     monkeypatch.setattr(dl, "_single_runs_payload_cache_persistence_enabled", lambda: True)
     monkeypatch.setattr(dl, "_single_runs_payload_cache_path", lambda: cache_path)
 
-    monkeypatch.setattr(client, "fetch", lambda *_a, **_k: _KOLKATA_120H_PAYLOAD)
+    monkeypatch.setattr(client, "fetch", lambda *_a, **_k: _http_fixture_payload(_KOLKATA_120H_PAYLOAD, _k))
     dl._fetch_single_runs_hourly_payloads_batched(
         models=["ecmwf_ifs"], locations=[_KOLKATA_LOCATION], run=_KOLKATA_RUN, forecast_hours=120,
     )
@@ -3053,7 +3072,7 @@ def test_single_runs_payload_cache_superset_index_rebuilt_on_load(
 
     def _fetch(_url, params, **kwargs):
         calls.append(dict(params))
-        return _KOLKATA_120H_PAYLOAD
+        return _http_fixture_payload(_KOLKATA_120H_PAYLOAD, kwargs)
 
     monkeypatch.setattr(client, "fetch", _fetch)
     dl._fetch_single_runs_hourly_payloads_batched(
@@ -3214,7 +3233,7 @@ def test_single_runs_payload_cache_serves_cross_process_superset_hit_from_persis
 
     def _fetch(_url, params, **kwargs):
         calls.append(dict(params))
-        return _CHENGDU_120H_PAYLOAD
+        return _http_fixture_payload(_CHENGDU_120H_PAYLOAD, kwargs)
 
     monkeypatch.setattr(client, "fetch", _fetch)
 
@@ -3478,7 +3497,7 @@ def test_single_location_120h_payload_donates_to_cross_process_72h_request(
 
     def _fetch(_url, params, **kwargs):
         calls.append(dict(params))
-        return _CHENGDU_120H_PAYLOAD
+        return _http_fixture_payload(_CHENGDU_120H_PAYLOAD, kwargs)
 
     monkeypatch.setattr(client, "fetch", _fetch)
     complete_location = (
@@ -3525,7 +3544,7 @@ def test_single_location_72h_request_is_served_from_a_cross_process_120h_donor(
 
     def _fetch(_url, params, **kwargs):
         calls.append(dict(params))
-        return _CHENGDU_120H_PAYLOAD
+        return _http_fixture_payload(_CHENGDU_120H_PAYLOAD, kwargs)
 
     monkeypatch.setattr(client, "fetch", _fetch)
     complete_location = (

@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from enum import Enum
-from typing import Mapping
+from typing import Callable, Mapping
 from urllib.parse import urlsplit
 
 import httpx
@@ -479,6 +479,7 @@ def fetch(
     count_toward_quota: bool = True,
     conditional_status_codes: frozenset[int] = frozenset(),
     store: OpenMeteoResponseStore | None = None,
+    capture_entity_body: Callable[[bytes, float], None] | None = None,
 ) -> dict:
     """GET an Open-Meteo endpoint with retries, 429 handling, and quota tracking.
 
@@ -509,12 +510,22 @@ def fetch(
     endpoint = _endpoint_for_url(url)
     job = endpoint_label or endpoint
     req = exact_request(url, params) if answers is not None else None
+
+    def capture_held(held_payload: object) -> bool:
+        if capture_entity_body is not None and answers is not None and req is not None:
+            capture = answers.entity_body_capture(request_id, req, held_payload)
+            if capture is not None:
+                capture_entity_body(*capture)
+                return True
+            return False
+        return True
+
     if req is not None:
         _refresh_run_state(
             answers, req, request_id, tracker=tracker, client=client, timeout=timeout
         )
         held = answers.lookup(request_id, req)
-        if held is not None:
+        if held is not None and (held[0] >= 400 or capture_held(held[1])):
             answers.note_served(job, quota_cost)
             return _serve(held, url, params, conditional_status_codes)
     twin_deadline = time.monotonic() + min(IN_FLIGHT_WAIT_SECONDS, float(timeout))
@@ -538,7 +549,7 @@ def fetch(
                 break
             # Another caller is paying for this exact answer; wait for it instead.
             held = _await_twin(answers, tracker, request_id, req, twin_deadline)
-            if held is not None:
+            if held is not None and (held[0] >= 400 or capture_held(held[1])):
                 answers.note_served(job, quota_cost)
                 return _serve(held, url, params, conditional_status_codes)
             if time.monotonic() >= twin_deadline or tracker.request_in_flight(request_id):
@@ -609,13 +620,20 @@ def fetch(
                     )
                 raise error
 
+            # httpx.content is the decoded HTTP entity body, not compressed wire bytes.
+            # Capture before parsing; neither JSON canonicalization nor a cache replay
+            # may manufacture new bytes or renew the original possession clock.
+            entity_body = resp.content
+            entity_sha256 = hashlib.sha256(entity_body).hexdigest()
+            fetched_at = time.time()
             payload = resp.json()
             if answers is not None:
                 slug = meta_slug(url)
                 if slug is not None:
                     answers.record_meta(slug, payload)
                 if proofs is not None:
-                    answers.put(request_id, req, proofs, payload, status=resp.status_code)
+                    answers.put(request_id, req, proofs, payload, status=resp.status_code,
+                                now=fetched_at, entity_body=entity_body)
                 if count_toward_quota:
                     answers.note_success(request_id)
             recorded = tracker.record_request_success(
@@ -628,6 +646,10 @@ def fetch(
                 raise RuntimeError(
                     "Open-Meteo request lease lost; discarded unowned response"
                 )
+            if capture_entity_body is not None:
+                if hashlib.sha256(entity_body).hexdigest() != entity_sha256:
+                    raise RuntimeError("response entity bytes changed after parsing")
+                capture_entity_body(entity_body, fetched_at)
             return payload
 
         except httpx.HTTPError as e:

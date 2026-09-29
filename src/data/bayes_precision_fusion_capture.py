@@ -47,9 +47,6 @@ from src.forecast.bayes_precision_fusion import (
 )
 # NOTE (single-serving-rule §4): ``eb_bias`` is deliberately NOT imported — the consumed
 # posterior center is RAW (z = x), so the EB shift primitive must never reach this path.
-from src.forecast.grid_representativeness_loader import (
-    sigma_repr_sq_for as _sigma_repr_sq_for,
-)
 
 _LOG = logging.getLogger("zeus.bayes_precision_fusion_capture")
 
@@ -310,6 +307,7 @@ class BayesPrecisionFusionCaptureResult:
     anchor_raw_m2_native: float | None = None
     anchor_raw_n_train: int = 0
     history_models: tuple[str, ...] = ()
+    grid_representativeness_evidence: Mapping[str, object] | None = None
 
     @property
     def has_extras(self) -> bool:
@@ -496,7 +494,10 @@ def capture_bayes_precision_instruments(
     def _repr_sq(model_name: str) -> float:
         if not apply_grid_representativeness:
             return 0.0
-        return _sigma_repr_sq_for(city, model_name)
+        # Current OM 2m products are provider-default DEM corrected. A legacy
+        # default DEM is not a native cell height; this native-only channel is
+        # not applied. Neutral algebra is not a claim of verified zero error.
+        return 0.0
 
     # UNIFY (single-serving-rule §4): instruments enter RAW (z = x), NOT EB-corrected
     # (z = x − b̂). The walk-forward residual history is retained for width/provenance
@@ -602,4 +603,10 @@ def capture_bayes_precision_instruments(
         anchor_raw_m2_native=_anchor_raw_m2,
         anchor_raw_n_train=_anchor_raw_n,
         history_models=tuple(sorted(histories)),
+        grid_representativeness_evidence={
+            "status": "NOT_APPLICABLE_DOWNSCALED" if apply_grid_representativeness else "DISABLED",
+            "reason": "DEFAULT_DEM_IS_NOT_NATIVE_MODEL_HEIGHT",
+            "penalty_applied": False,
+            "native_geometry_status": "UNPROVEN",
+        },
     )
