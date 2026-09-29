@@ -58,6 +58,7 @@ import json
 from collections.abc import Mapping
 import math
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -238,6 +239,21 @@ def current_value_serving_schema(
     )
 
 
+_ARTIFACT_IDENTITY_JSON_SQL = """json_object('artifact_id',a.artifact_id,'source_id',a.source_id,'product_id',a.product_id,
+    'source_cycle_time',a.source_cycle_time,'captured_at',a.captured_at,
+    'source_available_at',a.source_available_at,'recorded_at',a.recorded_at,'data_version',a.data_version,
+    'artifact_path',a.artifact_path,'sha256',a.sha256,'byte_size',a.byte_size,
+    'request_url',a.request_url,'request_params_json',a.request_params_json,'metadata',a.artifact_metadata_json,
+    'body_artifact',json((SELECT json_object('artifact_id',b.artifact_id,'source_id',b.source_id,
+        'product_id',b.product_id,'data_version',b.data_version,'source_cycle_time',b.source_cycle_time,
+        'source_available_at',b.source_available_at,'captured_at',b.captured_at,'recorded_at',b.recorded_at,
+        'artifact_path',b.artifact_path,'sha256',b.sha256,'byte_size',b.byte_size,
+        'request_url',b.request_url,'request_params_json',b.request_params_json,'metadata',b.artifact_metadata_json)
+        FROM raw_forecast_artifacts b WHERE b.artifact_id=json_extract(CASE WHEN json_valid(a.artifact_metadata_json)
+            THEN a.artifact_metadata_json ELSE '{}' END,'$.physical_http_capture_receipt.body_artifact_id'))))"""
+_PHYSICAL_CAPTURE_SCAN_BUDGET_SECONDS = 2.0
+
+
 def _product_identity_select(schema: CurrentValueServingSchema, *, decision_iso: str | None = None) -> str:
     fields = ", ".join(
         f"'{name}', {name if name in schema.product_identity_columns else 'NULL'}"
@@ -245,58 +261,22 @@ def _product_identity_select(schema: CurrentValueServingSchema, *, decision_iso:
     )
     artifact = "NULL"
     if schema.has_artifacts and "artifact_id" in schema.product_identity_columns:
-        # A derived proof is an append-only, same-issued capture. Only causal
-        # readers may use it; carrier-only callers cannot invent its cutoff.
-        derived = ""
-        cutoff = "NULL" if decision_iso is None else "'" + decision_iso.replace("'", "''") + "'"
-        if decision_iso is not None:
-            derived = f""" OR ((a.data_version='openmeteo_single_model_http_capture_receipt_v1'
-                OR (raw_model_forecasts.artifact_id IS NULL
-                AND raw_model_forecasts.elevation_param='requested'
-                AND raw_model_forecasts.downscaling_policy='none'
-                AND raw_model_forecasts.endpoint_mode='single_runs'))
-                AND a.source_id=raw_model_forecasts.source_id
-                AND a.product_id=raw_model_forecasts.product_id
-                AND a.source_cycle_time=raw_model_forecasts.source_cycle_time
-                AND a.data_version IN ('openmeteo_single_model_entity_body_v1','openmeteo_single_model_http_capture_receipt_v1')
-                AND EXISTS (SELECT 1 FROM
-                    json_each(replace(json_array(CAST(json_extract(CASE WHEN json_valid(a.request_params_json)
-                        THEN a.request_params_json ELSE '{{}}' END,'$.latitude') AS TEXT)), ',', '\",\"')) lat
-                    JOIN json_each(replace(json_array(CAST(json_extract(CASE WHEN json_valid(a.request_params_json)
-                        THEN a.request_params_json ELSE '{{}}' END,'$.longitude') AS TEXT)), ',', '\",\"')) lon ON lon.key=lat.key
-                    JOIN json_each(replace(json_array(CAST(json_extract(CASE WHEN json_valid(a.request_params_json)
-                        THEN a.request_params_json ELSE '{{}}' END,'$.timezone') AS TEXT)), ',', '\",\"')) tz ON tz.key=lat.key
-                    WHERE CAST(lat.value AS REAL)=raw_model_forecasts.latitude_requested
-                      AND CAST(lon.value AS REAL)=raw_model_forecasts.longitude_requested
-                      AND tz.value=raw_model_forecasts.timezone_requested))"""
-        artifact = f"""(SELECT json_group_array(json_object('artifact_id',a.artifact_id,'source_id',a.source_id,'product_id',a.product_id,
-            'source_cycle_time',a.source_cycle_time,'captured_at',a.captured_at,
-            'source_available_at',a.source_available_at,'recorded_at',a.recorded_at,'data_version',a.data_version,
-            'artifact_path',a.artifact_path,'sha256',a.sha256,'byte_size',a.byte_size,
-            'request_url',a.request_url,'request_params_json',a.request_params_json,
-            'metadata',a.artifact_metadata_json,
-            'body_artifact',json((SELECT json_object('artifact_id',b.artifact_id,'source_id',b.source_id,
-                'product_id',b.product_id,'data_version',b.data_version,'source_cycle_time',b.source_cycle_time,
-                'source_available_at',b.source_available_at,'captured_at',b.captured_at,'recorded_at',b.recorded_at,
-                'artifact_path',b.artifact_path,'sha256',b.sha256,'byte_size',b.byte_size,
-                'request_url',b.request_url,'request_params_json',b.request_params_json,'metadata',b.artifact_metadata_json)
-                FROM raw_forecast_artifacts b WHERE b.artifact_id=json_extract(CASE WHEN json_valid(a.artifact_metadata_json)
-                    THEN a.artifact_metadata_json ELSE '{{}}' END,'$.physical_http_capture_receipt.body_artifact_id'))))) FROM raw_forecast_artifacts a
-            WHERE a.artifact_id=raw_model_forecasts.artifact_id {derived})"""
+        artifact = f"(SELECT {_ARTIFACT_IDENTITY_JSON_SQL} FROM raw_forecast_artifacts a WHERE a.artifact_id=raw_model_forecasts.artifact_id)"
     cutoff = "NULL" if decision_iso is None else "'" + decision_iso.replace("'", "''") + "'"
     return f"json_object({fields}, 'physical_proof_cutoff', {cutoff}, 'physical_artifact', json({artifact}))"
 
 
-def _physical_artifact_at_cutoff(row: Mapping[str, object]) -> dict[str, object]:
+def _physical_artifact_at_cutoff(row: Mapping[str, object], candidates=None) -> dict[str, object]:
     """Choose the latest possessed event without rounding clocks in SQLite.
 
     SQL only narrows the request family. A malformed latest clock remains a
     candidate for strict rejection, rather than silently exposing an older
     body. Known future possession is excluded with full datetime precision.
     """
-    candidates = row.get("physical_artifact")
-    if not isinstance(candidates, list):
-        return dict(row)
+    if candidates is None:
+        candidates = row.get("physical_artifact")
+        if not isinstance(candidates, list):
+            return dict(row)
 
     def clock(value: object) -> datetime | None:
         try:
@@ -306,7 +286,7 @@ def _physical_artifact_at_cutoff(row: Mapping[str, object]) -> dict[str, object]
             return None
 
     cutoff = clock(row.get("physical_proof_cutoff"))
-    eligible = []
+    best = None
     for artifact in candidates:
         if not isinstance(artifact, dict):
             continue
@@ -321,9 +301,57 @@ def _physical_artifact_at_cutoff(row: Mapping[str, object]) -> dict[str, object]
             continue
         # Unknown event order fails closed instead of hiding malformed proof.
         order = captured or recorded or datetime.max.replace(tzinfo=timezone.utc)
-        eligible.append((order, recorded or order, int(artifact["artifact_id"]), artifact))
-    latest = max(eligible, key=lambda item: item[:3])[-1] if eligible else None
+        candidate = (order, recorded or order, int(artifact["artifact_id"]), artifact)
+        if best is None or candidate[:3] > best[:3]:
+            best = candidate
+    latest = best[-1] if best is not None else None
     return {**row, "physical_artifact": latest}
+
+
+def _read_product_identity_at_cutoff(conn: sqlite3.Connection, raw: object, *, deadline_monotonic: float | None = None) -> str:
+    """Stream the complete same-issued request family, retaining only its winner.
+
+    SCOPE: one exact provider/request family. DRAIN: normal bounded acquisition
+    or a subsequent read within the existing query budget. RESET: a complete
+    scan, never a truncated older winner after deadline/interruption.
+    """
+    row = json.loads(str(raw))
+    if row.get("physical_proof_cutoff") is None or not all(row.get(key) is not None for key in (
+        "source_id", "product_id", "source_cycle_time", "latitude_requested", "longitude_requested", "timezone_requested"
+    )):
+        return str(raw)
+    legacy = (row.get("artifact_id") is None and row.get("elevation_param") == "requested"
+        and row.get("downscaling_policy") == "none" and row.get("endpoint_mode") == "single_runs")
+    sql = f"""SELECT {_ARTIFACT_IDENTITY_JSON_SQL} FROM raw_forecast_artifacts a
+        WHERE a.artifact_id=? OR (a.source_id=? AND a.product_id=? AND a.source_cycle_time=?
+            AND (a.data_version='openmeteo_single_model_http_capture_receipt_v1'
+                OR (? AND a.data_version='openmeteo_single_model_entity_body_v1'))
+            AND EXISTS (SELECT 1 FROM
+                json_each(replace(json_array(CAST(json_extract(CASE WHEN json_valid(a.request_params_json)
+                    THEN a.request_params_json ELSE '{{}}' END,'$.latitude') AS TEXT)), ',', '\",\"')) lat
+                JOIN json_each(replace(json_array(CAST(json_extract(CASE WHEN json_valid(a.request_params_json)
+                    THEN a.request_params_json ELSE '{{}}' END,'$.longitude') AS TEXT)), ',', '\",\"')) lon ON lon.key=lat.key
+                JOIN json_each(replace(json_array(CAST(json_extract(CASE WHEN json_valid(a.request_params_json)
+                    THEN a.request_params_json ELSE '{{}}' END,'$.timezone') AS TEXT)), ',', '\",\"')) tz ON tz.key=lat.key
+                WHERE CAST(lat.value AS REAL)=? AND CAST(lon.value AS REAL)=? AND tz.value=?))"""
+    deadline = time.monotonic() + _PHYSICAL_CAPTURE_SCAN_BUDGET_SECONDS
+    if deadline_monotonic is not None:
+        deadline = min(deadline, deadline_monotonic)
+    cursor = conn.execute(sql, (row.get("artifact_id"), row["source_id"], row["product_id"], row["source_cycle_time"],
+        int(legacy), row["latitude_requested"], row["longitude_requested"], row["timezone_requested"]))
+    def candidates():
+        while True:
+            if time.monotonic() >= deadline:
+                raise CurrentValueServingReadUnavailable("physical_capture_scan_budget_exceeded")
+            batch = cursor.fetchmany(32)
+            if not batch:
+                return
+            for item in batch:
+                yield json.loads(str(item[0]))
+    try:
+        return json.dumps(_physical_artifact_at_cutoff(row, candidates()), separators=(",", ":"))
+    finally:
+        cursor.close()
 
 
 def read_current_instrument_family_latest_id(
@@ -375,7 +403,9 @@ def _read_source_clock_rows(
         single_runs_only=single_runs_only,
     )
     try:
-        return conn.execute(sql, params).fetchall()
+        deadline = time.monotonic() + _PHYSICAL_CAPTURE_SCAN_BUDGET_SECONDS
+        rows = conn.execute(sql, params).fetchall()
+        return [(*row[:-1], _read_product_identity_at_cutoff(conn, row[-1], deadline_monotonic=deadline)) for row in rows]
     except sqlite3.OperationalError as exc:
         _raise_typed_read_unavailable(exc)
         raise AssertionError("unreachable")

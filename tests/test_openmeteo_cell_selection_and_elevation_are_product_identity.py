@@ -754,6 +754,65 @@ def test_blocked_seed_fingerprint_tracks_same_raw_proof_possession_at_its_cutoff
     assert conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall() == original_raw
     assert _seed_name(target_scope, computed_at=cycle.replace(hour=9)) != _seed_name(target_scope, computed_at=cycle.replace(hour=5))
     conn.close()
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("count,future", ((65, True), (1000, False), (7200, False)))
+def test_physical_receipt_scan_is_complete_streamed_and_future_group_does_not_revoke_prior_cut(tmp_path, monkeypatch, metric, count, future):
+    import time
+    import tracemalloc
+    from src.data import replacement_current_value_serving as serving
+    conn, target, cycle = _current_rows(tmp_path, monkeypatch, metric=metric)
+    original_body = conn.execute("SELECT artifact_id FROM raw_model_forecasts WHERE model='icon_global'").fetchone()[0]
+    cursor = conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?", (original_body,))
+    original = dict(zip((field[0] for field in cursor.description), cursor.fetchone(), strict=True))
+    # Controlled candidate catalog: only the original has valid body proof.
+    # Later malformed receipts must be selected and rejected, never hidden.
+    columns = [key for key in original if key != "artifact_id"]
+    for index in range(count):
+        captured = cycle.replace(hour=10 if future else 8, microsecond=index+1)
+        candidate = {**original, "data_version": "openmeteo_single_model_http_capture_receipt_v1",
+            "sha256": f"{index+1:064x}", "captured_at": captured.isoformat(),
+            "source_available_at": captured.isoformat(), "recorded_at": captured.isoformat()}
+        if not future and index == count-1:
+            candidate["captured_at"] = "broken-latest-clock"
+        conn.execute(f"INSERT INTO raw_forecast_artifacts ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
+            tuple(candidate[key] for key in columns))
+    foreign = {**candidate, "sha256": "f"*64, "request_params_json": json.dumps({"latitude":0,"longitude":0,"timezone":"UTC"})}
+    conn.execute(f"INSERT INTO raw_forecast_artifacts ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
+        tuple(foreign[key] for key in columns))
+    conn.commit()
+    schema = serving.current_value_serving_schema(conn)
+    decision = cycle.replace(hour=9 if not future else 10)
+    identity = conn.execute(f"SELECT {serving._product_identity_select(schema, decision_iso=decision.isoformat())} FROM raw_model_forecasts WHERE model='icon_global'").fetchone()[0]
+    tracemalloc.start()
+    start = time.perf_counter()
+    selected = json.loads(serving._read_product_identity_at_cutoff(conn, identity))
+    elapsed = time.perf_counter()-start
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    print(json.dumps({"same_family_candidates":count,"future":future,"elapsed_seconds":elapsed,"peak_bytes":peak}))
+    if future:
+        assert selected["physical_artifact"]["artifact_id"] == original_body
+        assert serving.read_current_instrument_values(conn, city=target.city, metric=metric, target_date=target.target_date,
+            source_cycle_time_iso=cycle.isoformat(), decision_time_iso=decision.isoformat())["icon_global"].value_c == 20
+    else:
+        assert selected["physical_artifact"]["captured_at"] == "broken-latest-clock"
+        assert not serving._source_clock_product_has_authority(json.dumps(selected), lead_days=1)
+    assert peak < 2_000_000  # Retain a batch and best, not the whole catalog.
+    conn.close()
+
+
+def test_interrupted_physical_receipt_scan_never_returns_an_older_best(tmp_path, monkeypatch):
+    from src.data import replacement_current_value_serving as serving
+    conn, target, cycle = _current_rows(tmp_path, monkeypatch)
+    schema = serving.current_value_serving_schema(conn)
+    identity = conn.execute(f"SELECT {serving._product_identity_select(schema, decision_iso=cycle.replace(hour=5).isoformat())} FROM raw_model_forecasts WHERE model='icon_global'").fetchone()[0]
+    ticks = iter((0.0,0.0,3.0))
+    monkeypatch.setattr(serving.time, "monotonic", lambda:next(ticks))
+    with pytest.raises(serving.CurrentValueServingReadUnavailable, match="scan_budget_exceeded"):
+        serving._read_product_identity_at_cutoff(conn, identity)
+    conn.close()
 @pytest.mark.parametrize("damage", (None,"wrong_first_site"))
 def test_single_model_location_batch_persists_and_serves_second_city_both_metrics(tmp_path,monkeypatch,damage):
     from src.data import bayes_precision_fusion_download as dl

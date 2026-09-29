@@ -3458,7 +3458,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                 if revalidate_legacy_capture:
                     from src.data.replacement_current_value_serving import (
                         current_value_serving_schema, _product_identity_select,
-                        _source_clock_product_has_authority,
+                        _source_clock_product_has_authority, _read_product_identity_at_cutoff,
                     )
                     schema = current_value_serving_schema(_ro)
                     identity = _product_identity_select(schema, decision_iso=datetime.now(UTC).isoformat())
@@ -3470,7 +3470,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                         f" AND target_date IN ({date_marks}) AND source_cycle_time IN ({cycle_marks})",
                         (*requested_models, *target_cities, *target_dates, *request_cycles),
                     ):
-                        if not _source_clock_product_has_authority(candidate[-1], lead_days=int(candidate[-2])):
+                        if not _source_clock_product_has_authority(_read_product_identity_at_cutoff(_ro, candidate[-1], deadline_monotonic=wall_clock_deadline), lead_days=int(candidate[-2])):
                             persisted_cycle_keys.discard(tuple(candidate[:6]))
                 persisted_keys = {
                     (model, city, target_date, metric, endpoint)

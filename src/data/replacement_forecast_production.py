@@ -1194,7 +1194,7 @@ def _held_legacy_physical_proof_recovery_candidates(
         current_evidence_shape_has_held_authority, cycle_age_outside_bound,
     )
     from src.data.replacement_current_value_serving import (
-        current_value_serving_schema, _product_identity_select, _source_clock_product_has_authority,
+        current_value_serving_schema, _product_identity_select, _source_clock_product_has_authority, _read_product_identity_at_cutoff,
     )
     from src.data.bayes_precision_fusion_download import (
         BAYES_PRECISION_FUSION_ELEVATION_PARAM, BAYES_PRECISION_FUSION_DOWNSCALING_POLICY, _model_domain_hash,
@@ -1241,7 +1241,7 @@ def _held_legacy_physical_proof_recovery_candidates(
             ).fetchall()
             for candidate in rows:
                 raw = json.loads(str(candidate[0]))
-                if _source_clock_product_has_authority(candidate[0], lead_days=int(raw["lead_days"])):
+                if _source_clock_product_has_authority(_read_product_identity_at_cutoff(conn, candidate[0], deadline_monotonic=deadline_monotonic), lead_days=int(raw["lead_days"])):
                     continue
                 try:
                     cycle = datetime.fromisoformat(str(raw["source_cycle_time"]).replace("Z", "+00:00"))
