@@ -6,19 +6,23 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
 import src.data.raw_forecast_artifact_manifest as manifest_module
 
-from src.data.openmeteo_ecmwf_ifs9_anchor import HIGH_DATA_VERSION, PRODUCT_ID, SOURCE_ID
+from src.data.openmeteo_ecmwf_ifs9_anchor import HIGH_DATA_VERSION, LOW_DATA_VERSION, PRODUCT_ID, SOURCE_ID
 from src.data.raw_forecast_artifact_manifest import (
     RawForecastArtifactManifest,
     UnsupportedRawForecastArtifactManifestFieldsError,
     read_manifest,
     write_manifest,
+    write_manifest_to_db,
 )
+from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
 
 
 def _manifest(tmp_path):
@@ -90,3 +94,45 @@ def test_write_manifest_never_exposes_a_truncated_target_on_replace_failure(
 
     assert path.read_bytes() == original_bytes
     assert tuple(tmp_path.glob("*.tmp")) == ()
+
+
+@pytest.mark.parametrize("data_version", (HIGH_DATA_VERSION, LOW_DATA_VERSION))
+def test_normal_manifest_preparation_preserves_same_body_first_possession(tmp_path, data_version):
+    from scripts.materialize_replacement_forecast_live import _prepare_live_schema_and_manifest
+    conn = sqlite3.connect(":memory:")
+    ensure_replacement_forecast_live_schema(conn)
+    conn.commit()
+    original = replace(_manifest(tmp_path), data_version=data_version)
+    first = _prepare_live_schema_and_manifest(conn, init_schema=False, schema_ready=True,
+        openmeteo_manifest=original, anchor_artifact_id=None)
+    original_row = conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?", (first.anchor_artifact_id,)).fetchone()
+    later_path = tmp_path / "same-body-different-path.json"
+    later_path.write_bytes(Path(original.artifact_path).read_bytes())
+    later = replace(original, artifact_path=str(later_path),
+        source_available_at="2026-06-18T10:00:00+00:00", captured_at="2026-06-18T10:05:00+00:00",
+        product_metadata={"city": "Karachi", "target_date": "2026-06-19", "precision_metadata_json": "later-proof.json"})
+    second = _prepare_live_schema_and_manifest(conn, init_schema=False, schema_ready=True,
+        openmeteo_manifest=later, anchor_artifact_id=None)
+    assert second.anchor_artifact_id == first.anchor_artifact_id
+    assert conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?", (first.anchor_artifact_id,)).fetchone() == original_row
+    assert conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts WHERE source_available_at<=?", ("2026-06-18T09:00:00+00:00",)).fetchone()[0] == 1
+    conn.close()
+
+
+def test_new_raw_bytes_append_without_changing_old_capture(tmp_path):
+    conn = sqlite3.connect(":memory:")
+    ensure_replacement_forecast_live_schema(conn)
+    original = _manifest(tmp_path)
+    first_id = write_manifest_to_db(conn, original)
+    first_row = conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?", (first_id,)).fetchone()
+    fresh_path = tmp_path / "actual-new-body.json"
+    fresh_path.write_text('{"ok":false}\n', encoding="utf-8")
+    fresh = RawForecastArtifactManifest.from_file(fresh_path, source_id=original.source_id, product_id=original.product_id,
+        data_version=original.data_version, source_cycle_time=original.source_cycle_time,
+        source_available_at="2026-06-18T10:00:00+00:00", captured_at="2026-06-18T10:05:00+00:00",
+        request_url=original.request_url, request_params=original.request_params, product_metadata=original.product_metadata)
+    fresh_id = write_manifest_to_db(conn, fresh)
+    assert fresh_id != first_id
+    assert conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?", (first_id,)).fetchone() == first_row
+    assert conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts").fetchone()[0] == 2
+    conn.close()

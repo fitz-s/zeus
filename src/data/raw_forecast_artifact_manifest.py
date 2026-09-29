@@ -422,6 +422,10 @@ def write_manifest_to_db(
     artifact_id is the only value downstream materializers should use when linking
     derived rows to raw files.
 
+    This registry accepts immutable raw products only. Same-natural-identity
+    reuse preserves the original bytes, request and first-possession clocks;
+    a later acquisition/proof is an append-only dependency, not an UPDATE here.
+
     ``repin_on_drift`` (default off): when the on-disk artifact is PRESENT and valid but
     its byte_size/sha256 drifted from ``manifest`` (a benign rewrite after pinning), the
     manifest is re-pinned from the current bytes before verify+write instead of aborting.
@@ -452,15 +456,7 @@ def write_manifest_to_db(
             artifact_metadata_json, training_allowed
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(source_id, product_id, data_version, source_cycle_time, sha256)
-        DO UPDATE SET
-            source_available_at = excluded.source_available_at,
-            captured_at = excluded.captured_at,
-            artifact_path = excluded.artifact_path,
-            byte_size = excluded.byte_size,
-            request_url = excluded.request_url,
-            request_params_json = excluded.request_params_json,
-            artifact_metadata_json = excluded.artifact_metadata_json,
-            training_allowed = excluded.training_allowed
+        DO NOTHING
         """,
         (
             manifest.source_id,
