@@ -161,7 +161,7 @@ def geometry_proof_authenticity_reason(
         from src.data.openmeteo_ecmwf_ifs9_bucket_transport import (
             same_grid_cell, source_cell_geometry_proof,
         )
-        from src.config import STATION_GROUND_SOURCE_ARTIFACTS, cities_by_name, runtime_station_geometry_for_city
+        from src.config import cities_by_name, runtime_station_geometry_for_city, station_ground_source_artifact_ref
 
         city = cities_by_name.get(metadata.city)
         if city is None:
@@ -182,7 +182,9 @@ def geometry_proof_authenticity_reason(
         audit = ground.get("audit")
         if (
             not isinstance(audit, Mapping)
-            or audit.get("artifact_ref") != STATION_GROUND_SOURCE_ARTIFACTS.get(ground["facts"].get("source_kind"))
+            or audit.get("artifact_ref") != station_ground_source_artifact_ref(
+                source_kind=ground["facts"].get("source_kind"), station_id=ground["facts"].get("station_id"),
+            )
             or not isinstance(audit.get("body_sha256"), str)
             or len(audit["body_sha256"]) != 64
             or any(char not in "0123456789abcdef" for char in audit["body_sha256"])

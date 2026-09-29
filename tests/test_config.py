@@ -761,7 +761,7 @@ def _official_kord_registry(tmp_path, monkeypatch):
     assert hashlib.sha256(body).hexdigest() == "3c95677db4c091cb4c01a027b7276b7053dbe945c764803f1cd166c7e5a25aac"
     artifact = tmp_path / "noaa_homr_kord_station.json"
     artifact.write_bytes(body)
-    facts = config._homr_kord_ground_facts(body, "KORD")
+    facts = config._homr_ground_facts(body, "KORD")
     claim = {**facts, "artifact_ref": "config/noaa_homr_kord_station.json",
              "body_sha256": hashlib.sha256(body).hexdigest(), "checked_at": "2026-09-29T21:50:23Z",
              "query_date": "2026-09-29", "query_url": f"{config.HOMR_GROUND_SOURCE_URL}?qid=ICAO%3AKORD&date=2026-09-29&phrData=false"}
@@ -878,6 +878,11 @@ def test_official_kord_audit_is_not_stable_ground_or_ens_identity(tmp_path, monk
 @pytest.mark.parametrize("feet,metres,verified", [
     (True, .3048, False), (1 / .3048, True, False),
     (0, 0, True), (-1, -.3048, True), (672, 204.8, True), ("672", "204.8", True),
+    ("481", "146.5", True), ("484", "147.6", True), ("97", "29.7", True),
+    ("5", "1.4", True), ("10", "3.2", True),
+    ("0", "0.2", True), ("0", "-0.2", True),
+    ("0", "0.3", False), ("0", "-0.3", False),
+    ("1.0", "0.33", False), ("nan", "0", False), ("0", "inf", False),
 ])
 def test_official_kord_ground_measurements_reject_booleans_not_zero_or_negative(
     tmp_path, monkeypatch, feet, metres, verified,
@@ -899,3 +904,28 @@ def test_official_kord_ground_measurements_reject_booleans_not_zero_or_negative(
     assert ground["ground_status"] == ("VERIFIED" if verified else "UNPROVEN")
     if verified:
         assert ground["ground_elevation_m"] == float(metres)
+
+
+def test_pure_ground_parser_uses_frozen_bytes_not_current_file_or_publication_label(tmp_path, monkeypatch):
+    import src.config as config
+    _, artifact, _ = _official_kord_registry(tmp_path, monkeypatch)
+    frozen = artifact.read_bytes()
+    kwargs = {"source_kind": "noaa_homr_primary_dcp_snapshot_v1", "station_id": "KORD"}
+    facts = config.station_ground_facts_from_bytes(**kwargs, raw_body=frozen)
+    assert facts["elevation_m"] == 204.8
+    artifact.write_bytes(b"unavailable latest file")
+    assert config.station_ground_facts_from_bytes(**kwargs, raw_body=frozen) == facts
+    payload = json.loads(frozen)
+    station = payload["stationCollection"]["stations"][0]
+    station["platforms"] = [row for row in station["platforms"] if row["platform"] != "PLCD"]
+    assert config.station_ground_facts_from_bytes(**kwargs, raw_body=json.dumps(payload).encode()) == facts
+    station["remarks"] = []
+    assert config.station_ground_facts_from_bytes(**kwargs, raw_body=json.dumps(payload).encode()) is None
+    for kind, station_id, raw in (("unknown", "KORD", frozen),
+                                  (kwargs["source_kind"], "KATL", frozen),
+                                  (kwargs["source_kind"], "ZSSS", frozen),
+                                  (kwargs["source_kind"], "KORD", b"{}")):
+        assert config.station_ground_facts_from_bytes(source_kind=kind, station_id=station_id, raw_body=raw) is None
+    assert config.station_ground_source_artifact_ref(**kwargs) == "config/noaa_homr_kord_station.json"
+    assert config.station_ground_source_artifact_ref(source_kind=kwargs["source_kind"], station_id="KATL") == "config/noaa_homr_katl_station.json"
+    assert config.station_ground_source_artifact_ref(source_kind="hko_station_table_v1", station_id="KORD") is None

@@ -18,6 +18,7 @@ import tempfile
 from html.parser import HTMLParser
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
 from typing import Optional
@@ -537,6 +538,18 @@ STATION_GROUND_SOURCE_ARTIFACTS = {
     "hko_station_table_v1": "config/hko_station_metadata.html",
     "noaa_homr_primary_dcp_snapshot_v1": "config/noaa_homr_kord_station.json",
 }
+_HOMR_PRIMARY_DCP_STATIONS = frozenset({
+    "KATL", "KAUS", "KORD", "KDAL", "KBKF", "KHOU", "KLAX", "KMIA", "KLGA", "KSFO", "KSEA",
+})
+
+
+def station_ground_source_artifact_ref(*, source_kind: str, station_id: str) -> str | None:
+    """Return only the approved per-station source entity, never a global fallback."""
+    if source_kind == "hko_station_table_v1" and station_id == "HKO_HQ":
+        return STATION_GROUND_SOURCE_ARTIFACTS[source_kind]
+    if source_kind == "noaa_homr_primary_dcp_snapshot_v1" and station_id in _HOMR_PRIMARY_DCP_STATIONS:
+        return f"config/noaa_homr_{station_id.lower()}_station.json"
+    return None
 
 
 class _HkoStationTable(HTMLParser):
@@ -614,18 +627,18 @@ def _hko_ground_facts(raw: bytes, station_id: str) -> dict[str, object]:
     }
 
 
-def _homr_kord_ground_facts(raw: bytes, station_id: str) -> dict[str, object]:
-    """Replay the approved current KORD primary-DCP snapshot, not airport MSL.
+def _homr_ground_facts(raw: bytes, station_id: str) -> dict[str, object]:
+    """Replay an approved current US primary-DCP snapshot, not airport MSL.
 
     HOMR Enhanced ELEV_GROUND denotes the official temperature site; DSI9767B
     section 2aa defines signed feet above sea level. POR is not a location's
     effective interval, and capture possession must not authorize earlier cuts.
-    SCOPE: KORD-dependent OM9 precision only, not ENS/reference identity.
+    SCOPE: this exact station's OM9 precision only, not ENS/reference identity.
     DRAIN: approved current metadata capture plus normal config reload.
     RESET: valid role/bytes let normal producers recompute after possession.
     """
-    if station_id != "KORD":
-        raise ValueError("approved HOMR snapshot is only KORD")
+    if station_id not in _HOMR_PRIMARY_DCP_STATIONS:
+        raise ValueError("unsupported primary-DCP settlement station")
 
     def number(value: object) -> float:
         if isinstance(value, bool):
@@ -645,18 +658,21 @@ def _homr_kord_ground_facts(raw: bytes, station_id: str) -> dict[str, object]:
         raise ValueError("HOMR snapshot must contain one station")
     station = stations[0]
     identifiers = station["identifiers"]
-    expected = {"ICAO": "KORD", "WMO": "72530", "WBAN": "94846", "NCDCSTNID": "10003214"}
-    for kind, value in expected.items():
+    ids = {}
+    for kind in ("ICAO", "WMO", "WBAN", "NCDCSTNID"):
         found = [row["id"] for row in identifiers if row.get("idType") == kind]
-        if found != [value]:
+        if len(found) != 1 or not isinstance(found[0], str):
             raise ValueError("official station identifier ambiguous or foreign")
+        ids[kind] = found[0]
+    if ids["ICAO"] != station_id or any(re.fullmatch(r"\d+", ids[k]) is None for k in ("WMO", "WBAN", "NCDCSTNID")):
+        raise ValueError("official station identifier ambiguous or foreign")
     location = station["location"]
-    if station["ncdcStnId"] != "10003214" or location["ncdcstnId"] != "10003214":
+    if station["ncdcStnId"] != ids["NCDCSTNID"] or location["ncdcstnId"] != ids["NCDCSTNID"]:
         raise ValueError("official location belongs to another station")
     if station["header"]["por"]["endDate"] != "Present":
         raise ValueError("not a current station snapshot")
     platforms = {row["platform"] for row in station["platforms"]}
-    if not {"ASOS", "PLCD"} <= platforms:
+    if "ASOS" not in platforms:
         raise ValueError("official temperature platform unavailable")
     remarks = [row["remark"] for row in station["remarks"] if row.get("type") == "GENERAL"]
     if not any(
@@ -676,19 +692,51 @@ def _homr_kord_ground_facts(raw: bytes, station_id: str) -> dict[str, object]:
     elevations = [row for row in location["elevations"] if row.get("elevationType") == "GROUND"]
     if len(elevations) != 1:
         raise ValueError("primary observation ground ambiguous or missing")
-    elevation = number(elevations[0]["elevationMeters"])
-    feet = number(elevations[0]["elevationFeet"])
-    if not math.isclose(elevation, feet * .3048, abs_tol=.05):
+    ground = elevations[0]
+    elevation = number(ground["elevationMeters"])
+    number(ground["elevationFeet"])
+    # Both published quantities are rounded independently. Compare their
+    # displayed-precision intervals, not a tolerance that treats integer feet
+    # as exact and falsely rejects genuine one-decimal metre observations.
+    def interval(value: object, scale: Decimal) -> tuple[Decimal, Decimal]:
+        decimal = Decimal(str(value))
+        half_unit = Decimal("0.5").scaleb(decimal.as_tuple().exponent)
+        return (decimal - half_unit) * scale, (decimal + half_unit) * scale
+
+    metres_interval = interval(ground["elevationMeters"], Decimal(1))
+    feet_interval = interval(ground["elevationFeet"], Decimal("0.3048"))
+    if max(metres_interval[0], feet_interval[0]) > min(metres_interval[1], feet_interval[1]):
         raise ValueError("official ground units inconsistent")
     return {
         "revision": STATION_GROUND_PROOF_REVISION,
         "source_kind": "noaa_homr_primary_dcp_snapshot_v1", "station_id": station_id,
-        "source_station_id": "10003214", "wmo_station_id": "72530", "wban_station_id": "94846",
+        "source_station_id": ids["NCDCSTNID"], "wmo_station_id": ids["WMO"], "wban_station_id": ids["WBAN"],
         "height_role": "ground_msl", "quantity": "location.elevations.GROUND",
         "elevation_m": elevation, "site_lat": lat, "site_lon": lon, "temperature_station": True,
         "location_role": "primary_temperature_dcp", "coordinate_source": "ASOS CM",
         "source_url": HOMR_GROUND_SOURCE_URL,
     }
+
+
+def station_ground_facts_from_bytes(
+    *, source_kind: str, station_id: str, raw_body: bytes,
+) -> dict[str, object] | None:
+    """Replay supported official entities without I/O, clocks or self-claims.
+
+    This establishes physical facts only. Approved artifact identity, capture
+    possession and decision-time authority remain the caller's obligations.
+    """
+    if (not isinstance(source_kind, str) or not isinstance(station_id, str)
+            or not isinstance(raw_body, bytes) or len(raw_body) > 256 * 1024):
+        return None
+    if station_ground_source_artifact_ref(source_kind=source_kind, station_id=station_id) is None:
+        return None
+    try:
+        if source_kind == "hko_station_table_v1":
+            return _hko_ground_facts(raw_body, station_id)
+        return _homr_ground_facts(raw_body, station_id)
+    except (ValueError, TypeError, KeyError, IndexError, AttributeError, UnicodeError, ArithmeticError):
+        return None
 
 
 def _station_ground_for_entry(entry: dict, station_id: str) -> dict[str, object]:
@@ -706,7 +754,9 @@ def _station_ground_for_entry(entry: dict, station_id: str) -> dict[str, object]
         checked = datetime.fromisoformat(str(claim["checked_at"]).replace("Z", "+00:00"))
         if checked.tzinfo is None or checked.utcoffset() is None:
             raise ValueError("ground source audit time must be timezone-aware")
-        artifact_ref = STATION_GROUND_SOURCE_ARTIFACTS[kind]
+        artifact_ref = station_ground_source_artifact_ref(source_kind=kind, station_id=station_id)
+        if artifact_ref is None:
+            raise ValueError("ground source has no approved station entity")
         if claim.get("artifact_ref") != artifact_ref:
             raise ValueError("ground source artifact is not the approved config asset")
         artifact = CONFIG_DIR / Path(artifact_ref).name
@@ -717,14 +767,18 @@ def _station_ground_for_entry(entry: dict, station_id: str) -> dict[str, object]
         raw = artifact.read_bytes()
         if hashlib.sha256(raw).hexdigest() != claim["body_sha256"]:
             raise ValueError("ground source body identity mismatch")
-        facts = (_hko_ground_facts(raw, station_id) if kind == "hko_station_table_v1"
-                 else _homr_kord_ground_facts(raw, station_id))
+        facts = station_ground_facts_from_bytes(source_kind=kind, station_id=station_id, raw_body=raw)
+        if facts is None:
+            raise ValueError("official ground source facts unavailable")
         audit_keys = ["artifact_ref", "body_sha256", "checked_at"]
         if kind == "noaa_homr_primary_dcp_snapshot_v1":
             query_date = date.fromisoformat(claim["query_date"])
-            if query_date != checked.astimezone(timezone.utc).date() or claim.get("query_url") != (
-                f"{HOMR_GROUND_SOURCE_URL}?qid=ICAO%3AKORD&date={query_date.isoformat()}&phrData=false"
-            ):
+            queries = {
+                f"{HOMR_GROUND_SOURCE_URL}?current=true&qid=ICAO%3A{station_id}&date={query_date.isoformat()}&phrData=false",
+            }
+            if station_id == "KORD":  # Original approved receipt predates current=true narrowing.
+                queries.add(f"{HOMR_GROUND_SOURCE_URL}?qid=ICAO%3AKORD&date={query_date.isoformat()}&phrData=false")
+            if query_date != checked.astimezone(timezone.utc).date() or claim.get("query_url") not in queries:
                 raise ValueError("HOMR snapshot query is not bound to current capture")
             audit_keys.extend(("query_date", "query_url"))
         if any(claim.get(key) != value for key, value in facts.items()):
