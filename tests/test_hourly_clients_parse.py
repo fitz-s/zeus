@@ -1,6 +1,6 @@
 # Created: 2026-04-21
-# Last reused/audited: 2026-09-12 (T-group tenths parser unification)
-# Lifecycle: created=2026-04-21; last_reviewed=2026-09-12; last_reused=2026-09-12
+# Last reused/audited: 2026-09-29 (WU producer station identity)
+# Lifecycle: created=2026-04-21; last_reviewed=2026-09-29; last_reused=2026-09-29
 # Purpose: Networkless parse + aggregate invariants for the WU/Ogimet hourly clients and the shared METAR temperature parser.
 # Reuse: Inspect src/data/metar_temperature.py, src/data/ogimet_hourly_client.py and src/data/wu_hourly_client.py before relying on these assertions.
 # Authority basis: plan v3 Phase 0 files #4/#5; extremum-preservation
@@ -141,7 +141,71 @@ def test_parse_csv_line_bad_date_returns_none():
 
 def _wu_obs(hour: int, minute: int, temp: float, *, month: int = 1, day: int = 15) -> dict:
     dt = datetime(2024, month, day, hour, minute, tzinfo=timezone.utc)
-    return {"valid_time_gmt": int(dt.timestamp()), "temp": temp}
+    return {"valid_time_gmt": int(dt.timestamp()), "temp": temp, "obs_id": "KORD", "key": "KORD"}
+
+
+@pytest.mark.parametrize("identity", [{}, {"obs_id": "KLGA", "key": "KLGA"}, {"obs_id": "KORD", "key": "KLGA"}])
+def test_wu_aggregate_cannot_relabel_another_station(identity):
+    row = {"valid_time_gmt": int(datetime(2024, 1, 15, 14, tzinfo=timezone.utc).timestamp()), "temp": 32.0, **identity}
+    with pytest.raises(ValueError, match="station identity"):
+        _aggregate_hourly(
+            [row], icao="KORD", unit="F", timezone_name="America/Chicago",
+            city_name="Chicago", start_date=date(2024, 1, 15), end_date=date(2024, 1, 15),
+        )
+
+
+@pytest.mark.parametrize("defect", ["metadata_missing", "location_wrong", "unit_wrong", "row_missing", "row_wrong", "mixed", "conflicting"])
+def test_wu_hourly_response_identity_failure_emits_no_rows(monkeypatch, defect):
+    import src.data.wu_hourly_client as client
+
+    row = _wu_obs(14, 0, 32.0)
+    body = {"metadata": {"location_id": "KORD:9:US", "units": "e"}, "observations": [row]}
+    if defect == "metadata_missing":
+        body.pop("metadata")
+    elif defect == "location_wrong":
+        body["metadata"]["location_id"] = "KLGA:9:US"
+    elif defect == "unit_wrong":
+        body["metadata"]["units"] = "m"
+    elif defect == "row_missing":
+        row.pop("obs_id")
+        row.pop("key")
+    elif defect == "row_wrong":
+        row.update(obs_id="KLGA", key="KLGA")
+    elif defect == "mixed":
+        body["observations"].append({**row, "obs_id": "KLGA", "key": "KLGA"})
+    else:
+        row["key"] = "KLGA"
+    monkeypatch.setattr(client.httpx, "get", lambda *args, **kwargs: SimpleNamespace(status_code=200, json=lambda: body))
+    result = client.fetch_wu_hourly("KORD", "US", date(2024, 1, 15), date(2024, 1, 15), "F", "America/Chicago", city_name="Chicago")
+    assert result.failed and result.failure_reason == "PARSE_ERROR"
+    assert result.observations == []
+
+
+@pytest.mark.parametrize("city_name", ["Auckland", "Jinan", "Jakarta", "Lagos", "Taipei"])
+def test_wu_hourly_authentic_identity_accepts_each_current_wu_city(monkeypatch, city_name):
+    import src.data.wu_hourly_client as client
+    from src.config import cities_by_name
+
+    city = cities_by_name[city_name]
+    instant = datetime(2026, 9, 28, 12, tzinfo=ZoneInfo(city.timezone)).astimezone(timezone.utc)
+    row = {"valid_time_gmt": int(instant.timestamp()), "temp": 27.0, "key": city.wu_station, "obs_id": city.wu_station, "obs_name": "Airport friendly name"}
+    body = {"metadata": {"location_id": f"{city.wu_station}:9:{city.country_code}", "units": "m"}, "observations": [row]}
+    monkeypatch.setattr(client.httpx, "get", lambda *args, **kwargs: SimpleNamespace(status_code=200, json=lambda: body))
+    result = client.fetch_wu_hourly(city.wu_station, city.country_code, date(2026, 9, 28), date(2026, 9, 28), "C", city.timezone, city_name=city.name)
+    assert not result.failed
+    assert len(result.observations) == 1
+    assert result.observations[0].station_id == city.wu_station
+    assert result.observations[0].hour_max_temp == 27.0
+    assert result.observations[0].hour_min_temp == 27.0
+
+
+def test_wu_hourly_empty_response_is_no_data(monkeypatch):
+    import src.data.wu_hourly_client as client
+
+    monkeypatch.setattr(client.httpx, "get", lambda *args, **kwargs: SimpleNamespace(status_code=200, json=lambda: {"observations": []}))
+    result = client.fetch_wu_hourly("KORD", "US", date(2024, 1, 15), date(2024, 1, 15), "F", "America/Chicago", city_name="Chicago")
+    assert not result.failed
+    assert result.observations == []
 
 
 def test_wu_aggregate_emits_hour_max_and_min_from_same_bucket():

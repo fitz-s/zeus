@@ -53,6 +53,8 @@ from src.data.daily_obs_append import (
     WU_API_KEY,
     WU_HEADERS,
     WU_ICAO_HISTORY_URL,
+    _assert_wu_observation_station,
+    _wu_history_observations,
 )
 
 logger = logging.getLogger(__name__)
@@ -229,7 +231,12 @@ def fetch_wu_hourly(
             retryable=True,
             error=f"json parse failed: {exc}",
         )
-    raw_observations = body.get("observations", []) or []
+    try:
+        raw_observations = _wu_history_observations(body, icao=icao, cc=cc, unit=unit)
+    except ValueError as exc:
+        return WuHourlyFetchResult(
+            failure_reason="PARSE_ERROR", retryable=True, error=str(exc),
+        )
     aggregated = _aggregate_hourly(
         raw_observations,
         icao=icao,
@@ -284,6 +291,7 @@ def _aggregate_hourly(
     # Bucket: hour_floor -> list of (temp, raw_utc_dt)
     buckets: dict[datetime, list[tuple[float, datetime]]] = {}
     for obs in raw_observations:
+        _assert_wu_observation_station(obs, icao)
         temp = obs.get("temp")
         epoch = obs.get("valid_time_gmt")
         if temp is None or epoch is None:

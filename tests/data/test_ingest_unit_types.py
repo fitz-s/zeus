@@ -1,5 +1,5 @@
 # Created: 2026-05-18
-# Last reused or audited: 2026-05-18
+# Last reused or audited: 2026-09-29
 # Authority basis: src/data/ogimet_hourly_client.py, src/data/wu_hourly_client.py,
 #   src/data/meteostat_bulk_client.py, src/data/daily_obs_append.py,
 #   src/data/observation_client.py (F3 PR 2/3)
@@ -199,7 +199,7 @@ def test_wu_adapter_temp_unit_matches_fahrenheit_request() -> None:
 
     # Minimal synthetic raw_observations list
     raw_observations = [
-        {"temp": "72.5", "valid_time_gmt": "1746000000"},  # 2025-04-30T08:00:00Z
+        {"temp": "72.5", "valid_time_gmt": "1746000000", "obs_id": "KORD", "key": "KORD"},  # 2025-04-30T08:00:00Z
     ]
     city_name = "Chicago"
     start = date(2025, 4, 30)

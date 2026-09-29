@@ -157,6 +157,46 @@ class WuDailyFetchResult:
         return self.failure_reason is not None
 
 
+def _assert_wu_observation_station(observation: object, icao: str) -> None:
+    """Bind a history row to its returned station, never its request URL."""
+    if not isinstance(observation, dict):
+        raise ValueError("WU observation is not an object")
+    identities = [observation.get(field) for field in ("obs_id", "key")]
+    present = [value for value in identities if value not in (None, "")]
+    expected = str(icao).strip().upper()
+    if not expected or not present or any(
+        not isinstance(value, str) or value.strip().upper() != expected
+        for value in present
+    ):
+        raise ValueError("WU observation station identity missing or mismatched")
+
+
+def _wu_history_observations(body: object, *, icao: str, cc: str, unit: str) -> list[dict]:
+    """Validate the history product's station and unit before aggregation.
+
+    SCOPE: this requested station/product response. DRAIN: its normal retry.
+    RESET: the next response names that station in metadata and every row.
+    A published empty list remains no-data, rather than an identity failure.
+    """
+    if not isinstance(body, dict) or not isinstance(body.get("observations"), list):
+        raise ValueError("WU history observations is not a list")
+    observations = body["observations"]
+    if not observations:
+        return []
+    metadata = body.get("metadata")
+    if not isinstance(metadata, dict):
+        raise ValueError("WU history metadata missing")
+    expected_location = f"{icao}:9:{cc}".upper()
+    location = metadata.get("location_id")
+    if not isinstance(location, str) or location.strip().upper() != expected_location:
+        raise ValueError("WU history location identity missing or mismatched")
+    if metadata.get("units") != ("m" if unit == "C" else "e"):
+        raise ValueError("WU history measurement unit missing or mismatched")
+    for observation in observations:
+        _assert_wu_observation_station(observation, icao)
+    return observations
+
+
 def _fetch_wu_icao_daily_highs_lows(
     icao: str,
     cc: str,
@@ -231,10 +271,13 @@ def _fetch_wu_icao_daily_highs_lows(
                 retryable=True,
                 error=f"json parse failed: {e}",
             )
-        observations = body.get("observations", [])
-        if require_station_identity and any(str(obs.get("obs_id", "")).upper() != icao.upper() for obs in observations):
-            return WuDailyFetchResult(payload={}, failure_reason=CoverageReason.PARSE_ERROR,
-                                      error="WU station identity mismatch")
+        try:
+            observations = _wu_history_observations(body, icao=icao, cc=cc, unit=unit)
+        except ValueError as exc:
+            return WuDailyFetchResult(
+                payload={}, failure_reason=CoverageReason.PARSE_ERROR,
+                retryable=True, error=str(exc),
+            )
         if not observations:
             return WuDailyFetchResult(payload={})
 

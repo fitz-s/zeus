@@ -1,6 +1,6 @@
 # Created: 2026-04-13
-# Last reused/audited: 2026-09-01
-# Lifecycle: created=2026-04-13; last_reviewed=2026-09-01; last_reused=2026-09-01
+# Last reused/audited: 2026-09-29
+# Lifecycle: created=2026-04-13; last_reviewed=2026-09-29; last_reused=2026-09-29
 # Purpose: Protect K2 live-ingestion and backfill relationship contracts.
 # Reuse: Keep tests fixture-backed; inspect source-routing assumptions before extending.
 # Authority basis: K2 live-ingestion packet; P1 daily observation writer provenance packet.
@@ -962,6 +962,94 @@ def test_R5_empty_wu_payload_is_not_network_error() -> None:
     assert row["reason"] == CoverageReason.SOURCE_NOT_PUBLISHED_YET
     assert stats["fetch_errors"] == 0
     assert stats["missing_from_api"] == 1
+
+
+@pytest.mark.parametrize("identity", [{}, {"obs_id": "KLGA", "key": "KLGA"}, {"obs_id": "NZAA", "key": "KLGA"}])
+def test_wu_daily_response_identity_failure_cannot_write_atoms(monkeypatch, identity):
+    from types import SimpleNamespace
+
+    conn = _memdb()
+    row = {"valid_time_gmt": int(datetime(2026, 9, 28, 12, tzinfo=ZoneInfo("Pacific/Auckland")).timestamp()), "temp": 27.0, **identity}
+    body = {"metadata": {"location_id": "NZAA:9:NZ", "units": "m"}, "observations": [row]}
+    monkeypatch.setattr(daily_obs_append.httpx, "get", lambda *args, **kwargs: SimpleNamespace(status_code=200, json=lambda: body))
+    build = MagicMock(side_effect=AssertionError("unproven station reached atom builder"))
+    monkeypatch.setattr(daily_obs_append, "_build_atom_pair", build)
+    stats = daily_obs_append.append_wu_city("Auckland", [date(2026, 9, 28)], conn, rebuild_run_id="test-wu-station")
+    assert stats["fetch_errors"] == 1 and stats["inserted"] == 0
+    build.assert_not_called()
+    assert conn.execute("SELECT COUNT(*) FROM observations WHERE city='Auckland'").fetchone()[0] == 0
+    coverage = conn.execute("SELECT status,reason FROM data_coverage WHERE city='Auckland' AND target_date='2026-09-28'").fetchone()
+    assert tuple(coverage) == (CoverageStatus.FAILED.value, CoverageReason.PARSE_ERROR)
+
+
+@pytest.mark.parametrize("defect", ["metadata_missing", "location_wrong", "unit_wrong", "mixed"])
+def test_wu_daily_response_product_mismatch_preserves_parse_failure(monkeypatch, defect):
+    from types import SimpleNamespace
+
+    row = {"valid_time_gmt": int(datetime(2026, 9, 28, 12, tzinfo=ZoneInfo("Pacific/Auckland")).timestamp()), "temp": 27.0, "key": "NZAA", "obs_id": "NZAA"}
+    body = {"metadata": {"location_id": "NZAA:9:NZ", "units": "m"}, "observations": [row]}
+    if defect == "metadata_missing":
+        body.pop("metadata")
+    elif defect == "location_wrong":
+        body["metadata"]["location_id"] = "RCSS:9:TW"
+    elif defect == "unit_wrong":
+        body["metadata"]["units"] = "e"
+    else:
+        body["observations"].append({**row, "obs_id": "RCSS", "key": "RCSS"})
+    monkeypatch.setattr(daily_obs_append.httpx, "get", lambda *args, **kwargs: SimpleNamespace(status_code=200, json=lambda: body))
+    result = daily_obs_append._fetch_wu_icao_daily_highs_lows("NZAA", "NZ", date(2026, 9, 28), date(2026, 9, 28), "C", "Pacific/Auckland")
+    assert result.payload == {}
+    assert result.failure_reason == CoverageReason.PARSE_ERROR and result.retryable
+
+
+@pytest.mark.parametrize("city_name", ["Auckland", "Jinan", "Jakarta", "Lagos", "Taipei"])
+def test_wu_daily_authentic_identity_accepts_each_current_wu_city(monkeypatch, city_name):
+    from types import SimpleNamespace
+    from src.config import cities_by_name
+
+    city = cities_by_name[city_name]
+    row = {"valid_time_gmt": int(datetime(2026, 9, 28, 12, tzinfo=ZoneInfo(city.timezone)).timestamp()), "temp": 27.0, "key": city.wu_station, "obs_id": city.wu_station, "obs_name": "Airport friendly name"}
+    body = {"metadata": {"location_id": f"{city.wu_station}:9:{city.country_code}", "units": "m"}, "observations": [row, {**row, "temp": 25.0}]}
+    monkeypatch.setattr(daily_obs_append.httpx, "get", lambda *args, **kwargs: SimpleNamespace(status_code=200, json=lambda: body))
+    result = daily_obs_append._fetch_wu_icao_daily_highs_lows(city.wu_station, city.country_code, date(2026, 9, 28), date(2026, 9, 28), "C", city.timezone)
+    assert not result.failed
+    assert result.payload == {"2026-09-28": (27.0, 25.0)}
+
+
+def test_wu_daily_real_empty_response_keeps_no_data_semantics(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(daily_obs_append.httpx, "get", lambda *args, **kwargs: SimpleNamespace(status_code=200, json=lambda: {"observations": []}))
+    result = daily_obs_append._fetch_wu_icao_daily_highs_lows("NZAA", "NZ", date(2026, 9, 28), date(2026, 9, 28), "C", "Pacific/Auckland")
+    assert not result.failed and result.payload == {}
+
+
+@pytest.mark.parametrize(("city_name", "target", "unit", "high", "low"), [
+    ("Auckland", date(2026, 9, 28), "C", 27.0, 25.0),
+    ("NYC", date(2026, 4, 10), "F", 75.0, 55.0),
+])
+def test_wu_station_failure_drains_into_matching_high_low_write(monkeypatch, city_name, target, unit, high, low):
+    from types import SimpleNamespace
+    from src.config import cities_by_name, settlement_source_type_for_city
+
+    city = cities_by_name[city_name]
+    assert settlement_source_type_for_city(city, target) == "wu_icao"
+    conn = _memdb()
+    instant = datetime.combine(target, datetime.min.time(), tzinfo=ZoneInfo(city.timezone)) + timedelta(hours=12)
+    row = {"valid_time_gmt": int(instant.timestamp()), "temp": high, "key": "WRONG", "obs_id": "WRONG"}
+    body = {"metadata": {"location_id": f"{city.wu_station}:9:{city.country_code}", "units": "m" if unit == "C" else "e"}, "observations": [row]}
+    monkeypatch.setattr(daily_obs_append.httpx, "get", lambda *args, **kwargs: SimpleNamespace(status_code=200, json=lambda: body))
+    failed = daily_obs_append.append_wu_city(city_name, [target], conn, rebuild_run_id="identity-failed")
+    assert failed["fetch_errors"] == 1 and failed["inserted"] == 0
+    assert conn.execute("SELECT COUNT(*) FROM observations WHERE city=?", (city_name,)).fetchone()[0] == 0
+    row.update(key=city.wu_station, obs_id=city.wu_station)
+    body["observations"].append({**row, "temp": low})
+    recovered = daily_obs_append.append_wu_city(city_name, [target], conn, rebuild_run_id="identity-recovered")
+    assert recovered["inserted"] == 1 and recovered["fetch_errors"] == 0
+    observation = conn.execute("SELECT high_temp,low_temp,unit,station_id FROM observations WHERE city=? AND target_date=?", (city_name, target.isoformat())).fetchone()
+    assert tuple(observation) == (high, low, unit, f"{city.wu_station}:{city.country_code}")
+    coverage = conn.execute("SELECT status FROM data_coverage WHERE city=? AND target_date=? AND data_source='wu_icao_history'", (city_name, target.isoformat())).fetchone()
+    assert coverage[0] == CoverageStatus.WRITTEN.value
 
 
 def test_R5_wu_observation_upsert_preserves_row_identity() -> None:
