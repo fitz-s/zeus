@@ -169,7 +169,34 @@ def geometry_proof_authenticity_reason(
         station = runtime_station_geometry_for_city(city)
         if station["validity_reason"] is not None:
             return "OM9_STATION_SOURCE_INVALID"
-        station_height = float(station["elevation_m"])
+        ground = proof.get("station_ground_proof")
+        if (
+            station.get("ground_status") != "VERIFIED"
+            or not isinstance(ground, Mapping)
+            or ground.get("revision") != "station_ground_roles_v1"
+            or ground.get("status") != "VERIFIED"
+            or ground.get("facts") != station.get("ground_facts")
+            or not isinstance(ground.get("facts"), Mapping)
+        ):
+            return "OM9_STATION_GROUND_PROOF_UNPROVEN"
+        audit = ground.get("audit")
+        if (
+            not isinstance(audit, Mapping)
+            or audit.get("artifact_ref") != "config/hko_station_metadata.html"
+            or not isinstance(audit.get("body_sha256"), str)
+            or len(audit["body_sha256"]) != 64
+            or any(char not in "0123456789abcdef" for char in audit["body_sha256"])
+            or not isinstance(audit.get("checked_at"), str)
+        ):
+            return "OM9_STATION_GROUND_PROOF_UNPROVEN"
+        try:
+            _to_utc(audit["checked_at"], field_name="station_ground_checked_at")
+        except (ValueError, TypeError):
+            return "OM9_STATION_GROUND_PROOF_UNPROVEN"
+        # Current official entity bytes independently attest the same station
+        # facts. A frozen certificate's historical whole-page hash remains audit
+        # provenance, never an always-newest page-hash equality gate.
+        station_height = float(station["ground_elevation_m"])
         station_lat = float(station["lat"])
         station_lon = float(station["lon"])
         if not all(math.isfinite(v) for v in (station_height, station_lat, station_lon)):
@@ -244,12 +271,12 @@ def evaluate_openmeteo_ecmwf_ifs9_precision_guard(
         reasons.append("OM9_NATIVE_GRID_UNVERIFIED")
     if delivery_grid not in {"0p1", "9km", "0.1", "0p1_latlon"}:
         reasons.append("OM9_DELIVERY_GRID_RESOLUTION_UNVERIFIED")
-    if station_policy not in {"settlement_station", "airport_settlement_station", "operator_verified_station"}:
+    if station_policy not in {"settlement_station", "airport_settlement_station", "operator_verified_station", "settlement_station_reference"}:
         reasons.append("OM9_STATION_MAPPING_POLICY_REQUIRED")
     station_distance_km = _haversine_km(metadata.requested_lat, metadata.requested_lon, metadata.station_lat, metadata.station_lon)
     if metadata.requested_coordinate_precision_decimals < 4:
         reasons.append("OM9_REQUESTED_COORDINATE_PRECISION_TOO_LOW")
-    if station_policy in {"settlement_station", "airport_settlement_station", "operator_verified_station"} and station_distance_km > 5.0:
+    if station_policy in {"settlement_station", "airport_settlement_station", "operator_verified_station", "settlement_station_reference"} and station_distance_km > 5.0:
         reasons.append("OM9_REQUESTED_COORDINATE_NOT_SETTLEMENT_STATION")
     if unit not in {"c", "celsius"}:
         reasons.append("OM9_ANCHOR_UNIT_MUST_BE_CELSIUS")
@@ -299,6 +326,7 @@ def evaluate_openmeteo_ecmwf_ifs9_precision_guard(
         "OM9_STATION_SOURCE_UNAVAILABLE",
         "OM9_STATION_SOURCE_INVALID",
         "OM9_STATION_SOURCE_IDENTITY_MISMATCH",
+        "OM9_STATION_GROUND_PROOF_UNPROVEN",
         "OM9_TARGET_DEM_INVALID",
         "OM9_SOURCE_GEOMETRY_PROOF_MISMATCH",
         "OM9_SOURCE_GEOMETRY_METADATA_MISMATCH",

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-06-07
-# Last reused/audited: 2026-09-23
-# Lifecycle: created=2026-06-07; last_reviewed=2026-09-23; last_reused=2026-09-23
+# Last reused/audited: 2026-09-29
+# Lifecycle: created=2026-06-07; last_reviewed=2026-09-29; last_reused=2026-09-29
 # Purpose: Download current-target Open-Meteo ECMWF IFS 9km raw inputs for replacement forecast materialization.
 # Reuse: Run before live replacement materialization when dry-run reports current-target coverage gaps.
 # Authority basis: Raw artifacts are live inputs only after the replacement materializer emits
@@ -506,8 +506,8 @@ def _precision_metadata(
     station_id = str(station["station_id"])
     station_lat = float(station["lat"])
     station_lon = float(station["lon"])
-    station_height = float(station["elevation_m"])
-    if not all(math.isfinite(value) for value in (station_lat, station_lon, station_height)):
+    station_height = station["ground_elevation_m"]
+    if not all(math.isfinite(value) for value in (station_lat, station_lon)):
         raise ValueError("OM9 precise station has non-finite geometry")
     if _haversine_km(
         float(city_config.lat), float(city_config.lon), station_lat, station_lon,
@@ -530,6 +530,11 @@ def _precision_metadata(
         raise ValueError("OM9 raw response grid differs from same-source static surface")
     source_proof["raw_payload_sha256"] = hashlib.sha256(raw_payload_bytes).hexdigest()
     source_proof["station_registry_sha256"] = station["registry_sha256"]
+    source_proof["station_ground_proof"] = {
+        "revision": "station_ground_roles_v1", "status": station["ground_status"],
+        "reason": station["ground_reason"], "facts": station["ground_facts"],
+        "audit": station["ground_audit"],
+    }
     return {
         "city": city,
         "station_id": station_id,
@@ -559,7 +564,7 @@ def _precision_metadata(
         "station_elevation_m": station_height,
         "land_sea_mask": "sea" if source_proof["cell_is_sea"] else "land",
         "city_class": "coastal" if source_proof["nearby_sea"] else "standard",
-        "station_mapping_policy": "operator_verified_station",
+        "station_mapping_policy": "settlement_station_reference",
         "source_geometry_proof": source_proof,
     }
 

@@ -13,9 +13,11 @@ import hashlib
 import logging
 import math
 import os
+import re
 import tempfile
+from html.parser import HTMLParser
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Optional
@@ -527,10 +529,135 @@ def runtime_cities_by_name() -> dict[str, City]:
     return dict(cities_by_name)
 
 
+STATION_GROUND_PROOF_REVISION = "station_ground_roles_v1"
+HKO_GROUND_SOURCE_URL = "https://www.hko.gov.hk/en/cis/stn.htm"
+HKO_GROUND_QUANTITY = "Elevation of ground above mean sea-level (metres)"
+
+
+class _HkoStationTable(HTMLParser):
+    """Read the official manned-station table, not a descriptive page label."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.rows: list[list[str]] = []
+        self.in_table = False
+        self.row: list[str] | None = None
+        self.cell: list[str] | None = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "table" and dict(attrs).get("id") == "manned":
+            self.in_table = True
+        if not self.in_table:
+            return
+        if tag == "tr":
+            self.row = []
+        elif tag in {"td", "th"}:
+            self.cell = []
+        elif tag == "br" and self.cell is not None:
+            self.cell.append(" ")
+
+    def handle_data(self, data):
+        if self.in_table and self.cell is not None:
+            self.cell.append(data)
+
+    def handle_endtag(self, tag):
+        if not self.in_table:
+            return
+        if tag in {"td", "th"} and self.cell is not None:
+            if self.row is not None:
+                self.row.append(" ".join("".join(self.cell).split()))
+            self.cell = None
+        elif tag == "tr" and self.row is not None:
+            self.rows.append(self.row)
+            self.row = None
+        elif tag == "table":
+            self.in_table = False
+
+
+def _hko_ground_facts(raw: bytes, station_id: str) -> dict[str, object]:
+    if station_id != "HKO_HQ":
+        raise ValueError("official HKO row is not this settlement station")
+    table = _HkoStationTable()
+    table.feed(raw.decode("utf-8"))
+    rows = table.rows
+    if len(rows) < 3 or rows[0][2] != HKO_GROUND_QUANTITY or rows[1][:4] != ["Latitude N", "Longitude E", "Wind", "Temp"]:
+        raise ValueError("official ground quantity/temperature column unavailable")
+    sites = [row for row in rows[2:] if row and row[0] == "Hong Kong Observatory (HKO) (01/01/1884)"]
+    if len(sites) != 1 or len(sites[0]) != 15 or sites[0][5] != "✔":
+        raise ValueError("official HKO temperature station row unavailable")
+    site = sites[0]
+
+    def coordinate(value: str, limit: int) -> float:
+        match = re.fullmatch(r'(\d+)°(\d+)\'(\d+)"', value)
+        if match is None:
+            raise ValueError("official site coordinate invalid")
+        degrees, minutes, seconds = map(int, match.groups())
+        if not 0 <= degrees <= limit or not 0 <= minutes < 60 or not 0 <= seconds < 60:
+            raise ValueError("official site coordinate invalid")
+        return degrees + minutes / 60 + seconds / 3600
+
+    elevation = float(site[3])
+    if not math.isfinite(elevation):
+        raise ValueError("official ground elevation invalid")
+    return {
+        "revision": STATION_GROUND_PROOF_REVISION, "source_kind": "hko_station_table_v1",
+        "station_id": station_id,
+        "source_station_id": "HKO", "height_role": "ground_msl",
+        "quantity": HKO_GROUND_QUANTITY, "elevation_m": elevation,
+        "site_lat": coordinate(site[1], 90), "site_lon": coordinate(site[2], 180),
+        "temperature_station": True, "source_url": HKO_GROUND_SOURCE_URL,
+    }
+
+
+def _station_ground_for_entry(entry: dict, station_id: str) -> dict[str, object]:
+    result: dict[str, object] = {
+        "ground_status": "UNPROVEN", "ground_reason": "STATION_GROUND_PROOF_MISSING",
+        "ground_elevation_m": None, "ground_facts": None, "ground_audit": None,
+    }
+    claim = entry.get("station_ground_proof")
+    if not isinstance(claim, dict):
+        return result
+    try:
+        if claim.get("source_kind") != "hko_station_table_v1" or claim.get("source_url") != HKO_GROUND_SOURCE_URL or claim.get("revision") != STATION_GROUND_PROOF_REVISION:
+            raise ValueError("unsupported ground source/revision")
+        checked = datetime.fromisoformat(str(claim["checked_at"]).replace("Z", "+00:00"))
+        if checked.tzinfo is None or checked.utcoffset() is None:
+            raise ValueError("ground source audit time must be timezone-aware")
+        if claim.get("artifact_ref") != "config/hko_station_metadata.html":
+            raise ValueError("ground source artifact is not the approved config asset")
+        artifact = CONFIG_DIR / "hko_station_metadata.html"
+        if artifact.is_symlink() or not artifact.is_file():
+            raise ValueError("ground source artifact must be the regular config asset")
+        if artifact.stat().st_size > 256 * 1024:
+            raise ValueError("ground source body exceeds bounded catalog size")
+        raw = artifact.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != claim["body_sha256"]:
+            raise ValueError("ground source body identity mismatch")
+        facts = _hko_ground_facts(raw, station_id)
+        if any(claim.get(key) != value for key, value in facts.items()):
+            raise ValueError("ground claim differs from official site facts")
+        # The recorded reference point need not equal the official DMS point.
+        # Preserve both and apply the existing station identity tolerance only.
+        lat, lon = float(entry["lat"]), float(entry["lon"])
+        p1, p2 = math.radians(lat), math.radians(float(facts["site_lat"]))
+        dl = math.radians(lon - float(facts["site_lon"]))
+        a = math.sin((p1 - p2) / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+        if 2 * 6371.0088 * math.asin(min(1.0, math.sqrt(a))) > 5:
+            raise ValueError("official site differs from station reference identity")
+        result.update(
+            ground_status="VERIFIED", ground_reason=None,
+            ground_elevation_m=facts["elevation_m"], ground_facts=facts,
+            ground_audit={key: claim.get(key) for key in ("artifact_ref", "body_sha256", "checked_at")},
+        )
+    except (OSError, ValueError, TypeError, KeyError, IndexError, UnicodeError):
+        result["ground_reason"] = "STATION_GROUND_PROOF_INVALID"
+    return result
+
+
 def runtime_station_geometry_for_city(
     city: City, *, registry_path: Path | None = None,
 ) -> dict[str, object]:
-    """Bind a settlement station to recorded ground geometry, never synthetic grid data.
+    """Bind station reference identity separately from proved measurement ground.
 
     Invalid registry rows degrade only this city. The existing 5 km station
     request-coordinate tolerance is an identity check, not a fitted forecast
@@ -546,6 +673,9 @@ def runtime_station_geometry_for_city(
     proof: dict[str, object] = {
         "station_id": expected_id or None, "lat": None, "lon": None,
         "elevation_m": None, "station_surface": None,
+        "reference_role": "station_reference" if source_type == "hko" else "airport_reference",
+        "ground_status": "UNPROVEN", "ground_reason": "STATION_GROUND_PROOF_MISSING",
+        "ground_elevation_m": None, "ground_facts": None, "ground_audit": None,
         "registry_sha256": None, "source": None,
         "validity_reason": "STATION_SOURCE_IDENTITY_UNAVAILABLE",
     }
@@ -563,13 +693,11 @@ def runtime_station_geometry_for_city(
         proof["validity_reason"] = "STATION_REGISTRY_ID_MISMATCH"
         return proof
     try:
-        lat, lon, elevation = (
-            float(entry["lat"]), float(entry["lon"]), float(entry["elevation_m"])
-        )
+        lat, lon = float(entry["lat"]), float(entry["lon"])
     except (KeyError, TypeError, ValueError):
         proof["validity_reason"] = "STATION_REGISTRY_GEOMETRY_INVALID"
         return proof
-    if not (math.isfinite(lat) and math.isfinite(lon) and math.isfinite(elevation)) or not (-90 <= lat <= 90 and -180 <= lon <= 180):
+    if not (math.isfinite(lat) and math.isfinite(lon)) or not (-90 <= lat <= 90 and -180 <= lon <= 180):
         proof["validity_reason"] = "STATION_REGISTRY_GEOMETRY_INVALID"
         return proof
     p1, p2 = math.radians(lat), math.radians(float(city.lat))
@@ -578,11 +706,21 @@ def runtime_station_geometry_for_city(
     if 2 * 6371.0088 * math.asin(min(1.0, math.sqrt(a))) > 5.0:
         proof["validity_reason"] = "STATION_REGISTRY_REQUEST_COORDINATE_MISMATCH"
         return proof
+    try:
+        elevation = float(entry["elevation_m"])
+        if not math.isfinite(elevation):
+            elevation = None
+    except (KeyError, TypeError, ValueError):
+        elevation = None
     proof.update(
+        # Legacy elevation is airport/site reference metadata, not ground
+        # authority. Only the separate bytes-verified ground fields may certify
+        # the real measurement site's ground above MSL.
         lat=lat, lon=lon, elevation_m=elevation,
-        station_surface="land", source=str(entry.get("source") or ""),
+        station_surface="UNKNOWN", source=str(entry.get("source") or ""),
         validity_reason=None,
     )
+    proof.update(_station_ground_for_entry(entry, expected_id))
     return proof
 
 
@@ -590,7 +728,7 @@ def runtime_coordinate_manifest_json() -> str:
     """Freeze one station-coordinate, calendar and unit snapshot for source identity."""
     rows = []
     station_identity_keys = (
-        "station_id", "lat", "lon", "elevation_m", "station_surface", "validity_reason",
+        "station_id", "lat", "lon", "validity_reason",
     )
     for name, city in sorted(runtime_cities_by_name().items()):
         lat, lon = float(city.lat), float(city.lon)
@@ -602,9 +740,9 @@ def runtime_coordinate_manifest_json() -> str:
         rows.append({
             "city": name, "lat": lat, "lon": lon,
             "timezone": city.timezone, "unit": city.settlement_unit,
-            # Whole-registry SHA and source wording are audit metadata, not
-            # this city's physical extraction identity. A note on another
-            # station must not rotate every city's ENS data version.
+            # ENS extraction uses reference identity/coordinates and actual
+            # model LSM, not station ground height or asserted station surface.
+            # Ground facts belong to the independent OM9 precision proof.
             "station_geometry": {key: station[key] for key in station_identity_keys},
         })
     if not rows:

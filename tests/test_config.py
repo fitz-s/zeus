@@ -1,5 +1,5 @@
 # Created: pre-Phase-0
-# Last reused/audited: 2026-05-08
+# Last reused/audited: 2026-09-29
 # Authority basis: Phase 10 DT-close B001 config contract + first-principles ZEUS_MODE cleanup 2026-04-30
 """Tests for config loader and city metadata."""
 
@@ -559,14 +559,20 @@ def test_validate_cities_config_no_warnings():
     assert warnings == [], f"City config validation warnings: {warnings}"
 
 
-def test_hong_kong_station_geometry_has_real_registry_elevation() -> None:
-    from src.config import runtime_cities_by_name, runtime_station_geometry_for_city
+def test_hong_kong_station_reference_does_not_self_attest_ground(tmp_path) -> None:
+    from src.config import CONFIG_DIR, runtime_cities_by_name, runtime_station_geometry_for_city
 
-    row = runtime_station_geometry_for_city(runtime_cities_by_name()["Hong Kong"])
+    rows = json.loads((CONFIG_DIR / "station_precise_coords.json").read_text())
+    rows["Hong Kong"].pop("station_ground_proof", None)
+    registry = tmp_path / "stations.json"
+    registry.write_text(json.dumps(rows))
+    row = runtime_station_geometry_for_city(runtime_cities_by_name()["Hong Kong"], registry_path=registry)
     assert row["validity_reason"] is None
     assert row["station_id"] == "HKO_HQ"
     assert row["elevation_m"] == 32.0
-    assert row["station_surface"] == "land"
+    assert row["station_surface"] == "UNKNOWN"
+    assert row["ground_status"] == "UNPROVEN"
+    assert row["ground_elevation_m"] is None
     assert len(row["registry_sha256"]) == 64
 
 
@@ -580,7 +586,7 @@ def test_coordinate_manifest_identity_excludes_station_audit_only_edits(monkeypa
     baseline = config.runtime_coordinate_manifest_json()
     hong_kong = next(row for row in json.loads(baseline)["cities"] if row["city"] == "Hong Kong")
     assert set(hong_kong["station_geometry"]) == {
-        "station_id", "lat", "lon", "elevation_m", "station_surface", "validity_reason",
+        "station_id", "lat", "lon", "validity_reason",
     }
     expected = {
         metric: expected_replacement_dependency_identity_by_role(metric)["baseline_b0"].data_version
@@ -600,7 +606,7 @@ def test_coordinate_manifest_identity_excludes_station_audit_only_edits(monkeypa
         for metric in ("high", "low"):
             assert expected_replacement_dependency_identity_by_role(metric)["baseline_b0"].data_version == expected[metric]
 
-    for physical in ("lat", "elevation_m"):
+    for physical in ("lat",):
         with monkeypatch.context() as patcher:
             def changed_physics(city, *, field=physical):
                 station = original(city)
@@ -611,6 +617,13 @@ def test_coordinate_manifest_identity_excludes_station_audit_only_edits(monkeypa
             assert config.runtime_coordinate_manifest_json() != baseline
             for metric in ("high", "low"):
                 assert expected_replacement_dependency_identity_by_role(metric)["baseline_b0"].data_version != expected[metric]
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(config, "runtime_station_geometry_for_city", lambda city: {
+            **original(city), "elevation_m": 999.0,
+            "ground_audit": {"body_sha256": "f" * 64},
+        })
+        assert config.runtime_coordinate_manifest_json() == baseline
 
 
 def test_station_geometry_wrong_station_degrades_only_that_city(tmp_path) -> None:
@@ -629,3 +642,112 @@ def test_station_geometry_wrong_station_degrades_only_that_city(tmp_path) -> Non
     )
     assert row["validity_reason"] == "STATION_REGISTRY_ID_MISMATCH"
     assert row["station_surface"] is None
+
+
+def _official_hko_registry(tmp_path, monkeypatch):
+    """Replay captured official entity bytes; no HTTP or claimed label fixture."""
+    import hashlib
+    import src.config as config
+    body = (config.PROJECT_ROOT / "config/hko_station_metadata.html").read_bytes()
+    assert hashlib.sha256(body).hexdigest() == "88e4e04edb57201646035558898ea1a4f235189d634a4cc7c059131483a4af1b"
+    artifact = tmp_path / "hko_station_metadata.html"
+    artifact.write_bytes(body)
+    facts = config._hko_ground_facts(body, "HKO_HQ")
+    claim = {**facts, "artifact_ref": "config/hko_station_metadata.html", "body_sha256": hashlib.sha256(body).hexdigest(),
+             "checked_at": "2026-09-29T21:23:56Z"}
+    original = json.loads((config.CONFIG_DIR / "station_precise_coords.json").read_text())
+    original["Hong Kong"]["station_ground_proof"] = claim
+    registry = tmp_path / "station_precise_coords.json"
+    registry.write_text(json.dumps(original))
+    (tmp_path / "cities.json").write_bytes((config.CONFIG_DIR / "cities.json").read_bytes())
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
+    return registry, artifact, original
+
+
+def test_official_hko_ground_role_is_bytes_bound_and_not_sensor_agl(tmp_path, monkeypatch):
+    import hashlib
+    import src.config as config
+    registry, artifact, rows = _official_hko_registry(tmp_path, monkeypatch)
+    city = config.cities_by_name["Hong Kong"]
+    real = config.runtime_station_geometry_for_city(city)
+    assert real["ground_status"] == "VERIFIED"
+    assert real["ground_elevation_m"] == 32
+    assert real["ground_facts"]["height_role"] == "ground_msl"
+    assert real["ground_facts"]["site_lat"] == pytest.approx(22 + 18 / 60 + 7 / 3600)
+    assert real["ground_facts"]["site_lon"] == pytest.approx(114 + 10 / 60 + 27 / 3600)
+    assert real["station_surface"] == "UNKNOWN"  # actual model LSM owns surface eligibility
+    assert real["lat"] == float(rows["Hong Kong"]["lat"])  # reference coordinates unchanged
+    for field, value in (("source_station_id", "HKA"), ("elevation_m", 6), ("height_role", "sensor_agl"), ("body_sha256", "a" * 64), ("artifact_ref", "/etc/passwd"), ("source_kind", "unknown_source")):
+        altered = json.loads(json.dumps(rows))
+        altered["Hong Kong"]["station_ground_proof"][field] = value
+        registry.write_text(json.dumps(altered))
+        assert config.runtime_station_geometry_for_city(city)["ground_status"] == "UNPROVEN"
+    registry.write_text(json.dumps(rows))
+    body = artifact.read_bytes()
+    artifact.write_bytes(body.replace(b"Elevation of ground above mean sea-level", b"Elevation of airport reference above mean sea-level"))
+    rows["Hong Kong"]["station_ground_proof"]["body_sha256"] = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    registry.write_text(json.dumps(rows))
+    assert config.runtime_station_geometry_for_city(city)["ground_status"] == "UNPROVEN"
+
+
+@pytest.mark.parametrize("mutation", ["wrong_site", "missing_temperature", "duplicate_site", "symlink"])
+def test_official_hko_ground_rejects_foreign_or_non_temperature_site(tmp_path, monkeypatch, mutation):
+    import hashlib
+    import src.config as config
+    registry, artifact, rows = _official_hko_registry(tmp_path, monkeypatch)
+    body = artifact.read_bytes()
+    start = body.index(b'<td class="td1_year_class">Hong Kong Observatory')
+    end = body.index(b"</tr>", start)
+    site = body[start:end]
+    if mutation == "wrong_site":
+        body = body.replace(b"Hong Kong Observatory<br>(HKO)", b"Hong Kong International Airport<br>(HKA)", 1)
+    elif mutation == "missing_temperature":
+        # The second meteorological cell is Temp, not Wind or another quantity.
+        altered = site.replace(b'<td class="td1_normal_class">&#10004;</td>', b'<td class="td1_normal_class"></td>', 2)
+        body = body[:start] + altered + body[end:]
+    elif mutation == "duplicate_site":
+        body = body[:end] + b"</tr><tr>" + site + body[end:]
+    else:
+        other = tmp_path / "other.html"
+        other.write_bytes(body)
+        artifact.unlink()
+        artifact.symlink_to(other)
+    if mutation != "symlink":
+        artifact.write_bytes(body)
+    rows["Hong Kong"]["station_ground_proof"]["body_sha256"] = hashlib.sha256(body).hexdigest()
+    registry.write_text(json.dumps(rows))
+    geometry = config.runtime_station_geometry_for_city(config.cities_by_name["Hong Kong"])
+    assert geometry["validity_reason"] is None  # reference identity survives independent ground loss
+    assert geometry["ground_status"] == "UNPROVEN"
+
+
+def test_official_page_audit_changes_do_not_rotate_same_station_geometry(tmp_path, monkeypatch):
+    import hashlib
+    import src.config as config
+    registry, artifact, rows = _official_hko_registry(tmp_path, monkeypatch)
+    baseline = config.runtime_coordinate_manifest_json()
+    ground_facts = config.runtime_station_geometry_for_city(config.cities_by_name["Hong Kong"])["ground_facts"]
+    artifact.write_bytes(artifact.read_bytes() + b"<!-- unrelated page edit -->")
+    rows["Hong Kong"]["station_ground_proof"]["body_sha256"] = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    rows["Hong Kong"]["station_ground_proof"]["checked_at"] = "2026-09-30T00:00:00Z"
+    registry.write_text(json.dumps(rows))
+    assert config.runtime_coordinate_manifest_json() == baseline
+    assert config.runtime_station_geometry_for_city(config.cities_by_name["Hong Kong"])["ground_facts"] == ground_facts
+    artifact.write_bytes(artifact.read_bytes().replace(b'<td class="td1_normal_class">32</td>', b'<td class="td1_normal_class">33</td>', 1))
+    rows["Hong Kong"]["station_ground_proof"]["body_sha256"] = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    rows["Hong Kong"]["station_ground_proof"]["elevation_m"] = 33.0
+    registry.write_text(json.dumps(rows))
+    assert config.runtime_coordinate_manifest_json() == baseline  # ENS does not use ground height
+    assert config.runtime_station_geometry_for_city(config.cities_by_name["Hong Kong"])["ground_facts"] != ground_facts
+
+
+def test_airport_height_absence_does_not_erase_reference_identity(tmp_path):
+    import src.config as config
+    rows = json.loads((config.CONFIG_DIR / "station_precise_coords.json").read_text())
+    rows["Manila"].pop("elevation_m")
+    registry = tmp_path / "station_precise_coords.json"
+    registry.write_text(json.dumps(rows))
+    geometry = config.runtime_station_geometry_for_city(config.cities_by_name["Manila"], registry_path=registry)
+    assert geometry["validity_reason"] is None
+    assert geometry["elevation_m"] is None
+    assert geometry["ground_status"] == "UNPROVEN"

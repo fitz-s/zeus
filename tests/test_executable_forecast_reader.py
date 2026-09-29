@@ -1,6 +1,6 @@
 # Created: 2026-05-03
-# Last reused/audited: 2026-09-27
-# Lifecycle: created=2026-05-03; last_reviewed=2026-09-27; last_reused=2026-09-27
+# Last reused/audited: 2026-09-29
+# Lifecycle: created=2026-05-03; last_reviewed=2026-09-29; last_reused=2026-09-29
 # Purpose: Lock executable forecast bundle source-run, coverage, readiness, and snapshot coherence.
 # Reuse: Run for live-entry forecast reader, producer-readiness, source-cycle, or coverage-window changes.
 # Authority basis: docs/archive/2026-Q2/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
@@ -322,6 +322,54 @@ def test_reader_returns_only_source_linked_executable_snapshot() -> None:
     assert result.snapshot is not None
     assert result.snapshot.source_run_id == "source-run-1"
     assert len(result.snapshot.members) == 51
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+def test_public_ens_reader_unknown_station_ground_surface_preserves_actual_lsm_gate(metric):
+    from dataclasses import replace
+    conn = _conn()
+    _insert_snapshot(conn)
+    version = ECMWF_OPENDATA_HIGH_DATA_VERSION if metric == "high" else ECMWF_OPENDATA_LOW_DATA_VERSION
+    scope = replace(_scope(), temperature_metric=metric, data_version=version)
+    row = conn.execute("SELECT * FROM ensemble_snapshots").fetchone()
+    provenance = json.loads(row["provenance_json"])
+    surface = provenance["grid_surface_evidence"]
+    surface["station_geometry"].update(
+        station_surface="UNKNOWN", elevation_m=None, ground_elevation_m=None,
+        ground_status="UNPROVEN", reference_role="airport_reference",
+    )
+    quantity = "mx2t3_local_calendar_day_max" if metric == "high" else "mn2t3_local_calendar_day_min"
+    conn.execute("UPDATE ensemble_snapshots SET temperature_metric=?, observation_field=?, physical_quantity=?, dataset_id=?, provenance_json=?",
+                 (metric, "high_temp" if metric == "high" else "low_temp", quantity, version, json.dumps(provenance)))
+
+    def read():
+        return read_executable_forecast_snapshot(conn, scope=scope, source_id="ecmwf_open_data",
+                                                now_utc=_utc(2026, 5, 3, 9))
+    assert read().ok
+    original = json.loads(json.dumps(provenance))
+    for field, value in (("selected_land_fraction", .5), ("mask_grid_identity_hash", "d" * 64),
+                         ("mask_source_cycle_time", "2026-05-02T00:00:00+00:00"), ("selected_flat_index", 126)):
+        altered = json.loads(json.dumps(original))
+        altered["grid_surface_evidence"][field] = value
+        conn.execute("UPDATE ensemble_snapshots SET provenance_json=?", (json.dumps(altered),))
+        assert not read().ok
+    # Fresh independent read recovers on the original real LSM witness.
+    conn.execute("UPDATE ensemble_snapshots SET provenance_json=?", (json.dumps(original),))
+    assert read().ok
+
+
+def test_ens_physical_identity_ignores_reference_height_but_binds_real_lsm():
+    from src.contracts.ensemble_snapshot_provenance import grid_surface_evidence_identity_hash
+    from tests.test_ingest_grib_source_run_context import _land_grid_proof
+    proof = _land_grid_proof()
+    identity = grid_surface_evidence_identity_hash(proof)
+    proof["station_geometry"].update(elevation_m=9999, station_surface="UNKNOWN", ground_status="UNPROVEN")
+    assert grid_surface_evidence_identity_hash(proof) == identity
+    for field, value in (("selected_land_fraction", .95), ("selected_lat", 51.6),
+                         ("mask_sha256", "d" * 64), ("mask_source_cycle_time", "2026-05-04T00:00:00+00:00")):
+        altered = json.loads(json.dumps(proof))
+        altered[field] = value
+        assert grid_surface_evidence_identity_hash(altered) != identity
 
 
 def test_live_reader_rejects_historical_opendata_and_unproven_current_shape() -> None:

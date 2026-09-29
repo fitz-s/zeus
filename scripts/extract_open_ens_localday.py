@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Created: 2026-09-22
-# Last reused/audited: 2026-09-22
+# Last reused/audited: 2026-09-29
 # Authority basis: current OpenData source contract; native 3h local-day extrema.
 # Lifecycle: long_lived; raw GRIB -> decoded JSON only; no DB writes.
 """Decode native ENS windows at settlement coordinates.
@@ -714,7 +714,6 @@ def extract_open_ens_localday(
         city["city"] for city in cities
         if not isinstance(city.get("station_geometry"), dict)
         or city["station_geometry"].get("validity_reason") is not None
-        or city["station_geometry"].get("station_surface") != "land"
     ]
     cities = [city for city in cities if city["city"] not in rejected_cities]
     if not cities:

@@ -1,5 +1,5 @@
 # Created: 2026-05-11
-# Last reused/audited: 2026-09-23
+# Last reused/audited: 2026-09-29
 # Authority basis: PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md §5.5
 #   Cross-track filename collision antibody: per-step filenames include param
 #   (e.g. .step003_mx2t3.grib2 vs .step003_mn2t3.grib2) so concurrent mx2t6_high
@@ -1440,7 +1440,11 @@ def test_versioned_extractor_preserves_high_native_inner_and_boundary_candidates
             "lon": -74.0,
             "timezone": "America/New_York",
             "unit": "C",
-            "station_geometry": {"station_id": "KJFK", "station_surface": "land", "validity_reason": None},
+            "station_geometry": {
+                "station_id": "KJFK", "station_surface": "UNKNOWN", "validity_reason": None,
+                "reference_role": "airport_reference", "ground_status": "UNPROVEN",
+                "ground_elevation_m": None,
+            },
         }]}),
         encoding="utf-8",
     )
@@ -1513,6 +1517,8 @@ def test_versioned_extractor_preserves_high_native_inner_and_boundary_candidates
     assert result["status"] == "ok"
     payload_path = next(output_root.rglob("*_target_2026-06-06_lead_0.json"))
     payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    assert payload["grid_surface_evidence"]["station_geometry"]["ground_status"] == "UNPROVEN"
+    assert payload["grid_surface_evidence"]["station_geometry"]["station_surface"] == "UNKNOWN"
     assert payload["boundary_ambiguous"] is False
     assert payload["selected_step_ranges_inner"] == ["18-21"]
     assert payload["selected_step_ranges_boundary"] == ["3-6"]

@@ -360,7 +360,6 @@ def grid_surface_evidence_reason(row: Mapping[str, Any]) -> str | None:
         city is None
         or (row.get("city") is not None and str(row["city"]) != city_name)
         or geometry.get("validity_reason") is not None
-        or geometry.get("station_surface") != "land"
         or str(geometry.get("station_id") or "") != str(contract.get("settlement_station_id") or "")
         or str(geometry.get("station_id") or "") != str(expected_station.get("station_id") or "")
         or expected_station.get("validity_reason") is not None
@@ -373,11 +372,11 @@ def grid_surface_evidence_reason(row: Mapping[str, Any]) -> str | None:
     ):
         return "EXECUTABLE_FORECAST_GRID_SURFACE_STATION_UNVERIFIED"
     try:
-        station_lat, station_lon, station_elevation = (
-            float(geometry[key]) for key in ("lat", "lon", "elevation_m")
+        station_lat, station_lon = (
+            float(geometry[key]) for key in ("lat", "lon")
         )
-        expected_lat, expected_lon, expected_elevation = (
-            float(expected_station[key]) for key in ("lat", "lon", "elevation_m")
+        expected_lat, expected_lon = (
+            float(expected_station[key]) for key in ("lat", "lon")
         )
         request_lat, request_lon = float(proof["request_lat"]), float(proof["request_lon"])
         city_lat, city_lon = float(city.lat), float(city.lon)
@@ -385,18 +384,16 @@ def grid_surface_evidence_reason(row: Mapping[str, Any]) -> str | None:
         return "EXECUTABLE_FORECAST_GRID_SURFACE_STATION_UNVERIFIED"
     if (
         not all(math.isfinite(v) for v in (
-            station_lat, station_lon, station_elevation,
-            expected_lat, expected_lon, expected_elevation,
+            station_lat, station_lon,
+            expected_lat, expected_lon,
             request_lat, request_lon, city_lat, city_lon,
         ))
         or not -90 <= station_lat <= 90 or not -180 <= station_lon <= 180
         or not -90 <= request_lat <= 90 or not -180 <= request_lon <= 180
         or station_lat != expected_lat
         or (station_lon - expected_lon) % 360 != 0
-        or station_elevation != expected_elevation
         or request_lat != city_lat
         or (request_lon - city_lon) % 360 != 0
-        or geometry.get("station_surface") != expected_station.get("station_surface")
     ):
         return "EXECUTABLE_FORECAST_GRID_SURFACE_STATION_UNVERIFIED"
     try:

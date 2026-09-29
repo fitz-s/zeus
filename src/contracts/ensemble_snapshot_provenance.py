@@ -99,7 +99,9 @@ def grid_surface_evidence_identity_hash(proof: Mapping[str, object]) -> str:
         "revision": proof["revision"],
         "selection_rule": proof["selection_rule"],
         "request": {key: proof[key] for key in ("request_lat", "request_lon")},
-        "station": {key: station[key] for key in ("station_id", "lat", "lon", "elevation_m", "station_surface")},
+        # ENS cell eligibility is proved by the actual matching model LSM.
+        # Airport reference height and unproved station surface are not inputs.
+        "station": {key: station[key] for key in ("station_id", "lat", "lon")},
         "selected": {key: proof[key] for key in (
             "selected_flat_index", "selected_lat", "selected_lon", "selected_land_fraction",
         )},

@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-08-30
-# Lifecycle: created=2026-06-06; last_reviewed=2026-06-06
+# Last reused/audited: 2026-09-29
+# Lifecycle: created=2026-06-06; last_reviewed=2026-09-29; last_reused=2026-09-29
 # Purpose: Protect validated request generation for replacement live materialization.
 # Reuse: Run before changing queue input contract or live simple-switch request production.
 # Authority basis: Simple switch must not depend on hand-built unvalidated materialization JSON.
@@ -25,12 +25,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(autouse=True)
-def _isolate_old_synthetic_source_fixture(monkeypatch) -> None:
+def _isolate_old_synthetic_source_fixture(monkeypatch, request) -> None:
     # These tests exercise seed/request shape, not station/HSURF authenticity.
     # The separate source-proof tests assert that this synthetic fixture cannot
     # pass a real CLI production validation.
     import src.data.openmeteo_ecmwf_ifs9_precision_guard as guard
-    monkeypatch.setattr(guard, "geometry_proof_authenticity_reason", lambda *_args, **_kwargs: None)
+    if not request.node.name.startswith("test_station_ground_"):
+        monkeypatch.setattr(guard, "geometry_proof_authenticity_reason", lambda *_args, **_kwargs: None)
 
 
 def _openmeteo_payload(*, hours: range = range(24)) -> dict[str, object]:
@@ -139,6 +140,44 @@ def test_request_builder_outputs_materializer_ready_json(tmp_path) -> None:
     assert request["anchor_weight"] == 0.80
     assert request["anchor_sigma_c"] == 3.00
     assert request["input_revision_sources"] == ["hko_fnd"]
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+def test_station_ground_normal_request_builder_recompute_reset(tmp_path, monkeypatch, metric):
+    import scripts.download_replacement_forecast_current_targets as dl
+    from tests.test_openmeteo_ecmwf_ifs9_precision_guard import _official_hko_precision
+    _, original_raw, _, registry, _, rows = _official_hko_precision(tmp_path, monkeypatch)
+    payload = json.loads(original_raw)
+    payload.update(hourly_units={"temperature_2m": "C"}, hourly={
+        "time": [f"2026-09-30T{hour:02d}:00" for hour in range(24)],
+        "temperature_2m": [25.0 + hour % 7 for hour in range(24)],
+    })
+    raw = json.dumps(payload).encode()
+    seed = _write_inputs(tmp_path)
+    seed.update(city="Hong Kong", target_date="2026-09-30", temperature_metric=metric,
+                source_cycle_time="2026-09-29T00:00:00+00:00", computed_at="2026-09-29T04:00:00+00:00",
+                expires_at="2026-09-29T06:00:00+00:00", baseline_source_available_at="2026-09-29T02:00:00+00:00",
+                openmeteo_source_available_at="2026-09-29T03:00:00+00:00")
+    (tmp_path / "openmeteo_payload.json").write_bytes(raw)
+
+    def recompute():
+        precision = dl._precision_metadata("Hong Kong", "2026-09-30", anchor_sigma_c=3, raw_payload_bytes=raw)
+        (tmp_path / "precision_metadata.json").write_text(json.dumps(precision))
+        return build_replacement_forecast_materialization_request(seed, base_dir=tmp_path)
+
+    missing = json.loads(json.dumps(rows))
+    missing["Hong Kong"].pop("station_ground_proof")
+    registry.write_text(json.dumps(missing))
+    blocked = recompute()
+    assert not blocked.ok
+    assert "OM9_STATION_GROUND_PROOF_UNPROVEN" in blocked.reason_codes
+    registry.write_text(json.dumps(rows))
+    ready = recompute()
+    assert ready.ok, ready.reason_codes
+    request = build_materialize_request_dataclass(ready.request, base_dir=tmp_path)
+    assert request.temperature_metric == metric
+    assert request.openmeteo_precision_guard.passable_for_live_materialization
+    assert request.openmeteo_precision_guard.metadata.station_elevation_m == 32
 
 
 def test_shared_precision_metadata_rebinds_to_each_materialization_target(
