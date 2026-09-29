@@ -341,14 +341,18 @@ def _qualify_raw_fixture_rows(conn, *, rebuild=False):
             identity = dl._bayes_precision_fusion_product_identity(model, old["endpoint"], target)
             params = json.loads(identity["request_params_json"])
             run = datetime.fromisoformat(old["source_cycle_time"])
-            params["run"] = run.strftime("%Y-%m-%dT%H:%M")
+            previous = old["endpoint"] == "previous_runs"
+            if not previous:
+                params["run"] = run.strftime("%Y-%m-%dT%H:%M")
+            variable = params["hourly"]
             grid_lat, grid_lon = (31.14, 121.80) if model == "ecmwf_ifs" and old["city"].casefold() == "shanghai" else (city.lat, city.lon)
             payload = {"latitude": grid_lat, "longitude": grid_lon, "elevation": 8.0,
-                "timezone": city.timezone, "hourly_units": {"temperature_2m": "°C"},
+                "timezone": city.timezone, "hourly_units": {variable: "°C"},
                 "hourly": {"time": [f"{old['target_date']}T{hour:02d}:00" for hour in range(24)],
-                           "temperature_2m": [old["forecast_value_c"]] * 24}}
+                           variable: [old["forecast_value_c"]] * 24}}
             body = (json.dumps(payload, indent=2) + "\n").encode()
-            url = "https://single-runs-api.open-meteo.com/v1/forecast"
+            from src.data.openmeteo_client import PREVIOUS_RUNS_URL
+            url = PREVIOUS_RUNS_URL if previous else "https://single-runs-api.open-meteo.com/v1/forecast"
             bound = dl._bind_physical_response(payload, model=model, url=url, params=params, run=run,
                 captures=[(body, datetime.fromisoformat(captured).timestamp())])
             raw = {key: old[key] for key in ("model", "city", "target_date", "metric", "source_cycle_time",
@@ -370,14 +374,57 @@ def _qualify_raw_fixture_rows(conn, *, rebuild=False):
                 if name not in artifact_columns:
                     conn.execute(f"ALTER TABLE raw_forecast_artifacts ADD COLUMN {name}")
                     artifact_columns.append(name)
-            new_id = conn.execute("SELECT COALESCE(MAX(artifact_id),0)+1 FROM raw_forecast_artifacts").fetchone()[0]
-            artifact["artifact_id"] = produced["artifact_id"] = new_id
-            conn.execute("INSERT INTO raw_forecast_artifacts (" + ",".join(artifact) + ") VALUES (" +
-                         ",".join("?" for _ in artifact) + ")", tuple(artifact.values()))
+            existing = conn.execute("""SELECT artifact_id,captured_at,source_available_at
+                FROM raw_forecast_artifacts WHERE source_id=? AND product_id=? AND data_version=?
+                AND source_cycle_time=? AND sha256=?""", tuple(artifact[key] for key in
+                    ("source_id", "product_id", "data_version", "source_cycle_time", "sha256"))).fetchone()
+            if existing is not None:
+                # Mirror the ordinary writer: same immutable entity keeps its
+                # first possession clock, even when a later fixture row cites it.
+                produced["artifact_id"] = existing[0]
+                produced["captured_at"] = existing[1]
+                if model.startswith(("cwa_", "hko_")):
+                    produced["source_available_at"] = existing[2]
+            else:
+                new_id = conn.execute("SELECT COALESCE(MAX(artifact_id),0)+1 FROM raw_forecast_artifacts").fetchone()[0]
+                artifact["artifact_id"] = produced["artifact_id"] = new_id
+                conn.execute("INSERT INTO raw_forecast_artifacts (" + ",".join(artifact) + ") VALUES (" +
+                             ",".join("?" for _ in artifact) + ")", tuple(artifact.values()))
         fields = [name for name in produced if name != "raw_model_forecast_id"]
         conn.execute("UPDATE raw_model_forecasts SET " + ",".join(name + "=?" for name in fields) +
                      " WHERE raw_model_forecast_id=?", (*[produced[name] for name in fields], old["raw_model_forecast_id"]))
         staging.close()
+
+
+@pytest.mark.parametrize("endpoint", ("single_runs", "previous_runs"))
+def test_writer_fixture_binds_endpoint_series_without_renewing_same_body_capture(endpoint):
+    from src.data.openmeteo_client import PREVIOUS_RUNS_URL
+    conn = _conn()
+    conn.execute("""INSERT INTO raw_model_forecasts (
+        model,city,target_date,metric,source_cycle_time,source_available_at,captured_at,
+        lead_days,forecast_value_c,endpoint
+    ) VALUES ('gfs_global','Shanghai','2026-06-07','high',?,?,?,1,23,?)""",
+        (_dt(0).isoformat(), _dt(3).isoformat(), _dt(3).isoformat(), endpoint))
+    _qualify_raw_fixture_rows(conn)
+    before = dict(conn.execute("SELECT * FROM raw_forecast_artifacts").fetchone())
+    body = json.loads(Path(before["artifact_path"]).read_bytes())
+    variable = "temperature_2m_previous_day1" if endpoint == "previous_runs" else "temperature_2m"
+    assert body["hourly"][variable] == [23.0]*24
+    assert body["hourly_units"] == {variable: "°C"}
+    if endpoint == "previous_runs":
+        assert before["request_url"] == PREVIOUS_RUNS_URL
+    # The same immutable entity cited after a later fixture ingestion keeps
+    # its actual first receipt, exactly like the normal raw/artifact writer.
+    conn.execute("UPDATE raw_model_forecasts SET captured_at=?", (_dt(4).isoformat(),))
+    _qualify_raw_fixture_rows(conn, rebuild=True)
+    assert conn.execute("SELECT count(*) FROM raw_forecast_artifacts").fetchone()[0] == 1
+    assert dict(conn.execute("SELECT * FROM raw_forecast_artifacts").fetchone()) == before
+    raw = conn.execute("SELECT * FROM raw_model_forecasts").fetchone()
+    assert raw["artifact_id"] == before["artifact_id"]
+    assert raw["raw_sha256"] == before["sha256"]
+    assert raw["source_cycle_time"] == _dt(0).isoformat()
+    assert raw["captured_at"] == _dt(3).isoformat()
+    conn.close()
 
 
 def _fixture_current_shape(_conn, request, **kwargs):
