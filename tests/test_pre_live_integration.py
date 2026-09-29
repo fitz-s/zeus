@@ -136,7 +136,6 @@ def test_refresh_position_true_metrics(monkeypatch):
                     return {"price": 0.60} # Price 1h ago was 0.60
             return MockCursor()
     
-    monkeypatch.setattr("src.engine.monitor_refresh.recompute_native_probability", lambda *args, **kwargs: 0.40)
     
     edge_ctx = refresh_position(MockConn(), MockClob(), pos)
     

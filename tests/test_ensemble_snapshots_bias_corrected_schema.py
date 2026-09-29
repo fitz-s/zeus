@@ -110,46 +110,6 @@ def test_legacy_db_without_column_gets_migrated():
     assert row[0] == 0, "legacy row must default bias_corrected to 0"
 
 
-def test_store_snapshot_p_raw_round_trip_with_fresh_schema():
-    """Integration: writer + reader work end-to-end on ensemble_snapshots.
-
-    v1.F20: migrated from legacy ensemble_snapshots to ensemble_snapshots.
-    Pre-P2-B1 this test verified bias_corrected column migration; post-v1.F20
-    the v2 table is the canonical target and bias_corrected is a v2 column.
-    """
-    import json
-    import numpy as np
-    from src.engine.evaluator import _store_snapshot_p_raw
-
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    _attach_forecasts_snapshot_table(conn)
-    # Insert a v2 snapshot row so we have something to UPDATE.
-    conn.execute("""
-        INSERT INTO forecasts.ensemble_snapshots
-        (city, target_date, available_at, fetch_time, model_version, dataset_id,
-         temperature_metric, provenance_json)
-        VALUES ('NYC', '2026-04-15', '2026-04-15T12:00:00Z', '2026-04-15T12:00:00Z',
-                'ecmwf_ens', 'tigge_mx2t6_local_calendar_day_max', 'high', '{}')
-    """)
-    snapshot_id = conn.execute(
-        "SELECT snapshot_id FROM forecasts.ensemble_snapshots WHERE city = 'NYC'"
-    ).fetchone()[0]
-    conn.commit()
-
-    p_raw = np.array([0.2, 0.3, 0.5])
-    _store_snapshot_p_raw(conn, str(snapshot_id), p_raw, bias_corrected=True)
-    row = conn.execute(
-        "SELECT p_raw_json FROM forecasts.ensemble_snapshots "
-        "WHERE snapshot_id = ?", (snapshot_id,),
-    ).fetchone()
-    assert row is not None
-    assert row["p_raw_json"] is not None, (
-        "p_raw_json must persist in ensemble_snapshots (v1.F20 canonical target)"
-    )
-    assert json.loads(row["p_raw_json"]) == [0.2, 0.3, 0.5]
-
-
 def _attach_forecasts_snapshot_table(conn: sqlite3.Connection) -> None:
     conn.execute("ATTACH DATABASE ':memory:' AS forecasts")
     conn.execute("""
@@ -172,68 +132,5 @@ def _attach_forecasts_snapshot_table(conn: sqlite3.Connection) -> None:
     """)
 
 
-def test_store_snapshot_p_raw_uses_attached_forecasts_v2_without_legacy_projection():
-    """Forecast-live snapshots live in attached forecasts DB, not world legacy rows."""
-
-    import numpy as np
-    from src.engine.evaluator import _store_snapshot_p_raw
-
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    init_schema(conn)
-    _attach_forecasts_snapshot_table(conn)
-    conn.execute("""
-        INSERT INTO forecasts.ensemble_snapshots
-        (snapshot_id, city, target_date, available_at, fetch_time,
-         model_version, dataset_id, temperature_metric, provenance_json)
-        VALUES (777, 'London', '2026-05-17', '2026-05-15T09:55:00+00:00',
-                '2026-05-15T09:56:00+00:00', 'ecmwf_ens',
-                'ecmwf_opendata_mx2t3_local_calendar_day_max', 'high', '{}')
-    """)
-    conn.commit()
-
-    assert _store_snapshot_p_raw(conn, "777", np.array([0.25, 0.75]))
-
-    canonical = conn.execute(
-        "SELECT p_raw_json FROM forecasts.ensemble_snapshots WHERE snapshot_id = 777"
-    ).fetchone()
-    conn.close()
-
-    assert json.loads(canonical["p_raw_json"]) == [0.25, 0.75]
     # v1.F20: legacy ensemble_snapshots removed; no legacy projection to check.
 
-
-def test_read_v2_snapshot_metadata_prefers_attached_forecasts_schema():
-    from src.engine.evaluator import _read_snapshot_metadata
-
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    init_schema(conn)
-    _attach_forecasts_snapshot_table(conn)
-    conn.execute("""
-        INSERT INTO forecasts.ensemble_snapshots
-        (snapshot_id, city, target_date, available_at, fetch_time,
-         model_version, dataset_id, temperature_metric, boundary_ambiguous,
-         causality_status)
-        VALUES (888, 'London', '2026-05-17', '2026-05-15T09:55:00+00:00',
-                '2026-05-15T09:56:00+00:00', 'ecmwf_ens',
-                'ecmwf_opendata_mx2t3_local_calendar_day_max', 'high',
-                1, 'BOUNDARY_AMBIGUOUS')
-    """)
-    conn.commit()
-
-    meta = _read_snapshot_metadata(
-        conn,
-        "London",
-        "2026-05-17",
-        "high",
-        snapshot_id="888",
-    )
-    conn.close()
-
-    assert meta == {
-        "boundary_ambiguous": True,
-        "causality_status": "BOUNDARY_AMBIGUOUS",
-        "snapshot_id": 888,
-        "bin_grid_id": None,  # column absent in this test fixture schema (pre-v5); fallback path
-    }

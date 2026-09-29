@@ -56,70 +56,6 @@ class TestF1Day0NowcastStrategyAuthority:
     # finding's live substance — day0_nowcast_entry being a named, routable strategy
     # — remains covered by the registry and _strategy_key_for tests below.
 
-    def test_strategy_key_for_returns_day0_nowcast_entry_not_none(self) -> None:
-        """Finding 1 regression: was returning None, causing STRATEGY_KEY_UNCLASSIFIED."""
-        from src.config import City
-        from src.engine.discovery_mode import DiscoveryMode
-        from src.engine.evaluator import MarketCandidate, _strategy_key_for
-        from src.strategy.market_phase import MarketPhase
-        from src.types.market import Bin, BinEdge
-
-        city = City(
-            name="NYC", lat=40.7772, lon=-73.8726,
-            timezone="America/New_York", settlement_unit="F", cluster="NYC", wu_station="KLGA",
-            settlement_source_type="wu_icao",
-        )
-        candidate = MarketCandidate(
-            city=city,
-            target_date="2026-05-22",
-            outcomes=[],
-            hours_since_open=6.0,
-            temperature_metric="high",
-            discovery_mode=DiscoveryMode.DAY0_CAPTURE.value,
-            market_phase=MarketPhase.SETTLEMENT_DAY,
-            observation={"high_so_far": 34.0, "current_temp": 34.0},
-        )
-        edge = BinEdge(
-            bin=Bin(low=36.0, high=37.0, unit="F", label="36-37°F"),
-            direction="buy_yes",
-            edge=0.8, ci_lower=0.7, ci_upper=0.9,
-            p_model=0.9, p_market=0.1, p_posterior=0.9,
-            entry_price=0.04, p_value=0.01, vwmp=0.04, support_index=1,
-        )
-        key = _strategy_key_for(candidate, edge)
-        assert key == "day0_nowcast_entry", f"Expected 'day0_nowcast_entry', got {key!r}"
-
-    def test_strategy_key_for_hypothesis_settlement_day_high_returns_day0_nowcast(self) -> None:
-        from src.config import City
-        from src.engine.discovery_mode import DiscoveryMode
-        from src.engine.evaluator import MarketCandidate, _strategy_key_for_hypothesis
-        from src.strategy.market_analysis_family_scan import FullFamilyHypothesis
-        from src.strategy.market_phase import MarketPhase
-
-        city = City(
-            name="NYC", lat=40.7772, lon=-73.8726,
-            timezone="America/New_York", settlement_unit="F", cluster="NYC", wu_station="KLGA",
-            settlement_source_type="wu_icao",
-        )
-        candidate = MarketCandidate(
-            city=city,
-            target_date="2026-05-22",
-            outcomes=[],
-            hours_since_open=6.0,
-            temperature_metric="high",
-            discovery_mode=DiscoveryMode.DAY0_CAPTURE.value,
-            market_phase=MarketPhase.SETTLEMENT_DAY,
-            observation={"high_so_far": 34.0, "current_temp": 34.0},
-        )
-        hypothesis = FullFamilyHypothesis(
-            index=0, range_label="36-37°F", direction="buy_yes",
-            edge=0.8, ci_lower=0.7, ci_upper=0.9, p_value=0.01,
-            p_model=0.9, p_market=0.1, p_posterior=0.9,
-            entry_price=0.04, is_shoulder=False, passed_prefilter=True,
-        )
-        key = _strategy_key_for_hypothesis(candidate, hypothesis)
-        assert key == "day0_nowcast_entry", f"Expected 'day0_nowcast_entry', got {key!r}"
-
     def test_registry_day0_nowcast_entry_live_status_is_live(self) -> None:
         from src.strategy.strategy_profile import get
         profile = get("day0_nowcast_entry")
@@ -494,16 +430,6 @@ class TestF4EvidenceTierLifecycle:
 
 class TestF5ClusterThrottleDimensions:
     """F5: gross_heat and variance_heat throttle independently with distinct labels."""
-
-    def test_evaluator_source_has_separate_gross_variance_gates(self) -> None:
-        """Source inspection: both dimension labels exist; policy_heat not used as gate."""
-        from pathlib import Path
-        src = (
-            Path(__file__).parent.parent
-            / "src" / "engine" / "evaluator.py"
-        ).read_text()
-        assert "regime_throttled_gross_50pct" in src, "gross throttle label missing"
-        assert "regime_throttled_variance_50pct" in src, "variance throttle label missing"
 
     def test_gross_heat_only_fires_gross_label(self) -> None:
         """When gross > threshold but variance < threshold, only gross label fires."""

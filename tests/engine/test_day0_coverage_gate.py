@@ -35,10 +35,6 @@ from src.data.observation_client import (
     _fetch_wu_observation,
     _select_local_day_samples,
 )
-from src.engine.evaluator import (
-    _day0_observation_quality_rejection_reason,
-    _day0_observation_source_rejection_reason,
-)
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 
 
@@ -75,98 +71,6 @@ def _make_obs(
         coverage_status=coverage_status,
         observation_available_at="2026-05-24T14:00:00+00:00",
     )
-
-
-class TestCoverageWindowGate:
-    """P1-1: WINDOW_INCOMPLETE blocks entry quality gate by default."""
-
-    def test_window_incomplete_returns_rejection(self) -> None:
-        """T_P1_1a: WINDOW_INCOMPLETE coverage_status → quality rejection returned."""
-        obs = _make_obs(coverage_status="WINDOW_INCOMPLETE")
-        reason = _day0_observation_quality_rejection_reason(
-            _NYC, obs, HIGH_LOCALDAY_MAX, decision_time=_DECISION_TIME
-        )
-        assert reason is not None, (
-            "Expected rejection reason for WINDOW_INCOMPLETE coverage, got None"
-        )
-        assert "WINDOW_INCOMPLETE" in reason.upper() or "incomplete" in reason.lower(), (
-            f"Rejection reason must mention incomplete window, got: {reason!r}"
-        )
-
-    def test_window_incomplete_blocks_low_metric_too(self) -> None:
-        """T_P1_1b: WINDOW_INCOMPLETE blocks for low-temperature metric too."""
-        obs = _make_obs(coverage_status="WINDOW_INCOMPLETE")
-        reason = _day0_observation_quality_rejection_reason(
-            _NYC, obs, LOW_LOCALDAY_MIN, decision_time=_DECISION_TIME
-        )
-        assert reason is not None
-
-    def test_window_incomplete_can_pass_as_explicit_monitor_bound(self) -> None:
-        """Held monitor can use incomplete-window observations as one-sided bounds.
-
-        This does not claim full local-day extrema. It only allows the Day0
-        signal to consume observed_high_so_far as a HIGH floor or low_so_far as
-        a LOW ceiling while later maturity/exit gates decide authority.
-        """
-        obs = _make_obs(coverage_status="WINDOW_INCOMPLETE")
-        reason = _day0_observation_quality_rejection_reason(
-            _NYC,
-            obs,
-            HIGH_LOCALDAY_MAX,
-            decision_time=_DECISION_TIME,
-            allow_incomplete_window_bound=True,
-        )
-        assert reason is None
-
-    def test_ok_coverage_passes_quality_gate(self) -> None:
-        """T_P1_1c: OK coverage_status is not blocked by the window gate."""
-        obs = _make_obs(coverage_status="OK")
-        reason = _day0_observation_quality_rejection_reason(
-            _NYC, obs, HIGH_LOCALDAY_MAX, decision_time=_DECISION_TIME
-        )
-        # May still be rejected for other reasons (stale, missing fields), but
-        # NOT for coverage window.  If quality gate is None, the window check passed.
-        if reason is not None:
-            assert "incomplete" not in reason.lower() and "WINDOW_INCOMPLETE" not in reason.upper(), (
-                f"OK coverage_status must not trigger window rejection, got: {reason!r}"
-            )
-
-    def test_missing_coverage_status_does_not_block(self) -> None:
-        """T_P1_1d: missing/unknown coverage_status does not trigger WINDOW_INCOMPLETE block.
-
-        Pre-existing observations that never set coverage_status must not be
-        retroactively blocked — only explicit WINDOW_INCOMPLETE is gated.
-        """
-        obs = _make_obs(coverage_status="UNKNOWN")
-        reason = _day0_observation_quality_rejection_reason(
-            _NYC, obs, HIGH_LOCALDAY_MAX, decision_time=_DECISION_TIME
-        )
-        if reason is not None:
-            assert "incomplete" not in reason.lower()
-
-    def test_canonical_wu_extrema_source_does_not_require_current_temp(self) -> None:
-        obs = Day0ObservationContext(
-            high_so_far=89.0,
-            low_so_far=73.0,
-            current_temp=float("nan"),
-            source="wu_icao_history",
-            observation_time="2026-05-24T14:00:00+00:00",
-            unit="F",
-            station_id="KLGA",
-            sample_count=8,
-            first_sample_time="2026-05-24T05:00:00+00:00",
-            last_sample_time="2026-05-24T14:00:00+00:00",
-            coverage_status="OK",
-            observation_available_at="2026-05-24T14:00:00+00:00",
-        )
-
-        assert _day0_observation_source_rejection_reason(_NYC, obs) is None
-        assert (
-            _day0_observation_quality_rejection_reason(
-                _NYC, obs, HIGH_LOCALDAY_MAX, decision_time=_DECISION_TIME
-            )
-            is None
-        )
 
 
 class TestCoverageStatusConstants:
@@ -233,55 +137,6 @@ class TestComputeDay0CoverageStatusBoundary:
         assert status == "LOW_COVERAGE", (
             f"Expected LOW_COVERAGE for {self._MIN - 1} samples, got {status!r}"
         )
-
-
-def test_wu_fallback_detects_internal_high_window_gap(monkeypatch) -> None:
-    """The executable HTTP fallback cannot turn first+count into continuity."""
-    tz = ZoneInfo("America/New_York")
-    target_day = date(2026, 5, 24)
-    local_samples = [
-        datetime(2026, 5, 24, hour, tzinfo=tz)
-        for hour in [*range(0, 10), 18, 19]
-    ]
-    payload = {
-        "observations": [
-            {
-                "temp": 60.0 + index,
-                "valid_time_gmt": int(instant.timestamp()),
-                "obs_id": "KLGA",
-            }
-            for index, instant in enumerate(local_samples)
-        ]
-    }
-
-    class _Response:
-        status_code = 200
-
-        @staticmethod
-        def json():
-            return payload
-
-    monkeypatch.setattr(
-        "src.data.observation_client.httpx.get", lambda *args, **kwargs: _Response()
-    )
-    result = _fetch_wu_observation(
-        _NYC,
-        target_day=target_day,
-        reference_local=datetime(2026, 5, 24, 20, tzinfo=tz),
-        tz=tz,
-    )
-
-    assert result is not None
-    assert result.coverage_status == "GAP_SUSPECT"
-    assert result.gap_suspect_metrics == ("high",)
-    assert result.max_gap_minutes == pytest.approx(540.0)
-    high_reason = _day0_observation_quality_rejection_reason(
-        _NYC,
-        result,
-        HIGH_LOCALDAY_MAX,
-        decision_time=datetime(2026, 5, 25, 0, tzinfo=timezone.utc),
-    )
-    assert high_reason is not None and "gap-suspect" in high_reason
 
 
 def test_local_sample_selection_orders_repeated_hour_by_utc() -> None:
@@ -382,54 +237,3 @@ def _make_gap_obs(
         gap_suspect_metrics=tuple(gap_suspect_metrics) if gap_suspect_metrics is not None else None,
     )
 
-
-class TestGapSuspectEntryGate:
-    """M-2/H-3: GAP_SUSPECT fails the ENTRY quality gate closed for the
-    attributed metric only; the monitor bound-only escape hatch still serves."""
-
-    def test_gap_suspect_high_blocks_high_entry(self) -> None:
-        obs = _make_gap_obs(gap_suspect_metrics=("high",))
-        reason = _day0_observation_quality_rejection_reason(
-            _NYC, obs, HIGH_LOCALDAY_MAX, decision_time=_DECISION_TIME
-        )
-        assert reason is not None
-        assert "gap-suspect" in reason
-
-    def test_gap_suspect_high_does_not_block_low_entry(self) -> None:
-        """Metric attribution: an afternoon hole must not block a LOW market."""
-        obs = _make_gap_obs(gap_suspect_metrics=("high",))
-        reason = _day0_observation_quality_rejection_reason(
-            _NYC, obs, LOW_LOCALDAY_MIN, decision_time=_DECISION_TIME
-        )
-        if reason is not None:
-            assert "gap-suspect" not in reason
-
-    def test_gap_suspect_low_blocks_low_entry(self) -> None:
-        obs = _make_gap_obs(gap_suspect_metrics=("low",))
-        reason = _day0_observation_quality_rejection_reason(
-            _NYC, obs, LOW_LOCALDAY_MIN, decision_time=_DECISION_TIME
-        )
-        assert reason is not None
-        assert "gap-suspect" in reason
-
-    def test_gap_suspect_without_attribution_fails_closed_for_all_metrics(self) -> None:
-        """A GAP_SUSPECT status whose producer did not attribute metrics
-        (gap_suspect_metrics=None) must block every metric."""
-        obs = _make_gap_obs(gap_suspect_metrics=None)
-        for metric in (HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN):
-            reason = _day0_observation_quality_rejection_reason(
-                _NYC, obs, metric, decision_time=_DECISION_TIME
-            )
-            assert reason is not None and "gap-suspect" in reason
-
-    def test_gap_suspect_passes_as_explicit_monitor_bound(self) -> None:
-        """Monitor path (allow_incomplete_window_bound=True): serve bound-only."""
-        obs = _make_gap_obs(gap_suspect_metrics=("high",))
-        reason = _day0_observation_quality_rejection_reason(
-            _NYC,
-            obs,
-            HIGH_LOCALDAY_MAX,
-            decision_time=_DECISION_TIME,
-            allow_incomplete_window_bound=True,
-        )
-        assert reason is None

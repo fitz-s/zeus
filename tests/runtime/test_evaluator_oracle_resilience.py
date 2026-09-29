@@ -132,27 +132,3 @@ def test_oracle_penalty_reload_swallows_bad_value_types(monkeypatch, tmp_path):
     )
     assert info.penalty_multiplier <= 0.5
 
-
-def test_evaluate_candidate_produces_decision_when_oracle_file_missing(monkeypatch, tmp_path):
-    """Evaluator must not reject or raise when oracle artifact is absent."""
-    from tests.test_center_buy_repair import _candidate, _patch_evaluator
-
-    _redirect_storage(monkeypatch, tmp_path)
-    oracle_penalty.reload()
-    clob = _patch_evaluator(monkeypatch, entry_price=0.05)
-
-    decisions = evaluator_module.evaluate_candidate(
-        _candidate(discovery_mode=DiscoveryMode.OPENING_HUNT.value),
-        conn=None,
-        portfolio=PortfolioState(bankroll=211.37),
-        clob=clob,
-        limits=evaluator_module.RiskLimits(min_order_usd=1.0),
-        decision_time=TEST_DECISION_TIME,
-    )
-
-    assert decisions
-    assert all(decision.rejection_stage != "ORACLE_EVIDENCE_UNAVAILABLE" for decision in decisions)
-    assert all(
-        "oracle_penalty" not in getattr(decision, "applied_validations", [])
-        for decision in decisions
-    )

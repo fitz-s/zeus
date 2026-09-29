@@ -1065,26 +1065,6 @@ class TestSourceDiscipline:
         assert _qlcb_float(masked_lcb[("condition-29", "buy_no")]) == pytest.approx(0.6)
         assert payload["_edli_day0_lcb_transform"]["absorbing_no_conditions"] == []
 
-    def test_hko_legacy_monitor_fallback_abstains_from_support_clamp(self):
-        from src.engine import monitor_refresh
-
-        position = _position(
-            city="Hong Kong",
-            p_posterior=0.42,
-            selected_method="legacy_day0",
-        )
-        probability, validations = monitor_refresh._refresh_day0_observation(
-            position=position,
-            current_p_market=0.5,
-            conn=None,
-            city=_hong_kong(),
-            target_d=datetime(2026, 7, 20, tzinfo=UTC).date(),
-        )
-
-        assert probability == pytest.approx(0.42)
-        assert "hko_provisional_snapshot_not_absorbing" in validations
-        assert getattr(position, monitor_refresh._MONITOR_PROBABILITY_FRESH_ATTR) is False
-
     def test_hko_reseed_uses_latest_correction_not_cross_time_max(self, monkeypatch):
         from src.engine import monitor_refresh
         from src.data import replacement_forecast_seed_discovery as seed_discovery
@@ -1100,22 +1080,6 @@ class TestSourceDiscipline:
             monitor_refresh,
             "_is_position_target_local_day",
             lambda *_args, **_kwargs: True,
-        )
-        monkeypatch.setattr(
-            monitor_refresh,
-            "_day0_observation_source_rejection_reason",
-            lambda *_args, **_kwargs: None,
-        )
-        monkeypatch.setattr(
-            monitor_refresh,
-            "_fetch_day0_observation",
-            lambda *_args, **_kwargs: SimpleNamespace(
-                high_so_far=29.7,
-                low_so_far=25.7,
-                observation_time="2026-07-20T08:00:00+00:00",
-                source="hko_hourly_accumulator",
-                sample_count=1,
-            ),
         )
         monkeypatch.setattr(
             monitor_refresh,
@@ -1163,11 +1127,6 @@ class TestSourceDiscipline:
             monitor_refresh,
             "_is_position_target_local_day",
             lambda *_args, **_kwargs: True,
-        )
-        monkeypatch.setattr(
-            monitor_refresh,
-            "_fetch_day0_observation",
-            lambda *_args, **_kwargs: None,
         )
         monkeypatch.setattr(
             monitor_refresh,

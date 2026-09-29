@@ -48,57 +48,6 @@ class TestCausalityStatusRejectAxis(unittest.TestCase):
                 "Day0ObservationContext not importable from observation_client"
             )
 
-    def test_evaluator_has_causality_status_reject_gate_for_low_track(self):
-        """INV-16: evaluator.py must contain an explicit causality_status guard
-        for the low track, distinct from the low_so_far=None guard.
-
-        After Phase 6, the evaluator must check causality_status and route
-        N/A_CAUSAL_DAY_ALREADY_STARTED slots to the nowcast path, not Platt.
-
-        This test fails until Phase 6 because the causality guard does not exist.
-        """
-        self._import_context()
-
-        import src.engine.evaluator as ev_mod
-        import inspect
-        source = inspect.getsource(ev_mod)
-
-        self.assertIn(
-            "N/A_CAUSAL_DAY_ALREADY_STARTED",
-            source,
-            "evaluator.py must explicitly handle causality_status='N/A_CAUSAL_DAY_ALREADY_STARTED' "
-            "for the low track (INV-16). This is a separate gate from low_so_far=None.",
-        )
-
-    def test_causality_status_reject_is_distinct_from_observation_unavailable(self):
-        """INV-16: the evaluator must use a distinct rejection_stage for
-        causality violations vs. observation unavailability.
-
-        OBSERVATION_UNAVAILABLE_LOW = provider couldn't fetch low_so_far.
-        CAUSAL_SLOT_NOT_OK = the Day0 slot is N/A_CAUSAL_DAY_ALREADY_STARTED
-        and must not touch a historical Platt model.
-
-        These are two separate failure modes; mixing them hides the cause from
-        operators and the learning pipeline.
-        """
-        self._import_context()
-
-        import src.engine.evaluator as ev_mod
-        import inspect
-        source = inspect.getsource(ev_mod)
-
-        self.assertIn(
-            "OBSERVATION_UNAVAILABLE_LOW",
-            source,
-            "evaluator must use OBSERVATION_UNAVAILABLE_LOW for missing low_so_far",
-        )
-        self.assertIn(
-            "CAUSAL_SLOT_NOT_OK",
-            source,
-            "evaluator must use a distinct rejection_stage for causality_status != OK "
-            "(INV-16). The label 'CAUSAL_SLOT_NOT_OK' or equivalent must be present.",
-        )
-
     def test_day0_observation_context_carries_causality_status(self):
         """INV-16: Day0ObservationContext must carry causality_status so the
         evaluator can gate on it without re-querying the snapshot table.

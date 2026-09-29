@@ -75,18 +75,19 @@ def test_harvester_scheduler_fails_closed_without_legacy_integrated_fallback():
 
 
 def test_settlement_readers_filter_verified_authority_before_downstream_use():
-    """Replay, monitor, and harvester reads must not consume quarantined settlement values.
+    """Replay and harvester reads must not consume quarantined settlement values.
 
     P3 update (K1 followups, 2026-05-14): world_view/settlements.py retired;
     assertion relocated to src/execution/harvester.py (the canonical live
-    settlement consumer). replay.py and monitor_refresh.py assertions unchanged.
+    settlement consumer). 2026-09-29: the monitor's only settlement read lived in
+    the deleted legacy ENS refresher; the monitor reads no settlement rows.
     """
     replay_source = (ROOT / "src" / "engine" / "replay.py").read_text(encoding="utf-8")
     monitor_source = (ROOT / "src" / "engine" / "monitor_refresh.py").read_text(encoding="utf-8")
     harvester_source = (ROOT / "src" / "execution" / "harvester.py").read_text(encoding="utf-8")
 
     assert replay_source.count("authority = 'VERIFIED'") >= 4
-    assert "AND authority = 'VERIFIED' LIMIT 1" in monitor_source
+    assert "settlement_outcomes" not in monitor_source
     # harvester.py filters at application layer (.upper() != "VERIFIED") rather
     # than SQL layer; assert the specific guard pattern exists.
     assert '.upper() != "VERIFIED"' in harvester_source or \
@@ -2734,53 +2735,6 @@ def test_monitor_budget_coverage_positions_never_exceeds_a_tiny_book(monkeypatch
     assert summary["held_monitor_budget_reservation_count"] == 1
     assert len(summary["held_monitor_budget_coverage_positions"]) == 1
     assert summary["held_monitor_primary_belief_reserve_seconds"] == pytest.approx(5.0)
-
-
-def test_monitor_primary_belief_read_elapsed_seconds_recorded_on_position():
-    """``refresh_position`` must stamp the position with how long its
-    primary belief read (``monitor_probability_refresh``) took, so a caller
-    can fold it into the process-lifetime cost-sizing sample.
-    """
-    from src.engine import monitor_refresh
-
-    pos = _make_position(
-        state="day0_window",
-        city="Chicago",
-        target_date="2026-04-01",
-        entry_method="ens_member_counting",
-        selected_method="",
-        applied_validations=[],
-    )
-
-    class DummyClob:
-        def get_best_bid_ask(self, token_id):
-            return 0.41, 0.43, 100.0, 100.0
-
-    def fake_recompute(position, current_p_market, registry, **context):
-        time.sleep(0.02)
-        position.selected_method = position.entry_method
-        position.applied_validations = [position.entry_method]
-        monitor_refresh._set_monitor_probability_fresh(position, True)
-        return 0.52
-
-    # This test measures the elapsed-time instrumentation around the belief
-    # read, not hard-fact routing — Chicago is a real, NOAA-settled city and
-    # target_date is (incidentally, for this fixture's own purposes) in the
-    # past, so _day0_absorbing_hard_fact_overlay is now a genuinely eligible
-    # first attempt; disable it so this test keeps exercising the
-    # recompute_native_probability path (and its sleep) it was written for.
-    with patch.object(
-        monitor_refresh, "_day0_absorbing_hard_fact_overlay", lambda **_kw: None
-    ), patch.object(monitor_refresh, "recompute_native_probability", fake_recompute):
-        monitor_refresh.refresh_position(None, DummyClob(), pos)
-
-    elapsed = getattr(
-        pos,
-        monitor_refresh._MONITOR_PRIMARY_BELIEF_READ_ELAPSED_SECONDS_ATTR,
-        None,
-    )
-    assert isinstance(elapsed, float)
-    assert 0.02 <= elapsed < 5.0
 
 
 def test_monitor_primary_belief_read_elapsed_samples_bounded():
@@ -17778,7 +17732,6 @@ def test_same_cycle_day0_crossing_refreshes_through_day0_semantics(monkeypatch):
         monitor_refresh._set_monitor_probability_fresh(position, True)
         return 0.52
 
-    monkeypatch.setattr(monitor_refresh, "recompute_native_probability", fake_recompute)
     monkeypatch.setattr(
         Position,
         "evaluate_exit",
@@ -17853,7 +17806,6 @@ def test_day0_window_refresh_uses_day0_observation_semantics(monkeypatch):
         monitor_refresh._set_monitor_probability_fresh(position, True)
         return 0.52
 
-    monkeypatch.setattr(monitor_refresh, "recompute_native_probability", fake_recompute)
 
     edge_ctx = monitor_refresh.refresh_position(None, DummyClob(), pos)
 
@@ -17869,67 +17821,6 @@ def test_day0_window_refresh_uses_day0_observation_semantics(monkeypatch):
     assert edge_ctx.entry_provenance == EntryMethod.ENS_MEMBER_COUNTING
     assert pos.last_monitor_prob == pytest.approx(0.52)
     assert pos.last_monitor_market_price == pytest.approx(0.41)
-
-
-def test_day0_wu_observation_unavailable_reseeds_without_forecast_fallback(monkeypatch):
-    """A missing Day0 observation must not borrow legacy forecast freshness."""
-    from src.contracts import EntryMethod
-    from src.contracts.exceptions import ObservationUnavailableError
-    from src.engine import monitor_refresh
-
-    pos = _make_position(
-        state="day0_window",
-        city="Chicago",
-        target_date="2026-04-01",
-        entry_method=EntryMethod.ENS_MEMBER_COUNTING.value,
-        selected_method="",
-        applied_validations=[],
-    )
-    city = type(
-        "City",
-        (),
-        {
-            "name": "Chicago",
-            "timezone": "America/Chicago",
-            "settlement_source_type": "wu_icao",
-        },
-    )()
-    observed_methods = []
-
-    def fake_recompute(position, current_p_market, registry, **context):
-        observed_methods.append(position.entry_method)
-        if position.entry_method == EntryMethod.DAY0_OBSERVATION.value:
-            raise ObservationUnavailableError("wu observation unavailable")
-        raise AssertionError("legacy forecast monitor fallback must not run")
-
-    monkeypatch.setattr(monitor_refresh, "recompute_native_probability", fake_recompute)
-    reseeds = []
-    monkeypatch.setattr(
-        monitor_refresh,
-        "_enqueue_single_family_belief_reseed_failsoft",
-        lambda **kw: reseeds.append(kw),
-    )
-
-    p, refresh_pos, fresh = monitor_refresh.monitor_probability_refresh(
-        pos,
-        conn=None,
-        city=city,
-        target_d=date(2026, 4, 1),
-    )
-
-    assert observed_methods == [
-        EntryMethod.DAY0_OBSERVATION.value,
-    ]
-    assert p == pytest.approx(pos.p_posterior)
-    assert refresh_pos is not pos
-    assert refresh_pos.entry_method == EntryMethod.DAY0_OBSERVATION.value
-    assert fresh is False
-    assert "day0_observation_unavailable:replacement_belief_reseed" in refresh_pos.applied_validations
-    assert all("forecast_monitor_fallback" not in v for v in refresh_pos.applied_validations)
-    assert "q_source:emos" not in refresh_pos.applied_validations
-    assert reseeds == [
-        {"city": "Chicago", "target_date": "2026-04-01", "metric": "high"}
-    ]
 
 
 def test_day0_absorbing_hard_fact_dominates_replacement_posterior(monkeypatch):
@@ -18109,324 +18000,6 @@ def test_day0_absorbing_hard_fact_monitor_consumes_durable_evidence_only(monkeyp
     assert observed[0]["durable_only"] is True
 
 
-def test_day0_high_morning_observation_is_not_exit_authority():
-    """A local-day running HIGH near midnight is not the day's final high authority."""
-    from src.engine import monitor_refresh
-    from src.types.metric_identity import HIGH_LOCALDAY_MAX
-
-    temporal_context = SimpleNamespace(daypart="morning", post_peak_confidence=0.0)
-
-    reason = monitor_refresh._day0_extreme_authority_rejection_reason(
-        temperature_metric=HIGH_LOCALDAY_MAX,
-        temporal_context=temporal_context,
-        hours_remaining=23.0,
-        observed_extreme_so_far=22.2,
-        member_extrema_remaining=np.array([24.0, 25.0, 26.0]),
-    )
-
-    assert reason is not None
-    assert reason.startswith("day0_high_extreme_not_mature:")
-
-
-def test_day0_low_nonterminal_observation_is_not_exit_authority():
-    """A local-day running LOW is not final-low authority while most of the day remains."""
-    from src.engine import monitor_refresh
-    from src.types.metric_identity import LOW_LOCALDAY_MIN
-
-    temporal_context = SimpleNamespace(daypart="morning", post_peak_confidence=0.0)
-
-    reason = monitor_refresh._day0_extreme_authority_rejection_reason(
-        temperature_metric=LOW_LOCALDAY_MIN,
-        temporal_context=temporal_context,
-        hours_remaining=18.0,
-        observed_extreme_so_far=18.0,
-        member_extrema_remaining=np.array([17.0, 16.5, 18.5]),
-    )
-
-    assert reason == "day0_low_extreme_not_terminal:hours_remaining=18.0"
-
-
-def test_day0_deterministic_remaining_forecast_does_not_bypass_maturity():
-    """Forecast remaining-window determinism is not settlement hard-fact authority."""
-    from src.engine import monitor_refresh
-    from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
-
-    temporal_context = SimpleNamespace(daypart="morning", post_peak_confidence=0.0)
-
-    high_reason = monitor_refresh._day0_extreme_authority_rejection_reason(
-        temperature_metric=HIGH_LOCALDAY_MAX,
-        temporal_context=temporal_context,
-        hours_remaining=23.0,
-        observed_extreme_so_far=35.0,
-        member_extrema_remaining=np.array([24.0, 25.0, 26.0]),
-    )
-    assert high_reason is not None and "not_mature" in high_reason
-
-    low_reason = monitor_refresh._day0_extreme_authority_rejection_reason(
-        temperature_metric=LOW_LOCALDAY_MIN,
-        temporal_context=temporal_context,
-        hours_remaining=18.0,
-        observed_extreme_so_far=5.0,
-        member_extrema_remaining=np.array([17.0, 16.5, 18.5]),
-    )
-    assert low_reason == "day0_low_extreme_not_terminal:hours_remaining=18.0"
-
-
-def test_day0_high_morning_refresh_marks_probability_stale(monkeypatch):
-    """Seoul-style local-midnight HIGH observation must not create exit authority."""
-    from src.config import City
-    from src.engine import monitor_refresh
-    from src.signal.day0_extrema import RemainingMemberExtrema
-    import src.signal.diurnal as diurnal
-
-    pos = _make_position(
-        state="day0_window",
-        city="Seoul",
-        target_date="2026-06-08",
-        bin_label="25°C",
-        temperature_metric="high",
-        entry_method="ens_member_counting",
-        selected_method="",
-        p_posterior=0.79,
-    )
-    city = City(
-        name="Seoul",
-        lat=37.558,
-        lon=126.791,
-        timezone="Asia/Seoul",
-        settlement_unit="C",
-        cluster="East Asia",
-        wu_station="RKSI",
-        settlement_source_type="wu_icao",
-    )
-
-    monkeypatch.setattr(monitor_refresh, "_fetch_day0_observation", lambda *_: {
-        "high_so_far": 22.2,
-        "low_so_far": 20.0,
-        "current_temp": 22.2,
-        "observation_time": "2026-06-08T00:10:00+09:00",
-        "source": "wu_api",
-    })
-    monitor_clock = {}
-
-    def _hourly_vectors(**kwargs):
-        monitor_clock["read"] = kwargs
-        return {
-            "members_hourly": np.zeros((3, 3)),
-            "times": [
-                "2026-06-07T15:00:00+00:00",
-                "2026-06-07T16:00:00+00:00",
-                "2026-06-07T17:00:00+00:00",
-            ],
-            "source_id": "day0_hourly_vectors",
-            "forecast_source_role": "day0_remaining_window_live",
-            "source_models": ["icon_d2", "ecmwf_ifs"],
-            "expected_models": ["icon_d2", "ecmwf_ifs"],
-            "source_model_count": 2,
-            "fetch_time": datetime(2026, 6, 7, 15, 5, tzinfo=timezone.utc),
-        }
-
-    monkeypatch.setattr(monitor_refresh, "_read_day0_hourly_vectors", _hourly_vectors)
-    monkeypatch.setattr(diurnal, "build_day0_temporal_context", lambda *a, **k: SimpleNamespace(
-        daypart="morning",
-        post_peak_confidence=0.0,
-        current_utc_timestamp=datetime(2026, 6, 7, 15, 10, tzinfo=timezone.utc),
-        solar_day=None,
-        current_local_hour=0.17,
-        daylight_progress=0.0,
-    ))
-    # Freeze the staleness gate's wall-clock to the fixture's frame: the obs
-    # fast-lane gate (task #49) added a 1.0h max observation age measured
-    # against real now, which rotted this fixed-date fixture (obs 2026-06-07
-    # looked 100+ hours old). Real gate logic still runs — only the clock is
-    # injected.
-    _orig_quality_gate = monitor_refresh._day0_observation_quality_rejection_reason
-    monkeypatch.setattr(
-        monitor_refresh,
-        "_day0_observation_quality_rejection_reason",
-        lambda city, obs, metric, decision_time=None, **kwargs: _orig_quality_gate(
-            city, obs, metric,
-            decision_time=datetime(2026, 6, 7, 15, 10, tzinfo=timezone.utc),
-            **kwargs,
-        ),
-    )
-    def _remaining_extrema(*args, **kwargs):
-        monitor_clock["extrema"] = kwargs
-        return (
-            RemainingMemberExtrema.for_metric(
-                np.array([24.0, 25.0, 26.0]),
-                kwargs["temperature_metric"],
-            ),
-            23.0,
-        )
-
-    monkeypatch.setattr(
-        monitor_refresh,
-        "remaining_member_extrema_for_day0",
-        _remaining_extrema,
-    )
-    monkeypatch.setattr(
-        monitor_refresh,
-        "_build_all_bins",
-        lambda *a, **k: (
-            [
-                monitor_refresh.Bin(low=24, high=24, label="24°C", unit="C"),
-                monitor_refresh.Bin(low=25, high=25, label="25°C", unit="C"),
-                monitor_refresh.Bin(low=26, high=26, label="26°C", unit="C"),
-            ],
-            1,
-        ),
-    )
-
-    p, validations = monitor_refresh._refresh_day0_observation(
-        position=pos,
-        current_p_market=0.72,
-        conn=None,
-        city=city,
-        target_d=date(2026, 6, 8),
-    )
-
-    assert np.isfinite(p)
-    assert getattr(pos, "_monitor_probability_is_fresh") is True
-    observation_boundary = datetime(2026, 6, 7, 15, 10, tzinfo=timezone.utc)
-    assert monitor_clock["read"]["remaining_window_start"] == observation_boundary
-    assert monitor_clock["extrema"]["now"] == observation_boundary
-    assert "day0_observation_remaining_window" in validations
-    assert "day0_extreme_not_absorbing" in validations
-    assert any(v.startswith("day0_high_extreme_not_mature:") for v in validations)
-
-
-def test_day0_remaining_window_buy_no_returns_held_side_probability(monkeypatch):
-    """Day0 monitor q is a YES-bin vector; buy_no exits must receive 1 - q_yes."""
-    from src.engine import monitor_refresh
-    import src.signal.diurnal as diurnal
-
-    pos = _make_position(
-        trade_id="munich-29-no-day0-side-space",
-        state="day0_window",
-        city="Munich",
-        target_date="2026-06-30",
-        bin_label="Will the highest temperature in Munich be 29°C on June 30?",
-        temperature_metric="high",
-        direction="buy_no",
-        entry_method="qkernel_spine",
-        selected_method="day0_observation_remaining_window",
-        p_posterior=0.872825778061108,
-    )
-    city = SimpleNamespace(
-        name="Munich",
-        timezone="Europe/Berlin",
-        settlement_unit="C",
-        settlement_source_type="wu_icao",
-        wu_station="EDDM",
-    )
-
-    monkeypatch.setattr(
-        monitor_refresh,
-        "_fetch_day0_observation",
-        lambda *_: {
-            "high_so_far": 28.0,
-            "low_so_far": 18.0,
-            "current_temp": 27.5,
-            "observation_time": "2026-06-30T04:44:00+02:00",
-            "source": "wu_api",
-        },
-    )
-    monkeypatch.setattr(
-        monitor_refresh,
-        "_day0_observation_source_rejection_reason",
-        lambda *a, **k: None,
-    )
-    monkeypatch.setattr(
-        monitor_refresh,
-        "_day0_observation_quality_rejection_reason",
-        lambda *a, **k: None,
-    )
-    monkeypatch.setattr(
-        diurnal,
-        "build_day0_temporal_context",
-        lambda *a, **k: SimpleNamespace(
-            daypart="pre_sunrise",
-            post_peak_confidence=0.034,
-            current_utc_timestamp=datetime(2026, 6, 30, 2, 44, tzinfo=timezone.utc),
-            solar_day=None,
-            current_local_hour=4.74,
-            daylight_progress=0.0,
-        ),
-    )
-    monkeypatch.setattr(
-        monitor_refresh,
-        "_read_day0_hourly_vectors",
-        lambda **kw: {
-            "members_hourly": np.zeros((3, 3)),
-            "times": [
-                "2026-06-30T02:00:00+00:00",
-                "2026-06-30T03:00:00+00:00",
-                "2026-06-30T04:00:00+00:00",
-            ],
-            "source_id": "day0_hourly_vectors",
-            "forecast_source_role": "day0_remaining_window_live",
-            "source_models": ["icon_d2", "ecmwf_ifs"],
-            "expected_models": ["icon_d2", "ecmwf_ifs"],
-            "source_model_count": 2,
-            "fetch_time": datetime(2026, 6, 30, 2, 40, tzinfo=timezone.utc),
-        },
-    )
-    monkeypatch.setattr(
-        monitor_refresh,
-        "remaining_member_extrema_for_day0",
-        lambda *a, **k: (
-            SimpleNamespace(maxes=np.array([28.0, 29.0, 30.0]), mins=None),
-            8.0,
-        ),
-    )
-    monkeypatch.setattr(
-        monitor_refresh,
-        "_day0_extreme_authority_rejection_reason",
-        lambda **kwargs: "day0_high_extreme_not_mature:daypart=pre_sunrise,post_peak_confidence=0.034",
-    )
-    monkeypatch.setattr(
-        monitor_refresh,
-        "_day0_observed_extreme_from_canonical_surface",
-        lambda **kwargs: None,
-    )
-    monkeypatch.setattr(
-        monitor_refresh.Day0Router,
-        "route",
-        staticmethod(
-            lambda inputs: SimpleNamespace(
-                p_vector=lambda bins, n_mc=None: np.array([0.28, 0.1581, 0.5619])
-            )
-        ),
-    )
-    monkeypatch.setattr(
-        monitor_refresh,
-        "_build_all_bins",
-        lambda *a, **k: (
-            [
-                monitor_refresh.Bin(low=28, high=28, label="28°C", unit="C"),
-                monitor_refresh.Bin(low=29, high=29, label="29°C", unit="C"),
-                monitor_refresh.Bin(low=30, high=30, label="30°C", unit="C"),
-            ],
-            1,
-        ),
-    )
-    monkeypatch.setattr(monitor_refresh, "_maybe_write_day0_nowcast", lambda **kw: None)
-
-    p, validations = monitor_refresh._refresh_day0_observation(
-        position=pos,
-        current_p_market=0.57,
-        conn=None,
-        city=city,
-        target_d=date(2026, 6, 30),
-    )
-
-    assert p == pytest.approx(1.0 - 0.1581)
-    assert getattr(pos, "_monitor_probability_is_fresh") is True
-    assert "day0_observation_remaining_window" in validations
-    assert "day0_high_extreme_not_mature:daypart=pre_sunrise,post_peak_confidence=0.034" in validations
-
-
 def test_day0_window_live_refresh_uses_best_bid_not_vwmp(monkeypatch):
     """Day0 quote surface uses bid while posterior dispatch stays quote-free."""
     from src.engine import monitor_refresh
@@ -18459,7 +18032,6 @@ def test_day0_window_live_refresh_uses_best_bid_not_vwmp(monkeypatch):
         monitor_refresh._set_monitor_probability_fresh(position, True)
         return 0.52
 
-    monkeypatch.setattr(monitor_refresh, "recompute_native_probability", fake_recompute)
 
     edge_ctx = monitor_refresh.refresh_position(None, DummyClob(), pos)
 
@@ -18497,21 +18069,6 @@ def test_day0_refresh_fallback_keeps_probability_non_authoritative(monkeypatch):
         def get_best_bid_ask(self, token_id):
             return 0.41, 0.43, 100.0, 100.0
 
-    monkeypatch.setattr(
-        monitor_refresh,
-        "_fetch_day0_observation",
-        lambda city, target_d: type(
-            "Obs",
-            (),
-            {
-                "high_so_far": 44.0,
-                "current_temp": 43.0,
-                "source": "wu_api",
-                # Missing observation_time forces fallback to the stored posterior.
-                "observation_time": None,
-            },
-        )(),
-    )
 
     edge_ctx = monitor_refresh.refresh_position(None, DummyClob(), pos)
 

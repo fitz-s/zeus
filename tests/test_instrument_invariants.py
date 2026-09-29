@@ -230,25 +230,6 @@ def test_day0_post_peak_sigma_is_continuous():
 
 # ---- Exit/Entry Epistemic Parity ----
 
-def test_monitor_mc_count_matches_entry():
-    """Monitor and entry must use the same MC count for p_raw computation.
-
-    Currently: entry uses 5000, monitor uses 1000.
-    This 5x asymmetry means monitor's p_posterior has ~2.2x more variance,
-    causing false EDGE_REVERSAL near threshold boundaries.
-    """
-    from src.signal.ensemble_signal import DEFAULT_N_MC
-    # Check what monitor_refresh actually uses
-    import inspect
-    from src.engine import monitor_refresh
-    source = inspect.getsource(monitor_refresh)
-    if "ensemble_n_mc()" not in source or "day0_n_mc()" not in source:
-        pytest.fail(
-            "monitor_refresh does not source MC counts from config helpers. "
-            f"Entry uses {DEFAULT_N_MC}, so monitor must route through the same single source."
-        )
-
-
 def test_exit_uses_ci_not_raw_edge():
     """Exit compares conservative_forward_edge (ci_lower) against threshold via Position.evaluate_exit.
 
@@ -295,54 +276,6 @@ def test_exit_uses_ci_not_raw_edge():
 
 
 # ---- Data Confidence ----
-
-def test_persistence_discount_requires_adequate_samples():
-    """Persistence discount must not fire on < 30 samples, and must scale with n.
-
-    Statistical rule: frequency estimate needs n >= 30 before applying discount.
-    Discount scales linearly from 10% at n=30 to 30% at n>=100.
-    """
-    from src.engine.monitor_refresh import _check_persistence_anomaly
-    from unittest.mock import MagicMock
-    from datetime import date
-
-    def make_conn(n_samples):
-        conn = MagicMock()
-        # yesterday settlement
-        conn.execute.return_value.fetchone.side_effect = [
-            {"settlement_value": 15.0},  # yesterday
-            None,  # 2 days ago
-            None,  # 3 days ago
-            {"frequency": 0.02, "n_samples": n_samples},  # persistence lookup
-        ]
-        return conn
-
-    target = date(2026, 4, 1)
-    predicted = 25.0  # delta = +10 from 15.0 → ">10" bucket, rare
-
-    # n=10: no discount (too few samples)
-    conn_10 = make_conn(10)
-    result_10 = _check_persistence_anomaly(conn_10, "London", target, predicted)
-    assert result_10 == 1.0, f"n=10 should give no discount, got {result_10}"
-
-    # n=29: still no discount
-    conn_29 = make_conn(29)
-    result_29 = _check_persistence_anomaly(conn_29, "London", target, predicted)
-    assert result_29 == 1.0, f"n=29 should give no discount, got {result_29}"
-
-    # n=30: minimum discount fires (10%)
-    conn_30 = make_conn(30)
-    result_30 = _check_persistence_anomaly(conn_30, "London", target, predicted)
-    assert abs(result_30 - 0.90) < 0.01, f"n=30 should give 10% discount, got {1 - result_30:.2%}"
-
-    # n=100: full 30% discount
-    conn_100 = make_conn(100)
-    result_100 = _check_persistence_anomaly(conn_100, "London", target, predicted)
-    assert abs(result_100 - 0.70) < 0.01, f"n=100 should give 30% discount, got {1 - result_100:.2%}"
-
-    # Discount must increase with n (more data → more confident → larger penalty)
-    assert result_30 > result_100, "Larger n should yield larger discount"
-
 
 # ---- Integer Rounding Must Be Unit-Aware ----
 

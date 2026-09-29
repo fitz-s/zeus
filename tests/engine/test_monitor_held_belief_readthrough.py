@@ -201,7 +201,6 @@ def test_readthrough_fresh_recompute_restores_probability_authority(monkeypatch)
 
     monkeypatch.setattr(pb, "load_replacement_belief", lambda **kw: _stale_belief())
     # The legacy chain must NEVER be the freshness source.
-    monkeypatch.setattr(mr, "_refresh_ens_member_counting", lambda **kw: (0.5, []))
     # Read-through recompute succeeds and returns the held-side prob (e.g. NO has
     # collapsed to 0.30 — a reversal the frozen 0.758 belief could never see).
     monkeypatch.setattr(
@@ -238,7 +237,6 @@ def test_readthrough_insufficient_inputs_failclose_with_durable_belief_debt(monk
     import src.engine.position_belief as pb
 
     monkeypatch.setattr(pb, "load_replacement_belief", lambda **kw: _stale_belief())
-    monkeypatch.setattr(mr, "_refresh_ens_member_counting", lambda **kw: (0.5, []))
     # Read-through cannot honestly recompute (no current single_runs / no on-disk anchor).
     monkeypatch.setattr(mr, "_attempt_held_belief_readthrough", lambda *a, **k: None)
     reseed_called: list[tuple] = []
@@ -1208,7 +1206,6 @@ def test_readthrough_does_not_itself_decide_an_exit(monkeypatch):
     import src.engine.position_belief as pb
 
     monkeypatch.setattr(pb, "load_replacement_belief", lambda **kw: _stale_belief())
-    monkeypatch.setattr(mr, "_refresh_ens_member_counting", lambda **kw: (0.5, []))
     # A fresh belief that has NOT reversed (still favors the held NO side).
     monkeypatch.setattr(
         mr,
@@ -4205,3 +4202,35 @@ def test_wu_icao_post_local_day_falls_through_unchanged_with_real_conn(monkeypat
     assert result is None
     assert position.applied_validations == []
     assert getattr(position, "last_monitor_prob_is_fresh", False) is False
+
+
+def test_day0_held_position_without_canonical_identity_has_no_second_q_law(monkeypatch):
+    """One Day0 q law: the complete global simplex (mixture inside). A held Day0
+    position lacking a canonical condition id gets NO q — belief unavailable —
+    never a q from a separate Day0 engine that bypasses the served mixture.
+
+    Antibody: before 2026-09-29 this path returned the legacy Day0Router q
+    (``_refresh_day0_monitor_probability``) as the fresh held probability.
+    """
+    import src.engine.monitor_refresh as mr
+
+    position = _pos()
+    monkeypatch.setattr(mr, "_day0_absorbing_hard_fact_overlay", lambda **_: None)
+    monkeypatch.setattr(mr, "_would_use_day0_monitor_lane", lambda *_: True)
+    monkeypatch.setattr(mr, "_canonical_condition_id", lambda _: None)
+    monkeypatch.setattr(
+        mr,
+        "_refresh_current_global_day0_probability",
+        lambda *_a, **_k: pytest.fail("global simplex needs a canonical identity"),
+    )
+
+    prob, refreshed, fresh = mr.monitor_probability_refresh(
+        position, conn=None, city=object(), target_d=None,
+    )
+
+    assert prob == position.p_posterior
+    assert fresh is False
+    assert refreshed is not position
+    assert "day0_canonical_condition_identity_missing" in refreshed.applied_validations
+    assert not hasattr(mr, "_refresh_day0_monitor_probability")
+    assert not hasattr(mr, "_refresh_day0_observation")

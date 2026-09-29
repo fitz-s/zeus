@@ -330,9 +330,7 @@ test_trust_policy:
     # End-to-end sign / window / transport invariant audit for the FT-ship
     # hierarchical bias-correction layer. Authority: operator critique 2026-05-27
     # + docs/archive/2026-Q2/operations_historical/INVARIANT_SIGN_PROOF_2026-05-27.md.
-    tests/test_evaluator_explicit_n_mc.py: {created: "2026-04-30", last_used: "2026-05-08"}
     tests/test_evaluator_strategy_key_failclosed.py: {created: "2026-05-02", last_used: "2026-05-21"}
-    tests/test_evaluator_metric_normalizer_failclosed.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_execution_intent_typed_slippage.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_lifecycle_terminal_predicate.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_monitor_refresh_ci_fallback.py: {created: "2026-04-26", last_used: "2026-04-26"}
@@ -390,7 +388,6 @@ test_trust_policy:
     tests/test_writer_jobs_registry_guard.py: {created: "2026-05-24", last_used: "2026-05-24"}
     # P5-1 + P5-3 (PR #19 closeout completion, 2026-04-26):
     tests/test_realized_fill_at_receipt.py: {created: "2026-04-26", last_used: "2026-04-26"}
-    tests/test_evaluate_candidate_metric_integration.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_architecture_contracts.py: {created: "2026-04-02", last_used: "2026-07-19"}
     tests/test_backfill_completeness_guardrails.py: {created: "2026-04-25", last_used: "2026-04-25"}
     tests/test_backfill_scripts_match_live_config.py: {created: "2026-04-21", last_used: "2026-04-25"}
@@ -400,7 +397,6 @@ test_trust_policy:
 
     tests/test_promote_pending_trades.py: {created: "2026-05-17", last_used: "2026-07-16", note: "EXIT trade-fact promotion preserves exact matched size for full and partial FAK fills; original order size cannot overwrite confirmed partial-fill quantity."}
     tests/test_canonical_position_current_schema_alignment.py: {created: "2026-04-23", last_used: "2026-04-23"}
-    tests/test_center_buy_repair.py: {created: "2026-04-29", last_used: "2026-04-29"}
     tests/test_cross_module_invariants.py: {created: "2026-03-30", last_used: "2026-04-23"}
     tests/test_day0_exit_gate.py: {created: "2026-04-07", last_used: "2026-07-19"}
     tests/test_day0_admission.py: {created: "2026-06-17", last_used: "2026-09-29", note: "Day0 live admission contracts, including strict quote-after-observation ordering, current source-health classification, final-localday no-entry geometry, one-bin stress, maker-only routing, the absence of any diurnal-nowcast veto input (moved into q), and the held-ask repricing veto (>= 2 distinct asks in the prior 10 min) with its gate ordering, inert-without-a-count default, and day0-only scope."}
@@ -469,7 +465,6 @@ test_trust_policy:
     tests/test_platt.py: {created: "2026-03-30", last_used: "2026-08-01"}
     tests/test_platt_bootstrap_equivalence.py: {created: "2026-04-29", last_used: "2026-04-30"}
     tests/test_pnl_flow_and_audit.py: {created: "2026-04-28", last_used: "2026-04-29"}
-    tests/test_bootstrap_symmetry.py: {created: "2026-04-29", last_used: "2026-04-29"}
     tests/test_k1_review_fixes.py: {created: "2026-04-29", last_used: "2026-04-29"}
     tests/test_pre_live_integration.py: {created: "2026-04-29", last_used: "2026-04-29"}
     tests/test_provenance_enforcement.py: {created: "2026-04-07", last_used: "2026-04-23"}
@@ -831,9 +826,6 @@ test_trust_policy:
     tests/events/test_live_cap_no_caps_directive.py: {created: "2026-06-05", last_used: "2026-07-03", note: "no-caps directive RT: $250 ceiling + rate-window flag-gated — disabled ⇒ no cap; ON ⇒ caps unchanged. test_historical_cap_audits_are_superseded_by_no_cap_authority retired 2026-07-03 (evidence-doc cluster it reads was deleted by 2b158c02a, not archived as assumed)"}
     tests/sizing/test_portfolio_reservation_rollback.py: {created: "2026-06-05", last_used: "2026-06-05", note: "RT: portfolio reservation rollback under multi-bet correlated sizing"}
     # day0 live activation: absorbing-mask direction antibody + single live scope (2026-06-05, modernized 2026-06-18)
-    tests/engine/test_day0_live_mask_direction.py: {created: "2026-06-05", last_used: "2026-06-05", note: "P0 RT: pins LIVE day0 absorbing-mask direction (observed-so-far → mask → posterior) so inversion is UNCONSTRUCTABLE; reproduces #98 Paris low=14°C wrong-side"}
-    tests/engine/test_day0_mask_consolidation.py: {created: "2026-06-05", last_used: "2026-06-05", note: "P2 RT: collapse to ONE absorbing mask — hardened inline _edli_day0_mask_for_analysis truth table (zero behavioral delta), dark module deleted"}
-    tests/engine/test_day0_mask_runtime_gate.py: {created: "2026-06-05", last_used: "2026-06-05", note: "P3 RT: runtime DAY0_MASK_CONTRADICTS_OBSERVATION fail-closed gate — surviving bin contradicting rounded_value raises; future inversion fails CLOSED"}
     tests/engine/test_no_loss_class_nonexecutable_yes_gate.py: {created: "2026-06-13", last_used: "2026-06-13", note: "RED-on-revert antibody for the buy-NO loss-class gate in _canonical_probability_and_fdr_proof: a NON-executable-YES far bin emits q_lcb_no=0.0/p=1.0/prefilter=False (profitable-era gate), while an EXECUTABLE-YES bin's buy_no stays reconciled via the native NO edge (GOOD-fill path). RED-on-revert proven by temporarily restoring the 745aa10c6f forecast-NO else-branch (q_lcb_no jumps to 0.775). Authority: settled-data loss-class replay 2026-06-13, n=485, 98.1% admit; git regression 745aa10c6f"}
     tests/engine/test_no_calibration_loss_class_coverage.py: {created: "2026-06-13", last_used: "2026-06-13", note: "settled_data guard: reproduces forecast_posteriors JOIN settlement_outcomes replay (q_lcb_no=1-q_ucb_yes on the winning bin); unguarded forecast-NO admits the loss class on ~98% of settled winners, the gate admits ZERO (98%->0). Read-only state/zeus-forecasts.db?mode=ro with graceful pytest.skip when absent; synthetic-data twin always enforces the gate. Authority: settled-data loss-class replay 2026-06-13, n=485, 98.1% admit; git regression 745aa10c6f"}
     # a1c2163e4 ("fix(live): unify replacement forecast runtime semantics", 2026-06-18) deleted the
@@ -955,7 +947,6 @@ categories:
     - tests/test_config.py
     - tests/test_calibration_weighting_laws.py
     - tests/test_runtime_n_mc_floor.py
-    - tests/test_evaluator_explicit_n_mc.py
     - tests/test_evaluator_strategy_key_failclosed.py
     - tests/test_portfolio_kelly_relationships.py
     - tests/test_cross_module_invariants.py
@@ -1115,7 +1106,6 @@ categories:
     - tests/test_calibration_store_metric_required.py
     - tests/test_calibration_v2_fallback_alerting.py
     - tests/test_ensemble_snapshots_bias_corrected_schema.py
-    - tests/test_evaluator_metric_normalizer_failclosed.py
     - tests/test_execution_intent_typed_slippage.py
     - tests/test_entry_gate_authority_promotion.py
     - tests/test_cycle_runner_discovery_gate_authority.py
@@ -1129,7 +1119,6 @@ categories:
     - tests/test_position_lifecycle_state.py
     - tests/test_position_metric_resolver.py
     - tests/test_realized_fill_at_receipt.py
-    - tests/test_evaluate_candidate_metric_integration.py
     # PR #137 — post-Karachi remediation wave antibodies (2026-05-17).
     # E: WorktreeCreate hook stdout protocol antibody (moved from tests/.claude/hooks/).
     - tests/test_worktree_create_contract.py
@@ -1205,7 +1194,6 @@ categories:
     - tests/test_b063_rescue_events.py
     - tests/test_backfill_completeness_guardrails.py
     - tests/test_backfill_openmeteo_previous_runs.py
-    - tests/test_bootstrap_symmetry.py
     - tests/test_bug100_k1_k2_structural.py
     - tests/test_calibration_manager.py
     - tests/test_calibration_unification.py
@@ -1399,9 +1387,6 @@ categories:
     - tests/test_startup_wallet_dedup.py
     - tests/test_startup_wallet_warm_overlap.py
     # day0 live activation antibodies (2026-06-05, modernized 2026-06-18)
-    - tests/engine/test_day0_live_mask_direction.py
-    - tests/engine/test_day0_mask_consolidation.py
-    - tests/engine/test_day0_mask_runtime_gate.py
 
   transitional_advisory:
     - tests/test_calibration_quality.py
@@ -1414,7 +1399,6 @@ categories:
     - tests/test_ops_scripts_smoke.py
     - tests/test_audit_city_data_readiness.py
     - tests/test_bayesian_sigma_evaluation.py
-    - tests/test_center_buy_repair.py
     - tests/test_divergence_exit_counterfactual.py
     - tests/test_lead_sigma_evaluation.py
     - tests/test_sigma_floor_evaluation.py
@@ -1621,7 +1605,6 @@ law_gate:
       - tests/test_ensemble_signal.py
       - tests/test_structural_linter.py
       - tests/test_runtime_n_mc_floor.py
-      - tests/test_evaluator_explicit_n_mc.py
     protects:
       - config/settings.json
       - state/assumptions.json
@@ -3540,47 +3523,7 @@ test_metadata:
     created: 2026-05-22
     last_reused_or_audited: 2026-05-22
 
-  tests/test_day0_period_extrema_guard.py:
-    modules: [signal, evaluator, contracts]
-    category: integration_antibody
-    kind: antibody
-    profile: p0_3_period_extrema_day0_guard
-    blocks_commit: true
-    asserted_invariants:
-      - DAY0_REMAINING_WINDOW_REJECTS_PERIOD_EXTREMA_HIGH
-      - DAY0_REMAINING_WINDOW_REJECTS_PERIOD_EXTREMA_LOW
-    source_under_test:
-      - src/engine/evaluator.py
-      - src/signal/day0_window.py
-    law_dependencies:
-      - docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
-    notes: >
-      P0-3 antibody: day0 remaining-window guard rejects whole-day period_extrema
-      (mx2t3/mn2t3). Guard fires before any access to ens_result['members_hourly'].
-      Covers HIGH and LOW symmetry. Uses DAY0_NO_FORECAST_HOURS_REMAIN (existing enum)
-      with detail containing 'DAY0_REMAINING_WINDOW_UNAVAILABLE'. Schema bump deferred.
-    created: 2026-05-23
-    last_reused_or_audited: 2026-05-23
 
-  tests/test_probability_sanity_removed_log_only.py:
-    modules: [signal, evaluator]
-    category: integration_antibody
-    kind: antibody
-    profile: p0_d_probability_sanity_removed_log_only
-    blocks_commit: true
-    asserted_invariants:
-      - NON_DAY0_SANITY_REMOVED_LOG_ONLY_NOT_BLOCKING
-      - DAY0_HIGH_HARD_GATE_CONTRACT_PRESERVED
-    source_under_test:
-      - src/signal/probability_sanity.py
-      - src/engine/evaluator.py
-    law_dependencies:
-      - docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
-    notes: >
-      P0-D antibody: validate_high_distribution no longer runs as log-only telemetry for
-      non-day0 strategies. Day0 HIGH hard gate contract preserved.
-    created: 2026-05-23
-    last_reused_or_audited: 2026-05-23
 
   tests/test_exec_freshness_recapture.py:
     cohort: law_antibody

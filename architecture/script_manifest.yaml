@@ -502,7 +502,6 @@ scripts:
       - src/contracts/ensemble_snapshot_provenance.py::TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION
       - src/types/metric_identity.py::LOW_LOCALDAY_MIN
     required_tests: [tests/test_unblock_w1_low_identity_platt.py]
-  capture_replay_artifact.py: {class: audit_artifact_writer}
   check_advisory_gates.py: {class: enforcement}
   check_forecast_live_e2e.py:
     class: read_only_evidence

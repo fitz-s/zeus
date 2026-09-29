@@ -140,192 +140,19 @@ def _bind_store_to_conn(monkeypatch, conn: sqlite3.Connection) -> None:
     monkeypatch.setattr(day0_nowcast_store, "resolve_market_slug_for_position_identity", _resolve_bound)
 
 
-def _call_lane(
-    conn: sqlite3.Connection,
-    *,
-    obs_avail: str | None,
-    market_slug: str | None = "boston-2026-06-15-high",
-    token_id: str | None = None,
-    condition_id: str | None = None,
-    bin_label: str = "Will the highest temperature in Boston be 20°C on June 15?",
-) -> None:
-    """Drive the REAL _maybe_write_day0_nowcast with minimal stand-ins."""
-    position = types.SimpleNamespace(
-        market_slug=market_slug,
-        trade_id="t-1",
-        token_id=token_id,
-        condition_id=condition_id,
-        market_id=condition_id,
-        city="Boston",
-        target_date="2026-06-15",
-        bin_label=bin_label,
-    )
-    temporal_context = types.SimpleNamespace(daypart="afternoon")
-    temperature_metric = types.SimpleNamespace(temperature_metric="high")
-    from datetime import date
-
-    monitor_refresh._maybe_write_day0_nowcast(
-        position=position,
-        hours_remaining=4.0,
-        temporal_context=temporal_context,
-        p_cal_full=np.array([0.6, 0.4]),
-        p_raw_vector=np.array([0.55, 0.45]),
-        temperature_metric=temperature_metric,
-        target_d=date(2026, 6, 15),
-        observation_time="2026-06-15T14:00:00",
-        observation_available_at=obs_avail,
-    )
-
-
 # --------------------------------------------------------------------------- #
 # LANE-WRITES: persisted fit -> a real day0_nowcast_runs row WITH obs_available_at
 # --------------------------------------------------------------------------- #
-def test_lane_writes_row_with_obs_available_at_after_fit_persisted(monkeypatch) -> None:
-    conn = _deployed_shape_conn()
-
-    # 1. Persist the conservative/identity fit via the REAL writer (proves the
-    #    fit_version + schema_version=4 fixes against the deployed (3,4) CHECK).
-    day0_nowcast_store.write_platt_fit(_identity_fit(), conn=conn)
-    assert conn.execute("SELECT COUNT(*) FROM day0_horizon_platt_fits").fetchone()[0] == 1
-
-    # 2. With the fit present, the lane must STOP short-circuiting and write a row.
-    _bind_store_to_conn(monkeypatch, conn)
-    avail = "2026-06-15T13:45:01.123456+00:00"
-    _call_lane(conn, obs_avail=avail)
-
-    rows = conn.execute(
-        "SELECT * FROM day0_nowcast_runs ORDER BY rowid"
-    ).fetchall()
-    assert len(rows) == 1, "lane must write exactly one day0_nowcast_runs row"
-    row = dict(rows[0])
-    # The obs-timing clock value is carried byte-for-byte (no now() re-synthesis).
-    assert row["observation_available_at"] == avail
-    assert row["obs_availability_provenance"] == "live_fetch"
-    # FK + fit linkage intact.
-    assert row["fit_run_id"] == "hpf_v1_identity_conservative_v1"
-    assert row["daypart"] == "afternoon"
-    assert row["temperature_metric"] == "high"
-    conn.close()
-
-
 # --------------------------------------------------------------------------- #
 # LANE-WRITES (absent availability): NULL + honest UNVERIFIED, lane still fires.
 # --------------------------------------------------------------------------- #
-def test_lane_writes_null_unverified_when_availability_absent(monkeypatch) -> None:
-    conn = _deployed_shape_conn()
-    day0_nowcast_store.write_platt_fit(_identity_fit(), conn=conn)
-
-    _bind_store_to_conn(monkeypatch, conn)
-    _call_lane(conn, obs_avail=None)
-
-    rows = conn.execute("SELECT * FROM day0_nowcast_runs").fetchall()
-    assert len(rows) == 1
-    row = dict(rows[0])
-    assert row["observation_available_at"] is None
-    assert row["obs_availability_provenance"] == "UNVERIFIED"  # honest, never now()
-    conn.close()
-
-
-def test_lane_skips_stale_observation_available_at(monkeypatch) -> None:
-    conn = _deployed_shape_conn()
-    day0_nowcast_store.write_platt_fit(_identity_fit(), conn=conn)
-
-    _bind_store_to_conn(monkeypatch, conn)
-    _call_lane(conn, obs_avail="2026-06-17T14:00:00+00:00")
-
-    rows = conn.execute("SELECT * FROM day0_nowcast_runs").fetchall()
-    assert rows == []
-    conn.close()
-
-
 # --------------------------------------------------------------------------- #
 # AUTO-BOOTSTRAP: with NO fit, the lane persists identity fit and writes.
 # --------------------------------------------------------------------------- #
-def test_lane_auto_bootstraps_identity_fit_when_missing(monkeypatch) -> None:
-    conn = _deployed_shape_conn()
-    # NO write_platt_fit upfront: runtime must create the conservative identity fit.
-    _bind_store_to_conn(monkeypatch, conn)
-    _call_lane(conn, obs_avail="2026-06-15T13:45:01+00:00")
-
-    fit_n = conn.execute("SELECT COUNT(*) FROM day0_horizon_platt_fits").fetchone()[0]
-    run_n = conn.execute("SELECT COUNT(*) FROM day0_nowcast_runs").fetchone()[0]
-    assert fit_n == 1
-    assert run_n == 1
-    conn.close()
-
-
 # --------------------------------------------------------------------------- #
 # SQL position compatibility: market_slug is JSON-only, so live SQL positions
 # must resolve through canonical market_events instead of silently skipping.
 # --------------------------------------------------------------------------- #
-def test_lane_resolves_missing_position_market_slug_from_market_events_token(monkeypatch) -> None:
-    conn = _deployed_shape_conn()
-    day0_nowcast_store.write_platt_fit(_identity_fit(), conn=conn)
-    conn.execute(
-        """
-        INSERT INTO market_events (
-            market_slug, city, target_date, temperature_metric,
-            condition_id, token_id, range_label, outcome
-        ) VALUES (?,?,?,?,?,?,?,?)
-        """,
-        (
-            "highest-temperature-in-boston-on-june-15-2026",
-            "Boston",
-            "2026-06-15",
-            "high",
-            "0xcond",
-            "yes-token",
-            "Will the highest temperature in Boston be 20°C on June 15?",
-            "Will the highest temperature in Boston be 20°C on June 15?",
-        ),
-    )
-    conn.commit()
-
-    _bind_store_to_conn(monkeypatch, conn)
-    _call_lane(conn, obs_avail="2026-06-15T13:45:01+00:00", market_slug=None, token_id="yes-token")
-
-    row = conn.execute("SELECT market_slug FROM day0_nowcast_runs").fetchone()
-    assert row["market_slug"] == "highest-temperature-in-boston-on-june-15-2026"
-    conn.close()
-
-
-def test_lane_resolves_missing_position_market_slug_from_condition_bridge(monkeypatch) -> None:
-    conn = _deployed_shape_conn()
-    day0_nowcast_store.write_platt_fit(_identity_fit(), conn=conn)
-    conn.execute(
-        """
-        INSERT INTO market_events (
-            market_slug, city, target_date, temperature_metric,
-            condition_id, token_id, range_label, outcome
-        ) VALUES (?,?,?,?,?,?,?,?)
-        """,
-        (
-            "highest-temperature-in-boston-on-june-15-2026",
-            "Boston",
-            "2026-06-15",
-            "high",
-            "0xcond",
-            "yes-token",
-            "Will the highest temperature in Boston be 20°C on June 15?",
-            "Will the highest temperature in Boston be 20°C on June 15?",
-        ),
-    )
-    conn.commit()
-
-    _bind_store_to_conn(monkeypatch, conn)
-    _call_lane(
-        conn,
-        obs_avail="2026-06-15T13:45:01+00:00",
-        market_slug=None,
-        token_id=None,
-        condition_id="0xcond",
-    )
-
-    row = conn.execute("SELECT market_slug FROM day0_nowcast_runs").fetchone()
-    assert row["market_slug"] == "highest-temperature-in-boston-on-june-15-2026"
-    conn.close()
-
-
 # --------------------------------------------------------------------------- #
 # FIT-WRITE regression: write_platt_fit succeeds against the deployed (3,4) shape
 # and round-trips through read_latest_platt_fit. Locks the two latent bugs:

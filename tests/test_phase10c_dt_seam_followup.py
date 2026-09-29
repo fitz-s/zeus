@@ -159,42 +159,6 @@ class TestRCQBootstrapCtxLow:
 # ---------------------------------------------------------------------------
 
 
-class TestRCRPersistenceAnomalyGate:
-    """R-CR.1: _check_persistence_anomaly returns 1.0 immediately for LOW metric."""
-
-    def test_r_cr_1_low_metric_returns_1_no_db_query(self):
-        """R-CR.1: LOW metric gate returns 1.0 without touching DB."""
-        from src.engine.monitor_refresh import _check_persistence_anomaly
-        from src.types.metric_identity import LOW_LOCALDAY_MIN
-
-        # Pass a conn that would raise if queried
-        class _NeverConn:
-            def execute(self, *a, **kw):
-                raise AssertionError("R-CR.1: DB should NOT be queried for LOW metric")
-
-        result = _check_persistence_anomaly(
-            _NeverConn(), "NYC", "2026-04-01", 72.0,
-            temperature_metric=LOW_LOCALDAY_MIN,
-        )
-        assert result == 1.0, (
-            f"R-CR.1: Expected 1.0 for LOW metric gate, got {result}"
-        )
-
-    def test_r_cr_1_low_string_returns_1(self):
-        """R-CR.1 variant: string 'low' also triggers the gate."""
-        from src.engine.monitor_refresh import _check_persistence_anomaly
-
-        class _NeverConn:
-            def execute(self, *a, **kw):
-                raise AssertionError("DB should NOT be queried for LOW string")
-
-        result = _check_persistence_anomaly(
-            _NeverConn(), "NYC", "2026-04-01", 72.0,
-            temperature_metric="low",
-        )
-        assert result == 1.0, f"R-CR.1 str: expected 1.0, got {result}"
-
-
 # ---------------------------------------------------------------------------
 # R-CS — S3: harvester LOW→calibration_pairs routing
 # ---------------------------------------------------------------------------
@@ -606,56 +570,3 @@ class TestRCXCsvDocFlip:
                 f"R-CX.1: {bug_id} has empty fix_commit — must cite evidence"
             )
 
-
-class TestF104PersistenceNoDataLog:
-    """F104: PERSISTENCE_NO_DATA must be logged when temp_persistence has no row.
-
-    The never-fired silent branch (freq_row is None) was invisible; verify it
-    now emits a DEBUG log rather than returning 1.0 silently.
-    """
-
-    def test_persistence_no_data_logs_when_freq_row_missing(self, caplog):
-        """When temp_persistence returns no row for (city, season, bucket),
-        a PERSISTENCE_NO_DATA debug line must appear."""
-        import logging
-        import sqlite3
-        from datetime import date
-        from unittest.mock import patch
-
-        from src.engine.monitor_refresh import _check_persistence_anomaly
-
-        # Build the same schema-qualified DB shape used by monitor_refresh:
-        # forecasts.settlement_outcomes plus world.temp_persistence.
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
-        conn.execute("ATTACH DATABASE ':memory:' AS forecasts")
-        conn.execute("ATTACH DATABASE ':memory:' AS world")
-        conn.execute("""
-            CREATE TABLE forecasts.settlement_outcomes (
-                city TEXT, target_date TEXT, temperature_metric TEXT,
-                authority TEXT, settlement_value REAL
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE world.temp_persistence (
-                city TEXT, season TEXT, delta_bucket TEXT,
-                frequency REAL, n_samples INTEGER
-            )
-        """)
-        # Insert one settlement so deltas is non-empty (prevents PERSISTENCE_CHECK_DISABLED path).
-        conn.execute(
-            "INSERT INTO forecasts.settlement_outcomes VALUES (?,?,?,?,?)",
-            ("London", "2026-05-16", "high", "VERIFIED", 68.0),
-        )
-        conn.commit()
-
-        target = date(2026, 5, 17)
-        with patch("src.calibration.manager.season_from_date", return_value="spring"), \
-             patch("src.calibration.manager.lat_for_city", return_value=51.5):
-            with caplog.at_level(logging.DEBUG, logger="src.engine.monitor_refresh"):
-                result = _check_persistence_anomaly(conn, "London", target, 70.0)
-
-        assert result == 1.0
-        assert any(
-            "PERSISTENCE_NO_DATA" in r.message for r in caplog.records
-        ), "PERSISTENCE_NO_DATA log must fire when temp_persistence has no matching row"

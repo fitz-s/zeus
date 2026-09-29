@@ -139,59 +139,6 @@ def _make_metric_identity(metric: str):
 # ---------------------------------------------------------------------------
 
 
-class TestRCYCausalityStatusWire:
-    """R-CY.1/2: causality_status flows from v2 snapshot row to Day0SignalInputs."""
-
-    def test_r_cy_1_v2_row_causality_propagates(self):
-        """R-CY.1: v2 row causality_status='N/A_CAUSAL_DAY_ALREADY_STARTED' reaches
-        Day0SignalInputs (not overridden by 'OK' default).
-
-        B4 Phase 3 (2026-05-01): _read_snapshot_metadata now requires snapshot_id
-        per decision-time ordering rule (`src/engine/evaluator.py:233`); pass the
-        autoincrement id of the seeded row.
-        """
-        from src.engine.evaluator import _read_snapshot_metadata
-
-        conn = _make_v2_snapshots_db(causality_status="N/A_CAUSAL_DAY_ALREADY_STARTED")
-        snapshot_id = conn.execute(
-            "SELECT snapshot_id FROM ensemble_snapshots WHERE city='NYC' LIMIT 1"
-        ).fetchone()["snapshot_id"]
-        meta = _read_snapshot_metadata(
-            conn, "NYC", "2026-01-01", "low", snapshot_id=str(snapshot_id),
-        )
-
-        assert meta.get("causality_status") == "N/A_CAUSAL_DAY_ALREADY_STARTED", (
-            "R-CY.1: causality_status must be read from the v2 row, "
-            "not the 'OK' fallback. Got: " + repr(meta.get("causality_status"))
-        )
-
-    def test_r_cy_2_missing_v2_row_fallback_ok(self):
-        """R-CY.2: missing v2 row → causality_status fallback 'OK' (Golden Window)."""
-        from src.engine.evaluator import _read_snapshot_metadata
-
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
-        conn.execute("""
-            CREATE TABLE ensemble_snapshots (
-                snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                city TEXT, target_date TEXT, temperature_metric TEXT,
-                causality_status TEXT DEFAULT 'OK',
-                boundary_ambiguous INTEGER DEFAULT 0,
-                fetch_time TEXT DEFAULT '2026-01-01T00:00:00'
-            )
-        """)
-        # Empty table — no rows
-        conn.commit()
-
-        meta = _read_snapshot_metadata(conn, "NYC", "2026-01-01", "low")
-
-        # Empty dict → get() with default "OK"
-        causality = meta.get("causality_status", "OK")
-        assert causality == "OK", (
-            "R-CY.2: missing v2 row must give causality_status fallback 'OK'. Got: " + repr(causality)
-        )
-
-
 # ---------------------------------------------------------------------------
 # R-CZ — ensemble_signal member_extrema rename + property alias
 # ---------------------------------------------------------------------------
@@ -332,82 +279,6 @@ class TestRDALegacyMetricColumn:
             + repr(cols["temperature_metric"]["dflt_value"])
         )
 
-    def test_r_da_2_low_candidate_writes_temperature_metric_low(self):
-        """R-DA.2: _store_ens_snapshot writes temperature_metric='low' for a LOW candidate."""
-        conn = _make_legacy_snapshots_db()
-
-        # Build a mock ens with metric=low
-        ens = MagicMock()
-        ens.member_maxes = np.array([12.0, 11.5, 13.0])
-        ens.temperature_metric = _make_metric_identity("low")
-        ens.spread_float.return_value = 0.75
-        ens.is_bimodal.return_value = False
-
-        ens_result = {
-            "fetch_time": "2026-01-01T00:00:00Z",
-            "issue_time": "2026-01-01T00:00:00Z",
-            "valid_time": "2026-01-01T12:00:00Z",
-            "model": "ifs",
-        }
-
-        from src.config import City
-        city = City(
-            name="NYC", wu_station="KLGA", settlement_unit="F",
-            cluster="northeast", lat=40.7, lon=-74.0,
-            timezone="America/New_York", settlement_source_type="wu_icao",
-        )
-
-        from src.engine.evaluator import _store_ens_snapshot
-        _store_ens_snapshot(conn, city, "2026-01-01", ens, ens_result)
-
-        # v1.F20: _store_ens_snapshot writes to ensemble_snapshots (legacy removed)
-        row = conn.execute(
-            "SELECT temperature_metric FROM ensemble_snapshots WHERE city='NYC' LIMIT 1"
-        ).fetchone()
-        assert row is not None, "R-DA.2: snapshot row must exist after _store_ens_snapshot"
-        assert row["temperature_metric"] == "low", (
-            "R-DA.2: LOW candidate must write temperature_metric='low'. Got: "
-            + repr(row["temperature_metric"])
-        )
-
-    def test_r_da_3_high_candidate_writes_temperature_metric_high(self):
-        """R-DA.3: _store_ens_snapshot writes temperature_metric='high' for a HIGH candidate."""
-        conn = _make_legacy_snapshots_db()
-
-        ens = MagicMock()
-        ens.member_maxes = np.array([72.0, 73.5, 71.0])
-        ens.temperature_metric = _make_metric_identity("high")
-        ens.spread_float.return_value = 1.25
-        ens.is_bimodal.return_value = False
-
-        ens_result = {
-            "fetch_time": "2026-01-01T00:00:00Z",
-            "issue_time": "2026-01-01T00:00:00Z",
-            "valid_time": "2026-01-01T12:00:00Z",
-            "model": "ifs",
-        }
-
-        from src.config import City
-        city = City(
-            name="NYC", wu_station="KLGA", settlement_unit="F",
-            cluster="northeast", lat=40.7, lon=-74.0,
-            timezone="America/New_York", settlement_source_type="wu_icao",
-        )
-
-        from src.engine.evaluator import _store_ens_snapshot
-        _store_ens_snapshot(conn, city, "2026-01-01", ens, ens_result)
-
-        # v1.F20: _store_ens_snapshot writes to ensemble_snapshots (legacy removed)
-        row = conn.execute(
-            "SELECT temperature_metric FROM ensemble_snapshots WHERE city='NYC' LIMIT 1"
-        ).fetchone()
-        assert row is not None, "R-DA.3: snapshot row must exist after _store_ens_snapshot"
-        assert row["temperature_metric"] == "high", (
-            "R-DA.3: HIGH candidate must write temperature_metric='high'. Got: "
-            + repr(row["temperature_metric"])
-        )
-
-
 # ---------------------------------------------------------------------------
 # R-DB — INV-13 provenance live (no escape flag)
 # ---------------------------------------------------------------------------
@@ -457,27 +328,6 @@ class TestRDBProvenanceLive:
 
 class TestRDCInv16Transition:
     """R-DC.1/2: INV-16 tests 1+2 pass post-S1; test 3 xfailed with P10E ticket."""
-
-    def test_r_dc_1_inv16_tests_1_and_2_pass(self):
-        """R-DC.1: evaluator.py source contains the INV-16 causality gate strings
-        required by tests 1 and 2 of test_phase6_causality_status.py."""
-        import inspect
-        import src.engine.evaluator as ev_mod
-
-        source = inspect.getsource(ev_mod)
-
-        assert "N/A_CAUSAL_DAY_ALREADY_STARTED" in source, (
-            "R-DC.1: evaluator must contain 'N/A_CAUSAL_DAY_ALREADY_STARTED' "
-            "(INV-16 test 1 requirement)"
-        )
-        assert "CAUSAL_SLOT_NOT_OK" in source, (
-            "R-DC.1: evaluator must contain 'CAUSAL_SLOT_NOT_OK' rejection stage "
-            "(INV-16 test 2 requirement)"
-        )
-        assert "OBSERVATION_UNAVAILABLE_LOW" in source, (
-            "R-DC.1: evaluator must retain 'OBSERVATION_UNAVAILABLE_LOW' stage "
-            "(distinct rejection axis)"
-        )
 
     def test_r_dc_2_inv16_test3_passes_natively_post_p10e(self):
         """R-DC.2 (P10E updated): test_day0_observation_context_carries_causality_status

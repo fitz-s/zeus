@@ -368,22 +368,6 @@ class TestPreDay0LowCarryover:
         assert conditioning.residual_scope == "city:London"
         assert conditioning.residual_sample_count == 240
 
-    def test_pre_day0_low_carryover_requires_empirical_model_for_live_q(self):
-        import numpy as np
-        from src.signal.day0_low_distribution import build_pre_day0_low_empirical_conditioning
-
-        assert build_pre_day0_low_empirical_conditioning(
-            member_mins=np.full(51, 15.0),
-            window_low=12.0,
-            lead_hours_to_target_start=1.0,
-            unit="C",
-            city_name="London",
-            model=None,
-        ) is None
-        source = (ROOT / "src" / "engine" / "evaluator.py").read_text(encoding="utf-8")
-        assert "EMPIRICAL_RESIDUAL_MODEL_VERIFIED" in source
-        assert "UNCALIBRATED_HEURISTIC_SHADOW_ONLY" not in source
-
     def test_pre_day0_low_carryover_not_active_after_start_or_too_early(self):
         import numpy as np
 
@@ -812,67 +796,6 @@ def _make_position(**overrides) -> Position:
 
 
 class TestDay0TransitionMonotonicity:
-    def test_hourly_day0_observation_uses_publication_clock_for_freshness(self):
-        """Paris 15C regression: WU hourly settlement rows publish after the
-        hourly bucket. A just-published canonical row remains executable even
-        when its observation_time is slightly older than the base 1h window."""
-        from src.data.observation_client import Day0ObservationContext
-        from src.engine.evaluator import _day0_observation_quality_rejection_reason
-        from src.types.metric_identity import MetricIdentity
-
-        decision_time = datetime(2026, 7, 2, 12, 13, tzinfo=timezone.utc)
-        obs = Day0ObservationContext(
-            current_temp=22.0,
-            high_so_far=22.0,
-            low_so_far=15.0,
-            source="wu_icao_history",
-            observation_time="2026-07-02T11:00:00+00:00",
-            observation_available_at="2026-07-02T11:43:33.517275+00:00",
-            provider_reported_time="canonical_observation_instants",
-            unit="C",
-            coverage_status="OK",
-        )
-
-        assert (
-            _day0_observation_quality_rejection_reason(
-                SimpleNamespace(name="Paris"),
-                obs,
-                MetricIdentity.from_raw("low"),
-                decision_time=decision_time,
-                allow_incomplete_window_bound=True,
-            )
-            is None
-        )
-
-    def test_hourly_day0_observation_fails_when_publication_clock_is_stale(self):
-        from src.data.observation_client import Day0ObservationContext
-        from src.engine.evaluator import _day0_observation_quality_rejection_reason
-        from src.types.metric_identity import MetricIdentity
-
-        decision_time = datetime(2026, 7, 2, 12, 13, tzinfo=timezone.utc)
-        obs = Day0ObservationContext(
-            current_temp=22.0,
-            high_so_far=22.0,
-            low_so_far=15.0,
-            source="wu_icao_history",
-            observation_time="2026-07-02T11:00:00+00:00",
-            observation_available_at="2026-07-02T10:43:33.517275+00:00",
-            provider_reported_time="canonical_observation_instants",
-            unit="C",
-            coverage_status="OK",
-        )
-
-        reason = _day0_observation_quality_rejection_reason(
-            SimpleNamespace(name="Paris"),
-            obs,
-            MetricIdentity.from_raw("low"),
-            decision_time=decision_time,
-            allow_incomplete_window_bound=True,
-        )
-
-        assert reason is not None
-        assert "Day0 observation is stale" in reason
-
     def test_seoul_incident_replay_single_tick_reversal_holds(self):
         """Replay of position b5d966a9-990 (2026-06-07T15:08Z): buy_no Seoul 25C,
         day0 arrival at local midnight, posterior step 0.795->0.644 from the
@@ -1080,16 +1003,6 @@ class TestDay0TransitionMonotonicity:
             Direction.NO,
         )
         assert actual == pytest.approx(0.9951680588385971)
-
-    def test_day0_monitor_does_not_reintroduce_legacy_platt(self):
-        """Day0 monitor evidence must not resurrect the retired ENS+Platt era."""
-        source = (ROOT / "src" / "engine" / "monitor_refresh.py").read_text(encoding="utf-8")
-        start = source.index("def _refresh_day0_observation(")
-        end = source.index("def _day0_extreme_authority_rejection_reason(")
-        body = source[start:end]
-        assert "_monitor_calibrator_for_ens_result" not in body
-        assert "platt_recalibration" not in body
-
 
 # ===========================================================================
 # R8 — day0 q_lcb is a REAL lower bound (static-sampler fix, review item D)
@@ -1380,58 +1293,6 @@ class TestDay0MaturityAuthority:
             defaults.pop("metric")
         defaults.pop("metric", None)
         return _day0_extreme_authority_rejection_reason(**defaults)
-
-    def test_high_running_max_at_local_midnight_is_not_authority(self):
-        """The Seoul incident's root: a midnight running max replaced the
-        forecast posterior. Pre-peak HIGH bounds must be rejected."""
-        reason = self._gate(
-            temporal_context=SimpleNamespace(daypart="pre_sunrise", post_peak_confidence=0.0)
-        )
-        assert reason is not None and "not_mature" in reason
-
-    def test_high_pre_peak_morning_is_not_authority(self):
-        assert self._gate() is not None
-
-    def test_high_post_peak_with_confidence_is_authority(self):
-        reason = self._gate(
-            temporal_context=SimpleNamespace(daypart="post_peak", post_peak_confidence=0.8)
-        )
-        assert reason is None
-
-    def test_deterministic_remaining_forecast_does_not_bypass_maturity(self):
-        """A remaining-window forecast can be deterministic without being a settlement hard fact."""
-        reason = self._gate(
-            observed_extreme_so_far=30.0,
-            member_extrema_remaining=[25.0, 26.0, 27.0],
-            temporal_context=SimpleNamespace(daypart="morning", post_peak_confidence=0.0),
-        )
-        assert reason is not None and "not_mature" in reason
-
-    def test_no_observation_yet_is_never_authority(self):
-        reason = self._gate(observed_extreme_so_far=None)
-        assert reason is not None and "no_intraday_extreme" in reason
-
-    def test_low_not_terminal_until_final_hours(self):
-        # BOUNDED_LIVE low (members below the running min remain possible):
-        # early-day running min is not terminal authority.
-        reason = self._gate(
-            metric="low", hours_remaining=20.0,
-            observed_extreme_so_far=24.0, member_extrema_remaining=[22.0, 23.0],
-        )
-        assert reason is not None and "not_terminal" in reason
-        # Same bounded state inside the terminal window -> authority.
-        assert self._gate(
-            metric="low", hours_remaining=3.0,
-            observed_extreme_so_far=24.0, member_extrema_remaining=[22.0, 23.0],
-        ) is None
-        # A deterministic remaining-window LOW forecast is still not terminal
-        # observation authority while most of the local day remains.
-        reason = self._gate(
-            metric="low", hours_remaining=20.0,
-            observed_extreme_so_far=18.0, member_extrema_remaining=[19.0, 20.0],
-        )
-        assert reason is not None and "not_terminal" in reason
-
 
 # ===========================================================================
 # R23 — LCB transform audit identity (PR#404 P1): submit-license changes are

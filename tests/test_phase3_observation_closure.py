@@ -468,31 +468,6 @@ class TestEvaluatorLowUnblock(unittest.TestCase):
             "With valid low_so_far in Day0ObservationContext, evaluator low-reject gate must not fire",
         )
 
-    def test_evaluator_low_reject_branch_rejection_stage_label(self):
-        """R-H: after Phase 3 the low-reject branch (if it fires at all) uses
-        rejection_stage='OBSERVATION_UNAVAILABLE_LOW', not 'SIGNAL_QUALITY'.
-
-        Today evaluator.py:804 uses rejection_stage='SIGNAL_QUALITY' for the
-        low unavailable path. Phase 3 renames it to OBSERVATION_UNAVAILABLE_LOW
-        so callers can distinguish low-specific unavailability from ensemble quality.
-
-        This test fails today because:
-        1. Day0ObservationContext doesn't exist.
-        2. The string 'OBSERVATION_UNAVAILABLE_LOW' is absent from evaluator.py.
-        """
-        self._import_context()  # gate: Phase 3 must have landed
-
-        import src.engine.evaluator as ev_mod
-        import inspect
-        source = inspect.getsource(ev_mod)
-        self.assertIn(
-            "OBSERVATION_UNAVAILABLE_LOW",
-            source,
-            "evaluator.py must use rejection_stage='OBSERVATION_UNAVAILABLE_LOW' "
-            "for the low_so_far unavailability path after Phase 3",
-        )
-
-
 # ---------------------------------------------------------------------------
 # NC-8 — No bare implicit unit assumptions at the provider seam
 # ---------------------------------------------------------------------------

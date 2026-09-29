@@ -31,7 +31,6 @@ from src.state.portfolio import (
     PortfolioState,
     Position,
 )
-from src.engine.evaluator import _layer7_dedup_fires
 from src.execution.executor import (
     _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS,
     _ENTRY_TERMINAL_NO_FILL_REPRICE_COOLDOWN_SECONDS,
@@ -232,97 +231,6 @@ def test_pending_exit_does_not_block_different_token(mem_db):
     assert has_same_token_open_db(mem_db, OTHER_TOKEN) is False
 
 
-def test_opposite_outcome_token_is_not_the_same_held_token(mem_db):
-    """A held NO leg cannot absorb or block a distinct YES sibling holding."""
-    _insert_position(
-        mem_db,
-        "held-no-position",
-        "day0_window",
-        token_id=TOKEN_X,
-        direction="buy_no",
-        no_token_id=TOKEN_X_NO,
-        shares=5.2,
-        cost_basis_usd=1.768,
-    )
-
-    assert has_same_token_open_db(mem_db, TOKEN_X_NO) is True
-    assert has_same_token_open_db(mem_db, TOKEN_X) is False
-    assert _layer7_dedup_fires(
-        mem_db,
-        PortfolioState(),
-        TOKEN_X,
-    ) is False
-
-    admission = _entry_duplicate_same_token_component(
-        mem_db,
-        token_id=TOKEN_X,
-        candidate_position_id="new-yes-position",
-        allow_reconciled_position_increment=True,
-    )
-
-    assert admission["allowed"] is True
-    assert admission["reason"] == "allowed"
-    assert admission["increment_position_id"] == ""
-
-
-def test_executor_fails_closed_on_ambiguous_selected_token_identity(mem_db):
-    _insert_position(
-        mem_db,
-        "ambiguous-position",
-        "active",
-        token_id=TOKEN_X,
-        direction="unknown",
-        no_token_id=TOKEN_X_NO,
-        shares=5.2,
-        cost_basis_usd=1.768,
-    )
-
-    admission = _entry_duplicate_same_token_component(
-        mem_db,
-        token_id=TOKEN_X,
-        candidate_position_id="new-position",
-        allow_reconciled_position_increment=True,
-    )
-
-    assert admission["allowed"] is False
-    assert admission["reason"] == "position_selected_token_identity_invalid"
-    assert has_same_token_open_db(mem_db, TOKEN_X) is True
-    assert _layer7_dedup_fires(mem_db, PortfolioState(), TOKEN_X) is True
-
-    mem_db.execute(
-        """UPDATE position_current
-              SET direction='buy_no', no_token_id=NULL
-            WHERE position_id='ambiguous-position'"""
-    )
-    mem_db.commit()
-
-    assert has_same_token_open_db(mem_db, TOKEN_X) is True
-    assert _layer7_dedup_fires(mem_db, PortfolioState(), TOKEN_X) is True
-    missing_held_token = _entry_duplicate_same_token_component(
-        mem_db,
-        token_id=TOKEN_X,
-        candidate_position_id="new-position",
-        allow_reconciled_position_increment=True,
-    )
-    assert missing_held_token["allowed"] is False
-    assert (
-        missing_held_token["reason"]
-        == "position_selected_token_identity_invalid"
-    )
-
-    mem_db.execute(
-        """UPDATE position_current
-              SET direction=NULL, no_token_id=?
-            WHERE position_id='ambiguous-position'""",
-        (TOKEN_X_NO,),
-    )
-    mem_db.commit()
-
-    assert has_same_token_open_db(mem_db, TOKEN_X) is True
-    assert has_same_token_open_db(mem_db, TOKEN_X_NO) is True
-    assert _layer7_dedup_fires(mem_db, PortfolioState(), TOKEN_X) is True
-
-
 def test_economically_closed_allows_reentry(mem_db):
     """
     GIVEN: prior position exited cleanly → phase economically_closed
@@ -344,32 +252,6 @@ def test_voided_position_allows_reentry(mem_db):
     """Voided positions are terminal — must not block."""
     _insert_position(mem_db, "cee5fc85-3dd", "voided", TOKEN_X)
     assert has_same_token_open_db(mem_db, TOKEN_X) is False
-
-
-def test_terminal_local_phase_with_positive_chain_shares_blocks_reentry(mem_db):
-    """Chain-backed exposure remains live even if local lifecycle projection is terminal.
-
-    This protects the Munich/Istanbul class: a local void/quarantine label cannot
-    make a chain-held token available to the fresh-entry selector.
-    """
-    _insert_position(
-        mem_db,
-        "voided-but-chain-held",
-        "voided",
-        TOKEN_X,
-        chain_shares=12.5,
-        chain_state="synced",
-    )
-    assert has_same_token_open_db(mem_db, TOKEN_X) is True
-    assert _layer7_dedup_fires(mem_db, PortfolioState(), TOKEN_X) is True
-    final_boundary = _entry_duplicate_same_token_component(
-        mem_db,
-        token_id=TOKEN_X,
-        candidate_position_id="new-chain-duplicate",
-        allow_reconciled_position_increment=True,
-    )
-    assert final_boundary["allowed"] is False
-    assert final_boundary["reason"] == "open_position_same_token"
 
 
 def test_economically_closed_positive_chain_projection_does_not_block_reentry(mem_db):
@@ -560,54 +442,6 @@ def test_historical_matched_row_superseded_by_confirmed_does_not_block(mem_db):
 
 # ── OR-branch end-to-end: must fail when `or _inflight_exit` is removed ──────────
 
-def test_evaluator_rejects_when_only_inflight_exit_present(mem_db):
-    """
-    OR-branch relationship test: _layer7_dedup_fires must return True when
-    ONLY has_inflight_exit_for_token returns True (has_same_token_open_db returns
-    False — position already promoted to terminal economically_closed).
-
-    Scenario: position promoted to economically_closed (Bug #2 ran), but exit order
-    still shows MATCHED in venue_trade_facts during the 5-30s settlement window.
-    has_same_token_open_db → False (terminal phase); has_inflight_exit_for_token → True.
-
-    Meta-verify contract: removing `or has_inflight_exit_for_token(conn, token_id)`
-    from _layer7_dedup_fires in evaluator.py causes this test to FAIL because
-    token_held=False, inflight not checked → returns False → assertion below fails.
-
-    Verified by sed-break: sed 's/or has_inflight_exit_for_token//' evaluator.py
-    → this test FAILS. Restore → PASSES.
-    """
-    # Position promoted to terminal — has_same_token_open_db returns False
-    _insert_position(mem_db, "pos-promoted", "economically_closed", TOKEN_X)
-    assert has_same_token_open_db(mem_db, TOKEN_X) is False, (
-        "Precondition: economically_closed must not block (terminal phase)"
-    )
-
-    # Exit order still MATCHED in venue_trade_facts via venue_commands bridge
-    mem_db.execute(
-        "INSERT INTO venue_commands (command_id, position_id, token_id, intent_kind, state)"
-        " VALUES ('cmd-settle', 'pos-promoted', ?, 'EXIT', 'closing')",
-        (TOKEN_X,),
-    )
-    mem_db.execute(
-        "INSERT INTO venue_trade_facts"
-        " (trade_fact_id, trade_id, venue_order_id, command_id, state, observed_at, local_sequence)"
-        " VALUES (1, 'trade-promoted', 'order-settle', 'cmd-settle', 'MATCHED', '2026-05-17T22:24:00', 1)"
-    )
-    mem_db.commit()
-
-    assert has_inflight_exit_for_token(mem_db, TOKEN_X) is True, (
-        "Precondition: inflight exit must be detected via venue_commands join"
-    )
-
-    # _layer7_dedup_fires contains `has_same_token_open_db(...) or has_inflight_exit_for_token(...)`.
-    # This call is load-bearing: removing the `or ...` branch from that function returns False here.
-    assert _layer7_dedup_fires(mem_db, None, TOKEN_X) is True, (
-        "OR gate must reject: inflight-only scenario → ALREADY_HELD_SAME_TOKEN. "
-        "If this fails, `or has_inflight_exit_for_token` was removed from _layer7_dedup_fires."
-    )
-
-
 @pytest.mark.parametrize(
     ("chain_shares", "chain_state"),
     [
@@ -655,60 +489,6 @@ def test_executor_duplicate_gate_allows_cancelled_pending_entry_without_fill(
     )
 
     assert result["allowed"] is True
-
-
-@pytest.mark.parametrize(
-    ("chain_state", "drop_chain_state_column"),
-    [
-        ("synced", False),
-        (None, False),
-        (None, True),
-    ],
-)
-def test_terminal_no_fill_cannot_clear_unresolved_chain_exposure(
-    mem_db,
-    chain_state,
-    drop_chain_state_column,
-):
-    _insert_position(
-        mem_db,
-        "chain-held-pending",
-        "pending_entry",
-        token_id=TOKEN_X_NO,
-        direction="buy_no",
-        no_token_id=TOKEN_X,
-        chain_shares=12.5,
-        chain_state=chain_state,
-    )
-    if drop_chain_state_column:
-        mem_db.execute("ALTER TABLE position_current DROP COLUMN chain_state")
-    mem_db.execute(
-        """INSERT INTO venue_commands
-           (command_id, position_id, token_id, intent_kind, side, venue_order_id,
-            state, created_at, updated_at)
-           VALUES ('cmd-chain-held', 'chain-held-pending', ?, 'ENTRY', 'BUY',
-                   'order-chain-held', 'CANCELLED',
-                   '2026-06-18T09:15:14', '2026-06-18T09:20:22')""",
-        (TOKEN_X,),
-    )
-    mem_db.execute(
-        """INSERT INTO venue_order_facts
-           (venue_order_id, command_id, state, remaining_size, matched_size, source,
-            observed_at, local_sequence)
-           VALUES ('order-chain-held', 'cmd-chain-held', 'CANCEL_CONFIRMED',
-                   '0', '0', 'REST', '2026-06-18T09:20:22', 1)"""
-    )
-    mem_db.commit()
-
-    assert has_same_token_open_db(mem_db, TOKEN_X) is True
-    assert _layer7_dedup_fires(mem_db, PortfolioState(), TOKEN_X) is True
-    result = _entry_duplicate_same_token_component(
-        mem_db,
-        token_id=TOKEN_X,
-        candidate_position_id="fresh-candidate",
-    )
-    assert result["allowed"] is False
-    assert result["reason"] == "open_position_same_token"
 
 
 def test_executor_duplicate_gate_allows_cancelled_pending_entry_with_stale_live_order_fact(mem_db):

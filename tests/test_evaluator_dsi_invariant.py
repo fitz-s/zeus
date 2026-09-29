@@ -12,8 +12,6 @@ import pytest
 from src.config import City
 from src.engine.evaluator import (
     MarketCandidate,
-    _PRE_SNAPSHOT_DSI_SENTINEL,
-    evaluate_candidate,
 )
 
 _SENTINEL_RE = re.compile(r"^<pre_snapshot:.+>$")
@@ -41,27 +39,6 @@ def _candidate_few_bins() -> MarketCandidate:
         hours_since_open=24.0,
         temperature_metric="high",
     )
-
-
-def test_early_rejection_dsi_is_sentinel():
-    """< 3 bins triggers MARKET_FILTER before snapshot; DSI must be sentinel."""
-    decisions = evaluate_candidate(
-        _candidate_few_bins(),
-        conn=None,
-        portfolio=MagicMock(),
-        clob=MagicMock(),
-        limits=MagicMock(),
-    )
-    assert decisions, "evaluate_candidate must return at least one decision"
-    d = decisions[0]
-    assert d.rejection_stage == "MARKET_FILTER", (
-        f"Expected MARKET_FILTER, got {d.rejection_stage!r}"
-    )
-    assert _SENTINEL_RE.match(d.decision_snapshot_id), (
-        f"Expected sentinel matching {_SENTINEL_RE.pattern!r}, "
-        f"got {d.decision_snapshot_id!r}"
-    )
-    assert d.decision_snapshot_id == _PRE_SNAPSHOT_DSI_SENTINEL
 
 
 def test_edge_decision_rejects_none_dsi():

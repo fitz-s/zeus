@@ -28,41 +28,6 @@ from src.contracts.exceptions import ObservationUnavailableError
 from src.signal.forecast_uncertainty import day0_nowcast_context
 
 
-def test_monitor_refresh_day0_helper_passes_target_date_and_reference_time(monkeypatch):
-    captured: dict[str, object] = {}
-
-    def getter(city, target_date=None, reference_time=None):
-        captured["city"] = city
-        captured["target_date"] = target_date
-        captured["reference_time"] = reference_time
-        return {"high_so_far": 72.0, "current_temp": 70.0, "observation_time": "2026-04-01T12:00:00+00:00"}
-
-    monkeypatch.setattr(monitor_refresh, "get_current_observation", getter)
-    city = SimpleNamespace(name="NYC")
-
-    result = monitor_refresh._fetch_day0_observation(city, date(2026, 4, 1))
-
-    assert result["high_so_far"] == 72.0
-    assert captured["target_date"] == date(2026, 4, 1)
-    assert isinstance(captured["reference_time"], datetime)
-    assert captured["reference_time"].tzinfo is not None
-
-
-def test_monitor_refresh_day0_helper_falls_back_for_legacy_getter(monkeypatch):
-    captured = {"legacy_calls": 0}
-
-    def legacy_getter(city):
-        captured["legacy_calls"] += 1
-        return {"high_so_far": 72.0, "current_temp": 70.0, "observation_time": "2026-04-01T12:00:00+00:00"}
-
-    monkeypatch.setattr(monitor_refresh, "get_current_observation", legacy_getter)
-
-    result = monitor_refresh._fetch_day0_observation(SimpleNamespace(name="NYC"), date(2026, 4, 1))
-
-    assert result["current_temp"] == 70.0
-    assert captured["legacy_calls"] == 1
-
-
 def _city(**overrides) -> City:
     base = {
         "name": "Test City",
@@ -394,13 +359,6 @@ def test_post_local_day_missing_condition_stays_stale(
         "_refresh_current_global_day0_probability",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             AssertionError("missing canonical condition must not use global q")
-        ),
-    )
-    monkeypatch.setattr(
-        monitor_refresh,
-        "_refresh_day0_monitor_probability",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("missing canonical condition must not use legacy q")
         ),
     )
 

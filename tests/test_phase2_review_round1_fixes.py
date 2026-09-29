@@ -93,21 +93,17 @@ def test_derive_phase2_keys_returns_none_for_malformed():
 
 
 def test_evaluator_imports_derive_phase2_keys_from_ens_result():
-    """Both evaluator and monitor_refresh must delegate to the shared helper.
+    """Every live phase-2-key consumer delegates to the shared helper.
 
     Structural assertion locks Copilot #4/#5 + review P1 #7 — if a future
     refactor re-inlines the issue_time parsing without datetime support,
-    this test fails.
+    this test fails. 2026-09-29: the evaluator/monitor ENS lanes were deleted;
+    the event reactor is the surviving consumer.
     """
     import pathlib
     root = pathlib.Path(__file__).resolve().parents[1]
-    evaluator_src = (root / "src" / "engine" / "evaluator.py").read_text(encoding="utf-8")
-    monitor_src = (root / "src" / "engine" / "monitor_refresh.py").read_text(encoding="utf-8")
-    assert "derive_phase2_keys_from_ens_result" in evaluator_src, (
-        "Copilot/Codex review fix regression: evaluator no longer uses shared "
+    reactor_src = (root / "src" / "engine" / "event_reactor_adapter.py").read_text(encoding="utf-8")
+    assert "derive_phase2_keys_from_ens_result(" in reactor_src, (
+        "Copilot/Codex review fix regression: the reactor no longer uses the shared "
         "phase-2-key derivation helper"
-    )
-    assert "derive_phase2_keys_from_ens_result" in monitor_src, (
-        "Copilot/Codex review fix regression: monitor_refresh no longer uses "
-        "shared phase-2-key derivation helper"
     )

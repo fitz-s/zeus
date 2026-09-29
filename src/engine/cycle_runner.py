@@ -41,7 +41,7 @@ from src.data.observation_client import get_current_observation
 from src.data.polymarket_client import PolymarketClient
 from src.engine import cycle_runtime as _runtime
 from src.engine.discovery_mode import DiscoveryMode
-from src.engine.evaluator import EdgeDecision, MarketCandidate, evaluate_candidate
+from src.engine.evaluator import EdgeDecision, MarketCandidate
 from src.execution.command_bus import IdempotencyKey, IntentKind
 from src.execution.executor import (
     create_execution_intent,

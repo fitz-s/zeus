@@ -332,38 +332,43 @@ class TestRCOFDRFamilyIdMetricAware:
         )
 
     def test_r_co_2_evaluator_callers_pass_temperature_metric(self):
-        """R-CO.2: AST probe — evaluator.py make_*_family_id callers pass temperature_metric."""
-        src_path = PROJECT_ROOT / "src" / "engine" / "evaluator.py"
-        source = src_path.read_text()
-        tree = ast.parse(source)
+        """R-CO.2: AST probe — every src make_*_family_id caller passes temperature_metric.
 
-        call_sites_with_metric: list[int] = []
-        call_sites_without_metric: list[int] = []
+        2026-09-29: the evaluator lane was deleted; the law now binds the surviving
+        callers (replay and replay selection coverage) and any future caller in src/.
+        """
+        call_sites_with_metric: list[str] = []
+        call_sites_without_metric: list[str] = []
 
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            func_name = None
-            if isinstance(func, ast.Name):
-                func_name = func.id
-            elif isinstance(func, ast.Attribute):
-                func_name = func.attr
+        for src_path in sorted((PROJECT_ROOT / "src").rglob("*.py")):
+          if src_path.name == "selection_family.py":
+            continue
+          tree = ast.parse(src_path.read_text())
+          for node in ast.walk(tree):
+              if not isinstance(node, ast.Call):
+                  continue
+              func = node.func
+              func_name = None
+              if isinstance(func, ast.Name):
+                  func_name = func.id
+              elif isinstance(func, ast.Attribute):
+                  func_name = func.attr
 
-            if func_name not in ("make_hypothesis_family_id", "make_edge_family_id"):
-                continue
+              if func_name not in ("make_hypothesis_family_id", "make_edge_family_id"):
+                  continue
 
-            kwarg_names = [kw.arg for kw in node.keywords]
-            if "temperature_metric" in kwarg_names:
-                call_sites_with_metric.append(node.lineno)
-            else:
-                call_sites_without_metric.append(node.lineno)
+              kwarg_names = [kw.arg for kw in node.keywords]
+              site = f"{src_path.relative_to(PROJECT_ROOT)}:{node.lineno}"
+              if "temperature_metric" in kwarg_names:
+                  call_sites_with_metric.append(site)
+              else:
+                  call_sites_without_metric.append(site)
 
         assert call_sites_with_metric, (
-            "No evaluator.py calls to make_*_family_id found with temperature_metric kwarg"
+            "No src calls to make_*_family_id found with temperature_metric kwarg"
         )
         assert not call_sites_without_metric, (
-            f"evaluator.py call sites missing temperature_metric kwarg at lines: "
+            f"make_*_family_id call sites missing temperature_metric kwarg: "
             f"{call_sites_without_metric}"
         )
 

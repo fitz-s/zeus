@@ -163,10 +163,13 @@ def test_monitor_refresh_settlements_query_uses_forecasts_qualifier():
         "'FROM forecasts.settlement_outcomes' (K-B fix F48/F103)."
     )
 
-    assert "forecasts.settlement_outcomes" in src, (
-        "monitor_refresh.py: must contain 'FROM forecasts.settlement_outcomes' "
-        "in _check_persistence_anomaly (K-B fix F48/F103)."
-    )
+    # 2026-09-29: _check_persistence_anomaly (the only reader) was deleted with the
+    # legacy ENS refresher; any future settlement read must be forecasts-qualified.
+    for match in _re.finditer(r'\bsettlement_outcomes\b', src):
+        assert src[max(0, match.start() - len("forecasts.")):match.start()] == "forecasts.", (
+            "monitor_refresh.py: unqualified settlement_outcomes reference — must use "
+            "'forecasts.settlement_outcomes' (K-B fix F48/F103)."
+        )
 
 
 def test_monitor_refresh_temp_persistence_query_uses_world_qualifier():
@@ -189,10 +192,8 @@ def test_monitor_refresh_temp_persistence_query_uses_world_qualifier():
         "temp_persistence reference(s) found — must all be 'world.temp_persistence' "
         "(K-B fix F102)."
     )
-    assert "world.temp_persistence" in src, (
-        "monitor_refresh.py: must contain 'FROM world.temp_persistence' "
-        "in _check_persistence_anomaly (K-B fix F102)."
-    )
+    # 2026-09-29: _check_persistence_anomaly (the only reader) was deleted; the
+    # all-occurrences-qualified check above still binds any future reader.
 
 
 def test_forecasts_world_read_only_connection_preserves_world_authority(

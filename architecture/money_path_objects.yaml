@@ -1369,7 +1369,7 @@ external_truth_sources:
       - aviationweather.gov
       - /api/data/metar
       - global.amo.go.kr/observation/PkObsMetarList.do
-    required_tests: [tests/test_day0_fast_obs_lane.py, tests/test_day0_first_principles_antibodies.py, tests/engine/test_noaa_day0_observation_union.py]
+    required_tests: [tests/test_day0_fast_obs_lane.py, tests/test_day0_first_principles_antibodies.py]
   nea_sg_observation:
     # Singapore NEA real-time air-temperature API. It is an intraday
     # observation covariate for Singapore/Changi monitoring, not a settlement

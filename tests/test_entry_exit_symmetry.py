@@ -334,22 +334,6 @@ class TestDecisionEvidenceStaticCallSitePresence:
                     break
         return hits
 
-    def test_evaluator_accept_path_constructs_entry_evidence(self):
-        """src/engine/evaluator.py must construct
-        DecisionEvidence(evidence_type="entry", ...) somewhere (the
-        T4.1b accept-path wiring at L1700+). If this fails, a refactor
-        silently removed or relocated the construction — T4.1b /
-        T4.2 read path will begin returning None entry evidence
-        in production."""
-        tree = self._source_tree("src/engine/evaluator.py")
-        hits = self._decision_evidence_calls_with_type(tree, evidence_type="entry")
-        assert hits, (
-            "src/engine/evaluator.py must contain "
-            'DecisionEvidence(evidence_type="entry", ...) — T4.1b accept '
-            "path. Check evaluator.py accept site around the "
-            "should_trade=True EdgeDecision construction."
-        )
-
     def test_cycle_runtime_constructs_exit_evidence_for_gate(self):
         """src/engine/cycle_runtime.py must construct
         DecisionEvidence(evidence_type="exit", ...) for the

@@ -4336,27 +4336,6 @@ class TestForwardMarketSubstrateProducer:
         assert executable["executable_snapshot_id"] == "snap-mid"
         assert executable["no_executable_snapshot_id"] == "snap-mid-no"
 
-    def test_buy_no_direction_uses_no_side_executable_snapshot_id(self):
-        """RELATIONSHIP: BUY_NO reprice authority must bind the NO snapshot id."""
-        import src.engine.evaluator as evaluator_module
-
-        token_payload = {
-            "token_id": "yes-token",
-            "no_token_id": "no-token",
-            "market_id": "condition-1",
-            "executable_snapshot_id": "snap-yes",
-            "no_executable_snapshot_id": "snap-no",
-        }
-
-        buy_no = evaluator_module._directional_executable_tokens(token_payload, "buy_no")
-        buy_yes = evaluator_module._directional_executable_tokens(token_payload, "buy_yes")
-
-        assert buy_no["token_id"] == "yes-token"
-        assert buy_no["no_token_id"] == "no-token"
-        assert buy_no["executable_snapshot_id"] == "snap-no"
-        assert buy_yes["executable_snapshot_id"] == "snap-yes"
-        assert token_payload["executable_snapshot_id"] == "snap-yes"
-
     def test_persisted_reader_keeps_no_only_snapshot_executable_for_buy_no(self):
         """RELATIONSHIP: NO-only executable evidence must remain reachable."""
         conn = _make_persisted_substrate_conn()

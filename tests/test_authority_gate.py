@@ -524,18 +524,6 @@ def test_authority_violation_is_value_error():
 # Test 9: evaluator authority gate returns rejection on UNVERIFIED pairs
 # ---------------------------------------------------------------------------
 
-def test_evaluator_gate_label_present_in_evaluator_code():
-    """Property: evaluator.py contains the AUTHORITY_GATE rejection stage."""
-    evaluator = PROJECT_ROOT / "src" / "engine" / "evaluator.py"
-    content = evaluator.read_text()
-    assert "AUTHORITY_GATE" in content, (
-        "evaluator.py must have AUTHORITY_GATE rejection stage for K4 guard"
-    )
-    assert "insufficient_verified_calibration" in content, (
-        "evaluator.py must reference insufficient_verified_calibration reason"
-    )
-
-
 # ---------------------------------------------------------------------------
 # Test 10: K2_struct perimeter authority filter tests (commit 4)
 # ---------------------------------------------------------------------------

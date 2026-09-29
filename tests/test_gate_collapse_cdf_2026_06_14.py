@@ -65,14 +65,6 @@ def test_c_reactor_recheck_strings_removed():
 # ---------------------------------------------------------------------------
 # D3 — source-quality Kelly haircut removed; binary gate stays.
 # ---------------------------------------------------------------------------
-def test_d3_source_quality_haircut_multiply_removed():
-    src = _evaluator_source()
-    assert "km *= source_quality_haircut" not in src, (
-        "D3 banned continuous source-quality Kelly haircut must stay removed (no-caps law)")
-    # Honest binary no-data => no-trade gate STAYS.
-    assert "_source_quality_policy_rejection" in src
-
-
 # ---------------------------------------------------------------------------
 # D4 — DDD Rail-2 continuous discount removed; Rail-1 HALT stays.
 # ---------------------------------------------------------------------------
@@ -89,15 +81,6 @@ def test_d4_ddd_rail2_haircut_removed():
 # ---------------------------------------------------------------------------
 # D5 — global-heat double-throttle removed; gross/variance throttles + heat-in-Kelly stay.
 # ---------------------------------------------------------------------------
-def test_d5_heat_double_throttle_removed_others_kept():
-    src = _evaluator_source()
-    assert "global_heat_throttled_50pct" not in src, (
-        "D5 redundant global-heat risk_throttle must stay removed (already in dynamic_kelly_mult)")
-    # The gross_exp and variance_exp cluster throttles are DISTINCT quantities — they STAY.
-    assert "regime_throttled_gross_50pct" in src
-    assert "regime_throttled_variance_50pct" in src
-
-
 def test_d5_heat_still_flows_into_kelly():
     """Removing the second heat application is safe only because dynamic_kelly_mult
     still ingests portfolio_heat (the single, honest heat attenuation)."""

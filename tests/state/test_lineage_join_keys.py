@@ -71,32 +71,3 @@ def test_selection_hypothesis_fact_decision_id_not_null_after_write(tmp_path):
 
 _SENTINEL_RE = re.compile(r"^<pre_snapshot:.+>$")
 
-
-def test_pre_snapshot_dsi_sentinel_is_non_null_non_empty():
-    """F25: _PRE_SNAPSHOT_DSI_SENTINEL must match the expected sentinel pattern."""
-    from src.engine.evaluator import _PRE_SNAPSHOT_DSI_SENTINEL
-
-    assert _PRE_SNAPSHOT_DSI_SENTINEL is not None
-    assert _PRE_SNAPSHOT_DSI_SENTINEL != ""
-    assert _SENTINEL_RE.match(_PRE_SNAPSHOT_DSI_SENTINEL), (
-        f"Sentinel {_PRE_SNAPSHOT_DSI_SENTINEL!r} does not match expected pattern"
-    )
-
-
-def test_make_rejection_decision_stamps_sentinel():
-    """F25: _make_rejection_decision must stamp DSI sentinel on returned EdgeDecision."""
-    from src.engine.evaluator import _PRE_SNAPSHOT_DSI_SENTINEL, _make_rejection_decision
-
-    decision = _make_rejection_decision(
-        rejection_stage="TEST_STAGE",
-        rejection_reasons=["test reason"],
-        selected_method="test_method",
-        applied_validations=["v1"],
-    )
-
-    assert decision.should_trade is False
-    assert decision.decision_id, "decision_id must be non-empty"
-    assert decision.decision_snapshot_id == _PRE_SNAPSHOT_DSI_SENTINEL, (
-        f"Expected sentinel, got {decision.decision_snapshot_id!r}"
-    )
-    assert _SENTINEL_RE.match(decision.decision_snapshot_id)

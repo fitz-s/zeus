@@ -1071,7 +1071,6 @@ def test_phase1k_live_decision_snapshot_causality_routes_to_snapshot_causality_p
         "activation no production DB mutation no live venue side effects",
         [
             "src/engine/evaluator.py",
-            "tests/test_center_buy_repair.py",
             "tests/test_fdr_family_scope.py",
             "tests/test_decision_evidence_entry_emission.py",
             "tests/test_digest_profile_matching.py",
@@ -1083,7 +1082,6 @@ def test_phase1k_live_decision_snapshot_causality_routes_to_snapshot_causality_p
     assert digest["profile"] == "phase 1K live decision snapshot causality gate"
     assert digest["admission"]["status"] == "admitted"
     assert "src/engine/evaluator.py" in digest["admission"]["admitted_files"]
-    assert "tests/test_center_buy_repair.py" in digest["admission"]["admitted_files"]
     assert "tests/test_fdr_family_scope.py" in digest["admission"]["admitted_files"]
     assert "tests/test_decision_evidence_entry_emission.py" in digest["admission"]["admitted_files"]
     assert "src/data/ensemble_client.py" not in digest["admission"]["admitted_files"]
@@ -1098,7 +1096,6 @@ def test_phase1k_review_remediation_wording_routes_to_snapshot_causality_profile
         "production DB mutation no live venue side effects",
         [
             "src/engine/evaluator.py",
-            "tests/test_center_buy_repair.py",
             "tests/test_runtime_guards.py",
             "tests/test_fdr_family_scope.py",
             "tests/test_decision_evidence_entry_emission.py",
@@ -1125,7 +1122,6 @@ def test_phase1k_remediation_rereview_wording_keeps_forbidden_files_out_of_scope
         "production DB mutation no live venue side effects",
         [
             "src/engine/evaluator.py",
-            "tests/test_center_buy_repair.py",
             "tests/test_runtime_guards.py",
             "src/data/forecast_source_registry.py",
             "config/settings.json",
@@ -1199,7 +1195,6 @@ def test_phase1h_live_quote_residue_routes_to_cleanup_profile():
         [
             "src/engine/monitor_refresh.py",
             "tests/test_runtime_guards.py",
-            "tests/test_bootstrap_symmetry.py",
             "tests/test_live_safety_invariants.py",
             "tests/test_pnl_flow_and_audit.py",
             "tests/test_pre_live_integration.py",
@@ -1224,7 +1219,6 @@ def test_phase1h_slash_hyphen_wording_routes_to_cleanup_profile():
         [
             "src/engine/monitor_refresh.py",
             "tests/test_runtime_guards.py",
-            "tests/test_bootstrap_symmetry.py",
             "tests/test_live_safety_invariants.py",
             "tests/test_pnl_flow_and_audit.py",
             "tests/test_pre_live_integration.py",
@@ -1236,7 +1230,6 @@ def test_phase1h_slash_hyphen_wording_routes_to_cleanup_profile():
     assert digest["profile"] == "phase 1H live quote authority cleanup"
     assert digest["admission"]["status"] == "admitted"
     assert "src/engine/monitor_refresh.py" in digest["admission"]["admitted_files"]
-    assert "tests/test_bootstrap_symmetry.py" in digest["admission"]["admitted_files"]
 
 
 def test_r3_m1_lifecycle_grammar_routes_to_m1_profile_not_heartbeat():
