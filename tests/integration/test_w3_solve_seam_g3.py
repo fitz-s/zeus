@@ -6590,9 +6590,9 @@ def test_global_day0_actuation_compares_physical_state_not_carrier_provenance():
 
 def test_global_day0_authority_uses_current_possession_clock_not_stale_carrier_clock():
     conn, carrier = _stale_day0_carrier_and_current_observations()
-    decision_time = _dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc)
-    payload = json.loads(carrier.payload_json)
-    payload.update(
+    provisional_decision = _dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc)
+    provisional_payload = json.loads(carrier.payload_json)
+    provisional_payload.update(
         era._global_day0_execution_payload(
             carrier,
             family=SimpleNamespace(city="Moscow", target_date="2026-07-10", metric="high"),
@@ -6607,13 +6607,32 @@ def test_global_day0_authority_uses_current_possession_clock_not_stale_carrier_c
                 "unit": "C",
             },
             observation_conn=conn,
-            decision_time=decision_time,
+            decision_time=provisional_decision,
             posterior_id=29914,
         )
     )
     conn.close()
-    old_source_time = _dt.datetime(2026, 7, 10, 13, 0, tzinfo=_dt.timezone.utc)
-    old_received_time = _dt.datetime(2026, 7, 10, 13, 5, tzinfo=_dt.timezone.utc)
+    provisional_carrier = carrier
+    fixture = _day0_qualified_exact_fixture()
+    decision_time = _dt.datetime(2026, 9, 11, 10, tzinfo=_dt.timezone.utc)
+    old_source_time = _dt.datetime(2026, 9, 11, 3, tzinfo=_dt.timezone.utc)
+    old_received_time = old_source_time + _dt.timedelta(minutes=5)
+    old_payload = {**json.loads(fixture.event.payload_json),
+                   "observation_time": old_source_time.isoformat(),
+                   "observation_available_at": old_received_time.isoformat()}
+    carrier = make_opportunity_event(
+        event_type="DAY0_EXTREME_UPDATED", entity_key="London|2026-09-11|high|EGLC",
+        source="qualified-wrh-stale-carrier", observed_at=old_source_time.isoformat(),
+        available_at=old_received_time.isoformat(), received_at=old_received_time.isoformat(),
+        payload=old_payload, causal_snapshot_id="old-wrh-carrier")
+    payload = {**old_payload, **era._global_day0_execution_payload(
+        carrier, family=SimpleNamespace(city="London", target_date="2026-09-11", metric="high"),
+        resolution=SimpleNamespace(measurement_unit="C", station_id="EGLC"),
+        conditioning={"active":True,"metric":"high","observation_time":fixture.fact["observation_time"],
+                      "observed_extreme_c":30.,"sample_count":5,"source":fixture.fact["source"],"unit":"C"},
+        observation_conn=fixture.observations, decision_time=decision_time, posterior_id=29914)}
+    fixture.forecast.close()
+    fixture.observations.close()
 
     def base_cert(certificate_type, cert_payload=None):
         return build_certificate(
@@ -6636,9 +6655,12 @@ def test_global_day0_authority_uses_current_possession_clock_not_stale_carrier_c
         base_cert(claims.CLOCK_MODE),
         base_cert(claims.CAUSAL_EVENT),
         base_cert(claims.SOURCE_TRUTH),
-        base_cert(claims.FAMILY_CLOSURE, {"family_id": "Moscow|2026-07-10|high"}),
+        base_cert(claims.FAMILY_CLOSURE, {"family_id": "London|2026-09-11|high"}),
         base_cert(claims.BELIEF),
     )
+    with pytest.raises(ValueError, match="DAY0_SOURCE_PARENT_AUTHORITY_BLOCKED:day0 evidence is not absorbing:PROVISIONAL_CURRENT_SNAPSHOT"):
+        era._day0_live_source_parent_certificates(event=provisional_carrier, payload=provisional_payload,
+            base_certs=parents, decision_time=provisional_decision)
     certs = era._day0_live_source_parent_certificates(
         event=carrier,
         payload=payload,
@@ -6649,10 +6671,11 @@ def test_global_day0_authority_uses_current_possession_clock_not_stale_carrier_c
         cert for cert in certs if cert.certificate_type == claims.DAY0_AUTHORITY
     )
 
-    assert authority.payload["observation_time"] == "2026-07-10T19:00:00+00:00"
+    assert authority.payload["observation_time"] == "2026-09-11T09:00:00+00:00"
     assert authority.header.source_available_at == _dt.datetime(
-        2026, 7, 10, 19, 5, tzinfo=_dt.timezone.utc
+        2026, 9, 11, 9, 5, tzinfo=_dt.timezone.utc
     )
+    assert authority.header.source_available_at - old_received_time == _dt.timedelta(hours=6)
     assert authority.header.agent_received_at == decision_time
     assert authority.header.persisted_at == decision_time
     assert (
