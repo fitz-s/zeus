@@ -751,3 +751,125 @@ def test_airport_height_absence_does_not_erase_reference_identity(tmp_path):
     assert geometry["validity_reason"] is None
     assert geometry["elevation_m"] is None
     assert geometry["ground_status"] == "UNPROVEN"
+
+
+def _official_kord_registry(tmp_path, monkeypatch):
+    """Replay captured current HOMR bytes; airport and barometer stay distinct."""
+    import hashlib
+    import src.config as config
+    body = (config.PROJECT_ROOT / "config/noaa_homr_kord_station.json").read_bytes()
+    assert hashlib.sha256(body).hexdigest() == "3c95677db4c091cb4c01a027b7276b7053dbe945c764803f1cd166c7e5a25aac"
+    artifact = tmp_path / "noaa_homr_kord_station.json"
+    artifact.write_bytes(body)
+    facts = config._homr_kord_ground_facts(body, "KORD")
+    claim = {**facts, "artifact_ref": "config/noaa_homr_kord_station.json",
+             "body_sha256": hashlib.sha256(body).hexdigest(), "checked_at": "2026-09-29T21:50:23Z",
+             "query_date": "2026-09-29", "query_url": f"{config.HOMR_GROUND_SOURCE_URL}?qid=ICAO%3AKORD&date=2026-09-29&phrData=false"}
+    original = json.loads((config.CONFIG_DIR / "station_precise_coords.json").read_text())
+    original["Chicago"]["station_ground_proof"] = claim
+    registry = tmp_path / "station_precise_coords.json"
+    registry.write_text(json.dumps(original))
+    (tmp_path / "cities.json").write_bytes((config.CONFIG_DIR / "cities.json").read_bytes())
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
+    return registry, artifact, original
+
+
+def test_official_kord_ground_is_primary_temperature_dcp_not_airport_reference(tmp_path, monkeypatch):
+    import src.config as config
+    registry, artifact, rows = _official_kord_registry(tmp_path, monkeypatch)
+    city = config.cities_by_name["Chicago"]
+    ground = config.runtime_station_geometry_for_city(city)
+    assert ground["ground_status"] == "VERIFIED"
+    assert ground["ground_elevation_m"] == 204.8
+    assert ground["ground_facts"]["site_lat"] == 41.96017
+    assert ground["ground_facts"]["site_lon"] == -87.93164
+    assert ground["ground_facts"]["location_role"] == "primary_temperature_dcp"
+    assert ground["lat"] == float(rows["Chicago"]["lat"]) == 41.9786
+    assert ground["lon"] == float(rows["Chicago"]["lon"]) == -87.9048
+    assert ground["elevation_m"] == float(rows["Chicago"]["elevation_m"]) == 207.3
+    # The old reference height is retained, not certified as HOMR airport 203.3
+    # or temperature-site ground 204.8.
+    assert ground["station_surface"] == "UNKNOWN"
+    assert abs(city.lon - ground["ground_facts"]["site_lon"]) == pytest.approx(.00003)
+    assert config.runtime_station_geometry_for_city(config.cities_by_name["Manila"])["ground_status"] == "UNPROVEN"
+    for field, value in (("station_id", "ZSSS"), ("height_role", "airport_msl"),
+                         ("elevation_m", 203.3), ("source_kind", "unapproved_homr"),
+                         ("artifact_ref", "/etc/passwd"), ("query_date", "2026-09-28")):
+        changed = json.loads(json.dumps(rows))
+        changed["Chicago"]["station_ground_proof"][field] = value
+        registry.write_text(json.dumps(changed))
+        assert config.runtime_station_geometry_for_city(city)["ground_status"] == "UNPROVEN"
+
+
+@pytest.mark.parametrize("mutation", [
+    "foreign", "multiple", "duplicate_id", "airport", "barometric", "unknown", "duplicate_ground",
+    "missing_ground", "invalid_units", "nonfinite", "multiple_coordinates", "header_mismatch",
+    "not_primary_dcp", "not_temperature", "not_current", "malformed_shape", "symlink",
+])
+def test_official_kord_rejects_ambiguous_or_non_ground_snapshot(tmp_path, monkeypatch, mutation):
+    import hashlib
+    import src.config as config
+    registry, artifact, rows = _official_kord_registry(tmp_path, monkeypatch)
+    payload = json.loads(artifact.read_bytes())
+    stations = payload["stationCollection"]["stations"]
+    station = stations[0]
+    location = station["location"]
+    if mutation == "foreign":
+        next(row for row in station["identifiers"] if row["idType"] == "ICAO")["id"] = "ZSSS"
+    elif mutation == "multiple":
+        stations.append(json.loads(json.dumps(station)))
+    elif mutation == "duplicate_id":
+        station["identifiers"].append({"idType": "ICAO", "id": "KORD"})
+    elif mutation in {"airport", "barometric", "unknown"}:
+        location["elevations"][0]["elevationType"] = mutation.upper()
+    elif mutation == "duplicate_ground":
+        location["elevations"].append(dict(location["elevations"][0]))
+    elif mutation == "missing_ground":
+        location["elevations"].pop(0)
+    elif mutation == "invalid_units":
+        location["elevations"][0]["elevationMeters"] = "672"
+    elif mutation == "nonfinite":
+        location["elevations"][0]["elevationMeters"] = "nan"
+    elif mutation == "multiple_coordinates":
+        location["latLonPairs"].append(dict(location["latLonPairs"][0]))
+    elif mutation == "header_mismatch":
+        station["header"]["latitude_dec"] = "41.9786"
+    elif mutation == "not_primary_dcp":
+        station["remarks"] = []
+    elif mutation == "not_temperature":
+        station["platforms"] = [{"platform": "COOP"}]
+    elif mutation == "not_current":
+        station["header"]["por"]["endDate"] = "2023-09-15"
+    elif mutation == "malformed_shape":
+        payload["stationCollection"]["definitions"] = ["GROUND"]
+    else:
+        other = tmp_path / "elsewhere.json"
+        other.write_bytes(artifact.read_bytes())
+        artifact.unlink()
+        artifact.symlink_to(other)
+    if mutation != "symlink":
+        artifact.write_bytes(json.dumps(payload).encode())
+    rows["Chicago"]["station_ground_proof"]["body_sha256"] = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    registry.write_text(json.dumps(rows))
+    geometry = config.runtime_station_geometry_for_city(config.cities_by_name["Chicago"])
+    assert geometry["validity_reason"] is None
+    assert geometry["ground_status"] == "UNPROVEN"
+
+
+def test_official_kord_audit_is_not_stable_ground_or_ens_identity(tmp_path, monkeypatch):
+    import hashlib
+    import src.config as config
+    registry, artifact, rows = _official_kord_registry(tmp_path, monkeypatch)
+    city = config.cities_by_name["Chicago"]
+    before = config.runtime_station_geometry_for_city(city)
+    manifest = config.runtime_coordinate_manifest_json()
+    artifact.write_bytes(artifact.read_bytes() + b"\n")
+    claim = rows["Chicago"]["station_ground_proof"]
+    claim.update(body_sha256=hashlib.sha256(artifact.read_bytes()).hexdigest(), checked_at="2026-09-30T00:00:00Z",
+                 query_date="2026-09-30", query_url=f"{config.HOMR_GROUND_SOURCE_URL}?qid=ICAO%3AKORD&date=2026-09-30&phrData=false")
+    registry.write_text(json.dumps(rows))
+    after = config.runtime_station_geometry_for_city(city)
+    assert after["ground_status"] == "VERIFIED"
+    assert after["ground_facts"] == before["ground_facts"]
+    assert after["ground_audit"] != before["ground_audit"]
+    assert config.runtime_coordinate_manifest_json() == manifest

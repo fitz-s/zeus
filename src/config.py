@@ -17,7 +17,7 @@ import re
 import tempfile
 from html.parser import HTMLParser
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from enum import StrEnum
 from pathlib import Path
 from typing import Optional
@@ -532,6 +532,11 @@ def runtime_cities_by_name() -> dict[str, City]:
 STATION_GROUND_PROOF_REVISION = "station_ground_roles_v1"
 HKO_GROUND_SOURCE_URL = "https://www.hko.gov.hk/en/cis/stn.htm"
 HKO_GROUND_QUANTITY = "Elevation of ground above mean sea-level (metres)"
+HOMR_GROUND_SOURCE_URL = "https://www.ncei.noaa.gov/access/homr/services/station/search"
+STATION_GROUND_SOURCE_ARTIFACTS = {
+    "hko_station_table_v1": "config/hko_station_metadata.html",
+    "noaa_homr_primary_dcp_snapshot_v1": "config/noaa_homr_kord_station.json",
+}
 
 
 class _HkoStationTable(HTMLParser):
@@ -609,6 +614,74 @@ def _hko_ground_facts(raw: bytes, station_id: str) -> dict[str, object]:
     }
 
 
+def _homr_kord_ground_facts(raw: bytes, station_id: str) -> dict[str, object]:
+    """Replay the approved current KORD primary-DCP snapshot, not airport MSL.
+
+    HOMR Enhanced ELEV_GROUND denotes the official temperature site; DSI9767B
+    section 2aa defines signed feet above sea level. POR is not a location's
+    effective interval, and capture possession must not authorize earlier cuts.
+    SCOPE: KORD-dependent OM9 precision only, not ENS/reference identity.
+    DRAIN: approved current metadata capture plus normal config reload.
+    RESET: valid role/bytes let normal producers recompute after possession.
+    """
+    if station_id != "KORD":
+        raise ValueError("approved HOMR snapshot is only KORD")
+    collection = json.loads(raw)["stationCollection"]
+    definitions = [row for row in collection["definitions"]
+                   if row.get("defType") == "elevations" and row.get("abbr") == "GROUND"]
+    if len(definitions) != 1 or definitions[0].get("description") != "ELEVATION OF THE GROUND":
+        raise ValueError("official ground quantity unavailable")
+    stations = collection["stations"]
+    if not isinstance(stations, list) or len(stations) != 1:
+        raise ValueError("HOMR snapshot must contain one station")
+    station = stations[0]
+    identifiers = station["identifiers"]
+    expected = {"ICAO": "KORD", "WMO": "72530", "WBAN": "94846", "NCDCSTNID": "10003214"}
+    for kind, value in expected.items():
+        found = [row["id"] for row in identifiers if row.get("idType") == kind]
+        if found != [value]:
+            raise ValueError("official station identifier ambiguous or foreign")
+    location = station["location"]
+    if station["ncdcStnId"] != "10003214" or location["ncdcstnId"] != "10003214":
+        raise ValueError("official location belongs to another station")
+    if station["header"]["por"]["endDate"] != "Present":
+        raise ValueError("not a current station snapshot")
+    platforms = {row["platform"] for row in station["platforms"]}
+    if not {"ASOS", "PLCD"} <= platforms:
+        raise ValueError("official temperature platform unavailable")
+    remarks = [row["remark"] for row in station["remarks"] if row.get("type") == "GENERAL"]
+    if not any(
+        "PRIMARY STATION LATITUDE/LONGITUDE WAS UPDATED TO MATCH THE PRIMARY DCP (DATA COLLECTION PACKAGE) SENSOR EQUIPMENT REPORTING OBSERVATIONS TO NCEI." in remark
+        and "GROUND ELEVATION WAS UPDATED BASED UPON PROVIDED DCP LOCATIONS USING GIS." in remark
+        for remark in remarks
+    ):
+        raise ValueError("ground is not bound to primary observation DCP")
+    coordinates = location["latLonPairs"]
+    if len(coordinates) != 1 or coordinates[0]["source"] != "ASOS CM":
+        raise ValueError("primary observation coordinate ambiguous")
+    lat, lon = float(coordinates[0]["latitude_dec"]), float(coordinates[0]["longitude_dec"])
+    if not (math.isfinite(lat) and math.isfinite(lon) and -90 <= lat <= 90 and -180 <= lon <= 180):
+        raise ValueError("primary observation coordinate invalid")
+    if lat != float(station["header"]["latitude_dec"]) or lon != float(station["header"]["longitude_dec"]):
+        raise ValueError("header and primary observation coordinate differ")
+    elevations = [row for row in location["elevations"] if row.get("elevationType") == "GROUND"]
+    if len(elevations) != 1:
+        raise ValueError("primary observation ground ambiguous or missing")
+    elevation = float(elevations[0]["elevationMeters"])
+    feet = float(elevations[0]["elevationFeet"])
+    if not all(math.isfinite(v) for v in (elevation, feet)) or not math.isclose(elevation, feet * .3048, abs_tol=.05):
+        raise ValueError("official ground units inconsistent")
+    return {
+        "revision": STATION_GROUND_PROOF_REVISION,
+        "source_kind": "noaa_homr_primary_dcp_snapshot_v1", "station_id": station_id,
+        "source_station_id": "10003214", "wmo_station_id": "72530", "wban_station_id": "94846",
+        "height_role": "ground_msl", "quantity": "location.elevations.GROUND",
+        "elevation_m": elevation, "site_lat": lat, "site_lon": lon, "temperature_station": True,
+        "location_role": "primary_temperature_dcp", "coordinate_source": "ASOS CM",
+        "source_url": HOMR_GROUND_SOURCE_URL,
+    }
+
+
 def _station_ground_for_entry(entry: dict, station_id: str) -> dict[str, object]:
     result: dict[str, object] = {
         "ground_status": "UNPROVEN", "ground_reason": "STATION_GROUND_PROOF_MISSING",
@@ -618,14 +691,16 @@ def _station_ground_for_entry(entry: dict, station_id: str) -> dict[str, object]
     if not isinstance(claim, dict):
         return result
     try:
-        if claim.get("source_kind") != "hko_station_table_v1" or claim.get("source_url") != HKO_GROUND_SOURCE_URL or claim.get("revision") != STATION_GROUND_PROOF_REVISION:
+        kind = claim.get("source_kind")
+        if kind not in STATION_GROUND_SOURCE_ARTIFACTS or claim.get("revision") != STATION_GROUND_PROOF_REVISION:
             raise ValueError("unsupported ground source/revision")
         checked = datetime.fromisoformat(str(claim["checked_at"]).replace("Z", "+00:00"))
         if checked.tzinfo is None or checked.utcoffset() is None:
             raise ValueError("ground source audit time must be timezone-aware")
-        if claim.get("artifact_ref") != "config/hko_station_metadata.html":
+        artifact_ref = STATION_GROUND_SOURCE_ARTIFACTS[kind]
+        if claim.get("artifact_ref") != artifact_ref:
             raise ValueError("ground source artifact is not the approved config asset")
-        artifact = CONFIG_DIR / "hko_station_metadata.html"
+        artifact = CONFIG_DIR / Path(artifact_ref).name
         if artifact.is_symlink() or not artifact.is_file():
             raise ValueError("ground source artifact must be the regular config asset")
         if artifact.stat().st_size > 256 * 1024:
@@ -633,7 +708,16 @@ def _station_ground_for_entry(entry: dict, station_id: str) -> dict[str, object]
         raw = artifact.read_bytes()
         if hashlib.sha256(raw).hexdigest() != claim["body_sha256"]:
             raise ValueError("ground source body identity mismatch")
-        facts = _hko_ground_facts(raw, station_id)
+        facts = (_hko_ground_facts(raw, station_id) if kind == "hko_station_table_v1"
+                 else _homr_kord_ground_facts(raw, station_id))
+        audit_keys = ["artifact_ref", "body_sha256", "checked_at"]
+        if kind == "noaa_homr_primary_dcp_snapshot_v1":
+            query_date = date.fromisoformat(claim["query_date"])
+            if query_date != checked.astimezone(timezone.utc).date() or claim.get("query_url") != (
+                f"{HOMR_GROUND_SOURCE_URL}?qid=ICAO%3AKORD&date={query_date.isoformat()}&phrData=false"
+            ):
+                raise ValueError("HOMR snapshot query is not bound to current capture")
+            audit_keys.extend(("query_date", "query_url"))
         if any(claim.get(key) != value for key, value in facts.items()):
             raise ValueError("ground claim differs from official site facts")
         # The recorded reference point need not equal the official DMS point.
@@ -647,9 +731,9 @@ def _station_ground_for_entry(entry: dict, station_id: str) -> dict[str, object]
         result.update(
             ground_status="VERIFIED", ground_reason=None,
             ground_elevation_m=facts["elevation_m"], ground_facts=facts,
-            ground_audit={key: claim.get(key) for key in ("artifact_ref", "body_sha256", "checked_at")},
+            ground_audit={key: claim.get(key) for key in audit_keys},
         )
-    except (OSError, ValueError, TypeError, KeyError, IndexError, UnicodeError):
+    except (OSError, ValueError, TypeError, KeyError, IndexError, AttributeError, UnicodeError):
         result["ground_reason"] = "STATION_GROUND_PROOF_INVALID"
     return result
 

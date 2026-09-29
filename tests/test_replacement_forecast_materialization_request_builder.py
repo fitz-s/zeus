@@ -180,6 +180,43 @@ def test_station_ground_normal_request_builder_recompute_reset(tmp_path, monkeyp
     assert request.openmeteo_precision_guard.metadata.station_elevation_m == 32
 
 
+@pytest.mark.parametrize("metric", ["high", "low"])
+def test_station_ground_kord_normal_producer_request_recompute_reset(tmp_path, monkeypatch, metric):
+    import scripts.download_replacement_forecast_current_targets as dl
+    from tests.test_openmeteo_ecmwf_ifs9_precision_guard import _official_kord_precision
+    _, original_raw, _, registry, _, rows = _official_kord_precision(tmp_path, monkeypatch)
+    payload = json.loads(original_raw)
+    payload.update(hourly_units={"temperature_2m": "C"}, hourly={
+        "time": [f"2026-09-30T{hour:02d}:00" for hour in range(24)],
+        "temperature_2m": [15.0 + hour % 7 for hour in range(24)],
+    })
+    raw = json.dumps(payload).encode()
+    seed = _write_inputs(tmp_path)
+    seed.update(city="Chicago", target_date="2026-09-30", temperature_metric=metric,
+                source_cycle_time="2026-09-29T12:00:00+00:00", computed_at="2026-09-29T22:00:00+00:00",
+                expires_at="2026-09-29T23:00:00+00:00", baseline_source_available_at="2026-09-29T18:00:00+00:00",
+                openmeteo_source_available_at="2026-09-29T18:00:00+00:00")
+    (tmp_path / "openmeteo_payload.json").write_bytes(raw)
+
+    def recompute():
+        precision = dl._precision_metadata("Chicago", "2026-09-30", anchor_sigma_c=3, raw_payload_bytes=raw)
+        (tmp_path / "precision_metadata.json").write_text(json.dumps(precision))
+        return build_replacement_forecast_materialization_request(seed, base_dir=tmp_path)
+
+    missing = json.loads(json.dumps(rows))
+    missing["Chicago"].pop("station_ground_proof")
+    registry.write_text(json.dumps(missing))
+    assert "OM9_STATION_GROUND_PROOF_UNPROVEN" in recompute().reason_codes
+    registry.write_text(json.dumps(rows))
+    ready = recompute()
+    assert ready.ok, ready.reason_codes
+    request = build_materialize_request_dataclass(ready.request, base_dir=tmp_path)
+    assert request.temperature_metric == metric
+    assert request.computed_at.isoformat() == "2026-09-29T22:00:00+00:00"
+    assert request.openmeteo_precision_guard.passable_for_live_materialization
+    assert request.openmeteo_precision_guard.metadata.station_elevation_m == 204.8
+
+
 def test_shared_precision_metadata_rebinds_to_each_materialization_target(
     tmp_path,
 ) -> None:

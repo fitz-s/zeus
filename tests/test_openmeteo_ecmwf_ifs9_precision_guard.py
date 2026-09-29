@@ -199,6 +199,50 @@ def _official_hko_precision(tmp_path, monkeypatch):
     return metadata, raw, cell, registry, artifact, rows
 
 
+def _official_kord_precision(tmp_path, monkeypatch):
+    import json
+    import src.config as config
+    import scripts.download_replacement_forecast_current_targets as dl
+    import src.data.openmeteo_ecmwf_ifs9_bucket_transport as transport
+    from tests.test_config import _official_kord_registry
+    registry, artifact, rows = _official_kord_registry(tmp_path, monkeypatch)
+    city = config.cities_by_name["Chicago"]
+    raw = json.dumps({"latitude": city.lat, "longitude": city.lon, "elevation": 204.8,
+                      "timezone": city.timezone}).encode()
+    cell = {
+        "revision": "openmeteo_ifs9_o1280_source_cell_v1",
+        "static_hsurf_sha256": "controlled-static-v1", "selected_flat_index": 12,
+        "selected_grid_lat": city.lat, "selected_grid_lon": city.lon,
+        "raw_grid_elevation_m": 205.0, "effective_grid_elevation_m": 205.0,
+        "target_dem_elevation_m": 204.8, "cell_is_sea": False,
+        "cell_is_center": False, "nearby_sea": False,
+    }
+    # Controlled native HSURF fixture, not a ground/precision authority stub.
+    monkeypatch.setattr(transport, "source_cell_geometry_proof", lambda **_kwargs: dict(cell))
+    metadata = OpenMeteoIfs9PrecisionMetadata(**dl._precision_metadata(
+        "Chicago", "2026-09-30", anchor_sigma_c=3.0, raw_payload_bytes=raw,
+    ))
+    return metadata, raw, cell, registry, artifact, rows
+
+
+def test_source_geometry_kord_producer_uses_verified_ground_not_reference_height(tmp_path, monkeypatch):
+    import json
+    metadata, raw, _, registry, _, rows = _official_kord_precision(tmp_path, monkeypatch)
+    assert metadata.station_elevation_m == 204.8
+    assert metadata.requested_lat == 41.96017
+    assert metadata.requested_lon == -87.93161
+    assert metadata.station_lat == 41.9786  # preserve separate reference identity
+    assert metadata.station_lon == -87.9048
+    ground = metadata.source_geometry_proof["station_ground_proof"]
+    assert ground["facts"]["source_kind"] == "noaa_homr_primary_dcp_snapshot_v1"
+    assert evaluate_openmeteo_ecmwf_ifs9_precision_guard(metadata, raw_payload_bytes=raw).status == "PASS"
+    rows["Chicago"]["station_ground_proof"]["height_role"] = "airport_msl"
+    registry.write_text(json.dumps(rows))
+    assert "OM9_STATION_GROUND_PROOF_UNPROVEN" in evaluate_openmeteo_ecmwf_ifs9_precision_guard(
+        metadata, raw_payload_bytes=raw,
+    ).reason_codes
+
+
 def test_source_geometry_binds_response_station_and_static_surface(monkeypatch, tmp_path) -> None:
     import json
     metadata, raw, cell, registry, artifact, rows = _official_hko_precision(tmp_path, monkeypatch)
