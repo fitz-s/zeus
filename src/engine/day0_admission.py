@@ -47,14 +47,6 @@ class Day0AdmissionContext:
     # one-bin-edge fragility
     selected_bin_edge_distance_quanta: float
     edge_survives_one_bin_stress: bool
-    # diurnal-residual nowcast veto (gate 9). ``nowcast_q_held`` is the station
-    # residual nowcast's probability that the HELD token pays; ``decision_price_held``
-    # is the selected order's all-in unit cost, separate from the gross calibration
-    # anchor p0. Both None on every candidate the artifact cannot serve — the gate is then
-    # inert, which is its dormant default.
-    nowcast_q_held: float | None = None
-    nowcast_basis: str | None = None
-    decision_price_held: float | None = None
     # ask-repricing veto (gate 10). The number of DISTINCT top-ask values the HELD
     # token showed in [T - 10 min, T), T being the sealed book's capture instant. None
     # on every candidate the trade DB cannot be read for (no connection, no token id,
@@ -153,31 +145,12 @@ def day0_live_admission_rejection_reason(ctx: Day0AdmissionContext) -> str | Non
     if ctx.maker_only_required and ctx.execution_mode not in _MAKER_MODES:
         return "DAY0_TAKER_ENTRY_FORBIDDEN"
 
-    # 9) the station diurnal-residual nowcast prices the held token at or below what we
-    # are about to pay for it.
-    #
-    # On day0 our posterior conditions on the running observed extreme but treats the
-    # remaining NWP path as near-certain, so it is overconfident on the running-extreme
-    # bin before the diurnal peak: at local 08-11 with the peak 0-1h away a stated
-    # q_floor of 0.90-0.95 realises 0.31, and the market prices that correctly. The
-    # residual nowcast (src/calibration/day0_diurnal_residual.py) beats OUR posterior on
-    # executable edge but never beats the market's Brier, so it is wired HERE as a veto
-    # and never as a q source: the set "our model would trade, the nowcast vetoes" is
-    # -0.020/unit HIGH [-0.040, -0.001] and -0.043/unit LOW, negative in 6/6 walk-forward
-    # windows, and the live day0_nowcast_entry positions in that set lost $292 on $962
-    # over 30 days.
-    #
-    # The comparison is against the selected order's all-in held-token cost, including
-    # fees independently of the gross market-anchored calibration input, so the rule reads
-    # exactly as "the nowcast says this token is worth no more than its price". Both
-    # inputs absent (artifact dormant, unparseable bin, no running extreme) leaves the
-    # gate inert by construction.
-    if (
-        ctx.nowcast_q_held is not None
-        and ctx.decision_price_held is not None
-        and ctx.decision_price_held >= ctx.nowcast_q_held
-    ):
-        return "DAY0_DIURNAL_NOWCAST_VETO"
+    # 9) DELETED 2026-09-29: the station diurnal-residual nowcast veto. Evidence that
+    # improves the probability belongs in the probability: the residual now enters every
+    # Day0 simplex row as the survival-preserving mixture of
+    # src/calibration/day0_diurnal_residual.py (docs/authority/
+    # replacement_final_form_2026_06_09.md §1e), so a selected winner is priced with it
+    # and is never rejected by it afterwards.
 
     # 10) the held token's ask was already being repriced in the 10 minutes before we
     # decided — we are lifting an ask the market is currently walking away from.
@@ -218,8 +191,7 @@ def day0_live_admission_rejection_reason(ctx: Day0AdmissionContext) -> str | Non
     # it there would delete winners. The gate lives behind the DAY0_EVENT_TYPE guard at
     # the top of this function, which is what keeps that from happening.
     #
-    # No count (no trade-DB read, no token id, no snapshots) leaves the gate inert,
-    # exactly like the diurnal nowcast veto above.
+    # No count (no trade-DB read, no token id, no snapshots) leaves the gate inert.
     if (
         ctx.held_ask_distinct_count_10min is not None
         and ctx.held_ask_distinct_count_10min >= DAY0_ASK_REPRICING_MIN_DISTINCT

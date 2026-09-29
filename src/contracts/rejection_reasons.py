@@ -456,26 +456,13 @@ class RejectionReason(str, Enum):
         "DAY0_SOURCE_HEALTH_NOT_ADMISSIBLE, DAY0_QUOTE_TIME_MISSING, "
         "DAY0_QUOTE_STALE_VS_OBSERVATION, DAY0_ONE_BIN_EDGE_FRAGILE, "
         "DAY0_FINAL_LOCALDAY_NOENTRY, DAY0_TAKER_ENTRY_FORBIDDEN, "
-        "DAY0_DIURNAL_NOWCAST_VETO, DAY0_ASK_REPRICING_VETO, "
+        "DAY0_ASK_REPRICING_VETO, "
         "DAY0_SUBMIT_TIME_BIN_DEAD). A deliberate promotion circuit breaker, not a "
         "build failure — registered (2026-07-19 receipt-persistence fix, docs/evidence/"
         "capital_efficiency_2026_07_19/nosubmit_gates.md §5) so it classifies TERMINAL "
         "(via _registry_terminal_money_path_reasons) and persists to "
         "edli_no_submit_receipts instead of silently defaulting to the fail-open "
         "UNKNOWN-base requeue.",
-    )
-    DAY0_DIURNAL_NOWCAST_VETO = (
-        "DAY0_DIURNAL_NOWCAST_VETO",
-        RejectionCategory.DESIGNED_GATE,
-        "The station diurnal-residual nowcast (src/calibration/day0_diurnal_residual.py) "
-        "prices the held token at or below the decision-time all-in price we would pay "
-        "for it. Day0 pre-peak our posterior treats the remaining NWP path as near-"
-        "certain and overstates the running-extreme bin (stated 0.90-0.95 realises 0.31 "
-        "at local 08-11 with the peak 0-1h out); the empirical residual distribution "
-        "does not, and the set our model would trade against its veto is -0.020/unit "
-        "HIGH and -0.043/unit LOW, negative in 6/6 walk-forward windows. Emitted as the "
-        "detail of DAY0_LIVE_ADMISSION_REJECTED. A fitted-evidence refusal, not a cap: "
-        "with no artifact installed the gate is inert.",
     )
     DAY0_ASK_REPRICING_VETO = (
         "DAY0_ASK_REPRICING_VETO",

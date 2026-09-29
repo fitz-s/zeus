@@ -1293,7 +1293,7 @@ def test_day0_admission_rejection_receipt_reason_ignores_unrelated_errors() -> N
         ("buy_no", "MAKER_REST", "MAKER"),
     ),
 )
-@pytest.mark.parametrize("rejection", [None, "DAY0_DIURNAL_NOWCAST_VETO"])
+@pytest.mark.parametrize("rejection", [None, "DAY0_ASK_REPRICING_VETO"])
 def test_global_preflight_authority_applies_day0_admission_to_sealed_jit_candidate(
     monkeypatch, direction, execution_mode, expected_order_mode, rejection
 ) -> None:

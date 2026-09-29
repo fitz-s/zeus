@@ -759,16 +759,12 @@ def _rebind_prepared_probability(prepared: object, probability: object) -> objec
 
     admission_updates = {}
     original = prepared.probability_witness
-    context = getattr(prepared, "day0_diurnal_nowcast_context", None)
     saturation_identity = getattr(prepared, "day0_saturation_witness_identity", None)
-    if original.witness_identity != probability.witness_identity and (
-        context is not None or saturation_identity is not None
+    if (
+        original.witness_identity != probability.witness_identity
+        and saturation_identity is not None
     ):
         from src.engine.global_auction_universe import _rebind_probability_witness_tokens
-        from src.engine.qkernel_spine_bridge import (
-            Day0DiurnalNowcastCandidateBinding,
-            Day0DiurnalNowcastContext,
-        )
         from src.solve.solver import JointOutcomeProbabilityWitness
 
         try:
@@ -810,46 +806,6 @@ def _rebind_prepared_probability(prepared: object, probability: object) -> objec
                 ):
                     admission_updates["day0_saturation_witness_identity"] = (
                         probability.witness_identity
-                    )
-                if isinstance(context, Day0DiurnalNowcastContext) and (
-                    context.probability_witness_identity == original.witness_identity
-                    and context.probability_authority == "day0_remaining_day_global_probability_v1"
-                    and context.q_source == "day0_remaining_day"
-                ):
-                    old_bindings = {
-                        (binding.bin_id, binding.condition_id): binding
-                        for binding in original.bindings
-                    }
-                    labels = {}
-                    covered_sides = set()
-                    for bound in context.candidate_bindings:
-                        key = (bound.bin_id, bound.condition_id)
-                        old = old_bindings[key]
-                        token = old.yes_token_id if bound.side == "YES" else old.no_token_id
-                        if token != bound.token_id or labels.get(key, bound.bin_label) != bound.bin_label:
-                            raise ValueError("DAY0_NOWCAST_CONTEXT_BINDING_MISMATCH")
-                        labels[key] = bound.bin_label
-                        covered_sides.add((*key, bound.side))
-                    bindings = tuple(
-                        Day0DiurnalNowcastCandidateBinding(
-                            bin_id=binding.bin_id, condition_id=binding.condition_id,
-                            side=side, token_id=token, bin_label=labels[key],
-                        )
-                        for binding in probability.bindings
-                        if (key := (binding.bin_id, binding.condition_id)) in labels
-                        for side, token in (("YES", binding.yes_token_id), ("NO", binding.no_token_id))
-                        if token
-                        and (
-                            (*key, side) in covered_sides
-                            or not (
-                                old_bindings[key].yes_token_id if side == "YES"
-                                else old_bindings[key].no_token_id
-                            )
-                        )
-                    )
-                    admission_updates["day0_diurnal_nowcast_context"] = replace(
-                        context, probability_witness_identity=probability.witness_identity,
-                        candidate_bindings=bindings,
                     )
         except (AttributeError, KeyError, TypeError, ValueError):
             # Unproved hints stay bound to their old identity and cannot preempt

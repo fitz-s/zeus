@@ -37952,7 +37952,7 @@ def test_global_batch_falls_through_family_local_preflight_block(
             "BUY",
         ),
         (
-            "GLOBAL_PREFLIGHT_CANDIDATE_DAY0_ADMISSION_BLOCKED:DAY0_DIURNAL_NOWCAST_VETO",
+            "GLOBAL_PREFLIGHT_CANDIDATE_DAY0_ADMISSION_BLOCKED:DAY0_ASK_REPRICING_VETO",
             "BUY",
             "BUY",
         ),
@@ -46774,21 +46774,6 @@ def test_live_adapter_day0_ask_repricing_excludes_repriced_side_in_policy(
         trade.close()
 
 
-def _day0_nowcast_context_for_witness(witness, *, candidate_bindings):
-    return bridge.Day0DiurnalNowcastContext(
-        probability_witness_identity=witness.witness_identity,
-        probability_authority="day0_remaining_day_global_probability_v1",
-        q_source="day0_remaining_day",
-        city_name="Manila",
-        city_timezone="Asia/Manila",
-        settlement_unit="C",
-        metric="high",
-        running_extreme=32.0,
-        carrier_future_extremes_c=(),
-        candidate_bindings=tuple(candidate_bindings),
-    )
-
-
 def _day0_yes_only_witness(witness):
     from src.solve.solver import rebind_family_payoff_witness
 
@@ -46823,59 +46808,6 @@ def _reidentity_probability_witness(witness, **changes):
         exact_payoff_witness=rebound.exact_payoff_witness,
     )
     return replace(rebound, witness_identity=identity)
-
-
-def test_day0_probability_rebind_restores_nowcast_for_added_no_and_keeps_yes_context(
-    monkeypatch,
-):
-    event_id, prepared, _payload, kwargs = _saturated_day0_auction_inputs()
-    full = prepared.probability_witness
-    old = _day0_yes_only_witness(full)
-    old_context = _day0_nowcast_context_for_witness(
-        old,
-        candidate_bindings=(
-            bridge.Day0DiurnalNowcastCandidateBinding(
-                bin_id="bin-0",
-                condition_id="condition-0",
-                side="YES",
-                token_id="yes-0",
-                bin_label="Will the highest temperature in Manila be 32°C on July 2?",
-            ),
-        ),
-    )
-    rebound = global_batch_runtime._rebind_prepared_probability(
-        replace(prepared, probability_witness=old, day0_diurnal_nowcast_context=old_context),
-        full,
-    )
-
-    context = rebound.day0_diurnal_nowcast_context
-    assert context.probability_witness_identity == full.witness_identity
-    assert {
-        (binding.bin_id, binding.condition_id, binding.side, binding.token_id)
-        for binding in context.candidate_bindings
-    } == {
-        ("bin-0", "condition-0", "YES", "yes-0"),
-        ("bin-0", "condition-0", "NO", "no-0"),
-    }
-
-    monkeypatch.setattr(
-        era,
-        "_day0_diurnal_nowcast_verdict",
-        lambda **_kwargs: SimpleNamespace(q_held=0.05),
-    )
-    selected = select_prepared_global_auction({event_id: rebound}, **kwargs)
-
-    assert selected.decision.candidate.side == "YES"
-    assert selected.decision.candidate.bin_id == "bin-1"
-    rejected = [
-        row
-        for row in selected.decision.candidate_evaluations
-        if row.token_id == "no-0"
-    ]
-    assert rejected
-    assert all(
-        row.rejection_reason == "DAY0_DIURNAL_NOWCAST_VETO" for row in rejected
-    )
 
 
 def test_day0_probability_rebind_preserves_saturation_for_existing_token():
@@ -46974,71 +46906,17 @@ def test_day0_probability_rebind_rejects_non_token_identity_changes(mutation):
                 *old.bindings[1:],
             ),
         )
-    old_context = _day0_nowcast_context_for_witness(
-        old,
-        candidate_bindings=(
-            bridge.Day0DiurnalNowcastCandidateBinding(
-                bin_id="bin-0",
-                condition_id="condition-0",
-                side="YES",
-                token_id=("replaced-yes-0" if mutation == "token" else "yes-0"),
-                bin_label="known-label",
-            ),
-        ),
-    )
     rebound = global_batch_runtime._rebind_prepared_probability(
         replace(
             prepared,
             probability_witness=old,
-            day0_diurnal_nowcast_context=old_context,
             day0_saturation_witness_identity=old.witness_identity,
         ),
         full,
     )
 
     assert rebound.probability_witness is full
-    assert rebound.day0_diurnal_nowcast_context is old_context
     assert rebound.day0_saturation_witness_identity == old.witness_identity
-
-
-def test_day0_probability_rebind_does_not_expand_uncovered_existing_context_side():
-    _event_id, prepared, _payload, _kwargs = _saturated_day0_auction_inputs()
-    full = prepared.probability_witness
-    from src.solve.solver import rebind_family_payoff_witness
-
-    old = rebind_family_payoff_witness(
-        full,
-        bindings=tuple(
-            replace(
-                binding,
-                no_token_id=(binding.no_token_id if binding.bin_id == "bin-0" else None),
-            )
-            for binding in full.bindings
-        ),
-    )
-    old_context = _day0_nowcast_context_for_witness(
-        old,
-        candidate_bindings=(
-            bridge.Day0DiurnalNowcastCandidateBinding(
-                bin_id="bin-0",
-                condition_id="condition-0",
-                side="YES",
-                token_id="yes-0",
-                bin_label="known-label",
-            ),
-        ),
-    )
-    rebound = global_batch_runtime._rebind_prepared_probability(
-        replace(prepared, probability_witness=old, day0_diurnal_nowcast_context=old_context),
-        full,
-    )
-
-    context = rebound.day0_diurnal_nowcast_context
-    assert context.probability_witness_identity == full.witness_identity
-    assert {
-        (binding.bin_id, binding.condition_id, binding.side, binding.token_id)
-        for binding in context.candidate_bindings
-    } == {("bin-0", "condition-0", "YES", "yes-0")}
 
 
 def test_day0_probability_rebind_does_not_retag_mismatched_saturation_hint():
@@ -47056,59 +46934,6 @@ def test_day0_probability_rebind_does_not_retag_mismatched_saturation_hint():
 
     assert rebound.probability_witness is full
     assert rebound.day0_saturation_witness_identity == "different-old-witness"
-
-
-@pytest.mark.parametrize("mismatch", ("identity", "token", "label", "unknown_bin"))
-def test_day0_probability_rebind_keeps_mismatched_context_inert(mismatch):
-    _event_id, prepared, _payload, _kwargs = _saturated_day0_auction_inputs()
-    full = prepared.probability_witness
-    old = _day0_yes_only_witness(full)
-    bindings = [
-        bridge.Day0DiurnalNowcastCandidateBinding(
-            bin_id="bin-0",
-            condition_id="condition-0",
-            side="YES",
-            token_id=("wrong-token" if mismatch == "token" else "yes-0"),
-            bin_label="known-label",
-        )
-    ]
-    if mismatch == "label":
-        bindings.append(
-            bridge.Day0DiurnalNowcastCandidateBinding(
-                bin_id="bin-0",
-                condition_id="condition-0",
-                side="YES",
-                token_id="yes-0",
-                bin_label="conflicting-label",
-            )
-        )
-    elif mismatch == "unknown_bin":
-        bindings.append(
-            bridge.Day0DiurnalNowcastCandidateBinding(
-                bin_id="unknown-bin",
-                condition_id="unknown-condition",
-                side="YES",
-                token_id="unknown-yes",
-                bin_label="unknown-label",
-            )
-        )
-    context = _day0_nowcast_context_for_witness(
-        old,
-        candidate_bindings=bindings[:1],
-    )
-    if mismatch in {"label", "unknown_bin"}:
-        object.__setattr__(context, "candidate_bindings", tuple(bindings))
-    if mismatch == "identity":
-        context = replace(context, probability_witness_identity="wrong-identity")
-    rebound = global_batch_runtime._rebind_prepared_probability(
-        replace(prepared, probability_witness=old, day0_diurnal_nowcast_context=context),
-        full,
-    )
-
-    assert rebound.probability_witness is full
-    # A row claiming an unknown source bin is malformed authority, not a
-    # merely uncovered bin. It cannot be repaired by dropping the bad row.
-    assert rebound.day0_diurnal_nowcast_context is context
 
 
 def test_day0_saturated_no_is_removed_before_joint_kelly_and_yes_wins():
@@ -47195,181 +47020,6 @@ def test_day0_joint_plan_cache_reuses_rebuilt_candidates_with_equal_decision(
     ) == global_batch_runtime._capital_proof_counterfactual_receipt(
         uncached_first, **proof_kwargs
     )
-
-
-def test_day0_nowcast_rejects_the_current_overpriced_proposal_and_falls_through(monkeypatch):
-    event_id, prepared, _payload, kwargs = _saturated_day0_auction_inputs()
-    witness = prepared.probability_witness
-    context = bridge.Day0DiurnalNowcastContext(
-        probability_witness_identity=witness.witness_identity,
-        probability_authority="day0_remaining_day_global_probability_v1",
-        q_source="day0_remaining_day",
-        city_name="Manila",
-        city_timezone="Asia/Manila",
-        settlement_unit="C",
-        metric="high",
-        running_extreme=32.0,
-        carrier_future_extremes_c=(),
-        candidate_bindings=(
-            bridge.Day0DiurnalNowcastCandidateBinding(
-                bin_id="bin-0",
-                condition_id="condition-0",
-                side="NO",
-                token_id="no-0",
-                bin_label="Will the highest temperature in Manila be 32°C on July 2?",
-            ),
-        ),
-    )
-    prepared = replace(prepared, day0_diurnal_nowcast_context=context)
-    monkeypatch.setattr(
-        era,
-        "_day0_diurnal_nowcast_verdict",
-        lambda **_kwargs: SimpleNamespace(q_held=0.05),
-    )
-
-    selected = select_prepared_global_auction({event_id: prepared}, **kwargs)
-
-    assert selected.decision.candidate.side == "YES"
-    rejected = [
-        row for row in selected.decision.candidate_evaluations
-        if row.token_id == "no-0"
-    ]
-    assert rejected
-    assert all(row.rejection_reason == "DAY0_DIURNAL_NOWCAST_VETO" for row in rejected)
-
-
-def test_day0_nowcast_allows_the_same_token_to_reenter_on_a_cheaper_next_cut(monkeypatch):
-    event_id, prepared, _payload, kwargs = _saturated_day0_auction_inputs()
-    witness = prepared.probability_witness
-    context = bridge.Day0DiurnalNowcastContext(
-        probability_witness_identity=witness.witness_identity,
-        probability_authority="day0_remaining_day_global_probability_v1",
-        q_source="day0_remaining_day",
-        city_name="Manila",
-        city_timezone="Asia/Manila",
-        settlement_unit="C",
-        metric="high",
-        running_extreme=32.0,
-        carrier_future_extremes_c=(),
-        candidate_bindings=(
-            bridge.Day0DiurnalNowcastCandidateBinding(
-                bin_id="bin-0",
-                condition_id="condition-0",
-                side="NO",
-                token_id="no-0",
-                bin_label="Will the highest temperature in Manila be 32°C on July 2?",
-            ),
-        ),
-    )
-    prepared = replace(prepared, day0_diurnal_nowcast_context=context)
-    monkeypatch.setattr(
-        era,
-        "_day0_diurnal_nowcast_verdict",
-        lambda **_kwargs: SimpleNamespace(q_held=0.15),
-    )
-    first_assets = tuple(
-        replace(
-            asset,
-            curve=replace(
-                asset.curve,
-                book_hash="hash-nowcast-expensive",
-                levels=(BookLevel(price=Decimal("0.20"), size=Decimal("100")),),
-            ),
-        )
-        if asset.token_id == "no-0"
-        else asset
-        for asset in kwargs["book_epoch"].assets
-    )
-    first_states = tuple(
-        (
-            asset.family_key, asset.bin_id, asset.condition_id, asset.side,
-            asset.token_id, "EXECUTABLE", asset.curve.book_hash,
-            asset.market_event_id, asset.gamma_market_id, str(asset.neg_risk),
-        )
-        for asset in first_assets
-    )
-    first_book = CurrentGlobalBookEpoch(
-        assets=first_assets,
-        asset_states=first_states,
-        captured_at_utc=kwargs["decision_at_utc"],
-        max_age=_dt.timedelta(seconds=30),
-        witness_identity=current_global_book_epoch_identity(
-            asset_states=first_states,
-            captured_at_utc=kwargs["decision_at_utc"],
-        ),
-    )
-    first_kwargs = {
-        **kwargs,
-        "venue_universe_identity": first_book.witness_identity,
-        "current_venue_universe_identity_resolver": lambda: first_book.witness_identity,
-        "current_execution_resolver": lambda candidate: first_book.execution_authority(
-            candidate, checked_at_utc=kwargs["decision_at_utc"],
-        ),
-        "book_epoch": first_book,
-    }
-    first = select_prepared_global_auction({event_id: prepared}, **first_kwargs)
-    assert first.decision.candidate.side == "YES"
-
-    next_at = kwargs["decision_at_utc"] + _dt.timedelta(seconds=1)
-    assets = tuple(
-        replace(
-            asset,
-            curve=replace(
-                asset.curve,
-                book_hash="hash-nowcast-cheaper",
-                levels=(BookLevel(price=Decimal("0.10"), size=Decimal("100")),),
-            ),
-            captured_at_utc=next_at,
-        )
-        if asset.token_id == "no-0"
-        else replace(asset, captured_at_utc=next_at)
-        for asset in first_book.assets
-    )
-    states = tuple(
-        (
-            asset.family_key,
-            asset.bin_id,
-            asset.condition_id,
-            asset.side,
-            asset.token_id,
-            "EXECUTABLE",
-            asset.curve.book_hash,
-            asset.market_event_id,
-            asset.gamma_market_id,
-            str(asset.neg_risk),
-        )
-        for asset in assets
-    )
-    next_book = CurrentGlobalBookEpoch(
-        assets=assets,
-        asset_states=states,
-        captured_at_utc=next_at,
-        max_age=_dt.timedelta(seconds=30),
-        witness_identity=current_global_book_epoch_identity(
-            asset_states=states,
-            captured_at_utc=next_at,
-        ),
-    )
-    next_kwargs = {
-        **kwargs,
-        "selection_epoch_identity": "next-nowcast-cut",
-        "selection_cut_at_utc": next_at,
-        "decision_at_utc": next_at,
-        "venue_universe_identity": next_book.witness_identity,
-        "current_venue_universe_identity_resolver": lambda: next_book.witness_identity,
-        "current_execution_resolver": (
-            lambda candidate: next_book.execution_authority(
-                candidate,
-                checked_at_utc=next_at,
-            )
-        ),
-        "book_epoch": next_book,
-    }
-
-    next_cut = select_prepared_global_auction({event_id: prepared}, **next_kwargs)
-
-    assert next_cut.decision.candidate.side == "NO"
-    assert "DAY0_DIURNAL_NOWCAST_VETO" not in next_cut.decision.rejection_reasons.values()
 
 
 @pytest.mark.parametrize("case", ["absorbing", "unknown_transform", "lower_cap", "new_witness"])
@@ -47460,7 +47110,6 @@ def test_day0_ask_final_stamp_rereads_after_selection_cache(monkeypatch):
         _insert_day0_ask_snapshot(conn, snapshot_id="first", token_id="yes-token", captured_at=at-_dt.timedelta(minutes=2), ask="0.40")
         assert era._day0_candidate_ask_repricing_rejection_reason(candidate, event_type="DAY0_EXTREME_UPDATED", trade_conn=conn, counts=counts) is None
         _insert_day0_ask_snapshot(conn, snapshot_id="late-observed", token_id="yes-token", captured_at=at-_dt.timedelta(minutes=1), ask="0.41")
-        monkeypatch.setattr(era, "stamp_day0_diurnal_nowcast", lambda *_args, **_kwargs: None)
         payload = {"event_type": "DAY0_EXTREME_UPDATED"}
         era._stamp_day0_live_admission_payload(payload, event_payload={}, held_token_id="yes-token", book_captured_at=at, decision_time=at, trade_conn=conn)
         assert list(counts.values()) == [1]

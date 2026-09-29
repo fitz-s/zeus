@@ -24024,122 +24024,6 @@ def _day0_in_final_localday_noentry_window(
     return remaining <= timedelta(minutes=_DAY0_FINAL_LOCALDAY_NOENTRY_MINUTES)
 
 
-def _day0_held_token_decision_price(
-    actionable_payload: Mapping[str, object],
-) -> float | None:
-    """Return the sealed all-in held-token cost used by the Day0 seam.
-
-    Global expected cost and target shares are the economic authority. A
-    correction's p0 is a gross probability anchor and cannot authorize a cost
-    gate; only a legacy correction with no basis marker may supply its historical
-    all-in p0 when no sealed cost fields exist.
-    """
-
-    economics = actionable_payload.get("qkernel_execution_economics")
-    if not isinstance(economics, Mapping):
-        return None
-    has_cost = "global_expected_cost_usd" in economics
-    has_shares = "global_target_shares" in economics
-    if has_cost or has_shares:
-        if not (has_cost and has_shares):
-            return None
-        cost = _optional_float(economics.get("global_expected_cost_usd"))
-        shares = _optional_float(economics.get("global_target_shares"))
-        if (
-            cost is None
-            or shares is None
-            or cost <= 0.0
-            or shares <= 0.0
-            or not math.isfinite(cost / shares)
-            or cost / shares <= 0.0
-        ):
-            return None
-        return cost / shares
-    correction = economics.get("market_anchored_correction")
-    if isinstance(correction, Mapping) and correction.get("applied") is True:
-        p0 = _optional_float(correction.get("p0"))
-        if p0 is not None and correction.get("p0_basis") is None:
-            return p0
-    return None
-
-
-def _day0_nowcast_gap_native(
-    *,
-    actionable_payload: Mapping[str, object],
-    event_payload: Mapping[str, object],
-    metric: str,
-    running_extreme: float,
-    unit: str,
-) -> float | None:
-    """NWP gap = model center minus the running extreme (reversed for LOW), in the
-    city's settlement unit.
-
-    The centers come from the remaining-vector witness's carrier members already on the
-    payload — the same day-of model trajectories the posterior itself consumed — so the
-    hot path reads no database. Absent on most candidates, and absent means the pooled
-    cell, not a veto.
-    """
-
-    for source in (actionable_payload, event_payload):
-        if not isinstance(source, Mapping):
-            continue
-        values = _day0_nowcast_carrier_future_extremes(source)
-        if not values:
-            continue
-        center_c = float(np.median(np.asarray(values, dtype=float)))
-        center = center_c * 9.0 / 5.0 + 32.0 if unit == "F" else center_c
-        return (
-            center - running_extreme
-            if metric == "high"
-            else running_extreme - center
-        )
-    return None
-
-
-DAY0_NOWCAST_Q_HELD_KEY = "_edli_day0_nowcast_q_held"
-DAY0_NOWCAST_BASIS_KEY = "_edli_day0_nowcast_basis"
-DAY0_NOWCAST_FIT_DATE_KEY = "_edli_day0_nowcast_fit_date"
-
-
-def stamp_day0_diurnal_nowcast(
-    actionable_payload: dict[str, object],
-    *,
-    event_payload: Mapping[str, object],
-    decision_time: datetime,
-) -> None:
-    """Stamp the residual nowcast's verdict onto the actionable payload IN PLACE.
-
-    Called once, on the payload dict BEFORE ``build_actionable_trade_certificate``
-    seals it, so the certificate hash covers the stamp and the admission gate below can
-    be a pure predicate over already-computed facts. A candidate the nowcast cannot
-    serve leaves the keys absent, which is what makes the gate inert.
-    """
-
-    if str(actionable_payload.get("event_type") or "").strip() != "DAY0_EXTREME_UPDATED":
-        return
-    city = runtime_cities_by_name().get(
-        str(actionable_payload.get("city") or event_payload.get("city") or "")
-    )
-    metric = str(
-        actionable_payload.get("metric")
-        or actionable_payload.get("temperature_metric")
-        or event_payload.get("metric")
-        or ""
-    ).strip().lower()
-    verdict = _day0_diurnal_nowcast_verdict(
-        actionable_payload=actionable_payload,
-        event_payload=event_payload,
-        city=city,
-        metric=metric,
-        decision_time=decision_time,
-    )
-    if verdict is None:
-        return
-    actionable_payload[DAY0_NOWCAST_Q_HELD_KEY] = float(verdict.q_held)
-    actionable_payload[DAY0_NOWCAST_BASIS_KEY] = str(verdict.basis)
-    actionable_payload[DAY0_NOWCAST_FIT_DATE_KEY] = str(verdict.fit_date)
-
-
 DAY0_ASK_DISTINCT_10MIN_KEY = "_edli_day0_held_ask_distinct_10min"
 DAY0_ASK_WINDOW_START_KEY = "_edli_day0_held_ask_window_start_utc"
 DAY0_ASK_WINDOW_END_KEY = "_edli_day0_held_ask_window_end_utc"
@@ -24299,13 +24183,13 @@ _day0_ask_repricing_fault_lock = threading.Lock()
 
 
 def _log_day0_ask_repricing_fault(exc: BaseException) -> None:
-    """WARN once per exception family per hour — same budget as the nowcast fault log."""
+    """WARN once per exception family per hour."""
 
     family = type(exc).__name__
     now = _time.monotonic()
     with _day0_ask_repricing_fault_lock:
         last = _day0_ask_repricing_fault_logged_at.get(family)
-        if last is not None and now - last < _DAY0_NOWCAST_FAULT_LOG_INTERVAL_SECONDS:
+        if last is not None and now - last < _DAY0_ADVISORY_FAULT_LOG_INTERVAL_SECONDS:
             return
         _day0_ask_repricing_fault_logged_at[family] = now
     logging.getLogger(__name__).warning(
@@ -24313,100 +24197,7 @@ def _log_day0_ask_repricing_fault(exc: BaseException) -> None:
     )
 
 
-def _day0_diurnal_nowcast_verdict(
-    *,
-    actionable_payload: Mapping[str, object],
-    event_payload: Mapping[str, object],
-    city: object,
-    metric: str,
-    decision_time: datetime,
-) -> Any | None:
-    """The residual nowcast's held-token probability for this candidate, or None.
-
-    Fail-open on EVERY fault: no artifact, no city timezone, no running extreme,
-    unparseable bin label, unexpected exception. The caller then leaves the veto gate
-    inert. Reads no database — the running extreme, the bin label and the model centers
-    are all already in the payload the reactor assembled.
-    """
-
-    try:
-        from src.calibration.day0_diurnal_residual import (
-            load_day0_diurnal_residual_nowcast,
-        )
-
-        nowcast = load_day0_diurnal_residual_nowcast(now=decision_time)
-        if nowcast is None:
-            return None
-        city_name = str(getattr(city, "name", "") or "").strip()
-        timezone_name = str(getattr(city, "timezone", "") or "").strip()
-        if not city_name or not timezone_name or metric not in {"high", "low"}:
-            return None
-        direction = str(actionable_payload.get("direction") or "").strip().lower()
-        if direction not in {"buy_yes", "buy_no"}:
-            return None
-        bin_label = str(actionable_payload.get("bin_label") or "").strip()
-        if not bin_label:
-            return None
-        from src.data.market_scanner import _parse_temp_range
-
-        bin_low, bin_high = _parse_temp_range(bin_label)
-        if bin_low is None and bin_high is None:
-            return None
-        running_extreme = _day0_nowcast_extreme_native(
-            event_payload, metric, actionable_payload=actionable_payload,
-        )
-        if running_extreme is None:
-            return None
-        unit = str(getattr(city, "settlement_unit", "") or "").strip().upper()
-        if nowcast.fitted_unit(city_name) not in (None, unit):
-            # The artifact was fitted in a different unit for this city; its integer
-            # residual grid does not transfer.
-            return None
-        local_hour = (
-            decision_time.astimezone(ZoneInfo(timezone_name)).hour
-            + decision_time.astimezone(ZoneInfo(timezone_name)).minute / 60.0
-        )
-        gap = _day0_nowcast_gap_native(
-            actionable_payload=actionable_payload,
-            event_payload=event_payload,
-            metric=metric,
-            running_extreme=running_extreme,
-            unit=unit,
-        )
-        return nowcast.held_probability(
-            city=city_name,
-            metric=metric,
-            direction=direction,
-            local_hour=local_hour,
-            running_extreme=running_extreme,
-            bin_low=bin_low,
-            bin_high=bin_high,
-            gap=gap,
-        )
-    except Exception as exc:  # noqa: BLE001 — advisory gate; never blocks on its own fault
-        _log_day0_nowcast_fault(exc)
-        return None
-
-
-_DAY0_NOWCAST_FAULT_LOG_INTERVAL_SECONDS = 3600.0
-_day0_nowcast_fault_logged_at: dict[str, float] = {}
-_day0_nowcast_fault_lock = threading.Lock()
-
-
-def _log_day0_nowcast_fault(exc: BaseException) -> None:
-    """WARN once per exception family per hour — a recurring fault must be visible
-    without the decision cadence turning it into a log flood."""
-
-    family = type(exc).__name__
-    now = _time.monotonic()
-    with _day0_nowcast_fault_lock:
-        last = _day0_nowcast_fault_logged_at.get(family)
-        if last is not None and now - last < _DAY0_NOWCAST_FAULT_LOG_INTERVAL_SECONDS:
-            return
-        _day0_nowcast_fault_logged_at[family] = now
-    logging.getLogger(__name__).warning(
-        "day0 diurnal nowcast unavailable (%s): %s", family, exc
-    )
+_DAY0_ADVISORY_FAULT_LOG_INTERVAL_SECONDS = 3600.0
 
 
 def _stamp_day0_live_admission_payload(
@@ -24420,11 +24211,6 @@ def _stamp_day0_live_admission_payload(
 ) -> None:
     """Stamp the exact Day0 inputs consumed by the final admission predicate."""
 
-    stamp_day0_diurnal_nowcast(
-        actionable_payload,
-        event_payload=event_payload,
-        decision_time=decision_time,
-    )
     stamp_day0_held_ask_repricing(
         actionable_payload,
         held_token_id=held_token_id,
@@ -24588,15 +24374,6 @@ def _day0_live_submit_admission_rejection_reason(
         ),
         selected_bin_edge_distance_quanta=distance_quanta,
         edge_survives_one_bin_stress=stress_survives,
-        nowcast_q_held=_optional_float(
-            actionable_payload.get(DAY0_NOWCAST_Q_HELD_KEY)
-        ),
-        nowcast_basis=(
-            str(actionable_payload.get(DAY0_NOWCAST_BASIS_KEY))
-            if actionable_payload.get(DAY0_NOWCAST_BASIS_KEY)
-            else None
-        ),
-        decision_price_held=_day0_held_token_decision_price(actionable_payload),
         held_ask_distinct_count_10min=_optional_int(
             actionable_payload.get(DAY0_ASK_DISTINCT_10MIN_KEY)
         ),
@@ -24695,11 +24472,9 @@ def _build_live_execution_command_certificates(
             event=event,
         )
         _assert_live_entry_submit_authority(actionable_payload)
-        # Stamp the Day0 residual-nowcast verdict BEFORE the certificate seals the
-        # payload hash, so the veto the admission gate applies below is auditable on the
-        # certificate and on the no-submit receipt that carries it.
-        # Same seal-before-hash discipline, same fail-open contract: count how many
-        # distinct asks the HELD token showed in the 10 minutes BEFORE the sealed book
+        # Stamp the Day0 admission inputs BEFORE the certificate seals the payload
+        # hash, so the admission gate below is auditable on the certificate and on the
+        # no-submit receipt that carries it. Count how many distinct asks the HELD token showed in the 10 minutes BEFORE the sealed book
         # we are about to price against. The JIT snapshot is that sealed book — its
         # captured_at is the exact instant gate 5 reads as quote_time, and its
         # selected_outcome_token_id is the token we would hold (NO for buy_no) — so the
@@ -40604,215 +40379,6 @@ def _bind_day0_saturated_statistical_sides(
     )
 
 
-def _day0_nowcast_carrier_future_extremes(
-    payload: Mapping[str, object],
-) -> tuple[float, ...]:
-    """Freeze all carrier centers for the nowcast's descriptive median.
-
-    The legacy context field also holds final-daily centers; this aggregate
-    never feeds the remaining-future probability operator.
-    """
-
-    authority = payload.get("day0_probability_authority")
-    blocks: tuple[object, ...] = (payload,)
-    if isinstance(authority, Mapping):
-        blocks = (
-            authority,
-            authority.get("global_current_observation_payload"),
-            payload,
-        )
-    for block in blocks:
-        if not isinstance(block, Mapping):
-            continue
-        members = block.get("remaining_carrier_future_extremes_c") or block.get(
-            "_edli_day0_remaining_carrier_future_extremes_c"
-        )
-        if not isinstance(members, (list, tuple)) or not members:
-            continue
-        final = block.get("remaining_carrier_final_extremes_c") or block.get(
-            "_edli_day0_remaining_carrier_final_extremes_c", ()
-        )
-        if not isinstance(final, (list, tuple)):
-            continue
-        values = tuple(
-            value
-            for value in (_optional_float(member) for member in (*members, *final))
-            if value is not None and math.isfinite(value)
-        )
-        if values:
-            return values
-    return ()
-
-
-def _bind_day0_diurnal_nowcast_context(
-    prepared: object,
-    payload: Mapping[str, object],
-    family: object,
-    *,
-    event_type: str,
-):
-    """Bind source-only Day0 inputs to this exact probability witness.
-
-    SCOPE: one current witness and its native token/bin bindings. DRAIN: the
-    selector scores remaining fixed proposals immediately. RESET: every cut
-    prepares a new witness/context; no nowcast veto is cached across cuts.
-    """
-
-    from src.engine.qkernel_spine_bridge import (
-        Day0DiurnalNowcastCandidateBinding,
-        Day0DiurnalNowcastContext,
-    )
-
-    witness = getattr(prepared, "probability_witness", None)
-    if (
-        event_type != "DAY0_EXTREME_UPDATED"
-        or witness is None
-        or payload.get("probability_authority")
-        != "day0_remaining_day_global_probability_v1"
-        or (payload.get("_edli_q_source") or payload.get("q_source"))
-        != "day0_remaining_day"
-    ):
-        return prepared
-    try:
-        city = runtime_cities_by_name().get(str(getattr(family, "city", "") or ""))
-        metric = str(getattr(family, "metric", "") or "").strip().lower()
-        running_extreme = _day0_nowcast_extreme_native(payload, metric)
-        witness_bindings = {
-            str(binding.condition_id): binding
-            for binding in tuple(getattr(witness, "bindings", ()))
-        }
-        bindings = []
-        for candidate in tuple(getattr(family, "candidates", ())):
-            condition_id = str(getattr(candidate, "condition_id", "") or "")
-            witness_binding = witness_bindings.get(condition_id)
-            if witness_binding is None or not condition_id:
-                raise ValueError("DAY0_NOWCAST_CONTEXT_CONDITION_MISMATCH")
-            for side, token_id, candidate_token_id in (
-                ("YES", witness_binding.yes_token_id, candidate.yes_token_id),
-                ("NO", witness_binding.no_token_id, candidate.no_token_id),
-            ):
-                if token_id is None:
-                    continue
-                if str(token_id) != str(candidate_token_id or ""):
-                    raise ValueError("DAY0_NOWCAST_CONTEXT_TOKEN_MISMATCH")
-                bindings.append(
-                    Day0DiurnalNowcastCandidateBinding(
-                        bin_id=str(witness_binding.bin_id),
-                        condition_id=condition_id,
-                        side=side,
-                        token_id=str(token_id),
-                        bin_label=str(candidate.bin.label),
-                    )
-                )
-        context = Day0DiurnalNowcastContext(
-            probability_witness_identity=str(witness.witness_identity),
-            probability_authority=str(payload.get("probability_authority") or ""),
-            q_source=str(
-                payload.get("_edli_q_source") or payload.get("q_source") or ""
-            ),
-            city_name=str(getattr(city, "name", "") or ""),
-            city_timezone=str(getattr(city, "timezone", "") or ""),
-            settlement_unit=str(getattr(city, "settlement_unit", "") or ""),
-            metric=metric,
-            running_extreme=float(running_extreme),
-            carrier_future_extremes_c=_day0_nowcast_carrier_future_extremes(payload),
-            candidate_bindings=tuple(bindings),
-        )
-    except (AttributeError, TypeError, ValueError):
-        # Missing or malformed early context has no authority to preempt the
-        # final submit-time predicate.
-        return prepared
-    return dataclass_replace(prepared, day0_diurnal_nowcast_context=context)
-
-
-def day0_diurnal_nowcast_candidate_rejection_reason(
-    context: object,
-    candidate: object,
-    *,
-    decision_time: datetime,
-) -> str | None:
-    """Reject only this currently overpriced BUY proposal, if source-bound."""
-
-    from src.engine.qkernel_spine_bridge import Day0DiurnalNowcastContext
-
-    if not isinstance(context, Day0DiurnalNowcastContext):
-        return None
-    if str(getattr(candidate, "action", "BUY") or "BUY").upper() != "BUY":
-        return None
-    if (
-        str(getattr(candidate, "probability_witness_identity", "") or "")
-        != context.probability_witness_identity
-    ):
-        return None
-    source_payload = {
-        "probability_authority": context.probability_authority,
-        "_edli_q_source": context.q_source,
-    }
-    if _uses_replacement_probability_authority(source_payload):
-        return None
-    key = (
-        str(getattr(candidate, "bin_id", "") or ""),
-        str(getattr(candidate, "condition_id", "") or ""),
-        str(getattr(candidate, "side", "") or "").upper(),
-        str(getattr(candidate, "token_id", "") or ""),
-    )
-    binding = next(
-        (
-            row
-            for row in context.candidate_bindings
-            if (row.bin_id, row.condition_id, row.side, row.token_id) == key
-        ),
-        None,
-    )
-    if binding is None:
-        return None
-    source_payload.update(
-        {
-            "event_type": "DAY0_EXTREME_UPDATED",
-            "city": context.city_name,
-            "metric": context.metric,
-            "temperature_metric": context.metric,
-            "direction": f"buy_{binding.side.lower()}",
-            "bin_label": binding.bin_label,
-            "high_so_far": (
-                context.running_extreme if context.metric == "high" else None
-            ),
-            "low_so_far": (
-                context.running_extreme if context.metric == "low" else None
-            ),
-        }
-    )
-    if context.carrier_future_extremes_c:
-        source_payload["day0_probability_authority"] = {
-            "remaining_carrier_future_extremes_c": list(
-                context.carrier_future_extremes_c
-            )
-        }
-    city = SimpleNamespace(
-        name=context.city_name,
-        timezone=context.city_timezone,
-        settlement_unit=context.settlement_unit,
-    )
-    verdict = _day0_diurnal_nowcast_verdict(
-        actionable_payload=source_payload,
-        event_payload=source_payload,
-        city=city,
-        metric=context.metric,
-        decision_time=decision_time,
-    )
-    if verdict is None:
-        return None
-    try:
-        curve = getattr(candidate, "economic_cost_curve")
-        level = curve.levels[0]
-        cost = float(curve.fee_model.all_in_price(level.price))
-    except (AttributeError, IndexError, TypeError, ValueError):
-        return None
-    if not math.isfinite(cost):
-        return None
-    return "DAY0_DIURNAL_NOWCAST_VETO" if cost >= float(verdict.q_held) else None
-
-
 class _CurrentProbabilityUse(StrEnum):
     ENTRY = "entry"
     HELD_MONITOR = "held_monitor"
@@ -43486,12 +43052,6 @@ def _prepare_current_global_probability_family(
             payload=payload,
             family=family,
         ),
-    )
-    prepared = _bind_day0_diurnal_nowcast_context(
-        prepared,
-        payload,
-        family,
-        event_type=str(event.event_type or ""),
     )
     prepared = _bind_day0_saturated_statistical_sides(prepared, payload)
     if telemetry_context_sink is not None:
@@ -48140,26 +47700,6 @@ def _observed_day0_extreme_native(
     if value is not None:
         return value
     return _optional_float(payload.get("rounded_value"))
-
-
-def _day0_nowcast_extreme_native(
-    payload: Mapping[str, object],
-    metric: str,
-    *,
-    actionable_payload: Mapping[str, object] | None = None,
-) -> float | None:
-    """Use the current statistical boundary, preserving legacy observation fallback."""
-
-    physical = _optional_float(payload.get("_edli_day0_probability_boundary_native"))
-    if physical is not None and math.isfinite(physical):
-        return _day0_probability_boundary_native(payload, metric)
-    if actionable_payload is not None:
-        value = _optional_float(
-            actionable_payload.get("high_so_far" if metric == "high" else "low_so_far")
-        )
-        if value is not None:
-            return value
-    return _observed_day0_extreme_native(payload, metric)
 
 
 def _day0_probability_boundary_native(

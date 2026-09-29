@@ -109,92 +109,20 @@ def test_taker_entry_forbidden_until_calibrated() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Gate 9 — the station diurnal-residual nowcast veto (2026-09-04).
-#
-# Day0 pre-peak our posterior treats the remaining NWP path as near-certain and
-# overstates the running-extreme bin; the nowcast does not. It is wired as a
-# refusal, never as a q, because its Brier is significantly worse than the
-# market's at every hour. The artifact's PRESENCE is the switch: with no
-# nowcast_q_held in scope the gate is inert by construction.
+# Gate 9 DELETED 2026-09-29 — the diurnal-residual evidence moved INTO q
+# (src/calibration/day0_diurnal_residual.py mixture). Antibody: the admission
+# context cannot carry a nowcast verdict at all, so no post-selection predicate
+# can reject a winner on it.
 
 
-def test_nowcast_veto_fires_when_price_meets_or_exceeds_nowcast_probability() -> None:
-    assert (
-        day0_live_admission_rejection_reason(
-            _ctx(nowcast_q_held=0.31, decision_price_held=0.90)
-        )
-        == "DAY0_DIURNAL_NOWCAST_VETO"
-    )
-    # Boundary is inclusive: paying exactly what the nowcast says it is worth is
-    # a zero-edge trade, not a positive-edge one.
-    assert (
-        day0_live_admission_rejection_reason(
-            _ctx(nowcast_q_held=0.45, decision_price_held=0.45)
-        )
-        == "DAY0_DIURNAL_NOWCAST_VETO"
-    )
+def test_admission_context_has_no_nowcast_veto_inputs() -> None:
+    import dataclasses
 
+    from src.contracts.rejection_reasons import is_registered_rejection_reason
 
-def test_nowcast_veto_silent_when_price_is_below_nowcast_probability() -> None:
-    assert (
-        day0_live_admission_rejection_reason(
-            _ctx(nowcast_q_held=0.62, decision_price_held=0.41)
-        )
-        is None
-    )
-
-
-def test_nowcast_veto_inert_without_an_artifact_verdict() -> None:
-    # No nowcast (artifact absent/stale/unservable cell) never vetoes, whatever
-    # the price.
-    assert (
-        day0_live_admission_rejection_reason(
-            _ctx(nowcast_q_held=None, decision_price_held=0.99)
-        )
-        is None
-    )
-    # A verdict with no decision price is equally inert — the rule is a
-    # comparison, and half of it missing is not evidence of anything.
-    assert (
-        day0_live_admission_rejection_reason(
-            _ctx(nowcast_q_held=0.10, decision_price_held=None)
-        )
-        is None
-    )
-    assert day0_live_admission_rejection_reason(_ctx()) is None
-
-
-def test_nowcast_veto_runs_after_the_existing_gates() -> None:
-    # An earlier gate's verdict is the reported one: the veto is additive, and
-    # never masks a structural refusal.
-    assert (
-        day0_live_admission_rejection_reason(
-            _ctx(
-                execution_mode="taker",
-                nowcast_q_held=0.31,
-                decision_price_held=0.90,
-            )
-        )
-        == "DAY0_TAKER_ENTRY_FORBIDDEN"
-    )
-
-
-def test_nowcast_veto_reason_is_registered_in_the_k2_taxonomy() -> None:
-    from src.contracts.rejection_reasons import (
-        RejectionCategory,
-        classify_rejection_reason,
-        is_registered_rejection_reason,
-    )
-
-    reason = day0_live_admission_rejection_reason(
-        _ctx(nowcast_q_held=0.31, decision_price_held=0.90)
-    )
-    assert is_registered_rejection_reason(reason)
-    assert classify_rejection_reason(reason) is RejectionCategory.DESIGNED_GATE
-    # The live call site wraps it as the envelope's colon-suffixed detail.
-    wrapped = f"DAY0_LIVE_ADMISSION_REJECTED:{reason}"
-    assert is_registered_rejection_reason(wrapped)
-    assert classify_rejection_reason(wrapped) is RejectionCategory.DESIGNED_GATE
+    fields = {field.name for field in dataclasses.fields(Day0AdmissionContext)}
+    assert not fields & {"nowcast_q_held", "nowcast_basis", "decision_price_held"}
+    assert not is_registered_rejection_reason("DAY0_DIURNAL_NOWCAST_VETO")
 
 
 # ---------------------------------------------------------------------------
@@ -238,23 +166,12 @@ def test_ask_repricing_veto_inert_without_a_count() -> None:
 
 
 def test_ask_repricing_veto_runs_after_the_existing_gates() -> None:
-    # Additive, like gate 9: a structural refusal still reports itself.
+    # Additive: a structural refusal still reports itself.
     assert (
         day0_live_admission_rejection_reason(
             _ctx(execution_mode="taker", held_ask_distinct_count_10min=5)
         )
         == "DAY0_TAKER_ENTRY_FORBIDDEN"
-    )
-    # And gate 9 still precedes gate 10 when both would fire.
-    assert (
-        day0_live_admission_rejection_reason(
-            _ctx(
-                nowcast_q_held=0.31,
-                decision_price_held=0.90,
-                held_ask_distinct_count_10min=5,
-            )
-        )
-        == "DAY0_DIURNAL_NOWCAST_VETO"
     )
 
 
