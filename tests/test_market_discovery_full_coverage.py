@@ -2179,56 +2179,28 @@ def test_prefetch_missing_orderbook_uses_same_token_feasibility_book_any_directi
     assert books["yes-1"]["asks"][0]["price"] == "0.27"
 
 
-def test_prefetch_missing_orderbook_hydrates_from_top_of_book_feasibility(monkeypatch):
-    """Live price-channel rows may carry top-of-book without full depth JSON."""
+def test_prefetch_top_of_book_only_feasibility_is_unknown_depth(monkeypatch):
+    """A live price-channel row with top-of-book but no ladder hydrates NO book.
+
+    Its depth is unknown: the token is named for a venue read instead of being given
+    a size inferred from the scalar quote.
+    """
 
     conn = _make_in_memory_trade_db()
     conn.executescript(
         """
-        CREATE TABLE execution_feasibility_evidence (
-            evidence_id TEXT PRIMARY KEY,
-            event_id TEXT NOT NULL,
-            condition_id TEXT NOT NULL,
-            token_id TEXT NOT NULL,
-            outcome_label TEXT NOT NULL,
-            direction TEXT NOT NULL,
-            quote_seen_at TEXT NOT NULL,
-            book_hash_before TEXT,
-            best_bid_before REAL,
-            best_ask_before REAL,
-            depth_before_json TEXT,
-            created_at TEXT NOT NULL,
-            schema_version INTEGER NOT NULL
+        CREATE TABLE execution_feasibility_latest (
+            token_id TEXT, direction TEXT, evidence_id TEXT, event_id TEXT,
+            condition_id TEXT, outcome_label TEXT, quote_seen_at TEXT,
+            book_hash_before TEXT, best_bid_before REAL, best_ask_before REAL,
+            depth_before_json TEXT, created_at TEXT, schema_version INTEGER
         );
-        CREATE INDEX idx_execution_feasibility_evidence_token_time
-            ON execution_feasibility_evidence(token_id, quote_seen_at);
-        CREATE INDEX idx_execution_feasibility_evidence_token_created
-            ON execution_feasibility_evidence(token_id, created_at DESC);
         """
     )
     conn.execute(
-        """
-        INSERT INTO execution_feasibility_evidence (
-            evidence_id, event_id, condition_id, token_id, outcome_label, direction,
-            quote_seen_at, book_hash_before, best_bid_before, best_ask_before,
-            depth_before_json, created_at, schema_version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            "e1",
-            "evt1",
-            "cond-1",
-            "yes-1",
-            "YES",
-            "buy_yes",
-            _NOW.isoformat(),
-            "hash-1",
-            0.24,
-            0.27,
-            "",
-            _NOW.isoformat(),
-            1,
-        ),
+        "INSERT INTO execution_feasibility_latest VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("yes-1", "buy_yes", "e1", "evt1", "cond-1", "YES", _NOW.isoformat(),
+         "hash-1", 0.24, 0.27, "", _NOW.isoformat(), 1),
     )
     conn.commit()
     outcome = {
@@ -2239,18 +2211,18 @@ def test_prefetch_missing_orderbook_hydrates_from_top_of_book_feasibility(monkey
         "neg_risk": False,
     }
     candidates = [(0, 0, 0, {"slug": "m1"}, outcome, "cond-1", "buy_yes")]
+    ladder_missing: set[str] = set()
 
     books = ms._prefetch_selected_orderbooks_from_feasibility(
         conn,
         candidates,
         captured=_NOW,
         already_prefetched=set(),
+        ladder_missing_sink=ladder_missing,
     )
 
-    assert sorted(books) == ["yes-1"]
-    assert books["yes-1"]["bids"] == [{"price": "0.24", "size": "1"}]
-    assert books["yes-1"]["asks"] == [{"price": "0.27", "size": "1"}]
-    assert books["yes-1"]["min_order_size"] == "5"
+    assert books == {}
+    assert ladder_missing == {"yes-1"}
 
 
 def test_full_family_refresh_uses_feasibility_instead_of_synchronous_network_prefetch(monkeypatch):
@@ -3952,3 +3924,79 @@ def test_non_executable_tail_bin_identity_reaches_capture():
         "non-executable (orderbook-disabled) bins, stalling families at N-of-M and "
         "raising EXECUTABLE_SNAPSHOT_BLOCKED."
     )
+
+
+def test_ladder_missing_feasibility_token_is_read_from_the_venue_even_when_prefetch_is_skipped(monkeypatch):
+    """A price without a ladder is unknown depth: read the real book, never skip it.
+
+    The full-family lane defers ordinary /books misses to the price channel. A token
+    the price channel quotes WITHOUT a ladder has no depth evidence to defer to, so it
+    is read from the venue in every lane (review of eea222423: 18/82 traded tokens had
+    such rows). Nothing is fabricated: the captured book is the venue's.
+    """
+
+    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_FULL_FAMILY_DIRECT_CLOB_PREFETCH_MAX_CANDIDATES", "0")
+    conn = _make_in_memory_trade_db()
+    conn.executescript(
+        """
+        CREATE TABLE execution_feasibility_latest (
+            token_id TEXT, direction TEXT, evidence_id TEXT, event_id TEXT,
+            condition_id TEXT, outcome_label TEXT, quote_seen_at TEXT,
+            book_hash_before TEXT, best_bid_before REAL, best_ask_before REAL,
+            depth_before_json TEXT, created_at TEXT, schema_version INTEGER
+        );
+        """
+    )
+    market = _make_market("Tokyo", 1, metric="highest", target_date="2026-05-25")
+    outcome = market["outcomes"][0]
+    yes_token = outcome["token_id"]
+    no_token = outcome["no_token_id"]
+    conn.execute(
+        "INSERT INTO execution_feasibility_latest VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (yes_token, "buy_yes", "e-yes", "evt", outcome["condition_id"], "YES",
+         _NOW.isoformat(), "h-yes", 0.24, 0.27, None, _NOW.isoformat(), 1),
+    )
+    conn.commit()
+
+    network_calls: list[list[str]] = []
+
+    class _Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            call = list(token_ids)
+            network_calls.append(call)
+            return {
+                token_id: {
+                    "asset_id": token_id,
+                    "market": token_id,
+                    "bids": [{"price": "0.24", "size": "180"}],
+                    "asks": [{"price": "0.27", "size": "95"}],
+                }
+                for token_id in call
+            }
+
+    captured: dict[str, dict] = {}
+
+    def _capture(conn, *, market, decision, prefetched_orderbook, **kwargs):
+        book = prefetched_orderbook or {}
+        captured[str(book.get("asset_id") or "")] = book
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_capture):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[market],
+            clob=_Clob(),
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            max_outcomes=0,
+            budget_seconds=15.0,
+        )
+
+    # Only the ladder-missing token is read; the ordinary miss stays deferred.
+    assert network_calls == [[yes_token]]
+    assert summary["direct_clob_prefetch_skipped"] == 1
+    assert summary["ladder_missing_book_count"] == 1
+    assert summary["ladder_missing_book_fetched_count"] == 1
+    assert summary["prefetch_missing_skipped"] == 1
+    assert list(captured) == [yes_token]
+    assert captured[yes_token]["asks"] == [{"price": "0.27", "size": "95"}]
+    assert no_token not in captured

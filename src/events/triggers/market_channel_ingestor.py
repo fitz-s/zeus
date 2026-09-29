@@ -700,19 +700,31 @@ class MarketChannelIngestor:
         if metadata is None:
             return None
         previous = self.quote_cache.get(token_id)
-        depth_json = (
-            _apply_price_changes_depth(
-                previous.depth_json if previous is not None else None,
-                changes,
+        prior_depth = previous.depth_json if previous is not None else None
+        if source_event_type == "price_change":
+            depth_json = _apply_price_changes_depth(prior_depth, changes)
+        else:
+            # best_bid_ask is derived from the same book the price_change stream
+            # maintains; it carries no depth of its own. The held ladder stays
+            # the book while its top is this touch, and is unknown once it is not.
+            depth_json = (
+                prior_depth
+                if _ladder_top_is_touch(
+                    prior_depth,
+                    best_bid=_float_or_none(change.get("best_bid")),
+                    best_ask=_float_or_none(change.get("best_ask")),
+                )
+                else None
             )
-            if source_event_type == "price_change"
-            else None
-        )
         payload = MarketBookEventPayload(
             condition_id=metadata.condition_id,
             token_id=token_id,
             outcome_label=metadata.outcome_label,  # type: ignore[arg-type]
-            event_type="BOOK_SNAPSHOT" if depth_json is not None else "BEST_BID_ASK_CHANGED",
+            event_type=(
+                "BOOK_SNAPSHOT"
+                if source_event_type == "price_change" and depth_json is not None
+                else "BEST_BID_ASK_CHANGED"
+            ),
             quote_seen_at=_timestamp_ms_to_iso(message.get("timestamp")) or received_at,
             book_hash=str(change.get("hash") or ""),
             best_bid=_float_or_none(change.get("best_bid")),
@@ -4208,6 +4220,47 @@ def _best_price(levels: object, *, best: str) -> float | None:
     if not parsed:
         return None
     return max(parsed) if best == "bid" else min(parsed)
+
+
+def _ladder_top_is_touch(
+    depth_json: str | None,
+    *,
+    best_bid: float | None,
+    best_ask: float | None,
+) -> bool:
+    """Whether a held ladder's best levels are exactly this top of book.
+
+    An empty bid side is the venue's zero bid; an empty ask side has no ask.
+    """
+
+    if not depth_json:
+        return False
+    try:
+        depth = json.loads(depth_json)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    if (
+        not isinstance(depth, dict)
+        or not isinstance(depth.get("bids"), list)
+        or not isinstance(depth.get("asks"), list)
+    ):
+        return False
+    try:
+        ladder_bid = _best_price(depth["bids"], best="bid")
+        ladder_ask = _best_price(depth["asks"], best="ask")
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+        return False
+    bid_matches = (
+        (best_bid or 0.0) == 0.0
+        if ladder_bid is None
+        else best_bid is not None and abs(ladder_bid - best_bid) <= 1e-12
+    )
+    ask_matches = (
+        best_ask is None
+        if ladder_ask is None
+        else best_ask is not None and abs(ladder_ask - best_ask) <= 1e-12
+    )
+    return bid_matches and ask_matches
 
 
 def _apply_price_changes_depth(

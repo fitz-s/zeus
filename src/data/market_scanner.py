@@ -4840,6 +4840,7 @@ def _prefetch_selected_orderbooks_from_feasibility(
     captured: datetime,
     already_prefetched: set[str] | None = None,
     deadline: float | None = None,
+    ladder_missing_sink: set[str] | None = None,
 ) -> dict[str, dict]:
     """Use fresh live price-channel book evidence when direct CLOB batch misses.
 
@@ -4848,6 +4849,9 @@ def _prefetch_selected_orderbooks_from_feasibility(
     authority; it reuses the same CLOB-derived book rows already required by the
     submit witness, and the reconstructed book still passes snapshot identity and
     top-of-book validation before any candidate can become executable.
+
+    A fresh row that quotes a price but carries no ladder has UNKNOWN depth: its
+    token is added to ``ladder_missing_sink`` so the caller reads the real book.
     """
 
     latest_available = _table_exists(conn, "execution_feasibility_latest")
@@ -4869,7 +4873,12 @@ def _prefetch_selected_orderbooks_from_feasibility(
         quote_seen_at = _parse_snapshot_time(data.get("quote_seen_at"))
         if quote_seen_at is None or quote_seen_at < cutoff:
             return None
-        return _orderbook_from_feasibility_row(data, outcome=outcome)
+        book = _orderbook_from_feasibility_row(data, outcome=outcome)
+        if book is None and ladder_missing_sink is not None and (
+            data.get("best_ask_before") is not None or data.get("best_bid_before") is not None
+        ):
+            ladder_missing_sink.add(str(data.get("token_id") or "").strip())
+        return book
 
     try:
         _set_busy_timeout_ms(conn, _feasibility_prefetch_busy_timeout_ms())
@@ -4926,25 +4935,10 @@ def _orderbook_from_feasibility_row(row: dict[str, Any], *, outcome: dict[str, A
         return None
     bids = depth.get("bids")
     asks = depth.get("asks")
-    if not isinstance(bids, list):
-        bids = []
-    if not isinstance(asks, list):
-        asks = []
-
-    def _conservative_top(field: str) -> list[dict[str, str]]:
-        try:
-            price = Decimal(str(row.get(field)))
-        except (InvalidOperation, TypeError, ValueError):
-            return []
-        if not price.is_finite() or not Decimal("0") < price < Decimal("1"):
-            return []
-        return [{"price": str(price), "size": "1"}]
-
-    if not bids:
-        bids = _conservative_top("best_bid_before")
-    if not asks:
-        asks = _conservative_top("best_ask_before")
-    if not asks:
+    # A book is the venue's ladder or nothing. A missing ladder is UNKNOWN depth,
+    # never a size inferred from the scalar best quote: no book is reconstructed,
+    # so capture falls through to a current CLOB read.
+    if not isinstance(bids, list) or not isinstance(asks, list) or not asks:
         return None
     gamma_market_raw = outcome.get("gamma_market_raw")
     if not isinstance(gamma_market_raw, dict):
@@ -5336,6 +5330,9 @@ def refresh_executable_market_substrate_snapshots(
     batch_orderbook_supported = _configured_batch_orderbook_getter(clob) is not None
     full_family_capture = per_city_limit == 0
     prefetched_books: dict[str, dict] = {}
+    # Tokens the price channel quotes with no ladder. Their depth is unknown, never
+    # invented; they are read from the venue in every lane, ahead of any skip.
+    ladder_missing_tokens: set[str] = set()
     full_family_direct_clob_prefetch_forced = _bool_env(
         "ZEUS_MARKET_DISCOVERY_FULL_FAMILY_DIRECT_CLOB_PREFETCH_ENABLED",
         False,
@@ -5387,6 +5384,7 @@ def refresh_executable_market_substrate_snapshots(
                     captured=captured,
                     already_prefetched=set(prefetched_books),
                     deadline=prefetch_deadline,
+                    ladder_missing_sink=ladder_missing_tokens,
                 ).items()
                 if token_id not in prefetched_books
             }
@@ -5434,7 +5432,21 @@ def refresh_executable_market_substrate_snapshots(
         ]
         if not network_book_candidates:
             direct_clob_prefetch_skipped = True
-    if not direct_clob_prefetch_skipped:
+    ladder_missing_candidates = [
+        candidate
+        for candidate in candidates_needing_network_books
+        if _selected_token_for_direction(candidate[4], candidate[6]) in ladder_missing_tokens
+    ]
+    ladder_missing_ids = {id(candidate) for candidate in ladder_missing_candidates}
+    network_book_candidates = [
+        *ladder_missing_candidates,
+        *(
+            ()
+            if direct_clob_prefetch_skipped
+            else (c for c in network_book_candidates if id(c) not in ladder_missing_ids)
+        ),
+    ]
+    if network_book_candidates:
         full_family_primary_chunk_size = (
             min(
                 _BATCH_ORDERBOOK_CHUNK,
@@ -5775,6 +5787,8 @@ def refresh_executable_market_substrate_snapshots(
         "prefetch_missing_skipped": prefetch_missing_skipped,
         "prefetch_missing_identity_captured": prefetch_missing_identity_captured,
         "direct_clob_prefetch_skipped": int(direct_clob_prefetch_skipped),
+        "ladder_missing_book_count": len(ladder_missing_tokens),
+        "ladder_missing_book_fetched_count": len(ladder_missing_tokens & set(prefetched_books)),
         "direct_clob_prefetch_candidate_threshold": full_family_direct_clob_candidate_threshold,
         "direct_clob_prefetch_priority_condition_limit": priority_direct_clob_condition_limit,
         "direct_clob_prefetch_selected_priority_condition_count": len(selected_priority_conditions),

@@ -304,29 +304,58 @@ class _FakeClob:
         return {"bps": 0, "source": "clob_fee_rate", "token_id": token_id}
 
 
-def test_feasibility_row_without_exchange_book_depth_uses_conservative_top() -> None:
-    """Top-of-book quote evidence may hydrate only a conservative 1-share level."""
+@pytest.mark.parametrize(
+    ("depth_before_json", "best_bid", "best_ask"),
+    [
+        ("{}", "0.70", "0.75"),
+        ("", "0.70", "0.75"),
+        (json.dumps({"bids": [], "asks": []}), "0.70", "0.75"),
+        (json.dumps({"bids": [{"price": "0.70", "size": "9"}], "asks": []}), "0.70", "0.75"),
+        (json.dumps({"asks": [{"price": "0.75", "size": "12"}]}), None, "0.75"),
+    ],
+)
+def test_feasibility_row_with_unknown_depth_reconstructs_no_book(
+    depth_before_json, best_bid, best_ask
+) -> None:
+    """Unknown ladder depth is absent, never a fabricated size (every market).
+
+    A quote that names a best price on a side whose ladder is missing carries no
+    size. Reconstructing a level there invents depth; the 2026-09-29 admission
+    re-check rejected 9 maker winners as takers against such 1-share ladders.
+    """
     row = {
         "token_id": "no-token",
-        "best_bid_before": "0.70",
-        "best_ask_before": "0.75",
-        "depth_before_json": "{}",
+        "best_bid_before": best_bid,
+        "best_ask_before": best_ask,
+        "depth_before_json": depth_before_json,
         "book_hash_before": "hash-1",
     }
     outcome = {
         "condition_id": "cond-real",
-        "gamma_market_raw": {
-            "tick_size": "0.01",
-            "min_order_size": "5",
-            "negRisk": True,
-        },
+        "gamma_market_raw": {"tick_size": "0.01", "min_order_size": "5", "negRisk": True},
     }
+
+    assert _orderbook_from_feasibility_row(row, outcome=outcome) is None
+
+
+def test_feasibility_row_reuses_only_the_venue_ladder_verbatim() -> None:
+    """A venue ladder is reused level-for-level; its empty bid side is the venue's
+    own empty side (the channel then reports best_bid 0.0), not unknown depth."""
+    ladder = {"bids": [], "asks": [{"price": "0.75", "size": "12"}, {"price": "0.76", "size": "40"}]}
+    row = {
+        "token_id": "no-token",
+        "best_bid_before": 0.0,
+        "best_ask_before": "0.75",
+        "depth_before_json": json.dumps(ladder),
+        "book_hash_before": "hash-1",
+    }
+    outcome = {"condition_id": "cond-real", "gamma_market_raw": {}}
 
     book = _orderbook_from_feasibility_row(row, outcome=outcome)
 
     assert book is not None
-    assert book["bids"] == [{"price": "0.70", "size": "1"}]
-    assert book["asks"] == [{"price": "0.75", "size": "1"}]
+    assert book["bids"] == []
+    assert book["asks"] == ladder["asks"]
 
 
 def test_feasibility_row_without_exchange_metadata_defers_to_capture_authority() -> None:
@@ -621,3 +650,28 @@ def test_negrisk_child_active_false_accepting_true_capture_snapshot_admits() -> 
     assert status["clob_archived"] is False
     assert status["clob_enable_order_book"] is True
     assert status["executable_allowed"] is True
+
+
+def test_no_source_module_mints_a_book_level_with_a_literal_size() -> None:
+    """Structural antibody: a book level's size is venue evidence, never a literal.
+
+    Any ``{"price": ..., "size": <constant>}`` in src/ fabricates depth for every
+    market it touches.
+    """
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "src"
+    minted: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.Dict):
+                continue
+            keys = {
+                key.value: value
+                for key, value in zip(node.keys, node.values)
+                if isinstance(key, ast.Constant)
+            }
+            if "price" in keys and isinstance(keys.get("size"), ast.Constant):
+                minted.append(f"{path.relative_to(root.parent)}:{node.lineno}")
+    assert minted == []

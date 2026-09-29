@@ -2298,7 +2298,12 @@ def test_unchanged_bba_old_durable_depth_does_not_satisfy_repair():
     )
     service._record_current_generation_depth(unchanged_bba)
 
-    assert ingestor.quote_cache.get("token-1").depth_json is None
+    # The held ladder is still the book at this touch, so it stays cached; it is
+    # not new venue depth, so it cannot satisfy a pending repair.
+    assert json.loads(ingestor.quote_cache.get("token-1").depth_json) == {
+        "bids": book["bids"],
+        "asks": book["asks"],
+    }
     assert service._missing_depth_tokens == {"token-1"}
     assert service._clear_durable_missing_depth_tokens(logger=None) == 0
     assert service._missing_depth_tokens == {"token-1"}
@@ -6141,3 +6146,70 @@ def test_settlement_day_grace_all_null_history_still_kept():
 
     assert "yes-nullhist" in md, "all-NULL history must stay coverage-safe regardless of grace"
     assert "no-nullhist" in md
+
+
+def test_best_bid_ask_keeps_the_held_ladder_while_its_top_is_the_touch():
+    """Producer law: a best_bid_ask carries no depth of its own.
+
+    It must not erase the ladder the book/price_change stream maintains while that
+    ladder's top IS the touch it reports (the 2026-09-29 no-ladder rows: the price
+    projection kept the price and dropped the depth). Once the touch moves off the
+    held ladder's top, the depth is unknown: absent, never guessed.
+    """
+    conn, writer = _conn_writer()
+    ingestor = MarketChannelIngestor(
+        writer, active_token_ids={"token-1"}, token_metadata=_metadata(),
+    )
+    ladder = {
+        "bids": [{"price": "0.48", "size": "10"}],
+        "asks": [{"price": "0.52", "size": "10"}, {"price": "0.55", "size": "40"}],
+    }
+    ingestor.handle_message(
+        {"event_type": "book", "asset_id": "token-1", "market": "0xcondition",
+         **ladder, "hash": "h0", "timestamp": "1766789469000"},
+        received_at="2026-05-24T10:00:00+00:00",
+    )
+
+    def latest_depth():
+        return conn.execute(
+            "SELECT depth_before_json FROM execution_feasibility_latest "
+            "WHERE token_id='token-1' AND direction='buy_yes'"
+        ).fetchone()[0]
+
+    bba = {"event_type": "best_bid_ask", "asset_id": "token-1", "market": "0xcondition",
+           "best_bid": "0.48", "best_ask": "0.52", "hash": "h1"}
+    ingestor.handle_message({**bba, "timestamp": "1766789470000"},
+                            received_at="2026-05-24T10:00:01+00:00")
+    assert json.loads(ingestor.quote_cache.get("token-1").depth_json) == ladder
+    assert json.loads(latest_depth()) == ladder
+
+    # A bid-only move on a still-matching ask is a moved touch: depth unknown.
+    ingestor.handle_message({**bba, "best_bid": "0.49", "hash": "h2", "timestamp": "1766789471000"},
+                            received_at="2026-05-24T10:00:02+00:00")
+    assert latest_depth() is None
+    assert ingestor.quote_cache.get("token-1").depth_json is None
+
+
+def test_best_bid_ask_matching_an_empty_bid_ladder_keeps_that_ladder():
+    conn, writer = _conn_writer()
+    ingestor = MarketChannelIngestor(
+        writer, active_token_ids={"token-1"}, token_metadata=_metadata(),
+    )
+    ladder = {"bids": [], "asks": [{"price": "0.06", "size": "300"}]}
+    ingestor.handle_message(
+        {"event_type": "book", "asset_id": "token-1", "market": "0xcondition",
+         **ladder, "hash": "h0", "timestamp": "1766789469000"},
+        received_at="2026-05-24T10:00:00+00:00",
+    )
+    # The venue's empty bid reported as 0 at the same ask is the same touch.
+    ingestor.handle_message(
+        {"event_type": "best_bid_ask", "asset_id": "token-1", "market": "0xcondition",
+         "best_bid": "0", "best_ask": "0.06", "hash": "h1", "timestamp": "1766789470000"},
+        received_at="2026-05-24T10:00:01+00:00",
+    )
+    row = conn.execute(
+        "SELECT depth_before_json FROM execution_feasibility_latest "
+        "WHERE token_id='token-1' AND direction='buy_yes'"
+    ).fetchone()[0]
+    assert json.loads(row) == ladder
+    assert json.loads(ingestor.quote_cache.get("token-1").depth_json) == ladder
