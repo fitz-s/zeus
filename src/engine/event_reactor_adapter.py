@@ -45204,6 +45204,89 @@ def _day0_extra_member_sigma_native(
     return extra if extra > 0.0 and np.isfinite(extra) else 0.0
 
 
+DAY0_DIURNAL_MIXTURE_KEY = "_edli_day0_diurnal_mixture"
+
+
+def _day0_diurnal_mixture_for_family(
+    *,
+    payload: dict[str, object],
+    family,
+    city,
+    unit: str,
+    probability_time: "datetime | None",
+):
+    """The served Day0 diurnal-residual mixture for this family, or None.
+
+    The same lookup the materializer uses (``day0_diurnal_mixture``), fed this
+    decision's current probability boundary, native bin bounds and minute-cut
+    probability clock, so ENTRY, held redecision and submit reproduction build the
+    identical operator. Its payload is stamped for provenance and replay.
+    """
+
+    from src.calibration.day0_diurnal_residual import day0_diurnal_mixture
+
+    metric = str(getattr(family, "metric", "") or "").strip().lower()
+    if probability_time is None or metric not in {"high", "low"}:
+        return None
+    mixture, provenance = day0_diurnal_mixture(
+        city=str(getattr(city, "name", "") or family.city),
+        metric=metric,
+        unit=str(unit or "").strip().upper(),
+        decision_time=probability_time,
+        timezone_name=str(getattr(city, "timezone", "") or ""),
+        running_extreme=_day0_probability_boundary_native(payload, metric),
+        bin_bounds=[
+            (
+                None if bin_.low is None else float(bin_.low),
+                None if bin_.high is None else float(bin_.high),
+            )
+            for bin_ in family.bins
+        ],
+        round_to_grid=SettlementSemantics.for_city(city).round_single,
+    )
+    payload["_edli_day0_diurnal_mixture_status"] = provenance[
+        "day0_diurnal_mixture_status"
+    ]
+    if mixture is None or mixture.weight <= 0.0:
+        payload.pop(DAY0_DIURNAL_MIXTURE_KEY, None)
+        return None
+    payload[DAY0_DIURNAL_MIXTURE_KEY] = mixture.to_payload()
+    return mixture
+
+
+@dataclass(frozen=True)
+class _Day0DiurnalMixedSampler:
+    """Every bootstrap row through the same diurnal-residual operator as the point q.
+
+    A degenerate inner row falls back to ``analysis.p_cal``, which is already
+    mixed; that row passes through unchanged so no row is mixed twice.
+    """
+
+    inner: object
+    mixture: object
+
+    def _mix(self, analysis, row) -> np.ndarray:
+        row = np.asarray(row, dtype=float)
+        if np.array_equal(row, np.asarray(analysis.p_cal, dtype=float)):
+            return row
+        return np.asarray(self.mixture.apply(row), dtype=float)
+
+    def __call__(self, analysis, n_members):
+        return self._mix(analysis, self.inner(analysis, n_members))
+
+    def sample_matrix(self, analysis, n_samples: int, n_members: int) -> np.ndarray:
+        batch = getattr(self.inner, "sample_matrix", None)
+        rows = (
+            batch(analysis, n_samples, n_members)
+            if callable(batch)
+            else np.asarray(
+                [self.inner(analysis, n_members) for _ in range(max(0, int(n_samples)))],
+                dtype=float,
+            )
+        )
+        return np.asarray([self._mix(analysis, row) for row in rows], dtype=np.float64)
+
+
 @dataclass(frozen=True)
 class _Day0BootstrapSampler:
     members: np.ndarray
@@ -45693,6 +45776,7 @@ def _market_analysis_from_event_snapshot(
     # the former mean-correction maze into a single calibrator.
     _emos_q = None
     _emos_sampler = None
+    _day0_mixture = None
     # ONE-CALIBRATOR REGIME (#110 universal, operator 2026-06-05): for non-day0 cells, the cell
     # is served by EXACTLY one of {EMOS predictive, do-no-harm-VALIDATED honest raw N(xbar,S^2)};
     # served=raw / EMOS-miss / serve-fail routes to honest raw.
@@ -45913,6 +45997,18 @@ def _market_analysis_from_event_snapshot(
         if is_day0:
             p_raw = _apply_day0_mask_to_probability_vector(payload=payload, family=family, vector=p_raw)
             p_cal = _apply_day0_mask_to_probability_vector(payload=payload, family=family, vector=p_cal)
+            # Station diurnal-residual evidence enters q here (authority §1e):
+            # the point rows now, every bootstrap row through the sampler below.
+            _day0_mixture = _day0_diurnal_mixture_for_family(
+                payload=payload,
+                family=family,
+                city=city,
+                unit=unit,
+                probability_time=day0_probability_time,
+            )
+            if _day0_mixture is not None:
+                p_raw = np.asarray(_day0_mixture.apply(p_raw), dtype=float)
+                p_cal = np.asarray(_day0_mixture.apply(p_cal), dtype=float)
     p_market_yes: list[float] = []
     p_market_no: list[float] = []
     buy_no_available: list[bool] = []
@@ -45961,7 +46057,11 @@ def _market_analysis_from_event_snapshot(
             )
         )
         if _day0_sampler is not None:
-            sampler = _day0_sampler
+            sampler = (
+                _day0_sampler
+                if _day0_mixture is None
+                else _Day0DiurnalMixedSampler(inner=_day0_sampler, mixture=_day0_mixture)
+            )
         else:
             payload["_edli_day0_q_block_reason"] = "DAY0_BOOTSTRAP_LCB_UNAVAILABLE"
             raise ValueError("DAY0_BOOTSTRAP_LCB_UNAVAILABLE")

@@ -3,7 +3,7 @@
 **Status:** Live replacement probability law. Runtime rows use `forecast_posteriors.runtime_layer='live'`; no second row-authority label or alternate runtime layer exists.
 **Supersedes:** `BAYES_PRECISION_FUSION_SPEC.md` (deleted).  
 **Created:** 2026-06-09  
-**Last audited:** 2026-09-25 (§1d-bis admits interval-censored ENS boundary members under the supremum spread; operator-approved)
+**Last audited:** 2026-09-29 (§1e Day0 diurnal-residual mixture enters q; the post-selection nowcast veto is deleted)
 **Authority basis:** Commits 140d75ff6d · 6860f00a21 · edc598b440 · 94b584cc3f · 49492f1528 · 2b6936d3b5 · 9c594c9fc3 · df8199ef8e · e80c101c4c · 8541bc93cd · 8f20d39863 · a70436d478 · a1c2163e46 plus June 18 live-runtime cleanup. Historical experiment reports remain evidence only; they do not define the live execution layer.
 
 ---
@@ -391,6 +391,29 @@ bound below zero. The first is the rule's inner chronological validation. The
 second is the chronological outer-fold score of that same rule. Otherwise, or
 when the artifact is absent or stale, the unshifted carrier serves and
 provenance names the reason.
+
+#### Day0 diurnal-residual mixture (2026-09-29)
+
+`H = max(H_confirmed, H_remaining)`. Conditional on the observed boundary surviving,
+the remaining extreme is the mixture `(1 - w) provider path + w (A + D)`: A is the
+running extreme on the city's settlement grid (`SettlementSemantics.round_single`;
+Hong Kong truncates) and D is the station's empirical residual at k = hours to the
+city's median extreme hour, pooled per (metric, settlement unit, k) and shrunk
+toward the city's own cell. Bins the boundary has already passed keep their q; per
+simplex row r, with dead mass m, `r'[live] = (1 - w) r[live] + w (1 - m) pi[live]`.
+One pure operator (`src/calibration/day0_diurnal_residual.py`) transforms the point
+row and every draw row at every Day0 producer: the materializer's final simplex,
+after every Day0 route and before bounds are derived, and the reactor's
+`_market_analysis_from_event_snapshot` (point q and bootstrap sampler). Replay
+reproduces origin through the archived operator. The weight w per (metric, k
+bucket) is fitted daily by settled likelihood of this operator on the persisted base
+q (`day0_diurnal_base_q`), from posteriors dated [T-31, T-2] scored against residual
+counts that predate them; a cell with fewer than 200 rows serves w = 0. A missing,
+stale or malformed artifact serves the carrier q unchanged, and provenance names the
+status. The residual is evidence inside q; it never rejects, shrinks or vetoes a
+selected order. This change is Day0 survival revision
+`day0_settlement_channel_revision_model_v27_diurnal_mixture_v1` and resolver revision
+`day0_resolver_terminal_composition_v26_diurnal_mixture_v1`.
 
 The shared-carrier V1 is retained only for explicit, immutable historical replay. Current ENTRY and
 held-position belief require a complete V2 or typed V3 carrier declaration; ordinary

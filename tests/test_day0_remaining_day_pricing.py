@@ -7561,6 +7561,81 @@ def test_day0_high_signal_seed_is_prefix_stable_when_mc_count_changes():
     )
 
 
+def test_reactor_day0_q_and_every_draw_carry_the_diurnal_mixture(monkeypatch):
+    """The reactor's Day0 action q is the SAME operator the materializer applies:
+    M(base) on the point AND on every bootstrap row; the mixture is stamped."""
+    import src.engine.event_reactor_adapter as era
+    from src.calibration import day0_diurnal_residual as diurnal
+
+    bins = [
+        Bin(low=None, high=31, label="31C or below", unit="C"),
+        Bin(low=32, high=32, label="32C", unit="C"),
+        Bin(low=33, high=None, label="33C or above", unit="C"),
+    ]
+    family = SimpleNamespace(
+        city="Paris", metric="high", target_date="2026-07-27",
+        event_type="DAY0_EXTREME_UPDATED", family_id="Paris|2026-07-27|high", bins=bins,
+    )
+    family.candidates = [
+        SimpleNamespace(condition_id=f"condition-{i}", bin=b, yes_token_id=f"yes-{i}", no_token_id=f"no-{i}")
+        for i, b in enumerate(bins)
+    ]
+    native_costs = {
+        (f"condition-{i}", side): (None, EP(0.5, "ask", fee_deducted=True, currency="probability_units"), 0.5, None, None)
+        for i in range(3) for side in ("buy_yes", "buy_no")
+    }
+    snapshot = {
+        "settlement_unit": "C", "temperature_metric": "high", "members_json": "[31.6, 31.8, 32.1]",
+        "members_precision": 1.0, "source_id": "test", "issue_time": "2026-07-27T00:00:00+00:00",
+        "dataset_id": "test_v1", "data_version": "test_v1",
+    }
+    payload = {
+        "metric": "high", "rounded_value": 30, "observation_time": "2026-07-27T01:00:00+00:00",
+        "_edli_day0_remaining_model_names": ["ecmwf_ifs", "icon_global", "ukmo_global_deterministic_10km"],
+    }
+    monkeypatch.setattr(era, "_day0_remaining_day_q_enabled", lambda: True)
+    monkeypatch.setattr(era, "_day0_remaining_day_members",
+                        lambda **_kwargs: np.asarray([32.1, 31.8, 31.6], dtype=float))
+    mixture = diurnal.Day0DiurnalMixture(
+        weight=0.4, pi=(0.2, 0.3, 0.5), dead=(False, False, False), k=1,
+        anchor=30.0, fit_date="2026-07-26", artifact="test",
+    )
+    served = {"mixture": None}
+    seen = {}
+
+    def serve(**kwargs):
+        seen.update(kwargs)
+        m = served["mixture"]
+        if m is None:
+            return None, {"day0_diurnal_mixture_status": "artifact_unavailable"}
+        return m, m.provenance()
+
+    monkeypatch.setattr(diurnal, "day0_diurnal_mixture", serve)
+    decision_time = datetime(2026, 7, 27, 1, 5, 42, tzinfo=UTC)
+
+    def analyze():
+        threaded = dict(payload)
+        analysis = era._market_analysis_from_event_snapshot(
+            calibration_conn=sqlite3.connect(":memory:"), snapshot=snapshot, family=family,
+            native_costs=native_costs, payload=threaded, decision_time=decision_time,
+        )
+        return analysis.p_posterior, analysis.forecast_yes_probability_sample_matrix(64), threaded
+
+    base_q, base_samples, base_payload = analyze()
+    served["mixture"] = mixture
+    mixed_q, mixed_samples, mixed_payload = analyze()
+
+    assert not np.allclose(mixed_q, base_q)
+    assert np.allclose(mixed_q, mixture.apply(base_q), atol=1e-12)
+    assert np.allclose(mixed_samples, [mixture.apply(row) for row in base_samples], atol=1e-12)
+    assert "_edli_day0_diurnal_mixture" not in base_payload
+    assert mixed_payload["_edli_day0_diurnal_mixture"] == mixture.to_payload()
+    # One lookup, fed the probability boundary, native bounds and the minute-cut clock.
+    assert seen["running_extreme"] == 30.0
+    assert seen["bin_bounds"] == [(None, 31.0), (32.0, 32.0), (33.0, None)]
+    assert seen["decision_time"] == decision_time.replace(second=0)
+
+
 def test_day0_analysis_probability_content_is_stable_across_recapture_order(
     monkeypatch,
 ):

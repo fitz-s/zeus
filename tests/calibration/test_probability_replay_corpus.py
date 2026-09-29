@@ -121,6 +121,29 @@ def test_old_revision_state_produces_a_current_recipe_row():
     assert state.historical_market_features["p0"] == 0.42
 
 
+def test_archived_diurnal_mixture_is_part_of_the_reproduced_information_set():
+    """An origin priced through the diurnal-residual mixture reproduces only through
+    that same operator, and the replay re-applies it to the current recipe's q."""
+    from src.calibration.day0_diurnal_residual import Day0DiurnalMixture
+
+    mixture = Day0DiurnalMixture(
+        weight=0.5, pi=(0.1, 0.6, 0.0, 0.3), dead=(False, False, True, False), k=1,
+        anchor=9.0, fit_date="2026-09-19", artifact="test",
+    )
+    plain = _observation()
+    mixed = _observation(_edli_day0_diurnal_mixture=mixture.to_payload())
+    masked = [v * m for v, m in zip(plain["_edli_day0_remaining_carrier_q"], [1.0, 1.0, 0.0, 1.0])]
+    masked = [v / sum(masked) for v in masked]
+    origin_mixed = mixture.apply(masked)[SELECTED]
+
+    # The base origin no longer reproduces an archive that carries a mixture.
+    assert _replay_state(mixed)[1] == "ARCHIVE_DOES_NOT_REPRODUCE_ORIGIN"
+    q_mixed, reason, info_mixed = _replay_state(mixed, origin_raw_q=origin_mixed)
+    q_plain, _, info_plain = _replay_state(plain)
+    assert reason is None and info_mixed != info_plain
+    assert q_mixed != pytest.approx(q_plain, abs=1e-9)
+
+
 @pytest.mark.parametrize("field, value, reason", [
     ("_edli_day0_current_temperature_observed_at_utc",
      (CUT + timedelta(minutes=1)).isoformat(), "FUTURE_EVIDENCE:current_temperature_observed_at"),

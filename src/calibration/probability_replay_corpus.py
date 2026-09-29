@@ -234,8 +234,23 @@ def replay_day0_state(
         return None, "FAMILY_TOPOLOGY_UNBOUND", None
     index = condition_ids.index(condition_id)
     masked = [float(q) * float(m) for q, m in zip(archived_q, mask or [1.0] * n)]
-    if sum(masked) <= 0.0 or not math.isclose(
-        _held(masked[index] / sum(masked), side), origin_raw_q, rel_tol=0.0, abs_tol=1e-9,
+    if sum(masked) <= 0.0:
+        return None, "ARCHIVE_DOES_NOT_REPRODUCE_ORIGIN", None
+    masked = [value / sum(masked) for value in masked]
+    # The Day0 diurnal-residual mixture the decision applied is part of its
+    # information set: the archive reproduces origin only through that operator.
+    archived_mixture = payload.get("_edli_day0_diurnal_mixture")
+    mixture = None
+    if archived_mixture is not None:
+        from src.calibration.day0_diurnal_residual import Day0DiurnalMixture
+
+        try:
+            mixture = Day0DiurnalMixture.from_payload(archived_mixture)
+            masked = mixture.apply(masked)
+        except (KeyError, TypeError, ValueError):
+            return None, "DIURNAL_MIXTURE_ARCHIVE_INVALID", None
+    if not math.isclose(
+        _held(masked[index], side), origin_raw_q, rel_tol=0.0, abs_tol=1e-9,
     ):
         return None, "ARCHIVE_DOES_NOT_REPRODUCE_ORIGIN", None
 
@@ -264,10 +279,13 @@ def replay_day0_state(
         yes_q = _apply_day0_mask_to_probability_vector(
             payload=current, family=family, vector=current["_edli_day0_remaining_carrier_q"],
         )
+        if mixture is not None:
+            yes_q = mixture.apply(yes_q)
     except (KeyError, TypeError, ValueError) as exc:
         return None, f"RECIPE_REJECTED:{str(exc).split(':')[0][:80]}", None
     information_set = stable_hash({
         "fields": {field: payload.get(field) for field in _INFORMATION_SET_FIELDS},
+        "diurnal_mixture": archived_mixture,
         "family": [city, target_date, metric, list(condition_ids), [list(item) for item in bounds]],
     })
     return _held(float(yes_q[index]), side), None, information_set

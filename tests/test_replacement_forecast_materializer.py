@@ -2549,6 +2549,69 @@ def test_materializer_day0_observed_extreme_conditions_q_and_bounds(monkeypatch:
     assert provenance["day0_conditioning"]["observed_extreme_c"] == 26.0
 
 
+def test_materializer_day0_diurnal_mixture_enters_q_draws_and_bounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The diurnal-residual mixture transforms the persisted point q AND every draw,
+    rebuilds the bounds from the mixed draws, keeps the dead bin's mass, and persists
+    the base q the weight refit reads."""
+
+    from src.calibration import day0_diurnal_residual as diurnal
+
+    captured = {}
+    real = diurnal.day0_diurnal_mixture
+
+    def serve(**kwargs):
+        captured.update(kwargs)
+        mixture = diurnal.Day0DiurnalMixture(
+            weight=0.5, pi=(0.0, 0.25, 0.75), dead=(True, False, False), k=1,
+            anchor=26.0, fit_date="2026-06-06", artifact="test-artifact",
+        )
+        return mixture, mixture.provenance()
+
+    monkeypatch.setattr(diurnal, "day0_diurnal_mixture", serve)
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    result = materialize_replacement_forecast_live(
+        conn,
+        _request(
+            computed_at=_dt(18),
+            expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+            day0_observed_extreme_c=26.0,
+            day0_observed_extreme_source="noaa_wrh_zspd",
+            day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
+            day0_observed_extreme_sample_count=12,
+        ),
+    )
+    assert result.ok is True
+    row = conn.execute(
+        "SELECT q_json, q_lcb_json, q_ucb_json, provenance_json FROM forecast_posteriors "
+        "WHERE posterior_id = ?",
+        (result.posterior_id,),
+    ).fetchone()
+    q, q_lcb, q_ucb = (json.loads(row[key]) for key in ("q_json", "q_lcb_json", "q_ucb_json"))
+    provenance = json.loads(row["provenance_json"])
+    base = provenance["day0_diurnal_base_q"]
+    live = 1.0 - base["cool"]
+    assert q["cool"] == pytest.approx(base["cool"], abs=1e-12)
+    assert q["warm"] == pytest.approx(0.5 * base["warm"] + 0.5 * live * 0.25, abs=1e-12)
+    assert q["hot"] == pytest.approx(0.5 * base["hot"] + 0.5 * live * 0.75, abs=1e-12)
+    samples = provenance["q_bootstrap_samples_by_bin"]
+    for index in range(len(samples["hot"])):
+        row_sum = sum(samples[bin_id][index] for bin_id in ("cool", "warm", "hot"))
+        assert row_sum == pytest.approx(1.0, abs=1e-9)
+    assert min(samples["hot"]) >= 0.5 * 0.75 * (1.0 - max(samples["cool"])) - 1e-12
+    for bin_id in q:
+        assert q_lcb[bin_id] <= q[bin_id] + 1e-12 <= q_ucb[bin_id] + 2e-12
+    assert provenance["day0_diurnal_mixture_status"] == "applied"
+    assert provenance["day0_diurnal_mixture"]["pi"] == [0.0, 0.25, 0.75]
+    # The served anchor reads the family's native bounds and the observed extreme.
+    assert captured["running_extreme"] == pytest.approx(26.0)
+    assert captured["bin_bounds"][0] == (None, 20.0)
+    assert captured["unit"] == "C"
+    assert real is not serve
+
+
 def test_materializer_write_replaces_retracted_same_source_high(monkeypatch: pytest.MonkeyPatch) -> None:
     """A newer snapshot may retract its own HIGH without erasing independent evidence."""
     conn = _conn()
@@ -3462,12 +3525,12 @@ def test_day0_current_path_revision_separates_old_q_cohort() -> None:
     stamped = bind_day0_probability_semantics("current-path-cert")
     assert day0_probability_semantics_revision(stamped) == DAY0_PROBABILITY_SEMANTICS_REVISION
     assert DAY0_PROBABILITY_SEMANTICS_REVISION in {
-        "day0_settlement_channel_revision_model_v26_land_grid_v3",
-        "day0_resolver_terminal_composition_v25_land_grid_v3",
+        "day0_settlement_channel_revision_model_v27_diurnal_mixture_v1",
+        "day0_resolver_terminal_composition_v26_diurnal_mixture_v1",
     }
     assert stamped not in {
-        "day0-semrev:day0_settlement_channel_revision_model_v24:current-path-cert",
-        "day0-semrev:day0_resolver_terminal_composition_v23:current-path-cert",
+        "day0-semrev:day0_settlement_channel_revision_model_v26_land_grid_v3:current-path-cert",
+        "day0-semrev:day0_resolver_terminal_composition_v25_land_grid_v3:current-path-cert",
     }
 
 

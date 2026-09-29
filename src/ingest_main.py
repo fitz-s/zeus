@@ -5118,10 +5118,10 @@ def _artifact_refit_tick():
 def _day0_diurnal_residual_refit_tick():
     """Daily refit of state/day0_diurnal_residual.json (Day0 diurnal-residual nowcast).
 
-    The loader (src/calibration/day0_diurnal_residual.py ``load_day0_diurnal_residual_
-    nowcast``) gates the artifact on ``MAX_ARTIFACT_AGE_DAYS = 14``: once ``fit_date``
-    ages past that, the nowcast silently returns None and the Day0 veto gate 9
-    (src/engine/day0_admission.py) goes inert with no error. The only producer was a
+    The loader (src/calibration/day0_diurnal_residual.py ``day0_diurnal_mixture``)
+    gates the artifact on ``MAX_ARTIFACT_AGE_DAYS = 14``: once ``fit_date`` ages past
+    that, the Day0 q is served without the diurnal-residual mixture (provenance
+    names ``artifact_unavailable``). The only producer was a
     manual script (scripts/fit_day0_diurnal_residual.py) nobody was scheduled to rerun
     -- the live artifact (fit_date 2026-09-04) was headed for silent staleness on
     2026-09-18. This job removes that "someone remembers to rerun the fitter"
