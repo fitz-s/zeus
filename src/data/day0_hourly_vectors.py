@@ -284,6 +284,7 @@ class Day0CurrentTemperatureState:
     value_native: float
     observed_at: datetime
     source: str
+    clock_evidence: Mapping[str, object] | None = None
 
     def identity(self) -> dict[str, object]:
         return {
@@ -4136,6 +4137,7 @@ def read_day0_current_temperature_state(
                 route, str(raw_report or ""), observed_at=published, value=value
             ):
                 continue
+        clock_evidence = None
         if channel == "fmi_airport_temperature":
             from src.data.fmi_airport_temperature import valid_ledger_print
 
@@ -4171,6 +4173,28 @@ def read_day0_current_temperature_state(
                 value = precise_c * 9.0 / 5.0 + 32.0
         elif str(unit_raw or "").strip().upper() != unit:
             continue
+        if channel == "hko_rhrread_spot":
+            from src.data.day0_observation_reader import hko_temperature_observed_at
+
+            try:
+                temperature = json.loads(str(raw_report or ""))
+                observation_time = hko_temperature_observed_at(
+                    temperature, published_at=published, fetched_at=fetched,
+                )
+            except (TypeError, ValueError):
+                # SCOPE: this source print, never the entire city universe.
+                # DRAIN: the next valid source record. RESET: all three causal
+                # clocks validate; missing truth is unavailable, not a fake
+                # fresh observation at publication time.
+                continue
+            clock_evidence = {
+                "source": channel,
+                "station_id": station_raw,
+                "raw_report": str(raw_report),
+                "raw_report_sha256": hashlib.sha256(str(raw_report).encode("utf-8")).hexdigest(),
+                "published_at_utc": published.isoformat(),
+                "available_at_utc": fetched.isoformat(),
+            }
         observation_time = observation_time.astimezone(UTC)
         if (
             observation_time > decision_utc
@@ -4194,6 +4218,7 @@ def read_day0_current_temperature_state(
                 value_native=value,
                 observed_at=observation_time,
                 source=str(channel_raw),
+                clock_evidence=clock_evidence,
             )
     return latest_state
 

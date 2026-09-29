@@ -1,7 +1,7 @@
 # Created: 2026-05-22
-# Last reused/audited: 2026-09-02
+# Last reused/audited: 2026-09-29
 # Authority basis: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-C
-# Lifecycle: created=2026-05-22; last_reviewed=2026-09-02; last_reused=2026-09-02
+# Lifecycle: created=2026-05-22; last_reviewed=2026-09-29; last_reused=2026-09-29
 # Purpose: Regression antibody for Root C — high_so_far must be MAX(running_max) not latest row's value.
 # Reuse: Run when day0_observation_reader.read_day0_high_so_far or observation_instants schema changes.
 """Tests for src/data/day0_observation_reader.py — Root C regression antibody.
@@ -41,6 +41,72 @@ from src.data.day0_observation_reader import (
     same_station_preliminary_report_survival_likelihood,
     source_priority_for_city,
 )
+
+
+@pytest.mark.parametrize(
+    "record_time, expected",
+    [
+        ("2026-09-29T14:00:00+08:00", "2026-09-29T06:00:00+00:00"),
+        (None, None),
+        ("not-a-clock", None),
+        ("2026-09-29T14:00:00", None),
+        ("2026-09-29T14:03:00+08:00", None),
+    ],
+)
+def test_hko_current_state_uses_record_time_not_publication(record_time, expected):
+    from src.config import cities_by_name
+    from src.data.day0_hourly_vectors import read_day0_current_temperature_state
+    from src.state.schema.observation_prints_schema import append_print, ensure_table
+
+    conn = sqlite3.connect(":memory:")
+    ensure_table(conn)
+    temperature = {"data": [{"place": "Hong Kong Observatory", "value": 33, "unit": "C"}]}
+    if record_time is not None:
+        temperature["recordTime"] = record_time
+    append_print(
+        conn, city="Hong Kong", station_id="HKO", source_channel="hko_rhrread_spot",
+        publish_ts_utc="2026-09-29T06:02:00+00:00", value_native=33, unit="C",
+        fetched_at_utc="2026-09-29T06:05:00+00:00", raw_report=json.dumps(temperature),
+    )
+    state = read_day0_current_temperature_state(
+        conn=conn, city=cities_by_name["Hong Kong"], target_date="2026-09-29",
+        decision_time=datetime(2026, 9, 29, 6, 21, tzinfo=timezone.utc),
+    )
+    if expected is None:
+        assert state is None
+    else:
+        assert state is not None
+        assert state.observed_at.isoformat() == expected
+        assert state.value_native == 33
+    # No correction of the append-only publication/possession evidence.
+    assert conn.execute("SELECT publish_ts_utc, fetched_at_utc FROM observation_prints").fetchone() == (
+        "2026-09-29T06:02:00+00:00", "2026-09-29T06:05:00+00:00",
+    )
+    conn.close()
+
+
+def test_hko_later_publication_cannot_roll_back_current_observation():
+    from src.config import cities_by_name
+    from src.data.day0_hourly_vectors import read_day0_current_temperature_state
+    from src.state.schema.observation_prints_schema import append_print, ensure_table
+
+    conn = sqlite3.connect(":memory:")
+    ensure_table(conn)
+    for recorded, published, value in [("06:00", "06:02", 33), ("05:00", "06:10", 31)]:
+        append_print(
+            conn, city="Hong Kong", station_id="HKO", source_channel="hko_rhrread_spot",
+            publish_ts_utc=f"2026-09-29T{published}:00+00:00", value_native=value, unit="C",
+            fetched_at_utc="2026-09-29T06:11:00+00:00",
+            raw_report=json.dumps({"recordTime": f"2026-09-29T{recorded}:00+00:00"}),
+        )
+    state = read_day0_current_temperature_state(
+        conn=conn, city=cities_by_name["Hong Kong"], target_date="2026-09-29",
+        decision_time=datetime(2026, 9, 29, 6, 21, tzinfo=timezone.utc),
+    )
+    assert state is not None
+    assert state.value_native == 33
+    assert state.observed_at == datetime(2026, 9, 29, 6, tzinfo=timezone.utc)
+    conn.close()
 
 
 def test_source_priority_uses_target_date_source_family() -> None:

@@ -533,6 +533,49 @@ class TestSeoulMarginThroughLedger:
 
 
 class TestHkoSpotPrintWriterAndFold:
+    @pytest.mark.parametrize("record_time, accepted", [
+        ("2026-09-29T23:59:00+08:00", True),
+        (None, False),
+        ("2026-09-29T23:59:00", False),
+        ("2026-09-30T00:03:00+08:00", False),
+    ])
+    def test_rhrread_writer_separates_observation_publication_and_fetch(
+        self, monkeypatch, record_time, accepted,
+    ):
+        import src.data.daily_obs_append as writer
+
+        fetched = datetime(2026, 9, 29, 16, 5, tzinfo=UTC)
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return fetched if tz is not None else fetched.replace(tzinfo=None)
+
+        temperature = {"data": [{"place": "Hong Kong Observatory", "value": 29, "unit": "C"}]}
+        if record_time is not None:
+            temperature["recordTime"] = record_time
+        data = {"updateTime": "2026-09-30T00:02:00+08:00", "temperature": temperature}
+        class Response:
+            def raise_for_status(self):
+                pass
+            def json(self):
+                return data
+
+        monkeypatch.setattr(writer.httpx, "get", lambda *a, **k: Response())
+        monkeypatch.setattr(writer, "datetime", FrozenDateTime)
+        conn = _conn()
+        assert writer._accumulate_hko_reading(conn) is accepted
+        if accepted:
+            row = conn.execute("SELECT target_date, hour_utc FROM hko_hourly_accumulator").fetchone()
+            assert tuple(row) == ("2026-09-29", "2026-09-29T15:00Z")
+            row = conn.execute("SELECT publish_ts_utc, fetched_at_utc, raw_report FROM observation_prints").fetchone()
+            assert row["publish_ts_utc"] == "2026-09-29T16:02:00+00:00"
+            assert row["fetched_at_utc"] == fetched.isoformat()
+            assert json.loads(row["raw_report"])["recordTime"] == record_time
+        else:
+            assert conn.execute("SELECT COUNT(*) FROM hko_hourly_accumulator").fetchone()[0] == 0
+            assert conn.execute("SELECT COUNT(*) FROM observation_prints").fetchone()[0] == 0
+        conn.close()
+
     def test_rhrread_spot_reading_is_appended_with_hko_publish_clock(self):
         from src.data.daily_obs_append import (
             _append_hko_rhrread_print_to_ledger,

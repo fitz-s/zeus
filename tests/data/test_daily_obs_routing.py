@@ -1,5 +1,5 @@
 # Created: 2026-05-14
-# Last reused or audited: 2026-07-29
+# Last reused or audited: 2026-09-29
 # Authority basis: docs/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §2 P0
 """K1 P0 routing tests: daily_tick and catch_up_obs are called with a
 forecasts.db connection, not world.db.
@@ -221,6 +221,7 @@ class TestDailyObsTickRouting:
         response.json.return_value = {
             "updateTime": "2026-07-24T12:02:00+00:00",
             "temperature": {
+                "recordTime": "2026-07-24T12:00:00+00:00",
                 "data": [
                     {"place": "Hong Kong Observatory", "value": 31.0}
                 ]
@@ -280,6 +281,7 @@ class TestDailyObsTickRouting:
         response.json.return_value = {
             "updateTime": "2026-07-24T12:02:00+00:00",
             "temperature": {
+                "recordTime": "2026-07-24T12:00:00+00:00",
                 "data": [{"place": "Hong Kong Observatory", "value": 31.0}]
             },
         }
@@ -351,6 +353,7 @@ class TestDailyObsTickRouting:
         response.json.return_value = {
             "updateTime": "2026-07-24T12:02:00+00:00",
             "temperature": {
+                "recordTime": "2026-07-24T12:00:00+00:00",
                 "data": [{"place": "Hong Kong Observatory", "value": 31.0}]
             },
         }
@@ -410,6 +413,7 @@ class TestDailyObsTickRouting:
             # 23:55 HKT on July 15; the fetch happens after HKT midnight.
             "updateTime": "2026-07-15T23:55:00+08:00",
             "temperature": {
+                "recordTime": "2026-07-15T23:50:00+08:00",
                 "data": [{"place": "Hong Kong Observatory", "value": 31.0}]
             },
         }

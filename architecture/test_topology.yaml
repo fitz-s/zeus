@@ -35,6 +35,10 @@ test_trust_policy:
     tests/test_station_temperature_adapters.py: {created: "2026-09-29", last_used: "2026-09-29", note: "Round-2 causal current-observation, source identity, delivery and failure regression."}
     tests/test_warm_materializer.py: {created: "2026-09-29", last_used: "2026-09-29", note: "Round-2 causal current-observation, source identity, delivery and failure regression."}
     tests/test_fast_obs_receipt_chain.py: {created: "2026-09-29", last_used: "2026-09-29", note: "Terminal remainder monotonicity; actual live HTTP receipt cut without replay lookahead; civil-day DST bounds; optional physical station routing and shared FMI budget."}
+    tests/test_day0_observation_reader.py: {created: "2026-05-22", last_used: "2026-09-29", note: "Audited HKO reported observation/publication/availability clocks, invalid source unavailability and observation-order reader relationships."}
+    tests/test_observation_prints_ledger.py: {created: "2026-07-16", last_used: "2026-09-29", note: "Audited HKO source transaction and append-only three-clock writer relationships."}
+    tests/events/test_redemption_forecast_day0_authority.py: {created: "2026-05-24", last_used: "2026-09-29", note: "Audited Day0 authority and immutable old/current semantics revision boundaries."}
+    tests/data/test_daily_obs_routing.py: {created: "2026-05-14", last_used: "2026-09-29", note: "Audited attached-world HKO source transaction routing with reported observation clocks."}
     tests/test_noaa_wrh_settlement_product.py: {created: "2026-09-12", last_used: "2026-09-27", note: "NOAA WRH settlement-page product and single-station response identity; malformed or foreign station responses fail before atom/print/success coverage."}
     tests/data/test_current_settlement_history.py: {created: "2026-09-20", last_used: "2026-09-21", note: "Current-resolver causal probability validation and physical identity antibodies."}
     tests/forecast/test_probability_validation.py: {created: "2026-09-20", last_used: "2026-09-21", note: "Current-resolver causal probability validation and physical identity antibodies."}
@@ -545,7 +549,7 @@ test_trust_policy:
     tests/test_riskguard_red_durable_cmd.py: {created: "2026-04-27", last_used: "2026-07-20", note: "RED durable CANCEL/DERISK grammar and cancellation of historical tail-priced resting orders without creating a trade."}
     tests/test_command_bus_types.py: {created: "2026-04-26", last_used: "2026-08-10", note: "Closed command-bus types and INV-29 creation-only recovered-order adoption and external-operator close absorption events."}
     tests/test_command_recovery.py: {created: "2026-04-26", last_used: "2026-09-01", note: "Command recovery law, including high-cadence positive exact-ID recovery for known-order ambiguous submits, command-scoped immutable EXIT execution facts, known-order unknown-submit release only after complete authenticated exact-ID/account absence, detachment of older same-market terminal exchange ghosts, lost-ACK terminal no-fill recovery without disturbing older fills, authenticated partial and terminal economics, mixed-token repair, collateral projection, and current priority recovery ordering."}
-    tests/test_replacement_forecast_bundle_reader.py: {created: "2026-06-06", last_used: "2026-09-23", note: "Replacement bundle-reader no-bypass semantics. ENTRY rejects every newer raw input. HELD_REDECISION may retain only the last complete age-valid bundle while deterministic rows or anchor artifacts are ahead of an unchanged eligible ENS frontier; a newer eligible ENS cycle, same-cycle late row, identity fault, or HWM read loss still blocks. Rich current_value_serving provenance is checked against the exact current per-model rows actually consumed by used_weights/used_models; configured-but-unused sources do not create false missing-serving debt. OpenMeteo multi-day artifacts retain immutable hash/city/metric/causality proof and validate the posterior's consumed local-day coverage."}
+    tests/test_replacement_forecast_bundle_reader.py: {created: "2026-06-06", last_used: "2026-09-29", note: "Replacement bundle-reader no-bypass semantics and HKO current-temperature raw recordTime/value/causal-clock proof. ENTRY rejects every newer raw input. HELD_REDECISION may retain only the last complete age-valid bundle while deterministic rows or anchor artifacts are ahead of an unchanged eligible ENS frontier; a newer eligible ENS cycle, same-cycle late row, identity fault, or HWM read loss still blocks. Rich current_value_serving provenance is checked against the exact current per-model rows actually consumed by used_weights/used_models; configured-but-unused sources do not create false missing-serving debt. OpenMeteo multi-day artifacts retain immutable hash/city/metric/causality proof and validate the posterior's consumed local-day coverage."}
     tests/test_venue_command_repo.py: {created: "2026-04-26", last_used: "2026-08-20", note: "Venue command persistence contracts: legal certified taker/maker modes, inclusive [0.05,0.95] limits, stronger authenticated fill evidence terminalizes a command even when submit ACK persistence was lost, a causally later SDK ACK binds venue identity without downgrading PARTIAL/FILLED truth, creation-only typed recovered-order adoption and external-close absorption, atomic mixed-token rehome, atomic terminal-zero-fill rejection over prior positive matched order truth, and NC-18 repository-only journal mutation."}
     tests/test_migration_venue_commands_q_version.py: {created: "2026-07-04", last_used: "2026-07-04", note: "SCH-W1.2-ORDER-STATE live trade-DB migration coverage: adds nullable venue_commands.q_version, idempotent when already present, no-op when venue_commands is absent."}
     tests/test_belief_recency_index_migration.py: {created: "2026-09-20", last_used: "2026-09-20", note: "World probability_trace_fact belief-recency index migration: exact ordered-ID parity across timestamp ties and prefix boundaries, covering-index/no-TEMP-B-TREE plan, idempotence, unrelated-row preservation, and fresh-schema declaration."}
@@ -1195,6 +1199,9 @@ categories:
     - tests/engine/test_monitor_held_belief_readthrough.py
 
   useful_regression:
+    - tests/test_day0_observation_reader.py
+    - tests/test_observation_prints_ledger.py
+    - tests/test_replacement_forecast_bundle_reader.py
     - tests/data/test_current_settlement_history.py
     - tests/forecast/test_probability_validation.py
     - tests/scripts/test_validate_source_clock_probabilities.py
@@ -3531,6 +3538,48 @@ test_metadata:
     created: 2026-07-12
     last_reused_or_audited: 2026-07-12
 
+  tests/test_observation_prints_ledger.py:
+    modules: [data, state]
+    category: regression_antibody
+    kind: antibody
+    profile: hko_observation_clock
+    blocks_commit: true
+    asserted_invariants: [INV-14, INV-37, INV-47]
+    source_under_test:
+      - src/data/daily_obs_append.py
+      - src/data/replacement_forecast_current_target_plan.py
+      - src/state/schema/observation_prints_schema.py
+    law_dependencies: [AGENTS.md]
+    notes: HKO observed day/hour remains separate from append-only publication and availability evidence.
+    created: 2026-07-16
+    last_reused_or_audited: 2026-09-29
+
+  tests/events/test_redemption_forecast_day0_authority.py:
+    modules: [events]
+    category: regression_antibody
+    kind: antibody
+    profile: day0_authority
+    blocks_commit: true
+    asserted_invariants: [INV-14, INV-47]
+    source_under_test: [src/events/day0_authority.py]
+    law_dependencies: [AGENTS.md]
+    notes: Current Day0 revision stamping preserves immutable old certificates without relabeling them.
+    created: 2026-05-24
+    last_reused_or_audited: 2026-09-29
+
+  tests/data/test_daily_obs_routing.py:
+    modules: [data]
+    category: regression_antibody
+    kind: antibody
+    profile: daily_observation_routing
+    blocks_commit: true
+    asserted_invariants: [INV-37, INV-47]
+    source_under_test: [src/data/daily_obs_append.py]
+    law_dependencies: [AGENTS.md]
+    notes: HKO accumulator and ledger share the caller-owned attached-world source transaction.
+    created: 2026-05-14
+    last_reused_or_audited: 2026-09-29
+
   tests/test_day0_observation_reader.py:
     modules: [data]
     category: regression_antibody
@@ -3541,6 +3590,7 @@ test_metadata:
       - DAY0_HIGH_SO_FAR_IS_MAX_OF_ALL_RUNNING_MAXES
     source_under_test:
       - src/data/day0_observation_reader.py
+      - src/data/day0_hourly_vectors.py
     law_dependencies:
       - docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
     notes: >
@@ -3549,7 +3599,7 @@ test_metadata:
       the running_max of the latest row. Amsterdam 2026-05-22 concrete case: peak=25.0
       at 15:00 local, latest row=17.0 at 23:00 — naive reader returns 17.0 (wrong).
     created: 2026-05-22
-    last_reused_or_audited: 2026-05-22
+    last_reused_or_audited: 2026-09-29
 
   tests/test_no_latest_hour_running_max_antipattern.py:
     modules: [data]

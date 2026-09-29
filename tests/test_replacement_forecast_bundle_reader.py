@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-09-27
-# Lifecycle: created=2026-06-06; last_reviewed=2026-09-27; last_reused=2026-09-27
+# Last reused/audited: 2026-09-29
+# Lifecycle: created=2026-06-06; last_reviewed=2026-09-29; last_reused=2026-09-29
 # Purpose: Protect replacement posterior bundle reader no-bypass semantics.
 # Reuse: Run before wiring replacement posterior into executable forecast reader or event reactor.
 # Authority basis: Operator-directed live replacement forecast bundle reader semantics.
@@ -3936,6 +3936,100 @@ def test_current_ensemble_snapshot_rejects_intrinsic_valid_but_blocked_target_co
         metric="low",
     )
     assert reason == "REPLACEMENT_CURRENT_ENSEMBLE_SNAPSHOT_COVERAGE_BLOCKED"
+
+
+@pytest.mark.parametrize("damage", [None, "missing", "old_clock", "raw_hash", "wrong_value", "future_record"])
+def test_hko_clock_read_gate_reproduces_raw_record_not_revision_label(damage):
+    """This is the clock gate only, not a fabricated complete pin authority."""
+    import copy
+    from src.config import cities_by_name
+    from src.contracts.settlement_semantics import SettlementSemantics
+    from src.data.day0_hourly_vectors import (
+        build_day0_remaining_probability_carrier,
+        read_day0_current_temperature_state,
+    )
+    from src.state.schema.observation_prints_schema import append_print, ensure_table
+
+    conn = _conn()
+    ensure_table(conn)
+    raw = json.dumps({
+        "recordTime": "2026-09-29T14:00:00+08:00",
+        "data": [{"place": "Hong Kong Observatory", "value": 33, "unit": "C"}],
+    })
+    append_print(
+        conn, city="Hong Kong", station_id="HKO", source_channel="hko_rhrread_spot",
+        publish_ts_utc="2026-09-29T06:02:00+00:00", value_native=33, unit="C",
+        fetched_at_utc="2026-09-29T06:05:00+00:00", raw_report=raw,
+    )
+    state = read_day0_current_temperature_state(
+        conn=conn, city=cities_by_name["Hong Kong"], target_date="2026-09-29",
+        decision_time=datetime(2026, 9, 29, 6, 21, tzinfo=timezone.utc),
+    )
+    assert state is not None
+    carrier = build_day0_remaining_probability_carrier(
+        future_extremes_c=(33.2, 34.1), boundary_scenarios=((32.9, 1.0),),
+        metric="high", path_error_sigma_c=0.8, instrument_sigma_c=0.3,
+        bin_bounds_c=((None, 31.0), (32.0, 32.0), (33.0, None)),
+        n_point=1000, n_samples=500, identity_inputs={"unit": "C"},
+        settlement_semantics=SettlementSemantics.for_city(cities_by_name["Hong Kong"]),
+    )
+    provenance = {
+        "day0_current_temperature_state": state.identity(),
+        "day0_current_temperature_clock_evidence": copy.deepcopy(state.clock_evidence),
+        "day0_preliminary_report_survival_likelihood": {},
+        "day0_remaining_vector_witness": {},
+        "day0_remaining_carrier_content_identity": carrier["content_identity"],
+        "day0_remaining_carrier_operator": carrier["operator"],
+        "day0_remaining_carrier_q": carrier["q"],
+        "day0_remaining_carrier_sample_count": 500,
+        "day0_remaining_carrier_future_extremes_c": [33.2, 34.1],
+        "day0_remaining_carrier_path_error_sigma_c": 0.8,
+        "day0_remaining_carrier_probability_cutoff_utc": "2026-09-29T06:21:00+00:00",
+        "day0_remaining_carrier_probability_samples": carrier["samples"],
+    }
+    if damage == "missing":
+        provenance.pop("day0_current_temperature_clock_evidence")
+    elif damage == "old_clock":
+        provenance["day0_current_temperature_state"]["observed_at_utc"] = "2026-09-29T06:02:00+00:00"
+    elif damage == "raw_hash":
+        provenance["day0_current_temperature_clock_evidence"]["raw_report_sha256"] = "unproved-version-label"
+    elif damage == "wrong_value":
+        provenance["day0_current_temperature_state"]["value_native"] = 32.9
+    elif damage == "future_record":
+        evidence = provenance["day0_current_temperature_clock_evidence"]
+        data = json.loads(evidence["raw_report"])
+        data["recordTime"] = "2026-09-29T06:03:00+00:00"
+        evidence["raw_report"] = json.dumps(data)
+        evidence["raw_report_sha256"] = hashlib.sha256(evidence["raw_report"].encode()).hexdigest()
+    reason = reader._hko_current_temperature_clock_reason(provenance, city="Hong Kong")
+    assert (reason is None) is (damage is None)
+    assert reader._hko_current_temperature_clock_reason(provenance, city="Paris") is None
+    if damage is not None:
+        # The actual read boundary must reset old/malformed source-clock rows,
+        # not silently stamp their old q with the current Day0 revision. This
+        # stage assertion does not claim that this minimal carrier is eligible.
+        posterior_id = _insert_posterior(conn)
+        provenance.update(_live_provenance())
+        provenance["bayes_precision_fusion"]["decorrelated_providers_complete"] = True
+        conn.execute(
+            "UPDATE forecast_posteriors SET city=?, target_date=?, provenance_json=? "
+            "WHERE posterior_id=?",
+            ("Hong Kong", "2026-09-29", json.dumps(provenance), posterior_id),
+        )
+        selected = reader.read_prior_complete_replacement_forecast_bundle(
+            conn, city="Hong Kong", target_date="2026-09-29", temperature_metric="high",
+            decision_time=datetime(2026, 9, 29, 6, 21, tzinfo=timezone.utc),
+            raw_input_hwm_conn=conn,
+        )
+        assert selected.status == "NOT_APPLICABLE"
+        assert selected.reason_code == reason
+        exact = reader.read_pinned_replacement_forecast_bundle(
+            conn, posterior_id=posterior_id, city="Hong Kong", target_date="2026-09-29",
+            temperature_metric="high", decision_time=datetime(2026, 9, 29, 6, 21, tzinfo=timezone.utc),
+            raw_input_hwm_conn=conn,
+        )
+        assert exact.status == "BLOCKED" and exact.reason_code == reason
+    conn.close()
 
 
 def test_current_ensemble_snapshot_accepts_complete_current_target_coverage(monkeypatch):

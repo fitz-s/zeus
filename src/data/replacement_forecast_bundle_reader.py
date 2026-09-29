@@ -562,6 +562,54 @@ def _wu_fast_pinned_carrier_reason(
     return None
 
 
+def _hko_current_temperature_clock_reason(
+    provenance: Mapping[str, Any], *, city: str,
+) -> str | None:
+    """Reproduce the HKO spot observation clock from its immutable raw report."""
+    if city != "Hong Kong" or not _held_pinned_carrier_claimed(provenance):
+        return None
+    # SCOPE: the HKO held carrier, not other cities or source products. DRAIN:
+    # current redecision/materialization reconstructs recordTime from the ledger
+    # report. RESET: a successor carries matching raw clock/value evidence.
+    state = provenance.get("day0_current_temperature_state")
+    evidence = provenance.get("day0_current_temperature_clock_evidence")
+    if not isinstance(state, Mapping) or not isinstance(evidence, Mapping):
+        return "REPLACEMENT_PINNED_HKO_CURRENT_TEMPERATURE_CLOCK_UNAVAILABLE"
+    from src.data.day0_observation_reader import hko_temperature_observed_at
+
+    try:
+        raw = evidence["raw_report"]
+        if not isinstance(raw, str) or hashlib.sha256(raw.encode("utf-8")).hexdigest() != evidence["raw_report_sha256"]:
+            raise ValueError("raw clock evidence mismatch")
+        temperature = json.loads(raw)
+        published = _parse_utc(str(evidence["published_at_utc"]), field_name="published_at_utc")
+        available = _parse_utc(str(evidence["available_at_utc"]), field_name="available_at_utc")
+        observed = hko_temperature_observed_at(temperature, published_at=published, fetched_at=available)
+        state_clock = _parse_utc(str(state["observed_at_utc"]), field_name="observed_at_utc")
+        cutoff = _parse_utc(str(provenance["day0_remaining_carrier_probability_cutoff_utc"]), field_name="carrier_cutoff")
+        station_values = [
+            row for row in temperature["data"]
+            if isinstance(row, Mapping) and row.get("place") == "Hong Kong Observatory"
+        ]
+        raw_value = station_values[0].get("value") if len(station_values) == 1 else None
+        state_value = state.get("value_native")
+        if (
+            state.get("source") != "hko_rhrread_spot"
+            or evidence.get("source") != "hko_rhrread_spot"
+            or evidence.get("station_id") != "HKO"
+            or observed != state_clock or available > cutoff
+            or len(station_values) != 1
+            or station_values[0].get("unit") != "C"
+            or isinstance(raw_value, bool) or isinstance(state_value, bool)
+            or not math.isfinite(float(raw_value)) or not math.isfinite(float(state_value))
+            or float(raw_value) != float(state_value)
+        ):
+            raise ValueError("HKO current-state clock/value mismatch")
+    except (KeyError, TypeError, ValueError):
+        return "REPLACEMENT_PINNED_HKO_CURRENT_TEMPERATURE_CLOCK_INVALID"
+    return None
+
+
 def _held_pinned_provenance_reason(
     provenance: Mapping[str, Any],
     *,
@@ -579,6 +627,9 @@ def _held_pinned_provenance_reason(
     carrier_reason = _day0_carrier_identity_reason(provenance)
     if carrier_reason is not None:
         return carrier_reason
+    hko_clock_reason = _hko_current_temperature_clock_reason(provenance, city=city)
+    if hko_clock_reason is not None:
+        return hko_clock_reason
     provisional = provenance.get("day0_provisional_observation")
     if not isinstance(provisional, Mapping) or provisional.get("active") is not True:
         return "REPLACEMENT_PINNED_DAY0_PROVISIONAL_ACTIVE_MISSING"
@@ -1812,6 +1863,9 @@ def read_pinned_replacement_forecast_bundle(
     carrier_reason = _day0_carrier_identity_reason(provenance)
     if carrier_reason is not None:
         return ReplacementForecastBundleReadResult("BLOCKED", carrier_reason)
+    hko_clock_reason = _hko_current_temperature_clock_reason(provenance, city=city)
+    if hko_clock_reason is not None:
+        return ReplacementForecastBundleReadResult("BLOCKED", hko_clock_reason)
     if not _decorrelated_providers_complete(provenance):
         return ReplacementForecastBundleReadResult(
             "BLOCKED",
@@ -1967,7 +2021,9 @@ def read_prior_complete_replacement_forecast_bundle(
                 )
                 if provenance_reason is not None:
                     return ReplacementForecastBundleReadResult(
-                        "BLOCKED", provenance_reason
+                        "NOT_APPLICABLE" if provenance_reason.startswith(
+                            "REPLACEMENT_PINNED_HKO_CURRENT_TEMPERATURE_CLOCK_"
+                        ) else "BLOCKED", provenance_reason
                     )
                 hwm_deadline = raw_input_hwm_deadline_monotonic
                 if raw_input_hwm_read_max_seconds is not None:
@@ -2144,7 +2200,15 @@ def read_prior_complete_replacement_forecast_bundle(
         decision_time=decision_utc,
     )
     if candidate_reason is not None:
-        return ReplacementForecastBundleReadResult("BLOCKED", candidate_reason)
+        # SCOPE: this HKO source-clock carrier only. DRAIN: ordinary current
+        # Day0 rebuilding/materialization reads the original recordTime.
+        # RESET: its successor carries reproducible raw clock evidence. An
+        # unavailable old pin must not be relabeled with a new q revision.
+        return ReplacementForecastBundleReadResult(
+            "NOT_APPLICABLE" if candidate_reason.startswith(
+                "REPLACEMENT_PINNED_HKO_CURRENT_TEMPERATURE_CLOCK_"
+            ) else "BLOCKED", candidate_reason,
+        )
     try:
         hwm_deadline = raw_input_hwm_deadline_monotonic
         if raw_input_hwm_read_max_seconds is not None:

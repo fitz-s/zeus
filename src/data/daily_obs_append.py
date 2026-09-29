@@ -935,16 +935,24 @@ def _accumulate_hko_reading(conn, *, schema: str = "main") -> bool:
     now_utc = datetime.now(timezone.utc)
     try:
         source_issued_at = _hko_rhrread_source_issued_at(data)
+        from src.data.day0_observation_reader import hko_temperature_observed_at
+
+        observed_at = hko_temperature_observed_at(
+            data.get("temperature"),
+            published_at=source_issued_at,
+            fetched_at=now_utc,
+        )
     except ValueError as exc:
         logger.warning("HKO rhrread source clock rejected: %s", exc)
         return False
 
-    # The source clock, not our fetch wall-clock, fixes the HKT local day and
-    # hour identity. A delayed response must not masquerade as a current-day
-    # accumulator row while its ledger print belongs to the prior local day.
+    # SCOPE: this HKO spot reading only. DRAIN: the next source fetch retries
+    # a valid recordTime. RESET: observation <= publication <= possession.
+    # The temperature record clock fixes its day/hour; publication and fetch
+    # clocks remain separate append-only ledger evidence.
     hkt = ZoneInfo("Asia/Hong_Kong")
-    target_date_str = source_issued_at.astimezone(hkt).date().isoformat()
-    hour_utc_str = source_issued_at.strftime("%Y-%m-%dT%H:00Z")
+    target_date_str = observed_at.astimezone(hkt).date().isoformat()
+    hour_utc_str = observed_at.strftime("%Y-%m-%dT%H:00Z")
 
     params = (target_date_str, hour_utc_str, temp_c, now_utc.isoformat())
     savepoint_open = False

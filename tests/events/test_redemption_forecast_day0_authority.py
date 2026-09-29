@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-29
+# Last reused/audited: 2026-09-29
 # Authority basis: docs/operations/edli_v1/PR328_REDEMPTION_PACKAGE.md R2/R3 proof.
 
 import pytest
@@ -13,6 +13,24 @@ from src.events.day0_authority import (
     observability_row_to_authority,
 )
 from src.events.forecast_completeness import ForecastSnapshotEvidence, classify_forecast_snapshot
+
+
+def test_hko_observation_clock_revision_does_not_relabel_old_certificates():
+    from src.events.day0_authority import (
+        DAY0_PROBABILITY_SEMANTICS_REVISION,
+        bind_day0_probability_semantics,
+        day0_probability_semantics_revision,
+    )
+
+    current = bind_day0_probability_semantics("rebuilt-current-source-certificate")
+    assert day0_probability_semantics_revision(current) == DAY0_PROBABILITY_SEMANTICS_REVISION
+    for previous in (
+        "day0_settlement_channel_revision_model_v27_diurnal_mixture_v1",
+        "day0_resolver_terminal_composition_v26_diurnal_mixture_v1",
+    ):
+        old = f"day0-semrev:{previous}:immutable-entry-certificate"
+        assert day0_probability_semantics_revision(old) != DAY0_PROBABILITY_SEMANTICS_REVISION
+        assert bind_day0_probability_semantics(old) == old
 
 
 def _forecast(**overrides):

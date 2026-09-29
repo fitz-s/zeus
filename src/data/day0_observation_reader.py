@@ -61,7 +61,7 @@ import statistics
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from math import isfinite
-from typing import Optional, Sequence
+from typing import Mapping, Optional, Sequence
 from zoneinfo import ZoneInfo
 
 from src.contracts.family_fault_scope import GlobalValueFault
@@ -85,6 +85,36 @@ _TRUSTED_AUTHORITIES: frozenset[str] = frozenset({"VERIFIED", "ICAO_STATION_NATI
 _HKO_SOURCE = "hko_hourly_accumulator"
 _HKO_EXTREMA_BASIS = "hko_since_midnight_extrema_1min_mean"
 _WU_REVISION_LOOKBACK_DAYS = (7, 30, 90)
+
+
+def hko_temperature_observed_at(
+    temperature: object,
+    *,
+    published_at: datetime,
+    fetched_at: datetime,
+) -> datetime:
+    """Read HKO's temperature record clock, never its product update clock."""
+    if not isinstance(temperature, Mapping):
+        raise ValueError("HKO temperature payload unavailable")
+    raw_clock = temperature.get("recordTime")
+    if not isinstance(raw_clock, str) or not raw_clock.strip():
+        raise ValueError("HKO temperature recordTime unavailable")
+    try:
+        observed_at = datetime.fromisoformat(raw_clock.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("HKO temperature recordTime invalid") from exc
+    clocks = (observed_at, published_at, fetched_at)
+    if any(
+        not isinstance(clock, datetime) or clock.tzinfo is None or clock.utcoffset() is None
+        for clock in clocks
+    ):
+        raise ValueError("HKO temperature clocks must be timezone-aware")
+    observed_at, published_at, fetched_at = (
+        clock.astimezone(timezone.utc) for clock in clocks
+    )
+    if not observed_at <= published_at <= fetched_at:
+        raise ValueError("HKO temperature observation/publication/availability order invalid")
+    return observed_at
 
 # coverage_status constants
 COVERAGE_OK = "OK"
