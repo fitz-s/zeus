@@ -143,6 +143,7 @@ REPLACEMENT_FORECAST_STARTUP_JOB_ID = "replacement_forecast_download_startup_cat
 REPLACEMENT_AVAILABILITY_POLL_JOB_ID = "replacement_cycle_availability_poll"
 ANCHOR_META_CROSS_CHECK_JOB_ID = "anchor_meta_stamp_cross_check"
 FORECAST_RETENTION_JOB_ID = "forecast_retention"
+FORECAST_RETENTION_EXECUTOR_LANE = "forecast_retention"
 REPLACEMENT_FORECAST_EXECUTOR_LANE = "replacement_production"
 REPLACEMENT_FORECAST_PRIORITY_EXECUTOR_LANE = "replacement_priority"
 # forecast_posteriors has one SQLite writer. Parallel commit subprocesses do not
@@ -2708,16 +2709,17 @@ def _register_replacement_forecast_production_jobs(
         coalesce=True,
         misfire_grace_time=600,
     )
-    # Retention runs on the download lane (file I/O + short WAL-bounded posterior
-    # batches), never on a materialization lane. First pass 10 min after boot so a
-    # restart-heavy daemon still drains; each pass is bounded and idempotent.
+    # Retention owns a lane: a pass is minutes of file I/O and short WAL-bounded
+    # posterior batches, which must not delay discovery (download lane) or
+    # materialization. First pass 10 min after boot so a restart-heavy daemon
+    # still drains; each pass is bounded and idempotent.
     scheduler.add_job(  # type: ignore[attr-defined]
         _forecast_retention_job,
         "interval",
         minutes=60,
         next_run_time=datetime.now(timezone.utc) + timedelta(minutes=10),
         id=FORECAST_RETENTION_JOB_ID,
-        executor=REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE,
+        executor=FORECAST_RETENTION_EXECUTOR_LANE,
         max_instances=1,
         coalesce=True,
         misfire_grace_time=600,
@@ -2765,6 +2767,7 @@ def build_scheduler(*, startup_run_date: datetime | None = None):
                 max_workers=1
             ),
             REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE: _APSchedulerThreadPoolExecutor(max_workers=1),
+            FORECAST_RETENTION_EXECUTOR_LANE: _APSchedulerThreadPoolExecutor(max_workers=1),
         }
 
     # R3 (2026-07-08): registry-built scheduling with executor-lane routing + a fail-fast boot

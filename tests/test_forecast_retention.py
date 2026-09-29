@@ -297,5 +297,5 @@ def test_forecast_live_daemon_registers_retention_job(monkeypatch):
     daemon._register_replacement_forecast_production_jobs(Scheduler())
     (job,) = [j for j in jobs if j[2]["id"] == daemon.FORECAST_RETENTION_JOB_ID]
     assert job[0] is daemon._forecast_retention_job
-    assert job[2]["executor"] == daemon.REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE
+    assert job[2]["executor"] == daemon.FORECAST_RETENTION_EXECUTOR_LANE
     assert job[2]["max_instances"] == 1
