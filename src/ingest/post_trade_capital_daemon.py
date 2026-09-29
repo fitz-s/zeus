@@ -561,6 +561,16 @@ def _tier0_corpus_retention_cycle() -> dict[str, int]:
     return stats
 
 
+def _trade_retention_cycle() -> dict:
+    """Evict unreachable executable_market_snapshots rows (bounded, WAL-bounded)."""
+
+    from src.data.trade_retention import run_trade_retention
+
+    summary = run_trade_retention(apply=True)
+    logger.info("trade_retention=%s", json.dumps(summary, default=str))
+    return summary
+
+
 def _tier0_corpus_growth_cycle() -> None:
     """Daily per-table corpus growth line (read-only)."""
 
@@ -893,6 +903,16 @@ def main() -> None:
         "interval", minutes=5, id="tier0_corpus_retention",
         max_instances=1, coalesce=True,
         next_run_time=(datetime.now(timezone.utc) + timedelta(seconds=105)),
+    )
+    _scheduler.add_job(
+        _scheduler_job("trade_retention")(_trade_retention_cycle),
+        # SCOPE: executable_market_snapshots rows no reader can reach (family law,
+        # 30-day reader window, by-id referrers, newest per condition all kept).
+        # DRAIN: bounded WAL-checked chunks every ten minutes from a persisted cursor.
+        # RESET: the next tick resumes after a WAL pause or deferred lease.
+        "interval", minutes=10, id="trade_retention",
+        max_instances=1, coalesce=True,
+        next_run_time=(datetime.now(timezone.utc) + timedelta(seconds=135)),
     )
     _scheduler.add_job(
         _scheduler_job("tier0_corpus_growth")(_tier0_corpus_growth_cycle),

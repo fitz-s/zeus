@@ -64,14 +64,25 @@ import re
 import sqlite3
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator
 
+# The reachability law lives in family_reachability; re-exported for existing callers.
+from src.data.family_reachability import (  # noqa: F401
+    REACHABLE_TARGET_LAG_DAYS,
+    TERMINAL_PHASES,
+    Family,
+    Reachability,
+    ReachabilityUnknown,
+    build_reachability,
+    family as _family,
+    open_position_families,
+    read_only as _read_only,
+)
+
 logger = logging.getLogger(__name__)
 
-REACHABLE_TARGET_LAG_DAYS = 2
-TERMINAL_PHASES = frozenset({"settled", "voided", "admin_closed"})
 EVICTABLE_POSTERIOR_KEYS = (
     "q_bootstrap_samples_by_bin",
     "day0_remaining_carrier_probability_samples",
@@ -107,89 +118,6 @@ _PAYLOAD_NAME = re.compile(
 )
 _MANIFEST_NAME = re.compile(r"\.(?P<cycle>\d{8}T\d{6}Z)\.[0-9a-f]{12}\.[^.]+\.manifest\.json$")
 _CYCLE_DIR = re.compile(r"^\d{8}T\d{6}Z$")
-
-Family = tuple[str, str, str]
-
-
-def _norm_city(city: str) -> str:
-    return str(city).strip().replace(" ", "_")
-
-
-def _family(city: str, target_date: str, metric: str) -> Family:
-    return (_norm_city(city), str(target_date), str(metric).lower())
-
-
-@dataclass(frozen=True)
-class Reachability:
-    """The universal predicate: which families any reader can still reach."""
-
-    oldest_reachable_date: str
-    open_families: frozenset[Family]
-
-    def reachable(self, family: Family) -> bool:
-        return family[1] >= self.oldest_reachable_date or family in self.open_families
-
-
-def _read_only(db_path: Path) -> sqlite3.Connection:
-    if not db_path.exists():
-        raise FileNotFoundError(str(db_path))
-    from src.state.db import _connect_read_only  # noqa: PLC0415
-
-    return _connect_read_only(db_path)
-
-
-class ReachabilityUnknown(RuntimeError):
-    """A family some reader can reach cannot be named; evict nothing."""
-
-
-def _open_rest_families(conn: sqlite3.Connection) -> list[tuple[str, str, str]]:
-    # Probe first: the reactor resolver swallows read errors as "no rests".
-    conn.execute("SELECT count(*) FROM venue_commands").fetchone()
-    from src.events.reactor import _open_rest_family_rows_for_refresh  # noqa: PLC0415
-
-    return _open_rest_family_rows_for_refresh(conn)
-
-
-def open_position_families(trade_db: Path) -> frozenset[Family]:
-    """Families with a non-terminal position or an open ENTRY rest.
-
-    Raises on any read failure and ``ReachabilityUnknown`` on a non-terminal position
-    whose family is not fully named (fail closed).
-    """
-
-    conn = _read_only(Path(trade_db))
-    try:
-        placeholders = ",".join("?" for _ in TERMINAL_PHASES)
-        rows = conn.execute(
-            f"""
-            SELECT DISTINCT city, target_date, temperature_metric
-              FROM position_current
-             WHERE phase NOT IN ({placeholders})
-            """,
-            tuple(sorted(TERMINAL_PHASES)),
-        ).fetchall()
-        rests = _open_rest_families(conn)
-    finally:
-        conn.close()
-    unnamed = [row for row in rows if any(v is None or str(v).strip() == "" for v in row)]
-    if unnamed:
-        raise ReachabilityUnknown(f"{len(unnamed)} non-terminal position family(ies) not named")
-    return frozenset(_family(*row) for row in [*rows, *rests])
-
-
-def build_reachability(*, now: datetime, trade_db: Path | None = None) -> Reachability:
-    """The one family-reachability law for every store and queue.
-
-    ``trade_db`` defaults to the canonical trade DB. Raises when reachability is
-    unknown (read failure or an unnamed open family); callers keep everything.
-    """
-
-    if trade_db is None:
-        from src.state.db import _zeus_trade_db_path  # noqa: PLC0415
-
-        trade_db = _zeus_trade_db_path()
-    oldest = (now.astimezone(timezone.utc).date() - timedelta(days=REACHABLE_TARGET_LAG_DAYS))
-    return Reachability(oldest.isoformat(), open_position_families(Path(trade_db)))
 
 
 @dataclass

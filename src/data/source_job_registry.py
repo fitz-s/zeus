@@ -380,6 +380,12 @@ _SRC_MAIN: tuple[SourceJobSpec, ...] = (
     # data_collection_inventory orphan-check resolves _harvester_cycle against the new daemon
     # (src/execution/post_trade_capital.py via src/ingest/post_trade_capital_daemon.py)
     # instead of the now-import-only src/main.py reference.
+    SourceJobSpec("trade_retention", "post_trade_capital", "evidence", "default", True,
+                  callable_ref="_trade_retention_cycle", registry_built=False,
+                  notes="10-min bounded eviction of executable_market_snapshots rows no reader "
+                        "can reach (shared family reachability law + 30-day reader window + "
+                        "by-id referrer ledger + newest-per-condition); coordinated "
+                        "BACKGROUND_RECOVERY trade writes, WAL-bounded"),
     SourceJobSpec("harvester", "post_trade_capital", "derived", "default", True,
                   source_id="polymarket_gamma", callable_ref="_harvester_cycle", family=None,
                   notes="trading-side P&L resolver: READS forecasts.settlements (produced by "

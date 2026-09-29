@@ -1393,6 +1393,19 @@ files:
     why: Enforces at fetch() that a metered Open-Meteo request is sent only when its answer can differ from one already held. Holds exact-run answers (single-runs run=, previous-runs dates) with the provider run state they were fetched under, pinned forward-only from unmetered meta.json, in a private cross-process SQLite cache (state/openmeteo_response_store.db, zstd-3 BLOB, reachability retention); keeps the day-keyed per-job unit ledger and the hourly burn alarm. No truth, no canonical DB; failure falls back to the network path. Previous-runs entries are reused for at most one consistency wait, after which fresh meta confirmation and a refetch are required; the single-runs behavior is unchanged.
     downstream:
     - src/data/openmeteo_client.py
+  src/data/family_reachability.py:
+    zone: K2_runtime
+    authority_role: retention_reachability_law
+    why: The one family-reachability predicate every retention job keys on -- a (city, target_date, metric) family is reachable inside the last-local-day window, while a position on it is non-terminal (economically_closed kept) or while an ENTRY rest is open. Unknown reachability raises so callers evict nothing. Trade DB read mode=ro only.
+    downstream:
+    - src/data/forecast_retention.py
+    - src/data/trade_retention.py
+  src/data/trade_retention.py:
+    zone: K2_runtime
+    authority_role: trade_retention_by_reachability
+    why: Bounded, idempotent eviction of executable_market_snapshots rows no reader can reach -- family unreachable under the shared law, older than the 30-day reader window, not the newest row of its condition, and not stored by any by-id referrer (venue_commands, position_events, market_price_history, opportunity_fact, executable_market_snapshot_latest, no_trade_regret_events, edli_no_submit_receipts, decision_certificates). The referrer ledger advances by persisted rowid cursors; a lagging ledger, unknown family or failed read evicts nothing. Deletes in short coordinated BACKGROUND_RECOVERY trade transactions that drop and re-create the append-only trigger in-transaction, WAL-bounded; world and forecasts are read mode=ro (INV-37). Runs every 10 minutes in post-trade-capital; dry-run by default as a CLI.
+    downstream:
+    - src/ingest/post_trade_capital_daemon.py
   src/data/forecast_retention.py:
     zone: K2_runtime
     authority_role: forecast_retention_by_reachability
