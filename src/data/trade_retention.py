@@ -64,11 +64,13 @@ DELETE_TRIGGER = "no_delete_executable_market_snapshots"
 READER_WINDOW_DAYS = 30
 STATE_FILE = "trade_retention_state.json"
 
-DEFAULT_ROW_BUDGET = 100_000
+# Per 10-minute pass: <=50k rows classified and <=500 delete chunks of 100 rows, so a
+# pass ends well inside its interval; the ~12M-row backlog drains in about two days.
+DEFAULT_ROW_BUDGET = 50_000
 DEFAULT_REFERRER_BUDGET = 200_000
 DEFAULT_READ_BATCH = 5_000
-DEFAULT_CHUNK_ROWS = 200
-DEFAULT_WAL_LIMIT_BYTES = 1 << 30
+DEFAULT_CHUNK_ROWS = 100
+DEFAULT_WAL_LIMIT_BYTES = 512 << 20
 CHUNK_PAUSE_SECONDS = 0.5
 # Scalar columns + keys per row beyond the four JSON columns (measured 2026-09-29:
 # ~3.4 KB/row, of which ~2.7 KB JSON).
