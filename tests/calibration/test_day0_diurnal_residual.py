@@ -236,3 +236,44 @@ def test_served_lookup_falls_back_to_the_carrier_q(tmp_path, monkeypatch, setup)
     mixture, provenance = _served(when)
     assert mixture is None
     assert provenance == {"day0_diurnal_mixture_status": ARTIFACT_UNAVAILABLE}
+
+
+def _bad_counts(value) -> list:
+    counts = _counts(j0=60, j1=30, j2=10)
+    counts[3] = value
+    return counts
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        {"pooled": {"high|C|2": _bad_counts(-5)}},
+        {"pooled": {"high|C|2": _bad_counts(float("nan"))}},
+        {"pooled": {"high|C|2": _bad_counts(float("inf"))}},
+        {"pooled": {"high|C|2": _bad_counts(2.5)}},
+        {"city": {"high|Testville|2": _bad_counts(-1)}},
+        {"weights": {"high|2": {"w": float("nan"), "n": MIN_WEIGHT_ROWS}}},
+        {"weights": {"high|2": {"w": 1.5, "n": MIN_WEIGHT_ROWS}}},
+        {"weights": {"high|2": {"w": -0.1, "n": MIN_WEIGHT_ROWS}}},
+        {"peak_hours": {"Testville": float("nan")}},
+        {"peak_hours": {"Testville": -3.0}},
+        {"peak_hours": {"Testville": 30.0}},
+    ],
+)
+def test_corrupt_artifact_values_fall_back_to_the_unmixed_q(
+    tmp_path, monkeypatch, corruption
+) -> None:
+    """A negative, non-finite or non-integer count, a weight outside [0, 1], or an
+    anchor hour off the clock makes the artifact malformed: the served lookup returns
+    the unmixed-q fallback and never raises into the cut."""
+
+    path = tmp_path / mod.ARTIFACT_FILENAME
+    path.write_text(json.dumps(_artifact(**corruption)), encoding="utf-8")
+    monkeypatch.setattr(mod, "artifact_path", lambda: path)
+
+    mixture, provenance = _served()
+
+    assert mixture is None
+    assert provenance == {"day0_diurnal_mixture_status": ARTIFACT_UNAVAILABLE}
+    with pytest.raises(ValueError):
+        DiurnalResidualNowcast(_artifact(**corruption))

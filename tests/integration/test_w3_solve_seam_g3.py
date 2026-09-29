@@ -47100,19 +47100,29 @@ def test_day0_saturation_marker_drains_when_same_cut_cap_tightens():
     assert "DAY0_STATISTICAL_CERTAINTY_UNSUPPORTED" not in tightened.decision.rejection_reasons.values()
 
 
-def test_day0_ask_final_stamp_rereads_after_selection_cache(monkeypatch):
+def test_day0_ask_admission_reuses_selection_evidence_against_backdated_snapshot(monkeypatch):
+    """A snapshot written after selection but back-dated into the window cannot change
+    the verdict the winner was ranked on; a genuinely newer selected book reads its own
+    window."""
+    monkeypatch.setattr(era, "_DAY0_ASK_SELECTION_EVIDENCE", {})
     conn = sqlite3.connect(":memory:")
     init_snapshot_schema(conn)
     at = _dt.datetime(2026, 9, 19, 14, 30, tzinfo=_dt.timezone.utc)
     candidate = SimpleNamespace(action="BUY", token_id="yes-token", book_captured_at_utc=at)
-    counts = {}
     try:
         _insert_day0_ask_snapshot(conn, snapshot_id="first", token_id="yes-token", captured_at=at-_dt.timedelta(minutes=2), ask="0.40")
-        assert era._day0_candidate_ask_repricing_rejection_reason(candidate, event_type="DAY0_EXTREME_UPDATED", trade_conn=conn, counts=counts) is None
-        _insert_day0_ask_snapshot(conn, snapshot_id="late-observed", token_id="yes-token", captured_at=at-_dt.timedelta(minutes=1), ask="0.41")
+        assert era._day0_candidate_ask_repricing_rejection_reason(
+            candidate, event_type="DAY0_EXTREME_UPDATED", trade_conn=conn,
+            counts=era._DAY0_ASK_SELECTION_EVIDENCE,
+        ) is None
+        _insert_day0_ask_snapshot(conn, snapshot_id="late-backdated", token_id="yes-token", captured_at=at-_dt.timedelta(minutes=1), ask="0.41")
         payload = {"event_type": "DAY0_EXTREME_UPDATED"}
         era._stamp_day0_live_admission_payload(payload, event_payload={}, held_token_id="yes-token", book_captured_at=at, decision_time=at, trade_conn=conn)
-        assert list(counts.values()) == [1]
+        assert payload[era.DAY0_ASK_DISTINCT_10MIN_KEY] == 1
+        # A newer selected book is a newer fact and reads its own window.
+        newer = at + _dt.timedelta(minutes=1)
+        payload = {"event_type": "DAY0_EXTREME_UPDATED"}
+        era._stamp_day0_live_admission_payload(payload, event_payload={}, held_token_id="yes-token", book_captured_at=newer, decision_time=newer, trade_conn=conn)
         assert payload[era.DAY0_ASK_DISTINCT_10MIN_KEY] == 2
     finally:
         conn.close()

@@ -12316,7 +12316,7 @@ def event_bound_live_adapter_from_trade_conn(
             return min(allocator_limit, flat_cost_usd)
 
         strategy_policy_cache: dict[tuple[str, str, str], str | None] = {}
-        day0_ask_repricing_cache: dict[tuple[str, datetime], int | None] = {}
+        day0_ask_repricing_cache = _DAY0_ASK_SELECTION_EVIDENCE
 
         def _current_entry_calibration_scope(candidate, prepared):
             family_key = str(getattr(candidate, "family_key", ""))
@@ -24061,6 +24061,16 @@ DAY0_ASK_WINDOW_START_KEY = "_edli_day0_held_ask_window_start_utc"
 DAY0_ASK_WINDOW_END_KEY = "_edli_day0_held_ask_window_end_utc"
 
 
+# The ask-repricing evidence each (token, selected-book instant) was ranked on.
+# Candidate eligibility records it; the selected order's admission reads it back, so
+# a snapshot back-dated into the window after selection cannot change the verdict
+# the winner was selected on. Keys carry the book instant, so a newer book is a new
+# key and reads its own window. Bounded: cleared wholesale past the cap, which only
+# costs a re-read for a cut in flight.
+_DAY0_ASK_SELECTION_EVIDENCE: dict[tuple[str, datetime], int | None] = {}
+_DAY0_ASK_SELECTION_EVIDENCE_CAP = 20_000
+
+
 def day0_ask_repricing_rejection_reason(
     *,
     event_type: str,
@@ -24102,6 +24112,8 @@ def day0_ask_repricing_rejection_reason(
             if DAY0_ASK_DISTINCT_10MIN_KEY in payload else None
         )
         if counts is not None:
+            if counts is _DAY0_ASK_SELECTION_EVIDENCE and len(counts) >= _DAY0_ASK_SELECTION_EVIDENCE_CAP:
+                counts.clear()
             counts[key] = count
     else:
         count = counts[key]
@@ -24296,6 +24308,7 @@ def _stamp_day0_live_admission_payload(
         token_id=str(held_token_id or ""),
         book_captured_at=book_captured_at,
         trade_conn=trade_conn,
+        counts=_DAY0_ASK_SELECTION_EVIDENCE,
     )
     if count is None:
         return

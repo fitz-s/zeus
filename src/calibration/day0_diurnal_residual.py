@@ -205,7 +205,7 @@ class DiurnalResidualNowcast:
         weights: dict[str, float] = {}
         for key, cell in (artifact.get("weights") or {}).items():
             w = float(cell["w"])
-            if not 0.0 <= w <= 1.0 or int(cell["n"]) < MIN_WEIGHT_ROWS:
+            if not math.isfinite(w) or not 0.0 <= w <= 1.0 or int(cell["n"]) < MIN_WEIGHT_ROWS:
                 raise ValueError(f"day0 diurnal residual weight cell {key!r} invalid")
             weights[str(key)] = w
         self._weights = weights
@@ -340,7 +340,15 @@ def _counts_table(raw: object) -> dict[str, list[int]]:
             continue
         if len(counts) != J_MAX + 1:
             continue
-        table[str(key)] = [int(value) for value in counts]
+        parsed = []
+        for value in counts:
+            number = float(value)
+            # A count is a non-negative integer; anything else is a corrupt artifact,
+            # which the loader turns into the unmixed-q fallback.
+            if not math.isfinite(number) or number < 0 or number != int(number):
+                raise ValueError(f"day0 diurnal residual count cell {key!r} invalid")
+            parsed.append(int(number))
+        table[str(key)] = parsed
     return table
 
 
@@ -349,12 +357,11 @@ def _float_map(raw: object) -> dict[str, float]:
         return {}
     out: dict[str, float] = {}
     for key, value in raw.items():
-        try:
-            parsed = float(value)
-        except (TypeError, ValueError):
-            continue
-        if math.isfinite(parsed):
-            out[str(key)] = parsed
+        parsed = float(value)
+        # A median extreme hour is a local clock hour.
+        if not math.isfinite(parsed) or not 0.0 <= parsed < 24.0:
+            raise ValueError(f"day0 diurnal residual anchor hour {key!r} invalid")
+        out[str(key)] = parsed
     return out
 
 
