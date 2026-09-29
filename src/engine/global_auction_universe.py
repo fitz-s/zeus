@@ -2871,8 +2871,10 @@ def _current_day0_events(
         )
     ):
         raise ValueError("GLOBAL_DAY0_RESTRICTED_FAMILY_IDENTITY_INVALID")
+    from src.strategy.market_phase import earliest_reachable_target_date
+
     utc_date = decision_at_utc.astimezone(timezone.utc).date()
-    target_floor = (utc_date - timedelta(days=1)).isoformat()
+    target_floor = earliest_reachable_target_date(decision_at_utc)
     target_ceiling = (utc_date + timedelta(days=1)).isoformat()
     select = """
         SELECT opportunity_events.*,

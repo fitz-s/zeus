@@ -43,6 +43,20 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 
+def earliest_reachable_target_date(decision_time: datetime) -> str:
+    """The oldest target date any global auction cut can still value.
+
+    A target date before UTC-yesterday is strictly past in every inhabited
+    settlement timezone, so no scope scan (forecast or Day0) admits it and no
+    fact about it can change a decision. The per-city phase filter still owns
+    admission above this floor.
+    """
+
+    if decision_time.tzinfo is None:
+        raise ValueError("decision_time must be timezone-aware")
+    return (decision_time.astimezone(timezone.utc).date() - timedelta(days=1)).isoformat()
+
+
 class MarketPhase(str, Enum):
     """``str``-valued enum so SQL/JSON serialization is uniform with the
     rest of the project's state-like enums (e.g. ``LifecyclePhase`` at

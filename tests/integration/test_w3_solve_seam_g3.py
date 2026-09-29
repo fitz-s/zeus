@@ -34288,6 +34288,118 @@ def test_global_batch_isolates_family_omitted_by_current_book_provider(monkeypat
     assert result.venue_submit_count == 0
 
 
+def test_completed_cut_publishes_its_unheld_consumed_scope(monkeypatch):
+    """A terminal HOLD/CASH cut records the unheld families it valued, at its
+    scope-scan instant; a superseded cut records nothing."""
+
+    from src.runtime import reactor_wake
+
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    scope = current_global_auction_scope_from_events(
+        (event,), captured_at_utc=decision_at
+    )
+    family_key = scope.family_keys[0]
+    witness = SimpleNamespace(
+        family_key=family_key,
+        captured_at_utc=decision_at,
+        posterior_identity_hash="run-a",
+        witness_identity="q-a",
+        q_version="q-version-a",
+        family_binding_identity="binding-a",
+        sample_matrix_identity="samples-a",
+        band_alpha=0.05,
+        band_basis="lower-tail",
+    )
+    recorded = []
+    monkeypatch.setattr(
+        reactor_wake,
+        "record_consumed_scope",
+        lambda families, *, consumed_at: recorded.append(
+            (frozenset(families), consumed_at)
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "replace",
+        lambda value, **changes: SimpleNamespace(**(vars(value) | changes)),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: _WealthNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth",
+            economic_identity="wealth-economic",
+            ledger_snapshot_id="ledger",
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "select_prepared_global_auction",
+        lambda prepared, **_kwargs: PreparedGlobalAuctionResult(
+            decision=GlobalSingleOrderDecision(
+                shares=Decimal("0"),
+                cost_usd=Decimal("0"),
+                robust_delta_log_wealth=0.0,
+                robust_ev_usd=0.0,
+                capital_efficiency=0.0,
+                candidate=None,
+                no_trade_reason="CASH_DOMINATES",
+                rejection_reasons={},
+                candidate_evaluations=(),
+            ),
+            winner_event_id=None,
+            actuation=None,
+            holding_coverage=(),
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_store_global_auction_receipt",
+        lambda *_args, **_kwargs: 1,
+    )
+
+    def run(**kwargs):
+        return global_batch_runtime.process_current_global_batch(
+            (event,),
+            decision_time=decision_at,
+            world_conn=object(),
+            forecast_conn=object(),
+            trade_conn=object(),
+            payload_reader=lambda item: json.loads(item.payload_json),
+            prepare_event=lambda item, _at: EventSubmissionReceipt(
+                False,
+                item.event_id,
+                item.causal_snapshot_id,
+                prepared_global_family=SimpleNamespace(probability_witness=witness),
+            ),
+            actuate_winner=lambda *_: pytest.fail("cash-dominant cut must not actuate"),
+            stamp_receipt=lambda receipt: receipt,
+            venue_submit_count=lambda: 0,
+            current_execution=lambda *_: object(),
+            current_time_provider=lambda: decision_at,
+            current_book_epoch_provider=lambda probabilities, _at: (
+                probabilities,
+                _global_test_book("book-a", price="0.40"),
+            ),
+            **kwargs,
+        )
+
+    superseded = run(epoch_superseded=lambda: "wake:forecast_posterior_advanced")
+    assert superseded.economic_cut_completed is False
+    assert recorded == []
+
+    completed = run()
+    assert completed.economic_cut_completed is True
+    assert recorded == [
+        (frozenset({("Alpha", "2026-07-11", "high")}), decision_at)
+    ]
+
+
 def test_selection_holdings_require_only_current_book_native_tokens():
     @dataclass(frozen=True)
     class Prepared:

@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace as dataclass_replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Collection, Iterator
+from typing import Collection, Iterator, Mapping
 
 REACTOR_WAKE_FILENAME = "edli-reactor-wake.json"
 REACTOR_WAKE_QUEUE_SUFFIX = ".d"
@@ -2914,6 +2914,124 @@ def acknowledge_reactor_wakes(
     except (OSError, ValueError):
         return False
     return True
+
+
+# Reasons whose wake only asks for a re-read of committed truth: no capital
+# obligation (fill, held-SELL debt), no hard physical fact (Day0), no event ids
+# that must finish first. A forecast wake asks for a global cut; a substrate
+# wake asks for a redecision screen, which a cut does not perform.
+RETIRABLE_WAKE_REASONS = frozenset(
+    {"forecast_posterior_advanced", "money_path_substrate_refreshed"}
+)
+CUT_SERVED_WAKE_REASONS = frozenset({"forecast_posterior_advanced"})
+RETIRE_SERVED_WAKES_LIMIT = 500
+# (city, target_date, metric) -> scope-scan instant of the latest completed
+# cut that valued the family. Process-local: a restart only delays retirement
+# until the next completed cut. Entries leave once their target date is below
+# the reachable floor.
+_CONSUMED_SCOPE_LOCK = threading.Lock()
+_CONSUMED_SCOPE: dict[tuple[str, str, str], datetime] = {}
+
+
+def _family(city: object, target_date: object, metric: object) -> tuple[str, str, str]:
+    return (
+        str(city or "").strip(),
+        str(target_date or "").strip(),
+        str(metric or "").strip().lower(),
+    )
+
+
+def record_consumed_scope(
+    families: Collection[tuple[str, str, str]], *, consumed_at: datetime
+) -> None:
+    """Record that one completed cut valued ``families`` from truth committed
+    before ``consumed_at`` (its scope-scan instant).
+
+    The caller passes unheld families only: a forecast wake for a held family
+    also drives that family's targeted exit monitor, which a cut does not run.
+    """
+
+    if consumed_at.tzinfo is None:
+        raise ValueError("consumed_at must be timezone-aware")
+    at = consumed_at.astimezone(timezone.utc)
+    with _CONSUMED_SCOPE_LOCK:
+        for raw in families:
+            family = _family(*raw)
+            if all(family) and (
+                family not in _CONSUMED_SCOPE or _CONSUMED_SCOPE[family] < at
+            ):
+                _CONSUMED_SCOPE[family] = at
+
+
+def wake_is_served(
+    wake: ReactorWake,
+    *,
+    reachable_floor: str,
+    consumed: Mapping[tuple[str, str, str], datetime],
+) -> bool:
+    """Whether no consumer can learn anything more from this queued hint.
+
+    True only for a retirable reason whose every named family is either below
+    the reachable target-date floor (no scan, screen or monitor values it) or,
+    for a cut-served reason, was valued by a completed cut whose scope scan
+    began after the wake was published (the publisher commits truth before
+    publishing). A wake naming no family, or any other family, is not served.
+    """
+
+    if (
+        wake.reason not in RETIRABLE_WAKE_REASONS
+        or not wake.forecast_families
+        or wake.event_ids
+        or wake.held_sell_reauction_requests
+    ):
+        return False
+    try:
+        published = datetime.fromisoformat(
+            wake.published_at.replace("Z", "+00:00")
+        ).astimezone(timezone.utc)
+    except ValueError:
+        return False
+    for raw in wake.forecast_families:
+        family = _family(*raw)
+        if family[1] < reachable_floor:
+            continue
+        if wake.reason not in CUT_SERVED_WAKE_REASONS:
+            return False
+        consumed_at = consumed.get(family)
+        if consumed_at is None or consumed_at <= published:
+            return False
+    return True
+
+
+def retire_served_wakes(
+    *,
+    now: datetime | None = None,
+    path: Path | None = None,
+    limit: int = RETIRE_SERVED_WAKES_LIMIT,
+) -> int:
+    """Acknowledge queued hints that ``wake_is_served`` proves unservable.
+
+    SCOPE: queued ``RETIRABLE_WAKE_REASONS`` wakes only. DRAIN: at most
+    ``limit`` oldest served wakes per call, through the single
+    ``acknowledge_reactor_wakes`` path. RESET: bounded by reachability and
+    consumption, not age; every other wake stays queued for the scheduler.
+    """
+
+    from src.strategy.market_phase import earliest_reachable_target_date
+
+    floor = earliest_reachable_target_date(now or datetime.now(timezone.utc))
+    with _CONSUMED_SCOPE_LOCK:
+        for family in [key for key in _CONSUMED_SCOPE if key[1] < floor]:
+            del _CONSUMED_SCOPE[family]
+        consumed = dict(_CONSUMED_SCOPE)
+    served = tuple(
+        wake
+        for _queue_file, wake in _queued_wakes(path)
+        if wake_is_served(wake, reachable_floor=floor, consumed=consumed)
+    )[: max(0, int(limit))]
+    if not served or not acknowledge_reactor_wakes(served, path=path):
+        return 0
+    return len(served)
 
 
 def reactor_wake_revision(

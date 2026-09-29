@@ -7719,6 +7719,21 @@ def _run_edli_reactor_wake_listener(
                     _edli_reactor_wake_poll_once()
             except Exception:
                 logger.exception("EDLI reactor wake listener poll failed")
+            _retire_served_reactor_wakes()
+
+
+def _retire_served_reactor_wakes() -> None:
+    """Acknowledge queued hints no consumer can still serve (bounded per poll)."""
+
+    from src.runtime.reactor_wake import retire_served_wakes
+
+    try:
+        retired = retire_served_wakes()
+    except Exception:
+        logger.exception("EDLI reactor served-wake retirement failed")
+        return
+    if retired:
+        logger.info("EDLI reactor retired served wakes: count=%d", retired)
 
 
 def _start_edli_reactor_wake_listener() -> None:

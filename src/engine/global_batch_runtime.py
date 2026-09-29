@@ -8390,6 +8390,22 @@ def process_current_global_batch(
     # re-auction) owns a fresh latch.
     cancel_attribution: list[tuple[str, str]] = []
     last_stage = ["start"]
+    # Consumed-scope watermark. SCOPE: the unheld families this cut valued
+    # from truth committed before its scope scan began. It is published only
+    # when the cut completes (terminal HOLD/CASH or a venue submit), so the
+    # reactor may retire forecast hints that cut already absorbed.
+    consumed_scope: list[tuple[datetime, frozenset[tuple[str, str, str]]]] = []
+
+    def publish_consumed_scope() -> None:
+        if not consumed_scope:
+            return
+        consumed_at, families = consumed_scope[0]
+        try:
+            from src.runtime.reactor_wake import record_consumed_scope
+
+            record_consumed_scope(families, consumed_at=consumed_at)
+        except Exception as exc:  # noqa: BLE001 - a hint ledger never changes a cut
+            _LOG.warning("consumed-scope watermark not recorded: %r", exc)
 
     def attribute_cancel(source: str, stage: str) -> None:
         if not cancel_attribution:
@@ -8864,6 +8880,8 @@ def process_current_global_batch(
             and effective_next_claim is None
             and not deadline_expired
         )
+        if terminal_cut_completed:
+            publish_consumed_scope()
         cancel_pair: tuple[str, str] | None = None
         if reason in _CANCELLED_CUT_REASONS:
             cancel_pair = (
@@ -9328,6 +9346,22 @@ def process_current_global_batch(
                     wealth_witness=selection_wealth,
                 )
             )
+        consumed_scope[:] = [
+            (
+                scope_at,
+                frozenset(
+                    (
+                        str(payload.get("city") or "").strip(),
+                        str(payload.get("target_date") or "").strip(),
+                        str(payload.get("metric") or "").strip().lower(),
+                    )
+                    for family_key, scope_event in decision_scope.events_by_family
+                    if family_key not in held_family_keys
+                    and family_key not in held_obligation_family_keys
+                    for payload in (payload_reader(scope_event),)
+                ),
+            )
+        ]
         # Day0 facts reach this cut only through the families it prepares
         # and the holdings its wealth values.
         _observe_day0_scope(
@@ -11527,6 +11561,8 @@ def process_current_global_batch(
             )
         receipts = dict(prepared_loser_receipts)
         receipts[winner_id] = winner_receipt
+        if venue_delta == 1 and winner_receipt.submitted:
+            publish_consumed_scope()
         return GlobalBatchSubmitResult(
             receipts=receipts,
             winner_event_id=winner_id,
