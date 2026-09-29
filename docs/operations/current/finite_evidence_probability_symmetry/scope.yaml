@@ -8,7 +8,12 @@ frontier:
 - exit economic symmetry
 - current wealth uncertainty representation
 in_scope:
+- .gitattributes
 - AGENTS.md
+- config/AGENTS.md
+- config/hko_station_metadata.html
+- config/station_precise_coords.json
+- docs/operations/current/evidence/hko_station_metadata_20260929.html
 - docs/operations/current/finite_evidence_probability_symmetry/**
 - docs/operations/current_state.md
 - docs/authority/replacement_final_form_2026_06_09.md
@@ -28,6 +33,7 @@ in_scope:
 - src/data/replacement_forecast_materialization_seed_builder.py
 - src/data/replacement_forecast_materialization_request_builder.py
 - src/data/replacement_forecast_current_target_plan.py
+- src/data/replacement_forecast_live_materialization_queue.py
 - src/contracts/replacement_pipeline_files.py
 - src/contracts/strategy_capital_allocation.py
 - src/contracts/global_auction_receipt.py
@@ -38,16 +44,32 @@ in_scope:
 - src/data/replacement_forecast_bundle_reader.py
 - src/data/replacement_input_hwm.py
 - src/data/day0_observation_reader.py
+- src/data/day0_hourly_vectors.py
+- src/data/station_forecast_adapter.py
 - src/data/wu_hourly_client.py
+- src/data/daily_obs_append.py
 - src/data/ogimet_hourly_client.py
 - src/data/observation_instants_writer.py
 - src/data/day0_fast_obs.py
 - src/data/day0_source_health.py
 - src/data/observation_client.py
 - src/data/openmeteo_client.py
+- src/data/openmeteo_response_store.py
 - src/data/openmeteo_quota.py
 - src/data/bayes_precision_fusion_download.py
+- src/data/bayes_precision_fusion_history_provider.py
+- src/forecast/grid_representativeness_loader.py
+- scripts/build_grid_representativeness.py
+- config/grid_representativeness.json
+- scripts/fit_grid_representativeness.py
+- scripts/validate_grid_representativeness_fusion.py
 - src/data/replacement_forecast_production.py
+- src/config.py
+- src/contracts/ensemble_snapshot_provenance.py
+- scripts/download_replacement_forecast_current_targets.py
+- src/data/openmeteo_ecmwf_ifs9_precision_guard.py
+- scripts/extract_open_ens_localday.py
+- src/data/executable_forecast_reader.py
 - src/ingest_main.py
 - src/ingest/forecast_live_daemon.py
 - src/main.py
@@ -126,6 +148,7 @@ in_scope:
 - tests/test_cycle_monotone_materialization.py
 - tests/test_replacement_forecast_bundle_reader_tradeable_latest.py
 - tests/test_replacement_forecast_bundle_reader_staleness.py
+- tests/test_replacement_forecast_bundle_reader.py
 - tests/test_replacement_seed_coverage_gate.py
 - tests/engine/test_event_reactor_no_bypass.py
 - tests/engine/test_position_belief_authority.py
@@ -161,7 +184,28 @@ in_scope:
 - tests/test_day0_exit_gate.py
 - tests/test_day0_hard_fact_exit.py
 - tests/test_day0_observation_reader.py
+- tests/test_observation_prints_ledger.py
+- tests/events/test_redemption_forecast_day0_authority.py
+- tests/data/test_daily_obs_routing.py
 - tests/test_hourly_clients_parse.py
+- tests/test_k2_live_ingestion_relationships.py
+- tests/test_openmeteo_cell_selection_and_elevation_are_product_identity.py
+- tests/test_bayes_precision_fusion_gem_current_value_previous_runs_fallback.py
+- tests/test_bayes_precision_fusion_no_leak_history_join.py
+- tests/test_bayes_precision_fusion_download.py
+- tests/data/test_openmeteo_refetch_guard.py
+- tests/data/test_station_source_current_value_serving.py
+- tests/test_station_forecast_live_ingest_wiring.py
+- tests/test_config.py
+- tests/test_openmeteo_ecmwf_ifs9_precision_guard.py
+- tests/test_executable_forecast_reader.py
+- tests/test_ecmwf_open_data_collect_cycle.py
+- tests/test_grid_representativeness_fusion_sigma.py
+- tests/probability/test_representativeness_no_kelly_variance_double_count.py
+- tests/data/test_replacement_materializer_representativeness_center.py
+- tests/forecast/test_method_unify_representativeness_parity.py
+- tests/test_sigma_tau_calibration_serving_equivalence.py
+- tests/data/test_ingest_unit_types.py
 - tests/test_obs_v2_writer.py
 - tests/events/test_day0_extreme_updated_trigger.py
 - tests/events/test_event_store_idempotency.py
@@ -229,6 +273,7 @@ in_scope:
 - tests/execution/test_venue_cancel_journal.py
 - tests/events/test_continuous_redecision_emit.py
 out_of_scope:
+- scripts/backfill_openmeteo_previous_runs.py
 - state/zeus-world.db
 - state/zeus-world.db-*
 - state/zeus-forecasts.db

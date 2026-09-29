@@ -133,7 +133,23 @@
   "lat": "22.3022",
   "lon": "114.1742",
   "source": "HKO headquarters (city-center settlement)",
-  "station": "HKO_HQ"
+  "station": "HKO_HQ",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "hko_station_table_v1",
+   "station_id": "HKO_HQ",
+   "source_station_id": "HKO",
+   "height_role": "ground_msl",
+   "quantity": "Elevation of ground above mean sea-level (metres)",
+   "elevation_m": 32.0,
+   "site_lat": 22.301944444444445,
+   "site_lon": 114.17416666666666,
+   "temperature_station": true,
+   "source_url": "https://www.hko.gov.hk/en/cis/stn.htm",
+   "artifact_ref": "config/hko_station_metadata.html",
+   "body_sha256": "88e4e04edb57201646035558898ea1a4f235189d634a4cc7c059131483a4af1b",
+   "checked_at": "2026-09-29T21:23:56Z"
+  }
  },
  "Houston": {
   "distance_from_citiesjson_m": 518,
