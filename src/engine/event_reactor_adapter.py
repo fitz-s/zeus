@@ -44923,6 +44923,16 @@ def _day0_diurnal_mixture_for_family(
     metric = str(getattr(family, "metric", "") or "").strip().lower()
     if probability_time is None or metric not in {"high", "low"}:
         return None
+    # Fitted residuals describe hours inside the target local day. Held tail
+    # redecision continues after midnight, but tomorrow's clock hour cannot
+    # select yesterday's diurnal cell (the materializer applies the same scope).
+    if (
+        probability_time.astimezone(ZoneInfo(str(city.timezone))).date().isoformat()
+        != str(getattr(family, "target_date", "") or "")
+    ):
+        payload["_edli_day0_diurnal_mixture_status"] = "not_applicable"
+        payload.pop(DAY0_DIURNAL_MIXTURE_KEY, None)
+        return None
     mixture, provenance = day0_diurnal_mixture(
         city=str(getattr(city, "name", "") or family.city),
         metric=metric,

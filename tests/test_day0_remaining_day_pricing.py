@@ -7692,6 +7692,143 @@ def test_diurnal_draw_equal_to_mixed_point_is_still_transformed(batch):
     assert np.asarray(result) == pytest.approx(np.asarray(expected))
 
 
+@pytest.mark.parametrize("city_name", ("Hong Kong", "Tel Aviv", "Atlanta"))
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+@pytest.mark.parametrize("minute_from_midnight", (-1, 0, 15))
+def test_post_local_day_held_monitor_does_not_mix_next_days_diurnal_cell(
+    monkeypatch, city_name, metric, direction, minute_from_midnight,
+):
+    """The held statistical lane survives midnight; yesterday is not today's Day0."""
+    import src.engine.event_reactor_adapter as era
+    import src.engine.monitor_refresh as monitor
+    from src.calibration import day0_diurnal_residual as diurnal
+    from src.solve.solver import (
+        JointOutcomeProbabilityWitness, OutcomeTokenBinding, joint_probability_witness_identity,
+    )
+    from src.state.portfolio import Position
+
+    city = runtime_cities_by_name()[city_name]
+    target = "2026-07-27"
+    decision = (
+        datetime(2026, 7, 28, tzinfo=ZoneInfo(city.timezone))
+        + timedelta(minutes=minute_from_midnight)
+    ).astimezone(UTC)
+    scale, offset = (1.0, 0.0) if city.settlement_unit == "C" else (9.0 / 5.0, 32.0)
+    bounds = ((None, 31), (32, 32), (33, None)) if city.settlement_unit == "C" else ((None, 89), (90, 91), (92, None))
+    bins = [Bin(low, high, city.settlement_unit, f"bin-{index}") for index, (low, high) in enumerate(bounds)]
+    family = SimpleNamespace(
+        city=city_name, target_date=target, metric=metric,
+        family_id=f"{city_name}|{target}|{metric}", event_type="DAY0_EXTREME_UPDATED",
+        bins=bins, candidates=[SimpleNamespace(condition_id=f"0x{index + 1:064x}", bin=bin_) for index, bin_ in enumerate(bins)],
+    )
+    members = np.asarray([31.6, 31.8, 32.1]) * scale + offset
+    payload = {
+        "metric": metric, "target_date": target, "rounded_value": 30 * scale + offset,
+        "observation_time": (decision - timedelta(minutes=30)).isoformat(),
+        "_edli_day0_remaining_model_names": ["ecmwf_ifs", "icon_global", "ukmo_global_deterministic_10km"],
+    }
+    snapshot = {
+        "settlement_unit": city.settlement_unit, "temperature_metric": metric,
+        "members_json": json.dumps(members.tolist()), "members_precision": 1.0,
+        "source_id": "fixture", "dataset_id": "fixture", "data_version": "fixture",
+        "issue_time": (decision - timedelta(hours=6)).isoformat(),
+    }
+    counts = [500] + [0] * diurnal.J_MAX
+    nowcast = diurnal.DiurnalResidualNowcast({
+        "schema_version": diurnal.SCHEMA_VERSION, "j_max": diurnal.J_MAX, "fit_date": target,
+        "peak_hours": {city_name: 16}, "trough_hours": {city_name: 6},
+        "unit": {city_name: city.settlement_unit},
+        "pooled": {f"{metric}|{city.settlement_unit}|{k}": counts for k in range(-23, 24)},
+        "weights": {f"{metric}|{k}": {"w": 0.5, "n": 500} for k in (-3, -2, -1, 0, 1, 2, 3, 4, 8)},
+    }, identity="qualified-intraday-fixture")
+    active = {"nowcast": None}
+    monkeypatch.setattr(diurnal, "_load_nowcast", lambda: active["nowcast"])
+    monkeypatch.setattr(era, "_day0_remaining_day_members", lambda **_: members)
+    monkeypatch.setattr(monitor, "_day0_absorbing_hard_fact_overlay", lambda **_: None)
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return decision.astimezone(tz or UTC)
+
+    monkeypatch.setattr(monitor, "datetime", FrozenDateTime)
+    seen = {}
+
+    def build(position, *, decision_time, **_kwargs):
+        threaded = dict(payload)
+        analysis = era._market_analysis_from_event_snapshot(
+            calibration_conn=conn, snapshot=snapshot, family=family,
+            native_costs={}, payload=threaded, decision_time=decision_time,
+        )
+        point = analysis.p_posterior
+        samples = analysis.forecast_yes_probability_sample_matrix(500)
+        seen.update(payload=threaded, point=point, samples=samples)
+        bindings = tuple(OutcomeTokenBinding(
+            bin_id=bin_.label, condition_id=candidate.condition_id,
+            yes_token_id=f"yes-{index}", no_token_id=f"no-{index}",
+        ) for index, (bin_, candidate) in enumerate(zip(bins, family.candidates)))
+        identity = dict(
+            family_key=family.family_id, bindings=bindings, q_version="current-tail",
+            resolution_identity="resolution", topology_identity="topology", posterior_identity_hash="posterior",
+            source_truth_identity="source", authority_certificate_hash="certificate", band_alpha=0.05,
+            band_basis="current_coherent_day0_remaining_model_bootstrap_v1", yes_point_q=point,
+            yes_q_samples=samples, captured_at_utc=decision_time,
+        )
+        witness = JointOutcomeProbabilityWitness(
+            **identity, max_age=timedelta(minutes=5), witness_identity=joint_probability_witness_identity(**identity),
+        )
+        carrier_witness = {"vector_id": "current-tail"}
+        bundle = dict(bundle_identity="bundle", carrier_vector_identity="vector", carrier_vector_hash="hash", carrier_vector_witness=carrier_witness)
+        validation = {"reason": None}
+        for key, value in bundle.items():
+            if key != "carrier_vector_witness":
+                validation[f"actual_{key}"] = value
+                validation[f"expected_{key}"] = value
+        threaded.update(
+            _edli_global_day0_binding={"probability_base_identity": "current-tail", "day0_causal_evidence_bundle": bundle, "day0_remaining_vector_witness": carrier_witness},
+            _edli_day0_causal_evidence_bundle_validation=validation,
+        )
+        return monitor._CurrentGlobalDay0FamilySnapshot(
+            witness=witness, token_pairs=tuple((b.condition_id, b.yes_token_id, b.no_token_id) for b in bindings),
+            deterministic_condition_ids=frozenset(), day0_payload=threaded, metric=metric,
+            probability_authority="day0_remaining_day_global_probability_v1",
+        )
+
+    monkeypatch.setattr(monitor, "_build_current_global_day0_family_snapshot", build)
+    conn = sqlite3.connect(":memory:")
+    try:
+        position = Position(
+            trade_id="post-local", market_id="market", city=city_name, cluster=city_name,
+            target_date=target, bin_label=bins[1].label, direction=direction, unit=city.settlement_unit,
+            temperature_metric=metric, entry_method="ens_member_counting", entry_price=0.5, p_posterior=0.2,
+            condition_id=family.candidates[1].condition_id,
+            token_id="yes-1", no_token_id="no-1",
+        )
+        assert monitor._would_use_day0_monitor_lane(position, city, target)
+
+        def refresh():
+            cache = monitor._CurrentGlobalDay0FamilyCache(decision_time=decision)
+            return monitor.monitor_probability_refresh(position, conn=conn, city=city, target_d=target, day0_family_cache=cache)
+
+        base_probability, _base_position, base_fresh = refresh()
+        base_samples = np.asarray(seen["samples"])
+        active["nowcast"] = nowcast
+        probability, refreshed, fresh = refresh()
+        assert base_fresh is True and fresh is True
+        if minute_from_midnight < 0:
+            assert era.DAY0_DIURNAL_MIXTURE_KEY in seen["payload"]
+            assert seen["payload"]["_edli_day0_diurnal_mixture_status"] == diurnal.APPLIED
+        else:
+            assert probability == pytest.approx(base_probability)
+            assert seen["samples"] == pytest.approx(base_samples)
+            assert era.DAY0_DIURNAL_MIXTURE_KEY not in seen["payload"]
+            assert seen["payload"]["_edli_day0_diurnal_mixture_status"] == diurnal.NOT_APPLICABLE
+        assert getattr(refreshed, monitor._MONITOR_PROBABILITY_FRESH_ATTR) is True
+    finally:
+        conn.close()
+
+
 @pytest.mark.parametrize("batch", (False, True))
 def test_diurnal_degenerate_bootstrap_uses_explicit_raw_fallback_once(batch):
     """No-support rows fall back before mixing, in scalar and batch execution."""
