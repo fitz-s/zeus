@@ -14947,6 +14947,9 @@ def reconcile_terminal_partial_entry_reviews(
         command_id = str(command.get("command_id") or "")
         venue_order_id = str(command.get("venue_order_id") or "")
         try:
+            if not canonical_terminal_partial_entry_proven(conn, command_id):
+                summary["stayed"] += 1
+                continue
             trade_summary = _confirmed_bound_trade_fact_summary(
                 conn,
                 command_id=command_id,
@@ -15258,19 +15261,18 @@ def _review_required_terminal_fak_partial_exit_projection_matches(
     )
 
 
-def _clear_review_required_terminal_partial_entry(
+def _terminal_partial_entry_review_proof(
     conn: sqlite3.Connection,
     *,
     command: Mapping[str, object],
     trade_summary: Mapping[str, object],
-) -> bool:
-    """Reduce a terminal BUY review to its exact fill plus expired remainder.
+) -> dict[str, object] | None:
+    """Return the exact terminal-partial ENTRY proof, or None when unproven.
 
-    SCOPE: one ENTRY/BUY command whose persisted point order is terminal.
-    DRAIN: the point order and canonical confirmed trade facts must agree on the
-    exact positive fill and prove that the unmatched prefix cannot remain live.
-    RESET: one transaction records the terminal partial, projects only its
-    positive fill, and advances REVIEW_REQUIRED -> PARTIAL -> EXPIRED.
+    The persisted point order is terminal (MATCHED/FILLED, so nothing rests at
+    the venue), identifies this order/token/side/type, and its matched size
+    equals the CONFIRMED trade-fact sum, which is a genuine partial of the
+    submitted size.
     """
 
     if (
@@ -15279,7 +15281,7 @@ def _clear_review_required_terminal_partial_entry(
         or str(command.get("env_order_type") or "").upper()
         not in {"FAK", "GTC", "GTD"}
     ):
-        return False
+        return None
     command_id = str(command.get("command_id") or "")
     venue_order_id = str(command.get("venue_order_id") or "")
     review_row = conn.execute(
@@ -15295,10 +15297,10 @@ def _clear_review_required_terminal_partial_entry(
     ).fetchone()
     review = _json_dict(_dict_row(review_row).get("payload_json"))
     if review.get("reason") != "partial_remainder_point_order_filled_without_full_trade_fact":
-        return False
+        return None
     point_order = review.get("point_order")
     if not isinstance(point_order, Mapping):
-        return False
+        return None
     point = dict(point_order)
     if (
         _order_status(point) not in {"MATCHED", "FILLED"}
@@ -15309,7 +15311,7 @@ def _clear_review_required_terminal_partial_entry(
         or str(_first_present(point, "asset_id", "assetId", "token_id") or "")
         != str(command.get("token_id") or "")
     ):
-        return False
+        return None
     requested = _positive_decimal_or_none(command.get("size"))
     original = _positive_decimal_or_none(
         _first_present(
@@ -15333,8 +15335,64 @@ def _clear_review_required_terminal_partial_entry(
         or requested - matched < Decimal("0.01")
         or int(trade_summary.get("count") or 0) <= 0
     ):
+        return None
+    return {"point": point, "requested": requested, "filled": filled}
+
+
+def canonical_terminal_partial_entry_proven(
+    conn: sqlite3.Connection, command_id: str,
+) -> bool:
+    """Read-only: this REVIEW_REQUIRED ENTRY is a proven terminal partial.
+
+    One predicate for the recovery reducer and the restart guard: the order is
+    terminal at the venue and its CONFIRMED fills are durable, so nothing can
+    fill while the daemon is down.
+    """
+
+    try:
+        rows = _terminal_partial_entry_review_candidates(
+            conn, command_ids=frozenset({str(command_id)}),
+        )
+        if len(rows) != 1:
+            return False
+        command = rows[0]
+        trade_summary = _confirmed_bound_trade_fact_summary(
+            conn,
+            command_id=str(command.get("command_id") or ""),
+            venue_order_id=str(command.get("venue_order_id") or ""),
+        )
+        return _terminal_partial_entry_review_proof(
+            conn, command=command, trade_summary=trade_summary,
+        ) is not None
+    except (sqlite3.Error, TypeError, ValueError, InvalidOperation):
         return False
 
+
+def _clear_review_required_terminal_partial_entry(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, object],
+    trade_summary: Mapping[str, object],
+) -> bool:
+    """Reduce a terminal BUY review to its exact fill plus expired remainder.
+
+    SCOPE: one ENTRY/BUY command whose persisted point order is terminal.
+    DRAIN: the point order and canonical confirmed trade facts must agree on the
+    exact positive fill and prove that the unmatched prefix cannot remain live.
+    RESET: one transaction records the terminal partial, projects only its
+    positive fill, and advances REVIEW_REQUIRED -> PARTIAL -> EXPIRED.
+    """
+
+    proof = _terminal_partial_entry_review_proof(
+        conn, command=command, trade_summary=trade_summary,
+    )
+    if proof is None:
+        return False
+    point = proof["point"]
+    requested = proof["requested"]
+    filled = proof["filled"]
+    command_id = str(command.get("command_id") or "")
+    venue_order_id = str(command.get("venue_order_id") or "")
     observed_at = str(trade_summary.get("observed_at") or _now_iso())
     terminal_payload = {
         "reason": "terminal_fak_partial_entry_confirmed",

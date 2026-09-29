@@ -4996,6 +4996,92 @@ def test_deploy_live_terminal_entry_fill_proof_preserves_unknown_obligations(tmp
     conn.close()
 
 
+@pytest.mark.parametrize("proof_case", ["proven", "point_live", "trade_short"])
+def test_deploy_live_admits_proven_terminal_partial_entry_review_only(tmp_path, proof_case):
+    """Live 2026-09-29 a7d459611a2f4e1c: restart refused on a terminal partial.
+
+    A MATCHED point order whose CONFIRMED trades sum to its matched size rests
+    nothing at the venue, so the restart guard admits it through the SAME
+    predicate the recovery reducer gates on. A LIVE point order (resting
+    remainder) or an unmatched trade sum stays a nonterminal obligation.
+    """
+    import json
+    from src.state.db import init_schema, init_schema_trade_only
+    from src.state.collateral_ledger import init_collateral_schema
+    from src.execution import command_recovery
+    from tests.test_command_recovery import _seed_terminal_partial_entry_review
+
+    dl = _load("deploy_live_terminal_partial_entry_proof", "deploy_live.py")
+    path = tmp_path / "terminal-partial-entry.db"
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    init_collateral_schema(conn)
+    _seed_terminal_partial_entry_review(conn, order_type="GTC")
+    if proof_case != "proven":
+        row = conn.execute(
+            "SELECT sequence_no, payload_json FROM venue_command_events "
+            "WHERE command_id='cmd-entry-fak-partial' AND event_type='REVIEW_REQUIRED'"
+        ).fetchone()
+        payload = json.loads(row["payload_json"])
+        if proof_case == "point_live":
+            payload["point_order"]["status"] = "LIVE"
+        else:
+            payload["point_order"]["size_matched"] = "4.5"
+        conn.execute("DROP TRIGGER IF EXISTS trg_venue_command_events_no_update")
+        conn.execute(
+            "UPDATE venue_command_events SET payload_json=? WHERE command_id=? AND sequence_no=?",
+            (json.dumps(payload), "cmd-entry-fak-partial", row["sequence_no"]),
+        )
+    conn.commit()
+    before = conn.total_changes
+
+    proven = command_recovery.canonical_terminal_partial_entry_proven(
+        conn, "cmd-entry-fak-partial"
+    )
+    obligations = dl._canonical_live_restart_obligations(path)
+
+    assert proven is (proof_case == "proven")
+    assert obligations["nonterminal_command_ids"] == (
+        () if proof_case == "proven" else ("cmd-entry-fak-partial",)
+    )
+    assert conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id='cmd-entry-fak-partial'"
+    ).fetchone()[0] == "REVIEW_REQUIRED"
+    assert conn.total_changes == before
+    conn.close()
+
+
+def test_terminal_partial_entry_guard_and_reducer_share_one_predicate():
+    import ast
+    import inspect
+    import textwrap
+    from src.execution import command_recovery
+
+    def _calls(source: str) -> set[str]:
+        tree = ast.parse(textwrap.dedent(source))
+        return {
+            node.func.id if isinstance(node.func, ast.Name) else node.func.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, (ast.Name, ast.Attribute))
+        }
+
+    reducer = _calls(inspect.getsource(command_recovery.reconcile_terminal_partial_entry_reviews))
+    guard_source = (Path(__file__).resolve().parents[1] / "scripts" / "deploy_live.py").read_text()
+    guard_fn = guard_source[
+        guard_source.index("def _canonical_live_restart_obligations("):
+        guard_source.index("def _pre_stop_monitor_handoff_evidence(")
+    ]
+    assert "canonical_terminal_partial_entry_proven" in reducer
+    assert "canonical_terminal_partial_entry_proven" in _calls(guard_fn)
+    predicate = _calls(inspect.getsource(command_recovery.canonical_terminal_partial_entry_proven))
+    reducer_body = _calls(inspect.getsource(command_recovery._clear_review_required_terminal_partial_entry))
+    assert "_terminal_partial_entry_review_proof" in predicate
+    assert "_terminal_partial_entry_review_proof" in reducer_body
+
+
 def test_deploy_live_post_start_parked_count_ignores_proven_terminal_fak_partial(
     monkeypatch, tmp_path
 ):
