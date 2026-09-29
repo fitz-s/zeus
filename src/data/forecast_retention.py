@@ -283,7 +283,9 @@ def pending_cross_check_cycles(forecast_db: Path, receipt_path: Path) -> frozens
             """
             SELECT source_cycle_time,
                    json_extract(artifact_metadata_json, '$.city'),
-                   json_extract(artifact_metadata_json, '$.run_authority')
+                   artifact_metadata_json LIKE '%provider_meta_declared%',
+                   artifact_metadata_json LIKE '%bucket_partial_run_unverified%',
+                   artifact_metadata_json LIKE '%bucket_partial_run_downscaled_unverified%'
               FROM raw_forecast_artifacts
              WHERE source_id = 'openmeteo_ecmwf_ifs_9km'
                AND (artifact_metadata_json LIKE '%provider_meta_declared%'
@@ -293,15 +295,19 @@ def pending_cross_check_cycles(forecast_db: Path, receipt_path: Path) -> frozens
     finally:
         conn.close()
     pending: set[str] = set()
-    for cycle_iso, city, authority in rows:
+    for cycle_iso, city, meta_stamped, bucket, downscaled in rows:
+        # Same three LIKE selections and receipt keys as each cross-check regime.
         cycle_iso = str(cycle_iso)
-        if authority == "bucket_partial_run_unverified":
-            key = f"{cycle_iso}::bucket::{city}" if city else f"{cycle_iso}::bucket"
-        elif authority == "bucket_partial_run_downscaled_unverified":
-            key = f"{cycle_iso}::bucket_downscaled::{city}" if city else f"{cycle_iso}::bucket_downscaled"
-        else:
-            key = cycle_iso
-        if not _cross_check_receipt_is_terminal(receipts.get(key)):
+        keys = []
+        if meta_stamped:
+            keys.append(cycle_iso)
+        if bucket:
+            keys.append(f"{cycle_iso}::bucket::{city}" if city else f"{cycle_iso}::bucket")
+        if downscaled:
+            keys.append(
+                f"{cycle_iso}::bucket_downscaled::{city}" if city else f"{cycle_iso}::bucket_downscaled"
+            )
+        if any(not _cross_check_receipt_is_terminal(receipts.get(key)) for key in keys):
             cycle = datetime.fromisoformat(cycle_iso.replace("Z", "+00:00"))
             pending.add(cycle.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
     return frozenset(pending)
