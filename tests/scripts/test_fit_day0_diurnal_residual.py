@@ -261,3 +261,127 @@ def test_write_artifact_atomic_replaces_prior_artifact_on_success(tmp_path) -> N
         "schema": "day0_diurnal_residual",
     }
     assert not os.path.exists(f"{out_path}.tmp")
+
+
+# ------------------------- 2026-09-29: in-q mixture -------------------------
+
+
+def test_hong_kong_residual_is_gridded_by_truncation(tmp_path) -> None:
+    """Hong Kong settles on a truncating grid. A running high of 29.6 with a verified
+    final of 29 is D = 0 on that grid; half-up would anchor at 30 and file the row in a
+    different cell than the server reads."""
+
+    day = "2026-08-25"
+    values = {h: (20.0 + h * 0.4, 15.0, "C") for h in range(22)}
+    values[21] = (29.6, 15.0, "C")
+    world = tmp_path / "world.db"
+    _make_world_db(
+        str(world), _hourly_rows("Hong Kong", day, "hko_hourly_accumulator", "HKO", values)
+    )
+    forecast = tmp_path / "forecast.db"
+    _make_forecast_db(str(forecast), [("Hong Kong", day, "high", 29.0, "C")])
+
+    records, _unit, _src = build_records(str(world), str(forecast))
+    last = [
+        r for r in records if r["city"] == "Hong Kong" and r["metric"] == "high" and r["h"] == 21
+    ]
+    assert len(last) == 1
+    assert last[0]["D"] == 0
+
+
+def _counts_artifact() -> dict:
+    from scripts.fit_day0_diurnal_residual import J_MAX, SCHEMA_VERSION
+
+    counts = [0] * (J_MAX + 1)
+    counts[0], counts[1], counts[2] = 50, 35, 15
+    return {
+        "schema_version": SCHEMA_VERSION, "fit_date": "2026-07-01", "j_max": J_MAX,
+        "peak_hours": {"Tel Aviv": 12.0}, "trough_hours": {}, "unit": {"Tel Aviv": "C"},
+        "pooled": {"high|C|2": counts}, "city": {}, "weights": {},
+    }
+
+
+def _synthetic_posteriors(w_true: float, n: int) -> list[dict]:
+    """Rows whose winner is drawn from the operator at ``w_true``, so the maximum
+    likelihood weight must recover it."""
+
+    import random
+
+    from scripts.fit_day0_diurnal_residual import DiurnalResidualNowcast, _city_grid
+
+    rng = random.Random(7)
+    bounds = [(None, 29.0), (30.0, 30.0), (31.0, 31.0), (32.0, None)]
+    q = [0.0, 0.9, 0.08, 0.02]
+    truth = DiurnalResidualNowcast(_counts_artifact()).mixture(
+        city="Tel Aviv", metric="high", unit="C", local_hour=10.0, running_extreme=30.0,
+        bin_bounds=bounds, round_to_grid=_city_grid("Tel Aviv"), weight=w_true,
+    ).apply(q)
+    rows = []
+    for _ in range(n):
+        u, acc, winner = rng.random(), 0.0, len(truth) - 1
+        for index, p in enumerate(truth):
+            acc += p
+            if u <= acc:
+                winner = index
+                break
+        rows.append({
+            "pid": 1, "city": "Tel Aviv", "date": "2026-08-01", "metric": "high", "unit": "C",
+            "local_hour": 10.0, "running": 30.0, "bounds": bounds, "q": q, "winner": winner,
+        })
+    return rows
+
+
+def test_weight_fit_recovers_the_generating_weight() -> None:
+    from scripts.fit_day0_diurnal_residual import fit_weight, weight_rows
+
+    cells = weight_rows(_synthetic_posteriors(0.4, 4000), counts=_counts_artifact())
+    assert list(cells) == ["high|2"]
+    assert fit_weight(cells["high|2"]) == pytest.approx(0.4, abs=0.06)
+    # A carrier that is already right earns no weight.
+    right = weight_rows(_synthetic_posteriors(0.0, 4000), counts=_counts_artifact())
+    assert fit_weight(right["high|2"]) < 0.05
+
+
+def test_artifact_weights_use_only_the_lagged_window(monkeypatch) -> None:
+    """Weights for fit_date T come from posteriors dated [T-31, T-2], scored on counts
+    before T-32; a cell under MIN_WEIGHT_ROWS serves no weight."""
+
+    import scripts.fit_day0_diurnal_residual as fit
+
+    captured = {}
+
+    def fake_rows(window, *, counts):
+        captured["dates"] = sorted({row["date"] for row in window})
+        captured["counts_fit_date"] = counts["fit_date"]
+        return {"high|2": [(0.5, 0.5)] * fit.MIN_WEIGHT_ROWS, "high|3": [(0.5, 0.5)] * 3}
+
+    monkeypatch.setattr(fit, "weight_rows", fake_rows)
+    records = [{"city": "Tel Aviv", "date": "2026-07-01", "metric": "high", "h": 10,
+                "cum": 30.0, "D": 1, "unit": "C"}]
+    posteriors = [{"date": d} for d in ("2026-07-30", "2026-07-31", "2026-08-29", "2026-08-30")]
+    artifact = fit.build_artifact(
+        records, unit={"Tel Aviv": "C"}, fit_date="2026-08-31", posteriors=posteriors
+    )
+
+    assert captured["dates"] == ["2026-07-31", "2026-08-29"]
+    assert captured["counts_fit_date"] == "2026-07-30"
+    assert set(artifact["weights"]) == {"high|2"}
+    assert artifact["fit_date"] == "2026-08-31"
+
+
+def test_pooled_counts_are_keyed_by_settlement_unit() -> None:
+    """A Fahrenheit degree and a Celsius degree are different residual grids; the
+    pooled histogram must never mix them."""
+
+    from scripts.fit_day0_diurnal_residual import build_counts
+
+    records = [
+        {"city": "Tel Aviv", "date": "2026-07-01", "metric": "high", "h": 10,
+         "cum": 30.0, "D": 1, "unit": "C"},
+        {"city": "Atlanta", "date": "2026-07-01", "metric": "high", "h": 10,
+         "cum": 90.0, "D": 3, "unit": "F"},
+    ]
+    counts = build_counts(records, unit={"Tel Aviv": "C", "Atlanta": "F"}, fit_date="2026-07-02")
+    assert counts["peak_hours"] == {"Tel Aviv": 10, "Atlanta": 10}
+    assert counts["pooled"]["high|C|0"][1] == 1 and sum(counts["pooled"]["high|C|0"]) == 1
+    assert counts["pooled"]["high|F|0"][3] == 1 and sum(counts["pooled"]["high|F|0"]) == 1

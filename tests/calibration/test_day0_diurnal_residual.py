@@ -1,30 +1,43 @@
 # Created: 2026-09-04
-# Last reused or audited: 2026-09-04
-# Authority basis: diurnal-residual study 2026-09-04 (REPORT.md §5) — the estimator's
-#   arithmetic is the deliverable, so the three shrink stages are checked against
-#   hand-computed values rather than against the implementation's own output.
-"""Contract tests for the Day0 diurnal-residual estimator and its fail-open loader."""
+# Last reused or audited: 2026-09-29
+# Authority basis: docs/authority/replacement_final_form_2026_06_09.md §1e "Day0
+#   diurnal-residual mixture"; the estimator and the operator are checked against
+#   hand-computed values, never against the implementation's own output.
+"""Contract tests for the Day0 diurnal-residual evidence served inside q."""
 
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from src.calibration import day0_diurnal_residual as mod
 from src.calibration.day0_diurnal_residual import (
-    GAP_MIN_ROWS,
+    APPLIED,
+    ARTIFACT_UNAVAILABLE,
+    INACTIVE_CELL,
     J_MAX,
+    MIN_WEIGHT_ROWS,
     PRIOR_WEIGHT,
     SCHEMA_VERSION,
+    Day0DiurnalMixture,
     DiurnalResidualNowcast,
-    gap_band_index,
-    load_day0_diurnal_residual_nowcast,
+    day0_diurnal_mixture,
+    k_bucket,
 )
 
 FIT_DATE = "2026-08-04"
 NOW = datetime(2026, 8, 5, 3, 0, tzinfo=timezone.utc)
+
+
+def _half_up(value: float) -> float:
+    return float(math.floor(value + 0.5))
+
+
+def _truncate(value: float) -> float:
+    return float(math.floor(value))
 
 
 def _counts(**by_j: int) -> list[int]:
@@ -38,234 +51,141 @@ def _artifact(**overrides: object) -> dict:
     base = {
         "schema_version": SCHEMA_VERSION,
         "fit_date": FIT_DATE,
+        "j_max": J_MAX,
         # Peak 12 => at local hour 10, k = 2.
         "peak_hours": {"Testville": 12.0},
         "trough_hours": {"Testville": 4.0},
         "unit": {"Testville": "C"},
-        # pooled (high, k=2): 60 at j=0, 30 at j=1, 10 at j=2 -> n=100.
-        "pooled": {"high|2": _counts(j0=60, j1=30, j2=10)},
-        "gap": {},
+        "pooled": {"high|C|2": _counts(j0=60, j1=30, j2=10)},
         "city": {},
+        "weights": {"high|2": {"w": 0.5, "n": MIN_WEIGHT_ROWS}},
     }
     base.update(overrides)
     return base
 
 
-def _pooled_base() -> list[float]:
-    """Hand-computed pooled stage: (count + 0.5) / (100 + 0.5 * 13)."""
-
+def _pooled_pmf() -> list[float]:
     denominator = 100 + 0.5 * (J_MAX + 1)
     raw = [60, 30, 10] + [0] * (J_MAX - 2)
     return [(count + 0.5) / denominator for count in raw]
 
 
-def test_pooled_only_cell_matches_hand_computed_laplace() -> None:
+def test_pooled_cell_is_keyed_by_settlement_unit() -> None:
     nowcast = DiurnalResidualNowcast(_artifact())
 
-    result = nowcast.pmf(city="Testville", metric="high", local_hour=10.0)
-
-    assert result is not None
-    pmf, basis = result
-    assert basis == "pooled"
-    expected = _pooled_base()
-    total = sum(expected)
-    for actual, want in zip(pmf, expected):
-        assert actual == pytest.approx(want / total, abs=1e-12)
-    # +0.5 Laplace: an unobserved residual keeps strictly positive mass.
-    assert pmf[J_MAX] > 0.0
-    assert sum(pmf) == pytest.approx(1.0, abs=1e-12)
+    pmf = nowcast.pmf(city="Testville", metric="high", unit="C", local_hour=10.0)
+    assert pmf is not None
+    for actual, want in zip(pmf, _pooled_pmf()):
+        assert actual == pytest.approx(want, abs=1e-12)
+    # The F histogram is a different physical grid; a C cell never serves it.
+    assert nowcast.pmf(city="Testville", metric="high", unit="F", local_hour=10.0) is None
 
 
-def test_pooled_plus_gap_cell_matches_hand_computed_prior_25() -> None:
-    # gap band for +1.0 is [0.5, 1.5) -> index 2; 40 rows, over GAP_MIN_ROWS.
-    assert gap_band_index(1.0) == 2
-    gap_counts = _counts(j0=10, j1=20, j2=10)
-    assert sum(gap_counts) == 40 >= GAP_MIN_ROWS
-    nowcast = DiurnalResidualNowcast(_artifact(gap={"high|2|2": gap_counts}))
-
-    result = nowcast.pmf(city="Testville", metric="high", local_hour=10.0, gap=1.0)
-
-    assert result is not None
-    pmf, basis = result
-    assert basis == "gap"
-    base = _pooled_base()
-    expected = [
-        (gap_counts[j] + PRIOR_WEIGHT * base[j]) / (40 + PRIOR_WEIGHT)
-        for j in range(J_MAX + 1)
-    ]
-    total = sum(expected)
-    for actual, want in zip(pmf, expected):
-        assert actual == pytest.approx(want / total, abs=1e-12)
-
-
-def test_pooled_plus_gap_plus_city_matches_hand_computed_two_stage_shrink() -> None:
-    gap_counts = _counts(j0=10, j1=20, j2=10)
+def test_city_cell_shrinks_toward_the_pooled_pmf_with_prior_25() -> None:
     city_counts = _counts(j0=5, j1=5)
-    nowcast = DiurnalResidualNowcast(
-        _artifact(
-            gap={"high|2|2": gap_counts},
-            city={"high|Testville|2": city_counts},
-        )
-    )
+    nowcast = DiurnalResidualNowcast(_artifact(city={"high|Testville|2": city_counts}))
 
-    result = nowcast.pmf(city="Testville", metric="high", local_hour=10.0, gap=1.0)
+    pmf = nowcast.pmf(city="Testville", metric="high", unit="C", local_hour=10.0)
 
-    assert result is not None
-    pmf, basis = result
-    assert basis == "city"
-    base = _pooled_base()
-    tilted = [
-        (gap_counts[j] + PRIOR_WEIGHT * base[j]) / (40 + PRIOR_WEIGHT)
-        for j in range(J_MAX + 1)
-    ]
-    expected = [
-        (city_counts[j] + PRIOR_WEIGHT * tilted[j]) / (10 + PRIOR_WEIGHT)
-        for j in range(J_MAX + 1)
-    ]
+    base = _pooled_pmf()
+    expected = [(city_counts[j] + PRIOR_WEIGHT * base[j]) / (10 + PRIOR_WEIGHT) for j in range(J_MAX + 1)]
     total = sum(expected)
     for actual, want in zip(pmf, expected):
         assert actual == pytest.approx(want / total, abs=1e-12)
 
 
-def test_thin_gap_cell_below_minimum_does_not_tilt() -> None:
-    thin = _counts(j0=1, j1=1)
-    assert sum(thin) < GAP_MIN_ROWS
-    nowcast = DiurnalResidualNowcast(_artifact(gap={"high|2|2": thin}))
-
-    with_gap = nowcast.pmf(city="Testville", metric="high", local_hour=10.0, gap=1.0)
-    without = nowcast.pmf(city="Testville", metric="high", local_hour=10.0)
-
-    assert with_gap is not None and without is not None
-    assert with_gap[1] == "pooled"
-    assert with_gap[0] == pytest.approx(without[0], abs=1e-12)
-
-
-def test_point_bin_probability_reads_the_offset_cell() -> None:
+def test_mixture_keeps_dead_bins_and_mixes_live_mass_by_hand() -> None:
     nowcast = DiurnalResidualNowcast(_artifact())
-    pmf, _ = nowcast.pmf(city="Testville", metric="high", local_hour=10.0)
-
-    # running 30.4 rounds to 30; the 32 degC point bin is rel=+2.
-    result = nowcast.bin_probability(
-        city="Testville",
-        metric="high",
-        local_hour=10.0,
-        running_extreme=30.4,
-        bin_low=32.0,
-        bin_high=32.0,
+    # Running 30.4 -> A = 30. Bins: <=28 (dead), 29 (dead), 30, 31, >=32.
+    bounds = [(None, 28.0), (29.0, 29.0), (30.0, 30.0), (31.0, 31.0), (32.0, None)]
+    mixture = nowcast.mixture(
+        city="Testville", metric="high", unit="C", local_hour=10.0,
+        running_extreme=30.4, bin_bounds=bounds, round_to_grid=_half_up,
     )
+    assert mixture is not None
+    assert mixture.dead == (True, True, False, False, False)
+    assert mixture.weight == 0.5
+    pmf = _pooled_pmf()
+    assert mixture.pi[2] == pytest.approx(pmf[0], abs=1e-12)
+    assert mixture.pi[3] == pytest.approx(pmf[1], abs=1e-12)
+    assert mixture.pi[4] == pytest.approx(sum(pmf[2:]), abs=1e-12)
 
-    assert result is not None
-    assert result[0] == pytest.approx(pmf[2], abs=1e-12)
-
-
-def test_range_bin_sums_its_cells_and_open_top_sums_the_tail() -> None:
-    nowcast = DiurnalResidualNowcast(_artifact())
-    pmf, _ = nowcast.pmf(city="Testville", metric="high", local_hour=10.0)
-
-    ranged = nowcast.bin_probability(
-        city="Testville",
-        metric="high",
-        local_hour=10.0,
-        running_extreme=30.0,
-        bin_low=31.0,
-        bin_high=32.0,
-    )
-    open_top = nowcast.bin_probability(
-        city="Testville",
-        metric="high",
-        local_hour=10.0,
-        running_extreme=30.0,
-        bin_low=33.0,
-        bin_high=None,
-    )
-
-    assert ranged is not None and open_top is not None
-    assert ranged[0] == pytest.approx(pmf[1] + pmf[2], abs=1e-12)
-    assert open_top[0] == pytest.approx(sum(pmf[3:]), abs=1e-12)
+    row = [0.1, 0.1, 0.7, 0.05, 0.05]
+    mixed = mixture.apply(row)
+    # Dead bins untouched; live bins: (1-w) r + w (1-m) pi with m = 0.2.
+    assert mixed[:2] == [0.1, 0.1]
+    for index in (2, 3, 4):
+        assert mixed[index] == pytest.approx(0.5 * row[index] + 0.5 * 0.8 * mixture.pi[index], abs=1e-12)
+    assert sum(mixed) == pytest.approx(1.0, abs=1e-12)
 
 
-def test_bin_already_passed_by_the_absorbing_direction_gets_zero() -> None:
-    nowcast = DiurnalResidualNowcast(_artifact())
-
-    # HIGH cannot settle BELOW its running maximum.
-    result = nowcast.bin_probability(
-        city="Testville",
-        metric="high",
-        local_hour=10.0,
-        running_extreme=30.0,
-        bin_low=28.0,
-        bin_high=28.0,
-    )
-
-    assert result is not None
-    assert result[0] == 0.0
-
-
-def test_low_metric_reverses_the_offset_direction() -> None:
-    artifact = _artifact(pooled={"low|2": _counts(j0=60, j1=30, j2=10)})
+def test_low_metric_reverses_direction_and_dead_side() -> None:
+    artifact = _artifact(pooled={"low|C|2": _counts(j0=60, j1=30, j2=10)})
     nowcast = DiurnalResidualNowcast(artifact)
-    # trough 4 => local hour 2 gives k = 2.
-    pmf, _ = nowcast.pmf(city="Testville", metric="low", local_hour=2.0)
-
-    below = nowcast.bin_probability(
-        city="Testville",
-        metric="low",
-        local_hour=2.0,
-        running_extreme=10.0,
-        bin_low=8.0,
-        bin_high=8.0,
+    # trough 4 => local hour 2 gives k = 2. LOW cannot settle ABOVE its running min.
+    bounds = [(None, 8.0), (9.0, 9.0), (10.0, 10.0), (11.0, None)]
+    mixture = nowcast.mixture(
+        city="Testville", metric="low", unit="C", local_hour=2.0,
+        running_extreme=10.0, bin_bounds=bounds, round_to_grid=_half_up,
     )
-    above = nowcast.bin_probability(
-        city="Testville",
-        metric="low",
-        local_hour=2.0,
-        running_extreme=10.0,
-        bin_low=12.0,
-        bin_high=12.0,
-    )
-
-    assert below is not None and above is not None
-    assert below[0] == pytest.approx(pmf[2], abs=1e-12)
-    assert above[0] == 0.0
+    assert mixture is not None
+    assert mixture.dead == (False, False, False, True)
+    pmf = _pooled_pmf()
+    assert mixture.pi[2] == pytest.approx(pmf[0], abs=1e-12)
+    assert mixture.pi[1] == pytest.approx(pmf[1], abs=1e-12)
+    assert mixture.pi[0] == pytest.approx(sum(pmf[2:]), abs=1e-12)
 
 
-def test_buy_no_held_probability_is_the_complement() -> None:
+def test_city_grid_places_the_anchor_hong_kong_truncates() -> None:
     nowcast = DiurnalResidualNowcast(_artifact())
+    bounds = [(None, 29.0), (30.0, 30.0), (31.0, None)]
+    kwargs = dict(city="Testville", metric="high", unit="C", local_hour=10.0,
+                  running_extreme=29.6, bin_bounds=bounds)
+    half_up = nowcast.mixture(round_to_grid=_half_up, **kwargs)
+    truncate = nowcast.mixture(round_to_grid=_truncate, **kwargs)
+    # Half-up: A = 30, bin <=29 is dead. Truncate: A = 29, nothing is dead yet.
+    assert half_up.anchor == 30.0 and half_up.dead == (True, False, False)
+    assert truncate.anchor == 29.0 and truncate.dead == (False, False, False)
 
-    yes = nowcast.held_probability(
-        city="Testville",
-        metric="high",
-        direction="buy_yes",
-        local_hour=10.0,
-        running_extreme=30.0,
-        bin_low=30.0,
-        bin_high=30.0,
+
+def test_zero_weight_is_the_identity_and_unfitted_cell_serves_zero() -> None:
+    nowcast = DiurnalResidualNowcast(_artifact(weights={}))
+    mixture = nowcast.mixture(
+        city="Testville", metric="high", unit="C", local_hour=10.0, running_extreme=30.0,
+        bin_bounds=[(None, 29.0), (30.0, 30.0), (31.0, None)], round_to_grid=_half_up,
     )
-    no = nowcast.held_probability(
-        city="Testville",
-        metric="high",
-        direction="buy_no",
-        local_hour=10.0,
-        running_extreme=30.0,
-        bin_low=30.0,
-        bin_high=30.0,
-    )
-
-    assert yes is not None and no is not None
-    assert yes.q_held + no.q_held == pytest.approx(1.0, abs=1e-12)
-    assert yes.fit_date == FIT_DATE
-    assert yes.basis == "pooled"
+    assert mixture.weight == 0.0 and mixture.status == INACTIVE_CELL
+    row = [0.2, 0.5, 0.3]
+    assert mixture.apply(row) == row
 
 
-def test_unknown_city_and_empty_cell_return_none() -> None:
+def test_mixture_round_trips_through_its_payload() -> None:
     nowcast = DiurnalResidualNowcast(_artifact())
+    mixture = nowcast.mixture(
+        city="Testville", metric="high", unit="C", local_hour=10.0, running_extreme=30.0,
+        bin_bounds=[(None, 29.0), (30.0, 30.0), (31.0, None)], round_to_grid=_half_up,
+    )
+    restored = Day0DiurnalMixture.from_payload(json.loads(json.dumps(mixture.to_payload())))
+    assert restored == mixture
+    assert restored.identity() == mixture.identity()
 
-    assert nowcast.pmf(city="Nowhere", metric="high", local_hour=10.0) is None
-    # k = 12 - 3 = 9 has no pooled cell in this artifact.
-    assert nowcast.pmf(city="Testville", metric="high", local_hour=3.0) is None
+
+def test_apply_rejects_a_row_of_the_wrong_shape() -> None:
+    mixture = Day0DiurnalMixture(0.5, (0.5, 0.5), (False, False), 2, 30.0, FIT_DATE, "x")
+    with pytest.raises(ValueError, match="SHAPE"):
+        mixture.apply([1.0])
 
 
-# ----------------------------- loader contract ------------------------------
+def test_k_bucket_cells() -> None:
+    assert [k_bucket(k) for k in (-9, -3, 0, 3, 4, 7, 8, 15)] == [-3, -3, 0, 3, 4, 4, 8, 8]
+
+
+def test_artifact_weight_cell_below_minimum_rows_is_refused() -> None:
+    with pytest.raises(ValueError):
+        DiurnalResidualNowcast(_artifact(weights={"high|2": {"w": 0.4, "n": MIN_WEIGHT_ROWS - 1}}))
+
+
+# ----------------------------- served lookup ------------------------------
 
 
 @pytest.fixture(autouse=True)
@@ -277,68 +197,42 @@ def _clear_cache():
 
 def _install(tmp_path, monkeypatch, artifact: object) -> None:
     path = tmp_path / mod.ARTIFACT_FILENAME
-    if isinstance(artifact, str):
-        path.write_text(artifact, encoding="utf-8")
-    else:
-        path.write_text(json.dumps(artifact), encoding="utf-8")
+    path.write_text(artifact if isinstance(artifact, str) else json.dumps(artifact), encoding="utf-8")
     monkeypatch.setattr(mod, "artifact_path", lambda: path)
 
 
-def test_loader_returns_none_when_artifact_missing(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(mod, "artifact_path", lambda: tmp_path / "absent.json")
-
-    assert load_day0_diurnal_residual_nowcast(now=NOW) is None
-
-
-def test_loader_returns_none_on_malformed_artifact(tmp_path, monkeypatch) -> None:
-    _install(tmp_path, monkeypatch, "{not json")
-
-    assert load_day0_diurnal_residual_nowcast(now=NOW) is None
-
-
-def test_loader_returns_none_on_schema_mismatch(tmp_path, monkeypatch) -> None:
-    _install(tmp_path, monkeypatch, _artifact(schema_version=SCHEMA_VERSION + 1))
-
-    assert load_day0_diurnal_residual_nowcast(now=NOW) is None
-
-
-def test_loader_serves_a_fresh_artifact(tmp_path, monkeypatch) -> None:
-    _install(tmp_path, monkeypatch, _artifact())
-
-    nowcast = load_day0_diurnal_residual_nowcast(now=NOW)
-
-    assert nowcast is not None
-    assert nowcast.fit_date == FIT_DATE
-
-
-def test_loader_returns_none_past_the_freshness_horizon(tmp_path, monkeypatch) -> None:
-    _install(tmp_path, monkeypatch, _artifact())
-    stale = NOW + timedelta(days=mod.MAX_ARTIFACT_AGE_DAYS + 1)
-
-    assert load_day0_diurnal_residual_nowcast(now=stale) is None
-    # The boundary itself still serves — the horizon is inclusive.
-    boundary = datetime.fromisoformat(FIT_DATE).replace(tzinfo=timezone.utc) + timedelta(
-        days=mod.MAX_ARTIFACT_AGE_DAYS
+def _served(decision_time: datetime = NOW):
+    # Testville is served at UTC local time; 10:00 local => k = 2.
+    return day0_diurnal_mixture(
+        city="Testville", metric="high", unit="C",
+        decision_time=decision_time.replace(hour=10),
+        timezone_name="UTC", running_extreme=30.0,
+        bin_bounds=[(None, 29.0), (30.0, 30.0), (31.0, None)], round_to_grid=_half_up,
     )
-    assert load_day0_diurnal_residual_nowcast(now=boundary) is not None
 
 
-def test_loader_picks_up_a_rewritten_artifact_without_restart(
-    tmp_path, monkeypatch
-) -> None:
-    path = tmp_path / mod.ARTIFACT_FILENAME
-    monkeypatch.setattr(mod, "artifact_path", lambda: path)
-    path.write_text(json.dumps(_artifact()), encoding="utf-8")
-    first = load_day0_diurnal_residual_nowcast(now=NOW)
-    assert first is not None and first.fit_date == FIT_DATE
+def test_served_lookup_applies_a_fresh_artifact(tmp_path, monkeypatch) -> None:
+    _install(tmp_path, monkeypatch, _artifact())
+    mixture, provenance = _served()
+    assert mixture is not None and provenance["day0_diurnal_mixture_status"] == APPLIED
+    assert provenance["day0_diurnal_mixture_artifact"].startswith(FIT_DATE + ":")
 
-    refit = _artifact(fit_date="2026-08-05")
-    path.write_text(json.dumps(refit), encoding="utf-8")
-    # Force a distinct mtime so the cache key genuinely changes.
-    import os
 
-    stat = path.stat()
-    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
-
-    second = load_day0_diurnal_residual_nowcast(now=NOW + timedelta(days=1))
-    assert second is not None and second.fit_date == "2026-08-05"
+@pytest.mark.parametrize(
+    "setup",
+    ["missing", "malformed", "schema", "stale", "future"],
+)
+def test_served_lookup_falls_back_to_the_carrier_q(tmp_path, monkeypatch, setup) -> None:
+    when = NOW
+    if setup == "missing":
+        monkeypatch.setattr(mod, "artifact_path", lambda: tmp_path / "absent.json")
+    elif setup == "malformed":
+        _install(tmp_path, monkeypatch, "{not json")
+    elif setup == "schema":
+        _install(tmp_path, monkeypatch, _artifact(schema_version=SCHEMA_VERSION - 1))
+    else:
+        _install(tmp_path, monkeypatch, _artifact())
+        when = NOW + timedelta(days=mod.MAX_ARTIFACT_AGE_DAYS + 1) if setup == "stale" else NOW - timedelta(days=3)
+    mixture, provenance = _served(when)
+    assert mixture is None
+    assert provenance == {"day0_diurnal_mixture_status": ARTIFACT_UNAVAILABLE}
