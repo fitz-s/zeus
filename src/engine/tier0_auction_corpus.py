@@ -282,7 +282,18 @@ def _cut_row(
         datetime.now(timezone.utc).isoformat(),
         cancel_source,
         cancel_stage,
+        None,
+        None,
     )
+
+
+def selected_cut_id(selection_epoch_identity: str, decision_at_utc: datetime) -> str:
+    """The immutable id of the cut an evaluated selection writes."""
+
+    decision_iso = decision_at_utc.astimezone(timezone.utc).isoformat()
+    return hashlib.sha256(
+        _canonical(["tier0_cut_v1", selection_epoch_identity, decision_iso])
+    ).hexdigest()
 
 
 def build_cut_corpus(
@@ -407,9 +418,7 @@ def build_cut_corpus(
     )
     return CutCorpus(
         cut_row=_cut_row(
-            cut_id=hashlib.sha256(
-                _canonical(["tier0_cut_v1", selection_epoch_identity, decision_iso])
-            ).hexdigest(),
+            cut_id=selected_cut_id(selection_epoch_identity, decision_at_utc),
             selection_epoch_identity=selection_epoch_identity,
             status=cut_status(
                 winner_candidate_id=winner_candidate_id,
@@ -509,7 +518,7 @@ class PendingCut:
     it, so a queued cut holds compact bytes, not witness matrices.
     """
 
-    __slots__ = ("_build", "_rows", "decision_log_id")
+    __slots__ = ("_build", "_rows", "decision_log_id", "actuation")
 
     def __init__(
         self,
@@ -519,6 +528,8 @@ class PendingCut:
         self._build: Callable[[], tuple[CutCorpus, CandidateRows]] | None = build
         self._rows: tuple[CutCorpus, CandidateRows] | None = None
         self.decision_log_id = decision_log_id
+        # (outcome, reason) of a SELECTED cut's winner, set before the flush.
+        self.actuation: tuple[str, str | None] | None = None
 
     def rows(self) -> tuple[CutCorpus, CandidateRows]:
         if self._rows is None:
@@ -549,6 +560,26 @@ def queue_cut(db_key: str, cut: PendingCut) -> None:
             del queue[0]
             _OVERFLOW[db_key] = _OVERFLOW.get(db_key, 0) + 1
         queue.append(cut)
+
+
+def record_actuation(
+    db_key: str,
+    decision_log_id: int,
+    outcome: str,
+    reason: str | None,
+) -> bool:
+    """Attach a SELECTED cut's actuation outcome to its queued row.
+
+    Returns False when no queued cut carries ``decision_log_id`` (dropped by
+    overflow, or already written); the caller logs that loss.
+    """
+
+    with _PENDING_LOCK:
+        for cut in _PENDING.get(db_key, ()):
+            if cut.decision_log_id == decision_log_id:
+                cut.actuation = (outcome, reason)
+                return True
+    return False
 
 
 def pending_cuts(db_key: str) -> tuple[tuple[PendingCut, ...], int]:
@@ -582,7 +613,7 @@ _CUT_COLUMNS = (
     "selection_policy_identity", "full_scope_family_count", "eligible_family_count",
     "candidate_count", "winner_candidate_id", "decision_log_id",
     "payload_encoding", "payload_sha256", "payload", "created_at",
-    "cancel_source", "cancel_stage",
+    "cancel_source", "cancel_stage", "actuation_outcome", "actuation_reason",
 )
 _TOPOLOGY_COLUMNS = (
     "topology_id", "family_key", "city", "target_date", "metric", "native_unit",
@@ -637,6 +668,7 @@ def cut_write_units(
     *,
     decision_log_id: int | None,
     max_new_rows: int,
+    actuation: tuple[str, str | None] | None = None,
 ) -> list[Callable[[], None]]:
     """Split one cut into writes of at most ``max_new_rows`` new content rows.
 
@@ -654,7 +686,9 @@ def cut_write_units(
         chunk = families[offset : offset + max_new_rows]
         units.append(lambda chunk=chunk: _write_family_content(conn, chunk))
     units.append(
-        lambda: write_cut(conn, corpus, decision_log_id=decision_log_id)
+        lambda: write_cut(
+            conn, corpus, decision_log_id=decision_log_id, actuation=actuation
+        )
     )
     return units
 
@@ -689,15 +723,20 @@ def write_cut(
     corpus: CutCorpus,
     *,
     decision_log_id: int | None,
+    actuation: tuple[str, str | None] | None = None,
 ) -> None:
     """Write one cut inside the caller's open trade-DB transaction.
 
-    Idempotent: an identical retry of a cut already written is a no-op, and a
-    conflicting payload for the same cut id raises.
+    ``actuation`` is a SELECTED cut's (outcome, reason): SUBMITTED, or why its
+    winner reached no venue order. Idempotent: an identical retry of a cut
+    already written is a no-op, and a conflicting payload for the same cut id
+    raises.
     """
 
     row = dict(zip(_CUT_COLUMNS, corpus.cut_row))
     row["decision_log_id"] = decision_log_id
+    if actuation is not None:
+        row["actuation_outcome"], row["actuation_reason"] = actuation
     stored = conn.execute(
         "SELECT status, payload_sha256 FROM tier0_auction_cut WHERE cut_id = ?",
         (row["cut_id"],),

@@ -4139,6 +4139,7 @@ def _flush_tier0_learning_corpus(
                 cut_corpus,
                 decision_log_id=cut.decision_log_id,
                 max_new_rows=_TIER0_CORPUS_ROWS_PER_TRANSACTION,
+                actuation=cut.actuation,
             )
             # The last unit publishes the cut; candidate rows ride with it.
             last = units.pop()
@@ -8408,6 +8409,11 @@ def process_current_global_batch(
     # True once the current selection attempt's receipt (and its corpus cut
     # row) committed; a reject before that records an unreceipted cut instead.
     cut_receipt_written = False
+    # The SELECTED cut whose winner has no recorded outcome yet, as
+    # (decision_log_id, cut_id). SCOPE: this cut (a recursive re-auction owns
+    # its own). DRAIN: settle_selected_cut writes the outcome onto the queued
+    # corpus row; the outer finally settles any exit that did not.
+    open_selected_cut: list[tuple[int, str]] = []
     batch_started = time.monotonic()
     stage_started = batch_started
     # Cancel attribution. SCOPE: this cut. The first probe that cancels,
@@ -8432,6 +8438,40 @@ def process_current_global_batch(
             record_consumed_scope(families, consumed_at=consumed_at)
         except Exception as exc:  # noqa: BLE001 - a hint ledger never changes a cut
             _LOG.warning("consumed-scope watermark not recorded: %r", exc)
+
+    def settle_selected_cut(outcome: str, reason: str | None) -> str | None:
+        """Record the open SELECTED cut's actuation outcome; return its cut_id."""
+
+        if not open_selected_cut:
+            return None
+        decision_log_id, cut_id = open_selected_cut.pop()
+        from src.engine import tier0_auction_corpus as corpus
+
+        try:
+            recorded = corpus.record_actuation(
+                _decision_log_connection_key(trade_conn),
+                decision_log_id,
+                outcome,
+                reason,
+            )
+        except Exception as exc:  # noqa: BLE001 - evidence never costs the batch
+            _LOG.error(
+                "tier0 selected cut outcome not recorded: cut_id=%s %s: %s",
+                cut_id,
+                type(exc).__name__,
+                exc,
+            )
+            return cut_id
+        if not recorded:
+            _LOG.warning(
+                "tier0 selected cut outcome not recorded (cut no longer queued): "
+                "cut_id=%s decision_log_id=%s outcome=%s reason=%s",
+                cut_id,
+                decision_log_id,
+                outcome,
+                reason,
+            )
+        return cut_id
 
     def attribute_cancel(source: str, stage: str) -> None:
         if not cancel_attribution:
@@ -8908,6 +8948,7 @@ def process_current_global_batch(
         )
         if terminal_cut_completed:
             publish_consumed_scope()
+        settle_selected_cut("CUT_REJECTED", reason)
         cancel_pair: tuple[str, str] | None = None
         if reason in _CANCELLED_CUT_REASONS:
             cancel_pair = (
@@ -10440,6 +10481,24 @@ def process_current_global_batch(
                 _receipt_stages_end()
             last_selection_receipt_row_id = receipt_row_id
             cut_receipt_written = True
+            if (
+                isinstance(trade_conn, sqlite3.Connection)
+                and receipt_row_id is not None
+                and selected.decision.candidate is not None
+            ):
+                from src.engine import tier0_auction_corpus as corpus
+
+                # A re-selection supersedes a SELECTED cut that no preflight
+                # outcome settled; the new cut's winner is what actuates.
+                settle_selected_cut("RESELECTED", None)
+                open_selected_cut.append(
+                    (
+                        int(receipt_row_id),
+                        corpus.selected_cut_id(
+                            attempt_selection_epoch_identity, selection_at
+                        ),
+                    )
+                )
             # stages= attributes the elapsed_s this line already reported. The
             # decomposition (2026-09-17) accounted for only ~138 ms of a 516 ms
             # median and left ~73% in these builders, so the residual is
@@ -10908,6 +10967,10 @@ def process_current_global_batch(
                     trade_conn.commit()
                 if preflight.status == "STABLE":
                     break
+                settle_selected_cut(
+                    "PREFLIGHT_REJECTED",
+                    f"{preflight.status}:{preflight.reason or ''}",
+                )
                 wealth_reauction_audit = None
                 if preflight.status == "WEALTH_SUPERSEDED":
                     if wealth_reauction_count >= _WEALTH_REAUCTION_MAX_ATTEMPTS:
@@ -11542,11 +11605,26 @@ def process_current_global_batch(
         venue_delta = venue_submit_count() - before_calls
         if venue_delta not in {0, 1}:
             raise RuntimeError("GLOBAL_ACTUATION_VENUE_COUNT_INVALID")
-        if venue_delta == 0 or not winner_receipt.submitted:
+        if venue_delta == 1 and winner_receipt.submitted:
+            settle_selected_cut("SUBMITTED", None)
+        else:
+            no_order_cut_id = settle_selected_cut(
+                "NO_VENUE_ORDER",
+                ":".join(
+                    part
+                    for part in (
+                        str(getattr(winner_receipt, "side_effect_status", "") or ""),
+                        str(getattr(winner_receipt, "reason", "") or ""),
+                    )
+                    if part
+                )
+                or f"venue_delta={venue_delta}",
+            )
             _LOG.warning(
                 "global winner actuation produced no venue order: "
-                "event=%s candidate=%s actuation=%s status=%s reason=%s "
+                "cut_id=%s event=%s candidate=%s actuation=%s status=%s reason=%s "
                 "proof_accepted=%s venue_call_started=%s venue_ack_received=%s",
+                no_order_cut_id,
                 winner_id,
                 str(
                     getattr(selected.decision.candidate, "candidate_id", "") or ""
@@ -11667,6 +11745,7 @@ def process_current_global_batch(
                 venue_ack_received=False,
                 decision_proof_bundle=prior_bundle,
             )
+            settle_selected_cut("POST_SUBMIT_UNKNOWN", unknown_receipt.reason)
             receipts = dict(prepared_loser_receipts)
             receipts[winner.event_id] = unknown_receipt
             return GlobalBatchSubmitResult(
@@ -11682,6 +11761,15 @@ def process_current_global_batch(
         return reject(f"GLOBAL_AUCTION_FAILED:{type(exc).__name__}:{exc}")
     finally:
         release_selection_snapshot()
+        # Antibody: every exit from the actuation path settles its SELECTED
+        # cut. One that reaches here unsettled is a defect, named loudly.
+        unsettled_cut_id = settle_selected_cut("UNRECORDED_EXIT", None)
+        if unsettled_cut_id is not None:
+            _LOG.error(
+                "global auction SELECTED cut exited without an actuation "
+                "outcome: cut_id=%s",
+                unsettled_cut_id,
+            )
         alpha_shadow_events = tuple(pending_alpha_shadow_events.values())
         recorded_alpha_shadow_ids = _record_market_relative_alpha_shadows(
             world_conn,

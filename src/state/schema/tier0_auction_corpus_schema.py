@@ -157,6 +157,14 @@ _DDL = (
 _CUT_COLUMN_MIGRATIONS = {
     "cancel_source": "ALTER TABLE tier0_auction_cut ADD COLUMN cancel_source TEXT",
     "cancel_stage": "ALTER TABLE tier0_auction_cut ADD COLUMN cancel_stage TEXT",
+    # A SELECTED cut records what its winner became: SUBMITTED, or the outcome
+    # and reason it reached no venue order. NULL for every non-SELECTED cut.
+    "actuation_outcome": (
+        "ALTER TABLE tier0_auction_cut ADD COLUMN actuation_outcome TEXT"
+    ),
+    "actuation_reason": (
+        "ALTER TABLE tier0_auction_cut ADD COLUMN actuation_reason TEXT"
+    ),
 }
 
 
