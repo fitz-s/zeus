@@ -361,7 +361,8 @@ def test_physical_manifest_redacts_request_credentials(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("metric", ("high", "low"))
-def test_same_issued_archive_appends_proof_without_rewriting_legacy_raw(tmp_path, monkeypatch, metric):
+@pytest.mark.parametrize("latest_location_damage", (None, "missing", "foreign_claim", "duplicate"))
+def test_same_issued_archive_appends_proof_without_rewriting_legacy_raw(tmp_path, monkeypatch, metric, latest_location_damage):
     from src.data import bayes_precision_fusion_download as dl
     from src.data.replacement_current_value_serving import read_current_instrument_values
     conn, target, cycle = _current_rows(tmp_path, monkeypatch, metric=metric)
@@ -408,6 +409,21 @@ def test_same_issued_archive_appends_proof_without_rewriting_legacy_raw(tmp_path
     _persist_exact_provider_body(conn,tmp_path,city=target.city,metric=metric,target_date=target.target_date,
         model="icon_global",cycle=cycle.isoformat(),captured=cycle.replace(hour=10).isoformat(),
         value=21.0,expected_written=0)
+    if latest_location_damage is not None:
+        artifact_id, metadata_json = conn.execute("SELECT artifact_id,artifact_metadata_json FROM raw_forecast_artifacts "
+            "WHERE product_id LIKE '%icon_global%' ORDER BY artifact_id DESC LIMIT 1").fetchone()
+        metadata = json.loads(metadata_json)
+        locations = metadata["physical_response"]["locations"]
+        if latest_location_damage == "missing":
+            metadata["physical_response"]["locations"] = []
+        elif latest_location_damage == "foreign_claim":
+            locations[0]["requested_latitude"] = 0.0
+            locations[0]["requested_longitude"] = 0.0
+            locations[0]["timezone"] = "UTC"
+        else:
+            metadata["physical_response"]["locations"] = locations * 2
+        conn.execute("UPDATE raw_forecast_artifacts SET artifact_metadata_json=? WHERE artifact_id=?",
+            (json.dumps(metadata), artifact_id))
     conn.commit()
     # Latest same-family bytes differ from immutable value: do not hide this
     # mismatch behind the older valid derived witness.

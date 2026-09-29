@@ -260,11 +260,16 @@ def _product_identity_select(schema: CurrentValueServingSchema, *, decision_iso:
                 AND datetime(a.captured_at)<=datetime({cutoff})
                 AND datetime(a.source_available_at)<=datetime({cutoff})
                 AND datetime(a.recorded_at)<=datetime({cutoff})
-                AND EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(a.artifact_metadata_json)
-                    THEN json_extract(a.artifact_metadata_json,'$.physical_response.locations') END) loc
-                    WHERE json_extract(loc.value,'$.requested_latitude')=raw_model_forecasts.latitude_requested
-                      AND json_extract(loc.value,'$.requested_longitude')=raw_model_forecasts.longitude_requested
-                      AND json_extract(loc.value,'$.timezone')=raw_model_forecasts.timezone_requested))"""
+                AND EXISTS (SELECT 1 FROM
+                    json_each(replace(json_array(CAST(json_extract(CASE WHEN json_valid(a.request_params_json)
+                        THEN a.request_params_json ELSE '{{}}' END,'$.latitude') AS TEXT)), ',', '\",\"')) lat
+                    JOIN json_each(replace(json_array(CAST(json_extract(CASE WHEN json_valid(a.request_params_json)
+                        THEN a.request_params_json ELSE '{{}}' END,'$.longitude') AS TEXT)), ',', '\",\"')) lon ON lon.key=lat.key
+                    JOIN json_each(replace(json_array(CAST(json_extract(CASE WHEN json_valid(a.request_params_json)
+                        THEN a.request_params_json ELSE '{{}}' END,'$.timezone') AS TEXT)), ',', '\",\"')) tz ON tz.key=lat.key
+                    WHERE CAST(lat.value AS REAL)=raw_model_forecasts.latitude_requested
+                      AND CAST(lon.value AS REAL)=raw_model_forecasts.longitude_requested
+                      AND tz.value=raw_model_forecasts.timezone_requested))"""
         artifact = f"""(SELECT json_object('artifact_id',a.artifact_id,'source_id',a.source_id,'product_id',a.product_id,
             'source_cycle_time',a.source_cycle_time,'captured_at',a.captured_at,
             'source_available_at',a.source_available_at,'recorded_at',a.recorded_at,'data_version',a.data_version,
@@ -620,6 +625,8 @@ def _physical_response_has_authority(row: Mapping[str, object]) -> bool:
             return False
         index = indices[0]
         geometry = metadata["locations"][index]
+        if not math.isclose(float(geometry["requested_latitude"]), float(row["latitude_requested"]), abs_tol=1e-6) or not math.isclose(float(geometry["requested_longitude"]), float(row["longitude_requested"]), abs_tol=1e-6) or geometry["timezone"] != row["timezone_requested"]:
+            return False
         for key, expected in (("latitude", row["latitude_requested"]), ("longitude", row["longitude_requested"])):
             if not math.isclose(float(str(params[key]).split(",")[index]), float(expected), abs_tol=1e-6):
                 return False
@@ -632,6 +639,9 @@ def _physical_response_has_authority(row: Mapping[str, object]) -> bool:
         if len(body) != artifact["byte_size"] or hashlib.sha256(body).hexdigest() != artifact["sha256"]:
             return False
         decoded = json.loads(body)
+        payloads = [decoded] if isinstance(decoded, dict) else decoded
+        if not isinstance(payloads, list) or len(metadata["locations"]) != len(payloads) or len(str(params["latitude"]).split(",")) != len(payloads):
+            return False
         payload = decoded if isinstance(decoded, dict) and index == 0 else decoded[index]
         if payload["timezone"] != row["timezone_requested"]:
             return False
