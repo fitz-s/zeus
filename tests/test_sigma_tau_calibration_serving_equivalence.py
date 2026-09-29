@@ -1,27 +1,14 @@
 # Created: 2026-07-28
-# Last reused/audited: 2026-07-28 (FIX 1/FIX 6/FIX 7 deep-review corrections)
-# Lifecycle: created=2026-07-28; last_reviewed=2026-07-28; last_reused=2026-07-28
-# Purpose: Full-pipeline safety-property antibody for the sigma-tau calibration wiring -- proves
-#   the historical path is untouched and the current-evidence path is byte-identical to today when
-#   the artifact is absent, at the FULL materialize_replacement_forecast_live() level.
-# Reuse: Re-run whenever the artifact schema (authority/schema_version/tau_clock/bucket keys) or the
-#   materializer's provenance dict shape changes; the fixtures here must be kept in sync with both.
-# Authority basis: docs/operations/current/sigma_tau_calibration/PLAN.md. Proves the two safety
-#   properties the sigma-tau calibration wiring must hold at the FULL materializer pipeline level
-#   (not just the pure-function loader antibodies in test_sigma_tau_calibration_lookup.py):
-#     (a) the HISTORICAL (non-current-evidence) path is COMPLETELY UNCHANGED by this artifact's
-#         presence -- it never reads state/sigma_tau_calibration.json;
-#     (b) the CURRENT-EVIDENCE path with NO artifact present is BYTE-IDENTICAL (FULL provenance
-#         dict, not selected fields, plus the full q/q_lcb/q_ucb vectors) to the prior hardcoded
-#         neutral (1.0, 0.0, 0.0), and WITH a fitted+gate-passed artifact present, the applied k/
-#         artifact-hash actually reach the persisted posterior's provenance end-to-end.
-#   FIX 7: sigma_tau_artifact_hash is OMITTED (not merely null) from the inert provenance dict, so
-#   the equivalence claim is a literal dict-key-set equality, not "same values, extra null key".
-"""Serving-equivalence antibodies for the sigma-tau calibration wiring."""
+# Last audited: 2026-09-29
+# Purpose: Current-evidence q/bounds use the declared physical sigma and center.
+# Fitted historical calibration remains diagnostic and cannot create live authority.
+"""Current-shape serving equivalence and independent settlement-integral antibodies."""
 from __future__ import annotations
 
 import hashlib
 import json
+import math
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -29,8 +16,6 @@ import pytest
 import src.config as cfg
 import src.data.replacement_forecast_materializer as materializer_mod
 from src.data.replacement_forecast_materializer import (
-    _BayesPrecisionFusionFusionOverride,
-    _current_evidence_shape_from_values,
     materialize_replacement_forecast_live,
 )
 from tests.test_replacement_forecast_materializer import (
@@ -38,52 +23,16 @@ from tests.test_replacement_forecast_materializer import (
     _dt,
     _install_live_fusion,
     _request,
+    _TemperatureBin,
+    _fixed_center_debias,
+    _materializer_unit_source_surface,
+    _current_baseline_data_version,
 )
 
 
-def _current_shape_members() -> tuple[float, ...]:
-    return tuple(25.0 + 0.3 * ((i % 7) - 3) for i in range(24))
-
-
 def _install_current_evidence_fusion(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Same fixed override as _install_live_fusion, but with current_evidence_shape POPULATED --
-    routes materialization through the `_current_shape is not None` (Day0/current-evidence) branch
-    this change wires into the new sigma-tau lookup."""
-    shape = _current_evidence_shape_from_values(
-        snapshot_id=42,
-        source_cycle_time="2026-06-06T00:00:00+00:00",
-        source_available_at="2026-06-06T02:00:00+00:00",
-        members_c=_current_shape_members(),
-        provider_values_c={"ecmwf_ifs": 24.8, "icon_global": 25.2},
-        provider_weights={"ecmwf_ifs": 0.5, "icon_global": 0.5},
-        center_c=25.0,
-        provider_cycles={
-            "ecmwf_ifs": "2026-06-06T00:00:00+00:00",
-            "icon_global": "2026-06-06T00:00:00+00:00",
-        },
-    )
-    override = _BayesPrecisionFusionFusionOverride(
-        anchor_value_c=25.0,
-        anchor_sigma_c=0.35,
-        method="test_bayes_precision_fusion",
-        used_models=("ecmwf_ifs9", "gfs", "icon", "gem", "jma"),
-        model_set_hash="test-model-set",
-        resolution_mix_hash="test-resolution-mix",
-        lead_bucket="d1",
-        dropped_models=(),
-        excluded_regionals=(),
-        dropped_aliases=(),
-        raw_model_forecast_ids=(101, 102, 103),
-        anchor_bridge={"test": True},
-        predictive_sigma_c=2.0,
-        decorrelated_providers_complete=True,
-        decorrelated_providers_served=5,
-        decorrelated_providers_expected=5,
-        current_value_serving={"ecmwf_ifs9": {"served_via": "single_runs"}},
-        current_evidence_shape=shape.as_payload(),
-        current_evidence_members_c=shape.members_c,
-    )
-    monkeypatch.setattr(materializer_mod, "_replacement_bayes_precision_fusion_override", lambda *args, **kwargs: override)
+    # Downstream write seam; real shape/geometry constructors, no authority mock.
+    _install_live_fusion(monkeypatch, shape_cycle_time=_dt(6))
 
 
 def _full_row(conn) -> dict:
@@ -152,35 +101,22 @@ _EXPECTED_APPLIED_K = 1.25 * 0.95
 # (a) Historical path is byte-identical whether or not the tau artifact exists
 # ---------------------------------------------------------------------------
 
-def test_historical_path_ignores_sigma_tau_artifact(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_historical_path_ignores_sigma_tau_artifact(monkeypatch, tmp_path) -> None:
+    """A diagnostic historical carrier stays artifact-inert and cannot become live."""
     monkeypatch.setattr(cfg, "runtime_state_path", lambda fn: tmp_path / fn)
-
-    conn_without = _conn()
-    _install_live_fusion(monkeypatch)  # current_evidence_shape stays None -> historical branch
-    result_without = materialize_replacement_forecast_live(conn_without, _request(**_REQUEST_KWARGS))
-    assert result_without.ok is True
-    full_without = _full_row(conn_without)
-
+    _install_current_evidence_fusion(monkeypatch)
+    current = materializer_mod._replacement_bayes_precision_fusion_override(None)
+    monkeypatch.setattr(materializer_mod, "_replacement_bayes_precision_fusion_override",
+                        lambda *args, **kwargs: replace(current, current_evidence_shape=None))
+    request = _request(**_REQUEST_KWARGS)
+    without = materializer_mod._compute_posterior_payload(_conn(), request, metric="high", anchor_id=1)
     (tmp_path / "sigma_tau_calibration.json").write_text(json.dumps(_fitted_artifact_for_default_request()))
-
-    conn_with = _conn()
-    _install_live_fusion(monkeypatch)
-    result_with = materialize_replacement_forecast_live(conn_with, _request(**_REQUEST_KWARGS))
-    assert result_with.ok is True
-    full_with = _full_row(conn_with)
-
-    assert full_without["q"] == full_with["q"]
-    assert full_without["q_lcb"] == full_with["q_lcb"]
-    assert full_without["q_ucb"] == full_with["q_ucb"]
-    assert full_without["provenance"] == full_with["provenance"], (
-        "the historical path's FULL provenance dict (every key) must be unaffected by whether "
-        "state/sigma_tau_calibration.json exists"
-    )
-    assert "sigma_tau_artifact_hash" not in full_with["provenance"], (
-        "the historical path must never read state/sigma_tau_calibration.json, and the key must be "
-        "OMITTED (FIX 7), not merely null"
-    )
-    assert full_without["provenance"]["replacement_sigma_basis"] == "fused_center_residual_std"
+    with_artifact = materializer_mod._compute_posterior_payload(_conn(), request, metric="high", anchor_id=1)
+    assert not without.live_eligible and not with_artifact.live_eligible
+    assert (without.q, without.q_lcb_map, without.q_ucb_map, without.provenance_payload) == (
+        with_artifact.q, with_artifact.q_lcb_map, with_artifact.q_ucb_map, with_artifact.provenance_payload)
+    assert with_artifact.provenance_payload is None  # no historical certificate
+    assert not materialize_replacement_forecast_live(_conn(), request).ok
 
 
 # ---------------------------------------------------------------------------
@@ -203,15 +139,12 @@ def test_current_evidence_path_no_artifact_is_neutral(monkeypatch: pytest.Monkey
     )
 
 
-def test_current_evidence_path_no_artifact_matches_historical_path_shape(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A second angle on (b): with no artifact, the CURRENT-EVIDENCE path's provenance key set
-    (aside from the fields that legitimately differ between the two probability regimes, e.g.
-    replacement_sigma_basis and the current_evidence_shape fields) never gains an extra
-    sigma_tau_artifact_hash key that the pre-artifact code never had."""
+def test_current_evidence_path_no_artifact_keeps_stable_provenance_key_set(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Identical current evidence keeps a stable key set without an inert fitted hash."""
     monkeypatch.setattr(cfg, "runtime_state_path", lambda fn: tmp_path / fn)
 
     conn_hist = _conn()
-    _install_live_fusion(monkeypatch)
+    _install_current_evidence_fusion(monkeypatch)
     result_hist = materialize_replacement_forecast_live(conn_hist, _request(**_REQUEST_KWARGS))
     assert result_hist.ok is True
     prov_hist = _full_row(conn_hist)["provenance"]
@@ -227,11 +160,15 @@ def test_current_evidence_path_no_artifact_matches_historical_path_shape(monkeyp
 
 
 # ---------------------------------------------------------------------------
-# (c) Current-evidence path, WITH a fitted+gate-passed artifact -> k and hash reach provenance
+# (c) Even a valid non-neutral fitted artifact cannot alter the current live regime
 # ---------------------------------------------------------------------------
 
-def test_current_evidence_path_applies_fitted_artifact(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_current_evidence_path_ignores_valid_fitted_artifact(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(cfg, "runtime_state_path", lambda fn: tmp_path / fn)
+    _install_current_evidence_fusion(monkeypatch)
+    baseline_conn = _conn()
+    assert materialize_replacement_forecast_live(baseline_conn, _request(**_REQUEST_KWARGS)).ok
+    baseline = _full_row(baseline_conn)
     artifact_bytes = json.dumps(_fitted_artifact_for_default_request()).encode("utf-8")
     (tmp_path / "sigma_tau_calibration.json").write_bytes(artifact_bytes)
     expected_hash = hashlib.sha256(artifact_bytes).hexdigest()
@@ -242,8 +179,12 @@ def test_current_evidence_path_applies_fitted_artifact(monkeypatch: pytest.Monke
     assert result.ok is True
     prov = _full_row(conn)["provenance"]
 
-    assert prov["sigma_tau_artifact_hash"] == expected_hash
-    assert prov["sigma_scale_k_applied"] == pytest.approx(_EXPECTED_APPLIED_K)
+    resolved = materializer_mod._resolve_sigma_tau_calibration(_request(**_REQUEST_KWARGS), "C", "high")
+    assert resolved[:3] == pytest.approx((_EXPECTED_APPLIED_K, 0.0, 0.0))
+    assert resolved[3] == expected_hash
+    assert _full_row(conn) == baseline
+    assert "sigma_tau_artifact_hash" not in prov
+    assert prov["sigma_scale_k_applied"] is None
 
 
 def test_current_evidence_path_rejects_artifact_missing_oos_gate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -286,3 +227,53 @@ def test_current_evidence_path_rejects_wrong_tau_clock_declaration(monkeypatch: 
     prov = _full_row(conn)["provenance"]
 
     assert prov["sigma_scale_k_applied"] is None
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("unit", ("C", "F"))
+def test_current_shape_integrates_declared_sigma_despite_hostile_fitted_width_and_bias(monkeypatch, tmp_path, metric, unit):
+    """Point q and bound draws share physical sigma, not fitted/floored width."""
+    monkeypatch.setattr(cfg, "runtime_state_path", lambda fn: tmp_path / fn)
+    artifact = _fitted_artifact_for_default_request()
+    group = artifact["families"]["C"]["high"]
+    artifact["families"] = {unit: {metric: group}}
+    (tmp_path / "sigma_tau_calibration.json").write_text(json.dumps(artifact))
+    sigma = .593198
+    _install_live_fusion(monkeypatch, shape_cycle_time=_dt(6), predictive_sigma_c=sigma)
+    _fixed_center_debias(monkeypatch, shift_c=1.0, metric=metric)
+    monkeypatch.setattr(materializer_mod, "_replacement_settlement_sigma_floor_lookup",
+                        lambda *args, **kwargs: pytest.fail("current shape read fitted floor"))
+    if unit == "C":
+        step, left, right = 1.0, 24.5, 25.5
+        bins = (_TemperatureBin("below", upper_c=24), _TemperatureBin("point", lower_c=25, upper_c=25),
+                _TemperatureBin("above", lower_c=26))
+    else:
+        step, left, right = 5/9, (76.5-32)*5/9, (77.5-32)*5/9
+        bins = (_TemperatureBin("below", upper_c=(76-32)*5/9, display_unit="F", settlement_unit="F"),
+                _TemperatureBin("point", lower_c=25, upper_c=25, display_unit="F", settlement_unit="F"),
+                _TemperatureBin("above", lower_c=(78-32)*5/9, display_unit="F", settlement_unit="F"))
+    request = replace(_request(**_REQUEST_KWARGS, baseline_data_version=_current_baseline_data_version(metric)),
+                      temperature_metric=metric, bins=bins, settlement_step_c=step)
+    resolved = materializer_mod._resolve_sigma_tau_calibration(request, unit, metric)
+    assert resolved[0] == pytest.approx(_EXPECTED_APPLIED_K) and resolved[3]
+    original = materializer_mod._build_fused_q_bounds
+    calls = []
+    def observe_bounds(**kwargs):
+        calls.append((kwargs["mu_star"], kwargs["predictive_sigma_c"]))
+        return original(**kwargs)
+    monkeypatch.setattr(materializer_mod, "_build_fused_q_bounds", observe_bounds)
+    conn = _conn()
+    result = materialize_replacement_forecast_live(conn, request)
+    assert result.ok, result.reason_codes
+    full = _full_row(conn)
+    cdf = lambda x: .5*(1+math.erf((x-25.0)/(sigma*math.sqrt(2))))
+    expected = {"below": cdf(left), "point": cdf(right)-cdf(left), "above": 1-cdf(right)}
+    assert full["q"] == pytest.approx(expected, abs=1e-12)
+    assert calls and all(mu == 25 and width == sigma for mu, width in calls)
+    prov = full["provenance"]
+    assert prov["settlement_sigma_floor_applied"] is False
+    assert prov["settlement_sigma_floor_c"] is None
+    assert prov["sigma_scale_k_applied"] is None
+    assert prov["center_debias_c"] is None
+    assert "sigma_tau_artifact_hash" not in prov
+    assert all(full["q_lcb"][key] <= full["q"][key] <= full["q_ucb"][key] for key in expected)

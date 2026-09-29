@@ -241,7 +241,9 @@ def _fixture_ens_surface_provenance(*, cycle: str = "2026-06-06T00:00:00+00:00")
         "mask_source_url": "https://example.test/oper-mask.grib2",
         "mask_source_index_url": "https://example.test/oper-mask.index",
         "mask_source_cycle_time": cycle,
-        "mask_source_fetched_at": "2026-06-06T02:30:00+00:00",
+        # The toy mask receipt must belong to its declared run and already be
+        # possessed by the fixture snapshot (new12 is available at 12:05).
+        "mask_source_fetched_at": (datetime.fromisoformat(cycle)+timedelta(minutes=4)).isoformat(),
         "mask_source_index_offset": 0,
         "mask_source_index_length": 200,
         "mask_sha256": "a" * 64,
@@ -266,16 +268,204 @@ def _materializer_unit_source_surface(monkeypatch: pytest.MonkeyPatch) -> None:
     """Controlled HSURF input; never mock the precision guard or raw witness."""
     import src.data.openmeteo_ecmwf_ifs9_bucket_transport as transport
 
-    monkeypatch.setattr(transport, "source_cell_geometry_proof", lambda **_kwargs: {
+    monkeypatch.setattr(transport, "source_cell_geometry_proof", lambda **kw: {
         "revision": "openmeteo_ifs9_o1280_source_cell_v1",
         "static_hsurf_sha256": "b" * 64,
         "selected_flat_index": 100,
-        "selected_grid_lat": 31.14, "selected_grid_lon": 121.80,
+        "selected_grid_lat": 31.14 if abs(kw["latitude"] - 31.1433) < .01 else kw["latitude"],
+        "selected_grid_lon": 121.80 if abs(kw["latitude"] - 31.1433) < .01 else kw["longitude"],
         "raw_grid_elevation_m": 10.0,
         "effective_grid_elevation_m": 8.0,
         "target_dem_elevation_m": 8.0,
         "cell_is_sea": False, "cell_is_center": False, "nearby_sea": False,
     })
+
+
+def _qualify_raw_fixture_rows(conn, *, rebuild=False):
+    """Upgrade legacy fixture rows from actual writer output, retaining their IDs.
+
+    Only fixture setup calls this; production read/authority gates are unmodified.
+    Entity bytes and agency records pass the same capture/persistence constructors.
+    """
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.station_forecast_adapter as station_adapter
+    from src.config import runtime_cities_by_name
+    from unittest.mock import patch
+
+    columns = [row[1] for row in conn.execute("PRAGMA table_info(raw_model_forecasts)")]
+    originals = [dict(zip(columns, tuple(row))) for row in conn.execute("SELECT * FROM raw_model_forecasts")]
+    for old in originals:
+        if not rebuild and (old.get("artifact_id") or old.get("source_id")):
+            continue
+        cities = runtime_cities_by_name()
+        city = next(value for name, value in cities.items() if name.casefold() == old["city"].casefold())
+        staging = _conn()
+        model = old["model"]
+        captured = old.get("captured_at") or old["source_available_at"]
+        if model == "cwa_township":  # retained retired 063, never promote it to 061
+            staging.close()
+            continue
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                when = datetime.fromisoformat(captured)
+                return when.astimezone(tz) if tz else when.replace(tzinfo=None)
+        if model.startswith(("cwa_", "hko_")):
+            if model.startswith("cwa_"):
+                from tests.test_station_forecast_live_ingest_wiring import _hourly_low_xml
+                body = _hourly_low_xml(issue_time=old["source_cycle_time"],
+                    update_time=old["source_cycle_time"], sent_time=old["source_cycle_time"],
+                    points=[(f"{old['target_date']}T{hour:02d}:00:00+08:00", str(old["forecast_value_c"]))
+                            for hour in range(24)])
+            else:
+                body = json.dumps({"updateTime": old["source_cycle_time"], "weatherForecast": [{
+                    "forecastDate": old["target_date"].replace("-", ""),
+                    "forecastMaxtemp": {"value": old["forecast_value_c"], "unit": "C"},
+                    "forecastMintemp": {"value": old["forecast_value_c"], "unit": "C"}}]}).encode()
+            class Response:
+                def __enter__(self): return self
+                def __exit__(self, *_args): pass
+                def read(self): return body
+            with patch("urllib.request.urlopen", lambda *_args, **_kwargs: Response()), \
+                 patch.object(station_adapter, "datetime", Clock), patch.object(dl, "datetime", Clock):
+                if model.startswith("cwa_"):
+                    station_adapter.ingest_cwa_township_hourly_extrema_live(
+                        staging, metrics=(old["metric"],), api_key="fixture-only")
+                else:
+                    station_adapter.ingest_hko_fnd_live(staging, metrics=(old["metric"],))
+        else:
+            target = dl.BayesPrecisionFusionDownloadTarget(
+                city=old["city"], metric=old["metric"], target_date=old["target_date"],
+                lead_days=old["lead_days"], latitude=city.lat, longitude=city.lon, timezone_name=city.timezone,
+            )
+            identity = dl._bayes_precision_fusion_product_identity(model, old["endpoint"], target)
+            params = json.loads(identity["request_params_json"])
+            run = datetime.fromisoformat(old["source_cycle_time"])
+            params["run"] = run.strftime("%Y-%m-%dT%H:%M")
+            grid_lat, grid_lon = (31.14, 121.80) if model == "ecmwf_ifs" and old["city"].casefold() == "shanghai" else (city.lat, city.lon)
+            payload = {"latitude": grid_lat, "longitude": grid_lon, "elevation": 8.0,
+                "timezone": city.timezone, "hourly_units": {"temperature_2m": "°C"},
+                "hourly": {"time": [f"{old['target_date']}T{hour:02d}:00" for hour in range(24)],
+                           "temperature_2m": [old["forecast_value_c"]] * 24}}
+            body = (json.dumps(payload, indent=2) + "\n").encode()
+            url = "https://single-runs-api.open-meteo.com/v1/forecast"
+            bound = dl._bind_physical_response(payload, model=model, url=url, params=params, run=run,
+                captures=[(body, datetime.fromisoformat(captured).timestamp())])
+            raw = {key: old[key] for key in ("model", "city", "target_date", "metric", "source_cycle_time",
+                "source_available_at", "lead_days", "forecast_value_c", "endpoint")}
+            raw.update(captured_at=captured, **identity, _physical_response=bound[dl._BATCH_PHYSICAL_RESPONSE_KEY])
+            with patch.object(dl, "datetime", Clock):
+                dl._persist_rows(staging, [raw])
+        produced = dict(staging.execute("SELECT * FROM raw_model_forecasts").fetchone())
+        if "recorded_at" in produced:
+            produced["recorded_at"] = old.get("recorded_at") or captured
+        for name in produced:
+            if name not in columns:
+                conn.execute(f"ALTER TABLE raw_model_forecasts ADD COLUMN {name}")
+                columns.append(name)
+        if produced["artifact_id"] is not None:
+            artifact = dict(staging.execute("SELECT * FROM raw_forecast_artifacts").fetchone())
+            artifact_columns = [r[1] for r in conn.execute("PRAGMA table_info(raw_forecast_artifacts)")]
+            for name in artifact:
+                if name not in artifact_columns:
+                    conn.execute(f"ALTER TABLE raw_forecast_artifacts ADD COLUMN {name}")
+                    artifact_columns.append(name)
+            new_id = conn.execute("SELECT COALESCE(MAX(artifact_id),0)+1 FROM raw_forecast_artifacts").fetchone()[0]
+            artifact["artifact_id"] = produced["artifact_id"] = new_id
+            conn.execute("INSERT INTO raw_forecast_artifacts (" + ",".join(artifact) + ") VALUES (" +
+                         ",".join("?" for _ in artifact) + ")", tuple(artifact.values()))
+        fields = [name for name in produced if name != "raw_model_forecast_id"]
+        conn.execute("UPDATE raw_model_forecasts SET " + ",".join(name + "=?" for name in fields) +
+                     " WHERE raw_model_forecast_id=?", (*[produced[name] for name in fields], old["raw_model_forecast_id"]))
+        staging.close()
+
+
+def _fixture_current_shape(_conn, request, **kwargs):
+    """Controlled ENS members; real decomposition and later geometry binding."""
+    center = float(kwargs["center_c"])
+    return materializer_mod._current_evidence_shape_from_values(
+        snapshot_id=9001, source_cycle_time=str(request.source_cycle_time.isoformat()),
+        source_available_at=str(request.computed_at.isoformat()),
+        members_c=tuple(center + (index - 25) * .02 for index in range(51)),
+        grid_surface_evidence_revision="ecmwf_ens_land_cell_selection_v1",
+        grid_surface_evidence_identity_hash="a" * 64,
+        **{key: kwargs[key] for key in ("provider_values_c", "provider_weights", "center_c", "provider_cycles")},
+    )
+
+
+def _record_fixture_current_temperature(conn, *, at, value_c=30.0):
+    """Possessed typed METAR input consumed by the real Day0 state reader."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS observation_prints (
+        id INTEGER PRIMARY KEY, city TEXT, station_id TEXT, source_channel TEXT,
+        publish_ts_utc TEXT, value_native REAL, unit TEXT,
+        fetched_at_utc TEXT, raw_report TEXT
+    )""")
+    conn.execute("""INSERT INTO observation_prints (
+        city, station_id, source_channel, publish_ts_utc, value_native, unit,
+        fetched_at_utc, raw_report
+    ) VALUES ('Shanghai', 'ZSPD', 'aviationweather_metar', ?, ?, 'C', ?, ?)""",
+        (at.isoformat(), value_c, at.isoformat(),
+         f"METAR ZSPD {at.strftime('%d%H%M')}Z {round(value_c):02d}/20 T{round(value_c*10):04d}0200"))
+    from src.config import runtime_cities_by_name
+    from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS
+    from src.data.day0_hourly_vectors import (
+        Day0HourlyVector, day0_hourly_models_for_city,
+        day0_source_clock_ensemble_member_models, persist_day0_hourly_vectors,
+    )
+    city = runtime_cities_by_name()["Shanghai"]
+    captured = at - timedelta(minutes=1)
+    cycle = _dt(6)
+    vectors = []
+    provider_models = day0_hourly_models_for_city(city)
+    ensemble_models = day0_source_clock_ensemble_member_models()
+    for index, model in enumerate((*provider_models, *ensemble_models)):
+        ensemble = model in ensemble_models
+        api_model = "ecmwf_ifs025_ensemble" if ensemble else OPENMETEO_MODEL_IDS.get(model, model)
+        request_hash = "sha256:fixture-ens" if ensemble else f"sha256:fixture-{model}"
+        metadata = {
+            "provider": "openmeteo", "model": model, "model_api_id": api_model,
+            "endpoint": "https://single-runs-api.open-meteo.com/v1/forecast",
+            "endpoint_mode": "single_runs", "source_run_authority": "run_pinned_single_runs",
+            "provider_run_id": f"openmeteo:{api_model}:{cycle.isoformat()}",
+            "provider_source_cycle_time_utc": cycle.isoformat(),
+            "provider_source_available_at_utc": _dt(7).isoformat(),
+            "provider_source_modified_at_utc": _dt(7).isoformat(),
+            "fetch_started_at": captured.isoformat(), "fetch_finished_at": captured.isoformat(),
+            "request_hash": request_hash, "source_run_id": f"day0_hourly:{request_hash}",
+            "request_params_json": json.dumps({"metadata_model": api_model}),
+        }
+        offset = (ensemble_models.index(model)-25)*.02 if ensemble else index*.1
+        vectors.append(Day0HourlyVector(
+            model=model, city="Shanghai", target_date="2026-06-07", timezone_name=city.timezone,
+            captured_at=captured.isoformat(),
+            times=tuple(f"2026-06-07T{hour:02d}:00" for hour in range(24)),
+            temps_c=tuple(value_c + offset for _ in range(24)),
+            source_run_meta_json=json.dumps(metadata),
+        ))
+    for vector in vectors:
+        meta = json.loads(vector.source_run_meta_json)
+        persist_day0_hourly_vectors([vector], target_date="2026-06-07", conn=conn,
+            request_hash=meta["request_hash"], endpoint=meta["endpoint"], now=at)
+    conn.commit()
+
+
+def _fixture_fast_residual_likelihood(*, extreme_c, at):
+    from src.config import runtime_cities_by_name
+    from src.data.day0_fast_obs import FAST_RESIDUAL_LIKELIHOOD_REVISION, FastStationResidualLikelihood
+    from src.config import settlement_source_type_for_city
+    city = runtime_cities_by_name()["Shanghai"]
+    source_type = settlement_source_type_for_city(city, "2026-06-07")
+    settlement_channel = "wu_icao_history" if source_type == "wu_icao" else "noaa_wrh_zspd"
+    payload = {
+        "semantics_revision": FAST_RESIDUAL_LIKELIHOOD_REVISION,
+        "station_id": "ZSPD", "settlement_channel": settlement_channel,
+        "fast_channel": "aviationweather_metar", "unit": "C", "as_of": at.isoformat(),
+        "window_start": (at-timedelta(days=7)).isoformat(), "matched_pairs": 30,
+        "residual_weights_c": ((0.0, 1.0),), "unknown_weight": 0.0,
+        "settlement_extreme_c": extreme_c,
+    }
+    return FastStationResidualLikelihood(**payload, identity_hash=hashlib.sha256(json.dumps(
+        payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest())
 
 
 def _precision_guard(**overrides: object):
@@ -439,8 +629,28 @@ def _install_live_fusion(
     snapshot_id: int = 9001,
     shape_cycle_time: datetime | None = None,
     current_serving: dict[str, dict[str, object]] | None = None,
+    predictive_sigma_c: float = 2.0,
 ) -> None:
     members = tuple(25.0 + (index - 25) * 0.02 for index in range(51))
+    # This seam fixture isolates downstream writes. Build and bind its shape
+    # through the real proof constructors; acceptance tests below use raw writers.
+    within_var = sum((value - 25.0) ** 2 for value in members) / len(members)
+    provider_delta = math.sqrt(predictive_sigma_c ** 2 - within_var)
+    carrier_cycle = shape_cycle_time or _dt(0)
+    shape_cycle = carrier_cycle - timedelta(hours=shape_lag_hours)
+    shape = materializer_mod._current_evidence_shape_from_values(
+        snapshot_id=snapshot_id, source_cycle_time=shape_cycle.isoformat(),
+        source_available_at=(carrier_cycle + timedelta(hours=1)).isoformat(), members_c=members,
+        provider_values_c={"ecmwf_ifs": 25.0 - provider_delta, "icon_global": 25.0 + provider_delta},
+        provider_weights={"ecmwf_ifs": .5, "icon_global": .5}, center_c=25.0,
+        provider_cycles=dict.fromkeys(("ecmwf_ifs", "icon_global"), carrier_cycle.isoformat()),
+        carrier_cycle_time=carrier_cycle.isoformat(),
+        grid_surface_evidence_revision="ecmwf_ens_land_cell_selection_v1",
+        grid_surface_evidence_identity_hash="a" * 64,
+    )
+    shape = materializer_mod._bind_provider_geometry_identity(
+        shape, {}, anchor_metadata=_precision_guard().metadata,
+    )
     override = _BayesPrecisionFusionFusionOverride(
         anchor_value_c=25.0,
         anchor_sigma_c=0.35,
@@ -454,7 +664,7 @@ def _install_live_fusion(
         dropped_aliases=(),
         raw_model_forecast_ids=(101, 102, 103),
         anchor_bridge={"test": True},
-        predictive_sigma_c=2.0,
+        predictive_sigma_c=predictive_sigma_c,
         decorrelated_providers_complete=complete,
         decorrelated_providers_served=5 if complete else 4,
         decorrelated_providers_expected=5,
@@ -463,28 +673,7 @@ def _install_live_fusion(
             if current_serving is not None
             else {"ecmwf_ifs9": {"served_via": "single_runs"}}
         ),
-        current_evidence_shape={
-            "snapshot_id": snapshot_id,
-            "shape_hash": "test-current-shape",
-            # This override isolates downstream Day0/commit behavior. The
-            # selector/proof verification is exercised in the row tests below.
-            "grid_surface_evidence_revision": "ecmwf_ens_land_cell_selection_v1",
-            "grid_surface_evidence_identity_hash": "a" * 64,
-            "semantics_revision": (
-                materializer_mod.CURRENT_EVIDENCE_SEMANTICS_REVISION
-                if shape_lag_hours == 0.0
-                else materializer_mod.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
-            ),
-            "source_cycle_time": (
-                (shape_cycle_time or _dt(0)) - timedelta(hours=shape_lag_hours)
-            ).isoformat(),
-            "source_available_at": _dt(1).isoformat(),
-            "shape_lag_hours": shape_lag_hours,
-            "stale_shape_reused": shape_lag_hours > 0.0,
-            "translation_applied": False,
-            "member_count": len(members),
-            "between_cohort_status": "SIMULTANEOUS_PROVEN",
-        },
+        current_evidence_shape=shape.as_payload(),
         current_evidence_members_c=members,
     )
     monkeypatch.setattr(materializer_mod, "_replacement_bayes_precision_fusion_override", lambda *args, **kwargs: override)
@@ -833,7 +1022,7 @@ def test_hourly_cwa_extreme_persisted_row_enters_real_precision_override_when_co
         def as_payload() -> dict[str, object]:
             return {"source": "test-current-ens-shape"}
 
-    monkeypatch.setattr(materializer_mod, "_read_current_evidence_shape", lambda *_a, **_kw: _Shape())
+    monkeypatch.setattr(materializer_mod, "_read_current_evidence_shape", _fixture_current_shape)
     request = replace(
         _request(),
         city="Taipei", city_id="Taipei", city_timezone="Asia/Taipei",
@@ -842,6 +1031,12 @@ def test_hourly_cwa_extreme_persisted_row_enters_real_precision_override_when_co
         computed_at=datetime(2026, 7, 23, 10, 16, tzinfo=UTC),
     )
 
+    for model_id, model_name, value in ((703, "ecmwf_ifs", 25.0), (704, "gfs_global", 30.0)):
+        conn.execute("""INSERT INTO raw_model_forecasts
+            (raw_model_forecast_id,model,city,target_date,metric,source_cycle_time,source_available_at,captured_at,lead_days,forecast_value_c,endpoint)
+            VALUES (?,?,'Taipei',?,?,'2026-07-23T10:00:00+00:00','2026-07-23T10:15:00+00:00','2026-07-23T10:15:00+00:00',1,?,'single_runs')""",
+            (model_id, model_name, target.isoformat(), metric, value))
+    _qualify_raw_fixture_rows(conn)
     override = materializer_mod._replacement_bayes_precision_fusion_override(
         request, metric=metric, anchor_value_corrected_c=25.0, conn=conn,
     )
@@ -850,7 +1045,8 @@ def test_hourly_cwa_extreme_persisted_row_enters_real_precision_override_when_co
     assert model in override.used_models
     assert "cwa_township" not in override.used_models
     assert cwa_id in override.raw_model_forecast_ids
-    assert override.current_value_serving[model] == {
+    serving = override.current_value_serving[model]
+    assert {key: value for key,value in serving.items() if key != "physical_response"} == {
         "served_via": "single_runs",
         "previous_run_substitution": False,
         "raw_model_forecast_id": cwa_id,
@@ -859,6 +1055,14 @@ def test_hourly_cwa_extreme_persisted_row_enters_real_precision_override_when_co
         "age_hours": 0.017,
         "lead_days": 1,
     }
+    evidence = serving["physical_response"]
+    assert evidence["model"] == model and evidence["metric"] == metric
+    artifact = conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?",
+                            (evidence["artifact_id"],)).fetchone()
+    body = Path(artifact["artifact_path"]).read_bytes()
+    assert hashlib.sha256(body).hexdigest() == evidence["entity_body_sha256"]
+    from src.data.station_forecast_adapter import reextract_station_response_value
+    assert reextract_station_response_value(body, evidence) == value_c
     station_basis = override.precision_center_basis[model]
     assert station_basis["n"] == 0.0
     assert station_basis["weight"] > 0.0
@@ -1000,7 +1204,7 @@ def test_source_clock_scheme_rejects_possessed_d2_at_d2_lead_but_keeps_global(
         def as_payload() -> dict[str, object]:
             return {"source": "test-current-ens-shape"}
 
-    monkeypatch.setattr(materializer_mod, "_read_current_evidence_shape", lambda *_a, **_kw: _Shape())
+    monkeypatch.setattr(materializer_mod, "_read_current_evidence_shape", _fixture_current_shape)
     for target, d2_eligible in ((date(2026, 9, 25), False), (date(2026, 9, 24), True)):
         # The physical target changes; copy the raw evidence to that exact natural key.
         if d2_eligible:
@@ -1015,6 +1219,7 @@ def test_source_clock_scheme_rejects_possessed_d2_at_d2_lead_but_keeps_global(
             target_date=target, source_cycle_time=run,
             computed_at=run + timedelta(hours=4 if d2_newer else 1),
         )
+        _qualify_raw_fixture_rows(conn, rebuild=d2_eligible)
         override = materializer_mod._replacement_bayes_precision_fusion_override(
             request, metric=metric, anchor_value_corrected_c=20.0, conn=conn,
         )
@@ -1136,13 +1341,14 @@ def test_source_clock_partial_current_producer_to_jit(
         def as_payload() -> dict[str, object]:
             return {"source": "test-current-ens-shape", "provider_count": 3}
 
-    monkeypatch.setattr(materializer_mod, "_read_current_evidence_shape", lambda *_a, **_kw: _Shape())
+    monkeypatch.setattr(materializer_mod, "_read_current_evidence_shape", _fixture_current_shape)
     request = replace(
         _request(), city=city, city_id=city,
         city_timezone=runtime_cities_by_name()[city].timezone,
         temperature_metric=metric, target_date=date(2026, 9, 29),
         source_cycle_time=run, computed_at=decision,
     )
+    _qualify_raw_fixture_rows(conn)
     override = materializer_mod._replacement_bayes_precision_fusion_override(
         request, metric=metric, anchor_value_corrected_c=20.0, conn=conn,
     )
@@ -1260,6 +1466,7 @@ def test_source_clock_partial_current_producer_to_jit(
         ) is not None
         later = arrived + timedelta(minutes=1)
         reason: dict[str, str] = {}
+        _qualify_raw_fixture_rows(conn)
         assert adapter._posterior_bound_multimodel_members(
             conn, family=family, decision_time=later,
             source_cycle_time=run.isoformat(), provenance=provenance,
@@ -1303,6 +1510,7 @@ def test_source_clock_partial_current_producer_to_jit(
             source_cycle_time=run.isoformat(), provenance=provenance, **posterior_kwargs,
         ) is not None
         reason: dict[str, str] = {}
+        _qualify_raw_fixture_rows(conn)
         assert adapter._posterior_bound_multimodel_members(
             conn, family=family, decision_time=arrived + timedelta(minutes=1),
             source_cycle_time=run.isoformat(), provenance=provenance,
@@ -1886,12 +2094,12 @@ def test_day0_owner_witness_keeps_newer_fast_residual_over_absorbing_frontier(
         day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
         day0_observed_extreme_sample_count=13,
     )
-    likelihood = _test_current_residual(current, absorbing_extreme)
+    likelihood = _fixture_fast_residual_likelihood(extreme_c=absorbing_extreme, at=_dt(18, 10))
     monkeypatch.setattr(
         "src.data.day0_fast_obs.build_fast_station_residual_likelihood",
         lambda *args, **kwargs: likelihood,
     )
-    _install_day0_current_inputs(conn, monkeypatch, current)
+    _record_fixture_current_temperature(conn, at=_dt(18, 5), value_c=fast_extreme)
     witness = _day0_owner_witness(current, seed_file=tmp_path / "fast-owner.json")
     _record_day0_owner(conn, current, witness)
     prepared = _prepare_for_final_write(
@@ -2501,7 +2709,7 @@ def test_runtime_layer_rejects_wilson_or_missing_bounds() -> None:
     ) is False
 
 
-def test_forecast_posteriors_runtime_layer_migration_retires_unclassified_legacy_rows() -> None:
+def test_forecast_posteriors_runtime_layer_migration_refuses_legacy_labels_and_preserves_explicit_live_rows() -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute(
@@ -2510,6 +2718,7 @@ def test_forecast_posteriors_runtime_layer_migration_retires_unclassified_legacy
             posterior_id INTEGER PRIMARY KEY AUTOINCREMENT,
             trade_authority_status TEXT NOT NULL DEFAULT 'DIAGNOSTIC_ONLY'
                 CHECK (trade_authority_status IN ('DIAGNOSTIC_ONLY', 'LIVE_AUTHORITY')),
+            runtime_layer TEXT,
             q_json TEXT NOT NULL
         )
         """
@@ -2522,13 +2731,17 @@ def test_forecast_posteriors_runtime_layer_migration_retires_unclassified_legacy
         "INSERT INTO forecast_posteriors (trade_authority_status, q_json) VALUES (?, ?)",
         ("LIVE_AUTHORITY", '{"good":1}'),
     )
+    conn.execute(
+        "INSERT INTO forecast_posteriors (runtime_layer, q_json) VALUES (?, ?)",
+        (LIVE_RUNTIME_LAYER, '{"good":1}'),
+    )
 
     _ensure_forecast_posteriors_runtime_layer(conn)
 
     rows = conn.execute("SELECT posterior_id, runtime_layer, q_json FROM forecast_posteriors").fetchall()
-    # Legacy LIVE_AUTHORITY alone is not a current runtime certificate. Both
-    # unclassified rows are retired; migration does not relabel their q as live.
-    assert rows == []
+    assert [dict(row) for row in rows] == [
+        {"posterior_id": 3, "runtime_layer": LIVE_RUNTIME_LAYER, "q_json": '{"good":1}'}
+    ]
     assert "trade_authority_status" in {
         row["name"] for row in conn.execute("PRAGMA table_info(forecast_posteriors)")
     }
@@ -2623,7 +2836,7 @@ def test_forecast_posteriors_runtime_layer_migration_repairs_invalid_observation
         CREATE TABLE forecast_posteriors (
             posterior_id INTEGER PRIMARY KEY AUTOINCREMENT,
             trade_authority_status TEXT NOT NULL DEFAULT 'DIAGNOSTIC_ONLY'
-                CHECK (trade_authority_status IN ('LIVE_AUTHORITY')),
+                CHECK (trade_authority_status IN ('DIAGNOSTIC_ONLY', 'LIVE_AUTHORITY')),
             runtime_layer TEXT,
             q_json TEXT NOT NULL
         );
@@ -2710,8 +2923,8 @@ def test_legacy_anchor_schema_migration_does_not_rewrite_legacy_status_columns()
         CREATE TABLE forecast_posteriors (
             posterior_id INTEGER PRIMARY KEY AUTOINCREMENT,
             openmeteo_anchor_id INTEGER REFERENCES deterministic_forecast_anchors(anchor_id),
-            trade_authority_status TEXT NOT NULL DEFAULT 'BLOCKED'
-                CHECK (trade_authority_status IN ('BLOCKED', 'BLOCKED'))
+            trade_authority_status TEXT NOT NULL DEFAULT 'DIAGNOSTIC_ONLY'
+                CHECK (trade_authority_status IN ('DIAGNOSTIC_ONLY', 'LIVE_AUTHORITY'))
         );
         """
     )
@@ -3267,6 +3480,10 @@ def test_materializer_equal_frontier_uses_current_request_identity(
 
     conn = _conn()
     _install_live_fusion(monkeypatch)
+    likelihood = _fixture_fast_residual_likelihood(extreme_c=31.0, at=_dt(18))
+    monkeypatch.setattr("src.data.day0_fast_obs.build_fast_station_residual_likelihood",
+                        lambda *_args, **_kwargs: likelihood)
+    _record_fixture_current_temperature(conn, at=_dt(17, 55), value_c=31.0)
     prior = _request(
         computed_at=_dt(18),
         expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
@@ -5891,7 +6108,11 @@ def _create_target_frontier_tables(conn: sqlite3.Connection) -> None:
             '2026-06-06T00:00:00+00:00', '2026-06-06T03:00:00+00:00',
             '2026-06-06T03:00:00+00:00', 'anchor-sha-a', 10
         );
-        INSERT INTO raw_model_forecasts VALUES (
+        INSERT INTO raw_model_forecasts (
+            raw_model_forecast_id, model, city, target_date, metric,
+            source_cycle_time, source_available_at, captured_at,
+            lead_days, forecast_value_c, endpoint
+        ) VALUES (
             101, 'ecmwf_ifs9', 'Shanghai', '2026-06-07', 'high',
             '2026-06-06T00:00:00+00:00', '2026-06-06T03:00:00+00:00',
             '2026-06-06T03:00:00+00:00', 1, 27.0, 'single_runs'
@@ -5911,6 +6132,7 @@ def _create_target_frontier_tables(conn: sqlite3.Connection) -> None:
         (_fixture_ens_surface_provenance(),),
     )
     _set_target_frontier_coverage(conn, snapshot_id=101)
+    _qualify_raw_fixture_rows(conn)
     conn.commit()
 
 
@@ -5966,7 +6188,11 @@ def test_target_dependency_witness_is_bounded_to_exact_target_rows() -> None:
 
     conn.execute(
         """
-        INSERT INTO raw_model_forecasts VALUES (
+        INSERT INTO raw_model_forecasts (
+            raw_model_forecast_id, model, city, target_date, metric,
+            source_cycle_time, source_available_at, captured_at,
+            lead_days, forecast_value_c, endpoint
+        ) VALUES (
             102, 'ecmwf_ifs9', 'Shanghai', '2026-06-07', 'high',
             '2026-06-06T01:00:00+00:00', '2026-06-06T03:30:00+00:00',
             '2026-06-06T03:30:00+00:00', 1, 26.0, 'single_runs'
@@ -6588,7 +6814,11 @@ def test_new_target_family_provider_changes_final_witness() -> None:
     baseline = cli._target_dependency_witness(conn, prepared)
     conn.execute(
         """
-        INSERT INTO raw_model_forecasts VALUES (
+        INSERT INTO raw_model_forecasts (
+            raw_model_forecast_id, model, city, target_date, metric,
+            source_cycle_time, source_available_at, captured_at,
+            lead_days, forecast_value_c, endpoint
+        ) VALUES (
             104, 'gfs', 'Shanghai', '2026-06-07', 'high',
             '2026-06-06T01:00:00+00:00', '2026-06-06T03:30:00+00:00',
             '2026-06-06T03:30:00+00:00', 1, 26.0, 'single_runs'
@@ -6596,6 +6826,7 @@ def test_new_target_family_provider_changes_final_witness() -> None:
         """
     )
 
+    _qualify_raw_fixture_rows(conn)
     current = cli._revalidate_target_dependency_witness(conn, prepared, baseline)
     refreshed = cli._target_dependency_witness(conn, prepared)
     conn.close()
@@ -6730,13 +6961,14 @@ def test_final_ens_frontier_detects_absent_to_present() -> None:
     assert current.ensemble_frontier_id == 102
 
 
-def test_final_ens_frontier_exact_city_update_without_proof_fails_closed() -> None:
+def test_ens_casefold_fallback_rejects_new_exact_alias_without_current_proof() -> None:
     """An exact-city alias cannot displace a certified canonical-city proof."""
     import scripts.materialize_replacement_forecast_live as cli
 
     conn = sqlite3.connect(":memory:")
     _create_target_frontier_tables(conn)
     conn.execute("UPDATE raw_model_forecasts SET city = 'shanghai'")
+    _qualify_raw_fixture_rows(conn, rebuild=True)
     prepared = _prepared_target_frontier(101)
     prepared = replace(prepared, request=replace(prepared.request, city="shanghai"))
     conn.execute(
@@ -6757,15 +6989,20 @@ def test_final_ens_frontier_exact_city_update_without_proof_fails_closed() -> No
         city="shanghai",
         coverage_id="b0-coverage-102",
     )
-    baseline = cli._target_dependency_witness(conn, prepared)
-    assert baseline.ensemble_identity is not None
-    assert baseline.ensemble_identity.city == "Shanghai"
+    # Current provider authority is exact canonical city identity. An old ENS
+    # alias fallback does not grant authority to a malformed provider city key.
+    with pytest.raises(cli._TargetDependencyWitnessUnavailable, match="provider frontier unavailable"):
+        cli._target_dependency_witness(conn, prepared)
+    baseline_identity = materializer_mod.read_current_evidence_snapshot_identity(
+        conn, prepared.request, metric=prepared.metric)
+    assert baseline_identity is not None
+    assert baseline_identity.city == "Shanghai"
     conn.execute(
         "UPDATE ensemble_snapshots SET authority = 'VERIFIED' WHERE snapshot_id = 102"
     )
 
     with pytest.raises(cli._TargetDependencyWitnessUnavailable):
-        cli._revalidate_target_dependency_witness(conn, prepared, baseline)
+        cli._target_dependency_witness(conn, prepared)
     current_id = materializer_mod.read_current_evidence_snapshot_id(
         conn, prepared.request, metric=prepared.metric
     )
@@ -6896,7 +7133,11 @@ def test_provider_frontier_skips_invalid_rows_like_production_selector() -> None
     _create_target_frontier_tables(conn)
     conn.executemany(
         """
-        INSERT INTO raw_model_forecasts VALUES (
+        INSERT INTO raw_model_forecasts (
+            raw_model_forecast_id, model, city, target_date, metric,
+            source_cycle_time, source_available_at, captured_at,
+            lead_days, forecast_value_c, endpoint
+        ) VALUES (
             ?, 'ecmwf_ifs9', 'Shanghai', '2026-06-07', 'high',
             ?, '2026-06-06T03:30:00+00:00', '2026-06-06T03:30:00+00:00',
             ?, ?, 'single_runs'
@@ -6953,12 +7194,12 @@ def test_day0_final_writer_uses_frozen_frontier_without_likelihood_recompute(
         day0_observed_extreme_source="wu_api+same_station_fast_tail",
         day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
     )
-    likelihood = _test_current_residual(provisional, 30.0)
+    likelihood = _fixture_fast_residual_likelihood(extreme_c=30.0, at=_dt(18, 10))
     monkeypatch.setattr(
         "src.data.day0_fast_obs.build_fast_station_residual_likelihood",
         lambda *_args, **_kwargs: likelihood,
     )
-    _install_day0_current_inputs(conn, monkeypatch, provisional)
+    _record_fixture_current_temperature(conn, at=_dt(18, 5), value_c=31.0)
     prepared = _prepare_for_final_write(conn, provisional)
     monkeypatch.setattr(
         "src.data.day0_fast_obs.build_fast_station_residual_likelihood",
@@ -7243,7 +7484,11 @@ def test_final_provider_witness_query_count_is_fixed_with_many_invalid_rows() ->
     )
     conn.executemany(
         """
-        INSERT INTO raw_model_forecasts VALUES (
+        INSERT INTO raw_model_forecasts (
+            raw_model_forecast_id, model, city, target_date, metric,
+            source_cycle_time, source_available_at, captured_at,
+            lead_days, forecast_value_c, endpoint
+        ) VALUES (
             ?, 'ecmwf_ifs9', 'Shanghai', '2026-06-07', 'high',
             '2026-06-06T02:00:00+00:00', '2026-06-06T03:30:00+00:00',
             '2026-06-06T03:30:00+00:00', 'bad-lead', NULL, 'single_runs'
@@ -7271,7 +7516,11 @@ def test_final_provider_witness_query_count_is_fixed_with_many_invalid_rows() ->
     assert any("RAW_MODEL_FORECAST_ID IN" in sql.upper() for sql in provider_selects)
     conn.execute(
         """
-        INSERT INTO raw_model_forecasts VALUES (
+        INSERT INTO raw_model_forecasts (
+            raw_model_forecast_id, model, city, target_date, metric,
+            source_cycle_time, source_available_at, captured_at,
+            lead_days, forecast_value_c, endpoint
+        ) VALUES (
             3000, 'new_invalid', 'Shanghai', '2026-06-07', 'high',
             '2026-06-06T02:00:00+00:00', '2026-06-06T03:30:00+00:00',
             '2026-06-06T03:30:00+00:00', 'bad-lead', NULL, 'single_runs'
@@ -7299,6 +7548,7 @@ def test_source_clock_production_selector_preserves_520_valid_rows() -> None:
         """,
         ((f"provider_{index:03d}",) for index in range(520)),
     )
+    _qualify_raw_fixture_rows(conn)
     served = read_current_instrument_values(
         conn,
         city="Shanghai",
@@ -7388,7 +7638,11 @@ def test_exact_target_supersession_retries_before_commit(monkeypatch) -> None:
     def writer_lock():
         conn.execute(
             """
-            INSERT OR IGNORE INTO raw_model_forecasts VALUES (
+            INSERT OR IGNORE INTO raw_model_forecasts (
+            raw_model_forecast_id, model, city, target_date, metric,
+            source_cycle_time, source_available_at, captured_at,
+            lead_days, forecast_value_c, endpoint
+        ) VALUES (
                 102, 'ecmwf_ifs9', 'Shanghai', '2026-06-07', 'high',
                 '2026-06-06T01:00:00+00:00', '2026-06-06T03:30:00+00:00',
                 '2026-06-06T03:30:00+00:00', 1, 26.0, 'single_runs'
@@ -8267,7 +8521,7 @@ def test_seed_cycle_boundary_uses_ordered_live_family_index(
 
 
 def _no_center_debias(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin the de-bias to inactive — today's fail-open behaviour."""
+    """Absent fitted correction for the equivalence baseline."""
 
     monkeypatch.setattr(
         materializer_mod.center_debias_live_fit.PROVIDER,
@@ -8309,10 +8563,10 @@ def _materialize_q(
     return json.loads(row["q_json"]), json.loads(row["provenance_json"])
 
 
-def test_center_debias_shifts_the_served_center_and_stamps_provenance(
+def test_current_center_ignores_fitted_debias_and_keeps_raw_precision_center(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A positive HIGH shift warms the served belief: mass moves toward hotter bins."""
+    """A fitted HIGH shift must not move a current-evidence precision center."""
 
     baseline_conn = _conn()
     _install_live_fusion(monkeypatch)
@@ -8326,16 +8580,12 @@ def test_center_debias_shifts_the_served_center_and_stamps_provenance(
 
     # The fused center is 25.0 with bins cool(<20) / warm(21-30) / hot(>31): a +1.0
     # shift moves the center to 26.0, so mass leaves the cool tail for the hot one.
-    assert shifted_q["hot"] > baseline_q["hot"]
-    assert shifted_q["cool"] < baseline_q["cool"]
-    assert shifted_q != baseline_q
+    assert shifted_q == baseline_q
 
-    assert shifted_provenance["center_debias_c"] == pytest.approx(1.0)
-    assert shifted_provenance["center_debias_param_hash"] == "c" * 64
-    assert shifted_provenance["center_debias_training_cutoff"] == "2026-06-07T00:00:00Z"
-    assert shifted_provenance["bayes_precision_fusion"]["center_debias_c"] == (
-        pytest.approx(1.0)
-    )
+    assert shifted_provenance["center_debias_c"] is None
+    assert shifted_provenance["center_debias_param_hash"] is None
+    assert shifted_provenance["center_debias_training_cutoff"] is None
+    assert shifted_provenance["bayes_precision_fusion"]["center_debias_c"] is None
 
     # anchor_value_c stays the UNCORRECTED fused center — the fitter's residual
     # basis. Storing the corrected center here would make the next fit measure an
@@ -8396,7 +8646,8 @@ def test_served_settlement_log_probability_mu_matches_served_mu_anchor_with_debi
 ) -> None:
     """P1-2 fit/serve parity: the helper's ``mu`` must equal the served ``_mu_anchor``.
 
-    ``_mu_anchor`` is ``bayes_precision_fusion.anchor_value_c`` (raw) + ``center_debias_c``,
+    Current ``_mu_anchor`` is the raw precision center; a fitted ``center_debias_c``
+    is deliberately inert under current-evidence semantics,
     applied BEFORE the Day0 delta. ``served_settlement_log_probability`` reconstructs that
     same sum from the two provenance fields it is fed. Reproducing the served "hot" bin
     probability from provenance alone -- with no access to the live ``_mu_anchor`` variable --
@@ -8411,7 +8662,7 @@ def test_served_settlement_log_probability_mu_matches_served_mu_anchor_with_debi
     q, provenance = _materialize_q(conn, _request())
 
     bpf = provenance["bayes_precision_fusion"]
-    assert provenance["center_debias_c"] == pytest.approx(1.0)
+    assert provenance["center_debias_c"] is None
     # Inert calibration-layer knobs in this fixture -- k=1.0, w=0, no floor, no Day0 -- so the
     # helper's excluded terms cannot be masking a mu mismatch.
     assert provenance["sigma_scale_k_applied"] is None
@@ -8420,7 +8671,7 @@ def test_served_settlement_log_probability_mu_matches_served_mu_anchor_with_debi
 
     log_p = materializer_mod.served_settlement_log_probability(
         anchor_value_c=float(bpf["anchor_value_c"]),
-        center_debias_c=float(bpf["center_debias_c"]),
+        center_debias_c=float(bpf["center_debias_c"] or 0.0),
         predictive_sigma_c=float(bpf["predictive_sigma_c"]),
         k=1.0,
         metric="high",
@@ -8852,6 +9103,7 @@ def _low_revision_authority_conn(db_path: Path | None = None) -> sqlite3.Connect
         source_run_id=f"posterior:{incumbent_id}", strategy_key=STRATEGY_KEY,
         expires_at=_dt(22),
     )
+    _qualify_raw_fixture_rows(conn)
     conn.commit()
     return conn
 
@@ -8869,6 +9121,77 @@ def _low_revision_request() -> ReplacementForecastMaterializeRequest:
         temperature_metric="low",
         baseline_data_version=_current_baseline_data_version("low"),
     )
+
+
+def test_normal_current_writer_rebuilds_v6_posterior_after_literal_v5_refusal(tmp_path, monkeypatch):
+    """Real entity bytes/ordinary writer + qualified ENS read, not authority mocks."""
+    from src.config import runtime_cities_by_name
+    from src.data import bayes_precision_fusion_download as dl
+    from src.data.replacement_forecast_cycle_policy import (
+        current_evidence_shape_has_entry_authority, current_evidence_shape_has_held_authority,
+    )
+    db = tmp_path / "forecast.db"
+    conn = _low_revision_authority_conn(db)
+    city = runtime_cities_by_name()["Shanghai"]
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _dt(12, 10).astimezone(tz) if tz else _dt(12, 10).replace(tzinfo=None)
+    monkeypatch.setattr(dl, "datetime", Clock)
+    def fetch(url, params, **kwargs):
+        value = 22.0 if params["models"] == "icon_global" else 24.0
+        payload = {"latitude": city.lat, "longitude": city.lon, "elevation": 8.0,
+            "timezone": city.timezone, "hourly_units": {"temperature_2m": "°C"},
+            "hourly": {"time": [f"2026-06-07T{hour:02d}:00" for hour in range(24)],
+                       "temperature_2m": [value]*24}}
+        body = (json.dumps(payload, indent=2)+"\n").encode()
+        kwargs["capture_entity_body"](body, _dt(12, 10).timestamp())
+        return json.loads(body)
+    monkeypatch.setattr("src.data.openmeteo_client.fetch", fetch)
+    dl.download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=db, cycle=_dt(12),
+        targets=[dl.BayesPrecisionFusionDownloadTarget(
+            city="Shanghai", metric="low", target_date="2026-06-07", lead_days=1,
+            latitude=city.lat, longitude=city.lon, timezone_name=city.timezone)],
+        models=("icon_global", "ukmo_global_deterministic_10km"),
+        include_previous_runs=False, prune_after=False,
+    )
+    request = _low_revision_request()
+    real_shape_reader = materializer_mod._read_current_evidence_shape
+    with monkeypatch.context() as obsolete:
+        def old_shape(*args, **kwargs):
+            shape = real_shape_reader(*args, **kwargs)
+            assert shape is not None
+            return replace(shape, semantics_revision="ensemble_center_scenarios_v5")
+        obsolete.setattr(materializer_mod, "_read_current_evidence_shape", old_shape)
+        refused = materialize_replacement_forecast_live(conn, request)
+        assert not refused.ok
+        assert conn.execute("SELECT count(*) FROM forecast_posteriors").fetchone()[0] == 1
+    rebuilt = materialize_replacement_forecast_live(conn, request)
+    assert rebuilt.ok, rebuilt.reason_codes
+    row = conn.execute("SELECT q_json, provenance_json FROM forecast_posteriors WHERE posterior_id=?",
+                       (rebuilt.posterior_id,)).fetchone()
+    provenance = json.loads(row["provenance_json"])
+    shape = provenance["bayes_precision_fusion"]["current_evidence_shape"]
+    assert shape["semantics_revision"] == "ensemble_center_scenarios_v6"
+    assert shape["member_count"] == 51
+    assert current_evidence_shape_has_entry_authority(provenance)
+    assert current_evidence_shape_has_held_authority(provenance)
+    q = json.loads(row["q_json"])
+    mu = provenance["bayes_precision_fusion"]["anchor_value_c"]
+    sigma = shape["predictive_sigma_c"]
+    cdf = lambda x: .5*(1+math.erf((x-mu)/(sigma*math.sqrt(2))))
+    assert q == pytest.approx({"cool": cdf(20.5), "warm": cdf(30.5)-cdf(20.5),
+                               "hot": 1-cdf(30.5)}, abs=1e-12)
+    assert shape["provider_geometry_evidence"]["providers"]
+    serving = provenance["bayes_precision_fusion"]["current_value_serving"]
+    assert {"icon_global", "ukmo_global_deterministic_10km"}.issubset(serving)
+    for model in ("icon_global", "ukmo_global_deterministic_10km"):
+        assert serving[model]["physical_response"] is not None
+        captured = conn.execute("SELECT * FROM raw_model_forecasts WHERE raw_model_forecast_id=?",
+                                (serving[model]["raw_model_forecast_id"],)).fetchone()
+        assert captured["model"] == model and captured["raw_sha256"]
+    conn.close()
 
 
 def _built_low_revision_request(tmp_path: Path) -> ReplacementForecastMaterializeRequest:

@@ -1,8 +1,8 @@
 # Purpose: Verify forecast-cycle eligibility, coverage and current-carrier reseeding.
 # Reuse: Run when changing posterior cycle authority or seed coverage and drain rules.
 # Created: 2026-06-10
-# Last reused or audited: 2026-09-27
-# Lifecycle: created=2026-06-10; last_reviewed=2026-09-27; last_reused=2026-09-27
+# Last reused or audited: 2026-09-29
+# Lifecycle: created=2026-06-10; last_reviewed=2026-09-29; last_reused=2026-09-29
 # Authority basis: operator staleness/cycle-physics directive 2026-06-10 (bounded re-materialization
 #   staleness gate at materialization, fail-closed; cycle-phase provenance treats all standard
 #   00Z/06Z/12Z/18Z cycles as live-eligible synoptic); 2026-08-19 causal
@@ -131,6 +131,10 @@ def test_selected_land_cell_changes_current_shape_hash_without_changing_math() -
     second = _current_evidence_shape_from_values(**inputs,
         grid_surface_evidence_revision=GRID_SURFACE_EVIDENCE_REVISION,
         grid_surface_evidence_identity_hash="b" * 64)
+    from src.data.replacement_forecast_materializer import _bind_provider_geometry_identity
+    from tests.test_replacement_forecast_materializer import _precision_guard
+    first = _bind_provider_geometry_identity(first, {}, anchor_metadata=_precision_guard().metadata)
+    second = _bind_provider_geometry_identity(second, {}, anchor_metadata=_precision_guard().metadata)
     assert first.predictive_sigma_c == second.predictive_sigma_c == no_geometry.predictive_sigma_c
     assert len({first.shape_hash, second.shape_hash, no_geometry.shape_hash}) == 3
     assert current_evidence_shape_has_entry_authority({"bayes_precision_fusion": {
