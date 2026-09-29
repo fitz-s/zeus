@@ -1,11 +1,10 @@
 # Created: 2026-06-17
-# Last audited: 2026-06-17
+# Last audited: 2026-09-29
 # Authority basis: operator "finish v3" (2026-06-17) — settlement-graded GATE for the v3
 #   zeus_grid_coordinate_precision_upgrade_v3.md rule 5 deploy flag
 #   (edli.replacement_0_1_grid_representativeness_enabled). Proves flag-ON does NOT degrade the
-#   pooled fused center and (operator thesis) trims the cold bias by down-weighting coarse/offset
-#   native cells via Sigma. Read-only DB (?mode=ro). Reconstructs the EXACT live capture inputs.
-"""Settlement-validation replay: fused mu* flag-OFF vs flag-ON (cold-start) vs flag-ON (fitted).
+#   offline fused center under proved native inputs. Read-only DB (?mode=ro).
+"""Offline native-only replay, not a replacement live probability deploy gate.
 
 For each VERIFIED settled (city, metric, target_date) lead-1 cell in the HOLDOUT window
 (default last 7 days — disjoint from the [-60,-7] fit window of fit_grid_representativeness.py):
@@ -29,8 +28,9 @@ For each VERIFIED settled (city, metric, target_date) lead-1 cell in the HOLDOUT
   3. Compare fused mu* (native settlement unit) to settlement_value: bias (mean signed error),
      MAE, n; POOLED and PER-CITY; plus improved/worsened cell counts ON vs OFF.
 
-GATE: flag-ON must NOT degrade the pooled center (Delta MAE <= 0 or within noise) AND should
-reduce the cold bias. Read-only; writes NO DB and flips NO flag.
+Missing/not-applicable geometry yields NOT_VALIDATED, never an ON=OFF pass.
+Read-only; writes NO DB and flips NO flag. Historical fusion here is offline
+evidence only and must not be mistaken for current-evidence live q authority.
 
 Usage: python scripts/validate_grid_representativeness_fusion.py [--holdout 7] [--lead 1]
 """
@@ -61,7 +61,7 @@ from src.forecast.bayes_precision_fusion_anchor_bridge import (
 from src.data.bayes_precision_fusion_capture import (
     OPENMETEO_PREVIOUS_RUNS_ANCHOR_MODEL_NAME,
 )
-from src.forecast.grid_representativeness_loader import sigma_repr_sq_for
+from src.forecast.grid_representativeness_loader import read_grid_representativeness
 from src.forecast.model_selection import (
     GLOBAL_LIKELIHOOD_MODELS,
     REGIONAL_MODELS,
@@ -248,8 +248,8 @@ def build_instruments(con, *, city, metric, lat, lon, target_date, lead, repr_fi
     return anchor_z, anchor_tau0, instruments, disagree_var, selection
 
 
-def fuse_variant(anchor_z, anchor_tau0, instruments, disagree_var, *, city, repr_fit):
-    """Run the fusion for OFF / ON-cold / ON-fitted and return native mu* for each."""
+def fuse_variant(anchor_z, anchor_tau0, instruments, disagree_var, *, city, repr_fit, geometry_bindings=None, raw_responses=None):
+    """Offline native-only comparison; missing proof is not an ON=OFF pass."""
     def run(get_sigma):
         lik = tuple(
             ModelInstrument(
@@ -267,12 +267,26 @@ def fuse_variant(anchor_z, anchor_tau0, instruments, disagree_var, *, city, repr
         return fp.mu
 
     mu_off = run(lambda m: 0.0)
-    mu_cold = run(lambda m: sigma_repr_sq_for(city, m, fit=COLD_START_REPR_VARIANCE))
+    models = {ANCHOR_MODEL, *(i.model for i in instruments)}
+    reads = {m: read_grid_representativeness(
+        city, m, expected_binding=(geometry_bindings or {}).get(m), fit=COLD_START_REPR_VARIANCE,
+        raw_payload_bytes=(raw_responses or {}).get(((geometry_bindings or {}).get(m) or {}).get("raw_response_sha256")),
+    ) for m in models}
+    dispositions = {m: {"status": r.status, "reason": r.reason} for m, r in reads.items()}
+    if any(r.status != "APPLICABLE_NATIVE" for r in reads.values()):
+        return mu_off, None, None, dispositions
+    mu_cold = run(lambda m: reads[m].variance_c2)
     if repr_fit is not None:
-        mu_fit = run(lambda m: sigma_repr_sq_for(city, m, fit=repr_fit))
+        fitted = {m: read_grid_representativeness(
+            city, m, expected_binding=(geometry_bindings or {}).get(m), fit=repr_fit,
+            raw_payload_bytes=(raw_responses or {}).get(((geometry_bindings or {}).get(m) or {}).get("raw_response_sha256")),
+        ) for m in models}
+        if any(r.status != "APPLICABLE_NATIVE" for r in fitted.values()):
+            return mu_off, mu_cold, None, dispositions
+        mu_fit = run(lambda m: fitted[m].variance_c2)
     else:
         mu_fit = None
-    return mu_off, mu_cold, mu_fit
+    return mu_off, mu_cold, mu_fit, dispositions
 
 
 def _stat(xs):
@@ -307,6 +321,7 @@ def main() -> int:
     err_fit: list[float] = []
     per_city: dict[str, dict] = {}
     n_skipped = 0
+    geometry_dispositions: dict[str, int] = {}
     improved_cold = worsened_cold = improved_fit = worsened_fit = 0
 
     for r in cells:
@@ -325,9 +340,15 @@ def main() -> int:
             n_skipped += 1
             continue
         anchor_z, anchor_tau0, instruments, disagree_var, _sel = built
-        mu_off, mu_cold, mu_fit = fuse_variant(
+        mu_off, mu_cold, mu_fit, dispositions = fuse_variant(
             anchor_z, anchor_tau0, instruments, disagree_var, city=city, repr_fit=repr_fit
         )
+        if mu_cold is None:
+            n_skipped += 1
+            for proof in dispositions.values():
+                reason = f"{proof['status']}: {proof['reason']}"
+                geometry_dispositions[reason] = geometry_dispositions.get(reason, 0) + 1
+            continue
         e_off = c_to_native(mu_off, unit) - sv
         e_cold = c_to_native(mu_cold, unit) - sv
         err_off.append(e_off)
@@ -353,6 +374,10 @@ def main() -> int:
     cb, cm = _stat(err_cold)
     fb, fm = _stat(err_fit)
     n = len(err_off)
+    if n == 0:
+        print("NOT_VALIDATED: no comparable exact native product proof; no ON non-degradation verdict")
+        print("SUMMARY_JSON " + json.dumps({"n": 0, "n_skipped": n_skipped, "geometry_dispositions": geometry_dispositions}))
+        return 2
     print(f"=== Grid-representativeness fusion validation (holdout last {args.holdout}d, lead-{args.lead}) ===")
     print(f"  fused cells n={n}   (skipped {n_skipped}: no anchor current / no extras / unknown city)")
     print(f"  repr fit artifact: {'LOADED ' + REPR_FIT_PATH.name if repr_fit else 'ABSENT (ON-fitted skipped)'}")
@@ -387,7 +412,8 @@ def main() -> int:
 
     # emit a compact JSON summary for the report + shared memory.
     summary = {
-        "n": n, "n_skipped": n_skipped, "holdout_days": args.holdout, "lead": args.lead,
+        "n": n, "n_skipped": n_skipped, "geometry_dispositions": geometry_dispositions,
+        "holdout_days": args.holdout, "lead": args.lead,
         "off": {"bias": ob, "mae": om},
         "on_cold": {"bias": cb, "mae": cm, "dbias": cb - ob, "dmae": cm - om,
                     "improved": improved_cold, "worsened": worsened_cold},

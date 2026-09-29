@@ -1,3 +1,6 @@
+# Last reused/audited: 2026-09-29
+#   Native-penalty disposition travels through existing analysis/cert diagnostics;
+#   unproven/default-downscaled geometry never claims zero physical error.
 # Last reused/audited: 2026-09-25
 #   Global predictive-mean NO redecision preserves the immutable replacement
 #   certificate's same-bin YES parent while carrying its distinct action q in
@@ -28567,6 +28570,7 @@ def _forecast_authority_payload_from_posterior(
         _fail("canonical_bound_hash_unparseable")
         return None
     fusion = p_provenance.get("bayes_precision_fusion")
+    grid_geometry: dict[str, dict] | None = None
     bound_serving = (
         fusion.get("current_value_serving")
         if isinstance(fusion, Mapping)
@@ -28586,12 +28590,15 @@ def _forecast_authority_payload_from_posterior(
         if members_native is None:
             _fail(members_reason.get("reason") or "multimodel_members_unavailable")
     elif event.event_type in _FORECAST_DECISION_EVENT_TYPES:
+        grid_geometry = {}
         legacy_members = _spine_multimodel_members_for_event(
             conn,
             event=event,
             family=family,
             decision_time=decision_time,
+            geometry_out=grid_geometry,
         )
+        payload["_edli_grid_representativeness"] = grid_geometry
         members_native = None if legacy_members is None else tuple(legacy_members[0])
         if members_native is None:
             _fail("legacy_spine_members_unavailable")
@@ -28743,6 +28750,8 @@ def _forecast_authority_payload_from_posterior(
     }
     if source_clock_certificate is not None:
         payload_out.update(source_clock_certificate)
+    if grid_geometry is not None:
+        payload_out["grid_representativeness"] = deepcopy(grid_geometry)
     source_time = _parse_utc(p_source_available_at)
     agent_time = _parse_utc(p_computed_at) or source_time
     persisted_time = _parse_utc(p_computed_at) or source_time
@@ -32866,6 +32875,7 @@ def _generate_candidate_proofs(
                 "_edli_spine_repr_m2_by_index",
                 "_edli_spine_provider_weights_by_index",
                 "_edli_spine_served_center_authority",
+                "_edli_grid_representativeness",
             ):
                 payload.pop(_key, None)
 
@@ -32932,12 +32942,15 @@ def _generate_candidate_proofs(
             else:
                 # Legacy/non-source-clock carrier: retain the replay-equivalent
                 # same-cycle multi-model accessor and its raw precision evidence.
+                _grid_geometry: dict[str, dict] = {}
                 _legacy_spine = _spine_multimodel_members_for_event(
                     forecast_conn,
                     event=event,
                     family=family,
                     decision_time=decision_time,
+                    geometry_out=_grid_geometry,
                 )
+                payload["_edli_grid_representativeness"] = _grid_geometry
                 if _legacy_spine is not None:
                     _spine_raw, _spine_source_cycle, _spine_precision = _legacy_spine
 
@@ -33059,12 +33072,15 @@ def _generate_candidate_proofs(
                     "_edli_spine_pre_day0_low_block_reason",
                     "_edli_spine_provider_weights_by_index",
                     "_edli_spine_served_center_authority",
+                    "_edli_grid_representativeness",
                     "_edli_q_source",
                 )
                 if k in payload
             }
             if _spine_inputs:
                 _spine_inputs["city"] = str(family.city)
+                if "_edli_grid_representativeness" in _spine_inputs:
+                    _spine_inputs["_edli_grid_representativeness"] = deepcopy(_spine_inputs["_edli_grid_representativeness"])
                 provenance_capture["decision_receipt_spine_inputs"] = _spine_inputs
         except Exception:  # noqa: BLE001 — observability only; never break the decision
             pass
@@ -43922,6 +43938,7 @@ def _spine_multimodel_members_for_event(
     event: OpportunityEvent,
     family,
     decision_time: datetime,
+    geometry_out: dict[str, dict] | None = None,
 ) -> tuple[list[float], str, list[tuple[str, float | None, int, float]]] | None:
     """The Q-KERNEL SPINE member envelope sourced from the MULTI-MODEL DETERMINISTIC
     fusion table ``raw_model_forecasts`` — the SAME source the strategy-of-record,
@@ -44046,32 +44063,25 @@ def _spine_multimodel_members_for_event(
         raw_m2_by_model = {}
 
     _c2_to_native_var = 1.0 if unit == "C" else (9.0 / 5.0) ** 2  # degC²→native² scale
-    # Option C (2026-06-21): per-model grid-representativeness variance sigma_repr²
-    # (degC²) for THIS family's (city, model), threaded as an index-aligned channel
-    # alongside the raw m2. The downstream RawModelMember at build_fresh_model_set has
-    # model_id="reactor_served_{i}" (the model NAME is lost there), so repr MUST be
-    # computed HERE where the real model name + family.city are in scope, then carried
-    # by index. Converted to native² by the SAME _c2_to_native_var as the raw m2 so it
-    # adds in the member-value unit basis. FAIL-SOFT: a city/model absent from the grid
-    # table yields 0.0 (byte-identical for that member, no fabricated penalty, no flag).
-    # Enters the MEAN weights ONLY — never the predictive σ / Kelly width.
-    try:
-        from src.forecast.grid_representativeness_loader import (  # noqa: PLC0415
-            sigma_repr_sq_for as _sigma_repr_sq_for,
-        )
-    except Exception:  # noqa: BLE001
-        _sigma_repr_sq_for = None  # type: ignore[assignment]
+    # This legacy accessor has no product-bound native-height response bytes.
+    # Do not reuse a static target DEM as a native penalty. Keep the disposition
+    # alongside the unchanged numeric channel: zero means not applied, not zero
+    # physical error. Each analysis caller owns its fresh provenance dictionary.
+    from src.forecast.grid_representativeness_loader import (  # noqa: PLC0415
+        read_grid_representativeness,
+    )
 
     def _repr_native_for(model: str) -> float:
-        if _sigma_repr_sq_for is None:
+        result = read_grid_representativeness(str(family.city), str(model))
+        if geometry_out is not None:
+            geometry_out[str(model)] = {
+                "status": result.status, "reason": result.reason,
+                "native_penalty_not_applied": result.status != "APPLICABLE_NATIVE",
+            }
+        if result.status != "APPLICABLE_NATIVE":
             return 0.0
-        try:
-            _r_c2 = float(_sigma_repr_sq_for(str(family.city), str(model)))
-        except Exception:  # noqa: BLE001 — geometry is best-effort; absence == 0.0
-            return 0.0
-        if not (_r_c2 == _r_c2) or _r_c2 <= 0.0:  # NaN-safe; non-positive == no penalty
-            return 0.0
-        return _r_c2 * _c2_to_native_var
+        assert result.variance_c2 is not None
+        return result.variance_c2 * _c2_to_native_var
 
     members_native: list[float] = []
     # 4-tuple entries: (model, raw_m2_native|None, n, repr_m2_native). The repr is a

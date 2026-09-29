@@ -1,4 +1,8 @@
 {
+ "_provenance": {
+  "status": "UNPROVEN_LEGACY",
+  "reason": "Historical default-downscaled metadata lacks exact response binding and native/station ground proof. Existing cell_elevation_m and delta_z_m are historical labels, not certified native quantities."
+ },
  "Amsterdam": {
   "elevation_m": -3.4,
   "lat": "52.308601",

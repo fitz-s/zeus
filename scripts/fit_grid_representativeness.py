@@ -1,5 +1,5 @@
 # Created: 2026-06-17
-# Last audited: 2026-06-17
+# Last audited: 2026-09-29
 # Authority basis: operator "finish v3" (2026-06-17) — walk-forward fit of the v3
 #   zeus_grid_coordinate_precision_upgrade_v3.md rule 5 (sigma_repr^2 = g(d_eff,|dz|,regime))
 #   and rule 4 (station/grid shift beta_alt/b_grid) from VERIFIED settled residuals.
@@ -12,7 +12,7 @@ For every VERIFIED settled (city, metric, target_date) lead-1 cell in the FIT wi
   settlement_residual = settled_truth_C - model_forecast_value_C   (rule 4/5 convention:
       settled - x_station; for rule 5 only the SQUARE enters, so the sign is immaterial there)
   d_eff_m, dz_m       = the model's native-cell distance + delta_z from
-      config/grid_representativeness.json (the SAME table the live loader reads)
+      exact product-bound native/station-ground proof, not a legacy target DEM
 
 Then:
   * rule 5: fit_representativeness_variance(rows) -> ReprVarianceFit (a0, a_d, a_z)
@@ -20,7 +20,7 @@ Then:
 
 Both fits are POOLED across cities/models (a single global stratum) because the grid
 features (d_eff, dz) already carry the per-cell variation; per-(city,model) strata are far
-too thin for an honest slope (the live loader passes the pooled fit + per-cell d_eff/dz).
+too thin for an honest slope. These fits are offline evidence, not live q authority.
 The holdout window [-holdout, now] is RESERVED for scripts/validate_grid_representativeness_fusion.py
 (no overlap -> no leakage between fit and validation).
 
@@ -40,7 +40,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.forecast.grid_representativeness_loader import load_grid_representativeness
+from src.forecast.grid_representativeness_loader import read_grid_representativeness
 from src.forecast.representativeness_variance import (
     ReprResidualRow,
     StationShiftResidualRow,
@@ -67,22 +67,24 @@ def build_residual_rows(
     fit_lo: int,
     holdout: int,
     lead: int,
+    geometry_bindings: dict | None = None,
+    raw_responses: dict[str, bytes] | None = None,
 ) -> tuple[list[ReprResidualRow], list[StationShiftResidualRow], dict]:
     """Build pooled rule-5 + rule-4 residual rows over the FIT window [-fit_lo, -holdout].
 
     Uses endpoint='previous_runs' (fixed-lead train product, the SAME source the live
     history provider trains on) joined to VERIFIED settlement, strictly inside the fit
-    window so the holdout stays untouched. Each row is keyed to its (city, model) grid cell.
+    window so the holdout stays untouched. Geometry must independently bind this
+    row's product response; static city/model labels cannot certify history.
     """
-    grid = load_grid_representativeness()
     repr_rows: list[ReprResidualRow] = []
     shift_rows: list[StationShiftResidualRow] = []
-    diag = {"n_join": 0, "n_in_grid": 0, "models": {}, "cities": set()}
+    diag = {"n_join": 0, "n_in_grid": 0, "models": {}, "cities": set(), "geometry_dispositions": {}}
 
     rows = con.execute(
         """
         SELECT r.city AS city, r.model AS model, r.target_date AS target_date,
-               r.forecast_value_c AS fv,
+               r.forecast_value_c AS fv, r.raw_payload_hash AS raw_payload_hash,
                s.settlement_value AS sv, s.settlement_unit AS unit
         FROM raw_model_forecasts AS r
         JOIN settlement_outcomes AS s
@@ -102,18 +104,22 @@ def build_residual_rows(
     for row in rows:
         diag["n_join"] += 1
         city, model = row["city"], row["model"]
-        cell = ((grid.get(city) or {}).get("models") or {}).get(model)
-        if not isinstance(cell, dict):
+        # Binding must come from this historical product's evidence, not be
+        # copied out of a static artifact to make it certify itself.
+        binding = (geometry_bindings or {}).get((city, model, row["raw_payload_hash"]))
+        geometry = read_grid_representativeness(
+            city, model, expected_binding=binding,
+            raw_payload_bytes=(raw_responses or {}).get((binding or {}).get("raw_response_sha256")),
+        )
+        if geometry.status != "APPLICABLE_NATIVE":
+            reason = f"{geometry.status}: {geometry.reason}"
+            diag["geometry_dispositions"][reason] = diag["geometry_dispositions"].get(reason, 0) + 1
             continue
-        d_eff = cell.get("d_eff_m")
-        if d_eff is None:
-            continue
-        dz = cell.get("delta_z_m")
         try:
             settled_c = _settle_to_c(row["sv"], row["unit"])
             fv = float(row["fv"])
-            d_eff_m = float(d_eff)
-            dz_m = float(dz) if dz is not None else 0.0
+            d_eff_m = float(geometry.d_eff_m)
+            dz_m = float(geometry.delta_z_m)
         except (TypeError, ValueError):
             continue
         # rule 4/5 convention: settled - x_station (sign immaterial for rule-5 square).
@@ -153,6 +159,11 @@ def main() -> int:
         con, fit_lo=args.fit_lo, holdout=args.holdout, lead=args.lead
     )
     con.close()
+
+    if not repr_rows:
+        print("NOT_FITTED: no exact native/station-ground product proof; no fit artifacts written")
+        print(json.dumps(diag, sort_keys=True))
+        return 2
 
     repr_fit = fit_representativeness_variance(repr_rows, min_train=args.min_train)
     shift_fit = fit_station_shift(shift_rows, min_train=args.min_train)
