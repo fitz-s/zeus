@@ -332,6 +332,12 @@ _FORECAST_LIVE: tuple[SourceJobSpec, ...] = (
                   misfire_grace_time=600, family="forecast", registry_built=False,
                   notes="hourly belt-and-suspenders: re-verify meta-stamped anchor artifacts "
                         "against single-runs API (K4.0b(f)); file-writes only, no DB write"),
+    SourceJobSpec("forecast_retention", "forecast_live_daemon", "evidence", "default", True,
+                  callable_ref="_forecast_retention_job",
+                  misfire_grace_time=600, family="forecast", registry_built=False,
+                  notes="hourly bounded eviction of unreachable forecast queue files, raw "
+                        "manifests and posterior sample arrays; own forecast_retention lane; "
+                        "WAL-bounded forecast_posteriors writes under db_writer_lock(LIVE)"),
 )
 
 # ---------------------------------------------------------------------------
