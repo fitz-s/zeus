@@ -526,9 +526,9 @@ def ingest_hko_fnd_live(
 
     product = fetch_hko_fnd_product(endpoint=endpoint)
     payload = json.loads(product.raw_json)
-    rows = tuple(
+    body_rows = tuple(
         row
-        for value in selected
+        for value in ("high", "low")
         for row in parse_hko_fnd_payload(
             payload,
             city=city,
@@ -542,7 +542,8 @@ def ingest_hko_fnd_live(
         selection={"product": "HKO_FND", "city_timezone": city_timezone,
                    "forecast_date": row.target_date.replace("-", ""),
                    "temperature_field": "forecastMaxtemp" if row.metric == "high" else "forecastMintemp"},
-    ) for row in rows]
+    ) for row in body_rows]
+    rows = tuple(row for row in body_rows if row.metric in selected)
     return persist_station_forecast_rows(
         conn,
         rows,

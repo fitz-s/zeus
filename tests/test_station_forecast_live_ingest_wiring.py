@@ -565,6 +565,60 @@ def test_same_station_body_recapture_does_not_renew_possession_or_source_clock(m
     conn.close()
 
 
+@pytest.mark.parametrize("first", ("high", "low"))
+def test_hko_single_metric_then_sibling_reuses_complete_body_proof_without_clock_renewal(monkeypatch, first):
+    """A full possessed body proves both lawful quantities, not only first dispatch."""
+    import urllib.request
+    from datetime import datetime, timedelta, timezone
+    from src.data.replacement_current_value_serving import read_current_instrument_values
+
+    initial = datetime(2026, 7, 23, 10, 15, tzinfo=timezone.utc)
+    clock = [initial]
+    body = (json.dumps({"updateTime":"2026-07-23T10:14:00+00:00","weatherForecast":[{
+        "forecastDate":"20260724","forecastMaxtemp":{"value":33,"unit":"C"},
+        "forecastMintemp":{"value":27,"unit":"C"}}]},indent=2)+"\n").encode()
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self,*_args): pass
+        def read(self): return body
+    class Clock(datetime):
+        @classmethod
+        def now(cls,tz=None): return clock[0].astimezone(tz) if tz else clock[0].replace(tzinfo=None)
+    monkeypatch.setattr(urllib.request,"urlopen",lambda *_a,**_k: Response())
+    monkeypatch.setattr(adapter,"datetime",Clock)
+    monkeypatch.setattr("src.data.bayes_precision_fusion_download.datetime",Clock)
+    conn = _hourly_schema_conn()
+    try:
+        assert adapter.ingest_hko_fnd_live(conn,metrics=(first,)) == 1
+        artifact = conn.execute("SELECT * FROM raw_forecast_artifacts").fetchone()
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(raw_forecast_artifacts)")]
+        proof = dict(zip(columns,artifact))
+        assert Path(proof["artifact_path"]).read_bytes() == body
+        assert {item["metric"] for item in json.loads(proof["artifact_metadata_json"])["station_response"]["items"]} == {"high","low"}
+        second = "low" if first == "high" else "high"
+        clock[0] = initial+timedelta(hours=1)
+        assert adapter.ingest_hko_fnd_live(conn,metrics=(second,)) == 1
+        assert conn.execute("SELECT * FROM raw_forecast_artifacts").fetchone() == artifact
+        rows = conn.execute("SELECT metric,source_cycle_time,source_available_at,captured_at,artifact_id,recorded_at "
+                            "FROM raw_model_forecasts ORDER BY metric").fetchall()
+        assert {row[4] for row in rows} == {proof["artifact_id"]}
+        assert {row[1:4] for row in rows} == {("2026-07-23T10:14:00+00:00",initial.isoformat(),initial.isoformat())}
+        for metric in (first,second):
+            for cutoff, expected in ((initial+timedelta(minutes=1),metric==first),
+                                      (clock[0]+timedelta(minutes=1),True)):
+                served = read_current_instrument_values(conn,city="Hong Kong",metric=metric,target_date="2026-07-24",
+                    include_station_sources=True,source_cycle_time_iso="2026-07-23T10:14:00+00:00",
+                    decision_time_iso=cutoff.isoformat())
+                assert ("hko_fnd" in served) is expected
+        clock[0] += timedelta(hours=1)
+        assert adapter.ingest_hko_fnd_live(conn,metrics=("high","low")) == 0
+        assert conn.execute("SELECT * FROM raw_forecast_artifacts").fetchone() == artifact
+        assert conn.execute("SELECT metric,source_cycle_time,source_available_at,captured_at,artifact_id,recorded_at "
+                            "FROM raw_model_forecasts ORDER BY metric").fetchall() == rows
+    finally:
+        conn.close()
+
+
 @pytest.mark.parametrize("provider", ("hko", "cwa"))
 def test_shared_station_selector_and_frontier_reject_corrupt_body_without_hiding_sibling(monkeypatch, provider):
     from src.data.replacement_current_value_serving import (
