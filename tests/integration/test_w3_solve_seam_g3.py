@@ -48210,3 +48210,408 @@ def test_global_batch_original_exception_is_not_masked_by_a_failing_flush(monkey
     finally:
         corpus._PENDING.pop(key, None)
         trade_conn.close()
+
+
+def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric):
+    """Normal writers + controlled source receipts; no probability authority mock.
+
+    The 51-member GRIB/land-mask input is a causal toy receipt, not a claim of
+    actual ECMWF collection. HTTP entity bodies, current serving, the precision
+    guard, materializer, readiness and held-pin eligibility are production paths.
+    """
+    from datetime import date, datetime, timedelta, timezone
+    from src.config import runtime_cities_by_name, runtime_station_geometry_for_city
+    from src.contracts.ensemble_snapshot_provenance import GRID_SURFACE_EVIDENCE_REVISION
+    from src.data import bayes_precision_fusion_download as dl, daily_obs_append, station_forecast_adapter
+    from src.data import day0_hourly_vectors as hourly
+    from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS
+    from src.data.openmeteo_ecmwf_ifs9_anchor import (
+        OpenMeteoEcmwfIfs9AnchorRequest, build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest,
+        extract_openmeteo_ecmwf_ifs9_localday_anchor,
+    )
+    from src.data.raw_forecast_artifact_manifest import write_manifest_to_db
+    from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
+        OpenMeteoIfs9PrecisionMetadata, evaluate_openmeteo_ecmwf_ifs9_precision_guard,
+    )
+    from src.data.replacement_forecast_materializer import (
+        ReplacementForecastMaterializeRequest, materialize_replacement_forecast_live,
+    )
+    from src.data.replacement_forecast_readiness import expected_replacement_dependency_identity_by_role
+    from src.state.db import _create_readiness_state, _create_source_run, _create_source_run_coverage
+    from src.state.schema.v2_schema import apply_canonical_schema
+    from src.state.schema.observation_prints_schema import ensure_table as ensure_prints
+    from src.state.source_run_repo import write_source_run
+    from scripts import hko_ingest_tick
+    from src.data.observation_instants_writer import insert_rows
+    from tests.test_replacement_forecast_materializer import _TemperatureBin
+    from tests.test_station_forecast_live_ingest_wiring import _hourly_schema_conn, _station_grid_cohort
+
+    utc = timezone.utc
+    cycle = datetime(2026, 6, 6, 12, tzinfo=utc)
+    issued, captured = cycle + timedelta(minutes=5), cycle + timedelta(minutes=10)
+    cut = datetime(2026, 6, 7, 6, 20, tzinfo=utc)
+    target = date(2026, 6, 7)
+    city = runtime_cities_by_name()["Hong Kong"]
+    station = runtime_station_geometry_for_city(city)
+    db = tmp_path / f"hko-{metric}.db"
+    conn = _hourly_schema_conn(db)
+    conn.row_factory = sqlite3.Row
+    apply_canonical_schema(conn, forecast_tables=True)
+    ensure_prints(conn)
+    _create_source_run(conn)
+    _create_source_run_coverage(conn)
+    _create_readiness_state(conn)
+    identity = expected_replacement_dependency_identity_by_role(metric)["baseline_b0"]
+    run_id = f"hko-clock-{metric}-ens"
+    track = f"m{'x' if metric == 'high' else 'n'}2t6_{metric}_short_horizon"
+    release = f"ecmwf_open_data:{track}"
+    write_source_run(conn, source_run_id=run_id, source_id="ecmwf_open_data", track=track,
+        release_calendar_key=release, source_cycle_time=cycle, source_available_at=issued,
+        fetch_finished_at=issued, captured_at=issued, imported_at=issued,
+        target_local_date=target.isoformat(), city_id=city.name, city_timezone=city.timezone,
+        temperature_metric=metric, physical_quantity=identity.physical_quantity,
+        observation_field=identity.observation_field, data_version=identity.data_version,
+        expected_members=51, observed_members=51, expected_steps_json=[0, 3, 6],
+        observed_steps_json=[0, 3, 6], expected_count=3, observed_count=3,
+        status="SUCCESS", completeness_status="COMPLETE")
+    conn.execute("""INSERT INTO source_run_coverage (
+        coverage_id,source_run_id,source_id,source_transport,release_calendar_key,track,
+        city_id,city,city_timezone,target_local_date,temperature_metric,physical_quantity,
+        observation_field,data_version,expected_members,observed_members,expected_steps_json,
+        observed_steps_json,snapshot_ids_json,target_window_start_utc,target_window_end_utc,
+        completeness_status,readiness_status,computed_at,expires_at,recorded_at)
+        VALUES (?,?, 'ecmwf_open_data','native_grib',?,?,?,?,?,?,?,?,?,?,51,51,
+        '[0,3,6]','[0,3,6]','[1]','2026-06-06T16:00:00+00:00','2026-06-07T16:00:00+00:00',
+        'COMPLETE','LIVE_ELIGIBLE',?,?,?)""", (run_id,run_id,release,track,city.name,city.name,
+        city.timezone,target.isoformat(),metric,identity.physical_quantity,identity.observation_field,
+        identity.data_version,issued.isoformat(),(cut+timedelta(days=1)).isoformat(),issued.isoformat()))
+    neighbors = [dict(flat_index=100+i, lat=station["lat"]+dy, lon=station["lon"]+dx,
+                      land_fraction=.9 if i == 0 else .2)
+                 for i, (dy, dx) in enumerate(((0,0),(0,.25),(.25,0),(.25,.25)))]
+    surface = {"revision":GRID_SURFACE_EVIDENCE_REVISION,
+        "selection_rule":"nearest_land_of_surrounding_four_v1", "request_lat":station["lat"],
+        "request_lon":station["lon"], "station_geometry":dict(station),
+        "mask_source":"ecmwf_open_data_ifs_oper_fc_step0_lsm",
+        "mask_source_url":"https://example.test/hko-mask.grib2",
+        "mask_source_index_url":"https://example.test/hko-mask.index",
+        "mask_source_cycle_time":cycle.isoformat(),
+        "mask_source_fetched_at":(cycle+timedelta(minutes=4)).isoformat(),
+        "mask_source_index_offset":0,"mask_source_index_length":200,"mask_sha256":"a"*64,
+        "mask_grid_identity_hash":"b"*64,"temperature_grid_identity_hash":"b"*64,
+        "selected_flat_index":100,"selected_lat":station["lat"],"selected_lon":station["lon"],
+        "selected_land_fraction":.9,"four_neighbors":neighbors}
+    ens_provenance = {"city":city.name,"nearest_grid_lat":station["lat"],
+        "nearest_grid_lon":station["lon"],"contract_outcome_evidence":{"settlement_station_id":station["station_id"]},
+        "grid_surface_evidence":surface}
+    center = 32.0 if metric == "high" else 27.0
+    conn.execute("""INSERT INTO ensemble_snapshots (
+        snapshot_id,city,target_date,temperature_metric,physical_quantity,observation_field,
+        issue_time,available_at,fetch_time,lead_hours,members_json,model_version,dataset_id,
+        source_id,source_run_id,source_cycle_time,source_available_at,authority,causality_status,
+        boundary_ambiguous,forecast_window_attribution_status,contributes_to_target_extrema,
+        members_unit,recorded_at,provenance_json) VALUES (1,?,?,?,?,?,?,?,?,24,?,'ecmwf_ens',?,
+        'ecmwf_open_data',?,?,?,'VERIFIED','OK',0,'FULLY_INSIDE_TARGET_LOCAL_DAY',1,'degC',?,?)""",
+        (city.name,target.isoformat(),metric,identity.physical_quantity,identity.observation_field,
+         cycle.isoformat(),issued.isoformat(),issued.isoformat(),
+         json.dumps([center+(i-25)*.02 for i in range(51)]),identity.data_version,run_id,
+         cycle.isoformat(),issued.isoformat(),issued.isoformat(),json.dumps(ens_provenance)))
+    _station_grid_cohort(monkeypatch, conn, db, city.name, target_dates=(target.isoformat(),),
+                         cycle=cycle, captured=captured)
+    class RawClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return captured.astimezone(tz) if tz else captured.replace(tzinfo=None)
+    body = json.dumps({"updateTime":issued.isoformat(),"weatherForecast":[{
+        "forecastDate":"20260607","forecastMaxtemp":{"value":33,"unit":"C"},
+        "forecastMintemp":{"value":27,"unit":"C"}}]}, indent=2).encode()
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self,*_args): pass
+        def read(self): return body
+    with monkeypatch.context() as fetch:
+        fetch.setattr("urllib.request.urlopen", lambda *_a,**_k: Response())
+        fetch.setattr(station_forecast_adapter,"datetime",RawClock)
+        fetch.setattr(dl,"datetime",RawClock)
+        assert station_forecast_adapter.ingest_hko_fnd_live(conn, metrics=(metric,)) == 1
+
+    # Source-issued current temperature arrives via the ordinary accumulator + ledger writer.
+    observed = cut.replace(minute=0)
+    publish, available = observed+timedelta(minutes=2), observed+timedelta(minutes=5)
+    spot = {"updateTime":publish.isoformat(),"temperature":{"recordTime":observed.isoformat(),
+        "data":[{"place":"Hong Kong Observatory","value":33,"unit":"C"}]}}
+    class SpotResponse:
+        def raise_for_status(self): pass
+        def json(self): return spot
+    class SpotClock(datetime):
+        @classmethod
+        def now(cls,tz=None): return available.astimezone(tz) if tz else available.replace(tzinfo=None)
+    with monkeypatch.context() as fetch:
+        fetch.setattr(daily_obs_append.httpx,"get",lambda *_a,**_k: SpotResponse())
+        fetch.setattr(daily_obs_append,"datetime",SpotClock)
+        assert daily_obs_append._accumulate_hko_reading(conn)
+    for clock, high, low in (("2026-06-07T00:10:00+00:00",30.1,27.2),
+                              ("2026-06-07T06:10:00+00:00",32.9,27.0)):
+        stamp = datetime.fromisoformat(clock)
+        fetched = (stamp+timedelta(seconds=5)).isoformat()
+        csv_body = ("Date time,Automatic Weather Station,Maximum Air Temperature Since Midnight(degree Celsius),"
+                    "Minimum Air Temperature Since Midnight(degree Celsius)\n"
+                    f"{stamp.astimezone(ZoneInfo(city.timezone)).strftime('%Y%m%d%H%M')},HK Observatory,{high},{low}\n")
+        snapshot = hko_ingest_tick._parse_hko_extrema_csv(csv_body,fetched_at_utc=fetched)
+        row = hko_ingest_tick._build_hko_extrema_row(snapshot,temperature_c=33 if stamp>=available else None,
+            accumulator_fetched_at=available.isoformat() if stamp>=available else None,
+            data_version="v1.wu-native",imported_at=fetched)
+        assert insert_rows(conn,[row]) == 1
+        conn.commit()
+    times = [f"2026-06-07T{hour:02d}:00" for hour in range(24)]
+    vector_at = cut-timedelta(minutes=2)
+    vector_cycle = cut.replace(hour=0,minute=0)
+    for i, model in enumerate((*hourly.day0_hourly_models_for_city(city),
+                              *hourly.day0_source_clock_ensemble_member_models())):
+        ensemble = model in hourly.day0_source_clock_ensemble_member_models()
+        api_model = "ecmwf_ifs025_ensemble" if ensemble else OPENMETEO_MODEL_IDS.get(model,model)
+        values = [32.0+(i%5)*.05+(1.0 if 14<=h<=18 else -.5) for h in range(24)]
+        payload = {"hourly":{"time":times,"temperature_2m":values},"hourly_units":{"temperature_2m":"°C"}}
+        endpoint = "https://single-runs-api.open-meteo.com/v1/forecast"
+        params = {"endpoint":endpoint,"models":api_model,"timezone":city.timezone,"hourly":"temperature_2m"}
+        request_hash = hourly.build_request_hash(endpoint=endpoint,params=params,models=[model],
+                                                captured_at=vector_at.isoformat(),payload=payload)
+        meta = hourly._day0_provider_run_meta(model=model,model_api_id=api_model,run=vector_cycle,
+            available_at=vector_cycle+timedelta(hours=1),modified_at=vector_cycle+timedelta(hours=1),
+            authority="run_pinned_single_runs",endpoint_mode="single_runs",request_params=params,
+            request_hash=request_hash,fetch_started_at=vector_at,fetch_finished_at=vector_at)
+        vectors = hourly.parse_openmeteo_hourly_payload(payload,city=city,models=[model],
+            captured_at=vector_at.isoformat(),source_run_meta_json=json.dumps(meta))
+        assert len(vectors) == 1
+        assert hourly.persist_day0_hourly_vectors(vectors,target_date=target.isoformat(),conn=conn,
+            request_hash=request_hash,endpoint=endpoint,now=cut) == 1
+    raw = {"latitude":station["lat"],"longitude":station["lon"],"elevation":station["elevation_m"],
+        "timezone":city.timezone,"hourly_units":{"temperature_2m":"°C"},
+        "hourly":{"time":times,"temperature_2m":[27.0 if h<6 else 33.0 for h in range(24)]},
+        "_zeus_current_target_scope":{"city":city.name,"target_date":target.isoformat(),"metric":metric}}
+    raw_bytes = (json.dumps(raw,indent=2,sort_keys=True)+"\n").encode()
+    artifact_path = tmp_path / f"hko-anchor-{metric}.json"
+    artifact_path.write_bytes(raw_bytes)
+    anchor_request = OpenMeteoEcmwfIfs9AnchorRequest(latitude=station["lat"],longitude=station["lon"],
+                                                   run=cycle,timezone_name=city.timezone)
+    manifest = build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(artifact_path,request=anchor_request,
+        metric=metric,source_available_at=captured,captured_at=captured,
+        product_metadata={"city":city.name,"target_date":target.isoformat()})
+    artifact_id = write_manifest_to_db(conn,manifest)
+    geometry = {"revision":"openmeteo_ifs9_o1280_source_cell_v1","static_hsurf_sha256":"b"*64,
+        "selected_flat_index":100,"selected_grid_lat":station["lat"],"selected_grid_lon":station["lon"],
+        "raw_grid_elevation_m":station["elevation_m"],"effective_grid_elevation_m":station["elevation_m"],
+        "target_dem_elevation_m":station["elevation_m"],"cell_is_sea":False,"cell_is_center":False,
+        "nearby_sea":False,"raw_payload_sha256":hashlib.sha256(raw_bytes).hexdigest(),
+        "station_registry_sha256":station["registry_sha256"]}
+    # Controlled HSURF source input, not a mock of its authenticity guard.
+    from src.data import openmeteo_ecmwf_ifs9_bucket_transport as source_surface
+    monkeypatch.setattr(source_surface,"source_cell_geometry_proof",lambda **_kw: {
+        key:value for key,value in geometry.items() if key not in {"raw_payload_sha256","station_registry_sha256"}})
+    def anchor_http(_url,params,**kwargs):
+        kwargs["capture_entity_body"](raw_bytes,captured.timestamp())
+        return json.loads(raw_bytes)
+    monkeypatch.setattr("src.data.openmeteo_client.fetch",anchor_http)
+    dl._SINGLE_RUNS_PAYLOAD_CACHE.clear()
+    dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEX.clear()
+    conn.commit()
+    anchor_capture = dl.download_bayes_precision_fusion_extra_raw_inputs(forecast_db=db,cycle=cycle,
+        targets=[dl.BayesPrecisionFusionDownloadTarget(city=city.name,target_date=target.isoformat(),metric=metric,
+            latitude=station["lat"],longitude=station["lon"],timezone_name=city.timezone,lead_days=1)],
+        models=("ecmwf_ifs",),frozen_source_runs={"ecmwf_ifs":(cycle,captured)},
+        include_previous_runs=False,prune_after=False)
+    assert anchor_capture["written_row_count"] == 1
+    metadata = OpenMeteoIfs9PrecisionMetadata(city=city.name,station_id=station["station_id"],city_lat=city.lat,city_lon=city.lon,
+        station_lat=station["lat"],station_lon=station["lon"],requested_lat=station["lat"],requested_lon=station["lon"],
+        requested_coordinate_precision_decimals=4,nearest_grid_lat=station["lat"],nearest_grid_lon=station["lon"],
+        nearest_grid_distance_km=0,native_grid="openmeteo_ecmwf_ifs_9km",delivery_grid_resolution="0p1",
+        interpolation_method="nearest_gridpoint",endpoint_mode="hourly_zeus_aggregated",
+        local_day_start_utc=cycle.replace(hour=16),local_day_end_utc=cut.replace(hour=16,minute=0),
+        timezone_name=city.timezone,target_local_date=target,temperature_unit="C",anchor_sigma_c=3,
+        grid_elevation_m=station["elevation_m"],station_elevation_m=station["elevation_m"],land_sea_mask="land",
+        city_class="standard",station_mapping_policy="settlement_station",source_geometry_proof=geometry)
+    guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(metadata,raw_payload_bytes=raw_bytes)
+    anchor = extract_openmeteo_ecmwf_ifs9_localday_anchor(raw,city_timezone=city.timezone,
+        target_local_date=target,source_cycle_time=cycle,require_full_localday=True)
+    point = 32 if metric == "high" else 27
+    bins = (_TemperatureBin(f"{point-1}C or below",upper_c=point-1,center_c=point-2,rounding_rule="oracle_truncate"),
+            _TemperatureBin(f"{point}C",lower_c=point,upper_c=point,center_c=point,rounding_rule="oracle_truncate"),
+            _TemperatureBin(f"{point+1}C or above",lower_c=point+1,center_c=point+2,rounding_rule="oracle_truncate"))
+    for i, item in enumerate(bins):
+        condition = "0x"+f"{i+1:064x}"
+        conn.execute("""INSERT INTO market_events (market_slug,city,target_date,temperature_metric,
+            condition_id,token_id,range_label,range_low,range_high,created_at,recorded_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)""", (f"hko-{metric}-{i}",city.name,target.isoformat(),metric,
+            condition,f"yes-{i}",item.bin_id,item.lower_c,item.upper_c,cut.isoformat(),cut.isoformat()))
+    request = ReplacementForecastMaterializeRequest(city=city.name,city_id=city.name,city_timezone=city.timezone,
+        target_date=target,temperature_metric=metric,baseline_source_run_id=run_id,baseline_data_version=identity.data_version,
+        baseline_source_available_at=issued,openmeteo_anchor=anchor,openmeteo_source_run_id="hko-om9",
+        openmeteo_source_available_at=captured,bins=bins,source_cycle_time=cycle,computed_at=cut,
+        expires_at=cut+timedelta(hours=1),openmeteo_precision_guard=guard,openmeteo_raw_payload_bytes=raw_bytes,
+        anchor_artifact_id=artifact_id,
+        day0_observed_extreme_c=32.9 if metric=="high" else 27.0,day0_observed_extreme_source="hko_hourly_accumulator",
+        day0_observed_extreme_observation_time="2026-06-07T06:10:00+00:00",
+        day0_observed_extreme_sample_count=2,day0_observed_extreme_unit="C")
+    result = materialize_replacement_forecast_live(conn,request)
+    assert result.ok, result.reason_codes
+    return SimpleNamespace(conn=conn,db=db,city=city,request=request,result=result,cut=cut,bins=bins,
+                           anchor_request=anchor_request,artifact_path=artifact_path)
+
+
+@pytest.mark.parametrize("metric",("high","low"))
+def test_hko_normal_writer_clock_proof_reaches_legal_pin_and_same_cut_consumers(tmp_path,monkeypatch,metric):
+    fixture = _hko_clock_normal_materializer_fixture(tmp_path,monkeypatch,metric)
+    try:
+        from src.data import replacement_forecast_bundle_reader as reader
+        row = fixture.conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_id=?",
+                                   (fixture.result.posterior_id,)).fetchone()
+        provenance = json.loads(row[0])
+        assert provenance["day0_current_temperature_state"]["observed_at_utc"] == "2026-06-07T06:00:00+00:00"
+        proof = provenance["day0_current_temperature_clock_evidence"]
+        assert proof["published_at_utc"] == "2026-06-07T06:02:00+00:00"
+        assert proof["available_at_utc"] == "2026-06-07T06:05:00+00:00"
+        assert reader._held_pinned_provenance_reason(provenance,city="Hong Kong",target_date="2026-06-07",
+            metric=metric,decision_time=fixture.cut) is None
+        # The normal complete wave resets to the ordinary current-cycle path.
+        class ClockType(type):
+            def __instancecheck__(cls, value): return isinstance(value,_dt.datetime)
+        class DecisionClock(_dt.datetime,metaclass=ClockType):
+            @classmethod
+            def now(cls,tz=None): return fixture.cut.astimezone(tz) if tz else fixture.cut.replace(tzinfo=None)
+        monkeypatch.setattr(reader,"datetime",DecisionClock)
+        selected = reader.read_prior_complete_replacement_forecast_bundle(fixture.conn,city="Hong Kong",
+            target_date="2026-06-07",temperature_metric=metric,decision_time=fixture.cut,
+            raw_input_hwm_conn=fixture.conn)
+        assert selected.status == "NOT_APPLICABLE" and selected.reason_code == "REPLACEMENT_PINNED_COMPLETE_CYCLE_RESET", selected.reason_code
+        # Publish a real newer deterministic wave while its ENS shape is absent.
+        # Only then does the public held-continuity reader have authority to pin.
+        from src.data.openmeteo_ecmwf_ifs9_anchor import build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest
+        from src.data.raw_forecast_artifact_manifest import write_manifest_to_db
+        capture = fixture.cut+_dt.timedelta(minutes=1)
+        incomplete = build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(fixture.artifact_path,
+            request=replace(fixture.anchor_request,run=fixture.cut.replace(hour=0,minute=0)),metric=metric,
+            source_available_at=capture,captured_at=capture,
+            product_metadata={"city":"Hong Kong","target_date":"2026-06-07"})
+        incomplete_artifact_id = write_manifest_to_db(fixture.conn,incomplete)
+        decision = fixture.cut+_dt.timedelta(minutes=2)
+        selected = reader.read_prior_complete_replacement_forecast_bundle(fixture.conn,city="Hong Kong",
+            target_date="2026-06-07",temperature_metric=metric,decision_time=decision,
+            raw_input_hwm_conn=fixture.conn)
+        assert selected.ok, selected.reason_code
+        assert selected.bundle.posterior_id == fixture.result.posterior_id
+        from src.contracts.settlement_semantics import SettlementSemantics
+        from src.events.triggers.day0_extreme_updated import (
+            build_day0_extreme_updated_event, observation_instant_row_to_day0_observation,
+        )
+        observed = dict(fixture.conn.execute("SELECT * FROM observation_instants ORDER BY utc_timestamp DESC LIMIT 1").fetchone())
+        observation = observation_instant_row_to_day0_observation(observed,metric=metric)
+        assert observation["source_authorized_status"] == "AUTHORIZED"
+        event = build_day0_extreme_updated_event(observation=observation,
+            settlement_semantics=SettlementSemantics.for_city(fixture.city),decision_time=decision,
+            received_at=decision.isoformat())
+        payloads = []
+        def prepare(use,bundle):
+            payload = {}
+            prepared = era._prepare_current_global_probability_family(event,forecast_conn=fixture.conn,
+                topology_conn=fixture.conn,observation_conn=fixture.conn,decision_time=decision,
+                max_age=_dt.timedelta(seconds=30),allow_unobserved_day0_replacement=False,
+                allow_provisional_day0_replacement=True,probability_use=use,
+                pinned_complete_bundle=bundle,raw_input_hwm_conn=fixture.conn,day0_payload_out=payload)
+            payloads.append(payload)
+            return prepared
+        held = prepare(era._CurrentProbabilityUse.HELD_MONITOR,selected.bundle)
+        rebound = era._rehydrate_held_pinned_bundle_for_actuation(event,selected=held.probability_witness,
+            probability_use=era._CurrentProbabilityUse.REDUCE_ONLY_EXIT,forecast_conn=fixture.conn,
+            decision_time=decision)
+        assert rebound is not None
+        global_exit = prepare(era._CurrentProbabilityUse.REDUCE_ONLY_EXIT,rebound)
+        assert isinstance(held.probability_witness,JointOutcomeProbabilityWitness)
+        assert held.probability_witness.witness_identity == global_exit.probability_witness.witness_identity
+        np.testing.assert_array_equal(held.probability_witness.yes_point_q,global_exit.probability_witness.yes_point_q)
+        np.testing.assert_array_equal(held.probability_witness.yes_q_samples,global_exit.probability_witness.yes_q_samples)
+        from src.engine.monitor_refresh import _current_global_held_point_probability
+        for binding in held.probability_witness.bindings:
+            yes = SimpleNamespace(condition_id=binding.condition_id,direction="buy_yes")
+            no = SimpleNamespace(condition_id=binding.condition_id,direction="buy_no")
+            assert _current_global_held_point_probability(yes,held.probability_witness) == pytest.approx(
+                family_payoff_point_q(global_exit.probability_witness,bin_id=binding.bin_id,side="YES"),abs=1e-12)
+            assert _current_global_held_point_probability(no,held.probability_witness) == pytest.approx(
+                family_payoff_point_q(global_exit.probability_witness,bin_id=binding.bin_id,side="NO"),abs=1e-12)
+            np.testing.assert_allclose(family_payoff_q_samples(held.probability_witness,bin_id=binding.bin_id,side="YES"),
+                1-family_payoff_q_samples(global_exit.probability_witness,bin_id=binding.bin_id,side="NO"),rtol=0,atol=1e-12)
+        # Deliberately corrupt only the old fixture row to represent the old
+        # publication-clock carrier. The read gate must reset, never re-stamp q.
+        obsolete = copy.deepcopy(provenance)
+        obsolete.pop("day0_current_temperature_clock_evidence")
+        obsolete["day0_current_temperature_state"]["observed_at_utc"] = "2026-06-07T06:02:00+00:00"
+        fixture.conn.execute("UPDATE forecast_posteriors SET provenance_json=? WHERE posterior_id=?",
+            (json.dumps(obsolete),fixture.result.posterior_id))
+        missing = reader.read_prior_complete_replacement_forecast_bundle(fixture.conn,city="Hong Kong",
+            target_date="2026-06-07",temperature_metric=metric,decision_time=decision,raw_input_hwm_conn=fixture.conn)
+        assert missing.status == "NOT_APPLICABLE" and missing.reason_code == "REPLACEMENT_PINNED_HKO_CURRENT_TEMPERATURE_CLOCK_UNAVAILABLE"
+
+        # Supply a new causal toy ENS receipt through the source-run writer and
+        # ordinary deterministic HTTP writers, then run the actual materializer.
+        # No READY flag, pin predicate, shape reader, or probability is mocked.
+        from src.state.source_run_repo import write_source_run
+        from src.data import bayes_precision_fusion_download as dl
+        from src.data.replacement_forecast_materializer import materialize_replacement_forecast_live
+        from tests.test_station_forecast_live_ingest_wiring import _station_grid_cohort
+        new_cycle = fixture.cut.replace(hour=0,minute=0)
+        new_capture = decision+_dt.timedelta(minutes=2)
+        run = dict(fixture.conn.execute("SELECT * FROM source_run WHERE source_run_id=?",
+                                       (fixture.request.baseline_source_run_id,)).fetchone())
+        new_run_id = run["source_run_id"]+"-new"
+        run.update(source_run_id=new_run_id,source_cycle_time=new_cycle.isoformat(),
+            source_available_at=new_capture.isoformat(),fetch_finished_at=new_capture.isoformat(),
+            captured_at=new_capture.isoformat(),imported_at=new_capture.isoformat())
+        names = set(inspect.signature(write_source_run).parameters)-{"conn"}
+        write_source_run(fixture.conn,**{name:run[name] for name in names if name in run})
+        coverage = dict(fixture.conn.execute("SELECT * FROM source_run_coverage LIMIT 1").fetchone())
+        coverage.update(coverage_id=new_run_id,source_run_id=new_run_id,snapshot_ids_json="[2]",
+            computed_at=new_capture.isoformat(),recorded_at=new_capture.isoformat())
+        columns = tuple(coverage)
+        fixture.conn.execute("INSERT INTO source_run_coverage ("+",".join(columns)+") VALUES ("+
+            ",".join("?" for _ in columns)+")",tuple(coverage[name] for name in columns))
+        snapshot = dict(fixture.conn.execute("SELECT * FROM ensemble_snapshots WHERE snapshot_id=1").fetchone())
+        source_proof = json.loads(snapshot["provenance_json"])
+        source_proof["grid_surface_evidence"].update(mask_source_cycle_time=new_cycle.isoformat(),
+            mask_source_fetched_at=(new_cycle+_dt.timedelta(minutes=4)).isoformat())
+        snapshot.update(snapshot_id=2,source_run_id=new_run_id,issue_time=new_cycle.isoformat(),
+            source_cycle_time=new_cycle.isoformat(),available_at=new_capture.isoformat(),
+            source_available_at=new_capture.isoformat(),fetch_time=new_capture.isoformat(),
+            recorded_at=new_capture.isoformat(),provenance_json=json.dumps(source_proof))
+        columns = tuple(snapshot)
+        fixture.conn.execute("INSERT INTO ensemble_snapshots ("+",".join(columns)+") VALUES ("+
+            ",".join("?" for _ in columns)+")",tuple(snapshot[name] for name in columns))
+        _station_grid_cohort(monkeypatch,fixture.conn,fixture.db,"Hong Kong",target_dates=("2026-06-07",),
+                             cycle=new_cycle,captured=new_capture)
+        raw_body = fixture.artifact_path.read_bytes()
+        def current_anchor_http(_url,params,**kwargs):
+            kwargs["capture_entity_body"](raw_body,new_capture.timestamp())
+            return json.loads(raw_body)
+        monkeypatch.setattr("src.data.openmeteo_client.fetch",current_anchor_http)
+        assert dl.download_bayes_precision_fusion_extra_raw_inputs(forecast_db=fixture.db,cycle=new_cycle,
+            targets=[dl.BayesPrecisionFusionDownloadTarget(city="Hong Kong",target_date="2026-06-07",metric=metric,
+                latitude=fixture.anchor_request.latitude,longitude=fixture.anchor_request.longitude,
+                timezone_name=fixture.city.timezone,lead_days=0)],models=("ecmwf_ifs",),
+            frozen_source_runs={"ecmwf_ifs":(new_cycle,new_capture)},include_previous_runs=False,
+            prune_after=False)["written_row_count"] == 1
+        normal = materialize_replacement_forecast_live(fixture.conn,replace(fixture.request,
+            source_cycle_time=new_cycle,baseline_source_run_id=new_run_id,baseline_source_available_at=new_capture,
+            openmeteo_anchor=replace(fixture.request.openmeteo_anchor,source_cycle_time=new_cycle),
+            anchor_artifact_id=incomplete_artifact_id,openmeteo_source_available_at=capture,
+            computed_at=new_capture+_dt.timedelta(minutes=1),expires_at=new_capture+_dt.timedelta(hours=1)))
+        assert normal.ok, normal.reason_codes
+        assert normal.posterior_id != fixture.result.posterior_id
+        reset = reader.read_prior_complete_replacement_forecast_bundle(fixture.conn,city="Hong Kong",
+            target_date="2026-06-07",temperature_metric=metric,decision_time=new_capture+_dt.timedelta(minutes=1),
+            raw_input_hwm_conn=fixture.conn)
+        assert reset.status == "NOT_APPLICABLE" and reset.reason_code == "REPLACEMENT_PINNED_COMPLETE_CYCLE_RESET", reset.reason_code
+        final = json.loads(fixture.conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_id=?",
+                                               (normal.posterior_id,)).fetchone()[0])
+        assert reader._held_pinned_provenance_reason(final,city="Hong Kong",target_date="2026-06-07",metric=metric,
+            decision_time=new_capture+_dt.timedelta(minutes=1)) is None
+        assert fixture.conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_id=?",
+                                    (fixture.result.posterior_id,)).fetchone()[0] == json.dumps(obsolete)
+    finally:
+        fixture.conn.close()
