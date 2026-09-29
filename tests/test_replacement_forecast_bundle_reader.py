@@ -1274,6 +1274,49 @@ def _insert_ensemble_snapshot(
     )
 
 
+_READER_PROVIDER_GEOMETRY = None
+
+
+def _reader_provider_geometry():
+    """Derive fixture geometry via actual bytes/writer/selector, not a revision label.
+
+    This supplies geometry for isolated reader tests; it does not fabricate a
+    complete Day0 pin or replace the integration producer-to-pin relationship.
+    """
+    global _READER_PROVIDER_GEOMETRY
+    if _READER_PROVIDER_GEOMETRY is None:
+        import tempfile
+        from pathlib import Path
+        from src.data import replacement_forecast_materializer as materializer
+        from tests.test_station_forecast_live_ingest_wiring import _hourly_schema_conn, _station_grid_cohort
+
+        with tempfile.TemporaryDirectory(prefix="zeus-reader-geometry-") as directory, pytest.MonkeyPatch.context() as patch:
+            root = Path(directory)
+            patch.setattr("src.config.state_path", lambda filename: root / "state" / filename)
+            path = root / "forecast.db"
+            conn = _hourly_schema_conn(path)
+            models = _station_grid_cohort(
+                patch, conn, path, "Shanghai", target_dates=("2026-06-07",),
+                cycle=_dt(0), captured=_dt(3),
+            )
+            served = read_current_instrument_values(
+                conn, city="Shanghai", metric="high", target_date="2026-06-07",
+                source_cycle_time_iso=_dt(0).isoformat(), decision_time_iso=_dt(3, 5).isoformat(),
+            )
+            assert set(served) == set(models)
+            shape = materializer._current_evidence_shape_from_values(
+                snapshot_id=1, source_cycle_time=_dt(0).isoformat(), source_available_at=_dt(3).isoformat(),
+                members_c=tuple(27.0 + i * 0.01 for i in range(51)),
+                provider_values_c={model: row.value_c for model, row in served.items()},
+                provider_weights=dict.fromkeys(models, 0.5), center_c=32.0,
+                carrier_cycle_time=_dt(0), provider_cycles=dict.fromkeys(models, _dt(0).isoformat()),
+            )
+            bound = materializer._bind_provider_geometry_identity(shape, served)
+            _READER_PROVIDER_GEOMETRY = (bound.provider_geometry_evidence, bound.provider_geometry_identity_hash)
+            conn.close()
+    return json.loads(json.dumps(_READER_PROVIDER_GEOMETRY[0])), _READER_PROVIDER_GEOMETRY[1]
+
+
 def _live_provenance() -> dict[str, object]:
     from tests.test_replacement_forecast_materializer import _fixture_ens_surface_provenance
 
@@ -1285,6 +1328,7 @@ def _live_provenance() -> dict[str, object]:
         "source_available_at": _dt(3).isoformat(),
         "provenance_json": surface,
     }) is None
+    geometry, geometry_hash = _reader_provider_geometry()
     return {
         "reader_test": True,
         "replacement_q_mode": "FUSED_NORMAL_FULL",
@@ -1302,6 +1346,8 @@ def _live_provenance() -> dict[str, object]:
                 "shape_lag_hours": 0.0,
                 "stale_shape_reused": False,
                 "translation_applied": False,
+                "provider_geometry_evidence": geometry,
+                "provider_geometry_identity_hash": geometry_hash,
             }
         },
     }
@@ -1777,8 +1823,8 @@ def _insert_raw_model_forecast(
         INSERT INTO raw_model_forecasts (
             model, city, target_date, metric, source_cycle_time,
             source_available_at, captured_at, lead_days, forecast_value_c, endpoint,
-            coverage_status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            coverage_status, recorded_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             model,
@@ -1792,8 +1838,18 @@ def _insert_raw_model_forecast(
             forecast_value_c,
             endpoint,
             "COVERED",
+            captured_at.isoformat(),
         ),
     )
+    # Retain the scenario's IDs/clocks, but derive its product proof from the
+    # actual response binder and ordinary artifact/row writer. No authority
+    # predicate or reader result is replaced here.
+    from tests.test_replacement_forecast_materializer import (
+        _materializer_unit_source_surface, _qualify_raw_fixture_rows,
+    )
+    with pytest.MonkeyPatch.context() as inputs:
+        _materializer_unit_source_surface.__wrapped__(inputs)
+        _qualify_raw_fixture_rows(conn)
 
 
 def _insert_openmeteo_anchor_artifact(
@@ -2009,7 +2065,7 @@ def test_public_hwm_always_validates_declared_multiday_anchor_artifact(tmp_path)
         {
             "ecmwf_ifs": {
                 "raw_model_forecast_id": int(
-                    conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                    conn.execute("SELECT MAX(raw_model_forecast_id) FROM raw_model_forecasts").fetchone()[0]
                 ),
                 "served_cycle": _dt(0).isoformat(),
                 "captured_at": _dt(0, 5).isoformat(),
@@ -3501,8 +3557,8 @@ def test_held_redecision_blocks_same_cycle_late_input() -> None:
             conn,
             model=model,
             source_cycle_time=_dt(3),
-            captured_at=_dt(3, 5),
-            source_available_at=_dt(3, 5),
+            captured_at=_dt(3, 15) if model == "gfs" else _dt(3, 5),
+            source_available_at=_dt(3, 15) if model == "gfs" else _dt(3, 5),
         )
         consumed[model] = {
             "raw_model_forecast_id": int(
@@ -3516,13 +3572,9 @@ def test_held_redecision_blocks_same_cycle_late_input() -> None:
         "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
         (json.dumps(_with_current_value_serving(consumed)), posterior_id),
     )
-    _insert_raw_model_forecast(
-        conn,
-        model="gfs",
-        source_cycle_time=_dt(3),
-        captured_at=_dt(3, 15),
-        source_available_at=_dt(3, 15),
-    )
+    # The old posterior claims the same-cycle value was possessed at 03:05;
+    # the actual writer proves that exact raw row only arrived after 03:10.
+    # Do not manufacture an unpublishable duplicate of its immutable run key.
 
     held = read_replacement_forecast_bundle(
         conn,
