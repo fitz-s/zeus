@@ -36,15 +36,23 @@ CREATE TABLE venue_commands (command_id TEXT, position_id TEXT, venue_order_id T
   token_id TEXT, snapshot_id TEXT, state TEXT, intent_kind TEXT);
 CREATE TABLE venue_order_facts (venue_order_id TEXT, state TEXT, remaining_size REAL,
   local_sequence INTEGER);
-CREATE TABLE position_events (event_id TEXT PRIMARY KEY, snapshot_id TEXT);
+CREATE TABLE position_events (event_id TEXT PRIMARY KEY, snapshot_id TEXT,
+  event_type TEXT NOT NULL DEFAULT 'ENTRY_ORDER_POSTED', payload_json TEXT);
+CREATE TABLE venue_command_events (event_id TEXT PRIMARY KEY, payload_json TEXT);
+CREATE TABLE provenance_envelope_events (event_id TEXT PRIMARY KEY, payload_json TEXT);
+CREATE TABLE chronicle (id INTEGER PRIMARY KEY, details_json TEXT);
+CREATE TABLE public_market_trade_observations (id INTEGER PRIMARY KEY, payload_json TEXT);
 CREATE TABLE market_price_history (id INTEGER PRIMARY KEY, snapshot_id TEXT);
 CREATE TABLE opportunity_fact (id INTEGER PRIMARY KEY, snapshot_id TEXT);
 """
 WORLD_DDL = """
 CREATE TABLE no_trade_regret_events (regret_event_id TEXT PRIMARY KEY,
-  causal_snapshot_id TEXT, executable_snapshot_id TEXT);
+  causal_snapshot_id TEXT, executable_snapshot_id TEXT, envelope_json TEXT);
 CREATE TABLE edli_no_submit_receipts (receipt_id TEXT PRIMARY KEY,
-  causal_snapshot_id TEXT, executable_snapshot_id TEXT);
+  causal_snapshot_id TEXT, executable_snapshot_id TEXT, receipt_json TEXT, envelope_json TEXT);
+CREATE TABLE edli_live_order_events (event_id TEXT PRIMARY KEY, payload_json TEXT);
+CREATE TABLE opportunity_events (event_id TEXT PRIMARY KEY, causal_snapshot_id TEXT,
+  payload_json TEXT);
 CREATE TABLE decision_certificates (certificate_id TEXT PRIMARY KEY,
   certificate_type TEXT, payload_json TEXT);
 """
@@ -172,25 +180,55 @@ def test_open_position_keeps_an_old_family(env):
     assert _ids(trade) == {"c-held-0", "c-held-1", "c-held-newest"}
 
 
-@pytest.mark.parametrize(
-    "db,sql",
-    [
-        ("trade", "INSERT INTO venue_commands (command_id, snapshot_id) VALUES ('cmd','c-old-1')"),
-        ("trade", "INSERT INTO position_events VALUES ('e1','c-old-1')"),
-        ("trade", "INSERT INTO market_price_history (snapshot_id) VALUES ('c-old-1')"),
-        ("trade", "INSERT INTO opportunity_fact (snapshot_id) VALUES ('c-old-1')"),
-        ("trade", "INSERT INTO executable_market_snapshot_latest VALUES ('c-old','c-old-1')"),
-        ("world", "INSERT INTO no_trade_regret_events VALUES ('r1', NULL, 'c-old-1')"),
-        ("world", "INSERT INTO edli_no_submit_receipts VALUES ('n1', 'c-old-1', NULL)"),
-        ("world", "INSERT INTO decision_certificates VALUES ('d1','ActionableTradeCertificate',"
-                  " '{\"qkernel_execution_economics\":{\"raw_calibration_input\":"
-                  "{\"book_snapshot_id\":\"c-old-1\"}}}')"),
-    ],
-)
-def test_by_id_referrers_keep_their_rows(env, db, sql):
+def _doc(key: str) -> str:
+    return json.dumps({"outer": {"nested": [{key: "c-old-1"}]}})
+
+
+REFERRER_ROWS = [
+    ("trade", "INSERT INTO venue_commands (command_id, snapshot_id) VALUES ('cmd','c-old-1')"),
+    ("trade", "INSERT INTO position_events (event_id, snapshot_id) VALUES ('e1','c-old-1')"),
+    ("trade", "INSERT INTO position_events (event_id, payload_json) VALUES ('e2', ?)",
+     _doc("executable_snapshot_id")),
+    ("trade", "INSERT INTO position_events (event_id, payload_json) VALUES ('e3', ?)",
+     _doc("book_snapshot_id")),
+    ("trade", "INSERT INTO venue_command_events VALUES ('v1', ?)", _doc("snapshot_id")),
+    ("trade", "INSERT INTO provenance_envelope_events VALUES ('p1', ?)",
+     _doc("executable_snapshot_id")),
+    ("trade", "INSERT INTO chronicle (details_json) VALUES (?)", _doc("decision_snapshot_id")),
+    ("trade", "INSERT INTO public_market_trade_observations (payload_json) VALUES (?)",
+     _doc("executable_snapshot_id")),
+    ("trade", "INSERT INTO market_price_history (snapshot_id) VALUES ('c-old-1')"),
+    ("trade", "INSERT INTO opportunity_fact (snapshot_id) VALUES ('c-old-1')"),
+    ("trade", "INSERT INTO executable_market_snapshot_latest VALUES ('c-old','c-old-1')"),
+    ("world", "INSERT INTO no_trade_regret_events (regret_event_id, executable_snapshot_id)"
+              " VALUES ('r1','c-old-1')"),
+    ("world", "INSERT INTO no_trade_regret_events (regret_event_id, envelope_json)"
+              " VALUES ('r2', ?)", _doc("global_jit_book_snapshot_id")),
+    ("world", "INSERT INTO edli_no_submit_receipts (receipt_id, causal_snapshot_id)"
+              " VALUES ('n1','c-old-1')"),
+    ("world", "INSERT INTO edli_no_submit_receipts (receipt_id, receipt_json) VALUES ('n2', ?)",
+     _doc("executable_snapshot_id")),
+    ("world", "INSERT INTO edli_live_order_events VALUES ('l1', ?)", _doc("book_snapshot_id")),
+    ("world", "INSERT INTO opportunity_events (event_id, payload_json) VALUES ('o1', ?)",
+     _doc("executable_snapshot_id")),
+    # Every certificate type and every *snapshot_id key: one law, no allowlist.
+    ("world", "INSERT INTO decision_certificates VALUES ('d1','ExecutionCommandCertificate', ?)",
+     _doc("selected_snapshot_id")),
+    ("world", "INSERT INTO decision_certificates VALUES ('d2','ExecutionReceiptCertificate', ?)",
+     _doc("some_future_snapshot_id")),
+]
+
+
+def test_every_declared_referrer_has_a_row_test():
+    tested = {row[1].split()[2] for row in REFERRER_ROWS}  # INSERT INTO <table>
+    assert {ref.table for ref in tr.REFERRERS} <= tested
+
+
+@pytest.mark.parametrize("db,sql,params", [(r[0], r[1], tuple(r[2:])) for r in REFERRER_ROWS])
+def test_by_id_referrers_keep_their_rows(env, db, sql, params):
     state, trade, world, _ = env
     _seed_old(trade, 3)
-    _exec(trade if db == "trade" else world, sql)
+    _exec(trade if db == "trade" else world, sql, *params)
     _run(env)
     assert _ids(trade) == {"c-old-1", "c-old-newest"}
 
@@ -199,7 +237,7 @@ def test_referrer_added_after_ledger_is_seen_next_pass(env):
     state, trade, world, _ = env
     _seed_old(trade, 1)
     _run(env, row_budget=0)  # ledger reads everything, evicts nothing
-    _exec(world, "INSERT INTO no_trade_regret_events VALUES ('r1', NULL, 'c-old-0')")
+    _exec(world, "INSERT INTO no_trade_regret_events (regret_event_id, executable_snapshot_id) VALUES ('r1', 'c-old-0')")
     _run(env)
     assert "c-old-0" in _ids(trade)
 
@@ -226,7 +264,7 @@ def test_lagging_ledger_evicts_nothing(env):
     state, trade, world, _ = env
     _seed_old(trade, 3)
     for i in range(5):
-        _exec(world, "INSERT INTO no_trade_regret_events VALUES (?, NULL, NULL)", f"r{i}")
+        _exec(world, "INSERT INTO no_trade_regret_events (regret_event_id) VALUES (?)", f"r{i}")
     out = _run(env, referrer_budget=2, read_batch=2)
     assert out["status"] == "LEDGER_CATCHING_UP"
     assert len(_ids(trade)) == 4
@@ -299,10 +337,12 @@ def test_command_citing_a_row_mid_pass_keeps_it(env):
     tr_delete = pytest.MonkeyPatch()
     tr_delete.setattr(tr, "delete_chunk", cite_then_delete)
     try:
-        _run(env)
+        out = _run(env)
     finally:
         tr_delete.undo()
-    assert "c-old-0" in _ids(trade)
+    # The cited row is kept AND the rest of the chunk still goes (no stalled chunk).
+    assert _ids(trade) == {"c-old-0", "c-old-newest"}
+    assert out["report"]["evicted"] == 1 and out["report"]["stopped"] == "end"
 
 
 def test_idempotent(env):
@@ -325,3 +365,72 @@ def test_post_trade_daemon_registers_the_job():
     assert spec.owner_daemon == "post_trade_capital"
     assert spec.callable_ref == "_trade_retention_cycle"
     assert callable(getattr(daemon, spec.callable_ref))
+
+
+def test_monitor_refresh_payload_is_not_read_but_its_column_is(env):
+    _, trade, *_ = env
+    _seed_old(trade, 3)
+    _exec(trade, "INSERT INTO position_events VALUES ('m1', NULL, 'MONITOR_REFRESHED', ?)",
+          _doc("executable_snapshot_id"))
+    _exec(trade, "INSERT INTO position_events VALUES ('m2', 'c-old-2', 'MONITOR_REFRESHED', NULL)")
+    _run(env)
+    # c-old-1 is named only inside a MONITOR_REFRESHED payload (never written there live).
+    assert _ids(trade) == {"c-old-2", "c-old-newest"}
+
+
+def test_forecast_causal_snapshot_ids_are_not_referrers(env):
+    _, trade, world, _ = env
+    _seed_old(trade, 2)
+    _exec(world, "INSERT INTO opportunity_events (event_id, causal_snapshot_id) VALUES ('o', 'c-old-0')")
+    _run(env)
+    assert _ids(trade) == {"c-old-newest"}
+
+
+def test_chunk_row_count_mismatch_rolls_back_the_chunk(env, monkeypatch):
+    state, trade, *_ = env
+    _seed_old(trade, 4)
+    real_execute_counts = {"n": 0}
+
+    class Tamper:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, sql, *args):
+            cur = self._conn.execute(sql, *args)
+            if sql.strip().startswith("DROP TRIGGER") and real_execute_counts["n"] == 0:
+                real_execute_counts["n"] += 1
+                # A concurrent append-only violation: one planned row vanishes mid-chunk.
+                self._conn.execute("DELETE FROM executable_market_snapshots WHERE snapshot_id='c-old-0'")
+            return cur
+
+    base = _plain_transaction(trade)
+
+    @contextlib.contextmanager
+    def tampering():
+        with base() as conn:
+            yield Tamper(conn)
+
+    out = tr.run_trade_retention(
+        apply=True, now=NOW, state_dir=state, trade_db=trade, world_db=env[2],
+        forecast_db=env[3], transaction=tampering, chunk_rows=10, pause_seconds=0,
+    )
+    assert out["report"]["stopped"] == "deferred:ChunkMismatch"
+    assert out["report"]["evicted"] == 0
+    # The whole chunk rolled back, including the tamper and the trigger drop.
+    assert len(_ids(trade)) == 5
+    conn = sqlite3.connect(trade)
+    try:
+        with pytest.raises(sqlite3.IntegrityError, match="APPEND-ONLY"):
+            conn.execute("DELETE FROM executable_market_snapshots")
+    finally:
+        conn.close()
+
+
+def test_ledger_reading_is_bounded_by_time(env, monkeypatch):
+    state, trade, world, _ = env
+    _seed_old(trade, 2)
+    for i in range(10):
+        _exec(world, "INSERT INTO no_trade_regret_events (regret_event_id) VALUES (?)", f"r{i}")
+    out = _run(env, ledger_seconds=0.0)
+    assert out["status"] == "LEDGER_CATCHING_UP"
+    assert len(_ids(trade)) == 3

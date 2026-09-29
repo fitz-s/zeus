@@ -22,13 +22,38 @@ A snapshot row is kept while ANY reader can still reach it:
 * its ``snapshot_id`` is stored by a by-id referrer (``REFERRERS`` plus the current
   ``venue_commands`` and ``executable_market_snapshot_latest`` rows); command recovery,
   envelope gates, exit handoffs, the calibration corpus and replay reports dereference
-  these ids at any later time;
+  these ids at any later time. One law for every referrer: each listed column is either an
+  id or a JSON document, and every value under ANY ``*snapshot_id`` key is protected --
+  never a per-type or per-key allowlist;
 * it is the newest row of its ``condition_id`` -- every latest-per-condition reader
   (harvester, settlement commands, riskguard settlement proof, market bounds) keeps an
   answer for every condition ever seen.
 
 Unknown evicts nothing: a failed reachability read, a referrer ledger that has not yet
 caught up to its table's end, or a condition absent from ``market_events``.
+
+Referrer census (bounded read-only samples of every JSON column in trade + world,
+2026-09-29; a value counts only if it resolves to a row here):
+
+* referrers: ``position_events`` (column, and payload ``executable_snapshot_id`` on
+  POSITION_OPEN_INTENT / ENTRY_ORDER_POSTED), ``venue_command_events``,
+  ``provenance_envelope_events``, ``chronicle``, ``public_market_trade_observations``,
+  ``market_price_history``, ``opportunity_fact``, world ``no_trade_regret_events``
+  (columns plus ``envelope_json`` -- 66 of 73 sampled ids appear only there),
+  ``edli_no_submit_receipts``, ``edli_live_order_events``, ``opportunity_events``
+  payloads (``executable_snapshot_id`` on BEST_BID_ASK_CHANGED / BOOK_SNAPSHOT) and
+  ``decision_certificates`` (all types; ActionableTrade, FinalIntent, PreSubmitRevalidation
+  and ExecutableSnapshot carry resolving ids).
+* not referrers: ``opportunity_events.causal_snapshot_id`` holds forecast snapshot ids
+  (``rmf-...`` or posterior ids); ``venue_order_facts`` / ``venue_trade_facts``
+  ``raw_payload_json`` carry no ``*snapshot_id`` key; ``no_trade_regret_events.
+  alpha_feedback_json`` carries only a settlement proof. ``ledger_snapshot_id`` values name
+  wealth-ledger reads, not rows here, and are harmless to protect.
+
+``position_events`` rows are ~24 KB (their payload is the trade DB's largest column); the
+ledger reads its payload JSON only for event types other than MONITOR_REFRESHED, whose
+payload is built by ``lifecycle_events.build_monitor_refresh_event`` with no snapshot key
+(its ``snapshot_id`` column is still read).
 
 The referrer ledger is incremental: append-only referrer tables are scanned by rowid
 from a persisted cursor in short range-bounded reads (no long WAL-pinning read), and
@@ -67,7 +92,11 @@ STATE_FILE = "trade_retention_state.json"
 # Per 10-minute pass: <=50k rows classified and <=500 delete chunks of 100 rows, so a
 # pass ends well inside its interval; the ~11.6M-row backlog drains in about 2-3 days.
 DEFAULT_ROW_BUDGET = 50_000
-DEFAULT_REFERRER_BUDGET = 200_000
+DEFAULT_REFERRER_BUDGET = 2_000_000
+# Ledger reading per pass is bounded by wall time as well as rows: the first catch-up
+# reads ~24M referrer rows (opportunity_events alone is 19M, ~10k rows/s), so it spans
+# several passes; each read is still one short rowid-range statement.
+DEFAULT_LEDGER_SECONDS = 240.0
 DEFAULT_READ_BATCH = 5_000
 DEFAULT_CHUNK_ROWS = 100
 DEFAULT_WAL_LIMIT_BYTES = 1 << 30  # live WAL idles 0.2-1.5 GB; same gate as forecast retention
@@ -81,33 +110,48 @@ _SNAPSHOT_ID_IN_JSON = re.compile(r'"[A-Za-z_]*snapshot_id"\s*:\s*"([^"]+)"')
 
 @dataclass(frozen=True)
 class Referrer:
-    """An append-only table whose rows store snapshot ids read back by id later."""
+    """An append-only table whose rows store snapshot ids read back by id later.
+
+    ``id_columns`` hold one id each; ``json_columns`` hold JSON documents whose every
+    ``*snapshot_id`` value is an id. ``json_skip`` names a row filter under which a row's
+    JSON is known to carry no snapshot key (its id columns are still read).
+    """
 
     name: str
     db: str  # "trade" | "world"
     table: str
-    columns: tuple[str, ...]
-    json_payload: bool = False  # columns hold JSON; take every "*snapshot_id" value
-    where: str = ""  # extra row filter (only rows that can carry an executable id)
+    id_columns: tuple[str, ...] = ()
+    json_columns: tuple[str, ...] = ()
+    json_skip: str = ""
 
 
 REFERRERS: tuple[Referrer, ...] = (
-    Referrer("position_events", "trade", "position_events", ("snapshot_id",)),
+    Referrer(
+        "position_events", "trade", "position_events", ("snapshot_id",), ("payload_json",),
+        json_skip="event_type = 'MONITOR_REFRESHED'",
+    ),
+    Referrer("venue_command_events", "trade", "venue_command_events", (), ("payload_json",)),
+    Referrer(
+        "provenance_envelope_events", "trade", "provenance_envelope_events", (), ("payload_json",)
+    ),
+    Referrer("chronicle", "trade", "chronicle", (), ("details_json",)),
+    Referrer(
+        "public_market_trade_observations", "trade", "public_market_trade_observations",
+        (), ("payload_json",),
+    ),
     Referrer("market_price_history", "trade", "market_price_history", ("snapshot_id",)),
     Referrer("opportunity_fact", "trade", "opportunity_fact", ("snapshot_id",)),
     Referrer(
         "no_trade_regret_events", "world", "no_trade_regret_events",
-        ("causal_snapshot_id", "executable_snapshot_id"),
+        ("causal_snapshot_id", "executable_snapshot_id"), ("envelope_json",),
     ),
     Referrer(
         "edli_no_submit_receipts", "world", "edli_no_submit_receipts",
-        ("causal_snapshot_id", "executable_snapshot_id"),
+        ("causal_snapshot_id", "executable_snapshot_id"), ("receipt_json", "envelope_json"),
     ),
-    Referrer(
-        "decision_certificates", "world", "decision_certificates", ("payload_json",), True,
-        "AND certificate_type IN ('ActionableTradeCertificate', 'FinalIntentCertificate',"
-        " 'PreSubmitRevalidationCertificate', 'ExecutableSnapshotCertificate')",
-    ),
+    Referrer("edli_live_order_events", "world", "edli_live_order_events", (), ("payload_json",)),
+    Referrer("opportunity_events", "world", "opportunity_events", (), ("payload_json",)),
+    Referrer("decision_certificates", "world", "decision_certificates", (), ("payload_json",)),
 )
 # Mutable referrers: re-read in full every pass (small), never cursor-scanned.
 CURRENT_REFERRER_SQL = (
@@ -118,6 +162,10 @@ CURRENT_REFERRER_SQL = (
 
 class LedgerIncomplete(RuntimeError):
     """A referrer has rows the ledger has not read yet; evict nothing."""
+
+
+class ChunkMismatch(RuntimeError):
+    """A delete touched a different row count than planned; the chunk rolls back."""
 
 
 @dataclass
@@ -170,14 +218,21 @@ class State:
         os.replace(tmp, path)
 
 
-def _ids_from_row(values: Iterable[object], json_payload: bool) -> Iterable[str]:
-    for value in values:
-        if not value:
+def _ids_from_row(row: tuple, n_id_columns: int) -> Iterable[str]:
+    for index, value in enumerate(row):
+        if not value or isinstance(value, (bytes, bytearray)):
             continue
-        if json_payload:
-            yield from _SNAPSHOT_ID_IN_JSON.findall(str(value))
-        else:
+        if index < n_id_columns:
             yield str(value)
+        else:
+            yield from _SNAPSHOT_ID_IN_JSON.findall(str(value))
+
+
+def _referrer_select(ref: Referrer) -> str:
+    cols = list(ref.id_columns)
+    for col in ref.json_columns:
+        cols.append(f"CASE WHEN {ref.json_skip} THEN NULL ELSE {col} END" if ref.json_skip else col)
+    return ", ".join(cols)
 
 
 def refresh_ledger(
@@ -186,13 +241,17 @@ def refresh_ledger(
     *,
     budget: int,
     batch: int,
+    seconds: float = DEFAULT_LEDGER_SECONDS,
 ) -> dict[str, dict[str, int]]:
-    """Advance every referrer cursor by up to ``budget`` rows; raise if any lags.
+    """Advance every referrer cursor by up to ``budget`` rows each, within ``seconds``
+    overall; raise if any lags.
 
     Each read is one short rowid-range statement, so no read transaction stays open
-    across batches.
+    across batches. Referrers are visited in order every pass, so a slow one never
+    starves the rest of their end-of-table check.
     """
 
+    deadline = time.monotonic() + seconds
     progress: dict[str, dict[str, int]] = {}
     lagging = []
     for ref in REFERRERS:
@@ -200,14 +259,14 @@ def refresh_ledger(
         end = conn.execute(f"SELECT COALESCE(MAX(rowid), 0) FROM {ref.table}").fetchone()[0]
         cursor = state.referrer_cursors.get(ref.name, 0)
         read = 0
-        cols = ", ".join(ref.columns)
-        while cursor < end and read < budget:
+        cols = _referrer_select(ref)
+        width = len(ref.id_columns)
+        while cursor < end and read < budget and time.monotonic() < deadline:
             hi = min(end, cursor + batch)
             for row in conn.execute(
-                f"SELECT {cols} FROM {ref.table} WHERE rowid > ? AND rowid <= ? {ref.where}",
-                (cursor, hi),
+                f"SELECT {cols} FROM {ref.table} WHERE rowid > ? AND rowid <= ?", (cursor, hi)
             ):
-                state.referenced.update(_ids_from_row(row, ref.json_payload))
+                state.referenced.update(_ids_from_row(row, width))
             read += hi - cursor
             cursor = hi
         state.referrer_cursors[ref.name] = cursor
@@ -332,15 +391,29 @@ def delete_chunk(conn: sqlite3.Connection, snapshot_ids: list[str]) -> int:
     if trigger_sql is None or not trigger_sql[0]:
         raise RuntimeError(f"{DELETE_TRIGGER} missing; refusing to delete")
     marks = ",".join("?" for _ in snapshot_ids)
+    # Expected rows are fixed before the trigger drops: present and not cited by a
+    # command. Any other count means the table moved under us; raising rolls back the
+    # whole transaction, trigger drop included.
+    expected = conn.execute(
+        f"""
+        SELECT COUNT(*) FROM {TABLE}
+         WHERE snapshot_id IN ({marks})
+           AND NOT EXISTS (SELECT 1 FROM venue_commands vc WHERE vc.snapshot_id = {TABLE}.snapshot_id)
+        """,
+        snapshot_ids,
+    ).fetchone()[0]
     conn.execute(f"DROP TRIGGER {DELETE_TRIGGER}")
-    deleted = conn.execute(
+    conn.execute(
         f"""
         DELETE FROM {TABLE}
          WHERE snapshot_id IN ({marks})
            AND NOT EXISTS (SELECT 1 FROM venue_commands vc WHERE vc.snapshot_id = {TABLE}.snapshot_id)
         """,
         snapshot_ids,
-    ).rowcount
+    )
+    deleted = conn.execute("SELECT changes()").fetchone()[0]
+    if int(deleted) != int(expected):
+        raise ChunkMismatch(f"deleted {deleted} rows, expected {expected}")
     conn.execute(trigger_sql[0])
     return int(deleted)
 
@@ -396,7 +469,7 @@ def apply_evictions(
         try:
             with transaction() as conn:
                 deleted = delete_chunk(conn, [c[1] for c in chunk])
-        except (WriteLeaseTimeout, sqlite3.OperationalError) as exc:
+        except (WriteLeaseTimeout, sqlite3.OperationalError, ChunkMismatch) as exc:
             report.stopped = f"deferred:{type(exc).__name__}"
             return chunk[0][0] - 1
         report.chunks += 1
@@ -418,6 +491,7 @@ def run_trade_retention(
     transaction: Callable[[], ContextManager] | None = None,
     row_budget: int = DEFAULT_ROW_BUDGET,
     referrer_budget: int = DEFAULT_REFERRER_BUDGET,
+    ledger_seconds: float = DEFAULT_LEDGER_SECONDS,
     read_batch: int = DEFAULT_READ_BATCH,
     chunk_rows: int = DEFAULT_CHUNK_ROWS,
     wal_limit_bytes: int = DEFAULT_WAL_LIMIT_BYTES,
@@ -456,7 +530,7 @@ def run_trade_retention(
         }
         try:
             summary["referrers"] = refresh_ledger(
-                state, conns, budget=referrer_budget, batch=read_batch
+                state, conns, budget=referrer_budget, batch=read_batch, seconds=ledger_seconds
             )
         except LedgerIncomplete as exc:
             summary["status"] = "LEDGER_CATCHING_UP"
