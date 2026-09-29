@@ -209,7 +209,7 @@ _PRODUCT_IDENTITY_COLUMNS = (
     "source_id", "source_family", "product_id", "provider", "model_name",
     "request_params_json", "request_url_hash", "latitude_requested", "longitude_requested",
     "timezone_requested", "cell_selection", "elevation_param", "downscaling_policy",
-    "model_domain_hash", "metric", "forecast_value_c", "artifact_id", "raw_sha256",
+    "model_domain_hash", "metric", "forecast_value_c", "artifact_id", "raw_sha256", "captured_at", "lead_days",
 )
 
 
@@ -415,7 +415,7 @@ def _source_clock_product_has_authority(raw: object, *, lead_days: int | None) -
                 "cwa_township_hourly_high": "cwa_taiwan",
                 "cwa_township_hourly_low": "cwa_taiwan",
             }
-            return bool(
+            typed = bool(
                 _station_model_has_entry_authority(model)
                 and row["provider"] == providers.get(model)
                 and row["source_family"] == "station_official_forecast"
@@ -427,6 +427,7 @@ def _source_clock_product_has_authority(raw: object, *, lead_days: int | None) -
                 and (model != "cwa_township_hourly_high" or row.get("metric") == "high")
                 and (model != "cwa_township_hourly_low" or row.get("metric") == "low")
             )
+            return typed and _station_response_has_authority(row)
         from src.config import runtime_cities_by_name
         from src.data.bayes_precision_fusion_history_provider import raw_product_matches_live_source
 
@@ -435,6 +436,39 @@ def _source_clock_product_has_authority(raw: object, *, lead_days: int | None) -
             return False
         return _physical_response_has_authority(row)
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def _station_response_has_authority(row: Mapping[str, object]) -> bool:
+    try:
+        import hashlib
+        from pathlib import Path
+        from src.config import runtime_cities_by_name
+        from src.data.station_forecast_adapter import reextract_station_response_value
+        artifact = row.get("physical_artifact")
+        if not isinstance(artifact, dict) or artifact["sha256"] != row["raw_sha256"]:
+            return False
+        if any(artifact[key] != row[key] for key in ("source_id", "product_id", "source_cycle_time", "captured_at")):
+            return False
+        body = Path(str(artifact["artifact_path"])).read_bytes()
+        if len(body) != artifact["byte_size"] or hashlib.sha256(body).hexdigest() != artifact["sha256"]:
+            return False
+        evidence = json.loads(str(artifact["metadata"]))["station_response"]
+        if evidence["revision"] != "station_forecast_entity_body_v1":
+            return False
+        matching = [proof for proof in evidence["items"] if all(proof.get(key) == row[key]
+            for key in ("model", "city", "metric", "target_date", "source_cycle_time", "provider"))]
+        if len(matching) != 1:
+            return False
+        city = runtime_cities_by_name().get(str(row["city"]))
+        if city is None:
+            return False
+        station = "HKO" if str(getattr(city, "settlement_source_type", "")) == "hko" else str(getattr(city, "wu_station", "") or "").upper()
+        if matching[0].get("station_id") != station:
+            return False
+        value = reextract_station_response_value(body, matching[0])
+        return value is not None and math.isfinite(float(value)) and math.isclose(float(value), float(row["forecast_value_c"]), abs_tol=1e-9)
+    except (ImportError, KeyError, TypeError, ValueError, OSError, json.JSONDecodeError):
         return False
 
 
@@ -459,7 +493,9 @@ def _physical_response_has_authority(row: Mapping[str, object]) -> bool:
             return False
         if params.get("elevation") is not None or params.get("cell_selection", "land") != "land":
             return False
-        if params.get("temperature_unit") != "celsius" or params.get("hourly") != "temperature_2m":
+        variable = ("temperature_2m" if row["endpoint"] != "previous_runs" or int(row.get("lead_days") or 0) == 0
+                    else f"temperature_2m_previous_day{int(row['lead_days'])}")
+        if params.get("temperature_unit") != "celsius" or params.get("hourly") != variable:
             return False
         indices = [index for index, (latitude, longitude, tz) in enumerate(zip(
             str(params["latitude"]).split(","), str(params["longitude"]).split(","),
@@ -503,13 +539,15 @@ def _physical_response_has_authority(row: Mapping[str, object]) -> bool:
         hav = math.sin(dlat/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin(dlon/2)**2
         if 2 * 6371.0088 * math.asin(math.sqrt(min(1.0, hav))) >= 50.0:
             return False
-        variable = "temperature_2m"
         keyed = f"{variable}_{OPENMETEO_MODEL_IDS.get(model, model)}"
         units = payload["hourly_units"]
         if units.get(keyed, units.get(variable)) != "°C":
             return False
         if metadata["aggregation"] != "max_min_of_local_day_hourly_samples":
             return False
+        if row["endpoint"] == "previous_runs":
+            payload = {**payload, "hourly": {**payload["hourly"], "temperature_2m": payload["hourly"].get(variable) or payload["hourly"].get(keyed)},
+                       "hourly_units": {**payload["hourly_units"], "temperature_2m": "°C"}}
         values = _parse_batched_single_runs_payload(payload, [model],
             datetime.fromisoformat(str(row["target_date"])).date(), str(row["timezone_requested"]))
         high_c, low_c = values[model]
@@ -523,6 +561,11 @@ def _physical_response_provenance(row: Mapping[str, object]) -> Mapping[str, obj
     artifact = row.get("physical_artifact")
     if not isinstance(artifact, dict):
         return None
+    if _is_station_model(str(row["model"])):
+        evidence = json.loads(str(artifact["metadata"]))["station_response"]
+        proof = next(proof for proof in evidence["items"] if all(proof.get(key) == row[key]
+            for key in ("model", "city", "metric", "target_date", "source_cycle_time", "provider")))
+        return {**proof, "artifact_id": row["artifact_id"], "entity_body_sha256": artifact["sha256"]}
     metadata = json.loads(str(artifact["metadata"]))["physical_response"]
     params = metadata["request_params"]
     index = next(i for i, (lat, lon, tz) in enumerate(zip(
@@ -540,6 +583,9 @@ def _physical_response_provenance(row: Mapping[str, object]) -> Mapping[str, obj
         "cell_selection": row["cell_selection"], "elevation_param": row["elevation_param"],
         "downscaling_policy": row["downscaling_policy"],
         "native_variable": metadata["native_variable"],
+        "variable_role": metadata["variable_role"],
+        "native_file_variable": metadata["native_file_variable"],
+        "temporal_resolution": metadata["temporal_resolution"],
         "temperature_unit": metadata["temperature_unit"], "aggregation": metadata["aggregation"],
         "native_grid_elevation_m": None, "native_surface": "UNKNOWN",
         "representativeness_status": "UNPROVEN", **metadata["locations"][index]}
@@ -938,6 +984,7 @@ def read_current_instrument_values(
                 value_c=value, raw_model_forecast_id=rid, served_via=SERVED_VIA_SINGLE_RUNS,
                 served_cycle=served_cycle, captured_at=captured,
                 age_hours=0.0 if _age is None else _age, lead_days=lead,
+                physical_response=_physical_response_provenance(json.loads(str(row[-1]))),
             )
     return out
 

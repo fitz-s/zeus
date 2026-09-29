@@ -94,6 +94,7 @@ def _current_rows(tmp_path, monkeypatch, *, metric="high"):
     from src.data import bayes_precision_fusion_download as dl
 
     target = replace(_target(), metric=metric)
+    monkeypatch.setattr("src.config.state_path", lambda filename: tmp_path / "state" / filename)
     monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {
         target.city: SimpleNamespace(
             name=target.city, lat=target.latitude, lon=target.longitude,
@@ -213,7 +214,7 @@ def test_ordinary_new_cycle_drains_superseded_default_dem_label(tmp_path, monkey
     conn.close()
 
 
-def test_registered_station_products_keep_their_agency_authority(monkeypatch):
+def test_registered_station_labels_do_not_substitute_for_response_proof(monkeypatch):
     from src.data.replacement_current_value_serving import _source_clock_product_has_authority
 
     for model, provider in (
@@ -226,7 +227,99 @@ def test_registered_station_products_keep_their_agency_authority(monkeypatch):
             source_id=f"{model}_single_runs", model_name=model,
             product_id=f"{model}::single_runs", endpoint="single_runs", endpoint_mode="single_runs",
             downscaling_policy="agency_mos", elevation_param="station",
+            metric="low" if model.endswith("_low") else "high",
         )
-        assert _source_clock_product_has_authority(json.dumps(row), lead_days=1)
+        assert not _source_clock_product_has_authority(json.dumps(row), lead_days=1)
         assert not _source_clock_product_has_authority(json.dumps({**row, "product_id": "other"}), lead_days=1)
         assert not _source_clock_product_has_authority(json.dumps({**row, "model": "hko_unregistered"}), lead_days=1)
+        if model.startswith("cwa_township_hourly_"):
+            assert not _source_clock_product_has_authority(json.dumps({**row, "metric": "high" if row["metric"] == "low" else "low"}), lead_days=1)
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("damage", ("missing", "bytes", "wrong_city", "units", "value"))
+def test_actual_response_proof_rejects_missing_tampered_and_wrong_city(tmp_path, monkeypatch, metric, damage):
+    import hashlib
+    from src.data.replacement_current_value_serving import read_current_instrument_values
+    conn, target, cycle = _current_rows(tmp_path, monkeypatch, metric=metric)
+    artifact_id = conn.execute("SELECT artifact_id FROM raw_model_forecasts WHERE model='icon_global'").fetchone()[0]
+    path, metadata_json = conn.execute("SELECT artifact_path,artifact_metadata_json FROM raw_forecast_artifacts WHERE artifact_id=?", (artifact_id,)).fetchone()
+    if damage == "missing":
+        conn.execute("UPDATE raw_model_forecasts SET artifact_id=NULL WHERE model='icon_global'")
+    elif damage == "bytes":
+        Path(path).write_bytes(Path(path).read_bytes() + b" ")
+    elif damage == "value":
+        conn.execute("UPDATE raw_model_forecasts SET forecast_value_c=99 WHERE model='icon_global'")
+    else:
+        payload = json.loads(Path(path).read_bytes())
+        metadata = json.loads(metadata_json)
+        if damage == "wrong_city":
+            payload["latitude"], payload["longitude"] = 0, 0
+            metadata["physical_response"]["locations"][0]["selected_latitude"] = 0
+            metadata["physical_response"]["locations"][0]["selected_longitude"] = 0
+        else:
+            payload["hourly_units"]["temperature_2m"] = "°F"
+        body = json.dumps(payload).encode()
+        Path(path).write_bytes(body)
+        digest = hashlib.sha256(body).hexdigest()
+        conn.execute("UPDATE raw_forecast_artifacts SET sha256=?,byte_size=?,artifact_metadata_json=? WHERE artifact_id=?", (digest,len(body),json.dumps(metadata),artifact_id))
+        conn.execute("UPDATE raw_model_forecasts SET raw_sha256=? WHERE artifact_id=?", (digest,artifact_id))
+    scope = dict(city=target.city, metric=metric, target_date=target.target_date, source_cycle_time_iso=cycle.isoformat())
+    # Carrier-bound provided/drain checks and source-clock consumers share the gate.
+    for decision in (None, cycle.replace(hour=5).isoformat()):
+        values = read_current_instrument_values(conn, **scope, decision_time_iso=decision)
+        assert "icon_global" not in values
+    conn.close()
+
+
+def test_single_model_location_batch_keeps_each_models_actual_geometry(tmp_path, monkeypatch):
+    from datetime import date
+    from src.data import bayes_precision_fusion_download as dl
+    monkeypatch.setattr("src.config.state_path", lambda filename: tmp_path / filename)
+    dl._SINGLE_RUNS_PAYLOAD_CACHE.clear()
+    dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEX.clear()
+    run = datetime(2026, 6, 8, tzinfo=UTC)
+    requested = []
+
+    def fetch(url, params, **kwargs):
+        requested.append(dict(params))
+        assert params["models"] in ("icon_global", "ukmo_global_deterministic_10km")
+        elevation = 70 if params["models"] == "icon_global" else 120
+        payload = []
+        for index, (lat, lon) in enumerate(zip(params["latitude"].split(","), params["longitude"].split(","))):
+            payload.append({"latitude": float(lat) + .01, "longitude": float(lon) - .01,
+                "elevation": elevation + index, "timezone": "Europe/Paris",
+                "hourly_units": {"temperature_2m": "°C"},
+                "hourly": {"time": [f"2026-06-09T{hour:02d}:00" for hour in range(24)],
+                           "temperature_2m": [20.0 + index] * 24}})
+        body = json.dumps(payload, indent=2).encode()
+        kwargs["capture_entity_body"](body, run.replace(hour=4).timestamp())
+        return json.loads(body)
+
+    monkeypatch.setattr("src.data.openmeteo_client.fetch", fetch)
+    locations = [(48.967,2.428,"Europe/Paris",(date(2026,6,9),)),
+                 (48.0,2.0,"Europe/Paris",(date(2026,6,9),))]
+    result = dl._default_live_fetch_locations_batched(models=["icon_global","ukmo_global_deterministic_10km"], locations=locations, run=run, forecast_hours=120)
+    assert len(requested) == 2 and all("," not in params["models"] for params in requested)
+    for index, per_day in enumerate(result):
+        proof = per_day[date(2026,6,9)][dl._BATCH_PHYSICAL_RESPONSE_KEY]
+        assert proof["icon_global"]["target_dem_elevation_m"] == 70 + index
+        assert proof["ukmo_global_deterministic_10km"]["target_dem_elevation_m"] == 120 + index
+        assert proof["icon_global"]["native_grid_elevation_m"] is None
+        assert proof["icon_global"]["native_surface"] == "UNKNOWN"
+        assert proof["icon_global"]["aggregation"] == "max_min_of_local_day_hourly_samples"
+
+
+def test_physical_manifest_redacts_request_credentials(tmp_path, monkeypatch):
+    from src.data import bayes_precision_fusion_download as dl
+    monkeypatch.setattr("src.config.state_path", lambda filename: tmp_path / filename)
+    payload = {"latitude": 1, "longitude": 2, "elevation": 3}
+    body = json.dumps(payload).encode()
+    params = {"models":"icon_global","hourly":"temperature_2m", "latitude":1,"longitude":2,
+              "api_key":"secret-key","token":"secret-token","authorization":"secret-header"}
+    bound = dl._bind_physical_response(json.loads(body), model="icon_global",
+        url="https://username:password@example.com/v1/forecast?api_key=secret-key",
+        params=params, run=datetime(2026,6,8,tzinfo=UTC), captures=[(body,datetime(2026,6,8,4,tzinfo=UTC).timestamp())])
+    evidence = json.dumps(bound[dl._BATCH_PHYSICAL_RESPONSE_KEY])
+    for secret in ("secret-key","secret-token","secret-header","username","password"):
+        assert secret not in evidence

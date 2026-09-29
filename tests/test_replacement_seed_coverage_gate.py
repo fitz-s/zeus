@@ -28,6 +28,7 @@ unconstructible (Fitz: make the wrong state unrepresentable, not patch each inst
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
@@ -59,6 +60,18 @@ _TARGET_DATE = "2026-06-07"
 _METRIC = "high"
 _BASELINE_RUN = "b0-run"
 _OPENMETEO_RUN = "om9-run"
+
+
+def _current_geometry_fixture():
+    from src.contracts.ensemble_snapshot_provenance import GRID_SURFACE_EVIDENCE_REVISION
+    geometry = {"revision": "openmeteo_current_provider_geometry_v1",
+        "providers": {"gfs_global": {"model": "gfs_global", "selected_latitude":31.25,
+            "selected_longitude":121.5,"target_dem_elevation_m":4,
+            "native_grid_elevation_m":None,"native_surface":"UNKNOWN"}}}
+    return {"grid_surface_evidence_revision": GRID_SURFACE_EVIDENCE_REVISION,
+        "grid_surface_evidence_identity_hash": hashlib.sha256(b"fixture-same-model-land-mask").hexdigest(),
+        "provider_geometry_evidence": geometry,
+        "provider_geometry_identity_hash": hashlib.sha256(json.dumps(geometry, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
 
 
 def _seed() -> dict[str, object]:
@@ -117,6 +130,7 @@ def _insert_posterior(db_path: str, *, q_lcb_json: str | None) -> None:
                     "bayes_precision_fusion": {
                         "used_models": ["gfs_global"],
                         "current_evidence_shape": {
+                            **_current_geometry_fixture(),
                             "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
                             "shape_lag_hours": 0.0,
                             "source_cycle_time": "2026-06-06T00:00:00+00:00",
@@ -375,6 +389,7 @@ def test_day0_seed_coverage_requires_exact_conditioning_identity(tmp_path) -> No
                         "bayes_precision_fusion": {
                             "used_models": ["gfs_global"],
                             "current_evidence_shape": {
+                                **_current_geometry_fixture(),
                                 "semantics_revision": (
                                     CURRENT_EVIDENCE_SEMANTICS_REVISION
                                 ),
@@ -490,6 +505,7 @@ def test_day0_coverage_prefers_active_provisional_over_fallback_conditioning(tmp
                         "bayes_precision_fusion": {
                             "used_models": ["gfs_global"],
                             "current_evidence_shape": {
+                                **_current_geometry_fixture(),
                                 "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
                                 "shape_lag_hours": 0.0,
                                 "source_cycle_time": "2026-06-06T00:00:00+00:00",
@@ -531,6 +547,7 @@ def test_consumed_regional_clock_newer_than_anchor_cycle_is_covered(tmp_path) ->
                     "bayes_precision_fusion": {
                         "used_models": ["gfs_global", "regional_clock"],
                         "current_evidence_shape": {
+                            **_current_geometry_fixture(),
                             "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
                             "shape_lag_hours": 0.0,
                             "source_cycle_time": "2026-06-06T00:00:00+00:00",

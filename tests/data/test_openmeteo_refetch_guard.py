@@ -586,3 +586,57 @@ def test_quota_in_flight_read_is_quiet(tmp_path, monkeypatch) -> None:
     assert tracker.request_in_flight("rid") is True
     assert tracker.request_in_flight("other") is False
     assert om_quota.REQUEST_STATE_SCHEMA_VERSION == 2
+
+
+def test_entity_body_cache_preserves_bytes_and_original_capture_clock(world):
+    proc = world.process()
+    captures = []
+    first = world.fetch(proc, capture_entity_body=lambda *args: captures.append(args))
+    world.now["t"] += 20
+    second = world.fetch(proc, capture_entity_body=lambda *args: captures.append(args))
+    assert first == second == json.loads(captures[0][0])
+    assert captures[0] == captures[1]
+    assert world.provider.data_calls == 1
+    assert captures[0][1] < world.now["t"]  # Replay does not renew possession.
+
+
+def test_legacy_parsed_cache_requires_ordinary_metered_entity_capture(world):
+    proc = world.process()
+    payload = world.fetch(proc)
+    tracker, store = proc
+    params = _madrid()
+    req = om_store.exact_request(SINGLE_RUNS, params)
+    rid = om.request_identity(SINGLE_RUNS, params)
+    store.put(rid, req, store.proofs(req), payload)  # Old canonical-JSON codec.
+    assert store.entity_body_capture(rid, req, payload) is None
+    captures = []
+    got = world.fetch(proc, capture_entity_body=lambda *args: captures.append(args))
+    assert world.provider.data_calls == 2
+    assert json.loads(captures[0][0]) == got
+    assert tracker.calls_today() == 2
+
+
+def test_other_daemon_replacement_cannot_bind_new_body_to_old_cached_value(world, monkeypatch):
+    proc = world.process()
+    original = world.fetch(proc)
+    tracker, store = proc
+    req = om_store.exact_request(SINGLE_RUNS, _madrid())
+    rid = om.request_identity(SINGLE_RUNS, _madrid())
+    lookup = store.lookup
+    replaced = []
+
+    def raced_lookup(*args, **kwargs):
+        held = lookup(*args, **kwargs)
+        if held is not None and not replaced:
+            newer = {**original, "call": 99}
+            store.put(rid, req, store.proofs(req), newer,
+                      entity_body=json.dumps(newer, indent=2).encode())
+            replaced.append(True)
+        return held
+
+    monkeypatch.setattr(store, "lookup", raced_lookup)
+    captures = []
+    got = world.fetch(proc, capture_entity_body=lambda *args: captures.append(args))
+    assert world.provider.data_calls == 2
+    assert got != original and got["call"] != 99
+    assert len(captures) == 1 and json.loads(captures[0][0]) == got

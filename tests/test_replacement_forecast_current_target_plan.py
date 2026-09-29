@@ -2494,6 +2494,11 @@ def _create_db(path) -> None:
         shape["grid_surface_evidence_identity_hash"] = hashlib.sha256(
             b"paris-unit-fixture-grid-surface-identity"
         ).hexdigest()
+        geometry = {"revision": "openmeteo_current_provider_geometry_v1",
+            "providers": {"icon_global": {"selected_latitude":49.0,"selected_longitude":2.4,
+                                          "native_surface":"UNKNOWN"}}}
+        shape["provider_geometry_evidence"] = geometry
+        shape["provider_geometry_identity_hash"] = hashlib.sha256(json.dumps(geometry, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         conn.execute(
             "UPDATE forecast_posteriors SET provenance_json=? WHERE city='Paris'",
             (json.dumps(provenance),),

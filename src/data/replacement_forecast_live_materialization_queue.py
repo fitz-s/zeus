@@ -1284,6 +1284,18 @@ def _seed_already_covered(
         ).fetchone()
         if posterior is None:
             return False
+        # SQL is a structural candidate filter, not current probability authority.
+        # SCOPE this exact family/readiness dependency; DRAIN normal seed; RESET
+        # the newly materialized proof passes the same entry/held predicate.
+        try:
+            provenance = json.loads(str(posterior["provenance_json"] or "{}"))
+        except (TypeError, ValueError):
+            return False
+        from src.data.replacement_forecast_cycle_policy import current_evidence_shape_has_held_authority
+        fusion = provenance.get("bayes_precision_fusion") if isinstance(provenance, Mapping) else None
+        if isinstance(fusion, Mapping) and "current_evidence_shape" in fusion:
+            if not current_evidence_shape_has_held_authority(provenance):
+                return False
         if str(seed.get("upgrade_trigger") or "").strip() == "held_belief_computed_age_expired":
             required_computed_at = _parse_utc_iso(seed.get("computed_at"))
             posterior_computed_at = _parse_utc_iso(posterior["computed_at"])

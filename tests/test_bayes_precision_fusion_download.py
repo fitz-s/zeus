@@ -2056,17 +2056,18 @@ def test_bpf_batched_fetch_uses_injected_quota_tracker(monkeypatch) -> None:
         lead_days=1,
     )
 
+    assert got.pop(dl._BATCH_PHYSICAL_RESPONSE_KEY)["icon_global"]["revision"] == "openmeteo_single_model_entity_body_v1"
     assert got == {"icon_global": (19.5, 17.25)}
     assert tracker.calls_today() == 1
 
 
-def test_default_previous_runs_batched_uses_comma_model_param(monkeypatch) -> None:
-    """Batched Open-Meteo requests must use the documented comma-separated models value."""
+def test_default_previous_runs_requests_single_model_headers(monkeypatch) -> None:
+    """Each previous-runs model must own its actual response header."""
     import src.data.openmeteo_client as om
     from src.data import bayes_precision_fusion_download as dl
     from src.forecast.model_selection import ANCHOR_MODEL
 
-    captured: dict[str, object] = {}
+    captured: list[str] = []
 
     class _Resp:
         status_code = 200
@@ -2088,7 +2089,7 @@ def test_default_previous_runs_batched_uses_comma_model_param(monkeypatch) -> No
             }
 
     def _fake_get(_url, *, params, **_kwargs):
-        captured["models"] = params["models"]
+        captured.append(params["models"])
         return _Resp()
 
     class _Client:
@@ -2105,7 +2106,8 @@ def test_default_previous_runs_batched_uses_comma_model_param(monkeypatch) -> No
         lead_days=1,
     )
 
-    assert captured["models"] == "icon_global,ecmwf_ifs025"
+    assert captured == ["icon_global", "ecmwf_ifs025"]
+    assert set(got.pop(dl._BATCH_PHYSICAL_RESPONSE_KEY)) == {"icon_global", ANCHOR_MODEL}
     assert got == {"icon_global": (19.5, 17.25), ANCHOR_MODEL: (21.0, 19.0)}
 
 
@@ -3042,6 +3044,8 @@ def test_single_runs_payload_cache_persisted_format_unchanged_by_superset(
     (entry,) = on_disk["entries"].values()
     assert {"payload", "recorded_at"} <= set(entry), "original fields must survive unchanged"
     assert set(entry) == {"payload", "recorded_at", "identity_key", "forecast_hours", "past_hours"}
+    proof = entry["payload"].pop(dl._BATCH_PHYSICAL_RESPONSE_KEY)
+    assert proof["revision"] == "openmeteo_single_model_entity_body_v1"
     assert entry["payload"] == _KOLKATA_120H_PAYLOAD
     assert entry["forecast_hours"] == 120
     assert entry["past_hours"] == 0
@@ -3571,6 +3575,7 @@ def test_single_location_72h_request_is_served_from_a_cross_process_120h_donor(
     native = dl._parse_batched_single_runs_payload(
         _CHENGDU_72H_PAYLOAD, ["ecmwf_ifs"], date(2026, 9, 8), _CHENGDU_TIMEZONE,
     )
+    assert served.pop(dl._BATCH_PHYSICAL_RESPONSE_KEY)["ecmwf_ifs"]["revision"] == "openmeteo_single_model_entity_body_v1"
     assert served == native
 
 

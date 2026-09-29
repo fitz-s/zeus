@@ -1781,7 +1781,9 @@ def _bind_physical_response(
     decoded = json.loads(body)
     if decoded != payload:
         raise ValueError("physical capture payload mismatch")
-    if str(params.get("models")) != OPENMETEO_MODEL_IDS.get(model, model):
+    expected_model = (OPENMETEO_PREVIOUS_RUNS_MODEL_IDS.get(model, OPENMETEO_MODEL_IDS.get(model, model))
+                      if "start_date" in params else OPENMETEO_MODEL_IDS.get(model, model))
+    if str(params.get("models")) != expected_model:
         raise ValueError("physical capture must request exactly one model")
     # Request credentials never become durable provenance. URLs are endpoint-only.
     from urllib.parse import urlsplit, urlunsplit
@@ -1807,7 +1809,7 @@ def _bind_physical_response(
                    "selected_longitude": item.get("longitude"),
                    "target_dem_elevation_m": item.get("elevation")}
                   for item in items if isinstance(item, Mapping)]
-    if model == "ecmwf_ifs":
+    if model == "ecmwf_ifs" and params.get("models") == "ecmwf_ifs":
         from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
         for geometry in geometries:
             try:
@@ -1821,6 +1823,8 @@ def _bind_physical_response(
             if not math.isclose(float(proof["selected_grid_lat"]), float(geometry["selected_latitude"]), abs_tol=1e-5) or not math.isclose(selected_lon, float(geometry["selected_longitude"]), abs_tol=1e-5):
                 raise ValueError("actual IFS9 response does not match static selected grid")
             geometry["source_cell_geometry_proof"] = proof
+            geometry["native_grid_elevation_m"] = proof["raw_grid_elevation_m"]
+            geometry["native_surface"] = "SEA" if proof["cell_is_sea"] else "LAND"
     for index, item in enumerate(items):
         if not isinstance(item, dict):
             raise ValueError("physical response location invalid")
@@ -1832,6 +1836,9 @@ def _bind_physical_response(
             "location_index": index, "source_cycle_time": run.isoformat(),
             "locations": geometries,
             "native_variable": params["hourly"], "temperature_unit": "celsius",
+            "variable_role": "provider_api_2m_temperature",
+            "native_file_variable": "UNKNOWN",
+            "temporal_resolution": "hourly_provider_series_may_be_interpolated",
             "aggregation": "max_min_of_local_day_hourly_samples",
             "selected_latitude": item.get("latitude"),
             "selected_longitude": item.get("longitude"),
@@ -1870,7 +1877,7 @@ def _default_live_fetch_batched(
     """
     if len(models) > 1:
         combined: dict[str, object] = {}
-        physical: dict[str, object] = {}
+        keyed_evidence: dict[str, dict[str, object]] = {}
         for model in models:
             piece = _default_live_fetch_batched(
                 models=[model], latitude=latitude, longitude=longitude,
@@ -1880,10 +1887,11 @@ def _default_live_fetch_batched(
                 allow_standard_meta_fallback=allow_standard_meta_fallback,
                 deadline_monotonic=deadline_monotonic,
             )
-            physical.update(piece.pop(_BATCH_PHYSICAL_RESPONSE_KEY, {}))
+            for key in (_BATCH_PHYSICAL_RESPONSE_KEY, _BATCH_TRANSPORT_PROVENANCE_KEY,
+                        _BATCH_EXACT_RUN_UNMATERIALIZABLE_KEY):
+                keyed_evidence.setdefault(key, {}).update(piece.pop(key, {}))
             combined.update(piece)
-        if physical:
-            combined[_BATCH_PHYSICAL_RESPONSE_KEY] = physical
+        combined.update({key: evidence for key, evidence in keyed_evidence.items() if evidence})
         return combined
     batched_outcome: dict[str, object] | None = None
     try:
@@ -2078,14 +2086,19 @@ def _default_live_fetch_batched(
             "cell_selection": BAYES_PRECISION_FUSION_CELL_SELECTION,
         }
         try:
+            captures, capture_callback = _physical_response_capture(
+                model=model, url=SINGLE_RUNS_FORECAST_URL, params=params, run=run)
             payload = fetch(
                 SINGLE_RUNS_FORECAST_URL,
                 params,
                 endpoint_label=f"bayes_precision_fusion_{model}_single_runs_fallback",
                 quota=_BPF_OPENMETEO_QUOTA_TRACKER,
                 fast_fail_429=True,
+                capture_entity_body=capture_callback,
                 **_deadline_fetch_kwargs(deadline_monotonic),
             )
+            payload = _bind_physical_response(payload, model=model, url=SINGLE_RUNS_FORECAST_URL,
+                params=params, run=run, captures=captures)
             parsed = _parse_batched_single_runs_payload(
                 payload,
                 [model],
@@ -2094,6 +2107,7 @@ def _default_live_fetch_batched(
             )
             if model in parsed:
                 fallback[model] = parsed[model]
+                fallback.setdefault(_BATCH_PHYSICAL_RESPONSE_KEY, {}).update(parsed.get(_BATCH_PHYSICAL_RESPONSE_KEY, {}))
             else:
                 fallback_errors.append(f"{model}:missing_series")
         except Exception as model_exc:
@@ -2140,6 +2154,23 @@ def _default_live_fetch_locations_batched(
 
     if not locations:
         return []
+    if len(models) > 1:
+        combined = [{day: {} for day in days} for _, _, _, days in locations]
+        for model in models:
+            pieces = _default_live_fetch_locations_batched(
+                models=[model], locations=locations, run=run, forecast_hours=forecast_hours,
+                source_available_at=source_available_at,
+                allow_standard_meta_fallback=allow_standard_meta_fallback,
+                deadline_monotonic=deadline_monotonic)
+            for aggregate, piece in zip(combined, pieces, strict=True):
+                for day, values in piece.items():
+                    for key, value in values.items():
+                        if key in (_BATCH_PHYSICAL_RESPONSE_KEY, _BATCH_TRANSPORT_PROVENANCE_KEY,
+                                   _BATCH_EXACT_RUN_UNMATERIALIZABLE_KEY):
+                            aggregate[day].setdefault(key, {}).update(value)
+                        else:
+                            aggregate[day][key] = value
+        return combined
     try:
         payloads = _fetch_single_runs_hourly_payloads_batched(
             models=models,
@@ -2655,12 +2686,25 @@ def _default_previous_runs_fetch_batched(
     target_date: str,
     lead_days: int,
     deadline_monotonic: float | None = None,
+    run: datetime | None = None,
 ) -> dict[str, tuple[float | None, float | None]]:
     """R1+R2: ONE previous-runs call for ALL `models` at (city, target_date, lead).
 
     Returns {model: (high_c, low_c)}.
     FAIL-SOFT: total network failure returns {}.
     """
+    if len(models) > 1:
+        combined: dict[str, object] = {}
+        physical: dict[str, object] = {}
+        for model in models:
+            piece = _default_previous_runs_fetch_batched(models=[model], latitude=latitude,
+                longitude=longitude, timezone_name=timezone_name, target_date=target_date,
+                lead_days=lead_days, deadline_monotonic=deadline_monotonic, run=run)
+            physical.update(piece.pop(_BATCH_PHYSICAL_RESPONSE_KEY, {}))
+            combined.update(piece)
+        if physical:
+            combined[_BATCH_PHYSICAL_RESPONSE_KEY] = physical
+        return combined
     try:
         from src.data.openmeteo_client import PREVIOUS_RUNS_URL, fetch  # noqa: PLC0415
 
@@ -2679,16 +2723,26 @@ def _default_previous_runs_fetch_batched(
             "models": ",".join(om_ids),
             "temperature_unit": "celsius",
             "timezone": timezone_name,
+            "cell_selection": BAYES_PRECISION_FUSION_CELL_SELECTION,
         }
+        capture_run = run or datetime.now(UTC)
+        captures, capture_callback = _physical_response_capture(
+            model=models[0], url=PREVIOUS_RUNS_URL, params=params, run=capture_run)
         payload = fetch(
             PREVIOUS_RUNS_URL,
             params,
             endpoint_label="bayes_precision_fusion_previous_runs_batched",
             quota=_BPF_OPENMETEO_QUOTA_TRACKER,
             fast_fail_429=True,
+            capture_entity_body=capture_callback,
             **_deadline_fetch_kwargs(deadline_monotonic),
         )
-        return _parse_batched_previous_runs_payload(payload, models, hourly_var)
+        payload = _bind_physical_response(payload, model=models[0], url=PREVIOUS_RUNS_URL,
+            params=params, run=capture_run, captures=captures)
+        result = _parse_batched_previous_runs_payload(payload, models, hourly_var)
+        if isinstance(payload, Mapping) and payload.get(_BATCH_PHYSICAL_RESPONSE_KEY):
+            result[_BATCH_PHYSICAL_RESPONSE_KEY] = {models[0]: payload[_BATCH_PHYSICAL_RESPONSE_KEY]}
+        return result
     except Exception as exc:
         _LOG.warning("BAYES_PRECISION_FUSION batched previous_runs fetch failed (fail-soft): %s", exc)
         return {_BATCH_TRANSPORT_ERROR_KEY: _batch_transport_error(exc)}
@@ -2872,8 +2926,9 @@ def _persist_rows(
     is already durable. When called directly on an autocommit connection (the operator-named test
     API), each statement self-commits and the audit is durable on its own.
 
-    Each row is a dict keyed by _RMF_INSERT_COLUMNS (capture columns + BLOCKER 4 product
-    identity). raw_sha256 / artifact_id stay NULL here (capture precedes artifact persistence)."""
+    Each row is keyed by _RMF_INSERT_COLUMNS. A producer-owned exact entity capture
+    registers its existing artifact relation in this same transaction; injected values
+    without original bytes remain unproved and cannot acquire current serving authority."""
     # Conflict pass FIRST — a single conflicting row fails the whole batch (the corrected request
     # must be resolved by an operator, not partially applied).
     for row in rows:
@@ -2883,12 +2938,18 @@ def _persist_rows(
             raise _request_conflict_error(row, conflict)
     for row in rows:
         capture = row.pop("_physical_response", None)
+        station_capture = row.pop("_station_response", None)
+        station = isinstance(station_capture, Mapping)
+        if station:
+            capture = station_capture
         row.setdefault("raw_sha256", None)
         row.setdefault("artifact_id", None)
         if not isinstance(capture, Mapping):
             continue
         # Existing raw artifact relation, in the same forecast transaction as rows.
         params = capture["request_params"]
+        data_version = "station_forecast_entity_body_v1" if station else "openmeteo_single_model_entity_body_v1"
+        metadata = {"station_response": capture["station_response"]} if station else {"physical_response": dict(capture)}
         conn.execute(
             """INSERT INTO raw_forecast_artifacts
                (source_id,product_id,data_version,source_cycle_time,source_available_at,
@@ -2896,20 +2957,22 @@ def _persist_rows(
                 artifact_metadata_json,training_allowed) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0)
                ON CONFLICT(source_id,product_id,data_version,source_cycle_time,sha256)
                DO NOTHING""",
-            (row["source_id"], row["product_id"], "openmeteo_single_model_entity_body_v1",
+            (row["source_id"], row["product_id"], data_version,
              row["source_cycle_time"], row["source_available_at"], capture["captured_at"],
              capture["artifact_path"], capture["sha256"], capture["byte_size"],
              capture["request_url"], json.dumps(params, sort_keys=True),
-             json.dumps({"physical_response": dict(capture)}, sort_keys=True)),
+             json.dumps(metadata, sort_keys=True)),
         )
         artifact = conn.execute(
-            "SELECT artifact_id FROM raw_forecast_artifacts WHERE source_id=? AND product_id=? "
+            "SELECT artifact_id,captured_at,source_available_at FROM raw_forecast_artifacts WHERE source_id=? AND product_id=? "
             "AND data_version=? AND source_cycle_time=? AND sha256=?",
-            (row["source_id"], row["product_id"], "openmeteo_single_model_entity_body_v1",
+            (row["source_id"], row["product_id"], data_version,
              row["source_cycle_time"], capture["sha256"]),
         ).fetchone()
         row["artifact_id"], row["raw_sha256"] = int(artifact[0]), capture["sha256"]
-        row["captured_at"] = capture["captured_at"]
+        row["captured_at"] = str(artifact[1])
+        if station:
+            row["source_available_at"] = str(artifact[2])
     before = conn.total_changes
     placeholders = ",".join("?" for _ in _RMF_INSERT_COLUMNS)
     cols = ",".join(_RMF_INSERT_COLUMNS)
@@ -3931,7 +3994,9 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                     target_date=target_date,
                     lead_days=int(ref.lead_days),
                     deadline_monotonic=wall_clock_deadline,
+                    run=cycle,
                 )
+                previous_physical_responses = pv_map.pop(_BATCH_PHYSICAL_RESPONSE_KEY, {})
                 previous_transport_error = pv_map.pop(_BATCH_TRANSPORT_ERROR_KEY, None)
                 if previous_transport_error is not None:
                     previous_error_text = str(previous_transport_error[0])
@@ -3969,6 +4034,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                             "source_available_at": source_available_iso, "captured_at": captured_iso,
                             "lead_days": int(t.lead_days), "forecast_value_c": float(val),
                             "endpoint": "previous_runs",
+                            "_physical_response": previous_physical_responses.get(model),
                             **_bayes_precision_fusion_product_identity(model, "previous_runs", t),
                         })
 

@@ -2200,8 +2200,17 @@ def _covering_posterior_input_lag_reason(
         return (
             "basis=readiness_bound_posterior_unavailable"
             if readiness_posterior_id is not None
-            else None
+            else "basis=covering_posterior_unavailable"
         )
+    # Aggregate SQL counts are only coarse candidates. Final exact family
+    # coverage must reproduce the same proof used by entry and held readers;
+    # a malformed 64-hex hash must not mask its own normal materialization drain.
+    provenance = _json_object(row["provenance_json"])
+    fusion = provenance.get("bayes_precision_fusion")
+    if isinstance(fusion, Mapping) and "current_evidence_shape" in fusion:
+        from src.data.replacement_forecast_cycle_policy import current_evidence_shape_has_held_authority
+        if not current_evidence_shape_has_held_authority(provenance):
+            return "basis=current_evidence_probability_authority_invalid"
     from src.data.replacement_input_hwm import replacement_live_input_lag_reason
 
     raw_lag = replacement_live_input_lag_reason(
