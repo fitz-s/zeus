@@ -1222,7 +1222,7 @@ def _held_legacy_physical_proof_recovery_candidates(
             if city_cfg is None:
                 continue
             posterior = conn.execute(
-                "SELECT provenance_json FROM forecast_posteriors WHERE city=? AND target_date=?"
+                "SELECT provenance_json,computed_at FROM forecast_posteriors WHERE city=? AND target_date=?"
                 " AND temperature_metric=? AND runtime_layer='live'"
                 " ORDER BY computed_at DESC,posterior_id DESC LIMIT 1", scope,
             ).fetchone()
@@ -1231,7 +1231,7 @@ def _held_legacy_physical_proof_recovery_candidates(
                 fusion = provenance.get("bayes_precision_fusion")
             except (TypeError, ValueError):
                 continue
-            if not isinstance(fusion, Mapping) or not isinstance(fusion.get("current_evidence_shape"), Mapping) or current_evidence_shape_has_held_authority(provenance):
+            if not isinstance(fusion, Mapping) or not isinstance(fusion.get("current_evidence_shape"), Mapping) or current_evidence_shape_has_held_authority(provenance, materialized_at=posterior[1]):
                 continue
             rows = conn.execute(
                 f"SELECT {identity} FROM raw_model_forecasts WHERE city=? AND target_date=? AND metric=?"

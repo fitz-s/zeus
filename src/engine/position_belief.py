@@ -1054,7 +1054,7 @@ def load_replacement_belief(
             CURRENT_EVIDENCE_SEMANTICS_REVISION,
         )
         return None
-    if not current_evidence_shape_has_held_authority(provenance):
+    if not current_evidence_shape_has_held_authority(provenance, materialized_at=row["computed_at"]):
         logger.warning(
             "position_belief: current-evidence shape lacks held authority for %s/%s/%s",
             city,

@@ -204,6 +204,9 @@ def _anchor_station_ground_has_authority(geometry: Mapping[str, object], audit: 
     try:
         from src.config import runtime_cities_by_name, runtime_station_geometry_for_city
 
+        if materialized_at is None:
+            return False  # Never trust a self-claimed replacement cutoff.
+
         anchor = geometry["providers"]["__anchor_ifs9__"]
         ground = anchor["source_geometry_proof"]["station_ground_proof"]
         city = runtime_cities_by_name().get(str(anchor["city"]))

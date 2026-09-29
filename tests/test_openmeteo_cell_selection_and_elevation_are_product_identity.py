@@ -391,6 +391,7 @@ def test_station_ground_facts_identity_excludes_audit_but_cutoff_requires_posses
         float(station["ground_elevation_m"]), proof)
     bound = _bind_provider_geometry_identity(Shape(), {}, anchor_metadata=metadata, decision_at="2026-09-29T22:00:00+00:00")
     assert _anchor_station_ground_has_authority(bound.provider_geometry_evidence, bound.provider_geometry_audit, "2026-09-29T22:00:00Z")
+    assert not _anchor_station_ground_has_authority(bound.provider_geometry_evidence, bound.provider_geometry_audit)
     assert not _anchor_station_ground_has_authority(bound.provider_geometry_evidence, bound.provider_geometry_audit, "2026-09-29T04:00:00Z")
     old = _bind_provider_geometry_identity(Shape(), {}, anchor_metadata=metadata, decision_at="2026-09-29T04:00:00Z")
     assert not _anchor_station_ground_has_authority(old.provider_geometry_evidence, old.provider_geometry_audit, "2026-09-29T04:00:00Z")

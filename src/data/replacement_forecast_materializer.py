@@ -4069,7 +4069,7 @@ def _read_current_evidence_shape(
 
 
 def _fusion_current_evidence_shape_has_live_authority(
-    fusion: object,
+    fusion: object, *, materialized_at: object = None,
 ) -> bool:
     """Apply the shared live shape law at the producer commit boundary."""
 
@@ -4077,7 +4077,7 @@ def _fusion_current_evidence_shape_has_live_authority(
     if not isinstance(shape, Mapping):
         return False
     return current_evidence_shape_has_entry_authority(
-        {"bayes_precision_fusion": {"current_evidence_shape": shape}}
+        {"bayes_precision_fusion": {"current_evidence_shape": shape}}, materialized_at=materialized_at,
     )
 
 
@@ -8121,7 +8121,7 @@ def _compute_posterior_payload(
     # override layer is fail-soft (returns None) so at this seam an absent override reads as
     # STALE_HISTORY_ONLY (the live gate rejects it via BAYES_PRECISION_FUSION_CAPTURE_MISSING regardless).
     current_shape_live = _fusion_current_evidence_shape_has_live_authority(
-        bayes_precision_fusion_override
+        bayes_precision_fusion_override, materialized_at=request.computed_at,
     )
     if source_clock_scheme_unavailable:
         capture_status = REPLACEMENT_CAPTURE_STATUS_SOURCE_CLOCK_SCHEME_UNAVAILABLE

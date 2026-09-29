@@ -6218,17 +6218,17 @@ def _qkernel_shadow_current_semantics_by_posterior(
             chunk = posterior_hashes[start : start + 500]
             placeholders = ",".join("?" for _ in chunk)
             rows = conn.execute(
-                "SELECT posterior_identity_hash,provenance_json "
+                "SELECT posterior_identity_hash,provenance_json,computed_at "
                 "FROM forecast_posteriors "
                 f"WHERE posterior_identity_hash IN ({placeholders})",
                 tuple(chunk),
             ).fetchall()
-            for posterior_identity_hash, provenance in rows:
+            for posterior_identity_hash, provenance, materialized_at in rows:
                 shape = _current_evidence_shape(provenance)
                 if shape is None:
                     continue
                 if (
-                    current_evidence_shape_has_entry_authority(provenance)
+                    current_evidence_shape_has_entry_authority(provenance, materialized_at=materialized_at)
                     and shape.get("between_cohort_status")
                     == BETWEEN_COHORT_STATUS_SIMULTANEOUS_PROVEN
                     and not current_evidence_shape_semantics_mismatch(provenance)
