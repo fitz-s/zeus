@@ -142,6 +142,7 @@ REPLACEMENT_FORECAST_DISCOVERY_JOB_ID = "replacement_forecast_live_discovery"
 REPLACEMENT_FORECAST_STARTUP_JOB_ID = "replacement_forecast_download_startup_catch_up"
 REPLACEMENT_AVAILABILITY_POLL_JOB_ID = "replacement_cycle_availability_poll"
 ANCHOR_META_CROSS_CHECK_JOB_ID = "anchor_meta_stamp_cross_check"
+FORECAST_RETENTION_JOB_ID = "forecast_retention"
 REPLACEMENT_FORECAST_EXECUTOR_LANE = "replacement_production"
 REPLACEMENT_FORECAST_PRIORITY_EXECUTOR_LANE = "replacement_priority"
 # forecast_posteriors has one SQLite writer. Parallel commit subprocesses do not
@@ -2090,6 +2091,18 @@ def _anchor_meta_stamp_cross_check_job() -> None:
     _anchor_meta_stamp_cross_check.__wrapped__()
 
 
+@_scheduler_job(FORECAST_RETENTION_JOB_ID)
+def _forecast_retention_job() -> dict:
+    """Evict forecast inputs and sample payloads no reader can reach (bounded per pass)."""
+    from src.data.forecast_retention import run_forecast_retention
+
+    summary = run_forecast_retention(apply=True)
+    logger.info("forecast_retention=%s", json.dumps(summary, default=str))
+    if summary.get("status") == "REACHABILITY_UNAVAILABLE":
+        return {"status": "failed", "error": summary.get("error")}
+    return summary
+
+
 @_scheduler_job(REPLACEMENT_AVAILABILITY_POLL_JOB_ID)
 def _replacement_cycle_availability_poll_job() -> None:
     """PROBE-RESOLVED freshness owner (operator directive 2026-06-11: automatic download,
@@ -2690,6 +2703,20 @@ def _register_replacement_forecast_production_jobs(
         "interval",
         minutes=60,
         id=ANCHOR_META_CROSS_CHECK_JOB_ID,
+        executor=REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=600,
+    )
+    # Retention runs on the download lane (file I/O + short WAL-bounded posterior
+    # batches), never on a materialization lane. First pass 10 min after boot so a
+    # restart-heavy daemon still drains; each pass is bounded and idempotent.
+    scheduler.add_job(  # type: ignore[attr-defined]
+        _forecast_retention_job,
+        "interval",
+        minutes=60,
+        next_run_time=datetime.now(timezone.utc) + timedelta(minutes=10),
+        id=FORECAST_RETENTION_JOB_ID,
         executor=REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE,
         max_instances=1,
         coalesce=True,

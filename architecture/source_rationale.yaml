@@ -1393,6 +1393,12 @@ files:
     why: Enforces at fetch() that a metered Open-Meteo request is sent only when its answer can differ from one already held. Holds exact-run answers (single-runs run=, previous-runs dates) with the provider run state they were fetched under, pinned forward-only from unmetered meta.json, in a private cross-process SQLite cache (state/openmeteo_response_store.db, zstd-3 BLOB, reachability retention); keeps the day-keyed per-job unit ledger and the hourly burn alarm. No truth, no canonical DB; failure falls back to the network path. Previous-runs entries are reused for at most one consistency wait, after which fresh meta confirmation and a refetch are required; the single-runs behavior is unchanged.
     downstream:
     - src/data/openmeteo_client.py
+  src/data/forecast_retention.py:
+    zone: K2_runtime
+    authority_role: forecast_retention_by_reachability
+    why: One bounded, idempotent retention pass over every forecast store, keyed on one rule -- an item is kept while its (city, target_date, metric) family is inside the last-local-day window or has a non-terminal position. Evicts replacement queue terminal files, Open-Meteo raw payload/manifest files (except cycles the anchor cross-check still re-reads) and the Monte-Carlo sample arrays of unreachable forecast_posteriors rows (hashes, q, identity and refit inputs kept). Trade DB read mode=ro; forecasts writes WAL-bounded under db_writer_lock(LIVE). Runs hourly in forecast-live; dry-run by default as a CLI.
+    downstream:
+    - src/ingest/forecast_live_daemon.py
   src/data/bayes_precision_fusion_download.py:
     zone: K2_runtime
     authority_role: replacement_raw_forecast_capture
