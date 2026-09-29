@@ -134,6 +134,58 @@ def test_parse_csv_line_bad_date_returns_none():
     assert _parse_metar_csv_line(line) is None
 
 
+@pytest.mark.parametrize("body", ["LTFM 281020Z 34025KT 19/12 Q1016", "METAR LTFM 281020Z 34025KT 19/12 Q1016", "METAR COR LTFM 281020Z 34025KT 19/12 Q1016", "SPECI LTFM 281020Z 34025KT 19/12 Q1016", "METAR LTFM 281020Z COR 34025KT 19/12 Q1016"])
+def test_ogimet_csv_accepts_returned_station_with_report_variants(body):
+    result = _parse_metar_csv_line(f"LTFM,2026,09,28,10,20,{body}")
+    assert result is not None and result[1] == 19.0
+
+
+@pytest.mark.parametrize("line", ["LTFM,2026,09,28,10,20,METAR UUWW 281020Z 19/12 Q1016", "UUWW,2026,09,28,10,20,METAR LTFM 281020Z 19/12 Q1016", "LTFM,2026,09,28,10,20,281020Z 19/12 Q1016"])
+def test_ogimet_hourly_identity_mismatch_rejects_entire_response(monkeypatch, line):
+    monkeypatch.setattr(ogimet_client, "wait_for_ogimet_request_slot", lambda: None)
+    monkeypatch.setattr(ogimet_client, "_request_ogimet", lambda **kwargs: SimpleNamespace(status_code=200, text="LTFM,2026,09,28,10,00,METAR LTFM 281000Z 18/12 Q1016\n" + line))
+    result = ogimet_client.fetch_ogimet_hourly("LTFM", date(2026, 9, 28), date(2026, 9, 28), city_name="Istanbul", timezone_name="Europe/Istanbul", source_tag="ogimet_metar_ltfm")
+    assert result.failed and result.failure_reason == "PARSE_ERROR"
+    assert result.observations == []
+
+
+@pytest.mark.parametrize("unit,high,low", [("C", 20.0, 18.0), ("F", 68.0, 64.4)])
+def test_ogimet_hourly_matching_response_preserves_high_low_and_units(monkeypatch, unit, high, low):
+    monkeypatch.setattr(ogimet_client, "wait_for_ogimet_request_slot", lambda: None)
+    monkeypatch.setattr(ogimet_client, "_request_ogimet", lambda **kwargs: SimpleNamespace(status_code=200, text="LTFM,2026,09,28,10,00,METAR COR LTFM 281000Z 18/12 Q1016\nLTFM,2026,09,28,10,20,SPECI LTFM 281020Z 20/12 Q1016"))
+    result = ogimet_client.fetch_ogimet_hourly("LTFM", date(2026, 9, 28), date(2026, 9, 28), city_name="Istanbul", timezone_name="Europe/Istanbul", source_tag="ogimet_metar_ltfm", unit=unit)
+    assert not result.failed
+    [row] = result.observations
+    assert row.station_id == "LTFM" and row.temp_unit == unit
+    assert row.hour_max_temp == pytest.approx(high)
+    assert row.hour_min_temp == pytest.approx(low)
+
+
+def test_ogimet_hourly_empty_response_remains_no_data(monkeypatch):
+    monkeypatch.setattr(ogimet_client, "wait_for_ogimet_request_slot", lambda: None)
+    monkeypatch.setattr(ogimet_client, "_request_ogimet", lambda **kwargs: SimpleNamespace(status_code=200, text=""))
+    result = ogimet_client.fetch_ogimet_hourly("LTFM", date(2026, 9, 28), date(2026, 9, 28), city_name="Istanbul", timezone_name="Europe/Istanbul", source_tag="ogimet_metar_ltfm")
+    assert not result.failed and result.observations == []
+
+
+def test_ogimet_hourly_response_binds_each_configured_noaa_city(monkeypatch):
+    from src.config import cities_by_name
+
+    monkeypatch.setattr(ogimet_client, "wait_for_ogimet_request_slot", lambda: None)
+    configured = [city for city in cities_by_name.values() if city.settlement_source_type == "noaa"]
+    assert configured
+    for city in configured:
+        station = city.wu_station
+        instant = datetime(2026, 9, 28, 12, tzinfo=ZoneInfo(city.timezone)).astimezone(timezone.utc)
+        text = f"{station},{instant:%Y,%m,%d,%H,%M},METAR {station} {instant:%d%H%M}Z 20/12 Q1016"
+        monkeypatch.setattr(ogimet_client, "_request_ogimet", lambda text=text, **kwargs: SimpleNamespace(status_code=200, text=text))
+        result = ogimet_client.fetch_ogimet_hourly(station, date(2026, 9, 28), date(2026, 9, 28), city_name=city.name, timezone_name=city.timezone, source_tag=f"ogimet_metar_{station.lower()}", unit=city.settlement_unit)
+        assert not result.failed, city.name
+        [row] = result.observations
+        assert row.station_id == station and row.city == city.name
+        assert row.hour_max_temp == row.hour_min_temp == (20.0 if city.settlement_unit == "C" else 68.0)
+
+
 # ----------------------------------------------------------------------
 # WU extremum-preserving aggregation (the critical contract)
 # ----------------------------------------------------------------------

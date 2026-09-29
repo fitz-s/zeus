@@ -1849,6 +1849,24 @@ def _wait_for_ogimet_request_slot() -> None:
     wait_for_ogimet_request_slot()
 
 
+class OgimetStationIdentityInvalid(ValueError):
+    """An Ogimet row does not prove the requested METAR station."""
+
+
+def _assert_ogimet_metar_station(csv_station: str, body: str, station: str) -> None:
+    """Require CSV and report identities to agree with the request."""
+    # SCOPE: one requested station response. DRAIN: normal source retry.
+    # RESET: both returned identities again name that requested station.
+    expected = str(station).strip().upper()
+    tokens = body.strip().upper().split()
+    if tokens and tokens[0] in {"METAR", "SPECI"}:
+        tokens = tokens[1:]
+    if tokens and tokens[0] == "COR":
+        tokens = tokens[1:]
+    if not expected or csv_station.strip().upper() != expected or not tokens or tokens[0] != expected:
+        raise OgimetStationIdentityInvalid("Ogimet CSV/report station identity missing or mismatched")
+
+
 def _fetch_ogimet_day(
     target: _OgimetTarget,
     target_date: date,
@@ -1904,6 +1922,8 @@ def _fetch_ogimet_day(
         parts = line.split(",", 6)
         if len(parts) < 7:
             continue
+        if target.kind == "metar":
+            _assert_ogimet_metar_station(parts[0], parts[6], target.station)
         try:
             year, month, day, hour, minute = map(int, parts[1:6])
             obs_utc = datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
@@ -2322,7 +2342,18 @@ def append_ogimet_city(
     stats = {"inserted": 0, "guard_rejected": 0, "fetch_errors": 0}
 
     for target_d in target_dates:
-        result = _fetch_ogimet_day(target, target_d, tz)
+        try:
+            result = _fetch_ogimet_day(target, target_d, tz)
+        except OgimetStationIdentityInvalid as exc:
+            logger.warning("Ogimet station identity rejected %s/%s: %s", city_name, target_d, exc)
+            stats["fetch_errors"] += 1
+            record_failed(
+                conn, data_table=DataTable.OBSERVATIONS, city=city_name,
+                data_source=target.source_tag, target_date=target_d,
+                reason=CoverageReason.PARSE_ERROR, retry_after=_retry_embargo(hours=2),
+            )
+            conn.commit()
+            continue
         if result is None:
             stats["fetch_errors"] += 1
             record_failed(

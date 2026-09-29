@@ -1052,6 +1052,44 @@ def test_wu_station_failure_drains_into_matching_high_low_write(monkeypatch, cit
     assert coverage[0] == CoverageStatus.WRITTEN.value
 
 
+@pytest.mark.parametrize("city_name", ["Paris", "Atlanta"])
+@pytest.mark.parametrize("defect", ["csv_foreign", "report_foreign", "identity_absent", "mixed"])
+def test_ogimet_station_failure_drains_into_matching_high_low_write(monkeypatch, city_name, defect):
+    from types import SimpleNamespace
+    from src.config import cities_by_name
+
+    city = cities_by_name[city_name]
+    station = city.wu_station
+    target = date(2026, 9, 28)
+    instant = datetime.combine(target, datetime.min.time(), tzinfo=ZoneInfo(city.timezone)).astimezone(timezone.utc) + timedelta(hours=12)
+    stamp = instant.strftime("%Y,%m,%d,%H,%M")
+    matching = f"{station},{stamp},METAR COR {station} {instant:%d%H%M}Z 18/12 Q1016"
+    foreign = {
+        "csv_foreign": f"WRNG,{stamp},METAR {station} {instant:%d%H%M}Z 20/12 Q1016",
+        "report_foreign": f"{station},{stamp},METAR WRNG {instant:%d%H%M}Z 20/12 Q1016",
+        "identity_absent": f"{station},{stamp},{instant:%d%H%M}Z 20/12 Q1016",
+        "mixed": matching + f"\nWRNG,{stamp},METAR WRNG {instant:%d%H%M}Z 20/12 Q1016",
+    }[defect]
+    response = SimpleNamespace(status_code=200, text=foreign)
+    monkeypatch.setattr(daily_obs_append, "_wait_for_ogimet_request_slot", lambda: None)
+    monkeypatch.setattr(daily_obs_append.httpx, "get", lambda *args, **kwargs: response)
+    conn = _memdb()
+    failed = daily_obs_append.append_ogimet_city(city_name, [target], conn, rebuild_run_id="identity-failed")
+    assert failed["fetch_errors"] == 1 and failed["inserted"] == 0
+    assert conn.execute("SELECT COUNT(*) FROM observations WHERE city=?", (city_name,)).fetchone()[0] == 0
+    coverage = conn.execute("SELECT reason FROM data_coverage WHERE city=? AND target_date=?", (city_name, target.isoformat())).fetchone()
+    assert coverage[0] == CoverageReason.PARSE_ERROR
+    response.text = matching + f"\n{station},{stamp},SPECI {station} {instant:%d%H%M}Z 20/12 Q1016"
+    recovered = daily_obs_append.append_ogimet_city(city_name, [target], conn, rebuild_run_id="identity-recovered")
+    assert recovered["inserted"] == 1 and recovered["fetch_errors"] == 0
+    row = conn.execute("SELECT high_temp,low_temp,unit,station_id FROM observations WHERE city=? AND target_date=?", (city_name, target.isoformat())).fetchone()
+    assert row[0] == pytest.approx(20.0 if city.settlement_unit == "C" else 68.0)
+    assert row[1] == pytest.approx(18.0 if city.settlement_unit == "C" else 64.4)
+    assert row[2] == city.settlement_unit and row[3] == station
+    coverage = conn.execute("SELECT status FROM data_coverage WHERE city=? AND target_date=?", (city_name, target.isoformat())).fetchone()
+    assert coverage[0] == CoverageStatus.WRITTEN.value
+
+
 def test_R5_wu_observation_upsert_preserves_row_identity() -> None:
     """Duplicate live WU writes update the observation row without delete+insert."""
     conn = _memdb()

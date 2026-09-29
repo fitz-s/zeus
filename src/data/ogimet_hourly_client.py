@@ -41,6 +41,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
+from src.data.daily_obs_append import OgimetStationIdentityInvalid, _assert_ogimet_metar_station
 from src.data.metar_temperature import metar_temperature_c
 from src.data.wu_hourly_client import HourlyObservation
 from src.types.temperature import Celsius, CelsiusBox, c_to_f
@@ -133,6 +134,10 @@ def _parse_metar_csv_line(line: str) -> Optional[tuple[datetime, Celsius]]:
     """
     parts = line.split(",", 6)
     if len(parts) < 7:
+        return None
+    try:
+        _assert_ogimet_metar_station(parts[0], parts[6], parts[0])
+    except OgimetStationIdentityInvalid:
         return None
     try:
         year, month, day, hour, minute = map(int, parts[1:6])
@@ -387,6 +392,12 @@ def _fetch_one_chunk(
         if not line:
             continue
         raw += 1
+        parts = line.split(",", 6)
+        if len(parts) >= 7:
+            try:
+                _assert_ogimet_metar_station(parts[0], parts[6], station)
+            except OgimetStationIdentityInvalid as exc:
+                return _ChunkResult(failure_reason="PARSE_ERROR", retryable=True, error=str(exc))
         row = _parse_metar_csv_line(line)
         if row is not None:
             parsed.append(row)
