@@ -27,6 +27,9 @@ import pytest
 
 
 from src.data.openmeteo_ecmwf_ifs9_anchor import OpenMeteoIfs9LocalDayAnchor
+from src.data.openmeteo_ecmwf_ifs9_bucket_transport import (
+    source_cell_geometry_proof as _REAL_SOURCE_CELL_GEOMETRY_PROOF,
+)
 from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
     OpenMeteoIfs9PrecisionMetadata,
     evaluate_openmeteo_ecmwf_ifs9_precision_guard,
@@ -88,6 +91,152 @@ class _TemperatureBin:
 
 def _dt(hour: int, minute: int = 0) -> datetime:
     return datetime(2026, 6, 6, hour, minute, tzinfo=UTC)
+
+
+def _hko_dt(hour: int, minute: int = 0) -> datetime:
+    # The official ground entity was possessed on Sep29; never backdate it to
+    # the June fixtures. Sep30 -> Oct1 preserves the original +8h lead geometry.
+    return datetime(2026, 9, 30, hour, minute, tzinfo=UTC)
+
+
+@pytest.fixture
+def _hko_source_surface(tmp_path, monkeypatch):
+    """Actual O1280 OM decoding of controlled static input, not guard authority."""
+    from functools import partial
+    import numpy as np
+    from omfiles import OmFileWriter
+    import src.data.openmeteo_ecmwf_ifs9_bucket_transport as transport
+
+    path = tmp_path / "controlled-o1280-hsurf.om"
+    writer = OmFileWriter(str(path))
+    root = writer.write_array(np.full((1, transport.O1280_TOTAL_POINTS), 32.0,
+                                      dtype=np.float32), chunks=(1, 4096), name="HSURF")
+    writer.close(root)
+    # Other tests retain their legacy controlled seam. This fixture explicitly
+    # routes the real constructor to one temporary, whole-byte OM artifact.
+    monkeypatch.setattr(transport, "source_cell_geometry_proof",
+                        partial(_REAL_SOURCE_CELL_GEOMETRY_PROOF, local_cache=str(path)))
+    yield path
+    transport._hsurf_reader.cache_clear()
+
+
+@pytest.fixture
+def _hko_native_surfaces(tmp_path, monkeypatch):
+    """Ordinary loopback whole-OM captures for the two explicit model domains."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import numpy as np
+    from omfiles import OmFileWriter
+    from src.data import openmeteo_model_surface as surface
+
+    bodies = {}
+    for model, domain, shape in (
+        ("icon_global", "dwd_icon", (1441, 2879)),
+        ("ukmo_global_deterministic_10km", "ukmo_global_deterministic_10km", (1920, 2560)),
+    ):
+        path = tmp_path / f"{domain}.om"
+        writer = OmFileWriter(str(path))
+        root = writer.write_array(np.full(shape, 32.0, dtype=np.float32), chunks=(20,20), name="HSURF")
+        writer.close(root)
+        bodies[domain] = path.read_bytes()
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = bodies.get(self.path.lstrip("/"))
+            if body is None:
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("ETag", '"'+hashlib.sha256(body).hexdigest()+'"')
+            self.send_header("Last-Modified", "Tue, 29 Sep 2026 22:00:00 GMT")
+            self.end_headers()
+            self.wfile.write(body)
+        def log_message(self, *_args):
+            pass
+    server = ThreadingHTTPServer(("127.0.0.1",0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(surface, "_asset_url", lambda domain: f"http://127.0.0.1:{server.server_port}/{domain}")
+    monkeypatch.setattr(surface, "_cache_root", lambda: tmp_path / "native-static")
+    monkeypatch.setattr(surface, "_now", lambda: _hko_dt(12,1))
+    try:
+        for model in ("icon_global", "ukmo_global_deterministic_10km"):
+            capture = surface.ensure_model_surface(model)
+            assert capture.status == "READY", capture.reason
+        yield
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def _hko_raw_openmeteo_bytes() -> bytes:
+    from src.config import runtime_cities_by_name, runtime_station_geometry_for_city
+    from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
+    station = runtime_station_geometry_for_city(runtime_cities_by_name()["Hong Kong"])
+    cell = source_cell_geometry_proof(latitude=station["lat"], longitude=station["lon"],
+                                     target_elevation_m=32.0)
+    return json.dumps({
+        "latitude": cell["selected_grid_lat"], "longitude": cell["selected_grid_lon"],
+        "elevation": 32.0, "timezone": "Asia/Hong_Kong",
+        "hourly": {"time": [f"2026-10-01T{hour:02d}:00" for hour in range(24)],
+                   "temperature_2m": [27.0 if hour == 12 else 18.5 for hour in range(24)]},
+        "hourly_units": {"temperature_2m": "°C"},
+        "_zeus_current_target_scope": {"city": "Hong Kong", "target_date": "2026-10-01", "metric": "high"},
+    }, sort_keys=True).encode()
+
+
+def _hko_precision_guard():
+    from src.config import runtime_cities_by_name, runtime_station_geometry_for_city
+    from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
+    from src.data.openmeteo_ecmwf_ifs9_precision_guard import _haversine_km
+    city = runtime_cities_by_name()["Hong Kong"]
+    station = runtime_station_geometry_for_city(city)
+    assert station["ground_status"] == "VERIFIED"
+    raw = _hko_raw_openmeteo_bytes()
+    cell = source_cell_geometry_proof(latitude=station["lat"], longitude=station["lon"],
+                                     target_elevation_m=32.0)
+    proof = {**cell, "raw_payload_sha256": hashlib.sha256(raw).hexdigest(),
+             "station_registry_sha256": station["registry_sha256"],
+             "station_ground_proof": {"revision": "station_ground_roles_v1", "status": "VERIFIED",
+                 "reason": None, "facts": station["ground_facts"], "audit": station["ground_audit"]}}
+    metadata = OpenMeteoIfs9PrecisionMetadata(
+        city="Hong Kong", station_id=station["station_id"], city_lat=city.lat, city_lon=city.lon,
+        station_lat=station["lat"], station_lon=station["lon"], requested_lat=station["lat"],
+        requested_lon=station["lon"], requested_coordinate_precision_decimals=4,
+        nearest_grid_lat=cell["selected_grid_lat"], nearest_grid_lon=cell["selected_grid_lon"],
+        nearest_grid_distance_km=_haversine_km(station["lat"], station["lon"], cell["selected_grid_lat"], cell["selected_grid_lon"]),
+        native_grid="openmeteo_ecmwf_ifs_9km", delivery_grid_resolution="9km",
+        interpolation_method="openmeteo_api_point_interpolation", endpoint_mode="hourly_zeus_aggregated",
+        local_day_start_utc=_hko_dt(16), local_day_end_utc=_hko_dt(16)+timedelta(days=1),
+        timezone_name="Asia/Hong_Kong", target_local_date=date(2026, 10, 1), temperature_unit="C",
+        anchor_sigma_c=3.0, grid_elevation_m=cell["raw_grid_elevation_m"],
+        station_elevation_m=station["ground_elevation_m"], land_sea_mask="land", city_class="standard",
+        station_mapping_policy="settlement_station", source_geometry_proof=proof,
+    )
+    guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(metadata, raw_payload_bytes=raw)
+    assert guard.passable_for_live_materialization, guard.reason_codes
+    return guard
+
+
+def _hko_request(**kwargs):
+    from src.data.openmeteo_ecmwf_ifs9_anchor import extract_openmeteo_ecmwf_ifs9_localday_anchor
+    raw = _hko_raw_openmeteo_bytes()
+    cycle = kwargs.pop("source_cycle_time", _hko_dt(0))
+    cut = kwargs.pop("computed_at", _hko_dt(4))
+    expiry = kwargs.pop("expires_at", _hko_dt(6))
+    baseline_available = kwargs.pop("baseline_source_available_at", cycle+timedelta(hours=2))
+    anchor_available = kwargs.pop("openmeteo_source_available_at", cycle+timedelta(hours=3))
+    guard = kwargs.pop("openmeteo_precision_guard", _DEFAULT_PRECISION_GUARD)
+    if guard is _DEFAULT_PRECISION_GUARD:
+        guard = _hko_precision_guard()
+    anchor = extract_openmeteo_ecmwf_ifs9_localday_anchor(json.loads(raw), city_timezone="Asia/Hong_Kong",
+        target_local_date=date(2026, 10, 1), source_cycle_time=cycle)
+    return replace(_request(**kwargs, openmeteo_precision_guard=guard),
+        city="Hong Kong", city_id="Hong Kong", city_timezone="Asia/Hong_Kong", target_date=date(2026, 10, 1),
+        source_cycle_time=cycle, computed_at=cut, expires_at=expiry,
+        baseline_source_available_at=baseline_available, openmeteo_source_available_at=anchor_available,
+        openmeteo_anchor=anchor, openmeteo_raw_payload_bytes=raw)
 
 
 def _current_baseline_data_version(metric: str = "high") -> str:
@@ -216,20 +365,21 @@ def _fixture_raw_openmeteo_bytes() -> bytes:
     return (json.dumps(response, indent=2, sort_keys=True) + "\n").encode()
 
 
-def _fixture_ens_surface_provenance(*, cycle: str = "2026-06-06T00:00:00+00:00") -> str:
+def _fixture_ens_surface_provenance(*, cycle: str = "2026-06-06T00:00:00+00:00", city_name: str = "Shanghai") -> str:
     """Portable, internally consistent land-mask witness, not an ECMWF observation."""
     from src.config import cities_by_name, runtime_station_geometry_for_city
     from src.contracts.ensemble_snapshot_provenance import GRID_SURFACE_EVIDENCE_REVISION
 
-    station = runtime_station_geometry_for_city(cities_by_name["Shanghai"])
+    station = runtime_station_geometry_for_city(cities_by_name[city_name])
     assert station["validity_reason"] is None
+    lat, lon = (22.25, 114.25) if city_name == "Hong Kong" else (31.14, 121.80)
     neighbors = [
         {"flat_index": idx, "lat": lat, "lon": lon, "land_fraction": fraction}
         for idx, lat, lon, fraction in (
-            (100, 31.14, 121.80, 0.9),
-            (101, 31.14, 122.05, 0.2),
-            (102, 31.39, 121.80, 0.2),
-            (103, 31.39, 122.05, 0.2),
+            (100, lat, lon, 0.9),
+            (101, lat, lon+.25, 0.2),
+            (102, lat+.25, lon, 0.2),
+            (103, lat+.25, lon+.25, 0.2),
         )
     ]
     proof = {
@@ -250,14 +400,14 @@ def _fixture_ens_surface_provenance(*, cycle: str = "2026-06-06T00:00:00+00:00")
         "mask_grid_identity_hash": "b" * 64,
         "temperature_grid_identity_hash": "b" * 64,
         "selected_flat_index": 100,
-        "selected_lat": 31.14, "selected_lon": 121.80,
+        "selected_lat": lat, "selected_lon": lon,
         "selected_land_fraction": 0.9,
         "four_neighbors": neighbors,
     }
     return json.dumps({
-        "city": "Shanghai",
-        "nearest_grid_lat": 31.14,
-        "nearest_grid_lon": 121.80,
+        "city": city_name,
+        "nearest_grid_lat": lat,
+        "nearest_grid_lon": lon,
         "contract_outcome_evidence": {"settlement_station_id": station["station_id"]},
         "grid_surface_evidence": proof,
     })
@@ -572,50 +722,37 @@ def _precision_guard(**overrides: object):
     )
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_materializer_reauthenticates_same_artifact_and_anchor(monkeypatch: pytest.MonkeyPatch) -> None:
     from src.config import cities_by_name, runtime_station_geometry_for_city
     from src.data.openmeteo_ecmwf_ifs9_anchor import extract_openmeteo_ecmwf_ifs9_localday_anchor
     from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
     from src.data.openmeteo_ecmwf_ifs9_precision_guard import _haversine_km
 
-    city = cities_by_name["Shanghai"]
+    city = cities_by_name["Hong Kong"]
     station = runtime_station_geometry_for_city(city)
     assert station["validity_reason"] is None
     response = {
-        "latitude": 31.14, "longitude": 121.80, "elevation": 8.0,
-        "timezone": "Asia/Shanghai",
+        **json.loads(_hko_raw_openmeteo_bytes()),
         "hourly": {
-            "time": [f"2026-06-07T{hour:02d}:00" for hour in range(24)],
+            "time": [f"2026-10-01T{hour:02d}:00" for hour in range(24)],
             "temperature_2m": [27.0 if hour == 12 else 18.5 for hour in range(24)],
         },
         "hourly_units": {"temperature_2m": "°C"},
-        "_zeus_current_target_scope": {"city": "Shanghai", "target_date": "2026-06-07", "metric": "high"},
+        "_zeus_current_target_scope": {"city": "Hong Kong", "target_date": "2026-10-01", "metric": "high"},
     }
     raw_bytes = (json.dumps(response, sort_keys=True, indent=2) + "\n").encode()
-    # Deterministic substitute for the large HSURF file; the production guard,
-    # exact artifact bytes and anchor extraction remain unmocked.
-    static_cell = {
-        "revision": "openmeteo_ifs9_o1280_source_cell_v1",
-        "static_hsurf_sha256": "b" * 64,
-        "selected_flat_index": 100,
-        "selected_grid_lat": response["latitude"],
-        "selected_grid_lon": response["longitude"],
-        "raw_grid_elevation_m": 10.0,
-        "effective_grid_elevation_m": 8.0,
-        "target_dem_elevation_m": 8.0,
-        "cell_is_sea": False,
-        "cell_is_center": False,
-        "nearby_sea": False,
-    }
-    import src.data.openmeteo_ecmwf_ifs9_bucket_transport as transport
-    monkeypatch.setattr(transport, "source_cell_geometry_proof", lambda **_kwargs: dict(static_cell))
+    static_cell = source_cell_geometry_proof(latitude=station["lat"], longitude=station["lon"],
+                                            target_elevation_m=32.0)
     proof = {
         **static_cell,
         "raw_payload_sha256": hashlib.sha256(raw_bytes).hexdigest(),
         "station_registry_sha256": station["registry_sha256"],
+        "station_ground_proof": {"revision": "station_ground_roles_v1", "status": "VERIFIED", "reason": None,
+                                 "facts": station["ground_facts"], "audit": station["ground_audit"]},
     }
     metadata = OpenMeteoIfs9PrecisionMetadata(
-        city="Shanghai", station_id=station["station_id"],
+        city="Hong Kong", station_id=station["station_id"],
         city_lat=float(city.lat), city_lon=float(city.lon),
         station_lat=station["lat"], station_lon=station["lon"],
         requested_lat=station["lat"], requested_lon=station["lon"],
@@ -627,21 +764,21 @@ def test_materializer_reauthenticates_same_artifact_and_anchor(monkeypatch: pyte
         native_grid="openmeteo_ecmwf_ifs_9km", delivery_grid_resolution="9km",
         interpolation_method="openmeteo_api_point_interpolation",
         endpoint_mode="hourly_zeus_aggregated",
-        local_day_start_utc="2026-06-06T16:00:00+00:00",
-        local_day_end_utc="2026-06-07T16:00:00+00:00",
-        timezone_name="Asia/Shanghai", target_local_date="2026-06-07",
+        local_day_start_utc="2026-09-30T16:00:00+00:00",
+        local_day_end_utc="2026-10-01T16:00:00+00:00",
+        timezone_name="Asia/Hong_Kong", target_local_date="2026-10-01",
         temperature_unit="celsius", anchor_sigma_c=3.0,
-        grid_elevation_m=10.0, station_elevation_m=station["elevation_m"],
+        grid_elevation_m=32.0, station_elevation_m=station["ground_elevation_m"],
         land_sea_mask="land", city_class="standard",
         station_mapping_policy="operator_verified_station", source_geometry_proof=proof,
     )
     guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(metadata, raw_payload_bytes=raw_bytes)
     assert guard.passable_for_live_materialization
     anchor = extract_openmeteo_ecmwf_ifs9_localday_anchor(
-        response, city_timezone="Asia/Shanghai", target_local_date=date(2026, 6, 7),
-        source_cycle_time=_dt(0),
+        response, city_timezone="Asia/Hong_Kong", target_local_date=date(2026, 10, 1),
+        source_cycle_time=_hko_dt(0),
     )
-    request = replace(_request(), openmeteo_anchor=anchor, openmeteo_precision_guard=guard,
+    request = replace(_hko_request(), openmeteo_anchor=anchor, openmeteo_precision_guard=guard,
                       openmeteo_raw_payload_bytes=raw_bytes)
     assert materializer_mod._precision_guard_block_reason(request) == ()
     assert materializer_mod._precision_guard_block_reason(replace(request, openmeteo_raw_payload_bytes=None)) == (
@@ -677,6 +814,7 @@ def _install_live_fusion(
     shape_cycle_time: datetime | None = None,
     current_serving: dict[str, dict[str, object]] | None = None,
     predictive_sigma_c: float = 2.0,
+    request: ReplacementForecastMaterializeRequest | None = None,
 ) -> None:
     members = tuple(25.0 + (index - 25) * 0.02 for index in range(51))
     # This seam fixture isolates downstream writes. Build and bind its shape
@@ -696,7 +834,8 @@ def _install_live_fusion(
         grid_surface_evidence_identity_hash="a" * 64,
     )
     shape = materializer_mod._bind_provider_geometry_identity(
-        shape, {}, anchor_metadata=_precision_guard().metadata,
+        shape, {}, anchor_metadata=(request.openmeteo_precision_guard.metadata if request else _precision_guard().metadata),
+        decision_at=request.computed_at if request else None,
     )
     override = _BayesPrecisionFusionFusionOverride(
         anchor_value_c=25.0,
@@ -724,6 +863,13 @@ def _install_live_fusion(
         current_evidence_members_c=members,
     )
     monkeypatch.setattr(materializer_mod, "_replacement_bayes_precision_fusion_override", lambda *args, **kwargs: override)
+
+
+def _install_hko_live_fusion(monkeypatch, **kwargs):
+    """Lawful ground/geometry write seam; not a claim of normal provider capture."""
+    request = kwargs.pop("request", None) or _hko_request(source_cycle_time=_hko_dt(6), computed_at=_hko_dt(10), expires_at=_hko_dt(12))
+    kwargs.setdefault("shape_cycle_time", request.source_cycle_time)
+    _install_live_fusion(monkeypatch, request=request, **kwargs)
 
 
 def _install_pinned_ready_fusion(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2615,10 +2761,11 @@ def test_day0_owner_witness_blocks_swapped_owner_before_posterior_insert(
     assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 1
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_materializer_blocks_non_live_posterior_before_execution_authority_table() -> None:
     conn = _conn()
 
-    result = materialize_replacement_forecast_live(conn, _request())
+    result = materialize_replacement_forecast_live(conn, _hko_request())
 
     assert result.ok is False
     # Catch-all reason stays first (byte-identical prefix for existing consumers);
@@ -2634,13 +2781,14 @@ def test_materializer_blocks_non_live_posterior_before_execution_authority_table
     assert conn.execute("SELECT COUNT(*) FROM readiness_state").fetchone()[0] == 0
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_materializer_writes_authorized_06z_cycle_as_live_layer(monkeypatch: pytest.MonkeyPatch) -> None:
     conn = _conn()
-    _install_live_fusion(monkeypatch)
+    _install_hko_live_fusion(monkeypatch)
 
     result = materialize_replacement_forecast_live(
         conn,
-        _request(source_cycle_time=_dt(6), computed_at=_dt(10), expires_at=_dt(12)),
+        _hko_request(source_cycle_time=_hko_dt(6), computed_at=_hko_dt(10), expires_at=_hko_dt(12)),
     )
 
     assert result.ok is True
@@ -2652,13 +2800,14 @@ def test_materializer_writes_authorized_06z_cycle_as_live_layer(monkeypatch: pyt
     assert provenance["cycle_phase"] == "synoptic"
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_non_day0_partial_cohort_proof_changes_equal_q_posterior_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conn = _conn()
-    _install_live_fusion(monkeypatch)
+    _install_hko_live_fusion(monkeypatch)
     fusion = materializer_mod._replacement_bayes_precision_fusion_override()
-    request = _request(source_cycle_time=_dt(6), computed_at=_dt(10), expires_at=_dt(12))
+    request = _hko_request(source_cycle_time=_hko_dt(6), computed_at=_hko_dt(10), expires_at=_hko_dt(12))
     common = {
         "fallback_reason": "configured_current_provider_set_incomplete",
         "configured_coherent_sources": ["icon_global", "ukmo_global_deterministic_10km"],
@@ -2681,15 +2830,15 @@ def test_non_day0_partial_cohort_proof_changes_equal_q_posterior_identity(
 
     old = materialized(dict(common))
     first = materialized({**common,
-        "configured_cohort_decision_time": _dt(10).isoformat(),
+        "configured_cohort_decision_time": _hko_dt(10).isoformat(),
         "configured_cohort_value_serving": {"icon_global": {"raw_model_forecast_id": 10}},
     })
     revised_row = materialized({**common,
-        "configured_cohort_decision_time": _dt(10).isoformat(),
+        "configured_cohort_decision_time": _hko_dt(10).isoformat(),
         "configured_cohort_value_serving": {"icon_global": {"raw_model_forecast_id": 11}},
     })
     revised_cutoff = materialized({**common,
-        "configured_cohort_decision_time": _dt(10, 1).isoformat(),
+        "configured_cohort_decision_time": _hko_dt(10, 1).isoformat(),
         "configured_cohort_value_serving": {"icon_global": {"raw_model_forecast_id": 10}},
     })
     assert old[2] == first[2] == revised_row[2] == revised_cutoff[2]
@@ -2697,13 +2846,14 @@ def test_non_day0_partial_cohort_proof_changes_equal_q_posterior_identity(
     assert len({old[1], first[1], revised_row[1], revised_cutoff[1]}) == 4
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_materializer_surfaces_bounds_missing_sub_reason(monkeypatch: pytest.MonkeyPatch) -> None:
     """2026-07-13/14 incident fix: a fused-q bounds-build failure must surface the
     Q_MODE:FUSED_NORMAL_BOUNDS_MISSING sub-reason, not just the catch-all code — so
     a BLOCKED receipt tells the operator WHICH requirement failed without opening a
     subprocess log."""
     conn = _conn()
-    _install_live_fusion(monkeypatch)
+    _install_hko_live_fusion(monkeypatch)
     monkeypatch.setattr(
         materializer_mod,
         "_build_fused_q_bounds",
@@ -2712,7 +2862,7 @@ def test_materializer_surfaces_bounds_missing_sub_reason(monkeypatch: pytest.Mon
 
     result = materialize_replacement_forecast_live(
         conn,
-        _request(source_cycle_time=_dt(6), computed_at=_dt(10), expires_at=_dt(12)),
+        _hko_request(source_cycle_time=_hko_dt(6), computed_at=_hko_dt(10), expires_at=_hko_dt(12)),
     )
 
     assert result.ok is False
@@ -2997,28 +3147,17 @@ def test_legacy_anchor_schema_migration_does_not_rewrite_legacy_status_columns()
     assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_materializer_keeps_readiness_separate_by_baseline_source_run(monkeypatch: pytest.MonkeyPatch) -> None:
     conn = _conn()
-    _install_live_fusion(monkeypatch)
-
-    first = materialize_replacement_forecast_live(
-        conn,
-        _request(
-            baseline_source_run_id="ecmwf_open_data:mx2t6_high:2026-06-06T12Z",
-            baseline_source_available_at=_dt(2),
-            computed_at=_dt(4),
-            expires_at=_dt(6),
-        ),
-    )
-    second = materialize_replacement_forecast_live(
-        conn,
-        _request(
-            baseline_source_run_id="ecmwf_open_data:mx2t6_high:2026-06-07T00Z",
-            baseline_source_available_at=_dt(2, 15),
-            computed_at=_dt(4, 15),
-            expires_at=_dt(6, 15),
-        ),
-    )
+    first_request = _hko_request(baseline_source_run_id="ecmwf_open_data:mx2t6_high:2026-09-30T00Z",
+        baseline_source_available_at=_hko_dt(2), computed_at=_hko_dt(4), expires_at=_hko_dt(6))
+    second_request = _hko_request(baseline_source_run_id="ecmwf_open_data:mx2t6_high:2026-09-30T00Z:revised",
+        baseline_source_available_at=_hko_dt(2,15), computed_at=_hko_dt(4,15), expires_at=_hko_dt(6,15))
+    _install_hko_live_fusion(monkeypatch, request=first_request)
+    first = materialize_replacement_forecast_live(conn, first_request)
+    _install_hko_live_fusion(monkeypatch, request=second_request)
+    second = materialize_replacement_forecast_live(conn, second_request)
 
     assert first.ok is True
     assert second.ok is True
@@ -3026,8 +3165,8 @@ def test_materializer_keeps_readiness_separate_by_baseline_source_run(monkeypatc
         """
         SELECT track, dependency_json
         FROM readiness_state
-        WHERE city = 'Shanghai'
-          AND target_local_date = '2026-06-07'
+        WHERE city = 'Hong Kong'
+          AND target_local_date = '2026-10-01'
           AND temperature_metric = 'high'
           AND strategy_key = ?
         ORDER BY track
@@ -3036,14 +3175,16 @@ def test_materializer_keeps_readiness_separate_by_baseline_source_run(monkeypatc
     ).fetchall()
     assert len(rows) == 1
     assert rows[0]["track"] == "soft_anchor_posterior"
-    assert "2026-06-07T00Z" in rows[0]["dependency_json"]
+    assert "2026-09-30T00Z:revised" in rows[0]["dependency_json"]
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_materializer_writes_certified_bootstrap_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
     conn = _conn()
-    _install_live_fusion(monkeypatch)
+    request = _hko_request()
+    _install_hko_live_fusion(monkeypatch, request=request)
 
-    result = materialize_replacement_forecast_live(conn, _request())
+    result = materialize_replacement_forecast_live(conn, request)
 
     assert result.ok is True
     posterior_row = conn.execute("SELECT q_json, q_lcb_json, q_ucb_json, provenance_json, runtime_layer FROM forecast_posteriors WHERE posterior_id = ?", (result.posterior_id,)).fetchone()
@@ -3059,13 +3200,15 @@ def test_materializer_writes_certified_bootstrap_bounds(monkeypatch: pytest.Monk
     assert provenance["q_lcb_json_role"] == "fused_center_bootstrap_lcb"
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_materializer_does_not_publish_stale_ensemble_as_live_probability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conn = _conn()
-    _install_live_fusion(monkeypatch, shape_lag_hours=6.0)
+    request = _hko_request()
+    _install_hko_live_fusion(monkeypatch, request=request, shape_lag_hours=6.0)
 
-    result = materialize_replacement_forecast_live(conn, _request())
+    result = materialize_replacement_forecast_live(conn, request)
 
     assert result.ok is False
     assert "CAPTURE:CURRENT_EVIDENCE_NOT_LIVE" in result.reason_codes
@@ -3073,14 +3216,16 @@ def test_materializer_does_not_publish_stale_ensemble_as_live_probability(
     assert conn.execute("SELECT COUNT(*) FROM readiness_state").fetchone()[0] == 0
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_prepared_materialization_keeps_compute_read_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conn = _conn()
-    _install_live_fusion(monkeypatch)
+    request = _hko_request()
+    _install_hko_live_fusion(monkeypatch, request=request)
 
     conn.execute("BEGIN")
-    prepared = materializer_mod.prepare_replacement_forecast_live(conn, _request())
+    prepared = materializer_mod.prepare_replacement_forecast_live(conn, request)
     assert isinstance(
         prepared,
         materializer_mod.PreparedReplacementForecastMaterialization,
@@ -3102,11 +3247,15 @@ def test_prepared_materialization_keeps_compute_read_only(
     assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 1
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_materializer_lifts_computed_at_to_source_run_possession(monkeypatch: pytest.MonkeyPatch) -> None:
     conn = _conn()
     _ensure_source_run_table(conn)
-    _install_live_fusion(monkeypatch)
-    late_possession = _dt(4, 5)
+    request = _hko_request(computed_at=_hko_dt(4), expires_at=_hko_dt(6))
+    late_possession = _hko_dt(4, 5)
+    # The producer sees the effective possession cut after the request is
+    # normalized. Its frozen geometry audit must carry that same cut.
+    _install_hko_live_fusion(monkeypatch, request=replace(request, computed_at=late_possession))
     for source_run_id, source_id, track in (
         ("b0-run", "ecmwf_open_data", "mx2t3_high"),
         ("om9-run", "openmeteo_ecmwf_ifs9", "localday_high"),
@@ -3117,23 +3266,23 @@ def test_materializer_lifts_computed_at_to_source_run_possession(monkeypatch: py
             source_id=source_id,
             track=track,
             release_calendar_key=f"{source_id}:{track}",
-            source_cycle_time=_dt(0),
-            source_available_at=_dt(2),
+            source_cycle_time=_hko_dt(0),
+            source_available_at=_hko_dt(2),
             fetch_finished_at=late_possession,
             captured_at=late_possession,
             imported_at=late_possession,
             status="SUCCESS",
             completeness_status="COMPLETE",
-            city_id="Shanghai",
-            city_timezone="Asia/Shanghai",
-            target_local_date=date(2026, 6, 7),
+            city_id="Hong Kong",
+            city_timezone="Asia/Hong_Kong",
+            target_local_date=date(2026, 10, 1),
             temperature_metric="high",
             data_version="forecast_v2",
         )
 
     result = materialize_replacement_forecast_live(
         conn,
-        _request(computed_at=_dt(4), expires_at=_dt(6)),
+        request,
     )
 
     assert result.ok is True
@@ -5162,11 +5311,13 @@ def test_materializer_blocks_readiness_when_baseline_identity_is_wrong() -> None
     assert conn.execute("SELECT COUNT(*) FROM readiness_state").fetchone()[0] == 0
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_materializer_preserves_openmeteo_artifact_lineage_without_aifs(monkeypatch: pytest.MonkeyPatch) -> None:
     conn = _conn()
-    _install_live_fusion(monkeypatch)
+    request = _hko_request(anchor_artifact_id=11)
+    _install_hko_live_fusion(monkeypatch, request=request)
 
-    result = materialize_replacement_forecast_live(conn, _request(anchor_artifact_id=11))
+    result = materialize_replacement_forecast_live(conn, request)
 
     assert result.ok is True
     anchor_row = conn.execute("SELECT artifact_id FROM deterministic_forecast_anchors WHERE anchor_id = ?", (result.anchor_id,)).fetchone()
@@ -5179,13 +5330,15 @@ def test_materializer_preserves_openmeteo_artifact_lineage_without_aifs(monkeypa
     assert '"artifact_id":11' in readiness_row["dependency_json"]
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_materializer_records_precision_guard_in_anchor_and_posterior_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
     conn = _conn()
-    _install_live_fusion(monkeypatch)
+    request = _hko_request()
+    _install_hko_live_fusion(monkeypatch, request=request)
 
     result = materialize_replacement_forecast_live(
         conn,
-        _request(openmeteo_precision_guard=_precision_guard()),
+        request,
     )
 
     assert result.ok is True
@@ -5198,21 +5351,25 @@ def test_materializer_records_precision_guard_in_anchor_and_posterior_provenance
     assert posterior_provenance["openmeteo_precision_guard"]["reason_codes"] == ["OM9_PRECISION_METADATA_PASS"]
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_materializer_blocks_when_precision_guard_missing_or_blocked() -> None:
     conn = _conn()
 
     missing = materialize_replacement_forecast_live(
         conn,
-        _request(openmeteo_precision_guard=None),
+        _hko_request(openmeteo_precision_guard=None),
     )
 
     assert missing.ok is False
     assert missing.reason_codes == ("OM9_PRECISION_GUARD_REQUIRED_FOR_MATERIALIZATION",)
     assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
 
+    good = _hko_precision_guard()
+    blocked_guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
+        replace(good.metadata, endpoint_mode="daily_vendor_aggregated"), raw_payload_bytes=_hko_raw_openmeteo_bytes())
     blocked = materialize_replacement_forecast_live(
         conn,
-        _request(openmeteo_precision_guard=_precision_guard(endpoint_mode="daily_vendor_aggregated")),
+        _hko_request(openmeteo_precision_guard=blocked_guard),
     )
 
     assert blocked.ok is False
@@ -5254,18 +5411,20 @@ def test_materializer_requires_dependency_source_run_ids_before_writing_shadow_r
     assert conn.execute("SELECT COUNT(*) FROM readiness_state").fetchone()[0] == 0
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_materializer_posterior_available_at_includes_baseline_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
     conn = _conn()
-    _install_live_fusion(monkeypatch)
+    request = _hko_request(baseline_source_available_at=_hko_dt(3,30), openmeteo_source_available_at=_hko_dt(3))
+    _install_hko_live_fusion(monkeypatch, request=request)
 
     result = materialize_replacement_forecast_live(
         conn,
-        _request(baseline_source_available_at=_dt(3, 30), openmeteo_source_available_at=_dt(3)),
+        request,
     )
 
     assert result.ok is True
     posterior_row = conn.execute("SELECT source_available_at FROM forecast_posteriors WHERE posterior_id = ?", (result.posterior_id,)).fetchone()
-    assert posterior_row["source_available_at"] == _dt(3, 30).isoformat()
+    assert posterior_row["source_available_at"] == _hko_dt(3,30).isoformat()
 
 
 def test_materializer_blocks_expired_request_before_writing_shadow_rows() -> None:
@@ -8610,20 +8769,22 @@ def _materialize_q(
     return json.loads(row["q_json"]), json.loads(row["provenance_json"])
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_current_center_ignores_fitted_debias_and_keeps_raw_precision_center(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A fitted HIGH shift must not move a current-evidence precision center."""
 
+    request = _hko_request()
     baseline_conn = _conn()
-    _install_live_fusion(monkeypatch)
+    _install_hko_live_fusion(monkeypatch, request=request)
     _no_center_debias(monkeypatch)
-    baseline_q, baseline_provenance = _materialize_q(baseline_conn, _request())
+    baseline_q, baseline_provenance = _materialize_q(baseline_conn, request)
 
     shifted_conn = _conn()
-    _install_live_fusion(monkeypatch)
+    _install_hko_live_fusion(monkeypatch, request=request)
     _fixed_center_debias(monkeypatch, shift_c=1.0)
-    shifted_q, shifted_provenance = _materialize_q(shifted_conn, _request())
+    shifted_q, shifted_provenance = _materialize_q(shifted_conn, request)
 
     # The fused center is 25.0 with bins cool(<20) / warm(21-30) / hot(>31): a +1.0
     # shift moves the center to 26.0, so mass leaves the cool tail for the hot one.
@@ -8644,21 +8805,18 @@ def test_current_center_ignores_fitted_debias_and_keeps_raw_precision_center(
     )
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_center_debias_inactive_metric_is_byte_identical_to_no_correction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """LOW is the negative control: no shift, and provenance says so explicitly."""
 
+    request = replace(_hko_request(baseline_data_version=_current_baseline_data_version("low")), temperature_metric="low")
     baseline_conn = _conn()
-    _install_live_fusion(monkeypatch)
+    _install_hko_live_fusion(monkeypatch, request=request)
     _no_center_debias(monkeypatch)
     baseline_q, baseline_provenance = _materialize_q(
-        baseline_conn, replace(
-            _request(
-                baseline_data_version=_current_baseline_data_version("low")
-            ),
-            temperature_metric="low",
-        )
+        baseline_conn, request,
     )
     baseline_hash = baseline_conn.execute(
         "SELECT posterior_config_hash FROM forecast_posteriors"
@@ -8666,15 +8824,10 @@ def test_center_debias_inactive_metric_is_byte_identical_to_no_correction(
 
     # HIGH is enabled and would receive +1.0; this request is LOW, so it must not.
     low_conn = _conn()
-    _install_live_fusion(monkeypatch)
+    _install_hko_live_fusion(monkeypatch, request=request)
     _fixed_center_debias(monkeypatch, shift_c=1.0, metric="high")
     low_q, low_provenance = _materialize_q(
-        low_conn, replace(
-            _request(
-                baseline_data_version=_current_baseline_data_version("low")
-            ),
-            temperature_metric="low",
-        )
+        low_conn, request,
     )
     low_hash = low_conn.execute(
         "SELECT posterior_config_hash FROM forecast_posteriors"
@@ -8688,6 +8841,7 @@ def test_center_debias_inactive_metric_is_byte_identical_to_no_correction(
     assert low_hash == baseline_hash
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_served_settlement_log_probability_mu_matches_served_mu_anchor_with_debias(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -8703,10 +8857,11 @@ def test_served_settlement_log_probability_mu_matches_served_mu_anchor_with_debi
     below the bin edge, where the Normal CDF is steep) and the assertion below would fail.
     """
 
+    request = _hko_request()
     conn = _conn()
-    _install_live_fusion(monkeypatch)
+    _install_hko_live_fusion(monkeypatch, request=request)
     _fixed_center_debias(monkeypatch, shift_c=1.0)
-    q, provenance = _materialize_q(conn, _request())
+    q, provenance = _materialize_q(conn, request)
 
     bpf = provenance["bayes_precision_fusion"]
     assert provenance["center_debias_c"] is None
@@ -9047,7 +9202,7 @@ def _low_revision_authority_conn(db_path: Path | None = None) -> sqlite3.Connect
         ("old18", 18, 18, old_version),
         ("new12", 12, 12, current_version),
     ):
-        cycle = _dt(hour)
+        cycle = _hko_dt(hour)
         issued = cycle + timedelta(minutes=5)
         track = "mn2t6_low_short_horizon"
         release_key = "ecmwf_open_data:mn2t6_low_short_horizon"
@@ -9056,8 +9211,8 @@ def _low_revision_authority_conn(db_path: Path | None = None) -> sqlite3.Connect
             track=track, release_calendar_key=release_key,
             source_cycle_time=cycle, source_available_at=issued,
             fetch_finished_at=issued, captured_at=issued, imported_at=issued,
-            target_local_date="2026-06-07", city_id="Shanghai",
-            city_timezone="Asia/Shanghai", temperature_metric="low",
+            target_local_date="2026-10-01", city_id="Hong Kong",
+            city_timezone="Asia/Hong_Kong", temperature_metric="low",
             physical_quantity=expected.physical_quantity,
             observation_field=expected.observation_field, data_version=version,
             expected_members=51, observed_members=51,
@@ -9076,11 +9231,11 @@ def _low_revision_authority_conn(db_path: Path | None = None) -> sqlite3.Connect
                 completeness_status, readiness_status, computed_at, expires_at,
                 recorded_at
             ) VALUES (?, ?, 'ecmwf_open_data', 'native_grib', ?, ?,
-                      'Shanghai', 'Shanghai', 'Asia/Shanghai', '2026-06-07',
+                      'Hong Kong', 'Hong Kong', 'Asia/Hong_Kong', '2026-10-01',
                       'low', ?, ?, ?, 51, 51, '[0,3,6]', '[0,3,6]', ?,
-                      '2026-06-06T16:00:00+00:00', '2026-06-07T16:00:00+00:00',
+                      '2026-09-30T16:00:00+00:00', '2026-10-01T16:00:00+00:00',
                       'COMPLETE', 'LIVE_ELIGIBLE', ?,
-                      '2026-06-07T03:00:00+00:00', ?)""",
+                      '2026-10-01T03:00:00+00:00', ?)""",
             (f"coverage-{run_id}", run_id, release_key, track,
              expected.physical_quantity, expected.observation_field, version,
              json.dumps([snapshot_id]), issued.isoformat(), issued.isoformat()),
@@ -9094,7 +9249,7 @@ def _low_revision_authority_conn(db_path: Path | None = None) -> sqlite3.Connect
                 authority, causality_status, boundary_ambiguous,
                 forecast_window_attribution_status, contributes_to_target_extrema,
                 members_unit, recorded_at
-            ) VALUES (?, 'Shanghai', '2026-06-07', 'low', ?, ?, ?, ?, ?, 24,
+            ) VALUES (?, 'Hong Kong', '2026-10-01', 'low', ?, ?, ?, ?, ?, 24,
                       ?, 'ecmwf_ens', ?, 'ecmwf_open_data', ?, ?, ?,
                       'VERIFIED', 'OK', 0, 'FULLY_INSIDE_TARGET_LOCAL_DAY',
                       1, 'degC', ?)""",
@@ -9106,7 +9261,7 @@ def _low_revision_authority_conn(db_path: Path | None = None) -> sqlite3.Connect
         if run_id == "new12":
             conn.execute(
                 "UPDATE ensemble_snapshots SET provenance_json=? WHERE snapshot_id=?",
-                (_fixture_ens_surface_provenance(cycle=cycle.isoformat()), snapshot_id),
+                (_fixture_ens_surface_provenance(city_name="Hong Kong", cycle=cycle.isoformat()), snapshot_id),
             )
     for raw_id, model in enumerate(("ecmwf_ifs9", "gfs", "icon", "gem", "jma"), 101):
         conn.execute(
@@ -9114,10 +9269,10 @@ def _low_revision_authority_conn(db_path: Path | None = None) -> sqlite3.Connect
                 raw_model_forecast_id, model, city, target_date, metric,
                 source_cycle_time, source_available_at, captured_at, lead_days,
                 forecast_value_c, endpoint
-            ) VALUES (?, ?, 'Shanghai', '2026-06-07', 'low', ?, ?, ?, 1,
+            ) VALUES (?, ?, 'Hong Kong', '2026-10-01', 'low', ?, ?, ?, 1,
                       22.0, 'single_runs')""",
-            (raw_id, model, _dt(12).isoformat(),
-             _dt(12, 5).isoformat(), _dt(12, 5).isoformat()),
+            (raw_id, model, _hko_dt(12).isoformat(),
+             _hko_dt(12, 5).isoformat(), _hko_dt(12, 5).isoformat()),
         )
     soft = expected_replacement_dependency_identity_by_role("low")["soft_anchor_posterior"]
     conn.execute(
@@ -9126,9 +9281,9 @@ def _low_revision_authority_conn(db_path: Path | None = None) -> sqlite3.Connect
             temperature_metric, source_cycle_time, source_available_at,
             computed_at, q_json, q_lcb_json, posterior_method,
             dependency_source_run_ids_json, provenance_json, runtime_layer
-        ) VALUES (?, 'old-soft', ?, 'Shanghai', '2026-06-07', 'low',
-                  '2026-06-06T18:00:00+00:00', '2026-06-06T18:05:00+00:00',
-                  '2026-06-06T19:00:00+00:00', '{}', '{}', 'old-uncertified',
+        ) VALUES (?, 'old-soft', ?, 'Hong Kong', '2026-10-01', 'low',
+                  '2026-09-30T18:00:00+00:00', '2026-09-30T18:05:00+00:00',
+                  '2026-09-30T19:00:00+00:00', '{}', '{}', 'old-uncertified',
                   ?, ?, 'live')""",
         (soft.source_id, soft.data_version,
          json.dumps({"baseline_b0": "old18", "current_ensemble_snapshot": 18}),
@@ -9136,19 +9291,19 @@ def _low_revision_authority_conn(db_path: Path | None = None) -> sqlite3.Connect
     )
     incumbent_id = conn.execute(
         "SELECT posterior_id FROM forecast_posteriors WHERE source_cycle_time=?",
-        (_dt(18).isoformat(),),
+        (_hko_dt(18).isoformat(),),
     ).fetchone()[0]
     write_readiness_state(
         conn, readiness_id="old-uncertified-readiness", scope_type="strategy",
-        status="READY", computed_at=_dt(19), city_id="Shanghai",
-        city="Shanghai", city_timezone="Asia/Shanghai",
-        target_local_date="2026-06-07", metric="low", temperature_metric="low",
+        status="READY", computed_at=_hko_dt(19), city_id="Hong Kong",
+        city="Hong Kong", city_timezone="Asia/Hong_Kong",
+        target_local_date="2026-10-01", metric="low", temperature_metric="low",
         physical_quantity=soft.physical_quantity,
         observation_field=soft.observation_field,
         data_version=materializer_mod.LOW_DATA_VERSION,
         source_id=soft.source_id, track="soft_anchor_posterior",
         source_run_id=f"posterior:{incumbent_id}", strategy_key=STRATEGY_KEY,
-        expires_at=_dt(22),
+        expires_at=_hko_dt(22),
     )
     _qualify_raw_fixture_rows(conn)
     conn.commit()
@@ -9161,15 +9316,17 @@ def _low_revision_request() -> ReplacementForecastMaterializeRequest:
     )
 
     return replace(
-        _request(source_cycle_time=_dt(12), computed_at=_dt(20),
-                 expires_at=_dt(22), baseline_source_run_id="new12",
-                 baseline_source_available_at=_dt(12, 5),
+        _hko_request(source_cycle_time=_hko_dt(12), computed_at=_hko_dt(20),
+                 expires_at=_hko_dt(22), baseline_source_run_id="new12",
+                 baseline_source_available_at=_hko_dt(12, 5),
                  day0_observation_state=DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS),
         temperature_metric="low",
         baseline_data_version=_current_baseline_data_version("low"),
     )
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
+@pytest.mark.usefixtures("_hko_native_surfaces")
 def test_normal_current_writer_rebuilds_v6_posterior_after_literal_v5_refusal(tmp_path, monkeypatch):
     """Real entity bytes/ordinary writer + qualified ENS read, not authority mocks."""
     from src.config import runtime_cities_by_name
@@ -9179,28 +9336,31 @@ def test_normal_current_writer_rebuilds_v6_posterior_after_literal_v5_refusal(tm
     )
     db = tmp_path / "forecast.db"
     conn = _low_revision_authority_conn(db)
-    city = runtime_cities_by_name()["Shanghai"]
+    city = runtime_cities_by_name()["Hong Kong"]
     class Clock(datetime):
         @classmethod
         def now(cls, tz=None):
-            return _dt(12, 10).astimezone(tz) if tz else _dt(12, 10).replace(tzinfo=None)
+            return _hko_dt(12, 10).astimezone(tz) if tz else _hko_dt(12, 10).replace(tzinfo=None)
     monkeypatch.setattr(dl, "datetime", Clock)
     def fetch(url, params, **kwargs):
         value = 22.0 if params["models"] == "icon_global" else 24.0
         is_ifs = params["models"] == "ecmwf_ifs"
-        payload = {"latitude": 31.14 if is_ifs else city.lat,
-            "longitude": 121.80 if is_ifs else city.lon, "elevation": 8.0,
+        anchor_body = json.loads(_hko_raw_openmeteo_bytes())
+        selected_lat, selected_lon = ((anchor_body["latitude"], anchor_body["longitude"]) if is_ifs
+            else (22.25,114.125) if params["models"] == "icon_global" else (22.3125,114.1875))
+        payload = {"latitude": selected_lat,
+            "longitude": selected_lon, "elevation": 32.0,
             "timezone": city.timezone, "hourly_units": {"temperature_2m": "°C"},
-            "hourly": {"time": [f"2026-06-07T{hour:02d}:00" for hour in range(24)],
+            "hourly": {"time": [f"2026-10-01T{hour:02d}:00" for hour in range(24)],
                        "temperature_2m": [value]*24}}
         body = (json.dumps(payload, indent=2)+"\n").encode()
-        kwargs["capture_entity_body"](body, _dt(12, 10).timestamp())
+        kwargs["capture_entity_body"](body, _hko_dt(12, 10).timestamp())
         return json.loads(body)
     monkeypatch.setattr("src.data.openmeteo_client.fetch", fetch)
     dl.download_bayes_precision_fusion_extra_raw_inputs(
-        forecast_db=db, cycle=_dt(12),
+        forecast_db=db, cycle=_hko_dt(12),
         targets=[dl.BayesPrecisionFusionDownloadTarget(
-            city="Shanghai", metric="low", target_date="2026-06-07", lead_days=1,
+            city="Hong Kong", metric="low", target_date="2026-10-01", lead_days=1,
             latitude=city.lat, longitude=city.lon, timezone_name=city.timezone)],
         models=("ecmwf_ifs", "icon_global", "ukmo_global_deterministic_10km"),
         include_previous_runs=False, prune_after=False,
@@ -9224,8 +9384,8 @@ def test_normal_current_writer_rebuilds_v6_posterior_after_literal_v5_refusal(tm
     shape = provenance["bayes_precision_fusion"]["current_evidence_shape"]
     assert shape["semantics_revision"] == "ensemble_center_scenarios_v6"
     assert shape["member_count"] == 51
-    assert current_evidence_shape_has_entry_authority(provenance)
-    assert current_evidence_shape_has_held_authority(provenance)
+    assert current_evidence_shape_has_entry_authority(provenance, materialized_at=request.computed_at)
+    assert current_evidence_shape_has_held_authority(provenance, materialized_at=request.computed_at)
     q = json.loads(row["q_json"])
     mu = provenance["bayes_precision_fusion"]["anchor_value_c"]
     sigma = shape["predictive_sigma_c"]
@@ -9237,6 +9397,10 @@ def test_normal_current_writer_rebuilds_v6_posterior_after_literal_v5_refusal(tm
     assert {"icon_global", "ukmo_global_deterministic_10km"}.issubset(serving)
     for model in ("icon_global", "ukmo_global_deterministic_10km"):
         assert serving[model]["physical_response"] is not None
+        physical = serving[model]["physical_response"]
+        assert physical["model_surface_witness"]["status"] == "VERIFIED"
+        assert physical["native_surface"] == "LAND"
+        assert physical["native_grid_elevation_m"] == 32.0
         captured = conn.execute("SELECT * FROM raw_model_forecasts WHERE raw_model_forecast_id=?",
                                 (serving[model]["raw_model_forecast_id"],)).fetchone()
         assert captured["model"] == model and captured["raw_sha256"]
@@ -9252,7 +9416,7 @@ def test_normal_current_writer_rebuilds_v6_posterior_after_literal_v5_refusal(tm
     class ReaderClock(datetime):
         @classmethod
         def now(cls, tz=None):
-            cut = _dt(20, 1)
+            cut = _hko_dt(20, 1)
             return cut.astimezone(tz) if tz else cut.replace(tzinfo=None)
     monkeypatch.setattr(bundle_reader, "datetime", ReaderClock)
     readiness = ReplacementForecastReadinessDecision(
@@ -9265,8 +9429,8 @@ def test_normal_current_writer_rebuilds_v6_posterior_after_literal_v5_refusal(tm
     for purpose in ReplacementForecastAuthorityPurpose:
         served = read_replacement_forecast_bundle(
             conn, baseline_bundle=_BaselineBundle(_Evidence("new12")), readiness=readiness,
-            city="Shanghai", target_date=request.target_date, temperature_metric="low",
-            decision_time=_dt(20, 1).isoformat(),
+            city="Hong Kong", target_date=request.target_date, temperature_metric="low",
+            decision_time=_hko_dt(20, 1).isoformat(),
             current_bin_topology_hash=posterior["bin_topology_hash"], enforce_raw_input_hwm=True,
             authority_purpose=purpose,
         )
@@ -9291,13 +9455,13 @@ def test_normal_current_writer_rebuilds_v6_posterior_after_literal_v5_refusal(tm
         assert point == pytest.approx([q[item.bin_id] for item in reversed(request.bins)])
         identity = dict(family_key=served.bundle.family_id, bindings=bindings,
             q_version=served.bundle.posterior_identity_hash,
-            resolution_identity="Shanghai:ZSPD:noaa:C:low:2026-06-07",
+            resolution_identity="Hong Kong:HKO_HQ:hko:C:low:2026-10-01",
             topology_identity=served.bundle.bin_topology_hash,
             posterior_identity_hash=served.bundle.posterior_identity_hash,
             source_truth_identity=served.bundle.dependency_hash,
             authority_certificate_hash=hashlib.sha256(cert["provenance_json"].encode()).hexdigest(),
             band_alpha=.05, band_basis=basis, yes_point_q=point, yes_q_samples=samples,
-            captured_at_utc=_dt(20, 1))
+            captured_at_utc=_hko_dt(20, 1))
         witness = JointOutcomeProbabilityWitness(**identity, max_age=timedelta(minutes=5),
             witness_identity=joint_probability_witness_identity(**identity))
         for index,binding in enumerate(bindings):
@@ -9332,20 +9496,22 @@ def _built_low_revision_request(tmp_path: Path) -> ReplacementForecastMaterializ
     seed = _write_inputs(tmp_path)
     from dataclasses import asdict
 
-    (tmp_path / str(seed["openmeteo_payload_json"])).write_bytes(_fixture_raw_openmeteo_bytes())
+    (tmp_path / str(seed["openmeteo_payload_json"])).write_bytes(_hko_raw_openmeteo_bytes())
     (tmp_path / str(seed["precision_metadata_json"])).write_text(
-        json.dumps(asdict(_precision_guard().metadata), default=str), encoding="utf-8",
+        json.dumps(asdict(_hko_precision_guard().metadata), default=str), encoding="utf-8",
     )
     seed.update(
+        city="Hong Kong", city_id="Hong Kong", city_timezone="Asia/Hong_Kong", target_date="2026-10-01",
         temperature_metric="low",
-        source_cycle_time=_dt(12).isoformat(),
-        computed_at=_dt(20).isoformat(),
-        expires_at=_dt(22).isoformat(),
+        source_cycle_time=_hko_dt(12).isoformat(),
+        computed_at=_hko_dt(20).isoformat(),
+        expires_at=_hko_dt(22).isoformat(),
         baseline_source_run_id="new12",
         baseline_data_version=_current_baseline_data_version("low"),
-        baseline_source_available_at=_dt(12, 5).isoformat(),
+        baseline_source_available_at=_hko_dt(12, 5).isoformat(),
         day0_observation_state="zero_target_date_observations",
-        openmeteo_source_cycle_time=_dt(0).isoformat(),
+        openmeteo_source_cycle_time=_hko_dt(0).isoformat(),
+        openmeteo_source_available_at=_hko_dt(3).isoformat(),
     )
     built = build_replacement_forecast_materialization_request(
         seed, base_dir=tmp_path,
@@ -9356,6 +9522,7 @@ def _built_low_revision_request(tmp_path: Path) -> ReplacementForecastMaterializ
 
 
 @pytest.mark.parametrize("world_shadow", ("empty", "retired_only"))
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_low_revision_real_request_prefers_forecast_authority_over_attached_world_shadow(
     tmp_path: Path, world_shadow: str,
 ) -> None:
@@ -9385,12 +9552,13 @@ def test_low_revision_real_request_prefers_forecast_authority_over_attached_worl
     assert latest_eligible_ensemble_input_cycle(
         conn, city=request.city, target_date=request.target_date,
         metric="low", decision_time=request.computed_at,
-    ) == _dt(12)
+    ) == _hko_dt(12)
     assert materializer_mod._cycle_monotone_block_reasons(
         conn, request, metric="low"
     ) == ()
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_low_revision_real_request_prefers_attached_forecasts_over_world_main_shadow(
     tmp_path: Path,
 ) -> None:
@@ -9414,12 +9582,13 @@ def test_low_revision_real_request_prefers_attached_forecasts_over_world_main_sh
     assert latest_eligible_ensemble_input_cycle(
         world_conn, city=request.city, target_date=request.target_date,
         metric="low", decision_time=request.computed_at,
-    ) == _dt(12)
+    ) == _hko_dt(12)
 
 
 @pytest.mark.parametrize(
     "table_name", ("source_run", "source_run_coverage", "ensemble_snapshots")
 )
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_low_revision_world_only_fallback_preserves_attached_authority(
     tmp_path: Path, table_name: str,
 ) -> None:
@@ -9438,11 +9607,12 @@ def test_low_revision_world_only_fallback_preserves_attached_authority(
 
     assert _authority_table_ref(conn, table_name) == f"world.{table_name}"
     assert latest_eligible_ensemble_input_cycle(
-        conn, city="Shanghai", target_date="2026-06-07",
-        metric="low", decision_time=_dt(20),
-    ) == _dt(12)
+        conn, city="Hong Kong", target_date="2026-10-01",
+        metric="low", decision_time=_hko_dt(20),
+    ) == _hko_dt(12)
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_low_revision_migration_materializes_current_12z_and_rebinds_readiness(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -9450,12 +9620,12 @@ def test_low_revision_migration_materializes_current_12z_and_rebinds_readiness(
     from src.data.replacement_input_hwm import latest_eligible_ensemble_input_cycle
 
     conn = _low_revision_authority_conn()
-    _install_live_fusion(monkeypatch, snapshot_id=12, shape_cycle_time=_dt(12))
+    _install_hko_live_fusion(monkeypatch, request=_low_revision_request(), snapshot_id=12, shape_cycle_time=_hko_dt(12))
     request = _low_revision_request()
     assert latest_eligible_ensemble_input_cycle(
-        conn, city="Shanghai", target_date=request.target_date,
+        conn, city="Hong Kong", target_date=request.target_date,
         metric="low", decision_time=request.computed_at,
-    ) == _dt(12)
+    ) == _hko_dt(12)
     prior = conn.execute("SELECT * FROM readiness_state").fetchone()
     assert prior["source_run_id"] == "posterior:1"
 
@@ -9468,19 +9638,20 @@ def test_low_revision_migration_materializes_current_12z_and_rebinds_readiness(
     readiness = conn.execute(
         "SELECT * FROM readiness_state WHERE readiness_id=?", (result.readiness_id,)
     ).fetchone()
-    assert posterior["source_cycle_time"] == _dt(12).isoformat()
+    assert posterior["source_cycle_time"] == _hko_dt(12).isoformat()
     assert json.loads(posterior["dependency_source_run_ids_json"])["baseline_b0"] == "new12"
     assert readiness["status"] == "READY"
     assert str(result.posterior_id) in readiness["source_run_id"]
     assert conn.execute("SELECT count(*) FROM readiness_state").fetchone()[0] == 1
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_low_revision_repeat_materialization_keeps_one_new_certificate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The identical 12Z input reuses its posterior and readiness identity."""
     conn = _low_revision_authority_conn()
-    _install_live_fusion(monkeypatch, snapshot_id=12, shape_cycle_time=_dt(12))
+    _install_hko_live_fusion(monkeypatch, request=_low_revision_request(), snapshot_id=12, shape_cycle_time=_hko_dt(12))
     request = _low_revision_request()
 
     first = materialize_replacement_forecast_live(conn, request)
@@ -9494,6 +9665,7 @@ def test_low_revision_repeat_materialization_keeps_one_new_certificate(
 
 
 @pytest.mark.parametrize("purpose", ("ENTRY", "HELD_REDECISION"))
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_low_revision_bundle_consumer_reads_certified_12z_over_retained_18z(
     purpose: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -9512,13 +9684,13 @@ def test_low_revision_bundle_consumer_reads_certified_12z_over_retained_18z(
     current_serving = {
         model: {
             "served_via": "single_runs", "raw_model_forecast_id": raw_id,
-            "served_cycle": _dt(12).isoformat(),
-            "captured_at": _dt(12, 5).isoformat(),
+            "served_cycle": _hko_dt(12).isoformat(),
+            "captured_at": _hko_dt(12, 5).isoformat(),
         }
         for raw_id, model in enumerate(("ecmwf_ifs9", "gfs", "icon", "gem", "jma"), 101)
     }
-    _install_live_fusion(
-        monkeypatch, snapshot_id=12, shape_cycle_time=_dt(12),
+    _install_hko_live_fusion(
+        monkeypatch, request=_low_revision_request(), snapshot_id=12, shape_cycle_time=_hko_dt(12),
         current_serving=current_serving,
     )
     request = _low_revision_request()
@@ -9541,8 +9713,8 @@ def test_low_revision_bundle_consumer_reads_certified_12z_over_retained_18z(
 
     served = read_replacement_forecast_bundle(
         conn, baseline_bundle=_BaselineBundle(_Evidence("new12")),
-        readiness=readiness, city="Shanghai", target_date=request.target_date,
-        temperature_metric="low", decision_time=_dt(20, 1).isoformat(),
+        readiness=readiness, city="Hong Kong", target_date=request.target_date,
+        temperature_metric="low", decision_time=_hko_dt(20, 1).isoformat(),
         current_bin_topology_hash=posterior["bin_topology_hash"],
         enforce_raw_input_hwm=True,
         authority_purpose=ReplacementForecastAuthorityPurpose[purpose],
@@ -9551,24 +9723,25 @@ def test_low_revision_bundle_consumer_reads_certified_12z_over_retained_18z(
     assert served.ok is True, served.reason_code
     assert served.bundle is not None
     assert served.bundle.posterior_id == result.posterior_id
-    assert served.bundle.source_cycle_time == _dt(12).isoformat()
+    assert served.bundle.source_cycle_time == _hko_dt(12).isoformat()
     assert served.bundle.baseline_source_run_id == "new12"
 
 
 @pytest.mark.parametrize("invalidity", ("same_revision", "expired_candidate"))
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_low_revision_materializer_keeps_old_certificate_when_migration_is_unproven(
     invalidity: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Neither same-version rollback nor expired target proof writes a new q."""
     conn = _low_revision_authority_conn()
-    _install_live_fusion(monkeypatch, snapshot_id=12, shape_cycle_time=_dt(12))
+    _install_hko_live_fusion(monkeypatch, request=_low_revision_request(), snapshot_id=12, shape_cycle_time=_hko_dt(12))
     if invalidity == "same_revision":
         current = _current_baseline_data_version("low")
         conn.execute("UPDATE source_run SET dataset_id=? WHERE source_run_id='old18'", (current,))
         conn.execute("UPDATE source_run_coverage SET data_version=? WHERE source_run_id='old18'", (current,))
         conn.execute("UPDATE ensemble_snapshots SET dataset_id=? WHERE snapshot_id=18", (current,))
     else:
-        conn.execute("UPDATE source_run_coverage SET expires_at=? WHERE source_run_id='new12'", (_dt(19).isoformat(),))
+        conn.execute("UPDATE source_run_coverage SET expires_at=? WHERE source_run_id='new12'", (_hko_dt(19).isoformat(),))
 
     result = materialize_replacement_forecast_live(conn, _low_revision_request())
 
@@ -9583,11 +9756,15 @@ def test_low_revision_materializer_keeps_old_certificate_when_migration_is_unpro
     (
         ("source_run_coverage", "computed_at", "source_run_id='old18'"),
         ("source_run_coverage", "recorded_at", "source_run_id='old18'"),
-        ("forecast_posteriors", "computed_at", "source_cycle_time='2026-06-06T18:00:00+00:00'"),
+        pytest.param("forecast_posteriors", "computed_at", "source_cycle_time='2026-09-30T18:00:00+00:00'",
+            # Preserve the historical collected case identity while migrating
+            # its actual evidence clocks with the rest of this fixture family.
+            id="forecast_posteriors-computed_at-source_cycle_time='2026-06-06T18:00:00+00:00'"),
         ("ensemble_snapshots", "recorded_at", "snapshot_id=18"),
         ("ensemble_snapshots", "source_available_at", "snapshot_id=18"),
     ),
 )
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_low_revision_refuses_individual_future_incumbent_evidence(
     table: str, column: str, where: str,
 ) -> None:
@@ -9598,17 +9775,18 @@ def test_low_revision_refuses_individual_future_incumbent_evidence(
 
     conn = _low_revision_authority_conn()
     check = lambda: retired_low_uncertified_incumbent_yields_to_current_ensemble(
-        conn, city="Shanghai", target_date="2026-06-07", metric="low",
-        incoming_baseline_source_run_id="new12", decision_time=_dt(20),
+        conn, city="Hong Kong", target_date="2026-10-01", metric="low",
+        incoming_baseline_source_run_id="new12", decision_time=_hko_dt(20),
     )
     assert check() is True
     conn.execute(
         f"UPDATE {table} SET {column}=? WHERE {where}",
-        (_dt(21).isoformat(),),
+        (_hko_dt(21).isoformat(),),
     )
     assert check() is False
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_low_revision_refuses_expired_current_target_coverage() -> None:
     """A current run loses migration authority when target coverage expires."""
     from src.data.replacement_input_hwm import (
@@ -9618,14 +9796,15 @@ def test_low_revision_refuses_expired_current_target_coverage() -> None:
     conn = _low_revision_authority_conn()
     conn.execute(
         "UPDATE source_run_coverage SET expires_at=? WHERE source_run_id='new12'",
-        (_dt(19).isoformat(),),
+        (_hko_dt(19).isoformat(),),
     )
     assert retired_low_uncertified_incumbent_yields_to_current_ensemble(
-        conn, city="Shanghai", target_date="2026-06-07", metric="low",
-        incoming_baseline_source_run_id="new12", decision_time=_dt(20),
+        conn, city="Hong Kong", target_date="2026-10-01", metric="low",
+        incoming_baseline_source_run_id="new12", decision_time=_hko_dt(20),
     ) is False
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_low_revision_refuses_incumbent_run_imported_after_decision() -> None:
     """A future old-run ingest cannot establish historical rollback authority."""
     from src.data.replacement_input_hwm import (
@@ -9635,20 +9814,21 @@ def test_low_revision_refuses_incumbent_run_imported_after_decision() -> None:
     conn = _low_revision_authority_conn()
     conn.execute(
         "UPDATE source_run SET imported_at=? WHERE source_run_id='old18'",
-        (_dt(21).isoformat(),),
+        (_hko_dt(21).isoformat(),),
     )
     assert retired_low_uncertified_incumbent_yields_to_current_ensemble(
-        conn, city="Shanghai", target_date="2026-06-07", metric="low",
-        incoming_baseline_source_run_id="new12", decision_time=_dt(20),
+        conn, city="Hong Kong", target_date="2026-10-01", metric="low",
+        incoming_baseline_source_run_id="new12", decision_time=_hko_dt(20),
     ) is False
 
 
 class _LowRevisionQueueClock(datetime):
     @classmethod
     def now(cls, tz=None):
-        return _dt(20)
+        return _hko_dt(20)
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_low_revision_queue_boundary_and_marker_are_idempotent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -9659,25 +9839,26 @@ def test_low_revision_queue_boundary_and_marker_are_idempotent(
     db_path = tmp_path / "forecast.db"
     conn = _low_revision_authority_conn(db_path)
     seed = {
-        "city": "Shanghai", "target_date": "2026-06-07",
-        "temperature_metric": "low", "source_cycle_time": _dt(12).isoformat(),
+        "city": "Hong Kong", "target_date": "2026-10-01",
+        "temperature_metric": "low", "source_cycle_time": _hko_dt(12).isoformat(),
         "baseline_source_run_id": "new12",
     }
     assert queue._seed_source_cycle_boundary(forecast_db=db_path, seed=seed) is None
     seed_path = tmp_path / "new12.seed.json"
     seed_path.write_text("{}", encoding="utf-8")
     assert cycle_advance._record_enqueue(
-        conn, city="Shanghai", target_date="2026-06-07", metric="low",
-        consumed_cycle_iso=_dt(18).isoformat(), target_cycle_iso=_dt(12).isoformat(),
+        conn, city="Hong Kong", target_date="2026-10-01", metric="low",
+        consumed_cycle_iso=_hko_dt(18).isoformat(), target_cycle_iso=_hko_dt(12).isoformat(),
         held_position=True, seed_file=str(seed_path),
     ) is True
     assert cycle_advance._already_enqueued(
-        conn, city="Shanghai", target_date="2026-06-07", metric="low",
-        target_cycle_iso=_dt(12).isoformat(),
+        conn, city="Hong Kong", target_date="2026-10-01", metric="low",
+        target_cycle_iso=_hko_dt(12).isoformat(),
     ) is True
     assert conn.execute("SELECT count(*) FROM cycle_advance_enqueues").fetchone()[0] == 1
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_low_revision_queue_refuses_same_version_backward_cycle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -9693,10 +9874,10 @@ def test_low_revision_queue_refuses_same_version_backward_cycle(
     conn.execute("UPDATE ensemble_snapshots SET dataset_id=? WHERE snapshot_id=18", (current,))
     conn.commit()
     seed = {
-        "city": "Shanghai", "target_date": "2026-06-07",
-        "temperature_metric": "low", "source_cycle_time": _dt(12).isoformat(),
+        "city": "Hong Kong", "target_date": "2026-10-01",
+        "temperature_metric": "low", "source_cycle_time": _hko_dt(12).isoformat(),
         "baseline_source_run_id": "new12",
     }
     assert queue._seed_source_cycle_boundary(forecast_db=db_path, seed=seed) == (
-        "current_posterior", _dt(18).isoformat(),
+        "current_posterior", _hko_dt(18).isoformat(),
     )

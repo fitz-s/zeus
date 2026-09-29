@@ -20,14 +20,16 @@ from src.data.replacement_forecast_materializer import (
 )
 from tests.test_replacement_forecast_materializer import (
     _conn,
-    _dt,
-    _install_live_fusion,
-    _request,
+    _hko_dt as _dt,
+    _install_hko_live_fusion as _install_live_fusion,
+    _hko_request as _request,
     _TemperatureBin,
     _fixed_center_debias,
-    _materializer_unit_source_surface,
+    _hko_source_surface,
     _current_baseline_data_version,
 )
+
+pytestmark = pytest.mark.usefixtures("_hko_source_surface")
 
 
 def _install_current_evidence_fusion(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -49,11 +51,9 @@ def _full_row(conn) -> dict:
     }
 
 
-# The default _request() resolves to city=Shanghai (unit 'C', timezone Asia/Shanghai, a FIXED
-# +8h offset with no DST), metric 'high', target_date=2026-06-07, source_cycle_time=
-# 2026-06-06T06:00Z (must be a valid 00/06/12/18 UTC ECMWF cycle). FIX 1: tau is now measured to
-# the city's LOCAL target-date end, not UTC -- Shanghai local midnight of 2026-06-08 is
-# 2026-06-07T16:00Z (UTC+8), so lead_target_h = 16:00 (Jun 7) - 06:00 (Jun 6) = 34.0h -> bucket
+# The physical request uses Hong Kong's official ground proof after possession.
+# Sep30 06Z -> Oct1 local-day end (Oct1 16Z) preserves the original +8h
+# geometry: lead_target_h = 34.0h -> bucket
 # [24,36) (NOT [36,48), which is where the UTC-anchored cut would have placed it).
 _REQUEST_KWARGS = dict(source_cycle_time=_dt(6), computed_at=_dt(10), expires_at=_dt(12))
 _EXPECTED_BUCKET = "[24,36)"
@@ -87,7 +87,7 @@ def _fitted_artifact_for_default_request() -> dict:
                     "oos_gate": {"passed": True, "censored_delta": 0.05},
                     "n": 5000,
                     "buckets": buckets,
-                    "cities": {"Shanghai": {"c_raw": 0.9, "c_shrunk": city_c, "n": 200}},
+                    "cities": {"Hong Kong": {"c_raw": 0.9, "c_shrunk": city_c, "n": 200}},
                 }
             }
         },
