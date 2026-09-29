@@ -114,7 +114,7 @@ def _current_rows(tmp_path, monkeypatch, *, metric="high"):
     return conn, target, cycle
 
 
-def _mock_single_model_http(monkeypatch, dl, *, value):
+def _mock_single_model_http(monkeypatch, dl, *, value, network=False):
     dl._SINGLE_RUNS_PAYLOAD_CACHE.clear()
     dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEX.clear()
 
@@ -126,7 +126,10 @@ def _mock_single_model_http(monkeypatch, dl, *, value):
             "hourly": {"time": [(day + timedelta(hours=i)).isoformat(timespec="minutes") for i in range(24)],
                        "temperature_2m": [value] * 24}}
         body = (json.dumps(payload, indent=2) + "\n").encode()
-        kwargs["capture_entity_body"](body, dl.datetime.now(UTC).timestamp())
+        fetched_at = dl.datetime.now(UTC).timestamp()
+        kwargs["capture_entity_body"](body, fetched_at)
+        if network:
+            kwargs["capture_network_response"](body, fetched_at, {"content-type": "application/json"})
         return json.loads(body)
 
     monkeypatch.setattr("src.data.openmeteo_client.fetch", fetch)
@@ -141,7 +144,7 @@ def _download_time(monkeypatch, module, when):
     monkeypatch.setattr(module, "datetime", Clock)
 
 
-def _persist_exact_provider_body(conn, tmp_path, *, city, metric, target_date, model, cycle, captured, value, expected_written=1):
+def _persist_exact_provider_body(conn, tmp_path, *, city, metric, target_date, model, cycle, captured, value, expected_written=1, network=False):
     """Real entity parser/artifact/raw writer fixture, with causal original clocks."""
     from src.config import runtime_cities_by_name
     from src.data import bayes_precision_fusion_download as dl
@@ -166,7 +169,8 @@ def _persist_exact_provider_body(conn, tmp_path, *, city, metric, target_date, m
         patch.setattr("src.config.state_path", lambda filename: Path(tmp_path)/"state"/filename)
         _download_time(patch, dl, stamp)
         bound = dl._bind_physical_response(json.loads(body), model=model, url=SINGLE_RUNS_FORECAST_URL,
-            params=params, run=run, captures=[(body, stamp.timestamp())])
+            params=params, run=run, captures=[(body, stamp.timestamp())],
+            network_captures=[(body, stamp.timestamp(), {"content-type": "application/json"})] if network else ())
         row = dict(model=model,city=city,metric=metric,target_date=target_date,source_cycle_time=cycle,
             source_available_at=captured,captured_at=captured,lead_days=target.lead_days,
             forecast_value_c=value,endpoint="single_runs",_physical_response=bound[dl._BATCH_PHYSICAL_RESPONSE_KEY],
@@ -481,6 +485,86 @@ def test_same_issued_archive_appends_proof_without_rewriting_legacy_raw(tmp_path
         decision_time_iso=cycle.replace(hour=11).isoformat())
     assert set(changed)=={"ukmo_global_deterministic_10km"}
     assert conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall()==original
+    conn.close()
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("latest_damage", (None, "missing_body", "foreign_claim", "tampered_receipt"))
+def test_real_http_a_b_a_receipts_reset_without_renewing_immutable_raw_or_body(tmp_path, monkeypatch, metric, latest_damage):
+    from src.data import bayes_precision_fusion_download as dl
+    from src.data.replacement_current_value_serving import read_current_instrument_values
+    from src.data.replacement_input_hwm import _exact_current_value_serving_lag
+    conn, target, cycle = _current_rows(tmp_path, monkeypatch, metric=metric)
+    old_hash = dl._model_domain_hash(provider=dl.OPENMETEO_PROVIDER, model_name="icon_global",
+        cell_selection="land", elevation_param="requested", downscaling_policy="none", endpoint_mode="single_runs")
+    conn.execute("UPDATE raw_model_forecasts SET artifact_id=NULL,raw_sha256=NULL,elevation_param='requested',"
+        "downscaling_policy='none',model_domain_hash=? WHERE model='icon_global'", (old_hash,))
+    conn.execute("DELETE FROM raw_forecast_artifacts WHERE product_id LIKE '%icon_global%'")
+    conn.commit()
+    raw_before = conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall()
+    def recapture(hour, value, *, network=True):
+        _download_time(monkeypatch, dl, cycle.replace(hour=hour))
+        _mock_single_model_http(monkeypatch, dl, value=value, network=network)
+        result = dl.download_bayes_precision_fusion_extra_raw_inputs(
+            forecast_db=Path(conn.execute("PRAGMA database_list").fetchone()[2]), cycle=cycle,
+            targets=[target], models=("icon_global",), include_previous_runs=False, prune_after=False,
+            frozen_source_runs={"icon_global": dl._DerivedOffGridSingleRunsRun(run=cycle)}, revalidate_legacy_capture=True)
+        assert result["written_row_count"] == 0
+        if network:
+            assert (target.city, target.target_date, metric) in result["committed_families"]
+        assert conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall() == raw_before
+    def current(hour):
+        return read_current_instrument_values(conn, city=target.city, metric=metric, target_date=target.target_date,
+            source_cycle_time_iso=cycle.isoformat(), decision_time_iso=cycle.replace(hour=hour).isoformat())
+    recapture(8, 20)
+    original = current(9)["icon_global"]
+    body_id = original.physical_response["artifact_id"]
+    body_before = conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?", (body_id,)).fetchone()
+    # Another ordinary capture writer learns a changed provider answer. The
+    # recovery producer must not hide this behind its older equal-value body.
+    _persist_exact_provider_body(conn, tmp_path, city=target.city, metric=metric, target_date=target.target_date,
+        model="icon_global", cycle=cycle.isoformat(), captured=cycle.replace(hour=10).isoformat(),
+        value=21, expected_written=0, network=True)
+    conn.commit()
+    assert "icon_global" not in current(11)
+    recapture(12, 20)
+    restored = current(13)["icon_global"]
+    assert restored.raw_model_forecast_id == original.raw_model_forecast_id
+    assert restored.captured_at == original.captured_at == cycle.replace(hour=4).isoformat()
+    assert restored.physical_response["proof_captured_at"] == cycle.replace(hour=12).isoformat()
+    assert restored.physical_response["capture_receipt_artifact_id"] != original.physical_response["capture_receipt_artifact_id"]
+    assert conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?", (body_id,)).fetchone() == body_before
+    assert "icon_global" not in current(11)  # New possession cannot rewrite the historical cutoff.
+    assert current(9)["icon_global"].physical_response == original.physical_response
+    provenance = {"bayes_precision_fusion": {"used_models": ["icon_global"],
+        "current_value_serving": {"icon_global": original.as_provenance()}}}
+    lag = _exact_current_value_serving_lag(conn, city=target.city, target_date=target.target_date,
+        metric=metric, decision_time=cycle.replace(hour=13), posterior_computed_at=cycle.replace(hour=9), provenance=provenance)
+    assert lag[0] and "physical_proof_dependency_changed" in lag[1]
+    provenance["bayes_precision_fusion"]["current_value_serving"]["icon_global"] = restored.as_provenance()
+    reset_lag = _exact_current_value_serving_lag(conn, city=target.city, target_date=target.target_date,
+        metric=metric, decision_time=cycle.replace(hour=13), posterior_computed_at=cycle.replace(hour=13), provenance=provenance)
+    assert reset_lag[0] and reset_lag[1] is None, reset_lag
+    receipt_count = conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts WHERE data_version='openmeteo_single_model_http_capture_receipt_v1'").fetchone()[0]
+    assert receipt_count == 3
+    recapture(14, 20, network=False)
+    assert conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts WHERE data_version='openmeteo_single_model_http_capture_receipt_v1'").fetchone()[0] == receipt_count
+    assert current(15)["icon_global"].physical_response["capture_receipt_artifact_id"] == restored.physical_response["capture_receipt_artifact_id"]
+    if latest_damage is not None:
+        artifact_id = restored.physical_response["capture_receipt_artifact_id"]
+        path, metadata = conn.execute("SELECT artifact_path,artifact_metadata_json FROM raw_forecast_artifacts WHERE artifact_id=?", (artifact_id,)).fetchone()
+        if latest_damage == "tampered_receipt":
+            Path(path).write_bytes(Path(path).read_bytes() + b" ")
+        else:
+            parsed = json.loads(metadata)
+            receipt = parsed["physical_http_capture_receipt"]
+            if latest_damage == "missing_body":
+                receipt["body_artifact_id"] = 999999
+            else:
+                receipt["physical_response"]["locations"][0]["requested_latitude"] = 0
+            conn.execute("UPDATE raw_forecast_artifacts SET artifact_metadata_json=? WHERE artifact_id=?", (json.dumps(parsed), artifact_id))
+            conn.commit()
+        assert "icon_global" not in current(15)  # Latest bad event cannot uncover A08.
     conn.close()
 
 

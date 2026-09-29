@@ -1573,6 +1573,14 @@ def _exact_current_value_serving_lag(
                 consumed.get("ecmwf_ifs", (0, consumed_cycle, None))[1],
             )
         current_cycle = _parse_source_cycle_utc(current.served_cycle)
+        from src.data.replacement_current_value_serving import physical_source_proof_dependency
+        consumed_proof = serving[model].get("physical_response")
+        if physical_source_proof_dependency(consumed_proof) != physical_source_proof_dependency(current.physical_response):
+            return (
+                True,
+                f"basis=current_value_serving_physical_proof_dependency_changed:model={model}:consumed_raw_id={consumed_id}",
+                consumed.get("ecmwf_ifs", (0, consumed_cycle, None))[1],
+            )
         current_at = _parse_source_cycle_utc(current.captured_at)
         latest_id = int(current.raw_model_forecast_id)
         if current_cycle is None:

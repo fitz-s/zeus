@@ -55,6 +55,7 @@ its cycle); every live capture lands within hours of its cycle.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 import math
 import sqlite3
 from dataclasses import dataclass
@@ -249,14 +250,15 @@ def _product_identity_select(schema: CurrentValueServingSchema, *, decision_iso:
         derived = ""
         cutoff = "NULL" if decision_iso is None else "'" + decision_iso.replace("'", "''") + "'"
         if decision_iso is not None:
-            derived = f""" OR (raw_model_forecasts.artifact_id IS NULL
+            derived = f""" OR ((a.data_version='openmeteo_single_model_http_capture_receipt_v1'
+                OR (raw_model_forecasts.artifact_id IS NULL
                 AND raw_model_forecasts.elevation_param='requested'
                 AND raw_model_forecasts.downscaling_policy='none'
-                AND raw_model_forecasts.endpoint_mode='single_runs'
+                AND raw_model_forecasts.endpoint_mode='single_runs'))
                 AND a.source_id=raw_model_forecasts.source_id
                 AND a.product_id=raw_model_forecasts.product_id
                 AND a.source_cycle_time=raw_model_forecasts.source_cycle_time
-                AND a.data_version='openmeteo_single_model_entity_body_v1'
+                AND a.data_version IN ('openmeteo_single_model_entity_body_v1','openmeteo_single_model_http_capture_receipt_v1')
                 AND datetime(a.captured_at)<=datetime({cutoff})
                 AND datetime(a.source_available_at)<=datetime({cutoff})
                 AND datetime(a.recorded_at)<=datetime({cutoff})
@@ -275,9 +277,16 @@ def _product_identity_select(schema: CurrentValueServingSchema, *, decision_iso:
             'source_available_at',a.source_available_at,'recorded_at',a.recorded_at,'data_version',a.data_version,
             'artifact_path',a.artifact_path,'sha256',a.sha256,'byte_size',a.byte_size,
             'request_url',a.request_url,'request_params_json',a.request_params_json,
-            'metadata',a.artifact_metadata_json) FROM raw_forecast_artifacts a
+            'metadata',a.artifact_metadata_json,
+            'body_artifact',json((SELECT json_object('artifact_id',b.artifact_id,'source_id',b.source_id,
+                'product_id',b.product_id,'data_version',b.data_version,'source_cycle_time',b.source_cycle_time,
+                'source_available_at',b.source_available_at,'captured_at',b.captured_at,'recorded_at',b.recorded_at,
+                'artifact_path',b.artifact_path,'sha256',b.sha256,'byte_size',b.byte_size,
+                'request_url',b.request_url,'request_params_json',b.request_params_json,'metadata',b.artifact_metadata_json)
+                FROM raw_forecast_artifacts b WHERE b.artifact_id=json_extract(CASE WHEN json_valid(a.artifact_metadata_json)
+                    THEN a.artifact_metadata_json ELSE '{{}}' END,'$.physical_http_capture_receipt.body_artifact_id')))) FROM raw_forecast_artifacts a
             WHERE a.artifact_id=raw_model_forecasts.artifact_id {derived}
-            ORDER BY a.artifact_id DESC LIMIT 1)"""
+            ORDER BY datetime(a.captured_at) DESC,datetime(a.recorded_at) DESC,a.artifact_id DESC LIMIT 1)"""
     cutoff = "NULL" if decision_iso is None else "'" + decision_iso.replace("'", "''") + "'"
     return f"json_object({fields}, 'physical_proof_cutoff', {cutoff}, 'physical_artifact', json({artifact}))"
 
@@ -477,8 +486,55 @@ def _source_clock_product_has_authority(raw: object, *, lead_days: int | None) -
         return False
 
 
+def _resolve_http_capture_receipt(row: Mapping[str, object]) -> dict[str, object] | None:
+    """Bind a network event to canonical immutable body, without renewing raw clocks."""
+    artifact = row.get("physical_artifact")
+    if not isinstance(artifact, dict) or artifact.get("data_version") != "openmeteo_single_model_http_capture_receipt_v1":
+        return dict(row)
+    try:
+        import hashlib
+        from pathlib import Path
+        encoded = Path(str(artifact["artifact_path"])).read_bytes()
+        if len(encoded) != artifact["byte_size"] or hashlib.sha256(encoded).hexdigest() != artifact["sha256"]:
+            return None
+        receipt = json.loads(encoded)
+        if json.loads(str(artifact["metadata"])) != {"physical_http_capture_receipt": receipt}:
+            return None
+        body = artifact["body_artifact"]
+        if not isinstance(body, dict) or body.get("data_version") != "openmeteo_single_model_entity_body_v1":
+            return None
+        if receipt["revision"] != artifact["data_version"] or receipt["body_artifact_id"] != body["artifact_id"] or receipt["body_sha256"] != body["sha256"] or receipt["body_byte_size"] != body["byte_size"]:
+            return None
+        for key in ("source_id", "product_id", "source_cycle_time", "request_url"):
+            if receipt[key] != artifact[key] or receipt[key] != body[key]:
+                return None
+        if receipt["request_params"] != json.loads(str(artifact["request_params_json"])) or receipt["request_params"] != json.loads(str(body["request_params_json"])):
+            return None
+        for key in ("captured_at", "source_available_at", "recorded_at"):
+            if receipt[key] != artifact[key]:
+                return None
+        proof = receipt["physical_response"]
+        if proof["sha256"] != body["sha256"] or proof["byte_size"] != body["byte_size"] or proof["request_params"] != receipt["request_params"] or proof["request_url"] != receipt["request_url"] or proof["captured_at"] != receipt["captured_at"]:
+            return None
+        if proof["network_capture"] != {"captured_at": receipt["captured_at"], "response_headers": receipt["response_headers"]}:
+            return None
+        for key in ("source_cycle_time", "source_available_at", "captured_at", "recorded_at"):
+            if datetime.fromisoformat(str(body[key]).replace("Z", "+00:00")) > datetime.fromisoformat(str(artifact["recorded_at"]).replace("Z", "+00:00")):
+                return None
+        normalized = {**body, **{key: artifact[key] for key in ("source_available_at", "captured_at", "recorded_at")},
+            "metadata": json.dumps({"physical_response": proof}),
+            "capture_receipt_artifact_id": artifact["artifact_id"], "capture_receipt_sha256": artifact["sha256"]}
+        return {**row, "physical_artifact": normalized}
+    except (KeyError, TypeError, ValueError, OSError):
+        return None
+
+
 def _revalidated_legacy_product_row(row: Mapping[str, object]) -> dict[str, object] | None:
     """A typed view over immutable raw, never a legacy-label compatibility gate."""
+    resolved = _resolve_http_capture_receipt(row)
+    if resolved is None:
+        return None
+    row = resolved
     result = dict(row)
     if row.get("artifact_id") is not None:
         return result
@@ -681,6 +737,19 @@ def _physical_response_has_authority(row: Mapping[str, object]) -> bool:
         return False
 
 
+def physical_source_proof_dependency(proof: object) -> Mapping[str, object] | None:
+    """Immutable possession dependencies, separate from stable physical geometry."""
+    if not isinstance(proof, Mapping):
+        return None
+    result = {key: proof.get(key) for key in ("artifact_id", "entity_body_sha256",
+        "capture_receipt_artifact_id", "capture_receipt_sha256")}
+    surface = proof.get("model_surface_witness")
+    if isinstance(surface, Mapping) and isinstance(surface.get("asset_audit"), Mapping):
+        result["model_surface_asset"] = {key: surface["asset_audit"].get(key) for key in
+            ("whole_sha256", "manifest_sha256", "etag", "last_modified", "s3_version_id")}
+    return result
+
+
 def _physical_response_provenance(row: Mapping[str, object]) -> Mapping[str, object] | None:
     if not _is_station_model(str(row["model"])):
         row = _revalidated_legacy_product_row(row)
@@ -705,6 +774,8 @@ def _physical_response_provenance(row: Mapping[str, object]) -> Mapping[str, obj
     return {"revision": metadata["revision"], "model": row["model"],
         "product_id": row["product_id"], "artifact_id": row["artifact_id"],
         "entity_body_sha256": artifact["sha256"],
+        "capture_receipt_artifact_id": artifact.get("capture_receipt_artifact_id"),
+        "capture_receipt_sha256": artifact.get("capture_receipt_sha256"),
         "raw_model_forecast_id": row["raw_model_forecast_id"],
         "revalidated_legacy_product": bool(row.get("revalidated_legacy_product", False)),
         "recorded_product_policy": row.get("recorded_product_policy"),

@@ -1720,7 +1720,7 @@ def _fetch_standard_meta_stamped_payloads(
     }
     if past_hours:
         params["past_hours"] = int(past_hours)
-    captures, capture_callback = _physical_response_capture(
+    captures, capture_callback, network_captures, network_callback = _physical_response_capture(
         model=model, url=STANDARD_FORECAST_URL, params=params, run=before_run)
     payload = fetch(
         STANDARD_FORECAST_URL,
@@ -1729,10 +1729,11 @@ def _fetch_standard_meta_stamped_payloads(
         quota=_BPF_OPENMETEO_QUOTA_TRACKER,
         fast_fail_429=True,
         capture_entity_body=capture_callback,
+        capture_network_response=network_callback,
         **_deadline_fetch_kwargs(deadline_monotonic),
     )
     payload = _bind_physical_response(payload, model=model, url=STANDARD_FORECAST_URL,
-        params=params, run=before_run, captures=captures)
+        params=params, run=before_run, captures=captures, network_captures=network_captures)
     payloads = (payload,) if len(locations) == 1 and isinstance(payload, Mapping) else payload
     if (
         not isinstance(payloads, Sequence)
@@ -1765,19 +1766,29 @@ _BATCH_PHYSICAL_RESPONSE_KEY = "__physical_response_capture_v1"
 
 def _physical_response_capture(
     *, model: str, url: str, params: Mapping[str, object], run: datetime,
-) -> tuple[list[tuple[bytes, float]], Callable[[bytes, float], None]]:
+) -> tuple[list[tuple[bytes, float]], Callable[[bytes, float], None], list[tuple[bytes, float, Mapping[str, str]]], Callable[[bytes, float, Mapping[str, str]], None]]:
     captures: list[tuple[bytes, float]] = []
-    return captures, lambda body, fetched_at: captures.append((body, fetched_at))
+    network: list[tuple[bytes, float, Mapping[str, str]]] = []
+    return (captures, lambda body, fetched_at: captures.append((body, fetched_at)),
+        network, lambda body, fetched_at, headers: network.append((body, fetched_at, dict(headers))))
 
 
 def _bind_physical_response(
     payload: object, *, model: str, url: str, params: Mapping[str, object],
     run: datetime, captures: Sequence[tuple[bytes, float]],
+    network_captures: Sequence[tuple[bytes, float, Mapping[str, str]]] = (),
 ) -> object:
     """Bind each single-model location to original HTTP entity bytes, not a shared model header."""
     if not captures:
         return payload  # Old parsed cache is not exact physical evidence.
     body, fetched_at = captures[-1]
+    network_capture = None
+    if network_captures:
+        network_body, network_at, response_headers = network_captures[-1]
+        if network_body != body or network_at != fetched_at:
+            raise ValueError("network receipt and returned entity capture differ")
+        network_capture = {"captured_at": datetime.fromtimestamp(network_at, UTC).isoformat(),
+            "response_headers": dict(response_headers)}
     decoded = json.loads(body)
     if decoded != payload:
         raise ValueError("physical capture payload mismatch")
@@ -1848,6 +1859,7 @@ def _bind_physical_response(
             "target_dem_elevation_m": item.get("elevation"),
             "native_grid_elevation_m": None, "native_surface": "UNKNOWN",
             "representativeness_status": "UNPROVEN",
+            **({"network_capture": network_capture} if network_capture is not None else {}),
         }
     return payload
 # Open-Meteo `models=a,b,c` returns temperature_2m_a / temperature_2m_b / temperature_2m_c
@@ -1971,7 +1983,7 @@ def _default_live_fetch_batched(
         if cached_payload is not None:
             payload = copy.deepcopy(cached_payload)
         else:
-            captures, capture_callback = _physical_response_capture(
+            captures, capture_callback, network_captures, network_callback = _physical_response_capture(
                 model=models[0], url=SINGLE_RUNS_FORECAST_URL, params=params, run=run)
             payload = fetch(
                 SINGLE_RUNS_FORECAST_URL,
@@ -1980,10 +1992,11 @@ def _default_live_fetch_batched(
                 quota=_BPF_OPENMETEO_QUOTA_TRACKER,
                 fast_fail_429=True,
                 capture_entity_body=capture_callback,
+                capture_network_response=network_callback,
                 **_deadline_fetch_kwargs(deadline_monotonic),
             )
             payload = _bind_physical_response(payload, model=models[0],
-                url=SINGLE_RUNS_FORECAST_URL, params=params, run=run, captures=captures)
+                url=SINGLE_RUNS_FORECAST_URL, params=params, run=run, captures=captures, network_captures=network_captures)
             if isinstance(payload, Mapping) and _single_runs_payload_has_reusable_hourly_axis(
                 payload,
                 models=models,
@@ -2089,7 +2102,7 @@ def _default_live_fetch_batched(
             "cell_selection": BAYES_PRECISION_FUSION_CELL_SELECTION,
         }
         try:
-            captures, capture_callback = _physical_response_capture(
+            captures, capture_callback, network_captures, network_callback = _physical_response_capture(
                 model=model, url=SINGLE_RUNS_FORECAST_URL, params=params, run=run)
             payload = fetch(
                 SINGLE_RUNS_FORECAST_URL,
@@ -2098,10 +2111,11 @@ def _default_live_fetch_batched(
                 quota=_BPF_OPENMETEO_QUOTA_TRACKER,
                 fast_fail_429=True,
                 capture_entity_body=capture_callback,
+                capture_network_response=network_callback,
                 **_deadline_fetch_kwargs(deadline_monotonic),
             )
             payload = _bind_physical_response(payload, model=model, url=SINGLE_RUNS_FORECAST_URL,
-                params=params, run=run, captures=captures)
+                params=params, run=run, captures=captures, network_captures=network_captures)
             parsed = _parse_batched_single_runs_payload(
                 payload,
                 [model],
@@ -2540,7 +2554,7 @@ def _fetch_single_runs_hourly_payloads_batched_uncached(
     }
     if past_hours:
         params["past_hours"] = int(past_hours)
-    captures, capture_callback = _physical_response_capture(
+    captures, capture_callback, network_captures, network_callback = _physical_response_capture(
         model=models[0], url=SINGLE_RUNS_FORECAST_URL, params=params, run=run)
     payload = fetch(
         SINGLE_RUNS_FORECAST_URL,
@@ -2549,10 +2563,11 @@ def _fetch_single_runs_hourly_payloads_batched_uncached(
         quota=_BPF_OPENMETEO_QUOTA_TRACKER,
         fast_fail_429=True,
         capture_entity_body=capture_callback,
+        capture_network_response=network_callback,
         **_deadline_fetch_kwargs(deadline_monotonic),
     )
     payload = _bind_physical_response(payload, model=models[0],
-        url=SINGLE_RUNS_FORECAST_URL, params=params, run=run, captures=captures)
+        url=SINGLE_RUNS_FORECAST_URL, params=params, run=run, captures=captures, network_captures=network_captures)
     payloads = [payload] if len(locations) == 1 and isinstance(payload, Mapping) else payload
     if not isinstance(payloads, Sequence) or isinstance(payloads, (str, bytes)):
         raise RuntimeError(
@@ -2729,7 +2744,7 @@ def _default_previous_runs_fetch_batched(
             "cell_selection": BAYES_PRECISION_FUSION_CELL_SELECTION,
         }
         capture_run = run or datetime.now(UTC)
-        captures, capture_callback = _physical_response_capture(
+        captures, capture_callback, network_captures, network_callback = _physical_response_capture(
             model=models[0], url=PREVIOUS_RUNS_URL, params=params, run=capture_run)
         payload = fetch(
             PREVIOUS_RUNS_URL,
@@ -2738,10 +2753,11 @@ def _default_previous_runs_fetch_batched(
             quota=_BPF_OPENMETEO_QUOTA_TRACKER,
             fast_fail_429=True,
             capture_entity_body=capture_callback,
+            capture_network_response=network_callback,
             **_deadline_fetch_kwargs(deadline_monotonic),
         )
         payload = _bind_physical_response(payload, model=models[0], url=PREVIOUS_RUNS_URL,
-            params=params, run=capture_run, captures=captures)
+            params=params, run=capture_run, captures=captures, network_captures=network_captures)
         result = _parse_batched_previous_runs_payload(payload, models, hourly_var)
         if isinstance(payload, Mapping) and payload.get(_BATCH_PHYSICAL_RESPONSE_KEY):
             result[_BATCH_PHYSICAL_RESPONSE_KEY] = {models[0]: payload[_BATCH_PHYSICAL_RESPONSE_KEY]}
@@ -2905,6 +2921,47 @@ def _scan_and_audit_request_conflicts(conn, rows: Sequence[dict]) -> None:
         raise _request_conflict_error(*first_conflict)
 
 
+def _persist_http_capture_receipt(conn, row: Mapping[str, object], capture: Mapping[str, object], body_artifact_id: int) -> None:
+    """Append a real network event separately from content-addressed first possession."""
+    event = capture.get("network_capture")
+    if not isinstance(event, Mapping):
+        return  # A cache replay has bytes, but is not a new HTTP observation.
+    if event.get("captured_at") != capture.get("captured_at"):
+        raise ValueError("HTTP receipt capture clock differs from returned entity")
+    recorded_at = datetime.now(UTC).isoformat()
+    receipt = {
+        "revision": "openmeteo_single_model_http_capture_receipt_v1",
+        "source_id": row["source_id"], "product_id": row["product_id"],
+        "source_cycle_time": row["source_cycle_time"],
+        "body_artifact_id": body_artifact_id, "body_sha256": capture["sha256"],
+        "body_byte_size": capture["byte_size"], "request_url": capture["request_url"],
+        "request_params": capture["request_params"],
+        "captured_at": event["captured_at"], "source_available_at": event["captured_at"],
+        "recorded_at": recorded_at, "response_headers": event.get("response_headers", {}),
+        "physical_response": dict(capture),
+    }
+    encoded = json.dumps(receipt, sort_keys=True, separators=(",", ":"), default=str).encode()
+    digest = hashlib.sha256(encoded).hexdigest()
+    path = Path(str(capture["artifact_path"])).with_name(f"openmeteo_bpf_capture_receipt_{digest}.json")
+    if path.exists():
+        if path.read_bytes() != encoded:
+            raise ValueError("immutable HTTP receipt bytes changed")
+    else:
+        with path.open("xb") as handle:
+            handle.write(encoded)
+    conn.execute(
+        """INSERT INTO raw_forecast_artifacts
+           (source_id,product_id,data_version,source_cycle_time,source_available_at,captured_at,
+            artifact_path,sha256,byte_size,request_url,request_params_json,artifact_metadata_json,recorded_at,training_allowed)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0)
+           ON CONFLICT(source_id,product_id,data_version,source_cycle_time,sha256) DO NOTHING""",
+        (row["source_id"], row["product_id"], receipt["revision"], row["source_cycle_time"],
+         receipt["source_available_at"], receipt["captured_at"], str(path), digest, len(encoded),
+         capture["request_url"], json.dumps(capture["request_params"], sort_keys=True),
+         json.dumps({"physical_http_capture_receipt": receipt}, sort_keys=True), recorded_at),
+    )
+
+
 def _persist_rows(
     conn,
     rows: Sequence[dict],
@@ -2939,6 +2996,7 @@ def _persist_rows(
         if conflict is not None:
             _write_request_conflict_audit(conn, row, conflict)
             raise _request_conflict_error(row, conflict)
+    seen_http_events: set[tuple[object, ...]] = set()
     for row in rows:
         row.setdefault("recorded_at", datetime.now(UTC).isoformat())
         capture = row.get("_physical_response")
@@ -2974,6 +3032,12 @@ def _persist_rows(
              row["source_cycle_time"], capture["sha256"]),
         ).fetchone()
         row["artifact_id"], row["raw_sha256"] = int(artifact[0]), capture["sha256"]
+        event = capture.get("network_capture")
+        event_key = (row["source_id"], row["product_id"], row["source_cycle_time"], capture["sha256"],
+            json.dumps(params, sort_keys=True), event.get("captured_at") if isinstance(event, Mapping) else None)
+        if not station and event_key not in seen_http_events:
+            _persist_http_capture_receipt(conn, row, capture, int(artifact[0]))
+            seen_http_events.add(event_key)
         row["captured_at"] = str(artifact[1])
         if station:
             row["source_available_at"] = str(artifact[2])

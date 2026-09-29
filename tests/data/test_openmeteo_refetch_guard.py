@@ -600,6 +600,20 @@ def test_entity_body_cache_preserves_bytes_and_original_capture_clock(world):
     assert captures[0][1] < world.now["t"]  # Replay does not renew possession.
 
 
+def test_only_real_http_response_emits_capture_event_not_cache_replay(world):
+    proc = world.process()
+    captures, events = [], []
+    first = world.fetch(proc, capture_entity_body=lambda *args: captures.append(args),
+        capture_network_response=lambda *args: events.append(args))
+    assert len(events) == 1 and events[0][:2] == captures[0]
+    assert json.loads(events[0][0]) == first
+    world.now["t"] += 20
+    second = world.fetch(proc, capture_entity_body=lambda *args: captures.append(args),
+        capture_network_response=lambda *args: events.append(args))
+    assert second == first and len(events) == 1
+    assert captures[0] == captures[1]
+
+
 def test_legacy_parsed_cache_requires_ordinary_metered_entity_capture(world):
     proc = world.process()
     payload = world.fetch(proc)

@@ -480,6 +480,7 @@ def fetch(
     conditional_status_codes: frozenset[int] = frozenset(),
     store: OpenMeteoResponseStore | None = None,
     capture_entity_body: Callable[[bytes, float], None] | None = None,
+    capture_network_response: Callable[[bytes, float, Mapping[str, str]], None] | None = None,
 ) -> dict:
     """GET an Open-Meteo endpoint with retries, 429 handling, and quota tracking.
 
@@ -650,6 +651,10 @@ def fetch(
                 if hashlib.sha256(entity_body).hexdigest() != entity_sha256:
                     raise RuntimeError("response entity bytes changed after parsing")
                 capture_entity_body(entity_body, fetched_at)
+            if capture_network_response is not None and resp.status_code == 200:
+                headers = {name: str(resp.headers[name]) for name in
+                    ("date", "etag", "last-modified", "content-type") if name in resp.headers}
+                capture_network_response(entity_body, fetched_at, headers)
             return payload
 
         except httpx.HTTPError as e:

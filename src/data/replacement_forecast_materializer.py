@@ -7983,6 +7983,11 @@ def _compute_posterior_payload(
         dependency_payload["current_evidence_shape_hash"] = str(
             bayes_precision_fusion_override.current_evidence_shape["shape_hash"]
         )
+        from src.data.replacement_current_value_serving import physical_source_proof_dependency
+        dependency_payload["current_provider_physical_proofs"] = {
+            model: physical_source_proof_dependency(serving.get("physical_response"))
+            for model, serving in (bayes_precision_fusion_override.current_value_serving or {}).items()
+        }
     dependency_hash = _json_hash(dependency_payload)
     posterior_config = {
         "posterior_method": "openmeteo_ecmwf_ifs9_bayes_fusion",
