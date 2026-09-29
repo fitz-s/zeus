@@ -990,10 +990,14 @@ class TestDay0DiurnalResidualRefitScheduled:
         import src.ingest_main as im
         import src.observability.scheduler_health  # noqa: F401 -- import before patching STATE_DIR
 
+        from src.calibration.day0_diurnal_residual import SCHEMA_VERSION
+
         today = _dt.datetime.now(_dt.timezone.utc).date().isoformat()
         out_path = tmp_path / "day0_diurnal_residual.json"
         out_path.write_text(
-            _json.dumps({"fit_date": today, "schema_version": 1, "pooled": {}, "city": {}}),
+            _json.dumps(
+                {"fit_date": today, "schema_version": SCHEMA_VERSION, "pooled": {}, "city": {}}
+            ),
             encoding="utf-8",
         )
         before_text = out_path.read_text(encoding="utf-8")
@@ -1025,6 +1029,36 @@ class TestDay0DiurnalResidualRefitScheduled:
         assert job_name == "ingest_day0_diurnal_residual_refit"
         assert kwargs["failed"] is False, "a skip is a healthy outcome, not a failure"
 
+    def test_refits_today_when_incumbent_has_an_older_schema(self, tmp_path) -> None:
+        """Deploy blocker 2026-09-29: the live incumbent was fit TODAY by the previous
+        fitter (schema 1). The current loader cannot serve it, so the boot catch-up must
+        refit now rather than skip until tomorrow's cron; today's fit_date with the
+        CURRENT schema still skips."""
+        import datetime as _dt
+        import json as _json
+
+        import src.ingest_main as im
+        from src.calibration.day0_diurnal_residual import SCHEMA_VERSION
+
+        today = _dt.datetime.now(_dt.timezone.utc).date().isoformat()
+        out_path = tmp_path / "day0_diurnal_residual.json"
+        run_calls = []
+
+        def _fake_run(cmd, **kwargs):
+            run_calls.append(cmd)
+            return type("R", (), {"returncode": 0, "stdout": "wrote ok", "stderr": ""})()
+
+        for schema, runs_after in ((SCHEMA_VERSION - 1, 1), (SCHEMA_VERSION, 1)):
+            out_path.write_text(
+                _json.dumps({"fit_date": today, "schema_version": schema}), encoding="utf-8"
+            )
+            with (
+                patch("src.config.STATE_DIR", tmp_path),
+                patch("subprocess.run", side_effect=_fake_run),
+            ):
+                im._day0_diurnal_residual_refit_tick.__wrapped__()
+            assert len(run_calls) == runs_after, f"schema={schema}"
+
     def test_runs_fitter_when_incumbent_is_from_a_prior_day(self, tmp_path) -> None:
         """An incumbent fit through YESTERDAY (or any earlier date) must still trigger a
         normal refit -- the guard is fit_date-equality-to-today only, never a broader
@@ -1033,13 +1067,16 @@ class TestDay0DiurnalResidualRefitScheduled:
         import json as _json
 
         import src.ingest_main as im
+        from src.calibration.day0_diurnal_residual import SCHEMA_VERSION
 
         yesterday = (
             _dt.datetime.now(_dt.timezone.utc).date() - _dt.timedelta(days=1)
         ).isoformat()
         out_path = tmp_path / "day0_diurnal_residual.json"
         out_path.write_text(
-            _json.dumps({"fit_date": yesterday, "schema_version": 1, "pooled": {}, "city": {}}),
+            _json.dumps(
+                {"fit_date": yesterday, "schema_version": SCHEMA_VERSION, "pooled": {}, "city": {}}
+            ),
             encoding="utf-8",
         )
 

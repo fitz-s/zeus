@@ -5163,12 +5163,18 @@ def _day0_diurnal_residual_refit_tick():
     # when the host can least afford it. An incumbent whose fit_date already equals
     # today's UTC date has nothing to gain before tomorrow; skip and report SUCCESS.
     # A cron run always fires on a new fit_date, so the check is a no-op there.
+    # An incumbent written by an older fitter schema is not servable by the current
+    # loader, so today's fit_date alone never skips: a schema change refits at boot.
+    from src.calibration.day0_diurnal_residual import SCHEMA_VERSION as _DIURNAL_SCHEMA
+
     if out_path.exists():
         try:
-            incumbent_fit_date = json.loads(out_path.read_text(encoding="utf-8")).get("fit_date")
+            incumbent = json.loads(out_path.read_text(encoding="utf-8"))
+            incumbent_fit_date = incumbent.get("fit_date")
+            incumbent_schema = incumbent.get("schema_version")
         except Exception:
-            incumbent_fit_date = None
-        if incumbent_fit_date == fit_date:
+            incumbent_fit_date = incumbent_schema = None
+        if incumbent_fit_date == fit_date and incumbent_schema == _DIURNAL_SCHEMA:
             logger.info(
                 "[DAY0_DIURNAL_RESIDUAL_REFIT] skipping -- incumbent already fit through %s",
                 fit_date,
