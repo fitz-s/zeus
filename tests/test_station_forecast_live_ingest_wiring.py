@@ -415,6 +415,7 @@ def _station_body_writer(monkeypatch, provider, db_path=None):
         return Response()
     monkeypatch.setattr(urllib.request, "urlopen", http)
     monkeypatch.setattr(adapter, "datetime", Clock)
+    monkeypatch.setattr("src.data.bayes_precision_fusion_download.datetime", Clock)
     conn = _hourly_schema_conn(db_path)
     if provider == "hko":
         assert adapter.ingest_hko_fnd_live(conn, metrics=("high", "low")) == 4
@@ -426,26 +427,31 @@ def _station_body_writer(monkeypatch, provider, db_path=None):
     return conn, body, city, models
 
 
-def _station_grid_cohort(monkeypatch, conn, db_path, city):
+def _station_grid_cohort(
+    monkeypatch, conn, db_path, city, *, target_dates=("2026-07-24", "2026-07-25"),
+    cycle=None, captured=None,
+):
     """Actual grid producer supplies the second provider family for a cohort."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import date, datetime, timedelta, timezone
+    from zoneinfo import ZoneInfo
     from src.config import runtime_cities_by_name
     from src.data import bayes_precision_fusion_download as dl
 
-    captured = datetime(2026, 7, 23, 10, 15, tzinfo=timezone.utc)
-    cycle = captured.replace(hour=6, minute=0)
+    captured = captured or datetime(2026, 7, 23, 10, 15, tzinfo=timezone.utc)
+    cycle = cycle or captured.replace(hour=6, minute=0)
     class Clock(datetime):
         @classmethod
         def now(cls, tz=None):
             return captured.astimezone(tz) if tz else captured.replace(tzinfo=None)
     def fetch(_url, params, **kwargs):
-        start = datetime(2026, 7, 24)
+        start = datetime.fromisoformat(min(target_dates))
+        hours = (date.fromisoformat(max(target_dates)) - start.date()).days * 24 + 24
         payload = {"latitude": float(str(params["latitude"]).split(",")[0]),
                    "longitude": float(str(params["longitude"]).split(",")[0]), "elevation": 32.0,
                    "timezone": str(params["timezone"]).split(",")[0],
                    "hourly_units": {"temperature_2m": "°C"},
-                   "hourly": {"time": [(start + timedelta(hours=i)).isoformat(timespec="minutes") for i in range(48)],
-                              "temperature_2m": [26.0 + i % 7 for i in range(48)]}}
+                   "hourly": {"time": [(start + timedelta(hours=i)).isoformat(timespec="minutes") for i in range(hours)],
+                              "temperature_2m": [26.0 + i % 7 for i in range(hours)]}}
         body = (json.dumps(payload, indent=2) + "\n").encode()
         kwargs["capture_entity_body"](body, captured.timestamp())
         return json.loads(body)
@@ -457,15 +463,16 @@ def _station_grid_cohort(monkeypatch, conn, db_path, city):
     models = ("icon_global", "ukmo_global_deterministic_10km")
     targets = [dl.BayesPrecisionFusionDownloadTarget(
         city=city, target_date=target, metric=metric, latitude=point.lat,
-        longitude=point.lon, timezone_name=point.timezone, lead_days=int(target[-2:]) - 23,
-    ) for target in ("2026-07-24", "2026-07-25") for metric in ("high", "low")]
+        longitude=point.lon, timezone_name=point.timezone,
+        lead_days=(date.fromisoformat(target) - captured.astimezone(ZoneInfo(point.timezone)).date()).days,
+    ) for target in target_dates for metric in ("high", "low")]
     conn.commit()
     report = dl.download_bayes_precision_fusion_extra_raw_inputs(
         forecast_db=db_path, cycle=cycle, targets=targets, models=models,
         frozen_source_runs={model: (cycle, captured) for model in models},
         include_previous_runs=False, prune_after=False,
     )
-    assert report["written_row_count"] == 8
+    assert report["written_row_count"] == len(targets) * len(models)
     return models
 
 
@@ -583,6 +590,52 @@ def test_shared_station_selector_and_frontier_reject_corrupt_body_without_hiding
     assert models["low"] in read_current_instrument_values(
         conn, city=city, metric="low", target_date="2026-07-24", **timing, include_station_sources=True,
     )
+    conn.close()
+
+
+@pytest.mark.parametrize("bad_metric", ("high", "low"))
+@pytest.mark.parametrize("value,unit,valid", ((True, "C", False), (float("nan"), "C", False),
+                                            (33, "°C", True), (33, "CELSIUS", True),
+                                            (33, "F", False), (33, None, False)))
+def test_normal_hko_dual_metric_writer_preserves_valid_sibling_and_original_bad_row(monkeypatch, bad_metric, value, unit, valid):
+    import hashlib
+    import urllib.request
+    from datetime import datetime, timezone
+    from src.data.replacement_current_value_serving import read_current_instrument_values
+
+    temperatures = {"high": {"value": 33, "unit": "C"}, "low": {"value": 27, "unit": "C"}}
+    temperatures[bad_metric] = {"value": value, "unit": unit}
+    body = (json.dumps({"updateTime": "2026-07-23T18:14:00+08:00", "weatherForecast": [{
+        "forecastDate": "20260724", "forecastMaxtemp": temperatures["high"], "forecastMintemp": temperatures["low"],
+    }]}, indent=2) + "\n").encode()
+    class Response:
+        def __enter__(self):
+            return self
+        def __exit__(self, *_args):
+            pass
+        def read(self):
+            return body
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            when = datetime(2026, 7, 23, 10, 15, tzinfo=timezone.utc)
+            return when.astimezone(tz) if tz else when.replace(tzinfo=None)
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr(adapter, "datetime", Clock)
+    monkeypatch.setattr("src.data.bayes_precision_fusion_download.datetime", Clock)
+    conn = _hourly_schema_conn()
+    assert adapter.ingest_hko_fnd_live(conn, metrics=("high", "low")) == (2 if valid else 1)
+    expected = {"high", "low"} if valid else {"low" if bad_metric == "high" else "high"}
+    assert {row[0] for row in conn.execute("SELECT metric FROM raw_model_forecasts")} == expected
+    artifact = conn.execute("SELECT artifact_path,sha256,artifact_metadata_json FROM raw_forecast_artifacts").fetchone()
+    assert Path(artifact[0]).read_bytes() == body and artifact[1] == hashlib.sha256(body).hexdigest()
+    assert {item["metric"] for item in json.loads(artifact[2])["station_response"]["items"]} == expected
+    for metric in ("high", "low"):
+        served = read_current_instrument_values(
+            conn, city="Hong Kong", metric=metric, target_date="2026-07-24", include_station_sources=True,
+            source_cycle_time_iso="2026-07-23T10:14:00+00:00", decision_time_iso="2026-07-23T10:16:00+00:00",
+        )
+        assert ("hko_fnd" in served) is (metric in expected)
     conn.close()
 
 

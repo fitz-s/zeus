@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import sqlite3
 import xml.etree.ElementTree as ET
@@ -163,11 +164,19 @@ def parse_hko_fnd_payload(
             temp_obj = entry.get(temp_key)
             if not isinstance(temp_obj, Mapping):
                 continue
-            unit = str(temp_obj.get("unit", "C")).strip().upper()
+            unit = str(temp_obj.get("unit", "")).strip().upper()
             if unit not in {"C", "CELSIUS", "°C"}:
                 # forecast_value_c MUST be degC; refuse to silently store a non-C value.
+                logging.getLogger(__name__).warning("HKO forecast row unavailable: date=%s metric=%s reason=unit", target_iso, metric)
                 continue
-            value_c = float(temp_obj.get("value"))
+            raw_value = temp_obj.get("value")
+            if isinstance(raw_value, bool):
+                logging.getLogger(__name__).warning("HKO forecast row unavailable: date=%s metric=%s reason=boolean_value", target_iso, metric)
+                continue
+            value_c = float(raw_value)
+            if not math.isfinite(value_c):
+                logging.getLogger(__name__).warning("HKO forecast row unavailable: date=%s metric=%s reason=nonfinite_value", target_iso, metric)
+                continue
         except (TypeError, ValueError):
             continue
         target_date = date.fromisoformat(target_iso)
@@ -239,7 +248,7 @@ def reextract_station_response_value(raw_body: bytes, proof: Mapping[str, object
             rows = parse_hko_fnd_payload(payload, metric=metric, captured_at=captured.isoformat())
             entries = [entry for entry in payload["weatherForecast"]
                        if isinstance(entry, Mapping) and entry.get("forecastDate") == target.strftime("%Y%m%d")]
-            if (len(entries) != 1 or entries[0][field].get("unit") != "C"
+            if (len(entries) != 1 or str(entries[0][field].get("unit", "")).strip().upper() not in {"C", "CELSIUS", "°C"}
                     or isinstance(entries[0][field].get("value"), bool)):
                 return None
         elif model == f"cwa_township_hourly_{metric}":
