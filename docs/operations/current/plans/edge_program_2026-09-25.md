@@ -104,7 +104,7 @@ LIVE means landed plus a live metric proving it runs.
 | Day0 carrier producer/replay parity | LIVE | `8df58fddc`: one provider-collapse implementation; mismatch family-scoped. |
 | Cut completion (N5) | OPEN, P0 | Since 15:36Z every cut is INCOMPLETE: `solver.py:4151` selector picks an order its own validator rejects; plus ~80 % cancel/preempt from silent probes and a 39k unacked wake backlog. |
 | Family scoping as one structural rule | OPEN | Reason list is piecemeal; repo-wide parity audit in flight. |
-| Post-selection Day0 vetoes | OPEN | DIURNAL_NOWCAST / ASK_REPRICING reject winners; move into q / ranking cost. |
+| Post-selection Day0 vetoes | DONE 2026-09-29 | DIURNAL_NOWCAST deleted, residual mixed into Day0 q (§1e); ASK_REPRICING and executable size share one predicate between ranking and admission, anchored on the selected book. |
 | Market-anchored family correction | TOOLING | `0faa85cc9` offline fit; refit on exact q_raw once labels accrue. |
 | Day0 max/min remaining-window operator | PARTIAL | Center bias active in 2 of 24 cells. Resolver operator OFF. |
 | 10-minute consistency wait | NOT STARTED | `source_clock_vnext.py:17` |
