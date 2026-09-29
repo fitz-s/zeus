@@ -3344,6 +3344,9 @@ def _bind_provider_geometry_identity(
         if isinstance(proof, Mapping):
             stable = {key: proof[key] for key in stable_keys if key in proof}
             stable["product_id"] = str(stable.get("product_id", "")).split("::run=")[0]
+            if isinstance(proof.get("model_surface_witness"), Mapping):
+                witness = proof["model_surface_witness"]
+                stable["model_surface_geometry"] = witness.get("geometry")
             if isinstance(stable.get("selection"), Mapping):
                 stable["selection"] = {key: value for key, value in stable["selection"].items()
                     if key != "forecast_date"}
@@ -4077,7 +4080,9 @@ def _fusion_current_evidence_shape_has_live_authority(
     if not isinstance(shape, Mapping):
         return False
     return current_evidence_shape_has_entry_authority(
-        {"bayes_precision_fusion": {"current_evidence_shape": shape}}, materialized_at=materialized_at,
+        {"bayes_precision_fusion": {"current_evidence_shape": shape,
+            "current_value_serving": getattr(fusion, "current_value_serving", None),
+            "used_models": getattr(fusion, "used_models", None)}}, materialized_at=materialized_at,
     )
 
 

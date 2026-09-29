@@ -415,15 +415,16 @@ def test_physical_manifest_redacts_request_credentials(tmp_path, monkeypatch):
         assert secret not in evidence
 
 
-def test_station_ground_facts_identity_excludes_audit_but_cutoff_requires_possession(tmp_path, monkeypatch):
+@pytest.mark.parametrize("city", ("Hong Kong", "Chicago"))
+def test_station_ground_facts_identity_excludes_audit_but_cutoff_requires_possession(tmp_path, monkeypatch, city):
     from dataclasses import dataclass
     import src.config as config
-    from tests.test_config import _official_hko_registry
+    from tests.test_config import _official_hko_registry, _official_kord_registry
     from src.data.replacement_forecast_materializer import _bind_provider_geometry_identity
     from src.data.replacement_forecast_cycle_policy import _anchor_station_ground_has_authority
 
-    _official_hko_registry(tmp_path, monkeypatch)
-    station = config.runtime_station_geometry_for_city(config.runtime_cities_by_name()["Hong Kong"])
+    (_official_hko_registry if city == "Hong Kong" else _official_kord_registry)(tmp_path, monkeypatch)
+    station = config.runtime_station_geometry_for_city(config.runtime_cities_by_name()[city])
     assert station["ground_status"] == "VERIFIED"
     @dataclass(frozen=True)
     class Shape:
@@ -442,7 +443,7 @@ def test_station_ground_facts_identity_excludes_audit_but_cutoff_requires_posses
     proof = {"revision": "openmeteo_ifs9_o1280_source_cell_v1", "station_registry_sha256": "a" * 64,
         "station_ground_proof": {"revision": "station_ground_roles_v1", "status": "VERIFIED", "reason": None,
             "facts": station["ground_facts"], "audit": station["ground_audit"]}}
-    metadata = Metadata("Hong Kong", str(station["station_id"]), float(station["lat"]), float(station["lon"]),
+    metadata = Metadata(city, str(station["station_id"]), float(station["lat"]), float(station["lon"]),
         float(station["ground_elevation_m"]), proof)
     bound = _bind_provider_geometry_identity(Shape(), {}, anchor_metadata=metadata, decision_at="2026-09-29T22:00:00+00:00")
     assert _anchor_station_ground_has_authority(bound.provider_geometry_evidence, bound.provider_geometry_audit, "2026-09-29T22:00:00Z")
@@ -457,6 +458,7 @@ def test_station_ground_facts_identity_excludes_audit_but_cutoff_requires_posses
     other = _bind_provider_geometry_identity(Shape(), {}, anchor_metadata=replace(metadata, source_geometry_proof=changed_audit),
         decision_at="2026-09-29T22:00:00Z")
     assert other.provider_geometry_identity_hash == bound.provider_geometry_identity_hash
+    assert not _anchor_station_ground_has_authority(other.provider_geometry_evidence, other.provider_geometry_audit, "2026-09-29T22:00:00Z")
     assert other.shape_hash == bound.shape_hash
     changed_audit["station_ground_proof"]["facts"]["elevation_m"] = 33.0
     changed = _bind_provider_geometry_identity(Shape(), {}, anchor_metadata=replace(metadata, source_geometry_proof=changed_audit),
@@ -812,6 +814,38 @@ def test_interrupted_physical_receipt_scan_never_returns_an_older_best(tmp_path,
     monkeypatch.setattr(serving.time, "monotonic", lambda:next(ticks))
     with pytest.raises(serving.CurrentValueServingReadUnavailable, match="scan_budget_exceeded"):
         serving._read_product_identity_at_cutoff(conn, identity)
+    conn.close()
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_current_reader_binds_actual_model_surface_and_recovers_bad_asset_causally(tmp_path, monkeypatch, metric):
+    from src.data import bayes_precision_fusion_download as dl
+    from src.data import openmeteo_model_surface as surface
+    from src.data.replacement_current_value_serving import read_current_instrument_values, physical_source_proof_dependency
+    conn, target, cycle = _current_rows(tmp_path, monkeypatch, metric=metric)
+    def current(hour):
+        return read_current_instrument_values(conn, city=target.city, metric=metric, target_date=target.target_date,
+            source_cycle_time_iso=cycle.isoformat(), decision_time_iso=cycle.replace(hour=hour).isoformat())
+    original = current(5)["icon_global"]
+    proof = original.physical_response
+    witness = proof["model_surface_witness"]
+    assert witness["status"] == "VERIFIED" and witness["geometry"]["native_surface"] == "LAND"
+    assert witness["geometry"]["native_grid_elevation_m"] == 6
+    assert proof["target_dem_elevation_m"] == 123  # Distinct physical roles, no DEM-as-native.
+    assert physical_source_proof_dependency(proof)["model_surface_asset"]["whole_sha256"] == witness["asset_audit"]["whole_sha256"]
+    # A damaged proof manifest requires new possession. Repairing only the
+    # known whole-byte cache would correctly retain its original clock.
+    Path(witness["asset_audit"]["manifest_path"]).write_bytes(b"broken-owned-static-fixture")
+    assert "icon_global" not in current(5)
+    assert "ukmo_global_deterministic_10km" in current(5)  # Exact model, not global degradation.
+    _download_time(monkeypatch, dl, cycle.replace(hour=6))
+    restored_asset = surface.ensure_model_surface("icon_global")
+    assert restored_asset.status == "READY"
+    assert "icon_global" not in current(5)  # Later possession cannot repair the old decision.
+    restored = current(7)["icon_global"]
+    assert restored.raw_model_forecast_id == original.raw_model_forecast_id
+    assert restored.physical_response["entity_body_sha256"] == proof["entity_body_sha256"]
+    assert physical_source_proof_dependency(restored.physical_response) != physical_source_proof_dependency(proof)
     conn.close()
 @pytest.mark.parametrize("damage", (None,"wrong_first_site"))
 def test_single_model_location_batch_persists_and_serves_second_city_both_metrics(tmp_path,monkeypatch,damage):

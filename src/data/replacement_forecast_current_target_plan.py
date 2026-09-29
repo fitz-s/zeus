@@ -793,6 +793,7 @@ def _fusion_current_value_count(
     target_date: str,
     temperature_metric: str,
     source_cycle_time: str | None,
+    decision_time: datetime | None = None,
     raw_model_forecasts_available: bool | None = None,
 ) -> int:
     """Count current values the materializer q path can actually serve for a scope."""
@@ -817,6 +818,7 @@ def _fusion_current_value_count(
                 target_date=target_date,
                 source_cycle_time_iso=str(source_cycle_time),
                 include_station_sources=True,
+                decision_time_iso=decision_time.isoformat() if decision_time is not None else None,
             )
         )
     except Exception:
@@ -3187,6 +3189,7 @@ def build_replacement_forecast_current_target_plan(
                     or openmeteo_resolved_cycle
                     or baseline_source_cycle_time,
                     raw_model_forecasts_available="raw_model_forecasts" in tables,
+                    decision_time=decision_time,
                 )
             input_lag_reason = None
             if posterior_count > 0 and readiness_count > 0:

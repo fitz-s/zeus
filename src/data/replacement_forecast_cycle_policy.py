@@ -202,7 +202,7 @@ def current_evidence_shape_semantics_mismatch(provenance: object) -> bool:
 def _anchor_station_ground_has_authority(geometry: Mapping[str, object], audit: object, materialized_at: object = None) -> bool:
     """Re-read official ground bytes; airport/reference labels cannot certify it."""
     try:
-        from src.config import runtime_cities_by_name, runtime_station_geometry_for_city
+        from src.config import STATION_GROUND_SOURCE_ARTIFACTS, runtime_cities_by_name, runtime_station_geometry_for_city
 
         if materialized_at is None:
             return False  # Never trust a self-claimed replacement cutoff.
@@ -215,18 +215,21 @@ def _anchor_station_ground_has_authority(geometry: Mapping[str, object], audit: 
         if not isinstance(audit, Mapping) or not isinstance(audit.get("anchor_station_ground"), Mapping):
             return False
         frozen_audit = audit["anchor_station_ground"]
+        facts = ground.get("facts")
+        if not isinstance(facts, Mapping):
+            return False
         decision = datetime.fromisoformat(str(audit["decision_at"]).replace("Z", "+00:00"))
         if materialized_at is not None and decision != datetime.fromisoformat(str(materialized_at).replace("Z", "+00:00")):
             return False
         possessed = datetime.fromisoformat(str(frozen_audit["checked_at"]).replace("Z", "+00:00"))
         digest = frozen_audit.get("body_sha256")
         if (decision.tzinfo is None or possessed.tzinfo is None or possessed > decision
-            or frozen_audit.get("artifact_ref") != "config/hko_station_metadata.html"
+            or frozen_audit.get("artifact_ref") != STATION_GROUND_SOURCE_ARTIFACTS.get(str(facts.get("source_kind")))
             or not isinstance(digest, str) or len(digest) != 64
             or any(char not in "0123456789abcdef" for char in digest)):
             return False
         station = runtime_station_geometry_for_city(city)
-        facts = ground.get("facts")
+        actual_audit = station.get("ground_audit")
         return (
             station.get("validity_reason") is None
             and station.get("ground_status") == "VERIFIED"
@@ -234,6 +237,8 @@ def _anchor_station_ground_has_authority(geometry: Mapping[str, object], audit: 
             and ground.get("status") == "VERIFIED"
             and isinstance(facts, Mapping)
             and facts == station.get("ground_facts")
+            and isinstance(actual_audit, Mapping)
+            and digest == actual_audit.get("body_sha256")
             and anchor["station_id"] == station["station_id"]
             and float(anchor["station_elevation_m"]) == float(station["ground_elevation_m"])
             and float(anchor["station_lat"]) == float(station["lat"])
@@ -287,6 +292,34 @@ def _current_evidence_shape_has_probability_authority(
     if shape.get("provider_geometry_identity_hash") != geometry_hash:
         return False
     if not _anchor_station_ground_has_authority(geometry, shape.get("provider_geometry_audit"), materialized_at):
+        return False
+    try:
+        payload = json.loads(provenance) if isinstance(provenance, str) else provenance
+        serving = payload["bayes_precision_fusion"]["current_value_serving"]
+        used = payload["bayes_precision_fusion"]["used_models"]
+        if not isinstance(used, (list, tuple)) or not used or any(
+            model not in geometry["providers"] and model != "ecmwf_ifs" for model in used
+        ):
+            return False
+        from src.data.replacement_current_value_serving import _is_station_model
+        from src.data.openmeteo_model_surface import validate_model_surface_witness, model_surface_stable_projection
+        for model, physical_geometry in geometry["providers"].items():
+            if model == "__anchor_ifs9__" or _is_station_model(str(model)):
+                continue
+            if model == "ecmwf_ifs":
+                proof = physical_geometry.get("source_cell_geometry_proof")
+                if not isinstance(proof, Mapping) or proof.get("revision") != "openmeteo_ifs9_o1280_source_cell_v1" or proof.get("cell_is_sea") is not False:
+                    return False
+                continue
+            physical = serving[model]["physical_response"]
+            witness = physical["model_surface_witness"]
+            if (physical_geometry.get("model_surface_geometry") != model_surface_stable_projection(witness)
+                or validate_model_surface_witness(witness, model=str(model),
+                    selected_latitude=float(physical_geometry["selected_latitude"]),
+                    selected_longitude=float(physical_geometry["selected_longitude"]),
+                    body_captured_at=str(physical["proof_captured_at"]), decision_at=materialized_at) is not None):
+                return False
+    except (KeyError, TypeError, ValueError, OSError):
         return False
     return (
         str(shape.get("semantics_revision") or "")

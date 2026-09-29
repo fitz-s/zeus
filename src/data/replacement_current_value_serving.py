@@ -802,7 +802,8 @@ def _physical_response_has_authority(row: Mapping[str, object]) -> bool:
             decision_at=str(row.get("physical_proof_cutoff") or row["captured_at"]))
         high_c, low_c = values[model]
         expected = high_c if row["metric"] == "high" else low_c if row["metric"] == "low" else None
-        return expected is not None and math.isclose(float(expected), float(row["forecast_value_c"]), abs_tol=1e-9)
+        return (expected is not None and math.isclose(float(expected), float(row["forecast_value_c"]), abs_tol=1e-9)
+            and _current_model_surface_witness(row, geometry, artifact) is not None)
     except (KeyError, IndexError, TypeError, ValueError, OSError, json.JSONDecodeError):
         return False
 
@@ -818,6 +819,36 @@ def physical_source_proof_dependency(proof: object) -> Mapping[str, object] | No
         result["model_surface_asset"] = {key: surface["asset_audit"].get(key) for key in
             ("whole_sha256", "manifest_sha256", "etag", "last_modified", "s3_version_id")}
     return result
+
+
+def _current_model_surface_witness(row: Mapping[str, object], geometry: Mapping[str, object], artifact: Mapping[str, object]) -> Mapping[str, object] | None:
+    model = str(row["model"])
+    if model == "ecmwf_ifs":
+        # Preserve the existing exact O1280 witness; no other provider may
+        # borrow its surface or grid identity.
+        proof = geometry.get("source_cell_geometry_proof")
+        if not isinstance(proof, Mapping) or proof.get("revision") != "openmeteo_ifs9_o1280_source_cell_v1" or proof.get("cell_is_sea") is not False:
+            return None
+        from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
+        try:
+            actual = source_cell_geometry_proof(latitude=float(geometry["selected_latitude"]),
+                longitude=float(geometry["selected_longitude"]), target_elevation_m=float(geometry["target_dem_elevation_m"]))
+            return {"revision": "openmeteo_ifs9_o1280_source_cell_v1", "status": "VERIFIED", "geometry": actual} if actual == proof else None
+        except (OSError, ValueError, TypeError):
+            return None
+    cutoff = row.get("physical_proof_cutoff")
+    if cutoff is None:
+        return None  # A carrier cycle is not a proof possession decision cutoff.
+    from src.data.openmeteo_model_surface import (
+        read_model_surface_capture, model_surface_witness, validate_model_surface_witness,
+    )
+    asset = read_model_surface_capture(model, decision_at=str(cutoff))
+    proof = model_surface_witness(model, selected_latitude=float(geometry["selected_latitude"]),
+        selected_longitude=float(geometry["selected_longitude"]), body_captured_at=str(artifact["captured_at"]), asset_capture=asset)
+    if validate_model_surface_witness(proof, model=model, selected_latitude=float(geometry["selected_latitude"]),
+        selected_longitude=float(geometry["selected_longitude"]), body_captured_at=str(artifact["captured_at"]), decision_at=str(cutoff)) is not None:
+        return None
+    return proof
 
 
 def _physical_response_provenance(row: Mapping[str, object]) -> Mapping[str, object] | None:
@@ -842,6 +873,8 @@ def _physical_response_provenance(row: Mapping[str, object]) -> Mapping[str, obj
         if math.isclose(float(lat), float(row["latitude_requested"]), abs_tol=1e-6)
         and math.isclose(float(lon), float(row["longitude_requested"]), abs_tol=1e-6)
         and tz == row["timezone_requested"])
+    surface = _current_model_surface_witness(row, metadata["locations"][index], artifact)
+    surface_geometry = surface.get("geometry", {}) if isinstance(surface, Mapping) else {}
     return {"revision": metadata["revision"], "model": row["model"],
         "product_id": row["product_id"], "artifact_id": row["artifact_id"],
         "entity_body_sha256": artifact["sha256"],
@@ -866,7 +899,9 @@ def _physical_response_provenance(row: Mapping[str, object]) -> Mapping[str, obj
         "temporal_resolution": metadata["temporal_resolution"],
         "temperature_unit": metadata["temperature_unit"], "aggregation": metadata["aggregation"],
         "native_grid_elevation_m": None, "native_surface": "UNKNOWN",
-        "representativeness_status": "UNPROVEN", **metadata["locations"][index]}
+        "representativeness_status": "UNPROVEN", **metadata["locations"][index],
+        "model_surface_witness": surface,
+        **{key: surface_geometry[key] for key in ("native_surface", "native_grid_elevation_m") if key in surface_geometry}}
 
 
 def _served_source_clock_row(

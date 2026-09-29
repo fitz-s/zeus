@@ -3324,6 +3324,17 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     prune_skipped_timebox = False
     persist_schema_ready = False
 
+    # Static evidence acquisition is a normal producer prerequisite, not a
+    # network side effect of a probability reader. Unsupported/failed cells
+    # remain diagnostic raw inputs; they do not authorize current precision.
+    model_surface_status: dict[str, object] = {}
+    if not _use_legacy_per_model:
+        from src.data.openmeteo_model_surface import ensure_model_surface
+        for model in requested_models:
+            if wall_clock_deadline is not None and time.monotonic() >= wall_clock_deadline:
+                break
+            model_surface_status[model] = ensure_model_surface(model, deadline=wall_clock_deadline).as_payload()
+
     def _timebox_expired() -> bool:
         return wall_clock_deadline is not None and time.monotonic() >= wall_clock_deadline
 
@@ -4291,6 +4302,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         "candidate_row_count": len(rows),
         "written_row_count": written,
         "committed_families": tuple(sorted(committed_families)),
+        "model_surface_status": model_surface_status,
         "pruned_row_count": pruned,
         "dropped": tuple(dropped),
         "domain_excluded": tuple(sorted(set(domain_excluded))),

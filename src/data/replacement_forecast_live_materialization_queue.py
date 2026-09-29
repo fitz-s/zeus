@@ -2731,6 +2731,7 @@ def _source_clock_missing_configured_sources(
             target_date=target_date,
             source_cycle_time_iso=cycle.isoformat(),
             include_station_sources=True,
+            decision_time_iso=str(payload["computed_at"]) if payload.get("computed_at") is not None else None,
         )
     except Exception:  # noqa: BLE001 - uncertainty must retain the existing retry behavior
         return None

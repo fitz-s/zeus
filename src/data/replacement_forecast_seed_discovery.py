@@ -700,6 +700,7 @@ def _manifest_cycle_has_fusion_current_values(
     city: str,
     target_date: str,
     metric: str,
+    decision_time: datetime,
 ) -> bool | None:
     """Return whether this manifest cycle has persisted BPF current values.
 
@@ -725,6 +726,7 @@ def _manifest_cycle_has_fusion_current_values(
             metric=metric,
             target_date=target_date,
             source_cycle_time_iso=manifest_cycle,
+            decision_time_iso=decision_time.isoformat(),
         )
     except Exception:
         return False
@@ -1184,6 +1186,7 @@ def discover_replacement_forecast_materialization_seeds(
                     city=city,
                     target_date=target_date,
                     metric=metric,
+                    decision_time=computed,
                 )
                 if fusion_current_ready is False:
                     reasons.append(
