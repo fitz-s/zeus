@@ -7751,7 +7751,7 @@ def _reactor_wake_cancellation_probe(
     from src.events.candidate_binding import weather_family_id
     from src.runtime.reactor_wake import (
         WAKE_KIND_BELIEF,
-        WAKE_KIND_BOOK,
+        WAKE_KIND_REBOUND,
         CutDependency,
         _urgent_wake_path,
         cut_invalidating_wakes,
@@ -7835,7 +7835,7 @@ def _reactor_wake_cancellation_probe(
                 defer_forecast_revisions
                 and current_urgent_identity is not None
                 and reason_kind(current_urgent_identity[1])
-                in {WAKE_KIND_BELIEF, WAKE_KIND_BOOK}
+                in {WAKE_KIND_BELIEF, WAKE_KIND_REBOUND}
             )
             # A nonphysical marker may follow a Day0 fact in the same revision
             # window. Inspect all new queued wakes below before accepting it;

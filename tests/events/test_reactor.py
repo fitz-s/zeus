@@ -5594,7 +5594,7 @@ def test_reactor_wake_fill_is_bounded_fair_with_continuous_joint_inputs(tmp_path
     second = reactor_wake.read_reactor_wake(path=path)
     assert second is not None
     assert second.wake_id == "fill-first"
-    assert "position_fill_projected" in reactor_wake.URGENT_WAKE_REASONS
+    assert reactor_wake.wake_advances_revision(second)
     fill_batch = reactor_wake.coalescible_reactor_wakes(second, path=path)
     assert tuple(wake.wake_id for wake in fill_batch) == (
         "fill-first",

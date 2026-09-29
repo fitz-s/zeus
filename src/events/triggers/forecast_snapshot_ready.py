@@ -25,10 +25,7 @@ from src.events.opportunity_event import (
     OpportunityEvent,
     make_opportunity_event,
 )
-from src.strategy.market_phase import (
-    earliest_reachable_target_date,
-    market_phase_admits,
-)
+from src.strategy.market_phase import market_phase_admits
 
 UTC = timezone.utc
 REPLACEMENT_0_1_PRODUCT_ID = "openmeteo_ecmwf_ifs9_bayes_fusion_v1"
@@ -864,9 +861,12 @@ class ForecastSnapshotReadyTrigger:
                 _cycle_index = 0
 
         _decision_iso = decision_time.astimezone(UTC).isoformat()
-        # The shared reachability floor; the precise per-city phase filter
-        # below still owns admission.
-        _target_date_floor = earliest_reachable_target_date(decision_time)
+        # A target date older than UTC-yesterday is strictly past in every
+        # inhabited settlement timezone. Keep yesterday as the conservative
+        # boundary; the precise per-city phase filter below still owns admission.
+        _target_date_floor = (
+            decision_time.astimezone(UTC).date() - timedelta(days=1)
+        ).isoformat()
         _family_filter_sql, _family_filter_params = _family_restriction_sql(
             table_alias="fp",
             city_col="city",

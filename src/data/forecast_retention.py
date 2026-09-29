@@ -177,9 +177,19 @@ def open_position_families(trade_db: Path) -> frozenset[Family]:
     return frozenset(_family(*row) for row in [*rows, *rests])
 
 
-def build_reachability(*, now: datetime, trade_db: Path) -> Reachability:
+def build_reachability(*, now: datetime, trade_db: Path | None = None) -> Reachability:
+    """The one family-reachability law for every store and queue.
+
+    ``trade_db`` defaults to the canonical trade DB. Raises when reachability is
+    unknown (read failure or an unnamed open family); callers keep everything.
+    """
+
+    if trade_db is None:
+        from src.state.db import _zeus_trade_db_path  # noqa: PLC0415
+
+        trade_db = _zeus_trade_db_path()
     oldest = (now.astimezone(timezone.utc).date() - timedelta(days=REACHABLE_TARGET_LAG_DAYS))
-    return Reachability(oldest.isoformat(), open_position_families(trade_db))
+    return Reachability(oldest.isoformat(), open_position_families(Path(trade_db)))
 
 
 @dataclass

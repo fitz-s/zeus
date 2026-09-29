@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace as dataclass_replace
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Collection, Iterator, Mapping
+from typing import Callable, Collection, Iterator, Mapping
 
 REACTOR_WAKE_FILENAME = "edli-reactor-wake.json"
 REACTOR_WAKE_QUEUE_SUFFIX = ".d"
@@ -77,14 +77,6 @@ GLOBAL_AUCTION_COMPLETION_WAKE_REASON = (
 )
 COLLATERAL_AUTHORITY_REFRESHED_WAKE_REASON = "collateral_authority_refreshed"
 GLOBAL_AUCTION_COMPLETION_COALESCE_LIMIT = 16
-URGENT_WAKE_REASONS = frozenset(
-    {
-        "day0_extreme_event_committed",
-        "forecast_posterior_advanced",
-        "market_price_advanced",
-        "position_fill_projected",
-    }
-)
 _WAKE_QUEUE_CACHE_LOCK = threading.Lock()
 _WAKE_QUEUE_CACHE: dict[Path, dict[Path, ReactorWake | None]] = {}
 _WAKE_QUEUE_REVISIONS: dict[Path, tuple[int, ...]] = {}
@@ -970,7 +962,7 @@ def publish_reactor_wake(
     else:
         _atomic_write_wake(queue_target, wake)
         _atomic_write_wake(target, wake)
-    if wake.reason in URGENT_WAKE_REASONS:
+    if wake_advances_revision(wake):
         _atomic_write_wake(_urgent_wake_path(path), wake)
     _notify_reactor_wake(path)
     return wake
@@ -2920,7 +2912,9 @@ def acknowledge_reactor_wakes(
 # wakes published at or after its own decision time and asks one question:
 # does any of them change a fact this cut still depends on? Every wake reason
 # has one kind; the kind alone decides how the cut's dependency is consulted.
-#   BOOK     JIT-rebound at actuation: never invalidates.
+#   REBOUND  books, substrate and collateral wealth, each re-verified at
+#            actuation: invalidates only work that freezes a book-bound
+#            decision without that rebind.
 #   REQUEST  a generic completion marker asks for a cut; a running cut is one.
 #   BELIEF   a posterior for the named families: supersedes the epoch while
 #            the cut still reads belief for one of them (grace-eligible).
@@ -2930,14 +2924,18 @@ def acknowledge_reactor_wakes(
 #            cut at any checkpoint, through final actuation.
 # A family-scoped wake defers until the cut publishes what it values: the cut
 # reads current truth afterwards, and publishing re-judges every wake.
-WAKE_KIND_BOOK = "book"
+# Every kind that can invalidate some running cut advances the urgent-marker
+# revision on publish, so a revision-keyed verdict can never go stale. Only a
+# REQUEST (which invalidates nothing) leaves the marker alone.
+WAKE_KIND_REBOUND = "rebound"
 WAKE_KIND_REQUEST = "request"
 WAKE_KIND_BELIEF = "belief"
 WAKE_KIND_HARD = "hard"
 WAKE_KIND_CAPITAL = "capital"
 _WAKE_KIND_BY_REASON = {
-    "market_price_advanced": WAKE_KIND_BOOK,
-    "money_path_substrate_refreshed": WAKE_KIND_BOOK,
+    "market_price_advanced": WAKE_KIND_REBOUND,
+    "money_path_substrate_refreshed": WAKE_KIND_REBOUND,
+    COLLATERAL_AUTHORITY_REFRESHED_WAKE_REASON: WAKE_KIND_REBOUND,
     "forecast_posterior_advanced": WAKE_KIND_BELIEF,
     "day0_extreme_event_committed": WAKE_KIND_HARD,
     "position_fill_projected": WAKE_KIND_CAPITAL,
@@ -2962,6 +2960,13 @@ def wake_kind(wake: object) -> str:
             getattr(wake, "held_sell_reauction_requests", ())
         ),
     )
+
+
+def wake_advances_revision(wake: object) -> bool:
+    """Whether publishing ``wake`` must advance the urgent-marker revision:
+    exactly when its kind can invalidate some running cut."""
+
+    return wake_kind(wake) != WAKE_KIND_REQUEST
 
 
 @dataclass(frozen=True)
@@ -3056,7 +3061,7 @@ def cut_invalidating_wakes(
         kind = wake_kind(wake)
         if kind == WAKE_KIND_REQUEST:
             continue
-        if kind == WAKE_KIND_BOOK:
+        if kind == WAKE_KIND_REBOUND:
             if not dependency.rebinds_books:
                 epoch.append(wake)
             continue
@@ -3191,16 +3196,18 @@ def record_consumed_scope(
 def wake_is_served(
     wake: ReactorWake,
     *,
-    reachable_floor: str,
+    reachable: Callable[[tuple[str, str, str]], bool],
     consumed: Mapping[tuple[str, str, str], datetime],
 ) -> bool:
     """Whether no consumer can learn anything more from this queued hint.
 
-    True only for a retirable reason whose every named family is either below
-    the reachable target-date floor (no scan, screen or monitor values it) or,
-    for a cut-served reason, was valued by a completed cut whose scope scan
-    began after the wake was published (the publisher commits truth before
-    publishing). A wake naming no family, or any other family, is not served.
+    True only for a retirable reason whose every named family is either
+    unreachable under the one reachability law (``forecast_retention``: past
+    the date lag with no non-terminal position and no open ENTRY rest, so no
+    scan, screen or held monitor still values it) or, for a cut-served reason,
+    was valued by a completed cut whose scope scan began after the wake was
+    published (the publisher commits truth before publishing). A wake naming
+    no family, or any other family, is not served.
     """
 
     if (
@@ -3218,7 +3225,7 @@ def wake_is_served(
         return False
     for raw in wake.forecast_families:
         family = _family(*raw)
-        if family[1] < reachable_floor:
+        if not reachable(family):
             continue
         if wake.reason not in CUT_SERVED_WAKE_REASONS:
             return False
@@ -3232,6 +3239,7 @@ def retire_served_wakes(
     *,
     now: datetime | None = None,
     path: Path | None = None,
+    trade_db: Path | None = None,
     limit: int = RETIRE_SERVED_WAKES_LIMIT,
 ) -> int:
     """Acknowledge queued hints that ``wake_is_served`` proves unservable.
@@ -3240,19 +3248,32 @@ def retire_served_wakes(
     ``limit`` oldest served wakes per call, through the single
     ``acknowledge_reactor_wakes`` path. RESET: bounded by reachability and
     consumption, not age; every other wake stays queued for the scheduler.
+    Unknown reachability (a trade-DB read failure or an unnamed open family)
+    retires nothing.
     """
 
-    from src.strategy.market_phase import earliest_reachable_target_date
+    from src.data.forecast_retention import build_reachability
 
-    floor = earliest_reachable_target_date(now or datetime.now(timezone.utc))
+    try:
+        reach = build_reachability(
+            now=now or datetime.now(timezone.utc), trade_db=trade_db
+        )
+    except Exception:  # noqa: BLE001 - unknown reachability keeps every wake
+        return 0
+
+    def reachable(family: tuple[str, str, str]) -> bool:
+        return reach.reachable(
+            (family[0].replace(" ", "_"), family[1], family[2])
+        )
+
     with _CONSUMED_SCOPE_LOCK:
-        for family in [key for key in _CONSUMED_SCOPE if key[1] < floor]:
+        for family in [key for key in _CONSUMED_SCOPE if not reachable(key)]:
             del _CONSUMED_SCOPE[family]
         consumed = dict(_CONSUMED_SCOPE)
     served = tuple(
         wake
         for _queue_file, wake in _queued_wakes(path)
-        if wake_is_served(wake, reachable_floor=floor, consumed=consumed)
+        if wake_is_served(wake, reachable=reachable, consumed=consumed)
     )[: max(0, int(limit))]
     if not served or not acknowledge_reactor_wakes(served, path=path):
         return 0
