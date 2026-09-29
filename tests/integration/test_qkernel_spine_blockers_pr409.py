@@ -4802,3 +4802,38 @@ def test_global_selected_buy_defers_only_old_quote_to_current_book(direction, re
     else:
         with pytest.raises(ValueError, match="GLOBAL_CURRENT_STATE_PROOF_REJECTION_NOT_REBINDABLE"):
             era._bind_global_current_state_economics_to_proof(proof, cert)
+
+
+def test_global_selected_buy_survives_stale_local_quote_depth_shortfall():
+    """2026-09-29: 9 selected maker winners died at admission because the stale local
+    snapshot row (a fabricated 1-share ask) could not fill the venue minimum as a
+    taker. The global winner was sized on its own curve by the shared executable-size
+    predicate, so the exact-global scope must defer to that binding; ordinary family
+    selection keeps refusing the thin local quote."""
+
+    from dataclasses import replace
+
+    bin_obj = Bin(low=20.0, high=20.0, unit="C", label="20C")
+    row = _row(
+        condition_id="condition-thin", yes_token="yes-thin", no_token="no-thin",
+        yes_ask=0.48, no_ask=0.55, snapshot_id="snapshot-thin",
+    )
+    proof = replace(
+        _proof(direction="buy_yes", row=row, token_id="yes-thin", q_posterior=0.6,
+               q_lcb_5pct=0.5, bin_obj=bin_obj),
+        missing_reason=(
+            "requested 5 shares exceeds executable depth on token 'yes-thin' "
+            "(total ask depth 1 shares); fail closed rather than fabricate a fill price"
+        ),
+        passed_prefilter=False,
+    )
+    ordinary = era._selection_scoped_proofs(
+        proofs=(proof,), honor_admission_rejections=False, enforce_win_rate_floor=False,
+    )
+    exact_global = era._selection_scoped_proofs(
+        proofs=(proof,), honor_admission_rejections=False,
+        allow_global_current_state_rebind=True, allow_global_empty_ask_rebind=True,
+        enforce_win_rate_floor=False,
+    )
+    assert ordinary == ()
+    assert exact_global == (proof,)

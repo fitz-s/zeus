@@ -4757,6 +4757,36 @@ def _objective(
     return _lower_cvar(du, weights, alpha)
 
 
+def single_order_share_infeasibility(
+    curve: ExecutableCostCurve,
+    shares: Decimal,
+    *,
+    execution_mode: str | None,
+    enforce_venue_minimum: bool = True,
+) -> str | None:
+    """THE executable-size predicate for one BUY order on its own curve, or None.
+
+    Shared by selection sizing (``_single_order_cost``) and the selected order's
+    admission, so a winner can never be sized on a depth or lot that admission
+    then refuses. The curve is the one the order was ranked on: the side-native
+    ask ladder for an immediate taker, the passive proposal ladder for a maker rest.
+    """
+
+    requested = Decimal(shares)
+    if requested <= 0:
+        return "share size is below the executable minimum"
+    if (
+        enforce_venue_minimum
+        and execution_mode != "TAKER_LIMIT"
+        and requested < curve.min_order_size
+    ):
+        return "share size is below the executable minimum"
+    depth = sum((level.size for level in curve.levels), Decimal("0"))
+    if depth + Decimal("1e-18") < requested:
+        return "share size exceeds executable depth"
+    return None
+
+
 def _single_order_cost(
     curve: ExecutableCostCurve,
     shares: Decimal,
@@ -4766,13 +4796,15 @@ def _single_order_cost(
 ) -> Decimal:
     """Exact all-in spend for ``shares`` on the side-native ask ladder."""
 
+    reason = single_order_share_infeasibility(
+        curve,
+        shares,
+        execution_mode=execution_mode,
+        enforce_venue_minimum=enforce_venue_minimum,
+    )
+    if reason is not None:
+        raise ValueError(reason)
     remaining = Decimal(shares)
-    if remaining <= 0 or (
-        enforce_venue_minimum
-        and execution_mode != "TAKER_LIMIT"
-        and remaining < curve.min_order_size
-    ):
-        raise ValueError("share size is below the executable minimum")
     cost = Decimal("0")
     for level in curve.levels:
         take = min(remaining, level.size)

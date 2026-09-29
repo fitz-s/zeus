@@ -16389,7 +16389,9 @@ def _global_preflight_entry_authority_receipt(
                     str(getattr(snapshot, "selected_outcome_token_id", "") or "")
                     or str(actionable_payload.get("token_id") or "")
                 ),
-                book_captured_at=getattr(snapshot, "captured_at", None),
+                book_captured_at=_selected_book_captured_at(
+                    receipt.global_actuation, fallback=snapshot
+                ),
                 decision_time=decision_time,
                 trade_conn=trade_conn,
             )
@@ -18098,7 +18100,25 @@ def _global_current_book_may_rebind_rejection(
     text = str(reason or "").strip()
     return text.startswith("LIVE_UNIT_PRICE_OUT_OF_BOUNDS:") or (
         allow_empty_ask
-        and text == "EDLI executable snapshot marked non-executable: clob_no_ask_illiquid"
+        and (
+            text == "EDLI executable snapshot marked non-executable: clob_no_ask_illiquid"
+            or _is_local_quote_depth_shortfall(text)
+        )
+    )
+
+
+def _is_local_quote_depth_shortfall(reason: str | None) -> bool:
+    """A stale local snapshot row could not fill the venue minimum as a taker.
+
+    For a globally selected BUY this is not a fact about the order: the auction
+    sized it on its own sealed curve through ``single_order_share_infeasibility``,
+    and the binding below re-proves that predicate before the rebind.
+    """
+
+    text = str(reason or "")
+    return text.startswith("requested ") and (
+        " exceeds executable depth on token " in text
+        or " is below min_order_size " in text
     )
 
 
@@ -18792,6 +18812,18 @@ def _global_actuation_selected_proof(
         )
     ):
         raise ValueError("GLOBAL_ACTUATION_IDENTITY_INCOMPLETE")
+    if _is_local_quote_depth_shortfall(getattr(proof, "missing_reason", None)):
+        # The admission law is the selector's sizing law: the selected shares must be
+        # executable on the curve they were ranked on, in the mode they will trade.
+        from src.solve.solver import single_order_share_infeasibility
+
+        size_reason = single_order_share_infeasibility(
+            candidate.economic_cost_curve,
+            Decimal(str(decision.shares)),
+            execution_mode=str(getattr(candidate, "execution_mode", "") or ""),
+        )
+        if size_reason is not None:
+            raise ValueError(f"GLOBAL_SELECTED_ORDER_SIZE_INFEASIBLE:{size_reason}")
     bound = _bind_global_current_state_economics_to_proof(proof, cert)
     if trade_conn is not None:
         bound = _bind_global_candidate_executable_snapshot(
@@ -24029,6 +24061,55 @@ DAY0_ASK_WINDOW_START_KEY = "_edli_day0_held_ask_window_start_utc"
 DAY0_ASK_WINDOW_END_KEY = "_edli_day0_held_ask_window_end_utc"
 
 
+def day0_ask_repricing_rejection_reason(
+    *,
+    event_type: str,
+    token_id: str,
+    book_captured_at: datetime | None,
+    trade_conn: sqlite3.Connection | None,
+    counts: dict[tuple[str, datetime], int | None] | None = None,
+) -> tuple[int | None, str | None]:
+    """THE Day0 ask-repricing predicate: (distinct-ask count, rejection reason).
+
+    One function, called by candidate eligibility before ranking and by the
+    selected order's admission, anchored in both at the SELECTED book's capture
+    instant. A winner can therefore only be rejected here when the fact it was
+    selected on changed; a later JIT recapture of the same book never re-anchors
+    the window onto the very ask the winner was ranked against.
+
+    SCOPE: one native BUY token and its sealed-book window. DRAIN: each new
+    selected book reads its own window. RESET: a quiet window clears it; absent
+    evidence stays inert.
+    """
+    from src.engine.day0_admission import DAY0_EVENT_TYPE, DAY0_ASK_REPRICING_MIN_DISTINCT
+
+    token = str(token_id or "").strip()
+    if (
+        event_type != DAY0_EVENT_TYPE
+        or not token
+        or not isinstance(book_captured_at, datetime)
+        or book_captured_at.tzinfo is None
+    ):
+        return None, None
+    key = (token, book_captured_at.astimezone(UTC))
+    if counts is None or key not in counts:
+        payload: dict[str, object] = {"event_type": event_type}
+        stamp_day0_held_ask_repricing(
+            payload, held_token_id=token, book_captured_at=key[1], trade_conn=trade_conn,
+        )
+        count = (
+            int(payload[DAY0_ASK_DISTINCT_10MIN_KEY])
+            if DAY0_ASK_DISTINCT_10MIN_KEY in payload else None
+        )
+        if counts is not None:
+            counts[key] = count
+    else:
+        count = counts[key]
+    if count is not None and count >= DAY0_ASK_REPRICING_MIN_DISTINCT:
+        return count, "DAY0_ASK_REPRICING_VETO"
+    return count, None
+
+
 def _day0_candidate_ask_repricing_rejection_reason(
     candidate: object,
     *,
@@ -24036,34 +24117,17 @@ def _day0_candidate_ask_repricing_rejection_reason(
     trade_conn: sqlite3.Connection,
     counts: dict[tuple[str, datetime], int | None],
 ) -> str | None:
-    """Exclude already-repriced Day0 BUYs using their exact native book clock.
+    """Candidate eligibility: the shared predicate at this candidate's own book."""
 
-    SCOPE: this native BUY token and sealed-book window only. DRAIN: each new
-    window reads current evidence. RESET: a quiet window clears the veto; absent
-    evidence stays inert. The final JIT admission still rereads its own window.
-    """
-    from src.engine.day0_admission import DAY0_EVENT_TYPE, DAY0_ASK_REPRICING_MIN_DISTINCT
-
-    if event_type != DAY0_EVENT_TYPE or str(getattr(candidate, "action", "BUY")).upper() != "BUY":
+    if str(getattr(candidate, "action", "BUY")).upper() != "BUY":
         return None
-    token = str(getattr(candidate, "token_id", "") or "").strip()
-    captured_at = getattr(candidate, "book_captured_at_utc", None)
-    if not token or not isinstance(captured_at, datetime) or captured_at.tzinfo is None:
-        return None
-    key = (token, captured_at.astimezone(UTC))
-    if key not in counts:
-        payload: dict[str, object] = {"event_type": event_type}
-        stamp_day0_held_ask_repricing(
-            payload, held_token_id=token, book_captured_at=key[1], trade_conn=trade_conn,
-        )
-        counts[key] = (
-            int(payload[DAY0_ASK_DISTINCT_10MIN_KEY])
-            if DAY0_ASK_DISTINCT_10MIN_KEY in payload else None
-        )
-    count = counts[key]
-    if count is not None and count >= DAY0_ASK_REPRICING_MIN_DISTINCT:
-        return "DAY0_ASK_REPRICING_VETO"
-    return None
+    return day0_ask_repricing_rejection_reason(
+        event_type=event_type,
+        token_id=str(getattr(candidate, "token_id", "") or ""),
+        book_captured_at=getattr(candidate, "book_captured_at_utc", None),
+        trade_conn=trade_conn,
+        counts=counts,
+    )[1]
 
 
 def stamp_day0_held_ask_repricing(
@@ -24200,6 +24264,18 @@ def _log_day0_ask_repricing_fault(exc: BaseException) -> None:
 _DAY0_ADVISORY_FAULT_LOG_INTERVAL_SECONDS = 3600.0
 
 
+def _selected_book_captured_at(
+    global_actuation: object, *, fallback: object
+) -> datetime | None:
+    """The capture instant of the book the global auction selected this order on."""
+
+    candidate = getattr(getattr(global_actuation, "decision", None), "candidate", None)
+    selected = getattr(candidate, "book_captured_at_utc", None)
+    if isinstance(selected, datetime) and selected.tzinfo is not None:
+        return selected
+    return getattr(fallback, "captured_at", None)
+
+
 def _stamp_day0_live_admission_payload(
     actionable_payload: dict[str, object],
     *,
@@ -24209,14 +24285,28 @@ def _stamp_day0_live_admission_payload(
     decision_time: datetime,
     trade_conn: sqlite3.Connection | None,
 ) -> None:
-    """Stamp the exact Day0 inputs consumed by the final admission predicate."""
+    """Stamp the exact Day0 inputs consumed by the final admission predicate.
 
-    stamp_day0_held_ask_repricing(
-        actionable_payload,
-        held_token_id=held_token_id,
+    ``book_captured_at`` must be the SELECTED book's capture instant (the one the
+    candidate was ranked on), never a later JIT recapture of it.
+    """
+
+    count, _reason = day0_ask_repricing_rejection_reason(
+        event_type=str(actionable_payload.get("event_type") or "").strip(),
+        token_id=str(held_token_id or ""),
         book_captured_at=book_captured_at,
         trade_conn=trade_conn,
     )
+    if count is None:
+        return
+    from src.engine.day0_admission import DAY0_ASK_REPRICING_WINDOW_MINUTES
+
+    window_end = book_captured_at.astimezone(UTC)
+    actionable_payload[DAY0_ASK_DISTINCT_10MIN_KEY] = int(count)
+    actionable_payload[DAY0_ASK_WINDOW_START_KEY] = (
+        window_end - timedelta(minutes=DAY0_ASK_REPRICING_WINDOW_MINUTES)
+    ).isoformat()
+    actionable_payload[DAY0_ASK_WINDOW_END_KEY] = window_end.isoformat()
 
 
 def _sealed_book_observation_from_global_jit_handoff(
@@ -24492,7 +24582,9 @@ def _build_live_execution_command_certificates(
                 str(getattr(_day0_sealed_snapshot, "selected_outcome_token_id", "") or "")
                 or str(actionable_payload.get("token_id") or "")
             ),
-            book_captured_at=getattr(_day0_sealed_snapshot, "captured_at", None),
+            book_captured_at=_selected_book_captured_at(
+                global_actuation, fallback=_day0_sealed_snapshot
+            ),
             decision_time=decision_time,
             trade_conn=trade_conn,
         )

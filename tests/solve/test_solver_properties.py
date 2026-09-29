@@ -9275,3 +9275,68 @@ def test_selector_consults_the_shared_predicate_before_it_binds_an_order(monkeyp
         taker.candidate_id: "NON_POSITIVE_EXPECTED_GROWTH",
         maker.candidate_id: "NON_POSITIVE_EXPECTED_GROWTH",
     }
+
+
+# --- 2026-09-29: selector and selected-order admission share one predicate ---
+
+
+def test_selector_and_selected_order_invariant_share_one_predicate(monkeypatch):
+    """Structural antibody: candidate eligibility (before ranking) and the selected
+    order's admission call the SAME predicate function object, for both the Day0
+    ask-repricing fact and the executable-size fact, anchored on the SELECTED book.
+    A second, divergent copy of either law would let a winner be rejected after
+    selection on a fact it was not selected on."""
+    import inspect
+
+    import src.engine.event_reactor_adapter as era
+
+    calls = []
+    real = era.day0_ask_repricing_rejection_reason
+
+    def spy(**kwargs):
+        calls.append(kwargs["book_captured_at"])
+        return real(**kwargs)
+
+    monkeypatch.setattr(era, "day0_ask_repricing_rejection_reason", spy)
+    at = datetime(2026, 9, 29, 5, 0, tzinfo=UTC)
+    candidate = SimpleNamespace(action="BUY", token_id="t", book_captured_at_utc=at)
+    era._day0_candidate_ask_repricing_rejection_reason(
+        candidate, event_type="DAY0_EXTREME_UPDATED", trade_conn=None, counts={},
+    )
+    selected = SimpleNamespace(decision=SimpleNamespace(candidate=candidate))
+    later_jit = SimpleNamespace(captured_at=at + timedelta(minutes=9))
+    era._stamp_day0_live_admission_payload(
+        {"event_type": "DAY0_EXTREME_UPDATED"}, event_payload={}, held_token_id="t",
+        book_captured_at=era._selected_book_captured_at(selected, fallback=later_jit),
+        decision_time=at, trade_conn=None,
+    )
+    assert calls == [at, at]
+
+    assert "single_order_share_infeasibility(" in inspect.getsource(S._single_order_cost)
+    assert "single_order_share_infeasibility(" in inspect.getsource(
+        era._global_actuation_selected_proof
+    )
+    assert not hasattr(era, "_day0_diurnal_nowcast_verdict")
+
+
+def test_maker_winner_on_thin_ask_is_admissible_and_min_lot_above_depth_is_not():
+    """A MAKER_REST order ranked on its passive curve stays admissible when the ask
+    side is 1 share deep; a minimum lot above the curve depth is infeasible at
+    ranking, so it can never become a winner."""
+    passive = _global_curve(side="YES", token="t", levels=(("0.39", "40"),), min_order="5")
+    thin_ask = _global_curve(side="YES", token="t", levels=(("0.48", "1"),), min_order="5")
+    assert S.single_order_share_infeasibility(
+        passive, Decimal("5"), execution_mode="MAKER_REST"
+    ) is None
+    assert S.single_order_share_infeasibility(
+        thin_ask, Decimal("5"), execution_mode="TAKER_LIMIT"
+    ) == "share size exceeds executable depth"
+    shallow = _global_curve(side="YES", token="t", levels=(("0.39", "3"),), min_order="5")
+    assert S.single_order_share_infeasibility(
+        shallow, Decimal("5"), execution_mode="MAKER_REST"
+    ) == "share size exceeds executable depth"
+    with pytest.raises(ValueError, match="exceeds executable depth"):
+        S._single_order_cost(shallow, Decimal("5"), execution_mode="MAKER_REST")
+    assert S.single_order_share_infeasibility(
+        passive, Decimal("4"), execution_mode="MAKER_REST"
+    ) == "share size is below the executable minimum"
