@@ -188,6 +188,9 @@ _EDLI_COMMAND_RECOVERY_FIRST_DELAY_SECONDS = 43.0
 _EDLI_COMMAND_RECOVERY_FULL_CADENCE_SECONDS = 300.0
 _CAPITAL_RECOVERY_REACTOR_DRAIN_SECONDS = 15.0
 _EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET: int | None = None
+# First cadence bucket whose full sweep a deferred live tick skipped; cleared
+# when a full sweep completes.
+_EDLI_COMMAND_RECOVERY_FULL_SKIPPED_SINCE_BUCKET: int | None = None
 HELD_POSITION_MONITOR_FIRST_DELAY_SECONDS = 5.0
 HELD_POSITION_MONITOR_BOOTSTRAP_CHECK_SECONDS = 5.0
 # Bootstrap-stall visibility (2026-08-24 reversal plan item 5a): the gate below
@@ -8216,18 +8219,31 @@ def _edli_command_recovery_cycle() -> None:
         summary,
         log_context="edli_command_recovery.live_tick",
     )
+    full_bucket = _edli_command_recovery_full_bucket()
+    global _EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET
+    global _EDLI_COMMAND_RECOVERY_FULL_SKIPPED_SINCE_BUCKET
+    if full_bucket == _EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET:
+        return
     if any(
         summary.get(flag)
         for flag in ("db_budget_deferred", "db_lock_deferred", "monitor_preempted")
     ):
-        # SCOPE: this invocation's account-wide full sweep only. DRAIN: the
-        # next cadence retries after live_tick dependencies yield. RESET: a
-        # live_tick summary with all three defer flags clear permits full work.
-        return
-    full_bucket = _edli_command_recovery_full_bucket()
-    global _EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET
-    if full_bucket == _EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET:
-        return
+        # SCOPE: this invocation's account-wide full sweep only. DRAIN: a
+        # yielded live tick may skip the full sweep within one cadence bucket.
+        # RESET: once a skip has crossed a bucket boundary the full sweep runs
+        # anyway; its writes are background-priority and yield to the monitor,
+        # and without it every shape only the full sweep reduces is stranded.
+        skipped_since = _EDLI_COMMAND_RECOVERY_FULL_SKIPPED_SINCE_BUCKET
+        if skipped_since is None:
+            _EDLI_COMMAND_RECOVERY_FULL_SKIPPED_SINCE_BUCKET = full_bucket
+            return
+        if full_bucket <= skipped_since:
+            return
+        logger.warning(
+            "edli_command_recovery: full sweep skipped since bucket %s; "
+            "running it despite live_tick deferral",
+            skipped_since,
+        )
     try:
         invocation_deadline_exhausted = _time.monotonic() >= invocation_deadline
     except Exception:  # pragma: no cover - defensive clock failure is fail-closed
@@ -8245,6 +8261,9 @@ def _edli_command_recovery_cycle() -> None:
     if recovery_client is not None:
         recovery_kwargs["client"] = recovery_client
     full_summary = reconcile_unresolved_commands(**recovery_kwargs)
+    # A full attempt resets the skip clock: deferral may postpone the sweep by
+    # at most one cadence bucket, never indefinitely.
+    _EDLI_COMMAND_RECOVERY_FULL_SKIPPED_SINCE_BUCKET = None
     follow_through_ok = _consume_edli_command_recovery_summary(
         full_summary,
         log_context="edli_command_recovery.full",

@@ -35316,6 +35316,24 @@ def _reconcile_passes_short_conn(
             and time.monotonic() >= scheduler_deadline
         ):
             _entry_posterior_recovery_fast_pass()
+        # The fast lanes run on their own deadlines. The generic sweep's write
+        # slice starts here, so their wall clock cannot leave every generic
+        # pass dead on arrival; passes the slice cannot reach run on the full
+        # sweep, whose cadence a yielded live tick cannot suppress for long.
+        live_tick_deadline = time.monotonic() + live_tick_budget
+        if scheduler_deadline is not None:
+            live_tick_deadline = min(live_tick_deadline, scheduler_deadline)
+        apply_deadline = live_tick_deadline
+        conn_factory = _recovery_priority_conn_factory(
+            cross_db_factory,
+            scope=scope,
+            deadline_monotonic=apply_deadline,
+        )
+        apply_conn_factory = _recovery_apply_conn_factory(
+            conn_factory,
+            scope=scope,
+            deadline_monotonic=apply_deadline,
+        )
 
     # A confirmed trade already persisted for a REVIEW_REQUIRED submit is the
     # narrowest unresolved capital truth: it resolves known exposure and releases

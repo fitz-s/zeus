@@ -22859,11 +22859,15 @@ class TestRecoveryResolutionTable:
             "errors": 0,
         }
         assert capital_apply_calls
-        assert len(priority_deadlines) == 2
+        # initial generic slice, capital lane, then the generic slice
+        # re-anchored after the fast lanes.
+        assert len(priority_deadlines) == 3
         general_deadline = priority_deadlines[0][2]
         capital_deadline = priority_deadlines[1][2]
         assert priority_deadlines[1][0] is _trade_only_conn_factory
         assert capital_deadline > general_deadline + 1.0
+        assert priority_deadlines[2][1] == "live_tick"
+        assert priority_deadlines[2][2] >= general_deadline
         verified = _conn_factory()
         try:
             assert _get_state(verified, "cmd-001") == "EXPIRED"
@@ -40196,6 +40200,133 @@ def test_edli_command_recovery_deferral_skips_full_bucket_until_next_tick(
     ]
     assert main._EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET == 7
 
+
+def test_edli_command_recovery_full_sweep_cannot_be_starved_by_perpetual_deferral(
+    monkeypatch,
+):
+    """Live 2026-09-27..29: every live tick deferred, so no full sweep ran for
+    two days and every shape only the full sweep reduces was stranded. A skip
+    may postpone the full sweep within one cadence bucket, never across one."""
+    from src import main
+    from src.execution import command_recovery, venue_cancel_journal
+    from src.state import db
+
+    class _Connection:
+        def set_progress_handler(self, *_args):
+            pass
+
+        def close(self):
+            pass
+
+    scopes = []
+    bucket = [7]
+
+    def _reconcile(*, scope, deadline_monotonic):
+        scopes.append(scope)
+        summary = {"scope": scope, "scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+        if scope == "live_tick":
+            summary["db_budget_deferred"] = True
+        return summary
+
+    monkeypatch.setattr(main, "_consume_live_control_commands", lambda: None)
+    monkeypatch.setattr(main, "_settings_section", lambda *_args: {})
+    monkeypatch.setattr(main, "get_mode", lambda: "live")
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main, "_edli_command_recovery_full_bucket", lambda: bucket[0])
+    monkeypatch.setattr(main, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", None)
+    monkeypatch.setattr(main, "_EDLI_COMMAND_RECOVERY_FULL_SKIPPED_SINCE_BUCKET", None)
+    monkeypatch.setattr(db, "get_trade_connection_read_only", lambda **_kw: _Connection())
+    monkeypatch.setattr(command_recovery, "capital_blocking_command_count", lambda _c: 0)
+    monkeypatch.setattr(
+        command_recovery, "terminal_exit_residual_projection_pending", lambda _c: False,
+    )
+    monkeypatch.setattr(
+        venue_cancel_journal, "find_screen_redecision_cancel_obligations", lambda _c: [],
+    )
+    monkeypatch.setattr(command_recovery, "reconcile_unresolved_commands", _reconcile)
+    monkeypatch.setattr(
+        main,
+        "_consume_edli_command_recovery_summary",
+        lambda _summary, *, log_context: True,
+    )
+
+    main._edli_command_recovery_cycle.__wrapped__()
+    main._edli_command_recovery_cycle.__wrapped__()
+    assert scopes == ["live_tick", "live_tick"]
+
+    bucket[0] = 8
+    main._edli_command_recovery_cycle.__wrapped__()
+    assert scopes == ["live_tick", "live_tick", "live_tick", "full"]
+    assert main._EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET == 8
+
+    bucket[0] = 9
+    main._edli_command_recovery_cycle.__wrapped__()
+    main._edli_command_recovery_cycle.__wrapped__()
+    bucket[0] = 10
+    main._edli_command_recovery_cycle.__wrapped__()
+    assert scopes[4:] == ["live_tick", "live_tick", "live_tick", "full"]
+
+
+def test_live_tick_generic_pass_is_not_dead_on_arrival_after_slow_fast_lanes(
+    conn, tmp_path, monkeypatch,
+):
+    """Live 2026-09-29: 722 x "budget exhausted at pass
+    review_required_matched_submit_trade_fact". The fast lanes spent the
+    0.1 s generic slice's wall clock, so the first generic pass raised before
+    issuing a query, every tick, forever."""
+    from src.execution import command_recovery, venue_sync_contract
+
+    conn.commit()
+    path = tmp_path / "doa.db"
+    with sqlite3.connect(path) as target:
+        conn.backup(target)
+    now = [0.0]
+    calls = []
+
+    def factory():
+        db = sqlite3.connect(path)
+        db.row_factory = sqlite3.Row
+        return db
+
+    def _slow_fast_lanes():
+        calls.append("capital_fast")
+        now[0] += 5.0
+
+    def _generic(_conn):
+        calls.append("review_required_matched_submit_trade_fact")
+        return {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        command_recovery, "reconcile_review_required_matched_submit_trade_facts", _generic,
+    )
+    real_capital_fast_entry = command_recovery._capital_recovery_db_budget_seconds
+
+    def _budget_then_slow():
+        # Called once as the capital fast lane starts: that lane's work is
+        # what consumes the tick's wall clock.
+        if "capital_fast" not in calls:
+            _slow_fast_lanes()
+        return real_capital_fast_entry()
+
+    monkeypatch.setattr(
+        command_recovery, "_capital_recovery_db_budget_seconds", _budget_then_slow,
+    )
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    command_recovery._reconcile_passes_short_conn(
+        MagicMock(),
+        summary,
+        "2026-09-29T18:50:00+00:00",
+        scope="live_tick",
+        deadline_monotonic=100.0,
+    )
+
+    assert calls[0] == "capital_fast"
+    assert "review_required_matched_submit_trade_fact" in calls
+    assert summary.get("db_budget_deferred_at") != (
+        "review_required_matched_submit_trade_fact"
+    )
 
 def test_edli_command_recovery_shared_deadline_prevents_late_full_sweep(monkeypatch):
     from src import main
