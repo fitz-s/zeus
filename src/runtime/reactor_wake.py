@@ -2912,9 +2912,12 @@ def acknowledge_reactor_wakes(
 # wakes published at or after its own decision time and asks one question:
 # does any of them change a fact this cut still depends on? Every wake reason
 # has one kind; the kind alone decides how the cut's dependency is consulted.
-#   REBOUND  books, substrate and collateral wealth, each re-verified at
-#            actuation: invalidates only work that freezes a book-bound
-#            decision without that rebind.
+#   QUOTE    a venue price move, JIT-rebound at actuation: invalidates only
+#            work that freezes a book-bound decision without that rebind
+#            (a paused no-submit carrier), which it must reach promptly.
+#   REBOUND  substrate and collateral refreshes, re-verified at actuation
+#            (wealth: _global_actuation_current_wealth_block_reason): the
+#            same, but a background refresh that need not interrupt.
 #   REQUEST  a generic completion marker asks for a cut; a running cut is one.
 #   BELIEF   a posterior for the named families: supersedes the epoch while
 #            the cut still reads belief for one of them (grace-eligible).
@@ -2924,19 +2927,18 @@ def acknowledge_reactor_wakes(
 #            cut at any checkpoint, through final actuation.
 # A family-scoped wake defers until the cut publishes what it values: the cut
 # reads current truth afterwards, and publishing re-judges every wake.
-# A kind that can invalidate an auction cut (every such cut rebinds books and
-# wealth at actuation) advances the urgent-marker revision on publish, so a
-# revision-keyed verdict can never go stale. REBOUND and REQUEST cannot, so
-# they leave the marker alone: a REBOUND fact reaches the one consumer that
-# freezes a book-bound decision without a rebind (a paused no-submit carrier)
-# on its next queue read.
+# Every kind but REBOUND and REQUEST advances the urgent-marker revision on
+# publish, so a revision-keyed verdict can never go stale for any kind that
+# can invalidate a cut promptly. REBOUND is re-verified at actuation and
+# reaches a paused carrier on its next queue read; REQUEST invalidates nothing.
+WAKE_KIND_QUOTE = "quote"
 WAKE_KIND_REBOUND = "rebound"
 WAKE_KIND_REQUEST = "request"
 WAKE_KIND_BELIEF = "belief"
 WAKE_KIND_HARD = "hard"
 WAKE_KIND_CAPITAL = "capital"
 _WAKE_KIND_BY_REASON = {
-    "market_price_advanced": WAKE_KIND_REBOUND,
+    "market_price_advanced": WAKE_KIND_QUOTE,
     "money_path_substrate_refreshed": WAKE_KIND_REBOUND,
     COLLATERAL_AUTHORITY_REFRESHED_WAKE_REASON: WAKE_KIND_REBOUND,
     "forecast_posterior_advanced": WAKE_KIND_BELIEF,
@@ -2965,12 +2967,13 @@ def wake_kind(wake: object) -> str:
     )
 
 
-_REVISION_KINDS = frozenset({WAKE_KIND_BELIEF, WAKE_KIND_HARD, WAKE_KIND_CAPITAL})
+_REVISION_KINDS = frozenset(
+    {WAKE_KIND_QUOTE, WAKE_KIND_BELIEF, WAKE_KIND_HARD, WAKE_KIND_CAPITAL}
+)
 
 
 def wake_advances_revision(wake: object) -> bool:
-    """Whether publishing ``wake`` must advance the urgent-marker revision:
-    exactly when its kind can invalidate an auction cut."""
+    """Whether publishing ``wake`` must advance the urgent-marker revision."""
 
     return wake_kind(wake) in _REVISION_KINDS
 
@@ -3067,7 +3070,7 @@ def cut_invalidating_wakes(
         kind = wake_kind(wake)
         if kind == WAKE_KIND_REQUEST:
             continue
-        if kind == WAKE_KIND_REBOUND:
+        if kind in {WAKE_KIND_QUOTE, WAKE_KIND_REBOUND}:
             if not dependency.rebinds_books:
                 epoch.append(wake)
             continue

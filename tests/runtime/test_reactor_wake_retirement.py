@@ -210,17 +210,20 @@ _CUT_DEPENDENCY = reactor_wake.CutDependency(
         "a_reason_no_table_names",
     ),
 )
-def test_revision_advances_exactly_for_wakes_that_can_invalidate_a_cut(tmp_path, reason):
-    """One table: a wake the predicate can count against an auction cut
-    (which rebinds books and wealth) moves the urgent-marker revision, so a
-    revision-keyed verdict cannot go stale; any other wake leaves it alone."""
+def test_every_wake_that_can_invalidate_an_auction_cut_advances_the_revision(
+    tmp_path, reason
+):
+    """One table: a wake the predicate can count against an auction cut (which
+    rebinds books and wealth) moves the urgent-marker revision, so a
+    revision-keyed verdict cannot go stale. Of the rest, only a price quote
+    (which must reach a paused carrier promptly) moves it, as on base."""
 
     path = tmp_path / reactor_wake.REACTOR_WAKE_FILENAME
     wake = _publish(path, reason, (CURRENT,), at=NOW)
     verdict = reactor_wake.cut_invalidating_wakes((wake,), _CUT_DEPENDENCY)
     can_invalidate = bool(verdict.hard or verdict.epoch)
     advanced = reactor_wake.reactor_urgent_wake_revision(path=path) is not None
-    assert advanced is can_invalidate
+    assert advanced is (can_invalidate or reason == "market_price_advanced")
     assert can_invalidate is (
         reason
         not in {
