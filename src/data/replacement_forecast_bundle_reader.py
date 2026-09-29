@@ -1116,9 +1116,13 @@ def _live_grade_provenance(
     if not isinstance(shape, Mapping):
         return None
     shape_authorized = (
-        current_evidence_shape_has_entry_authority(provenance)
+        current_evidence_shape_has_entry_authority(
+            provenance, materialized_at=row_map.get("computed_at")
+        )
         if authority_purpose is ReplacementForecastAuthorityPurpose.ENTRY
-        else current_evidence_shape_has_held_authority(provenance)
+        else current_evidence_shape_has_held_authority(
+            provenance, materialized_at=row_map.get("computed_at")
+        )
     )
     if not shape_authorized:
         return None
