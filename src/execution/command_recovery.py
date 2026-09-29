@@ -4118,7 +4118,11 @@ def _confirmed_bound_trade_fact_summary(
     }
 
 
-def reconcile_complete_exit_trade_fact_commands(conn: sqlite3.Connection) -> dict:
+def reconcile_complete_exit_trade_fact_commands(
+    conn: sqlite3.Connection,
+    *,
+    command_ids: frozenset[str] | None = None,
+) -> dict:
     """Terminalize one SELL when exact confirmed fills cover its command size.
 
     SCOPE: one nonterminal EXIT/SELL command and its exact venue order id.
@@ -4133,6 +4137,14 @@ def reconcile_complete_exit_trade_fact_commands(conn: sqlite3.Connection) -> dic
         and _table_exists(conn, "venue_trade_facts")
     ):
         return summary
+    if command_ids is not None and not command_ids:
+        return summary
+    scoped_ids = tuple(sorted(command_ids)) if command_ids is not None else ()
+    scope_clause = (
+        f" AND command_id IN ({','.join('?' for _ in scoped_ids)})"
+        if command_ids is not None
+        else ""
+    )
     rows = conn.execute(
         """
         SELECT *
@@ -4140,7 +4152,7 @@ def reconcile_complete_exit_trade_fact_commands(conn: sqlite3.Connection) -> dic
          WHERE intent_kind = 'EXIT'
            AND UPPER(COALESCE(side, '')) = 'SELL'
            AND state IN ('ACKED', 'POST_ACKED', 'PARTIAL', 'REVIEW_REQUIRED')
-           AND COALESCE(venue_order_id, '') != ''
+           AND COALESCE(venue_order_id, '') != ''""" + scope_clause + """
            AND EXISTS (
                 SELECT 1
                   FROM venue_trade_facts fact
@@ -4151,7 +4163,8 @@ def reconcile_complete_exit_trade_fact_commands(conn: sqlite3.Connection) -> dic
                    AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
            )
          ORDER BY datetime(updated_at), command_id
-        """
+        """,
+        scoped_ids,
     ).fetchall()
     for raw in rows:
         command = _dict_row(raw)
@@ -14947,7 +14960,7 @@ def reconcile_terminal_partial_entry_reviews(
         command_id = str(command.get("command_id") or "")
         venue_order_id = str(command.get("venue_order_id") or "")
         try:
-            if not canonical_terminal_partial_entry_proven(conn, command_id):
+            if not venue_terminal_fill_proven(conn, command_id):
                 summary["stayed"] += 1
                 continue
             trade_summary = _confirmed_bound_trade_fact_summary(
@@ -15339,15 +15352,10 @@ def _terminal_partial_entry_review_proof(
     return {"point": point, "requested": requested, "filled": filled}
 
 
-def canonical_terminal_partial_entry_proven(
+def _terminal_partial_entry_proven(
     conn: sqlite3.Connection, command_id: str,
 ) -> bool:
-    """Read-only: this REVIEW_REQUIRED ENTRY is a proven terminal partial.
-
-    One predicate for the recovery reducer and the restart guard: the order is
-    terminal at the venue and its CONFIRMED fills are durable, so nothing can
-    fill while the daemon is down.
-    """
+    """Read-only shape proof: a REVIEW_REQUIRED ENTRY terminal partial."""
 
     try:
         rows = _terminal_partial_entry_review_candidates(
@@ -16182,31 +16190,7 @@ def _reconcile_terminal_fak_partial_exit_reviews(
         command_id = str(command.get("command_id") or "")
         venue_order_id = str(command.get("venue_order_id") or "")
         try:
-            trade_summary = _confirmed_bound_trade_fact_summary(
-                conn,
-                command_id=command_id,
-                venue_order_id=venue_order_id,
-                limit_price=command.get("price"),
-                side=command.get("side"),
-            )
-            # Canonical proof is shared across ACKED, POST_ACKED and
-            # REVIEW_REQUIRED.  REVIEW_REQUIRED retains the legacy point-order
-            # or cancel-failed fallback only when canonical proof is absent.
-            advanced = _clear_canonical_terminal_fak_partial_exit(
-                conn,
-                command=command,
-                trade_summary=trade_summary,
-            )
-            if (
-                not advanced
-                and str(command.get("state") or "").upper()
-                == "REVIEW_REQUIRED"
-            ):
-                advanced = _clear_review_required_terminal_fak_partial_exit(
-                    conn,
-                    command=command,
-                    trade_summary=trade_summary,
-                )
+            advanced = _reduce_terminal_fak_partial_exit_command(conn, command)
             if advanced:
                 summary["advanced"] += 1
             else:
@@ -16232,6 +16216,204 @@ def _reconcile_terminal_fak_partial_exit_reviews(
                     exc,
                 )
                 summary["errors"] += 1
+    return summary
+
+
+def _confirmed_fill_completes_command(
+    conn: sqlite3.Connection, command_id: str,
+) -> bool:
+    """Read-only shape proof: CONFIRMED fills leave nothing that can rest.
+
+    Either the fills cover the whole order size exactly (a limit order cannot
+    fill beyond it) or the order is FAK/FOK (it never rests) and its fills
+    complete it within the fill tolerance.
+    """
+
+    command = _dict_row(
+        conn.execute(
+            """
+            SELECT command.*, envelope.order_type AS env_order_type
+              FROM venue_commands command
+              LEFT JOIN venue_submission_envelopes envelope
+                ON envelope.envelope_id = command.envelope_id
+             WHERE command.command_id = ?
+            """,
+            (str(command_id),),
+        ).fetchone()
+    )
+    venue_order_id = str(command.get("venue_order_id") or "")
+    if not venue_order_id:
+        return False
+    fills = _confirmed_bound_trade_fact_summary(
+        conn,
+        command_id=str(command_id),
+        venue_order_id=venue_order_id,
+        limit_price=command.get("price"),
+        side=command.get("side"),
+    )
+    filled = _positive_decimal_or_none(fills.get("filled_size"))
+    requested = _positive_decimal_or_none(command.get("size"))
+    never_rests = str(command.get("env_order_type") or "").upper() in {"FAK", "FOK"}
+    return bool(
+        fills.get("authenticated_confirmed") is True
+        and fills.get("fill_prices_respect_limit") is True
+        and filled is not None
+        and requested is not None
+        and (filled >= requested or never_rests)
+        and _fill_size_completes_limit_order(
+            filled, requested, side=command.get("side"),
+        )
+        and _positive_decimal_or_none(fills.get("fill_price")) is not None
+        and _parse_ts(fills.get("observed_at")) is not None
+    )
+
+
+def _venue_terminal_fill_shape(
+    conn: sqlite3.Connection, command_id: str,
+) -> str | None:
+    """Name the venue evidence proving this order's fill truth is final.
+
+    Every shape proves the order is terminal at the venue (nothing rests) and
+    that its CONFIRMED trade facts equal the venue's matched size.
+    """
+
+    try:
+        if _terminal_partial_entry_proven(conn, command_id):
+            return "terminal_partial_entry"
+        if canonical_terminal_entry_order_full_fill_proven(conn, command_id):
+            return "terminal_full_fill_entry"
+        if canonical_terminal_fak_exit_order_proven(conn, command_id):
+            return "terminal_fak_partial_exit"
+        if _confirmed_fill_completes_command(conn, command_id):
+            return "confirmed_full_fill"
+    except (sqlite3.Error, TypeError, ValueError, InvalidOperation):
+        return None
+    return None
+
+
+def venue_terminal_fill_proven(conn: sqlite3.Connection, command_id: str) -> bool:
+    """Read-only: the venue can no longer change this command's fills.
+
+    The single law shared by the restart guard and the review reducer: the
+    order is terminal at the venue (nothing rests) and its CONFIRMED trade
+    facts equal the venue's matched size, whatever the review reason.
+    """
+
+    return _venue_terminal_fill_shape(conn, str(command_id)) is not None
+
+
+def _venue_terminal_fill_review_command_ids(conn: sqlite3.Connection) -> tuple[str, ...]:
+    if not _table_exists(conn, "venue_commands"):
+        return ()
+    rows = conn.execute(
+        """
+        SELECT command_id
+          FROM venue_commands
+         WHERE state = 'REVIEW_REQUIRED'
+         ORDER BY command_id
+        """
+    ).fetchall()
+    return tuple(
+        str(row[0]) for row in rows if venue_terminal_fill_proven(conn, str(row[0]))
+    )
+
+
+def _reduce_terminal_fak_partial_exit_command(
+    conn: sqlite3.Connection,
+    command: Mapping[str, object],
+) -> bool:
+    trade_summary = _confirmed_bound_trade_fact_summary(
+        conn,
+        command_id=str(command.get("command_id") or ""),
+        venue_order_id=str(command.get("venue_order_id") or ""),
+        limit_price=command.get("price"),
+        side=command.get("side"),
+    )
+    # Canonical proof is shared across ACKED, POST_ACKED and REVIEW_REQUIRED.
+    # REVIEW_REQUIRED retains the legacy point-order or cancel-failed fallback
+    # only when canonical proof is absent.
+    if _clear_canonical_terminal_fak_partial_exit(
+        conn, command=command, trade_summary=trade_summary,
+    ):
+        return True
+    return bool(
+        str(command.get("state") or "").upper() == "REVIEW_REQUIRED"
+        and _clear_review_required_terminal_fak_partial_exit(
+            conn, command=command, trade_summary=trade_summary,
+        )
+    )
+
+
+def reconcile_venue_terminal_fill_reviews(
+    conn: sqlite3.Connection,
+    *,
+    command_ids: frozenset[str] | None = None,
+) -> dict:
+    """Resolve REVIEW_REQUIRED commands whose venue fill truth is final.
+
+    SCOPE: REVIEW_REQUIRED commands for which ``venue_terminal_fill_proven``
+    holds, optionally one exact id set. DRAIN: each shape's reducer records
+    the fill (idempotent against an already-written projection) and
+    terminalizes the command. RESET: a shape whose reducer cannot prove its
+    projection stays REVIEW_REQUIRED; the restart guard still admits it.
+    """
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    candidate_ids = (
+        tuple(sorted(command_ids))
+        if command_ids is not None
+        else _venue_terminal_fill_review_command_ids(conn)
+    )
+    for command_id in candidate_ids:
+        shape = _venue_terminal_fill_shape(conn, command_id)
+        if shape is None:
+            continue
+        summary["scanned"] += 1
+        try:
+            if shape == "terminal_partial_entry":
+                result = reconcile_terminal_partial_entry_reviews(
+                    conn, command_ids=frozenset({command_id}),
+                )
+            elif shape == "terminal_full_fill_entry":
+                result = reconcile_matched_cancel_review_required_entries(
+                    conn, full_fill_command_ids=frozenset({command_id}),
+                )
+            elif shape == "terminal_fak_partial_exit":
+                rows = _terminal_fak_partial_exit_review_candidates(
+                    conn, command_ids=(command_id,),
+                )
+                advanced = bool(rows) and _reduce_terminal_fak_partial_exit_command(
+                    conn, rows[0],
+                )
+                result = {"advanced": int(advanced), "errors": 0}
+            else:
+                row = conn.execute(
+                    "SELECT intent_kind FROM venue_commands WHERE command_id = ?",
+                    (command_id,),
+                ).fetchone()
+                if str(row[0] if row else "").upper() == "EXIT":
+                    result = reconcile_complete_exit_trade_fact_commands(
+                        conn, command_ids=frozenset({command_id}),
+                    )
+                else:
+                    result = reconcile_authenticated_entry_trade_facts(
+                        conn, command_id=command_id,
+                    )
+        except Exception as exc:
+            logger.error(
+                "recovery: venue-terminal fill review %s (%s) failed: %s",
+                command_id,
+                shape,
+                exc,
+            )
+            summary["errors"] += 1
+            continue
+        if int(result.get("errors", 0) or 0):
+            summary["errors"] += 1
+        elif int(result.get("advanced", 0) or 0):
+            summary["advanced"] += 1
+        else:
+            summary["stayed"] += 1
     return summary
 
 
@@ -33846,15 +34028,14 @@ def _reconcile_passes_short_conn(
             # A MATCHED point order whose CONFIRMED trades cover a genuine
             # partial never becomes "complete" for the authenticated fold; its
             # one reducer is the terminal-partial clearance.
-            terminal_partial_review_command_ids = frozenset(
-                str(row["command_id"])
-                for row in _terminal_partial_entry_review_candidates(conn)
+            venue_terminal_review_command_ids = frozenset(
+                _venue_terminal_fill_review_command_ids(conn)
             )
             review_ids = sorted(
                 terminal_fill_review_command_ids
                 | point_full_fill_review_command_ids
                 | terminal_positive_review_command_ids
-                | terminal_partial_review_command_ids
+                | venue_terminal_review_command_ids
             )
             all_review_command_ids = frozenset(review_ids)
             if review_ids:
@@ -33965,8 +34146,8 @@ def _reconcile_passes_short_conn(
                         )
                     else:
                         result = None
-                        if command_id in terminal_partial_review_command_ids:
-                            result = reconcile_terminal_partial_entry_reviews(
+                        if command_id in venue_terminal_review_command_ids:
+                            result = reconcile_venue_terminal_fill_reviews(
                                 conn, command_ids=frozenset({command_id}),
                             )
                         if result is None or not (

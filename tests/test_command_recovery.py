@@ -45178,3 +45178,51 @@ def test_live_tick_terminal_partial_entry_review_projects_fill_before_expired_ma
                AND event_type = 'ENTRY_ORDER_FILLED'
             """
         ).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize(
+    ("shape", "expected_state"),
+    [
+        ("partial_entry", "EXPIRED"),
+        ("full_fill_entry", "FILLED"),
+        ("fak_exit_persist", "FILLED"),
+        ("partial_entry_point_live", "REVIEW_REQUIRED"),
+        ("fak_exit_persist_short", "REVIEW_REQUIRED"),
+    ],
+)
+def test_venue_terminal_fill_reviews_resolve_every_shape_once(conn, shape, expected_state):
+    """The one law's reducer terminalizes every proven shape and nothing else."""
+    from src.execution import command_recovery
+    from tests.test_ops_scripts_smoke import _seed_venue_terminal_review_case
+
+    command_id = _seed_venue_terminal_review_case(conn, shape)
+    first = command_recovery.reconcile_venue_terminal_fill_reviews(conn)
+    assert _get_state(conn, command_id) == expected_state
+    assert first["errors"] == 0
+    assert first["advanced"] == int(expected_state != "REVIEW_REQUIRED")
+    events_after_first = len(_get_events(conn, command_id))
+    second = command_recovery.reconcile_venue_terminal_fill_reviews(conn)
+    assert second == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    assert len(_get_events(conn, command_id)) == events_after_first
+
+
+def test_venue_terminal_fak_exit_review_does_not_rewrite_recorded_fill(conn):
+    """df6d663611cf4413: the fill and position close are already durable; only the command moves."""
+    from src.execution import command_recovery
+    from tests.test_ops_scripts_smoke import _seed_venue_terminal_review_case
+
+    command_id = _seed_venue_terminal_review_case(conn, "fak_exit_persist")
+    before = {
+        table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        for table in ("execution_fact", "position_events", "venue_trade_facts")
+    }
+    summary = command_recovery.reconcile_venue_terminal_fill_reviews(
+        conn, command_ids=frozenset({command_id}),
+    )
+    assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+    assert _get_state(conn, command_id) == "FILLED"
+    assert _get_events(conn, command_id)[-1]["event_type"] == "FILL_CONFIRMED"
+    assert {
+        table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        for table in before
+    } == before

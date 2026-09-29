@@ -4822,7 +4822,7 @@ def test_deploy_live_review_terminal_fak_order_proof_is_the_only_review_exceptio
     proof_calls = []
     monkeypatch.setattr(
         command_recovery,
-        "canonical_terminal_fak_exit_order_proven",
+        "venue_terminal_fill_proven",
         lambda _conn, command_id: proof_calls.append(command_id)
         or command_id == "review-proven",
     )
@@ -4996,64 +4996,126 @@ def test_deploy_live_terminal_entry_fill_proof_preserves_unknown_obligations(tmp
     conn.close()
 
 
-@pytest.mark.parametrize("proof_case", ["proven", "point_live", "trade_short"])
-def test_deploy_live_admits_proven_terminal_partial_entry_review_only(tmp_path, proof_case):
-    """Live 2026-09-29 a7d459611a2f4e1c: restart refused on a terminal partial.
-
-    A MATCHED point order whose CONFIRMED trades sum to its matched size rests
-    nothing at the venue, so the restart guard admits it through the SAME
-    predicate the recovery reducer gates on. A LIVE point order (resting
-    remainder) or an unmatched trade sum stays a nonterminal obligation.
-    """
+def _seed_venue_terminal_review_case(conn, shape: str) -> str:
+    """Seed one REVIEW_REQUIRED shape; return its command id."""
     import json
+    from src.state.venue_command_repo import append_event
+    from tests.test_command_recovery import (
+        _advance_to_acked,
+        _append_trade_fact,
+        _insert,
+        _seed_terminal_entry_point_full_fill_case,
+        _seed_terminal_partial_entry_review,
+    )
+
+    if shape in {"partial_entry", "partial_entry_point_live", "partial_entry_trade_short"}:
+        _seed_terminal_partial_entry_review(conn, order_type="GTC")
+        command_id = "cmd-entry-fak-partial"
+        if shape != "partial_entry":
+            row = conn.execute(
+                "SELECT sequence_no, payload_json FROM venue_command_events "
+                "WHERE command_id=? AND event_type='REVIEW_REQUIRED'",
+                (command_id,),
+            ).fetchone()
+            payload = json.loads(row["payload_json"])
+            if shape == "partial_entry_point_live":
+                payload["point_order"]["status"] = "LIVE"
+            else:
+                payload["point_order"]["size_matched"] = "4.5"
+            conn.execute("DROP TRIGGER IF EXISTS trg_venue_command_events_no_update")
+            conn.execute(
+                "UPDATE venue_command_events SET payload_json=? "
+                "WHERE command_id=? AND sequence_no=?",
+                (json.dumps(payload), command_id, row["sequence_no"]),
+            )
+        return command_id
+    if shape == "full_fill_entry":
+        _seed_terminal_entry_point_full_fill_case(conn)
+        append_event(
+            conn, command_id="cmd-001", event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:08:00Z", payload={
+                "reason": "partial_remainder_point_order_filled_without_full_trade_fact",
+                "point_order": {
+                    "id": "ord-entry-point-proof", "status": "MATCHED", "side": "BUY",
+                    "asset_id": "tok-001", "original_size": "44.12",
+                    "size_matched": "44.117355", "order_type": "GTC",
+                },
+            },
+        )
+        return "cmd-001"
+    # FAK EXIT whose post-submit receipt write hit a lock (live df6d663611cf4413).
+    command_id = "cmd-fak-exit-persist"
+    _insert(
+        conn, command_id=command_id, position_id="pos-fak-exit-persist",
+        intent_kind="EXIT", side="SELL", order_type="FAK", size=16.35, price=0.07,
+    )
+    _advance_to_acked(conn, command_id=command_id, venue_order_id="ord-fak-exit-persist")
+    append_event(
+        conn, command_id=command_id, event_type="REVIEW_REQUIRED",
+        occurred_at="2026-04-26T00:08:00Z",
+        payload={
+            "reason": "final_submission_envelope_persistence_failed",
+            "venue_order_id": "ord-fak-exit-persist",
+            "venue_status": "matched",
+        },
+    )
+    _append_trade_fact(
+        conn, command_id=command_id, order_id="ord-fak-exit-persist",
+        trade_id="trade-fak-exit-persist", state="CONFIRMED",
+        filled_size="16.35" if shape == "fak_exit_persist" else "10",
+        fill_price="0.07",
+    )
+    return command_id
+
+
+@pytest.mark.parametrize(
+    ("shape", "admitted"),
+    [
+        ("partial_entry", True),
+        ("full_fill_entry", True),
+        ("fak_exit_persist", True),
+        ("partial_entry_point_live", False),
+        ("partial_entry_trade_short", False),
+        ("fak_exit_persist_short", False),
+    ],
+)
+def test_deploy_live_admits_review_required_only_when_venue_fill_is_terminal(
+    tmp_path, shape, admitted,
+):
+    """A REVIEW_REQUIRED command blocks restart only while the venue can change its fills.
+
+    Live 2026-09-29: a7d459611a2f4e1c (terminal partial entry) and
+    df6d663611cf4413 (FAK exit, receipt write hit a lock) both had complete,
+    durable CONFIRMED fills yet refused every restart.
+    """
     from src.state.db import init_schema, init_schema_trade_only
     from src.state.collateral_ledger import init_collateral_schema
     from src.execution import command_recovery
-    from tests.test_command_recovery import _seed_terminal_partial_entry_review
 
-    dl = _load("deploy_live_terminal_partial_entry_proof", "deploy_live.py")
-    path = tmp_path / "terminal-partial-entry.db"
+    dl = _load(f"deploy_live_venue_terminal_{shape}", "deploy_live.py")
+    path = tmp_path / f"{shape}.db"
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     init_schema(conn)
     init_schema_trade_only(conn)
     init_collateral_schema(conn)
-    _seed_terminal_partial_entry_review(conn, order_type="GTC")
-    if proof_case != "proven":
-        row = conn.execute(
-            "SELECT sequence_no, payload_json FROM venue_command_events "
-            "WHERE command_id='cmd-entry-fak-partial' AND event_type='REVIEW_REQUIRED'"
-        ).fetchone()
-        payload = json.loads(row["payload_json"])
-        if proof_case == "point_live":
-            payload["point_order"]["status"] = "LIVE"
-        else:
-            payload["point_order"]["size_matched"] = "4.5"
-        conn.execute("DROP TRIGGER IF EXISTS trg_venue_command_events_no_update")
-        conn.execute(
-            "UPDATE venue_command_events SET payload_json=? WHERE command_id=? AND sequence_no=?",
-            (json.dumps(payload), "cmd-entry-fak-partial", row["sequence_no"]),
-        )
+    command_id = _seed_venue_terminal_review_case(conn, shape)
     conn.commit()
     before = conn.total_changes
 
-    proven = command_recovery.canonical_terminal_partial_entry_proven(
-        conn, "cmd-entry-fak-partial"
-    )
+    assert command_recovery.venue_terminal_fill_proven(conn, command_id) is admitted
     obligations = dl._canonical_live_restart_obligations(path)
-
-    assert proven is (proof_case == "proven")
-    assert obligations["nonterminal_command_ids"] == (
-        () if proof_case == "proven" else ("cmd-entry-fak-partial",)
-    )
+    assert obligations["nonterminal_command_ids"] == (() if admitted else (command_id,))
+    if shape.startswith("fak_exit"):
+        assert dl._nonterminal_sell_command_count(path) == (0 if admitted else 1)
     assert conn.execute(
-        "SELECT state FROM venue_commands WHERE command_id='cmd-entry-fak-partial'"
+        "SELECT state FROM venue_commands WHERE command_id=?", (command_id,)
     ).fetchone()[0] == "REVIEW_REQUIRED"
     assert conn.total_changes == before
     conn.close()
 
 
-def test_terminal_partial_entry_guard_and_reducer_share_one_predicate():
+def test_venue_terminal_fill_law_is_the_one_guard_and_reducer_predicate():
     import ast
     import inspect
     import textwrap
@@ -5068,18 +5130,31 @@ def test_terminal_partial_entry_guard_and_reducer_share_one_predicate():
             and isinstance(node.func, (ast.Name, ast.Attribute))
         }
 
-    reducer = _calls(inspect.getsource(command_recovery.reconcile_terminal_partial_entry_reviews))
     guard_source = (Path(__file__).resolve().parents[1] / "scripts" / "deploy_live.py").read_text()
-    guard_fn = guard_source[
-        guard_source.index("def _canonical_live_restart_obligations("):
-        guard_source.index("def _pre_stop_monitor_handoff_evidence(")
-    ]
-    assert "canonical_terminal_partial_entry_proven" in reducer
-    assert "canonical_terminal_partial_entry_proven" in _calls(guard_fn)
-    predicate = _calls(inspect.getsource(command_recovery.canonical_terminal_partial_entry_proven))
-    reducer_body = _calls(inspect.getsource(command_recovery._clear_review_required_terminal_partial_entry))
-    assert "_terminal_partial_entry_review_proof" in predicate
-    assert "_terminal_partial_entry_review_proof" in reducer_body
+
+    def _guard_fn(name: str, next_name: str) -> set[str]:
+        return _calls(guard_source[guard_source.index(f"def {name}("):guard_source.index(f"def {next_name}(")])
+
+    shape_proofs = {
+        "_terminal_partial_entry_proven",
+        "canonical_terminal_entry_order_full_fill_proven",
+        "canonical_terminal_fak_exit_order_proven",
+        "_confirmed_fill_completes_command",
+    }
+    for guard in (
+        _guard_fn("_canonical_live_restart_obligations", "_pre_stop_monitor_handoff_evidence"),
+        _guard_fn("_nonterminal_sell_command_count", "_held_sell_global_auction_debt_count"),
+    ):
+        assert "venue_terminal_fill_proven" in guard
+        assert not guard & shape_proofs
+    reducer = _calls(inspect.getsource(command_recovery.reconcile_venue_terminal_fill_reviews))
+    assert "_venue_terminal_fill_shape" in reducer
+    law = _calls(inspect.getsource(command_recovery.venue_terminal_fill_proven))
+    assert "_venue_terminal_fill_shape" in law
+    assert shape_proofs <= _calls(inspect.getsource(command_recovery._venue_terminal_fill_shape))
+    assert "venue_terminal_fill_proven" in _calls(
+        inspect.getsource(command_recovery.reconcile_terminal_partial_entry_reviews)
+    )
 
 
 def test_deploy_live_post_start_parked_count_ignores_proven_terminal_fak_partial(

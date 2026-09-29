@@ -1178,11 +1178,7 @@ def _canonical_live_restart_obligations(trade_db: Path) -> dict[str, object]:
                 """,
                 tuple(terminal_states),
             ).fetchall()
-        from src.execution.command_recovery import (
-            canonical_terminal_fak_exit_order_proven,
-            canonical_terminal_entry_order_full_fill_proven,
-            canonical_terminal_partial_entry_proven,
-        )
+        from src.execution.command_recovery import venue_terminal_fill_proven
         from src.execution.exit_safety import _terminal_partial_command_proven
 
         command_ids = tuple(
@@ -1191,11 +1187,7 @@ def _canonical_live_restart_obligations(trade_db: Path) -> dict[str, object]:
             if (
                 not (
                     state == "REVIEW_REQUIRED"
-                    and (
-                        canonical_terminal_fak_exit_order_proven(conn, str(command_id))
-                        or canonical_terminal_entry_order_full_fill_proven(conn, str(command_id))
-                        or canonical_terminal_partial_entry_proven(conn, str(command_id))
-                    )
+                    and venue_terminal_fill_proven(conn, str(command_id))
                 )
                 and (
                     state != "PARTIAL"
@@ -3056,9 +3048,7 @@ def _nonterminal_sell_command_count(trade_db: Path) -> int:
     """Count canonical SELL commands still able to require venue recovery."""
 
     from src.execution.command_bus import TERMINAL_STATES
-    from src.execution.command_recovery import (
-        canonical_terminal_fak_exit_order_proven,
-    )
+    from src.execution.command_recovery import venue_terminal_fill_proven
     from src.execution.exit_safety import _terminal_partial_command_proven
 
     try:
@@ -3087,9 +3077,7 @@ def _nonterminal_sell_command_count(trade_db: Path) -> int:
             if (
                 not (
                     state == "REVIEW_REQUIRED"
-                    and canonical_terminal_fak_exit_order_proven(
-                        conn, str(command_id)
-                    )
+                    and venue_terminal_fill_proven(conn, str(command_id))
                 )
                 and (
                     state != "PARTIAL"
