@@ -89,7 +89,10 @@ def cut(monkeypatch, tmp_path):
     return _build_cut(monkeypatch, tmp_path)
 
 
-def _build_cut(monkeypatch, tmp_path, **adapter_kwargs):
+_DECISION_AT = _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc)
+
+
+def _build_cut(monkeypatch, tmp_path, *, decision_at=_DECISION_AT, **adapter_kwargs):
 
     wake_path = tmp_path / "state" / "edli-reactor-wake.json"
     monkeypatch.setattr(
@@ -121,18 +124,19 @@ def _build_cut(monkeypatch, tmp_path, **adapter_kwargs):
         auction_capital_authority=CapacityAuthority(),
         **adapter_kwargs,
     )
-    adapter.process_global_batch(
-        (_forecast_event("Dallas"),),
-        _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),
-    )
+    adapter.process_global_batch((_forecast_event("Dallas"),), decision_at)
 
-    def publish_day0(*families):
+    def publish(reason, *families, published_at=None):
         reactor_wake.publish_reactor_wake(
-            source="day0_metar_source_clock",
-            reason="day0_extreme_event_committed",
+            source="test-producer",
+            reason=reason,
             path=wake_path,
             forecast_families=families,
+            published_at=published_at,
         )
+
+    def publish_day0(*families, published_at=None):
+        publish("day0_extreme_event_committed", *families, published_at=published_at)
 
     def observe(family_keys, **flags):
         captured["cut_scope_observer"](
@@ -142,7 +146,7 @@ def _build_cut(monkeypatch, tmp_path, **adapter_kwargs):
         )
 
     return SimpleNamespace(
-        captured=captured, publish_day0=publish_day0, observe=observe
+        captured=captured, publish=publish, publish_day0=publish_day0, observe=observe
     )
 
 
@@ -230,6 +234,44 @@ def test_winner_frozen_cut_ignores_routine_monitor_fairness(monkeypatch, tmp_pat
     assert cut.captured["selection_cancelled"]() is False
     cut.publish_day0(_IN)
     assert cut.captured["selection_cancelled"]() == _DAY0
+
+
+def test_cutoff_is_the_cuts_own_decision_time(monkeypatch, tmp_path):
+    """(b) A fact published after the producer wake but before this cut's
+    decision time is truth the cut reads, never an invalidation of it."""
+
+    decision_at = _dt.datetime.now(_dt.timezone.utc)
+    cut = _build_cut(
+        monkeypatch,
+        tmp_path,
+        decision_at=decision_at,
+        producer_wake_published_at=(
+            decision_at - _dt.timedelta(minutes=5)
+        ).isoformat(),
+    )
+    cut.observe({_IN_KEY})
+    cut.publish_day0(_IN, published_at=decision_at - _dt.timedelta(seconds=1))
+    assert cut.captured["selection_cancelled"]() is False
+
+    cut.publish_day0(_IN, published_at=decision_at + _dt.timedelta(seconds=1))
+    assert cut.captured["selection_cancelled"]() == _DAY0
+
+
+def test_in_scope_posterior_supersedes_only_until_q_is_frozen(monkeypatch, tmp_path):
+    """Belief dependence ends once every scoped family's q is prepared."""
+
+    monkeypatch.setattr(era, "GLOBAL_AUCTION_PREEMPTION_GRACE_MAX_SUPERSESSIONS", 0)
+    cut = _build_cut(monkeypatch, tmp_path)
+    cut.observe({_IN_KEY})
+    cut.publish("forecast_posterior_advanced", _IN)
+    assert (
+        cut.captured["epoch_superseded"]() == "wake:forecast_posterior_advanced"
+    )
+
+    frozen = _build_cut(monkeypatch, tmp_path / "frozen")
+    frozen.observe({_IN_KEY}, q_frozen=True)
+    frozen.publish("forecast_posterior_advanced", _IN)
+    assert frozen.captured["epoch_superseded"]() is False
 
 
 @pytest.mark.parametrize("family", (_IN, _OUT))
