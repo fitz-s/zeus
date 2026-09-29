@@ -197,23 +197,14 @@ def test_builder_preserves_entity_bytes_and_honest_default_role(monkeypatch):
 
 @pytest.mark.parametrize("role", ["native_model_cell", "default_downscaled_target_dem"])
 @pytest.mark.parametrize("unit,settled", [("C", 25.0), ("F", 77.0)])
-def test_offline_fitter_uses_only_product_bound_native_geometry(monkeypatch, role, unit, settled):
-    import sqlite3
-    from datetime import date, timedelta
+@pytest.mark.parametrize("metric", ["high", "low"])
+def test_offline_fitter_uses_only_product_bound_native_geometry(monkeypatch, role, unit, settled, metric):
     from scripts import fit_grid_representativeness as fitter
 
     table, binding, raw = _geometry(role=role)
     real_read = read_grid_representativeness
     monkeypatch.setattr(fitter, "read_grid_representativeness", lambda *args, **kwargs: real_read(*args, grid_table=table, **kwargs))
-    con = sqlite3.connect(":memory:")
-    con.row_factory = sqlite3.Row
-    con.executescript("""
-        CREATE TABLE raw_model_forecasts(city,model,target_date,forecast_value_c,raw_payload_hash,metric,endpoint,lead_days);
-        CREATE TABLE settlement_outcomes(city,target_date,temperature_metric,settlement_value,settlement_unit,authority);
-    """)
-    td = (date.today() - timedelta(days=15)).isoformat()
-    con.execute("INSERT INTO raw_model_forecasts VALUES(?,?,?,?,?,?,?,?)", ("Tokyo", "ecmwf_ifs", td, 24., binding["raw_response_sha256"], "HIGH", "previous_runs", 1))
-    con.execute("INSERT INTO settlement_outcomes VALUES(?,?,?,?,?,?)", ("Tokyo", td, "HIGH", settled, unit, "VERIFIED"))
+    con = _canonical_fitter_connection(binding["raw_response_sha256"], metric=metric, unit=unit, settled=settled)
     key = ("Tokyo", "ecmwf_ifs", binding["raw_response_sha256"])
     rows, shifts, diag = fitter.build_residual_rows(con, fit_lo=60, holdout=7, lead=1, geometry_bindings={key: binding}, raw_responses={binding["raw_response_sha256"]: raw})
     if role == "native_model_cell":
@@ -227,6 +218,30 @@ def test_offline_fitter_uses_only_product_bound_native_geometry(monkeypatch, rol
     rows, shifts, diag = fitter.build_residual_rows(con, fit_lo=60, holdout=7, lead=1)
     assert rows == shifts == [] and any("UNPROVEN" in reason for reason in diag["geometry_dispositions"])
     con.close()
+
+
+def _canonical_fitter_connection(raw_sha256, *, metric="high", unit="C", settled=25.):
+    import sqlite3
+    from datetime import date, timedelta
+    from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema, _create_settlement_outcomes
+
+    con = sqlite3.connect(":memory:")
+    con.row_factory = sqlite3.Row
+    ensure_replacement_forecast_live_schema(con)
+    _create_settlement_outcomes(con)
+    td = (date.today() - timedelta(days=15)).isoformat()
+    cycle = f"{td}T00:00:00+00:00"
+    con.execute("""INSERT INTO raw_model_forecasts
+        (model,city,target_date,forecast_value_c,raw_sha256,metric,endpoint,lead_days,
+         source_cycle_time,source_available_at,captured_at)
+        VALUES(?,?,?,?,?,?,?,1,?,?,?)""",
+        ("ecmwf_ifs", "Tokyo", td, 24., raw_sha256, metric, "previous_runs", cycle, cycle, cycle))
+    con.execute("""INSERT INTO settlement_outcomes
+        (city,target_date,temperature_metric,settlement_value,settlement_unit,authority)
+        VALUES(?,?,?,?,?,'VERIFIED')""", ("Tokyo", td, metric, settled, unit))
+    columns = {row["name"] for row in con.execute("PRAGMA table_info(raw_model_forecasts)")}
+    assert "raw_sha256" in columns and "raw_payload_hash" not in columns
+    return con
 
 
 def test_offline_validator_does_not_claim_dem_or_missing_proof_is_an_on_pass(monkeypatch):
@@ -243,18 +258,18 @@ def test_offline_validator_does_not_claim_dem_or_missing_proof_is_an_on_pass(mon
 
 
 def test_unproven_fitter_main_writes_no_fit_assets(monkeypatch, capsys):
-    from types import SimpleNamespace
     from scripts import fit_grid_representativeness as fitter
 
+    con = _canonical_fitter_connection("c" * 64)
     monkeypatch.setattr(fitter.sys, "argv", ["fit_grid_representativeness.py"])
-    monkeypatch.setattr(fitter.sqlite3, "connect", lambda *args, **kwargs: SimpleNamespace(row_factory=None, close=lambda: None))
-    monkeypatch.setattr(fitter, "build_residual_rows", lambda *args, **kwargs: ([], [], {"geometry_dispositions": {"UNPROVEN: no exact bytes": 1}}))
+    monkeypatch.setattr(fitter.sqlite3, "connect", lambda *args, **kwargs: con)
     class ForbiddenWrite:
         def write_text(self, *args, **kwargs): pytest.fail("unproven geometry cannot write fitted assets")
     monkeypatch.setattr(fitter, "REPR_FIT_OUT", ForbiddenWrite())
     monkeypatch.setattr(fitter, "SHIFT_FIT_OUT", ForbiddenWrite())
     assert fitter.main() == 2
-    assert "NOT_FITTED" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "NOT_FITTED" in output and '"n_join": 1' in output and "UNPROVEN" in output
 
 
 @pytest.mark.parametrize("unit,scale", [("C", 1.0), ("F", 3.24)])

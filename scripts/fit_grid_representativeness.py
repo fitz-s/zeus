@@ -84,7 +84,7 @@ def build_residual_rows(
     rows = con.execute(
         """
         SELECT r.city AS city, r.model AS model, r.target_date AS target_date,
-               r.forecast_value_c AS fv, r.raw_payload_hash AS raw_payload_hash,
+               r.forecast_value_c AS fv, r.raw_sha256 AS raw_sha256,
                s.settlement_value AS sv, s.settlement_unit AS unit
         FROM raw_model_forecasts AS r
         JOIN settlement_outcomes AS s
@@ -106,7 +106,7 @@ def build_residual_rows(
         city, model = row["city"], row["model"]
         # Binding must come from this historical product's evidence, not be
         # copied out of a static artifact to make it certify itself.
-        binding = (geometry_bindings or {}).get((city, model, row["raw_payload_hash"]))
+        binding = (geometry_bindings or {}).get((city, model, row["raw_sha256"]))
         geometry = read_grid_representativeness(
             city, model, expected_binding=binding,
             raw_payload_bytes=(raw_responses or {}).get((binding or {}).get("raw_response_sha256")),
