@@ -670,6 +670,54 @@ def test_bpf_payload_cache_reuse_cannot_mint_a_network_receipt_for_metric_twin(t
     conn.close()
 
 
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("clock", ("captured_at", "source_available_at", "recorded_at"))
+def test_latest_same_family_malformed_receipt_clock_is_not_hidden_by_old_body(tmp_path, monkeypatch, metric, clock):
+    from src.data.replacement_current_value_serving import read_current_instrument_values
+    conn, target, cycle = _current_rows(tmp_path, monkeypatch, metric=metric)
+    original = conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall()
+    def current(hour):
+        return read_current_instrument_values(conn, city=target.city, metric=metric, target_date=target.target_date,
+            source_cycle_time_iso=cycle.isoformat(), decision_time_iso=cycle.replace(hour=hour).isoformat())
+    assert "icon_global" in current(5)
+    _persist_exact_provider_body(conn, tmp_path, city=target.city, metric=metric, target_date=target.target_date,
+        model="icon_global", cycle=cycle.isoformat(), captured=cycle.replace(hour=10).isoformat(),
+        value=21, expected_written=0, network=True)
+    conn.commit()
+    assert "icon_global" not in current(11)
+    receipt_id = conn.execute("SELECT MAX(artifact_id) FROM raw_forecast_artifacts WHERE data_version='openmeteo_single_model_http_capture_receipt_v1'").fetchone()[0]
+    conn.execute(f"UPDATE raw_forecast_artifacts SET {clock}='broken-clock' WHERE artifact_id=?", (receipt_id,))
+    conn.commit()
+    assert "icon_global" not in current(11)
+    assert "icon_global" in current(5)
+    _persist_exact_provider_body(conn, tmp_path, city=target.city, metric=metric, target_date=target.target_date,
+        model="icon_global", cycle=cycle.isoformat(), captured=cycle.replace(hour=12).isoformat(),
+        value=20, expected_written=0, network=True)
+    conn.commit()
+    assert current(13)["icon_global"].value_c == 20
+    assert conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall() == original
+    conn.close()
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("future_microsecond", (900000, 101))
+def test_future_receipt_preserves_prior_value_at_subsecond_cutoff(tmp_path, monkeypatch, metric, future_microsecond):
+    from src.data.replacement_current_value_serving import read_current_instrument_values
+    conn, target, cycle = _current_rows(tmp_path, monkeypatch, metric=metric)
+    cutoff = cycle.replace(hour=10, microsecond=100)
+    future = cutoff.replace(microsecond=future_microsecond)
+    _persist_exact_provider_body(conn, tmp_path, city=target.city, metric=metric, target_date=target.target_date,
+        model="icon_global", cycle=cycle.isoformat(), captured=future.isoformat(),
+        value=21, expected_written=0, network=True)
+    conn.commit()
+    def current(decision):
+        return read_current_instrument_values(conn, city=target.city, metric=metric, target_date=target.target_date,
+            source_cycle_time_iso=cycle.isoformat(), decision_time_iso=decision.isoformat())
+    assert current(cutoff)["icon_global"].value_c == 20
+    assert "icon_global" not in current(future)
+    conn.close()
+
+
 @pytest.mark.parametrize("damage", (None,"wrong_first_site"))
 def test_single_model_location_batch_persists_and_serves_second_city_both_metrics(tmp_path,monkeypatch,damage):
     from src.data import bayes_precision_fusion_download as dl

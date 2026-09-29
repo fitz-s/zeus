@@ -259,9 +259,6 @@ def _product_identity_select(schema: CurrentValueServingSchema, *, decision_iso:
                 AND a.product_id=raw_model_forecasts.product_id
                 AND a.source_cycle_time=raw_model_forecasts.source_cycle_time
                 AND a.data_version IN ('openmeteo_single_model_entity_body_v1','openmeteo_single_model_http_capture_receipt_v1')
-                AND datetime(a.captured_at)<=datetime({cutoff})
-                AND datetime(a.source_available_at)<=datetime({cutoff})
-                AND datetime(a.recorded_at)<=datetime({cutoff})
                 AND EXISTS (SELECT 1 FROM
                     json_each(replace(json_array(CAST(json_extract(CASE WHEN json_valid(a.request_params_json)
                         THEN a.request_params_json ELSE '{{}}' END,'$.latitude') AS TEXT)), ',', '\",\"')) lat
@@ -272,7 +269,7 @@ def _product_identity_select(schema: CurrentValueServingSchema, *, decision_iso:
                     WHERE CAST(lat.value AS REAL)=raw_model_forecasts.latitude_requested
                       AND CAST(lon.value AS REAL)=raw_model_forecasts.longitude_requested
                       AND tz.value=raw_model_forecasts.timezone_requested))"""
-        artifact = f"""(SELECT json_object('artifact_id',a.artifact_id,'source_id',a.source_id,'product_id',a.product_id,
+        artifact = f"""(SELECT json_group_array(json_object('artifact_id',a.artifact_id,'source_id',a.source_id,'product_id',a.product_id,
             'source_cycle_time',a.source_cycle_time,'captured_at',a.captured_at,
             'source_available_at',a.source_available_at,'recorded_at',a.recorded_at,'data_version',a.data_version,
             'artifact_path',a.artifact_path,'sha256',a.sha256,'byte_size',a.byte_size,
@@ -284,11 +281,49 @@ def _product_identity_select(schema: CurrentValueServingSchema, *, decision_iso:
                 'artifact_path',b.artifact_path,'sha256',b.sha256,'byte_size',b.byte_size,
                 'request_url',b.request_url,'request_params_json',b.request_params_json,'metadata',b.artifact_metadata_json)
                 FROM raw_forecast_artifacts b WHERE b.artifact_id=json_extract(CASE WHEN json_valid(a.artifact_metadata_json)
-                    THEN a.artifact_metadata_json ELSE '{{}}' END,'$.physical_http_capture_receipt.body_artifact_id')))) FROM raw_forecast_artifacts a
-            WHERE a.artifact_id=raw_model_forecasts.artifact_id {derived}
-            ORDER BY datetime(a.captured_at) DESC,datetime(a.recorded_at) DESC,a.artifact_id DESC LIMIT 1)"""
+                    THEN a.artifact_metadata_json ELSE '{{}}' END,'$.physical_http_capture_receipt.body_artifact_id'))))) FROM raw_forecast_artifacts a
+            WHERE a.artifact_id=raw_model_forecasts.artifact_id {derived})"""
     cutoff = "NULL" if decision_iso is None else "'" + decision_iso.replace("'", "''") + "'"
     return f"json_object({fields}, 'physical_proof_cutoff', {cutoff}, 'physical_artifact', json({artifact}))"
+
+
+def _physical_artifact_at_cutoff(row: Mapping[str, object]) -> dict[str, object]:
+    """Choose the latest possessed event without rounding clocks in SQLite.
+
+    SQL only narrows the request family. A malformed latest clock remains a
+    candidate for strict rejection, rather than silently exposing an older
+    body. Known future possession is excluded with full datetime precision.
+    """
+    candidates = row.get("physical_artifact")
+    if not isinstance(candidates, list):
+        return dict(row)
+
+    def clock(value: object) -> datetime | None:
+        try:
+            stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return stamp.astimezone(timezone.utc) if stamp.tzinfo is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    cutoff = clock(row.get("physical_proof_cutoff"))
+    eligible = []
+    for artifact in candidates:
+        if not isinstance(artifact, dict):
+            continue
+        captured = clock(artifact.get("captured_at"))
+        recorded = clock(artifact.get("recorded_at"))
+        if cutoff is None:
+            if artifact.get("artifact_id") != row.get("artifact_id"):
+                continue
+        elif recorded is not None and recorded > cutoff:
+            continue
+        elif recorded is None and captured is not None and captured > cutoff:
+            continue
+        # Unknown event order fails closed instead of hiding malformed proof.
+        order = captured or recorded or datetime.max.replace(tzinfo=timezone.utc)
+        eligible.append((order, recorded or order, int(artifact["artifact_id"]), artifact))
+    latest = max(eligible, key=lambda item: item[:3])[-1] if eligible else None
+    return {**row, "physical_artifact": latest}
 
 
 def read_current_instrument_family_latest_id(
@@ -449,6 +484,7 @@ def _source_clock_product_has_authority(raw: object, *, lead_days: int | None) -
         row = json.loads(str(raw))
         if not isinstance(row, dict):
             return False
+        row = _physical_artifact_at_cutoff(row)
         model = str(row["model"] or "")
         if _is_station_model(model):
             # Agency forecasts have their own physical product, never DEM
@@ -524,7 +560,11 @@ def _resolve_http_capture_receipt(row: Mapping[str, object]) -> dict[str, object
         normalized = {**body, **{key: artifact[key] for key in ("source_available_at", "captured_at", "recorded_at")},
             "metadata": json.dumps({"physical_response": proof}),
             "capture_receipt_artifact_id": artifact["artifact_id"], "capture_receipt_sha256": artifact["sha256"]}
-        return {**row, "physical_artifact": normalized}
+        result = {**row, "physical_artifact": normalized, "revalidated_physical_capture": True,
+            "recorded_body_artifact_id": row.get("artifact_id"), "recorded_raw_sha256": row.get("raw_sha256")}
+        if row.get("artifact_id") is not None or row.get("elevation_param") == "default_90m_dem":
+            result.update(artifact_id=body["artifact_id"], raw_sha256=body["sha256"])
+        return result
     except (KeyError, TypeError, ValueError, OSError):
         return None
 
@@ -573,7 +613,7 @@ def _physical_proof_clocks_have_authority(row: Mapping[str, object], artifact: M
             return False
         if not clocks[0] <= clocks[1] <= clocks[2] <= clocks[3]:
             return False
-        if row.get("revalidated_legacy_product", False):
+        if row.get("revalidated_legacy_product", False) or row.get("revalidated_physical_capture", False):
             from src.data.replacement_forecast_cycle_policy import cycle_age_outside_bound
             if cycle_age_outside_bound(decision, clocks[0]):
                 return False
@@ -751,6 +791,7 @@ def physical_source_proof_dependency(proof: object) -> Mapping[str, object] | No
 
 
 def _physical_response_provenance(row: Mapping[str, object]) -> Mapping[str, object] | None:
+    row = _physical_artifact_at_cutoff(row)
     if not _is_station_model(str(row["model"])):
         row = _revalidated_legacy_product_row(row)
         if row is None:
@@ -776,6 +817,8 @@ def _physical_response_provenance(row: Mapping[str, object]) -> Mapping[str, obj
         "entity_body_sha256": artifact["sha256"],
         "capture_receipt_artifact_id": artifact.get("capture_receipt_artifact_id"),
         "capture_receipt_sha256": artifact.get("capture_receipt_sha256"),
+        "recorded_body_artifact_id": row.get("recorded_body_artifact_id"),
+        "recorded_raw_sha256": row.get("recorded_raw_sha256"),
         "raw_model_forecast_id": row["raw_model_forecast_id"],
         "revalidated_legacy_product": bool(row.get("revalidated_legacy_product", False)),
         "recorded_product_policy": row.get("recorded_product_policy"),
