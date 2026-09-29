@@ -260,6 +260,8 @@ def _cut_row(
     candidate_count: int,
     winner_candidate_id: str | None,
     payload: Mapping[str, object],
+    cancel_source: str | None = None,
+    cancel_stage: str | None = None,
 ) -> tuple[object, ...]:
     raw = _canonical(dict(payload))
     return (
@@ -278,6 +280,8 @@ def _cut_row(
         hashlib.sha256(raw).hexdigest(),
         encode_payload(raw),
         datetime.now(timezone.utc).isoformat(),
+        cancel_source,
+        cancel_stage,
     )
 
 
@@ -457,11 +461,14 @@ def build_unreceipted_cut(
     selection_policy_identity: str,
     economic_cut_completed: bool,
     detail: Mapping[str, object],
+    cancel_source: str | None = None,
+    cancel_stage: str | None = None,
 ) -> CutCorpus:
     """Corpus for a cut that ended before its auction receipt was written.
 
     Such a cut never froze a full witness/book vector, so it records the
-    status, reason and decision time, and nothing is reconstructed.
+    status, reason and decision time, and nothing is reconstructed. A
+    cancelled INCOMPLETE cut also records its cancel source and stage.
     """
 
     if reason.startswith(_NO_CANDIDATE_REASONS):
@@ -483,6 +490,8 @@ def build_unreceipted_cut(
             candidate_count=0,
             winner_candidate_id=None,
             payload=detail,
+            cancel_source=cancel_source if status == "INCOMPLETE" else None,
+            cancel_stage=cancel_stage if status == "INCOMPLETE" else None,
         ),
         families=(),
         q_raw_by_candidate={},
@@ -573,6 +582,7 @@ _CUT_COLUMNS = (
     "selection_policy_identity", "full_scope_family_count", "eligible_family_count",
     "candidate_count", "winner_candidate_id", "decision_log_id",
     "payload_encoding", "payload_sha256", "payload", "created_at",
+    "cancel_source", "cancel_stage",
 )
 _TOPOLOGY_COLUMNS = (
     "topology_id", "family_key", "city", "target_date", "metric", "native_unit",

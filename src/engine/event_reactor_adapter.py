@@ -2603,6 +2603,15 @@ def _day0_wake_outside_scope(
     )
 
 
+def _wake_label(wakes: Iterable[object]) -> str:
+    """Attribution label naming the reasons of the wakes that superseded a cut."""
+
+    reasons = sorted(
+        {str(getattr(wake, "reason", "") or "") or "unknown" for wake in wakes}
+    )
+    return "wake:" + (",".join(reasons) if reasons else "unknown")
+
+
 def _global_batch_wakes_supersede(
     wakes: Iterable[object],
     *,
@@ -9316,7 +9325,9 @@ def event_bound_live_adapter_from_trade_conn(
             )
             return True
 
-        def _epoch_superseded() -> bool:
+        def _epoch_superseded() -> str | bool:
+            """False to continue; else the label of the fact that supersedes."""
+
             current = reactor_urgent_wake_revision()
             if (
                 current is None
@@ -9334,18 +9345,18 @@ def event_bound_live_adapter_from_trade_conn(
                 # queued while book/substrate wakes remain JIT-rebound.
                 try:
                     if exact_held_sell_completion_wake_ids(fail_on_error=True):
-                        return True
+                        return "exact_held_sell_pending"
                 except (OSError, ValueError):
-                    return True
+                    return "exact_held_sell_queue_unreadable"
                 if _generic_held_completion_wakes_supersede(
                     pending_wakes,
                     valuation_family_keys=_dependency_scope_family_keys,
                 ):
-                    return True
+                    return _wake_label(pending_wakes)
                 if not pending_wakes:
                     marker = reactor_urgent_wake_identity()
                     if marker is None:
-                        return True
+                        return "urgent_marker_unreadable"
                     marker_wake_id, marker_reason = marker
                     if marker_wake_id not in _global_batch_owned_wake_ids:
                         if marker_reason in {
@@ -9356,7 +9367,7 @@ def event_bound_live_adapter_from_trade_conn(
                             return False
                         # A marker lacks family scope, so a forecast/completion
                         # fact cannot safely be declared independent here.
-                        return True
+                        return f"urgent_marker:{marker_reason}"
                 _global_batch_urgent_wake_revision[0] = current
                 return False
             if (
@@ -9379,7 +9390,7 @@ def event_bound_live_adapter_from_trade_conn(
                     )
                     for wake in pending_wakes
                 ):
-                    return True
+                    return "wake:day0_extreme_event_committed"
                 if not pending_wakes:
                     marker = reactor_urgent_wake_identity()
                     if (
@@ -9387,13 +9398,13 @@ def event_bound_live_adapter_from_trade_conn(
                         and marker[0] not in _global_batch_owned_wake_ids
                         and marker[1] == "day0_extreme_event_committed"
                     ):
-                        return True
+                        return "urgent_marker:day0_extreme_event_committed"
                 _global_batch_urgent_wake_revision[0] = current
                 return False
             if not pending_wakes:
                 marker = reactor_urgent_wake_identity()
                 if marker is None:
-                    return True
+                    return "urgent_marker_unreadable"
                 marker_wake_id, marker_reason = marker
                 if marker_wake_id not in _global_batch_owned_wake_ids:
                     if marker_reason == "market_price_advanced":
@@ -9408,7 +9419,7 @@ def event_bound_live_adapter_from_trade_conn(
                     if _consult_preemption_grace(reasons=(marker_reason,)):
                         _global_batch_urgent_wake_revision[0] = current
                         return False
-                    return True
+                    return f"urgent_marker:{marker_reason}"
                 _global_batch_urgent_wake_revision[0] = current
                 return False
             if not _global_batch_wakes_supersede(
@@ -9427,11 +9438,15 @@ def event_bound_live_adapter_from_trade_conn(
             if _consult_preemption_grace(reasons=pending_wake_reasons):
                 _global_batch_urgent_wake_revision[0] = current
                 return False
-            return True
+            return _wake_label(
+                wake
+                for wake in pending_wakes
+                if not _day0_wake_outside_scope(wake, _day0_scope_family_keys)
+            )
 
         _stable_preflight_monitor_handoff = [False]
 
-        def _hard_day0_authority_cancelled() -> bool:
+        def _hard_day0_authority_cancelled() -> str | bool:
             # Called from every WorkContext checkpoint; the full queue read
             # runs only when the urgent revision or the scope changed.
             current = reactor_urgent_wake_revision()
@@ -9454,7 +9469,11 @@ def event_bound_live_adapter_from_trade_conn(
                 not _day0_wake_outside_scope(wake, _day0_scope_family_keys)
                 for wake in day0_wakes
             ):
-                return True
+                return (
+                    "day0_hard_fact:scope_unknown"
+                    if _day0_scope_family_keys is None
+                    else "day0_hard_fact:in_scope"
+                )
             if (
                 not day0_wakes
                 and reactor_urgent_wake_reason()
@@ -9463,11 +9482,11 @@ def event_bound_live_adapter_from_trade_conn(
                 # publish_reactor_wake writes the queue record before the
                 # marker, so a new Day0 marker with no queued record names no
                 # family; it keeps the hard veto.
-                return True
+                return "day0_hard_fact:marker_without_record"
             _day0_clear_at[0] = (current, _day0_scope_family_keys)
             return False
 
-        def _generic_final_actuation_cancelled() -> bool:
+        def _generic_final_actuation_cancelled() -> str | bool:
             """Keep the generic 30-second/fresh-fact fence through venue I/O."""
 
             return _generic_final_actuation_is_cancelled(
@@ -9477,7 +9496,7 @@ def event_bound_live_adapter_from_trade_conn(
                     exact_held_sell_completion_wake_ids(fail_on_error=True)
                 ),
                 epoch_superseded=_epoch_superseded,
-            )
+            ) and "generic_completion_fence"
 
         final_actuation_cancelled = (
             _generic_final_actuation_cancelled
@@ -9485,22 +9504,29 @@ def event_bound_live_adapter_from_trade_conn(
             else _hard_day0_authority_cancelled
         )
 
-        def _day0_selection_cancelled() -> bool:
+        def _day0_selection_cancelled() -> object:
+            """False to continue; else the cancelling leaf's label.
+
+            An external ``selection_cancelled`` leaf's own truthy value passes
+            through, so a labelled leaf keeps its attribution.
+            """
+
             if family_scoped_held_completion:
                 # Strict generic completion must use the same epoch/scoped
                 # supersession path as _epoch_superseded.  The unscoped hard
                 # Day0 probe would otherwise cancel on an unrelated family
                 # before the published valuation scope can be consulted.
                 try:
-                    if _epoch_superseded():
-                        _stable_preflight_monitor_handoff[0] = False
-                        return True
+                    superseded = _epoch_superseded()
                 except Exception:  # noqa: BLE001 - unavailable truth is a veto
                     logging.getLogger(__name__).exception(
                         "global strict-generic supersession probe failed"
                     )
                     _stable_preflight_monitor_handoff[0] = False
-                    return True
+                    return "probe_error:strict_generic_supersession"
+                if superseded:
+                    _stable_preflight_monitor_handoff[0] = False
+                    return superseded
             else:
                 try:
                     hard_cancelled = _hard_day0_authority_cancelled()
@@ -9509,13 +9535,14 @@ def event_bound_live_adapter_from_trade_conn(
                         "global hard Day0 authority probe failed"
                     )
                     _stable_preflight_monitor_handoff[0] = False
-                    return True
+                    return "probe_error:day0_hard_fact"
                 if hard_cancelled:
                     _stable_preflight_monitor_handoff[0] = False
-                    return True
-            if _generic_final_actuation_cancelled():
+                    return hard_cancelled
+            generic_cancelled = _generic_final_actuation_cancelled()
+            if generic_cancelled:
                 _stable_preflight_monitor_handoff[0] = False
-                return True
+                return generic_cancelled
             if _stable_preflight_monitor_handoff[0]:
                 # A stable submit-time proof owns the short final-actuation
                 # window. Periodic monitor pressure already has durable completion
@@ -9525,8 +9552,9 @@ def event_bound_live_adapter_from_trade_conn(
                 return False
             if selection_cancelled is not None:
                 try:
-                    if selection_cancelled():
-                        return True
+                    requested = selection_cancelled()
+                    if requested:
+                        return requested
                 except Exception:  # noqa: BLE001 - cancellation is fail-soft.
                     logging.getLogger(__name__).exception(
                         "global selection cancellation probe failed"

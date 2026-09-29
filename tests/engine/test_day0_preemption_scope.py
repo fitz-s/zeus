@@ -149,9 +149,11 @@ def test_in_scope_day0_commit_cancels_the_cut(cut):
     cut.captured["day0_scope_observer"](frozenset({_IN_KEY}))
     cut.publish_day0(_IN)
 
-    assert cut.captured["selection_cancelled"]() is True
-    assert cut.captured["final_actuation_cancelled"]() is True
-    assert cut.captured["epoch_superseded"]() is True
+    assert cut.captured["selection_cancelled"]() == "day0_hard_fact:in_scope"
+    assert cut.captured["final_actuation_cancelled"]() == "day0_hard_fact:in_scope"
+    assert (
+        cut.captured["epoch_superseded"]() == "wake:day0_extreme_event_committed"
+    )
 
 
 def test_day0_commit_before_the_scope_is_known_cancels(cut):
@@ -160,14 +162,14 @@ def test_day0_commit_before_the_scope_is_known_cancels(cut):
     cut.captured["day0_scope_observer"](None)
     cut.publish_day0(_OUT)
 
-    assert cut.captured["selection_cancelled"]() is True
+    assert cut.captured["selection_cancelled"]() == "day0_hard_fact:scope_unknown"
 
 
 def test_day0_wake_without_families_cancels(cut):
     cut.captured["day0_scope_observer"](frozenset({_IN_KEY}))
     cut.publish_day0()
 
-    assert cut.captured["selection_cancelled"]() is True
+    assert cut.captured["selection_cancelled"]() == "day0_hard_fact:in_scope"
 
 
 def test_receipt_stage_keeps_selection_for_out_of_scope_day0(cut):
@@ -185,7 +187,7 @@ def test_receipt_stage_keeps_selection_for_out_of_scope_day0(cut):
     assert cut.captured["selection_cancelled"]() is False
     assert cut.captured["final_actuation_cancelled"]() is False
     cut.publish_day0(_IN)
-    assert cut.captured["final_actuation_cancelled"]() is True
+    assert cut.captured["final_actuation_cancelled"]() == "day0_hard_fact:in_scope"
 
 
 def test_widened_scope_rereads_an_absorbed_day0_wake(cut):
@@ -198,7 +200,7 @@ def test_widened_scope_rereads_an_absorbed_day0_wake(cut):
 
     observe(frozenset({_IN_KEY, _OUT_KEY}))
 
-    assert cut.captured["selection_cancelled"]() is True
+    assert cut.captured["selection_cancelled"]() == "day0_hard_fact:in_scope"
 
 
 @pytest.mark.parametrize("family", (_IN, _OUT))
@@ -213,7 +215,9 @@ def test_reserved_completion_cut_scopes_its_day0_supersession(
     reserved.captured["day0_scope_observer"](frozenset({_IN_KEY}))
     reserved.publish_day0(family)
 
-    assert reserved.captured["epoch_superseded"]() is (family == _IN)
+    assert reserved.captured["epoch_superseded"]() == (
+        "wake:day0_extreme_event_committed" if family == _IN else False
+    )
 
 
 def test_runtime_publishes_scan_scope_then_winner_scope(monkeypatch):

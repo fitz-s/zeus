@@ -64,8 +64,25 @@ from src.solve.solver import (
 GLOBAL_BOOK_CONFIRMED_ABSENT_FIELD = "_global_confirmed_absent"
 
 
+def cancel_source(requested: object) -> str:
+    """Name the probe that cancelled a cut: its label, else ``unattributed``.
+
+    A cancellation probe returns a falsy value to continue, or a truthy value
+    to cancel. A composite probe returns the non-empty label of the leaf that
+    fired; a bare ``True`` carries no attribution.
+    """
+
+    if isinstance(requested, str) and requested.strip():
+        return requested.strip()
+    return "unattributed"
+
+
 class GlobalAuctionScopeCancelled(RuntimeError):
     """Raised when held-position monitoring preempts a read-only scope scan."""
+
+    def __init__(self, message: str, *, source: str = "unattributed") -> None:
+        self.source = str(source)
+        super().__init__(message)
 
 
 class WorkDeferredCode(str, Enum):
@@ -84,10 +101,16 @@ class WorkDeferred(RuntimeError):
         *,
         stage: str,
         remaining_s: float,
+        source: str | None = None,
     ) -> None:
         self.code = code
         self.stage = str(stage)
         self.remaining_s = max(0.0, float(remaining_s))
+        # Who yielded this cut: the cancelling probe's label, or the deadline.
+        self.source = str(
+            source
+            or ("deadline" if code is WorkDeferredCode.DEADLINE else "unattributed")
+        )
         super().__init__(f"{code.value}:{self.stage}")
 
 
@@ -105,11 +128,15 @@ class WorkContext:
         return max(0.0, float(self.deadline_monotonic) - self.monotonic())
 
     def checkpoint(self, stage: str) -> float:
-        if self.cancel_requested is not None and self.cancel_requested():
+        requested = (
+            self.cancel_requested() if self.cancel_requested is not None else None
+        )
+        if requested:
             raise WorkDeferred(
                 WorkDeferredCode.PREEMPTED,
                 stage=stage,
                 remaining_s=self.remaining(),
+                source=cancel_source(requested),
             )
         remaining = self.remaining()
         if remaining <= 0.0:
@@ -2795,11 +2822,13 @@ def _current_day0_events(
         if cancelled is None:
             return
         try:
-            requested = bool(cancelled())
+            requested = cancelled()
         except Exception:
             return
         if requested:
-            raise GlobalAuctionScopeCancelled("GLOBAL_SELECTION_CANCELLED")
+            raise GlobalAuctionScopeCancelled(
+                "GLOBAL_SELECTION_CANCELLED", source=cancel_source(requested)
+            )
 
     _raise_if_cancelled()
     if not _table_exists(world_conn, "opportunity_events"):
@@ -3042,22 +3071,29 @@ def scan_current_global_auction_scope(
     if decision_at_utc.tzinfo is None:
         raise ValueError("decision_at_utc must be timezone-aware")
 
-    cancellation_seen = False
+    # The first cancelling probe's label; None until a probe cancelled.
+    cancellation_seen: str | None = None
 
     def _cancelled() -> bool:
         nonlocal cancellation_seen
         if cancelled is None:
             return False
         try:
-            requested = bool(cancelled())
+            requested = cancelled()
         except Exception:
             return False
-        cancellation_seen = cancellation_seen or requested
-        return requested
+        if requested and cancellation_seen is None:
+            cancellation_seen = cancel_source(requested)
+        return bool(requested)
+
+    def _cancelled_error() -> GlobalAuctionScopeCancelled:
+        return GlobalAuctionScopeCancelled(
+            "GLOBAL_SELECTION_CANCELLED", source=cancellation_seen or "unattributed"
+        )
 
     def _raise_if_cancelled() -> None:
         if _cancelled():
-            raise GlobalAuctionScopeCancelled("GLOBAL_SELECTION_CANCELLED")
+            raise _cancelled_error()
 
     _raise_if_cancelled()
     held = tuple(
@@ -3167,7 +3203,7 @@ def scan_current_global_auction_scope(
         _raise_if_cancelled()
     except InterruptedError as exc:
         if cancellation_seen:
-            raise GlobalAuctionScopeCancelled("GLOBAL_SELECTION_CANCELLED") from exc
+            raise _cancelled_error() from exc
         raise
     except sqlite3.OperationalError as exc:
         interrupted = (
@@ -3176,7 +3212,7 @@ def scan_current_global_auction_scope(
             or "interrupted" in str(exc).lower()
         )
         if cancellation_seen and interrupted:
-            raise GlobalAuctionScopeCancelled("GLOBAL_SELECTION_CANCELLED") from exc
+            raise _cancelled_error() from exc
         raise
     finally:
         watch_stop.set()

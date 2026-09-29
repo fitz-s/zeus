@@ -7709,6 +7709,18 @@ def _held_position_monitor_preemption_pending(
     return False
 
 
+def _first_cancel_label(
+    *probes: tuple[str, Callable[[], object]],
+) -> str | bool:
+    """Evaluate labelled cancellation probes in order; return the first label
+    whose probe fires, else False. The label attributes the cancelled cut."""
+
+    for label, probe in probes:
+        if probe():
+            return label
+    return False
+
+
 def _reactor_wake_cancellation_probe(
     *,
     producer_wake_reason: str | None,
@@ -10023,14 +10035,17 @@ def run_edli_event_reactor_cycle(
             )
             if generic_completion_deadline_monotonic is not None
             else time.monotonic() + construct_cut_seconds,
-            cancel_requested=lambda: (
-                _urgent_wake_pending()
-                or _construct_monitor_cancelled()
-                or _generic_completion_latch_cancelled()
-                or (
-                    not exact_final_actuation_window
-                    and _EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
-                )
+            cancel_requested=lambda: _first_cancel_label(
+                ("urgent_wake", _urgent_wake_pending),
+                ("monitor_handoff", _construct_monitor_cancelled),
+                ("generic_completion_latch", _generic_completion_latch_cancelled),
+                (
+                    "exact_held_sell_pending",
+                    lambda: (
+                        not exact_final_actuation_window
+                        and _EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
+                    ),
+                ),
             ),
         )
         _reactor_construct_complete = False
@@ -10334,9 +10349,9 @@ def run_edli_event_reactor_cycle(
             auction_capital_authority=_auction_capital_authority,
             producer_wake_ids=producer_wake_ids,
             producer_wake_published_at=producer_wake_published_at,
-            selection_cancelled=lambda: (
-                _monitor_selection_cancelled()
-                or _generic_completion_latch_cancelled()
+            selection_cancelled=lambda: _first_cancel_label(
+                ("monitor_handoff", _monitor_selection_cancelled),
+                ("generic_completion_latch", _generic_completion_latch_cancelled),
             ),
             selection_completion_fairness_reserved=(
                 _monitor_completion_mode.fairness_reserved

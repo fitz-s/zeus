@@ -151,8 +151,30 @@ _DDL = (
 )
 
 
+# Additive columns on an already-live table (2026-09-29). An INCOMPLETE cut
+# names who cancelled it (the probe label, or ``deadline``) and the work
+# checkpoint where it yielded; both are NULL for every other outcome.
+_CUT_COLUMN_MIGRATIONS = {
+    "cancel_source": "ALTER TABLE tier0_auction_cut ADD COLUMN cancel_source TEXT",
+    "cancel_stage": "ALTER TABLE tier0_auction_cut ADD COLUMN cancel_stage TEXT",
+}
+
+
 def ensure_tables(conn: sqlite3.Connection) -> None:
     """Create the corpus tables and indexes (idempotent, additive only)."""
 
     for ddl in _DDL:
         conn.execute(ddl)
+    existing = {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_xinfo(tier0_auction_cut)").fetchall()
+    }
+    for column, ddl in _CUT_COLUMN_MIGRATIONS.items():
+        if column in existing:
+            continue
+        try:
+            conn.execute(ddl)
+        except sqlite3.OperationalError as exc:
+            # Another writer's ALTER won the presence-check race.
+            if "duplicate column name" not in str(exc):
+                raise

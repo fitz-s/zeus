@@ -243,7 +243,8 @@ class TestNthSupersessionAborts:
         _bump_revision(harness, 2)
         assert epoch_superseded() is False  # 2nd: coalesced (count 1 -> 2)
         _bump_revision(harness, 3)
-        assert epoch_superseded() is True  # 3rd: budget exhausted (2 >= 2) -> abort
+        # 3rd: budget exhausted (2 >= 2) -> abort, attributed to the wake.
+        assert epoch_superseded() == "wake:forecast_posterior_advanced"
 
 
 class TestHardVetoNeverCoalesced:
@@ -259,7 +260,8 @@ class TestHardVetoNeverCoalesced:
         harness.wake_families["value"] = ()
 
         _bump_revision(harness, 1)
-        assert epoch_superseded() is True  # immediate abort, no grace consulted
+        # Immediate abort, no grace consulted, attributed to the wake.
+        assert epoch_superseded() == f"wake:{reason}"
 
         suppressed = [
             r for r in caplog.records if "preemption churn suppressed" in r.message
@@ -276,7 +278,7 @@ class TestHardVetoNeverCoalesced:
         harness.urgent_reason["value"] = "position_fill_projected"
         harness.wake_families["value"] = ()
         _bump_revision(harness, 1)
-        assert epoch_superseded() is True  # hard veto, immediate abort
+        assert epoch_superseded() == "wake:position_fill_projected"  # hard veto
 
 
 class TestDrainResetsPerGeneration:
@@ -294,7 +296,7 @@ class TestDrainResetsPerGeneration:
         _bump_revision(harness, 1)
         assert gen1() is False  # coalesced (count 0 -> 1, budget exhausted)
         _bump_revision(harness, 2)
-        assert gen1() is True  # budget exhausted -> immediate abort
+        assert gen1() == "wake:forecast_posterior_advanced"  # budget exhausted
 
         # Generation 2: a brand-new adapter (fresh closure) must start at 0
         # again, not inherit generation 1's exhausted counter.
@@ -362,9 +364,9 @@ def test_generic_dependency_scope_reset_rechecks_unchanged_wake(harness, monkeyp
     assert epoch() is False
     # A new cut must not reuse that ignored wake cursor or the old scope.
     observe(None)
-    assert epoch() is True
+    assert epoch() == f"wake:{reason}"
     observe(frozenset({held, outside}))
-    assert epoch() is True
+    assert epoch() == f"wake:{reason}"
 
 
 def test_ordinary_auction_has_no_dependency_scope_observer(harness):

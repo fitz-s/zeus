@@ -55,6 +55,7 @@ from src.engine.global_auction_universe import (
     WorkDeferred,
     WorkDeferredCode,
     bounded_work_sqlite,
+    cancel_source,
     current_global_book_epoch_identity,
     current_global_auction_scope_from_events,
     current_portfolio_wealth_witness,
@@ -182,6 +183,7 @@ def _global_auction_trade_write_lease(
             ),
             stage=f"{owner}:write_lease",
             remaining_s=remaining,
+            source="deadline" if remaining <= 0.0 else "write_lease_timeout",
         ) from exc
 
 
@@ -375,6 +377,7 @@ def _receipt_stage_summary(stages: Mapping[str, list[float]]) -> str:
 @dataclass
 class _GlobalPreflightSqliteFence:
     interrupt_reason: str | None = None
+    cancel_source: str | None = None
 
 
 @contextmanager
@@ -410,7 +413,10 @@ def _global_preflight_sqlite_fence(
                 continue
             if cancelled is not None:
                 try:
-                    if cancelled():
+                    requested = cancelled()
+                    if requested:
+                        if fence.cancel_source is None:
+                            fence.cancel_source = cancel_source(requested)
                         interrupt("cancelled")
                 except Exception:  # noqa: BLE001 - hints cannot invent a veto
                     pass
@@ -1736,6 +1742,17 @@ def _global_maker_rest_escalation_rejection(
         return "GLOBAL_MAKER_REST_ALREADY_ESCALATED"
     return None
 
+
+# Reasons for a cut that a probe cancelled, superseded or deferred. Each such
+# reject logs one attributed line and writes cancel_source/cancel_stage.
+_CANCELLED_CUT_REASONS = frozenset(
+    {
+        "GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED",
+        "GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT",
+        WorkDeferredCode.PREEMPTED.value,
+        WorkDeferredCode.DEADLINE.value,
+    }
+)
 
 _COMPLETE_ECONOMIC_NO_TRADE_REASONS = frozenset(
     {
@@ -4016,6 +4033,8 @@ def _queue_unreceipted_tier0_cut(
     event_count: int,
     fractional_kelly_multiplier: Decimal,
     buy_candidates_enabled: bool,
+    cancel_source: str | None = None,
+    cancel_stage: str | None = None,
 ) -> None:
     """Queue a cut that ended before its receipt; a later flush writes it."""
 
@@ -4033,6 +4052,8 @@ def _queue_unreceipted_tier0_cut(
             selection_policy_identity=identity,
             economic_cut_completed=economic_cut_completed,
             detail={"event_count": event_count},
+            cancel_source=cancel_source,
+            cancel_stage=cancel_stage,
         )
         corpus.queue_cut(
             _decision_log_connection_key(trade_conn),
@@ -8363,9 +8384,29 @@ def process_current_global_batch(
     cut_receipt_written = False
     batch_started = time.monotonic()
     stage_started = batch_started
+    # Cancel attribution. SCOPE: this cut. The first probe that cancels,
+    # supersedes or defers it latches (source, stage); ``reject`` logs one line
+    # and writes the pair to the cut row. RESET: every cut (and recursive
+    # re-auction) owns a fresh latch.
+    cancel_attribution: list[tuple[str, str]] = []
+    last_stage = ["start"]
+
+    def attribute_cancel(source: str, stage: str) -> None:
+        if not cancel_attribution:
+            cancel_attribution.append((str(source), str(stage)))
+
+    selection_probe = selection_cancelled
+    if selection_probe is not None:
+
+        def selection_cancelled() -> object:
+            requested = selection_probe()
+            if requested:
+                attribute_cancel(cancel_source(requested), last_stage[0])
+            return requested
 
     def log_stage(stage: str, *, families: int | None = None) -> None:
         nonlocal stage_started
+        last_stage[0] = stage
         now = time.monotonic()
         elapsed = now - stage_started
         total = now - batch_started
@@ -8518,10 +8559,11 @@ def process_current_global_batch(
         return tuple(expired)
 
     def superseded(stage: str) -> bool:
+        last_stage[0] = stage
         if epoch_superseded is None:
             return False
         try:
-            changed = bool(epoch_superseded())
+            changed = epoch_superseded()
         except Exception as exc:  # noqa: BLE001 - wake hint failure cannot block trading
             _LOG.warning(
                 "global batch supersession probe failed: stage=%s error=%r",
@@ -8530,16 +8572,11 @@ def process_current_global_batch(
             )
             return False
         if changed:
-            _LOG.info(
-                "global batch superseded by newer durable input: stage=%s "
-                "elapsed_s=%.3f events=%d",
-                stage,
-                time.monotonic() - batch_started,
-                len(event_tuple),
-            )
-        return changed
+            attribute_cancel(f"epoch_superseded:{cancel_source(changed)}", stage)
+        return bool(changed)
 
     def cancelled(stage: str) -> bool:
+        last_stage[0] = stage
         if work_context is not None:
             work_context.checkpoint(stage)
             return False
@@ -8554,37 +8591,25 @@ def process_current_global_batch(
                 exc,
             )
             return False
-        if changed:
-            _LOG.info(
-                "global batch preempted by urgent input: stage=%s "
-                "elapsed_s=%.3f events=%d",
-                stage,
-                time.monotonic() - batch_started,
-                len(event_tuple),
-            )
         return changed
 
     def final_cancelled(stage: str) -> bool:
+        last_stage[0] = stage
         if final_actuation_cancelled is None:
             return False
         try:
-            changed = bool(final_actuation_cancelled())
+            changed = final_actuation_cancelled()
         except Exception as exc:  # noqa: BLE001 - hard authority failure is a veto
             _LOG.error(
                 "global final-actuation cancellation probe failed: stage=%s error=%r",
                 stage,
                 exc,
             )
+            attribute_cancel("final_actuation_probe_error", stage)
             return True
         if changed:
-            _LOG.info(
-                "global final actuation revoked by newer authority: stage=%s "
-                "elapsed_s=%.3f events=%d",
-                stage,
-                time.monotonic() - batch_started,
-                len(event_tuple),
-            )
-        return changed
+            attribute_cancel(cancel_source(changed), stage)
+        return bool(changed)
 
     @contextmanager
     def bounded_read(conn: object, stage: str, *, shared_connection: bool = False):
@@ -8839,6 +8864,22 @@ def process_current_global_batch(
             and effective_next_claim is None
             and not deadline_expired
         )
+        cancel_pair: tuple[str, str] | None = None
+        if reason in _CANCELLED_CUT_REASONS:
+            cancel_pair = (
+                cancel_attribution[0]
+                if cancel_attribution
+                else ("unattributed", last_stage[0])
+            )
+            _LOG.info(
+                "global auction cut cancelled: reason=%s source=%s stage=%s "
+                "elapsed_s=%.3f events=%d",
+                reason,
+                cancel_pair[0],
+                cancel_pair[1],
+                time.monotonic() - batch_started,
+                len(event_tuple),
+            )
         if not cut_receipt_written:
             _queue_unreceipted_tier0_cut(
                 trade_conn,
@@ -8848,6 +8889,8 @@ def process_current_global_batch(
                 event_count=len(event_tuple),
                 fractional_kelly_multiplier=fractional_kelly_multiplier,
                 buy_candidates_enabled=buy_candidates_enabled,
+                cancel_source=cancel_pair[0] if cancel_pair else None,
+                cancel_stage=cancel_pair[1] if cancel_pair else None,
             )
         release_selection_snapshot()
         receipts: dict[str, EventSubmissionReceipt] = {}
@@ -9020,6 +9063,7 @@ def process_current_global_batch(
             )
         )
         missing_held_families: list[tuple[str, str, str]] = []
+        last_stage[0] = "scope_scan"
         try:
             with ExitStack() as scope_reads:
                 scope_world_conn = scope_reads.enter_context(
@@ -9055,13 +9099,8 @@ def process_current_global_batch(
                     day0_only=day0_only_scope,
                     cancelled=selection_cancelled,
                 )
-        except GlobalAuctionScopeCancelled:
-            _LOG.info(
-                "global batch preempted during scope scan for held-position monitor: "
-                "elapsed_s=%.3f events=%d",
-                time.monotonic() - batch_started,
-                len(event_tuple),
-            )
+        except GlobalAuctionScopeCancelled as exc:
+            attribute_cancel(exc.source, "scope_scan")
             return reject("GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED")
         log_stage("scope_scan", families=len(full_scope.events_by_family))
         if cancelled("scope_scan"):
@@ -10719,7 +10758,12 @@ def process_current_global_batch(
                             WorkDeferredCode.PREEMPTED,
                             stage="winner_preflight:cancelled",
                             remaining_s=work_context.remaining(),
+                            source=preflight_fence.cancel_source,
                         )
+                    attribute_cancel(
+                        preflight_fence.cancel_source or "unattributed",
+                        "winner_preflight:cancelled",
+                    )
                     return reject(
                         "GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED"
                     )
@@ -11515,15 +11559,7 @@ def process_current_global_batch(
             continuation_event=continuation_event,
         )
     except WorkDeferred as exc:
-        _LOG.info(
-            "global auction deferred: code=%s stage=%s remaining_s=%.3f "
-            "cancel=%s deadline=%s",
-            exc.code.value,
-            exc.stage,
-            exc.remaining_s,
-            exc.code.value == "DEFERRED_PREEMPTED",
-            work_context.deadline_monotonic if work_context else None,
-        )
+        attribute_cancel(exc.source, exc.stage)
         return reject(exc.code.value)
     except Exception as exc:  # noqa: BLE001 - one authority fault invalidates epoch
         _LOG.exception("global auction epoch failed closed")
