@@ -29,7 +29,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -2163,6 +2163,32 @@ def _venue_point_order_boot_recoverable(item: dict[str, Any]) -> dict[str, Any] 
     return None
 
 
+def _venue_terminal_fill_proven_ids(command_ids: Iterable[str]) -> frozenset[str]:
+    """Command ids whose venue fill truth is final under the one recovery law.
+
+    Resting/nonterminal classification in this preflight must not re-derive
+    order state from partial projections; it asks
+    ``command_recovery.venue_terminal_fill_proven`` on a read-only connection.
+    """
+
+    ids = sorted({str(command_id) for command_id in command_ids if str(command_id or "")})
+    if not ids or not TRADE_DB.exists():
+        return frozenset()
+    from src.execution.command_recovery import venue_terminal_fill_proven
+
+    conn = sqlite3.connect(f"file:{TRADE_DB}?mode=ro", uri=True, timeout=5)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON")
+        return frozenset(
+            command_id for command_id in ids if venue_terminal_fill_proven(conn, command_id)
+        )
+    except sqlite3.Error:
+        return frozenset()
+    finally:
+        conn.close()
+
+
 def _venue_point_order_truth_alignment_check() -> CheckResult:
     """Classify venue/local drift without stopping the recovery runtime."""
 
@@ -2184,12 +2210,15 @@ def _venue_point_order_truth_alignment_check() -> CheckResult:
     local_terminal_no_fill_recoverable: list[dict[str, Any]] = []
     local_terminal_partial_covered: list[dict[str, Any]] = []
     venue_read_commands: list[dict[str, Any]] = []
+    venue_terminal_ids = _venue_terminal_fill_proven_ids(
+        command.get("command_id") for command in commands
+    )
     for command in commands:
-        if _terminal_partial_command_has_no_resting_remainder(command):
+        if str(command.get("command_id") or "") in venue_terminal_ids:
             local_terminal_partial_covered.append(
                 {
                     **command,
-                    "coverage": "terminal_partial_remainder_zero",
+                    "coverage": "venue_terminal_fill_proven",
                 }
             )
         elif _restart_relevant_entry_command_terminal_no_fill_recoverable(command):
@@ -2310,14 +2339,6 @@ def _venue_point_order_truth_alignment_check() -> CheckResult:
                         "point_error": repr(exc),
                         "open_orders_fallback_match": False,
                     }
-                    if _terminal_fak_order_has_no_resting_remainder(risk_item):
-                        covered.append(
-                            {
-                                **risk_item,
-                                "coverage": "settled_fak_remainder_canceled",
-                            }
-                        )
-                        continue
                     recoverable = _venue_point_order_boot_recoverable(risk_item)
                     if recoverable is not None:
                         boot_recoverable.append(recoverable)
@@ -2362,16 +2383,7 @@ def _venue_point_order_truth_alignment_check() -> CheckResult:
                 "local_fact_observed_at": command.get("latest_fact_observed_at"),
                 "venue_order": _venue_order_summary(payload),
             }
-            if (
-                payload is None or status in {"", "UNKNOWN", "NOT_FOUND"}
-            ) and _terminal_fak_order_has_no_resting_remainder(item):
-                covered.append(
-                    {
-                        **item,
-                        "coverage": "settled_fak_remainder_canceled",
-                    }
-                )
-            elif payload is None:
+            if payload is None:
                 risky.append({**item, "risk": "venue_point_order_not_found"})
             elif status in {"", "UNKNOWN"}:
                 risk_item = {**item, "risk": "venue_point_order_status_unknown"}
@@ -2412,18 +2424,13 @@ def _venue_point_order_truth_alignment_check() -> CheckResult:
             close()
 
     evidence["covered_count"] = len(covered)
-    settled_fak_count = sum(
-        item.get("coverage") == "settled_fak_remainder_canceled"
-        for item in covered
-    )
-    evidence["settled_fak_non_resting_count"] = settled_fak_count
     evidence["boot_recoverable"] = boot_recoverable
     evidence["risky"] = risky
     return CheckResult(
         "venue_point_order_truth_alignment",
         not risky,
-        "canonical settled FAK semantics prove no resting remainder"
-        if not risky and settled_fak_count
+        "venue-terminal fill law proves no resting remainder"
+        if not risky and local_terminal_partial_covered and not venue_read_commands
         else "authenticated venue point-order truth matches local restart-relevant order facts"
         if not risky and not boot_recoverable
         else "authenticated venue point-order drift is boot-recoverable before live order submission"
@@ -3195,23 +3202,13 @@ def _resting_venue_command_lifecycle_alignment_check() -> CheckResult:
     risky: list[dict[str, Any]] = []
     covered: list[dict[str, Any]] = []
     boot_recoverable: list[dict[str, Any]] = []
+    venue_terminal_ids = _venue_terminal_fill_proven_ids(
+        row["command_id"] for row in rows
+    )
     for row in rows:
         item = dict(row)
-        if _terminal_partial_command_has_no_resting_remainder(item):
-            covered.append(
-                {
-                    **item,
-                    "coverage": "terminal_partial_remainder_zero",
-                }
-            )
-            continue
-        if _terminal_fak_order_has_no_resting_remainder(item):
-            covered.append(
-                {
-                    **item,
-                    "coverage": "settled_fak_remainder_canceled",
-                }
-            )
+        if str(item.get("command_id") or "") in venue_terminal_ids:
+            covered.append({**item, "coverage": "venue_terminal_fill_proven"})
             continue
         intent_kind = str(row["intent_kind"] or "").upper()
         phase = str(row["position_phase"] or "")
@@ -3248,22 +3245,16 @@ def _resting_venue_command_lifecycle_alignment_check() -> CheckResult:
     evidence["risky"] = risky
     evidence["boot_recoverable"] = boot_recoverable
     evidence["covered_count"] = len(covered)
-    settled_fak_count = sum(
-        item.get("coverage") == "settled_fak_remainder_canceled"
-        for item in covered
+    venue_terminal_count = sum(
+        item.get("coverage") == "venue_terminal_fill_proven" for item in covered
     )
-    terminal_partial_count = sum(
-        item.get("coverage") == "terminal_partial_remainder_zero"
-        for item in covered
-    )
-    evidence["settled_fak_non_resting_count"] = settled_fak_count
-    evidence["terminal_partial_non_resting_count"] = terminal_partial_count
+    evidence["venue_terminal_non_resting_count"] = venue_terminal_count
     return CheckResult(
         "resting_venue_command_lifecycle_alignment",
         not risky,
         (
-            "canonical terminal order facts prove no resting command"
-            if settled_fak_count or terminal_partial_count
+            "venue-terminal fill law proves no resting command"
+            if venue_terminal_count
             else "resting venue commands are aligned with position lifecycle"
             if not boot_recoverable
             else "resting venue command conflicts are boot-recoverable"
@@ -3283,113 +3274,6 @@ def _positive_float(value: object) -> float | None:
     if parsed > 0.0:
         return parsed
     return None
-
-
-def _terminal_partial_command_has_no_resting_remainder(item: dict[str, Any]) -> bool:
-    """Accept an ENTRY or EXIT short fill only when quantities close exactly."""
-
-    if str(item.get("intent_kind") or "").upper() not in {"ENTRY", "EXIT"}:
-        return False
-    command_state = str(
-        item.get("command_state") or item.get("state") or ""
-    ).upper()
-    fact_state = str(
-        item.get("latest_fact_state") or item.get("local_fact_state") or ""
-    ).upper()
-    if command_state == "REVIEW_REQUIRED":
-        if (
-            str(item.get("position_phase") or "") not in HARD_TERMINAL_POSITION_PHASES
-            or fact_state not in TERMINAL_VENUE_FACT_STATES
-        ):
-            return False
-    elif command_state != "PARTIAL":
-        return False
-    if fact_state not in TERMINAL_VENUE_FACT_STATES | {
-        "PARTIAL",
-        "PARTIALLY_MATCHED",
-    }:
-        return False
-    matched = _decimal_float(
-        item.get("latest_fact_matched_size")
-        if item.get("latest_fact_matched_size") not in (None, "")
-        else item.get("local_fact_matched_size")
-    )
-    remaining = _decimal_float(
-        item.get("latest_fact_remaining_size")
-        if item.get("latest_fact_remaining_size") not in (None, "")
-        else item.get("local_fact_remaining_size")
-    )
-    filled = _decimal_float(item.get("positive_trade_filled_size"))
-    requested = _decimal_float(item.get("size"))
-    command_order_id = str(item.get("venue_order_id") or "").strip().lower()
-    fact_order_id = str(
-        item.get("latest_fact_venue_order_id") or ""
-    ).strip().lower()
-    trade_order_id = str(
-        item.get("positive_trade_venue_order_id") or ""
-    ).strip().lower()
-    return (
-        bool(command_order_id)
-        and fact_order_id == command_order_id
-        and trade_order_id == command_order_id
-        and str(item.get("positive_trade_fact_state") or "").upper()
-        in {"MATCHED", "MINED", "CONFIRMED"}
-        and matched is not None
-        and matched > 0.0
-        and remaining is not None
-        and abs(remaining) <= 1e-9
-        and filled is not None
-        and abs(filled - matched) <= 1e-6
-        and requested is not None
-        and requested - filled > 0.01
-    )
-
-
-def _terminal_fak_order_has_no_resting_remainder(item: dict[str, Any]) -> bool:
-    """Recognize an exact settled FAK short fill as non-resting.
-
-    FAK cancels its unmatched remainder at submission for both ENTRY BUY and
-    EXIT SELL.  Require the persisted envelope plus exact order-bound trade and
-    order quantities so an ordinary partial GTC cannot inherit this coverage.
-    """
-
-    fact_state = str(
-        item.get("latest_fact_state") or item.get("local_fact_state") or ""
-    ).upper()
-    matched = _decimal_float(
-        item.get("latest_fact_matched_size")
-        if item.get("latest_fact_matched_size") not in (None, "")
-        else item.get("local_fact_matched_size")
-    )
-    filled = _decimal_float(item.get("positive_trade_filled_size"))
-    requested = _decimal_float(item.get("size"))
-    command_order_id = str(item.get("venue_order_id") or "").strip().lower()
-    fact_order_id = str(
-        item.get("latest_fact_venue_order_id") or ""
-    ).strip().lower()
-    trade_order_id = str(
-        item.get("positive_trade_venue_order_id") or ""
-    ).strip().lower()
-    return (
-        str(item.get("intent_kind") or "").upper() in {"ENTRY", "EXIT"}
-        and str(item.get("command_state") or item.get("state") or "").upper()
-        == "REVIEW_REQUIRED"
-        and str(item.get("position_phase") or "")
-        in {"settled", "economically_closed"}
-        and str(item.get("order_type") or "").upper() == "FAK"
-        and str(item.get("positive_trade_fact_state") or "").upper()
-        == "CONFIRMED"
-        and fact_state in {"MATCHED", "FILLED", "PARTIAL", "PARTIALLY_MATCHED"}
-        and bool(command_order_id)
-        and fact_order_id == command_order_id
-        and trade_order_id == command_order_id
-        and matched is not None
-        and matched > 0.0
-        and filled is not None
-        and abs(filled - matched) <= 1e-6
-        and requested is not None
-        and requested - filled > 0.01
-    )
 
 
 def _terminal_fak_collateral_reservation_debt_check() -> CheckResult:
@@ -3469,6 +3353,10 @@ def _terminal_fak_collateral_reservation_debt_check() -> CheckResult:
             )
         debts: list[dict[str, Any]] = []
         unknowns: list[dict[str, Any]] = []
+        law_recoverable: list[dict[str, Any]] = []
+        venue_terminal_ids = _venue_terminal_fill_proven_ids(
+            str(row["command_id"] or "") for row in rows
+        )
         for raw_row in rows:
             row = dict(raw_row)
             sample = {
@@ -3500,6 +3388,22 @@ def _terminal_fak_collateral_reservation_debt_check() -> CheckResult:
                 "settled",
                 "economically_closed",
             }:
+                continue
+            if sample["command_id"] in venue_terminal_ids:
+                # The venue can no longer change this order's fills; the one
+                # review reducer converts the reservation on its next pass.
+                law_recoverable.append(
+                    {
+                        **sample,
+                        "position_phase": row["phase"],
+                        "active_ctf_reservation_amount": int(
+                            row.get("reserved_amount") or 0
+                        ),
+                        "resolution": (
+                            "command_recovery.reconcile_venue_terminal_fill_reviews"
+                        ),
+                    }
+                )
                 continue
             if (
                 str(row.get("state") or "").upper() != "REVIEW_REQUIRED"
@@ -3656,6 +3560,8 @@ def _terminal_fak_collateral_reservation_debt_check() -> CheckResult:
     evidence["debt_count"] = len(debts)
     evidence["unknown_samples"] = unknowns[:25]
     evidence["unknown_count"] = len(unknowns)
+    evidence["venue_terminal_recoverable_samples"] = law_recoverable[:25]
+    evidence["venue_terminal_recoverable_count"] = len(law_recoverable)
     clean = not debts and not unknowns
     return CheckResult(
         "terminal_fak_collateral_reservation_debt",

@@ -3606,109 +3606,8 @@ def test_review_required_entry_with_positive_trade_fact_is_boot_recoverable(
     )
 
 
-@pytest.mark.parametrize("intent_kind", ("ENTRY", "EXIT"))
-def test_settled_fak_remainder_is_not_classified_as_resting(
-    monkeypatch,
-    tmp_path,
-    intent_kind,
-):
-    trade_db = tmp_path / "zeus_trades.db"
-    world_db = tmp_path / "zeus-world.db"
-    forecast_db = tmp_path / "zeus-forecasts.db"
-    sqlite3.connect(world_db).close()
-    sqlite3.connect(forecast_db).close()
-    _init_resting_command_trade_db(
-        trade_db,
-        phase="settled",
-        intent_kind=intent_kind,
-    )
-    conn = sqlite3.connect(trade_db)
-    now = datetime.now(timezone.utc).isoformat()
-    conn.execute("ALTER TABLE venue_commands ADD COLUMN envelope_id TEXT")
-    conn.execute(
-        "UPDATE venue_commands SET state = 'REVIEW_REQUIRED', envelope_id = 'env-1'"
-    )
-    conn.execute(
-        """
-        CREATE TABLE venue_submission_envelopes (
-            envelope_id TEXT PRIMARY KEY,
-            order_type TEXT NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        "INSERT INTO venue_submission_envelopes VALUES ('env-1', 'FAK')"
-    )
-    conn.execute(
-        """
-        UPDATE venue_order_facts
-           SET state = 'PARTIALLY_MATCHED',
-               matched_size = '5.05',
-               remaining_size = '0.01'
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE venue_trade_facts (
-            command_id TEXT,
-            venue_order_id TEXT,
-            state TEXT,
-            filled_size TEXT,
-            fill_price TEXT,
-            observed_at TEXT
-        )
-        """
-    )
-    conn.execute(
-        """
-        INSERT INTO venue_trade_facts VALUES (
-            'cmd-1', '0xabc', 'CONFIRMED', '5.05', '0.60', ?
-        )
-        """,
-        (now,),
-    )
-    conn.commit()
-    conn.close()
-    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
-    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
-    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
-
-    result = preflight._resting_venue_command_lifecycle_alignment_check()
-
-    assert result.ok is True
-    assert result.evidence["risky"] == []
-    assert result.evidence["covered_count"] == 1
-    assert result.evidence["settled_fak_non_resting_count"] == 1
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    (
-        ("latest_fact_venue_order_id", "other-order"),
-        ("positive_trade_venue_order_id", "other-order"),
-        ("positive_trade_filled_size", 5.04),
-        ("size", 5.05),
-    ),
-)
-def test_settled_fak_remainder_requires_exact_short_fill_proof(field, value):
-    item = {
-        "intent_kind": "EXIT",
-        "command_state": "REVIEW_REQUIRED",
-        "position_phase": "settled",
-        "order_type": "FAK",
-        "venue_order_id": "order-1",
-        "size": 12.0,
-        "latest_fact_state": "PARTIALLY_MATCHED",
-        "latest_fact_venue_order_id": "order-1",
-        "latest_fact_matched_size": 5.05,
-        "positive_trade_fact_state": "CONFIRMED",
-        "positive_trade_venue_order_id": "order-1",
-        "positive_trade_filled_size": 5.05,
-    }
-
-    assert not preflight._terminal_fak_order_has_no_resting_remainder(
-        {**item, field: value}
-    )
 
 
 def test_resting_exit_order_allows_pending_exit(monkeypatch, tmp_path):
@@ -4088,86 +3987,6 @@ def test_venue_point_order_truth_alignment_boot_recovers_unknown_status_with_pos
     )
 
 
-def test_venue_point_order_shape_error_does_not_revive_settled_fak_remainder(
-    monkeypatch,
-    tmp_path,
-):
-    trade_db = tmp_path / "zeus_trades.db"
-    _init_entry_venue_audit_db(
-        trade_db,
-        command_state="REVIEW_REQUIRED",
-        fact_state="PARTIALLY_MATCHED",
-        matched_size="5.05",
-    )
-    conn = sqlite3.connect(trade_db)
-    now = datetime.now(timezone.utc).isoformat()
-    conn.execute("ALTER TABLE venue_commands ADD COLUMN envelope_id TEXT")
-    conn.execute("UPDATE venue_commands SET envelope_id = 'env-1'")
-    conn.execute(
-        """
-        CREATE TABLE venue_submission_envelopes (
-            envelope_id TEXT PRIMARY KEY,
-            order_type TEXT NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        "INSERT INTO venue_submission_envelopes VALUES ('env-1', 'FAK')"
-    )
-    conn.execute(
-        """
-        CREATE TABLE position_current (
-            position_id TEXT PRIMARY KEY,
-            phase TEXT,
-            shares REAL,
-            cost_basis_usd REAL,
-            chain_shares REAL
-        )
-        """
-    )
-    conn.execute(
-        """
-        INSERT INTO position_current VALUES (
-            'pos-venue-audit', 'settled', 5.05, 3.03, 5.05
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE venue_trade_facts (
-            command_id TEXT,
-            venue_order_id TEXT,
-            state TEXT,
-            filled_size TEXT,
-            fill_price TEXT,
-            observed_at TEXT
-        )
-        """
-    )
-    conn.execute(
-        """
-        INSERT INTO venue_trade_facts VALUES (
-            'cmd-venue-audit', 'venue-order-1', 'CONFIRMED', '5.05', '0.60', ?
-        )
-        """,
-        (now,),
-    )
-    conn.commit()
-    conn.close()
-    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
-    fake_adapter = _FakeVenuePointAdapter({}, point_errors={"venue-order-1"})
-    monkeypatch.setattr(
-        preflight,
-        "_preflight_venue_adapter",
-        lambda: (_FakeVenueClient(), fake_adapter),
-    )
-
-    result = preflight._venue_point_order_truth_alignment_check()
-
-    assert result.ok is True
-    assert result.evidence["risky"] == []
-    assert result.evidence["covered_count"] == 1
-    assert result.evidence["settled_fak_non_resting_count"] == 1
 
 
 def test_venue_point_order_truth_alignment_accepts_projected_partial_match(
@@ -4202,158 +4021,10 @@ def test_venue_point_order_truth_alignment_accepts_projected_partial_match(
     assert result.evidence["risky"] == []
 
 
-def test_venue_point_order_truth_alignment_skips_terminal_short_fill_venue_read(
-    monkeypatch,
-    tmp_path,
-):
-    trade_db = tmp_path / "zeus_trades.db"
-    _init_entry_venue_audit_db(
-        trade_db,
-        command_state="PARTIAL",
-        fact_state="MATCHED",
-        matched_size="7",
-    )
-    conn = sqlite3.connect(trade_db)
-    now = datetime.now(timezone.utc).isoformat()
-    conn.execute(
-        "UPDATE venue_order_facts SET remaining_size = '0' WHERE command_id = 'cmd-venue-audit'"
-    )
-    conn.execute(
-        """
-        CREATE TABLE venue_trade_facts (
-            command_id TEXT, venue_order_id TEXT, state TEXT,
-            filled_size TEXT, fill_price TEXT, observed_at TEXT
-        )
-        """
-    )
-    conn.execute(
-        """
-        INSERT INTO venue_trade_facts VALUES (
-            'cmd-venue-audit', 'venue-order-1', 'CONFIRMED', '7', '0.67', ?
-        )
-        """,
-        (now,),
-    )
-    conn.commit()
-    conn.close()
-    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
-
-    def _unexpected_venue_reader():
-        raise AssertionError("terminal short fill must not be re-read as a resting order")
-
-    monkeypatch.setattr(preflight, "_preflight_venue_adapter", _unexpected_venue_reader)
-
-    result = preflight._venue_point_order_truth_alignment_check()
-
-    assert result.ok is True
-    assert result.evidence["venue_read_command_count"] == 0
-    assert result.evidence["local_terminal_partial_non_resting_count"] == 1
-    assert result.evidence["covered_count"] == 1
 
 
-def test_resting_alignment_treats_terminal_short_fill_as_non_resting(
-    monkeypatch,
-    tmp_path,
-):
-    trade_db = tmp_path / "zeus_trades.db"
-    world_db = tmp_path / "zeus-world.db"
-    forecast_db = tmp_path / "zeus-forecasts.db"
-    sqlite3.connect(world_db).close()
-    sqlite3.connect(forecast_db).close()
-    _init_resting_command_trade_db(trade_db, phase="active", intent_kind="ENTRY")
-    conn = sqlite3.connect(trade_db)
-    now = datetime.now(timezone.utc).isoformat()
-    conn.execute("UPDATE venue_commands SET state = 'PARTIAL' WHERE command_id = 'cmd-1'")
-    conn.execute(
-        """
-        UPDATE venue_order_facts
-           SET state = 'MATCHED', matched_size = '7', remaining_size = '0'
-         WHERE command_id = 'cmd-1'
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE venue_trade_facts (
-            command_id TEXT, venue_order_id TEXT, state TEXT,
-            filled_size TEXT, fill_price TEXT, observed_at TEXT
-        )
-        """
-    )
-    conn.execute(
-        "INSERT INTO venue_trade_facts VALUES ('cmd-1', '0xabc', 'CONFIRMED', '7', '0.49', ?)",
-        (now,),
-    )
-    conn.commit()
-    conn.close()
-    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
-    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
-    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
-
-    result = preflight._resting_venue_command_lifecycle_alignment_check()
-
-    assert result.ok is True
-    assert result.evidence["risky"] == []
-    assert result.evidence["terminal_partial_non_resting_count"] == 1
 
 
-def test_venue_point_order_truth_alignment_skips_terminal_review_short_fill(
-    monkeypatch,
-    tmp_path,
-):
-    trade_db = tmp_path / "zeus_trades.db"
-    _init_entry_venue_audit_db(
-        trade_db,
-        command_state="REVIEW_REQUIRED",
-        fact_state="EXPIRED",
-        matched_size="4.484847",
-    )
-    conn = sqlite3.connect(trade_db)
-    now = datetime.now(timezone.utc).isoformat()
-    conn.execute(
-        "UPDATE venue_order_facts SET remaining_size = '0' WHERE command_id = 'cmd-venue-audit'"
-    )
-    conn.execute(
-        """
-        CREATE TABLE position_current (
-            position_id TEXT PRIMARY KEY, phase TEXT, shares REAL,
-            cost_basis_usd REAL, chain_shares REAL
-        )
-        """
-    )
-    conn.execute(
-        "INSERT INTO position_current VALUES ('pos-venue-audit', 'settled', 4.484847, 3.0, 0.0)"
-    )
-    conn.execute(
-        """
-        CREATE TABLE venue_trade_facts (
-            command_id TEXT, venue_order_id TEXT, state TEXT,
-            filled_size TEXT, fill_price TEXT, observed_at TEXT
-        )
-        """
-    )
-    conn.execute(
-        """
-        INSERT INTO venue_trade_facts VALUES (
-            'cmd-venue-audit', 'venue-order-1', 'CONFIRMED', '4.484847', '0.67', ?
-        )
-        """,
-        (now,),
-    )
-    conn.commit()
-    conn.close()
-    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
-
-    def _unexpected_venue_reader():
-        raise AssertionError("terminal review short fill must not require venue read")
-
-    monkeypatch.setattr(preflight, "_preflight_venue_adapter", _unexpected_venue_reader)
-
-    result = preflight._venue_point_order_truth_alignment_check()
-
-    assert result.ok is True
-    assert result.evidence["venue_read_command_count"] == 0
-    assert result.evidence["local_terminal_partial_non_resting_count"] == 1
-    assert result.evidence["covered_count"] == 1
 
 
 @pytest.mark.parametrize("mismatch", ("order_fact", "trade_fact"))
@@ -4432,170 +4103,12 @@ def test_venue_point_terminal_short_fill_requires_exact_order_identity(
     assert result.evidence["risky"][0]["risk"] == "venue_point_order_read_failed"
 
 
-def test_review_short_fill_requires_terminal_position_and_fact() -> None:
-    base = {
-        "intent_kind": "ENTRY",
-        "command_state": "REVIEW_REQUIRED",
-        "venue_order_id": "order-1",
-        "size": 10.0,
-        "latest_fact_matched_size": 4.0,
-        "latest_fact_remaining_size": 0.0,
-        "positive_trade_fact_state": "CONFIRMED",
-        "positive_trade_filled_size": 4.0,
-    }
-
-    assert not preflight._terminal_partial_command_has_no_resting_remainder(
-        {**base, "position_phase": "active", "latest_fact_state": "EXPIRED"}
-    )
-    assert not preflight._terminal_partial_command_has_no_resting_remainder(
-        {**base, "position_phase": "settled", "latest_fact_state": "PARTIALLY_MATCHED"}
-    )
 
 
-def test_resting_alignment_treats_terminal_partial_exit_as_non_resting(
-    monkeypatch,
-    tmp_path,
-):
-    trade_db = tmp_path / "zeus_trades.db"
-    world_db = tmp_path / "zeus-world.db"
-    forecast_db = tmp_path / "zeus-forecasts.db"
-    sqlite3.connect(world_db).close()
-    sqlite3.connect(forecast_db).close()
-    _init_resting_command_trade_db(
-        trade_db,
-        phase="economically_closed",
-        intent_kind="EXIT",
-    )
-    conn = sqlite3.connect(trade_db)
-    now = datetime.now(timezone.utc).isoformat()
-    conn.execute("UPDATE venue_commands SET state = 'PARTIAL', size = 18.25 WHERE command_id = 'cmd-1'")
-    conn.execute(
-        """
-        UPDATE venue_order_facts
-           SET state = 'PARTIALLY_MATCHED', matched_size = '10', remaining_size = '0'
-         WHERE command_id = 'cmd-1'
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE venue_trade_facts (
-            command_id TEXT, venue_order_id TEXT, state TEXT,
-            filled_size TEXT, fill_price TEXT, observed_at TEXT
-        )
-        """
-    )
-    conn.execute(
-        "INSERT INTO venue_trade_facts VALUES ('cmd-1', '0xabc', 'CONFIRMED', '10', '0.85', ?)",
-        (now,),
-    )
-    conn.commit()
-    conn.close()
-    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
-    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
-    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
-
-    result = preflight._resting_venue_command_lifecycle_alignment_check()
-
-    assert result.ok is True
-    assert result.evidence["risky"] == []
-    assert result.evidence["terminal_partial_non_resting_count"] == 1
 
 
-def test_resting_alignment_treats_terminal_review_short_fill_as_non_resting(
-    monkeypatch,
-    tmp_path,
-):
-    trade_db = tmp_path / "zeus_trades.db"
-    world_db = tmp_path / "zeus-world.db"
-    forecast_db = tmp_path / "zeus-forecasts.db"
-    sqlite3.connect(world_db).close()
-    sqlite3.connect(forecast_db).close()
-    _init_resting_command_trade_db(trade_db, phase="settled", intent_kind="ENTRY")
-    conn = sqlite3.connect(trade_db)
-    now = datetime.now(timezone.utc).isoformat()
-    conn.execute("UPDATE venue_commands SET state = 'REVIEW_REQUIRED' WHERE command_id = 'cmd-1'")
-    conn.execute(
-        """
-        UPDATE venue_order_facts
-           SET state = 'EXPIRED', matched_size = '5', remaining_size = '0'
-         WHERE command_id = 'cmd-1'
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE venue_trade_facts (
-            command_id TEXT, venue_order_id TEXT, state TEXT,
-            filled_size TEXT, fill_price TEXT, observed_at TEXT
-        )
-        """
-    )
-    conn.execute(
-        "INSERT INTO venue_trade_facts VALUES ('cmd-1', '0xabc', 'CONFIRMED', '5', '0.49', ?)",
-        (now,),
-    )
-    conn.commit()
-    conn.close()
-    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
-    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
-    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
-
-    result = preflight._resting_venue_command_lifecycle_alignment_check()
-
-    assert result.ok is True
-    assert result.evidence["risky"] == []
-    assert result.evidence["boot_recoverable"] == []
-    assert result.evidence["terminal_partial_non_resting_count"] == 1
 
 
-@pytest.mark.parametrize("mismatch", ("order_fact", "trade_fact"))
-def test_resting_terminal_short_fill_requires_exact_order_identity(
-    monkeypatch,
-    tmp_path,
-    mismatch,
-):
-    trade_db = tmp_path / "zeus_trades.db"
-    world_db = tmp_path / "zeus-world.db"
-    forecast_db = tmp_path / "zeus-forecasts.db"
-    sqlite3.connect(world_db).close()
-    sqlite3.connect(forecast_db).close()
-    _init_resting_command_trade_db(trade_db, phase="settled", intent_kind="ENTRY")
-    conn = sqlite3.connect(trade_db)
-    now = datetime.now(timezone.utc).isoformat()
-    fact_order_id = "wrong-order" if mismatch == "order_fact" else "0xabc"
-    trade_order_id = "wrong-order" if mismatch == "trade_fact" else "0xabc"
-    conn.execute("UPDATE venue_commands SET state = 'REVIEW_REQUIRED' WHERE command_id = 'cmd-1'")
-    conn.execute(
-        """
-        UPDATE venue_order_facts
-           SET venue_order_id = ?, state = 'EXPIRED', matched_size = '5', remaining_size = '0'
-         WHERE command_id = 'cmd-1'
-        """,
-        (fact_order_id,),
-    )
-    conn.execute(
-        """
-        CREATE TABLE venue_trade_facts (
-            command_id TEXT, venue_order_id TEXT, state TEXT,
-            filled_size TEXT, fill_price TEXT, observed_at TEXT
-        )
-        """
-    )
-    conn.execute(
-        "INSERT INTO venue_trade_facts VALUES ('cmd-1', ?, 'CONFIRMED', '5', '0.49', ?)",
-        (trade_order_id, now),
-    )
-    conn.commit()
-    conn.close()
-    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
-    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
-    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
-
-    result = preflight._resting_venue_command_lifecycle_alignment_check()
-
-    assert result.ok is False
-    assert result.restart_blocking is False
-    assert result.evidence["terminal_partial_non_resting_count"] == 0
-    assert result.evidence["risky"]
 
 
 def test_runtime_state_dir_reads_primary_root_from_live_plist(monkeypatch, tmp_path):
@@ -9471,3 +8984,136 @@ def test_exit_full_fill_repairable_by_position_excludes_partial_fill_inflated_by
     assert "pos-full-exit" in result
     assert result["pos-full-exit"]["filled_size"] == 5.0
     assert result["pos-full-exit"]["residual_shares"] == 0.0
+
+
+def _venue_terminal_preflight_db(tmp_path, monkeypatch, shape: str) -> str:
+    """Real-schema trade DB holding one REVIEW_REQUIRED shape; return its id."""
+    from src.state.collateral_ledger import init_collateral_schema
+    from src.state.db import init_schema, init_schema_trade_only
+    from tests.test_ops_scripts_smoke import _seed_venue_terminal_review_case
+
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    conn = sqlite3.connect(trade_db)
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    init_collateral_schema(conn)
+    command_id = _seed_venue_terminal_review_case(conn, shape)
+    if shape.startswith(("fak_exit", "gtc_exit")):
+        # df6d663611cf4413: the exit already closed the position and no order
+        # fact was ever written (receipt persistence hit a lock).
+        conn.execute(
+            "UPDATE position_current SET phase = 'economically_closed' "
+            "WHERE position_id = 'pos-fak-exit-persist'"
+        )
+        if not conn.execute(
+            "SELECT 1 FROM position_current WHERE position_id = 'pos-fak-exit-persist'"
+        ).fetchone():
+            from tests.test_command_recovery import _seed_pending_entry_projection
+
+            _seed_pending_entry_projection(
+                conn,
+                command_id=command_id,
+                position_id="pos-fak-exit-persist",
+                order_id="ord-fak-exit-persist",
+            )
+            conn.execute(
+                "UPDATE position_current SET phase = 'economically_closed' "
+                "WHERE position_id = 'pos-fak-exit-persist'"
+            )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+    return command_id
+
+
+@pytest.mark.parametrize(
+    ("shape", "green"),
+    [
+        ("fak_exit_persist", True),
+        ("partial_entry", True),
+        ("full_fill_entry", True),
+        ("gtc_exit_resting", False),
+        ("fak_exit_persist_short", False),
+    ],
+)
+def test_resting_alignment_classifies_only_through_the_venue_terminal_law(
+    monkeypatch, tmp_path, shape, green,
+):
+    """Live 2026-09-29: df6d663611cf4413 (FAK exit, confirmed full fill, no
+    order facts) was classified "resting" by a second classifier and refused
+    every restart. Only the law decides whether an order can still rest."""
+    command_id = _venue_terminal_preflight_db(tmp_path, monkeypatch, shape)
+
+    result = preflight._resting_venue_command_lifecycle_alignment_check()
+
+    if green:
+        assert result.ok is True
+        assert result.evidence["risky"] == []
+        assert result.evidence["venue_terminal_non_resting_count"] == 1
+    else:
+        assert result.evidence["venue_terminal_non_resting_count"] == 0
+        assert command_id in {
+            item["command_id"]
+            for item in result.evidence["risky"] + result.evidence["boot_recoverable"]
+        }
+
+
+def test_venue_terminal_entry_skips_point_order_read(monkeypatch, tmp_path):
+    """A law-proven terminal entry is never re-read at the venue."""
+    _venue_terminal_preflight_db(tmp_path, monkeypatch, "partial_entry")
+
+    def _no_read():
+        raise AssertionError("venue-terminal entry must not be re-read")
+
+    monkeypatch.setattr(preflight, "_preflight_venue_adapter", _no_read)
+    result = preflight._venue_point_order_truth_alignment_check()
+
+    assert result.ok is True
+    assert result.evidence["local_terminal_partial_non_resting_count"] == 1
+    assert result.evidence["venue_read_command_count"] == 0
+
+
+def test_terminal_fak_collateral_debt_defers_to_the_venue_terminal_law(
+    monkeypatch, tmp_path,
+):
+    """df6d663611cf4413's open CTF_SELL reservation is the review reducer's
+    to convert, not an unknown that blocks restart."""
+    _venue_terminal_preflight_db(tmp_path, monkeypatch, "fak_exit_persist")
+
+    result = preflight._terminal_fak_collateral_reservation_debt_check()
+
+    assert result.ok is True
+    assert result.evidence["unknown_count"] == 0
+    assert result.evidence["venue_terminal_recoverable_count"] == 1
+
+
+def test_every_preflight_command_classifier_asks_the_venue_terminal_law():
+    import ast
+    import inspect
+    import textwrap
+
+    def _calls(fn) -> set[str]:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        return {
+            node.func.id if isinstance(node.func, ast.Name) else node.func.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, (ast.Name, ast.Attribute))
+        }
+
+    for check in (
+        preflight._resting_venue_command_lifecycle_alignment_check,
+        preflight._venue_point_order_truth_alignment_check,
+        preflight._terminal_fak_collateral_reservation_debt_check,
+    ):
+        assert "_venue_terminal_fill_proven_ids" in _calls(check), check.__name__
+    assert "venue_terminal_fill_proven" in _calls(preflight._venue_terminal_fill_proven_ids)
+    assert not hasattr(preflight, "_terminal_partial_command_has_no_resting_remainder")
+    assert not hasattr(preflight, "_terminal_fak_order_has_no_resting_remainder")

@@ -5047,7 +5047,9 @@ def _seed_venue_terminal_review_case(conn, shape: str) -> str:
     command_id = "cmd-fak-exit-persist"
     _insert(
         conn, command_id=command_id, position_id="pos-fak-exit-persist",
-        intent_kind="EXIT", side="SELL", order_type="FAK", size=16.35, price=0.07,
+        intent_kind="EXIT", side="SELL",
+        order_type="GTC" if shape == "gtc_exit_resting" else "FAK",
+        size=16.35, price=0.07,
     )
     _advance_to_acked(conn, command_id=command_id, venue_order_id="ord-fak-exit-persist")
     append_event(
@@ -5058,6 +5060,11 @@ def _seed_venue_terminal_review_case(conn, shape: str) -> str:
             "venue_order_id": "ord-fak-exit-persist",
             "venue_status": "matched",
         },
+    )
+    conn.execute(
+        "INSERT INTO collateral_reservations (command_id, reservation_type, token_id, amount, created_at) "
+        "VALUES (?, 'CTF_SELL', 'tok-001', 16350000, '2026-04-26T00:04:00Z')",
+        (command_id,),
     )
     _append_trade_fact(
         conn, command_id=command_id, order_id="ord-fak-exit-persist",
