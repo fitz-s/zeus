@@ -64,6 +64,7 @@ from math import isfinite
 from typing import Optional, Sequence
 from zoneinfo import ZoneInfo
 
+from src.contracts.family_fault_scope import GlobalValueFault
 from src.types.temperature import Fahrenheit, f_to_c
 
 # ---------------------------------------------------------------------------
@@ -224,7 +225,7 @@ def _hko_observation_table_ref(conn: sqlite3.Connection) -> str:
                 if schema == "main"
                 else f"{schema}.observation_instants"
             )
-    raise ValueError("HKO_PROVISIONAL_REVISION_HISTORY_SCHEMA_INCOMPLETE")
+    raise GlobalValueFault("HKO_PROVISIONAL_REVISION_HISTORY_SCHEMA_INCOMPLETE")
 
 
 def _hko_official_snapshot_rows(
@@ -259,7 +260,7 @@ def _hko_official_snapshot_rows(
         "provenance_json",
     }
     if not required <= columns:
-        raise ValueError("HKO_PROVISIONAL_REVISION_HISTORY_SCHEMA_INCOMPLETE")
+        raise GlobalValueFault("HKO_PROVISIONAL_REVISION_HISTORY_SCHEMA_INCOMPLETE")
     decision_utc = decision_time.astimezone(timezone.utc)
     rows = conn.execute(
         f"""

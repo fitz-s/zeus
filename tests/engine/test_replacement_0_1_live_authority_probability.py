@@ -758,9 +758,9 @@ def test_current_global_probability_authority_rebuilds_canonical_matrix_and_refu
     ),
 )
 def test_current_probability_failure_is_family_local(reason: str) -> None:
-    assert adapter._is_global_probability_family_unavailable(
-        ValueError(reason)
-    ) is True
+    from src.contracts.family_fault_scope import family_fault_tag
+
+    assert family_fault_tag(ValueError(reason)) == "FamilyAuthorityUnavailable"
 
 
 def test_kma_observation_conflict_is_family_local_and_not_cacheable() -> None:
@@ -774,7 +774,9 @@ def test_kma_observation_conflict_is_family_local_and_not_cacheable() -> None:
         correction_rank="METAR",
     )
 
-    assert adapter._is_global_probability_family_unavailable(conflict) is True
+    from src.contracts.family_fault_scope import family_fault_tag
+
+    assert family_fault_tag(conflict) == "FamilyAuthorityUnavailable"
     receipt = EventSubmissionReceipt(
         False,
         "event-kma-conflict",

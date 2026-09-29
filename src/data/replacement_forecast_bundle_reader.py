@@ -2011,10 +2011,6 @@ def read_prior_complete_replacement_forecast_bundle(
                 return ReplacementForecastBundleReadResult(
                     "BLOCKED", f"REPLACEMENT_RAW_INPUT_HWM:{exc.blocker_reason()}"
                 )
-            except sqlite3.OperationalError as exc:
-                return ReplacementForecastBundleReadResult(
-                    "BLOCKED", f"REPLACEMENT_RAW_INPUT_HWM:basis=hwm_read_failed:{exc}"
-                )
             if continuity_status is _HeldContinuityStatus.READY:
                 result = read_pinned_replacement_forecast_bundle(
                     conn,
@@ -2191,10 +2187,6 @@ def read_prior_complete_replacement_forecast_bundle(
     except ReplacementInputHwmReadUnavailable as exc:
         return ReplacementForecastBundleReadResult(
             "BLOCKED", f"REPLACEMENT_RAW_INPUT_HWM:{exc.blocker_reason()}"
-        )
-    except sqlite3.OperationalError as exc:
-        return ReplacementForecastBundleReadResult(
-            "BLOCKED", f"REPLACEMENT_RAW_INPUT_HWM:basis=hwm_read_failed:{exc}"
         )
     if continuity_status is _HeldContinuityStatus.BLOCKED:
         return ReplacementForecastBundleReadResult(

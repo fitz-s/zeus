@@ -73,6 +73,7 @@ from src.events.day0_authority import (
     assert_live_day0_probability_authority,
     assert_live_day0_qkernel_guard_authority,
 )
+from src.contracts.family_fault_scope import GlobalValueFault
 from src.contracts.payoff_q_correction import CalibrationPolicySpec, PayoffQCorrection
 from src.events.reactor import EventSubmissionReceipt
 from src.solve.solver import (
@@ -12287,7 +12288,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     )
 
     def contract_prepare(*_args, **_kwargs):
-        raise ValueError("GLOBAL_PROBABILITY_DECISION_TIME_NAIVE")
+        raise GlobalValueFault("GLOBAL_PROBABILITY_DECISION_TIME_NAIVE")
 
     monkeypatch.setattr(
         era,
@@ -12299,7 +12300,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         _dt.datetime(2026, 7, 10, 8, 14, tzinfo=_dt.timezone.utc),
     )
     assert contract_receipt.reason == (
-        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
+        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:GlobalValueFault:"
         "GLOBAL_PROBABILITY_DECISION_TIME_NAIVE"
     )
     policy = paused_policy
@@ -36037,23 +36038,239 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
     assert calls["ineligible_prepare"] == expected_prepare_calls
 
 
+def _chained(outer: BaseException, inner: BaseException) -> BaseException:
+    try:
+        try:
+            raise inner
+        except BaseException as caught:
+            raise outer from caught
+    except BaseException as raised:
+        return raised
+
+
+@pytest.mark.parametrize(
+    ("fault", "family_scoped"),
+    (
+        # (a) A family-evidence reason nobody has registered anywhere.
+        (ValueError("DAY0_BRAND_NEW_FAMILY_EVIDENCE_REASON"), True),
+        (ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_MISMATCH"), True),
+        # A lock on this family's read defers only this family.
+        (sqlite3.OperationalError("database is locked"), True),
+        # (b) DB faults stop the cut, raw or wrapped into a family-shaped reason.
+        (sqlite3.OperationalError("disk I/O error"), False),
+        (
+            _chained(
+                ValueError("NOAA_PRELIMINARY_SURVIVAL_EVIDENCE_UNAVAILABLE"),
+                sqlite3.DatabaseError("database disk image is malformed"),
+            ),
+            False,
+        ),
+        (
+            _chained(
+                ValueError("CALIBRATION_AUTHORITY_MISSING:calibration store unavailable"),
+                sqlite3.OperationalError("unable to open database file"),
+            ),
+            False,
+        ),
+        # Shared-state and caller-contract value faults stop the cut.
+        (GlobalValueFault("GLOBAL_PROBABILITY_DECISION_TIME_NAIVE"), False),
+        # Unknown types fail closed.
+        (RuntimeError("SETTLEMENT_SIGMA_FLOOR_MISSING_ARTIFACT"), False),
+        (TypeError("code fault"), False),
+    ),
+)
+def test_family_prepare_fault_scope_is_decided_by_construction(
+    monkeypatch, fault, family_scoped,
+):
+    """One family's prepare fault excludes that family; a global fault stops the cut.
+
+    The rule is structural: no reason list, so a new family verdict cannot
+    silently default to cut-level (8df58fddc, 14244e742, 3d9154568).
+    """
+
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event_a = _global_scope_event(city="Alpha", source_run_id="run-a")
+    event_b = _global_scope_event(city="Beta", source_run_id="run-b")
+    scope = current_global_auction_scope_from_events(
+        (event_a, event_b), captured_at_utc=decision_at
+    )
+    family_a, family_b = scope.family_keys
+    prepared_b = SimpleNamespace(
+        probability_witness=SimpleNamespace(
+            family_key=family_b,
+            captured_at_utc=decision_at,
+            posterior_identity_hash="run-b",
+        )
+    )
+    selected = SimpleNamespace(
+        decision=SimpleNamespace(candidate=object(), no_trade_reason=None),
+        winner_event_id=event_b.event_id,
+        actuation=SimpleNamespace(actuation_identity="actuation-b"),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: _WealthNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth-certificate",
+            economic_identity="wealth-economics",
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime, "current_venue_auction_identity", lambda *_, **__: "venue"
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "select_prepared_global_auction",
+        lambda prepared_by_event, **_: selected,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_store_global_auction_receipt",
+        lambda *_, **__: 1,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime.CurrentFamilyProbabilityAuthority,
+        "from_witness",
+        classmethod(lambda cls, witness: object()),
+    )
+
+    captured = {}
+    process_batch = global_batch_runtime.process_current_global_batch
+    monkeypatch.setattr(era, "_forecast_lane_phase_admits", lambda _proof: True)
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "process_current_global_batch",
+        lambda events, **kwargs: captured.update(kwargs)
+        or SimpleNamespace(events=tuple(events)),
+    )
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        sqlite3.connect(":memory:"),
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=sqlite3.connect(":memory:"),
+        topology_conn=sqlite3.connect(":memory:"),
+        calibration_conn=sqlite3.connect(":memory:"),
+    )
+    adapter.process_global_batch((event_a, event_b), decision_at)
+    monkeypatch.setattr(
+        global_batch_runtime, "process_current_global_batch", process_batch
+    )
+
+    def prepare_family(event, **_kwargs):
+        if event.event_id == event_a.event_id:
+            raise fault
+        return prepared_b
+
+    monkeypatch.setattr(
+        era, "_prepare_current_global_probability_family", prepare_family
+    )
+    venue = [0]
+
+    def actuate(winner, _chosen, _at):
+        venue[0] += 1
+        return EventSubmissionReceipt(
+            True,
+            winner.event_id,
+            winner.causal_snapshot_id,
+            proof_accepted=True,
+            side_effect_status="SUBMITTED",
+        )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event_a, event_b),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda current: json.loads(current.payload_json),
+        prepare_event=captured["prepare_event"],
+        actuate_winner=actuate,
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: venue[0],
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+    )
+
+    if family_scoped:
+        assert result.winner_event_id == event_b.event_id
+        assert result.venue_submit_count == 1
+        assert result.receipts[event_a.event_id].reason.startswith(
+            "GLOBAL_FAMILY_INELIGIBLE:GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+        )
+    else:
+        assert result.winner_event_id is None
+        assert result.venue_submit_count == 0
+        assert result.receipts[event_a.event_id].reason.startswith(
+            f"GLOBAL_PREPARED_FAMILY_INCOMPLETE:{family_a}:"
+        )
+
+
 @pytest.mark.parametrize(
     ("message", "family_scoped"),
     (
-        ("FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:TARGET_LOCAL_DAY_BOUNDARY_AMBIGUOUS", True),
-        ("FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:SOURCE_RUN_HORIZON_OUT_OF_RANGE", True),
-        ("FORECAST_READER_SCOPE_CONSTRUCTION_MISSING:coverage_missing", True),
-        # Exception text from inside the reader is a code/schema fault, not a
-        # verdict about this family's forecast: it still stops the whole cut.
-        ("FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:no such table: source_run", False),
-        ("FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:unsupported executable forecast authority table", False),
-        ("FORECAST_READER_SCOPE_CONSTRUCTION_MISSING:source_run_authority_missing", False),
+        ("TARGET_LOCAL_DAY_BOUNDARY_AMBIGUOUS", True),
+        ("SOURCE_RUN_HORIZON_OUT_OF_RANGE", True),
+        (ValueError("members_json must contain a list"), True),
+        # A DB, schema or code fault inside the reader is not a verdict about
+        # this family's forecast: it keeps its cause and stops the whole cut.
+        (sqlite3.OperationalError("no such table: source_run"), False),
+        (sqlite3.OperationalError("database is locked"), "transient"),
+        (TypeError("reader bug"), False),
+        (GlobalValueFault("unsupported executable forecast authority table"), False),
     ),
 )
 def test_forecast_reader_verdict_is_family_scoped_but_reader_fault_is_not(
-    message, family_scoped,
+    monkeypatch, message, family_scoped,
 ):
-    assert era._is_global_probability_family_unavailable(ValueError(message)) is family_scoped
+    import src.data.executable_forecast_reader as reader
+    from src.contracts.family_fault_scope import (
+        FAMILY_AUTHORITY_UNAVAILABLE,
+        TRANSIENT_FAMILY_AUTHORITY_UNAVAILABLE,
+        family_fault_tag,
+    )
+
+    def read(*_args, **_kwargs):
+        if isinstance(message, BaseException):
+            raise message
+        return SimpleNamespace(ok=False, bundle=None, reason_code=message)
+
+    monkeypatch.setattr(reader, "read_executable_forecast", read)
+    family = SimpleNamespace(
+        city="Alpha",
+        target_date="2026-07-10",
+        metric="high",
+        family_id="family",
+        condition_ids=("c1",),
+    )
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    try:
+        reason, _ = era._executable_forecast_reader_authority_block_reason(
+            sqlite3.connect(":memory:"),
+            snapshot={
+                "source_id": "s",
+                "data_version": "v",
+                "source_run_id": "r",
+                "track": "t",
+            },
+            source_run={"source_run_id": "r"},
+            coverage={"target_local_date": "2026-07-10"},
+            event=event,
+            family=family,
+            allow_latest=False,
+            decision_time=_dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc),
+        )
+        exc = ValueError(reason)
+    except Exception as raised:  # noqa: BLE001 - the prepare boundary sees what escapes
+        exc = raised
+    expected = {
+        True: FAMILY_AUTHORITY_UNAVAILABLE,
+        "transient": TRANSIENT_FAMILY_AUTHORITY_UNAVAILABLE,
+        False: None,
+    }[family_scoped]
+    assert family_fault_tag(exc) == expected
 
 
 def test_global_batch_rejects_when_all_families_lack_current_q(monkeypatch):
@@ -36254,16 +36471,12 @@ def test_global_batch_required_held_kma_conflict_stays_fail_closed(monkeypatch):
     (
         "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:RuntimeError:boom",
         (
-            "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
+            "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:GlobalValueFault:"
             "GLOBAL_PROBABILITY_DECISION_TIME_NAIVE"
         ),
         (
             "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:OperationalError:"
             "no such table: readiness_state"
-        ),
-        (
-            "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
-            "DAY0_NOAA_PRELIMINARY_CARRIER_UNREGISTERED_MISMATCH"
         ),
         (
             "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:RuntimeError:"
@@ -36279,12 +36492,9 @@ def test_global_batch_rejects_unexpected_probability_prepare_failure(
 
     if "DAY0_NOAA_PRELIMINARY_CARRIER_" in reason:
         carrier_reason = reason.rsplit(":", 1)[-1]
-        error = (
-            ValueError(carrier_reason)
-            if ":ValueError:" in reason
-            else RuntimeError(carrier_reason)
-        )
-        assert era._is_global_probability_family_unavailable(error) is False
+        from src.contracts.family_fault_scope import family_fault_tag
+
+        assert family_fault_tag(RuntimeError(carrier_reason)) is None
 
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event = _global_scope_event(city="Alpha", source_run_id="run-a")

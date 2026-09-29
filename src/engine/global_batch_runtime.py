@@ -24,6 +24,10 @@ import numpy as np
 
 from src.contracts.executable_cost_curve import ExecutableCostCurve
 from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+from src.contracts.family_fault_scope import (
+    FAMILY_AUTHORITY_UNAVAILABLE,
+    TRANSIENT_FAMILY_AUTHORITY_UNAVAILABLE,
+)
 from src.contracts.global_auction_receipt import (
     CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
     global_auction_artifact_summary_hash,
@@ -6101,11 +6105,13 @@ def _current_probability_ineligible(receipt: EventSubmissionReceipt) -> bool:
         return False
     reason = str(receipt.reason or "")
     return reason.startswith(
-        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
-        "FamilyAuthorityUnavailable:"
-    ) or reason.startswith(
-        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
-        "TransientFamilyAuthorityUnavailable:"
+        tuple(
+            f"GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:{tag}:"
+            for tag in (
+                FAMILY_AUTHORITY_UNAVAILABLE,
+                TRANSIENT_FAMILY_AUTHORITY_UNAVAILABLE,
+            )
+        )
     )
 
 

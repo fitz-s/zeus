@@ -4542,7 +4542,9 @@ def test_composite_without_settlement_channel_fails_closed_for_its_family(
     reason = "GLOBAL_DAY0_FAST_RESIDUAL_POSTERIOR_IDENTITY_INVALID"
     with pytest.raises(ValueError, match=reason) as fresh:
         era._day0_revision_model_source(payload)
-    assert era._is_global_probability_family_unavailable(fresh.value)
+    from src.contracts.family_fault_scope import family_fault_tag
+
+    assert family_fault_tag(fresh.value) == "FamilyAuthorityUnavailable"
 
     payload["_edli_day0_provisional_revision_likelihood"] = {
         "identity_hash": "carried",
@@ -8250,9 +8252,11 @@ def test_entry_source_clock_reason_is_unavailable_but_not_cacheable():
     assert era._cacheable_global_probability_ineligible(ordinary)
     assert not era._cacheable_global_probability_ineligible(generic)
     assert not era._cacheable_global_probability_ineligible(compound)
-    assert era._is_global_probability_family_unavailable(
+    from src.contracts.family_fault_scope import family_fault_tag
+
+    assert family_fault_tag(
         ValueError("DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE:ENTRY_SOURCE_CLOCK")
-    )
+    ) == "FamilyAuthorityUnavailable"
 
 
 def test_direct_entry_carrier_binds_source_clock_cap_without_readiness():

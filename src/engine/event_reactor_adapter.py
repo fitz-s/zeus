@@ -189,6 +189,13 @@ from src.contracts.day0_payoff_truth import (
     classify_day0_payoff_truth,
 )
 from src.contracts.execution_intent import ExecutableCostBasis
+from src.contracts.family_fault_scope import (
+    FAMILY_AUTHORITY_UNAVAILABLE,
+    TRANSIENT_FAMILY_AUTHORITY_UNAVAILABLE,
+    GlobalValueFault,
+    family_fault_tag,
+    is_sqlite_lock_error,
+)
 from src.contracts.execution_price import ExecutionPrice, ExecutionPriceContractError
 from src.contracts.global_auction_receipt import (
     CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
@@ -446,62 +453,8 @@ _GLOBAL_PROBABILITY_CACHEABLE_INELIGIBLE_REASONS = frozenset(
         "POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE",
     }
 )
-_GLOBAL_PROBABILITY_FAMILY_UNAVAILABLE_REASONS = frozenset(
-    {
-        "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
-        "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE:ENTRY_SOURCE_CLOCK",
-        "EVENT_BOUND_MARKET_TOPOLOGY_MISSING",
-        "GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING",
-        "GLOBAL_DAY0_BASE_FORECAST_SNAPSHOT_MISSING",
-        "GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH",
-        "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH",
-        "GLOBAL_DAY0_CURRENT_OBSERVATION_MISSING",
-        "GLOBAL_DAY0_FAST_RESIDUAL_CURRENT_OBSERVATION_MISMATCH",
-        "GLOBAL_DAY0_FAST_RESIDUAL_POSTERIOR_IDENTITY_INVALID",
-        "GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE",
-        "GLOBAL_DAY0_PHYSICAL_FRONTIER_NOT_SETTLEMENT_CONFIRMED",
-        "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_ENTRY_AUTHORITY",
-        "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_EXECUTION_AUTHORITY",
-        "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH",
-        "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISSING",
-        "GLOBAL_DAY0_PROVISIONAL_ROLLOVER_UNCONFIRMED",
-        "GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE",
-        "GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING",
-        "GLOBAL_DAY0_RAW_PROVENANCE_MISSING",
-        "GLOBAL_DAY0_REPLACEMENT_CONDITIONING_MISSING",
-        "GLOBAL_CURRENT_POSTERIOR_IDENTITY_INCOMPLETE",
-        "GLOBAL_CURRENT_POSTERIOR_SIMPLEX_INVALID",
-        "GLOBAL_DAY0_SOURCE_AVAILABLE_AT_INVALID",
-        "GLOBAL_DAY0_SOURCE_CYCLE_INVALID",
-        # SCOPE: city/date/metric family only. DRAIN: source, posterior, and
-        # current-carrier rebuilds run each cycle. RESET: the exact vector,
-        # identity, q, samples, operator, and sample count all reproduce.
-        "DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_MISMATCH",
-        "DAY0_NOAA_PRELIMINARY_CARRIER_IDENTITY_MISMATCH",
-        "DAY0_NOAA_PRELIMINARY_CARRIER_Q_MISMATCH",
-        "DAY0_NOAA_PRELIMINARY_CARRIER_SAMPLES_MISMATCH",
-        "DAY0_NOAA_PRELIMINARY_CARRIER_OPERATOR_MISMATCH",
-        "DAY0_NOAA_PRELIMINARY_CARRIER_SAMPLE_COUNT_MISMATCH",
-        "DAY0_NOAA_PRELIMINARY_CARRIER_TOPOLOGY_INVALID",
-        "DAY0_WU_CURRENT_CARRIER_TOPOLOGY_INVALID",
-        "POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE",
-    }
-)
-_GLOBAL_PROBABILITY_FAMILY_UNAVAILABLE_PREFIXES = (
-    "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:",
-    "GLOBAL_DAY0_SOURCE_CLOCK_BOUND_BLOCKED:",
-)
-# SCOPE: the one family whose executable forecast the canonical reader refused.
-# The reader's verdict is an upper-case reason code; its exception text (a
-# lower-case message) is a code or schema fault and still stops the cut.
-# DRAIN/RESET: the next source run re-serves an eligible contributor.
-_FORECAST_READER_FAMILY_VERDICT = re.compile(
-    r"FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:[A-Z][A-Z0-9_]*"
-    r"|FORECAST_READER_SCOPE_CONSTRUCTION_MISSING:"
-    r"(?:source_run_id_missing|source_run_missing|coverage_missing|scope_incomplete)"
-)
-_FAMILY_AUTHORITY_UNAVAILABLE = "FamilyAuthorityUnavailable"
-_TRANSIENT_FAMILY_AUTHORITY_UNAVAILABLE = "TransientFamilyAuthorityUnavailable"
+_FAMILY_AUTHORITY_UNAVAILABLE = FAMILY_AUTHORITY_UNAVAILABLE
+_TRANSIENT_FAMILY_AUTHORITY_UNAVAILABLE = TRANSIENT_FAMILY_AUTHORITY_UNAVAILABLE
 
 
 def _global_current_gamma_client(*, timeout_seconds: float):
@@ -8516,14 +8469,7 @@ def event_bound_live_adapter_from_trade_conn(
                 allow_provisional_day0_replacement=True,
             )
         except Exception as exc:  # noqa: BLE001 - typed fail-closed batch receipt
-            failure_type = type(exc).__name__
-            if (
-                isinstance(exc, sqlite3.OperationalError)
-                and _is_sqlite_lock_error(exc)
-            ):
-                failure_type = _TRANSIENT_FAMILY_AUTHORITY_UNAVAILABLE
-            elif _is_global_probability_family_unavailable(exc):
-                failure_type = _FAMILY_AUTHORITY_UNAVAILABLE
+            failure_type = family_fault_tag(exc) or type(exc).__name__
             # T-day0inelig.md §6 D1: DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE is a
             # catch-all over several distinct real exceptions (dominant one: a
             # causal-bundle capture-equivalence mismatch, not actually missing
@@ -10016,14 +9962,7 @@ def event_bound_live_adapter_from_trade_conn(
                     telemetry_context_sink=_telemetry_context_sink(event),
                 )
             except Exception as exc:  # noqa: BLE001 - held authority remains fail closed
-                failure_type = type(exc).__name__
-                if (
-                    isinstance(exc, sqlite3.OperationalError)
-                    and _is_sqlite_lock_error(exc)
-                ):
-                    failure_type = _TRANSIENT_FAMILY_AUTHORITY_UNAVAILABLE
-                elif _is_global_probability_family_unavailable(exc):
-                    failure_type = _FAMILY_AUTHORITY_UNAVAILABLE
+                failure_type = family_fault_tag(exc) or type(exc).__name__
                 # T-day0inelig.md §6 D1: mirrors the ENTRY-lane prepare
                 # failure above — same catch-all reason, same separate cause
                 # field, reason string untouched.
@@ -12692,7 +12631,7 @@ def _run_live_order_build_savepoint(
                 result = build()
             except sqlite3.OperationalError as exc:
                 _rollback_release_live_order_build_savepoint(conn, savepoint_name=savepoint_name)
-                if not _is_sqlite_lock_error(exc) or attempt > len(retry_delays):
+                if not is_sqlite_lock_error(exc) or attempt > len(retry_delays):
                     raise
                 logging.getLogger(__name__).warning(
                     "live order certificate build hit sqlite lock; rolled back savepoint "
@@ -12768,37 +12707,6 @@ def _persist_live_command_certificates_before_executor_submit(
 
     DecisionCertificateLedger(conn).persist_all(certificates)
     conn.commit()
-
-
-def _is_sqlite_lock_error(exc: sqlite3.OperationalError) -> bool:
-    lock_codes = {
-        getattr(sqlite3, "SQLITE_BUSY", 5),
-        getattr(sqlite3, "SQLITE_LOCKED", 6),
-    }
-    code = getattr(exc, "sqlite_errorcode", None)
-    if code is not None and code in lock_codes:
-        return True
-    message = str(exc).lower()
-    return (
-        "database is locked" in message
-        or "database table is locked" in message
-        or "database is busy" in message
-    )
-
-
-def _is_global_probability_family_unavailable(exc: Exception) -> bool:
-    from src.data.day0_fast_obs import KmaObservationConflict
-
-    if isinstance(exc, KmaObservationConflict):
-        return True
-    if not isinstance(exc, ValueError):
-        return False
-    reason = str(exc)
-    return (
-        reason in _GLOBAL_PROBABILITY_FAMILY_UNAVAILABLE_REASONS
-        or reason.startswith(_GLOBAL_PROBABILITY_FAMILY_UNAVAILABLE_PREFIXES)
-        or _FORECAST_READER_FAMILY_VERDICT.fullmatch(reason) is not None
-    )
 
 
 def _sqlite_busy_timeout_ms(conn: sqlite3.Connection) -> int | None:
@@ -37580,7 +37488,7 @@ def _day0_replacement_conditioning(
     """Return the current observation conditioning carried by replacement q."""
 
     if not isinstance(allow_stale_supporting_conditioning, bool):
-        raise ValueError("GLOBAL_DAY0_SUPPORTING_CONDITIONING_POLICY_INVALID")
+        raise GlobalValueFault("GLOBAL_DAY0_SUPPORTING_CONDITIONING_POLICY_INVALID")
 
     provenance = getattr(replacement_bundle, "provenance_json", None) or {}
     if not isinstance(provenance, Mapping):
@@ -40966,7 +40874,7 @@ def _prepare_current_global_probability_family(
     )
 
     if decision_time.tzinfo is None:
-        raise ValueError("GLOBAL_PROBABILITY_DECISION_TIME_NAIVE")
+        raise GlobalValueFault("GLOBAL_PROBABILITY_DECISION_TIME_NAIVE")
 
     def _raw_input_hwm_deadline() -> float | None:
         if before_raw_input_hwm_read is not None:
@@ -41013,36 +40921,36 @@ def _prepare_current_global_probability_family(
         )
 
     if max_age <= timedelta(0):
-        raise ValueError("GLOBAL_PROBABILITY_FRESHNESS_CONTRACT_MISSING")
+        raise GlobalValueFault("GLOBAL_PROBABILITY_FRESHNESS_CONTRACT_MISSING")
     if not isinstance(allow_unobserved_day0_replacement, bool):
-        raise ValueError("GLOBAL_UNOBSERVED_DAY0_REPLACEMENT_POLICY_INVALID")
+        raise GlobalValueFault("GLOBAL_UNOBSERVED_DAY0_REPLACEMENT_POLICY_INVALID")
     if not isinstance(allow_provisional_day0_replacement, bool):
-        raise ValueError("GLOBAL_PROVISIONAL_DAY0_REPLACEMENT_POLICY_INVALID")
+        raise GlobalValueFault("GLOBAL_PROVISIONAL_DAY0_REPLACEMENT_POLICY_INVALID")
     if not isinstance(probability_use, _CurrentProbabilityUse):
-        raise ValueError("GLOBAL_PROBABILITY_USE_INVALID")
+        raise GlobalValueFault("GLOBAL_PROBABILITY_USE_INVALID")
     if not isinstance(_force_day0_redecision_fallback, bool):
-        raise ValueError("GLOBAL_DAY0_REDECISION_FALLBACK_POLICY_INVALID")
+        raise GlobalValueFault("GLOBAL_DAY0_REDECISION_FALLBACK_POLICY_INVALID")
     entry_authority = probability_use is _CurrentProbabilityUse.ENTRY
     if allow_partial_deterministic is None:
         allow_partial_deterministic = (
             required_condition_id is not None or not entry_authority
         )
     elif not isinstance(allow_partial_deterministic, bool):
-        raise ValueError("GLOBAL_PARTIAL_DETERMINISTIC_POLICY_INVALID")
+        raise GlobalValueFault("GLOBAL_PARTIAL_DETERMINISTIC_POLICY_INVALID")
     if required_condition_id is not None:
         required_condition_id = str(required_condition_id).strip()
     if pinned_complete_bundle is not None and entry_authority:
-        raise ValueError("GLOBAL_HELD_PINNED_RECOMPUTE_ENTRY_FORBIDDEN")
+        raise GlobalValueFault("GLOBAL_HELD_PINNED_RECOMPUTE_ENTRY_FORBIDDEN")
     if pinned_complete_bundle is not None and probability_use not in {
         _CurrentProbabilityUse.HELD_MONITOR,
         _CurrentProbabilityUse.REDUCE_ONLY_EXIT,
     }:
-        raise ValueError("GLOBAL_HELD_PINNED_RECOMPUTE_USE_INVALID")
+        raise GlobalValueFault("GLOBAL_HELD_PINNED_RECOMPUTE_USE_INVALID")
     if (
         pinned_complete_bundle is not None
         and event.event_type != "DAY0_EXTREME_UPDATED"
     ):
-        raise ValueError("GLOBAL_HELD_PINNED_RECOMPUTE_DAY0_ONLY")
+        raise GlobalValueFault("GLOBAL_HELD_PINNED_RECOMPUTE_DAY0_ONLY")
     bundle_authority_purpose = (
         ReplacementForecastAuthorityPurpose.ENTRY
         if entry_authority
@@ -41271,7 +41179,7 @@ def _prepare_current_global_probability_family(
                 "WHERE type='table' AND name='observation_instants'"
             ).fetchone()
             if observation_table is None:
-                raise ValueError("GLOBAL_DAY0_OBSERVATION_HWM_UNAVAILABLE")
+                raise GlobalValueFault("GLOBAL_DAY0_OBSERVATION_HWM_UNAVAILABLE")
             has_target_observation = (
                 day0_observation_conn.execute(
                     "SELECT 1 FROM observation_instants "
@@ -45007,7 +44915,7 @@ def _forecast_snapshot_row_for_event(
     """
     table_ref = _authority_table_ref(conn, "ensemble_snapshots")
     if table_ref is None:
-        raise ValueError("ensemble_snapshots authority table missing for event-bound inference")
+        raise GlobalValueFault("ensemble_snapshots authority table missing for event-bound inference")
     columns = _table_ref_columns(conn, table_ref)
     required = {"city", "target_date", "temperature_metric", "snapshot_id"}
     if not required.issubset(columns):
@@ -49119,7 +49027,7 @@ def _pinned_station_extreme_providers_c(
         if expects_station_final():
             # SCOPE/RESET are the same exact family/read; DRAIN on a readable
             # forecast connection, never silently substitute hourly-only q.
-            raise ValueError("DAY0_STATION_EXTREME_POSTERIOR_READER_UNAVAILABLE")
+            raise GlobalValueFault("DAY0_STATION_EXTREME_POSTERIOR_READER_UNAVAILABLE")
         return ()
     try:
         posterior_id = int(posterior_id)
@@ -50661,8 +50569,7 @@ def _day0_remaining_day_members(
         # mismatch, not a members-missing condition). The enum value at the
         # caller must stay byte-identical (shared-enum-invariant-audit-all-
         # producers: exact-equality membership in
-        # _GLOBAL_PROBABILITY_CACHEABLE_INELIGIBLE_REASONS /
-        # _GLOBAL_PROBABILITY_FAMILY_UNAVAILABLE_REASONS elsewhere in this
+        # _GLOBAL_PROBABILITY_CACHEABLE_INELIGIBLE_REASONS elsewhere in this
         # module), so the real cause travels on a SEPARATE payload key instead.
         cause = f"{type(exc).__name__}:{str(exc)[:200]}"
         receipt = getattr(exc, "day0_causal_bundle_validation_receipt", None)
@@ -52552,7 +52459,9 @@ def _forecast_snapshot_reader_block_reason(
     source_run_table = _authority_table_ref(conn, "source_run")
     coverage_table = _authority_table_ref(conn, "source_run_coverage")
     if source_run_table is None or coverage_table is None:
-        return "FORECAST_READER_SCOPE_CONSTRUCTION_MISSING:source_run_authority_missing", None
+        raise GlobalValueFault(
+            "FORECAST_READER_SCOPE_CONSTRUCTION_MISSING:source_run_authority_missing"
+        )
     source_run = _row_by_id(conn, source_run_table, "source_run_id", source_run_id)
     if source_run is None:
         return "FORECAST_READER_SCOPE_CONSTRUCTION_MISSING:source_run_missing", None
@@ -52637,8 +52546,16 @@ def _executable_forecast_reader_authority_block_reason(
             decision_time=decision_time,
             require_entry_readiness=False,
         )
-    except (sqlite3.Error, ValueError, TypeError, KeyError) as exc:
+    except GlobalValueFault:
+        raise
+    except ValueError as exc:
         return f"FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:{exc}", None
+    except sqlite3.Error as exc:
+        # Chained: the prepare boundary scopes a lock to this family and stops
+        # the cut for every other DB fault.
+        raise ValueError(f"FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:{exc}") from exc
+    except (TypeError, KeyError) as exc:
+        raise GlobalValueFault(f"FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:{exc}") from exc
     if not result.ok or result.bundle is None:
         return f"FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:{result.reason_code}", None
     # SINGLE SNAPSHOT AUTHORITY: honour the reader's elected executable snapshot rather than

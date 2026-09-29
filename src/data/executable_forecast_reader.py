@@ -16,6 +16,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, List, Mapping
 
 from src.config import settings
+from src.contracts.family_fault_scope import GlobalValueFault
 from src.contracts.ensemble_snapshot_provenance import (
     ECMWF_OPENDATA_HIGH_DATA_VERSION,
     ECMWF_OPENDATA_LOW_DATA_VERSION,
@@ -507,7 +508,7 @@ _TABLE_EXISTS_SQL = {
 
 def _table_exists(conn: sqlite3.Connection, *, schema: str, table: str) -> bool:
     if schema not in {"main", WORLD_SCHEMA, FORECASTS_SCHEMA} or table not in FORECAST_AUTHORITY_TABLES:
-        raise ValueError("unsupported executable forecast authority table")
+        raise GlobalValueFault("unsupported executable forecast authority table")
     if not _schema_attached(conn, schema):
         return False
     row = conn.execute(_TABLE_EXISTS_SQL[schema], (table,)).fetchone()
@@ -523,7 +524,7 @@ def _authority_table(conn: sqlite3.Connection, table: str) -> str | None:
     """
 
     if table not in FORECAST_AUTHORITY_TABLES:
-        raise ValueError("unsupported executable forecast authority table")
+        raise GlobalValueFault("unsupported executable forecast authority table")
     forecasts_attached = _schema_attached(conn, FORECASTS_SCHEMA)
     world_attached = _schema_attached(conn, WORLD_SCHEMA)
     if table in FORECASTS_OWNED_TABLES and _main_is_canonical_forecasts(conn):
@@ -546,7 +547,7 @@ def _source_run_coverage_by_id_sql(table: str) -> str:
         return "SELECT * FROM world.source_run_coverage WHERE coverage_id = ?"
     if table == "source_run_coverage":
         return "SELECT * FROM source_run_coverage WHERE coverage_id = ?"
-    raise ValueError("unsupported source_run_coverage authority table")
+    raise GlobalValueFault("unsupported source_run_coverage authority table")
 
 
 def _source_run_coverage_by_id(conn: sqlite3.Connection, coverage_id: str) -> dict[str, Any] | None:
@@ -576,7 +577,7 @@ def _source_run_coverages_for_scope_sql(table: str) -> str:
     elif table == "source_run_coverage":
         prefix = "SELECT * FROM source_run_coverage"
     else:
-        raise ValueError("unsupported source_run_coverage authority table")
+        raise GlobalValueFault("unsupported source_run_coverage authority table")
     return (
         prefix
         + """
@@ -628,7 +629,7 @@ def _source_run_by_id_sql(table: str) -> str:
         return "SELECT * FROM world.source_run WHERE source_run_id = ?"
     if table == "source_run":
         return "SELECT * FROM source_run WHERE source_run_id = ?"
-    raise ValueError("unsupported source_run authority table")
+    raise GlobalValueFault("unsupported source_run authority table")
 
 
 def _source_run_by_id(conn: sqlite3.Connection, source_run_id: str) -> dict[str, Any] | None:
@@ -713,7 +714,7 @@ def _latest_producer_readiness(
         LIMIT 1
         """
     else:
-        raise ValueError("unsupported readiness_state authority table")
+        raise GlobalValueFault("unsupported readiness_state authority table")
     row = conn.execute(
         sql,
         (
@@ -843,7 +844,7 @@ def _snapshot_query_sql(table: str, *, source_run_id_present: bool) -> str:
             LIMIT 1
             """
     else:
-        raise ValueError("unsupported ensemble_snapshots authority table")
+        raise GlobalValueFault("unsupported ensemble_snapshots authority table")
 
 
 def _snapshot_telemetry_query_sql(table: str, *, source_run_id_present: bool) -> str:
@@ -897,7 +898,7 @@ def _snapshot_telemetry_query_sql(table: str, *, source_run_id_present: bool) ->
             ORDER BY {_EXTREMA_RANK_ORDER_BY}
             """
     else:
-        raise ValueError("unsupported ensemble_snapshots authority table")
+        raise GlobalValueFault("unsupported ensemble_snapshots authority table")
 
 
 def _compute_inter_cycle_spread(cycle_times: list[str | None]) -> float:
