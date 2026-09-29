@@ -3032,6 +3032,19 @@ def _blocked_attempt_fingerprint(
                 models=configured_models,
                 schema=current_value_serving_schema(conn),
             )
+            from src.data.replacement_current_value_serving import (
+                read_current_instrument_values, physical_source_proof_dependency,
+            )
+            served = read_current_instrument_values(
+                conn, city=scope[0], metric=scope[2], target_date=scope[1],
+                source_cycle_time_iso=str(payload.get("source_cycle_time") or computed_at.isoformat()),
+                include_station_sources=True, decision_time_iso=computed_at.isoformat(),
+            )
+            physical_proof_frontier = {
+                model: physical_source_proof_dependency(value.physical_response)
+                for model, value in sorted(served.items())
+                if configured_models is None or model in configured_models
+            }
             from src.data.replacement_input_hwm import (  # noqa: PLC0415
                 _latest_eligible_ensemble_input_mark,
             )
@@ -3126,6 +3139,7 @@ def _blocked_attempt_fingerprint(
             "raw": {
                 "missing_configured_sources": missing_sources,
                 "source_clock_frontier": source_clock_frontier,
+                "physical_proof_frontier": physical_proof_frontier,
                 "eligible_ensemble_input_mark": eligible_ensemble_input_mark,
                 "day0_hourly_frontier": day0_hourly_frontier,
             },

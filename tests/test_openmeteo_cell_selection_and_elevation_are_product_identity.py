@@ -718,6 +718,42 @@ def test_future_receipt_preserves_prior_value_at_subsecond_cutoff(tmp_path, monk
     conn.close()
 
 
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_blocked_seed_fingerprint_tracks_same_raw_proof_possession_at_its_cutoff(tmp_path, monkeypatch, metric):
+    from src.data import bayes_precision_fusion_download as dl
+    from src.data.replacement_forecast_live_materialization_queue import _blocked_attempt_fingerprint
+    from src.data.replacement_forecast_seed_discovery import _seed_name
+    conn, target, cycle = _current_rows(tmp_path, monkeypatch, metric=metric)
+    db = Path(conn.execute("PRAGMA database_list").fetchone()[2])
+    original_raw = conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall()
+    target_scope = {"city": target.city, "target_date": target.target_date, "temperature_metric": metric}
+    def fingerprint(hour):
+        payload = {**target_scope, "source_cycle_time": cycle.isoformat(), "computed_at": cycle.replace(hour=hour).isoformat()}
+        return _blocked_attempt_fingerprint(input_json=tmp_path / _seed_name(target_scope, computed_at=cycle.replace(hour=hour)),
+            forecast_db=db, payload=payload)
+    old = fingerprint(5)
+    assert old is not None and fingerprint(6) == old  # Merely ticking is not new evidence.
+    raw_cursor = conn.execute("SELECT * FROM raw_model_forecasts WHERE model='icon_global'")
+    raw = dict(zip((field[0] for field in raw_cursor.description), raw_cursor.fetchone(), strict=True))
+    body_path, body_params, request_url = conn.execute("SELECT artifact_path,request_params_json,request_url FROM raw_forecast_artifacts WHERE artifact_id=?", (raw["artifact_id"],)).fetchone()
+    entity = Path(body_path).read_bytes()
+    captured = cycle.replace(hour=8)
+    _download_time(monkeypatch, dl, captured)
+    bound = dl._bind_physical_response(json.loads(entity), model="icon_global", url=request_url,
+        params=json.loads(body_params), run=cycle, captures=[(entity, captured.timestamp())],
+        network_captures=[(entity, captured.timestamp(), {"content-type": "application/json"})])
+    body_count = conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts WHERE data_version='openmeteo_single_model_entity_body_v1'").fetchone()[0]
+    assert dl._persist_rows(conn, [{**raw, "captured_at": captured.isoformat(), "source_available_at": captured.isoformat(),
+        "recorded_at": captured.isoformat(), "_physical_response": bound[dl._BATCH_PHYSICAL_RESPONSE_KEY]}]) == 0
+    conn.commit()
+    refreshed = fingerprint(9)
+    assert refreshed is not None and refreshed != old
+    assert fingerprint(5) == old  # New possession never changes the frozen old decision.
+    assert fingerprint(10) == refreshed
+    assert conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts WHERE data_version='openmeteo_single_model_entity_body_v1'").fetchone()[0] == body_count
+    assert conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall() == original_raw
+    assert _seed_name(target_scope, computed_at=cycle.replace(hour=9)) != _seed_name(target_scope, computed_at=cycle.replace(hour=5))
+    conn.close()
 @pytest.mark.parametrize("damage", (None,"wrong_first_site"))
 def test_single_model_location_batch_persists_and_serves_second_city_both_metrics(tmp_path,monkeypatch,damage):
     from src.data import bayes_precision_fusion_download as dl
