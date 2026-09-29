@@ -2209,7 +2209,7 @@ def _covering_posterior_input_lag_reason(
     fusion = provenance.get("bayes_precision_fusion")
     if isinstance(fusion, Mapping) and "current_evidence_shape" in fusion:
         from src.data.replacement_forecast_cycle_policy import current_evidence_shape_has_held_authority
-        if not current_evidence_shape_has_held_authority(provenance):
+        if not current_evidence_shape_has_held_authority(provenance, materialized_at=row["computed_at"]):
             return "basis=current_evidence_probability_authority_invalid"
     from src.data.replacement_input_hwm import replacement_live_input_lag_reason
 

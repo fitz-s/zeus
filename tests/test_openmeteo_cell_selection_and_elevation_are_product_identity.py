@@ -360,6 +360,55 @@ def test_physical_manifest_redacts_request_credentials(tmp_path, monkeypatch):
         assert secret not in evidence
 
 
+def test_station_ground_facts_identity_excludes_audit_but_cutoff_requires_possession(tmp_path, monkeypatch):
+    from dataclasses import dataclass
+    import src.config as config
+    from tests.test_config import _official_hko_registry
+    from src.data.replacement_forecast_materializer import _bind_provider_geometry_identity
+    from src.data.replacement_forecast_cycle_policy import _anchor_station_ground_has_authority
+
+    _official_hko_registry(tmp_path, monkeypatch)
+    station = config.runtime_station_geometry_for_city(config.runtime_cities_by_name()["Hong Kong"])
+    assert station["ground_status"] == "VERIFIED"
+    @dataclass(frozen=True)
+    class Shape:
+        shape_hash: str = "current-shape"
+        provider_geometry_evidence: object = None
+        provider_geometry_identity_hash: object = None
+        provider_geometry_audit: object = None
+    @dataclass(frozen=True)
+    class Metadata:
+        city: str
+        station_id: str
+        station_lat: float
+        station_lon: float
+        station_elevation_m: float
+        source_geometry_proof: object
+    proof = {"revision": "openmeteo_ifs9_o1280_source_cell_v1", "station_registry_sha256": "a" * 64,
+        "station_ground_proof": {"revision": "station_ground_roles_v1", "status": "VERIFIED", "reason": None,
+            "facts": station["ground_facts"], "audit": station["ground_audit"]}}
+    metadata = Metadata("Hong Kong", str(station["station_id"]), float(station["lat"]), float(station["lon"]),
+        float(station["ground_elevation_m"]), proof)
+    bound = _bind_provider_geometry_identity(Shape(), {}, anchor_metadata=metadata, decision_at="2026-09-29T22:00:00+00:00")
+    assert _anchor_station_ground_has_authority(bound.provider_geometry_evidence, bound.provider_geometry_audit, "2026-09-29T22:00:00Z")
+    assert not _anchor_station_ground_has_authority(bound.provider_geometry_evidence, bound.provider_geometry_audit, "2026-09-29T04:00:00Z")
+    old = _bind_provider_geometry_identity(Shape(), {}, anchor_metadata=metadata, decision_at="2026-09-29T04:00:00Z")
+    assert not _anchor_station_ground_has_authority(old.provider_geometry_evidence, old.provider_geometry_audit, "2026-09-29T04:00:00Z")
+    changed_audit = json.loads(json.dumps(proof))
+    changed_audit["station_registry_sha256"] = "b" * 64
+    changed_audit["station_ground_proof"]["audit"]["body_sha256"] = "c" * 64
+    changed_audit["station_ground_proof"]["audit"]["checked_at"] = "2026-09-29T21:30:00Z"
+    other = _bind_provider_geometry_identity(Shape(), {}, anchor_metadata=replace(metadata, source_geometry_proof=changed_audit),
+        decision_at="2026-09-29T22:00:00Z")
+    assert other.provider_geometry_identity_hash == bound.provider_geometry_identity_hash
+    assert other.shape_hash == bound.shape_hash
+    changed_audit["station_ground_proof"]["facts"]["elevation_m"] = 33.0
+    changed = _bind_provider_geometry_identity(Shape(), {}, anchor_metadata=replace(metadata, source_geometry_proof=changed_audit),
+        decision_at="2026-09-29T22:00:00Z")
+    assert changed.shape_hash != bound.shape_hash
+    assert not _anchor_station_ground_has_authority(changed.provider_geometry_evidence, changed.provider_geometry_audit, "2026-09-29T22:00:00Z")
+
+
 @pytest.mark.parametrize("metric", ("high", "low"))
 @pytest.mark.parametrize("latest_location_damage", (None, "missing", "foreign_claim", "duplicate"))
 def test_same_issued_archive_appends_proof_without_rewriting_legacy_raw(tmp_path, monkeypatch, metric, latest_location_damage):

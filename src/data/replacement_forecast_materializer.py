@@ -737,6 +737,10 @@ def _precision_guard_block_reason(
     if not isinstance(raw_bytes, bytes):
         return ("OM9_SOURCE_RESPONSE_BYTES_MISSING",)
     try:
+        ground = guard.metadata.source_geometry_proof["station_ground_proof"]
+        possessed = _to_utc(ground["audit"]["checked_at"], field_name="station_ground_checked_at")
+        if possessed > _to_utc(request.computed_at, field_name="computed_at"):
+            return ("OM9_STATION_GROUND_PROOF_AFTER_DECISION",)
         raw = json.loads(raw_bytes)
         if not isinstance(raw, Mapping):
             raise ValueError("Open-Meteo response must be an object")
@@ -3297,6 +3301,7 @@ class _CurrentEvidenceShape:
     interval_censored_member_count: int | None = None
     provider_geometry_evidence: Mapping[str, object] | None = None
     provider_geometry_identity_hash: str | None = None
+    provider_geometry_audit: Mapping[str, object] | None = None
 
     def as_payload(self) -> dict[str, object]:
         payload = asdict(self)
@@ -3320,11 +3325,12 @@ class _CurrentEvidenceShape:
 
 def _bind_provider_geometry_identity(
     shape: _CurrentEvidenceShape, served: Mapping[str, object],
-    *, anchor_metadata: object | None = None,
+    *, anchor_metadata: object | None = None, decision_at: datetime | str | None = None,
 ) -> _CurrentEvidenceShape:
     """Stable actual provider geometry, independent of capture IDs/clocks/batch shape."""
     from dataclasses import replace
     projection: dict[str, object] = {}
+    audit: dict[str, object] = {"decision_at": decision_at.isoformat() if isinstance(decision_at, datetime) else decision_at}
     stable_keys = (
         "revision", "model", "product_id", "requested_latitude", "requested_longitude",
         "timezone", "cell_selection", "elevation_param", "downscaling_policy",
@@ -3344,7 +3350,7 @@ def _bind_provider_geometry_identity(
             projection[str(model)] = stable
     if anchor_metadata is not None:
         metadata = asdict(anchor_metadata)
-        keys = ("requested_lat", "requested_lon", "nearest_grid_lat", "nearest_grid_lon",
+        keys = ("city", "station_id", "station_lat", "station_lon", "requested_lat", "requested_lon", "nearest_grid_lat", "nearest_grid_lon",
                 "grid_elevation_m", "station_elevation_m", "timezone_name", "native_grid",
                 "delivery_grid_resolution", "temperature_unit", "source_geometry_proof")
         anchor = {key: metadata[key] for key in keys if key in metadata}
@@ -3352,13 +3358,19 @@ def _bind_provider_geometry_identity(
         if isinstance(proof, Mapping):
             anchor["source_geometry_proof"] = {key: value for key, value in proof.items()
                 if key != "station_registry_sha256" and not any(clock in key for clock in ("fetched", "captured", "payload_sha", "manifest_sha", "recorded", "cycle", "available"))}
+            ground = anchor["source_geometry_proof"].get("station_ground_proof")
+            if isinstance(ground, Mapping):
+                audit["anchor_station_ground"] = ground.get("audit")
+                anchor["source_geometry_proof"]["station_ground_proof"] = {
+                    key: ground[key] for key in ("revision", "status", "reason", "facts") if key in ground
+                }
         projection["__anchor_ifs9__"] = anchor
     if not projection:
         raise ValueError("current provider actual geometry evidence missing")
     evidence = {"revision": "openmeteo_current_provider_geometry_v1", "providers": projection}
     digest = _json_hash(evidence)
     return replace(shape, provider_geometry_evidence=evidence,
-        provider_geometry_identity_hash=digest,
+        provider_geometry_identity_hash=digest, provider_geometry_audit=audit,
         shape_hash=_json_hash({"current_shape_hash": shape.shape_hash, "provider_geometry_identity_hash": digest}))
 
 
@@ -5176,6 +5188,7 @@ def _replacement_bayes_precision_fusion_override(
             {model: value for model, value in served_current.items()
              if model in (_source_clock_used_models or _weights)},
             anchor_metadata=getattr(request.openmeteo_precision_guard, "metadata", None),
+            decision_at=computed_at,
         )
         if _source_clock_payload is not None:
             _source_clock_payload["current_evidence_shape"] = _source_clock_current_shape.as_payload()

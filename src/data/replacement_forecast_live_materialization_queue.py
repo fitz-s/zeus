@@ -1294,7 +1294,7 @@ def _seed_already_covered(
         from src.data.replacement_forecast_cycle_policy import current_evidence_shape_has_held_authority
         fusion = provenance.get("bayes_precision_fusion") if isinstance(provenance, Mapping) else None
         if isinstance(fusion, Mapping) and "current_evidence_shape" in fusion:
-            if not current_evidence_shape_has_held_authority(provenance):
+            if not current_evidence_shape_has_held_authority(provenance, materialized_at=posterior["computed_at"]):
                 return False
         if str(seed.get("upgrade_trigger") or "").strip() == "held_belief_computed_age_expired":
             required_computed_at = _parse_utc_iso(seed.get("computed_at"))

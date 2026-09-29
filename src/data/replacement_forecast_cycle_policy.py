@@ -199,8 +199,49 @@ def current_evidence_shape_semantics_mismatch(provenance: object) -> bool:
     return str(shape.get("semantics_revision") or "") != expected
 
 
+def _anchor_station_ground_has_authority(geometry: Mapping[str, object], audit: object, materialized_at: object = None) -> bool:
+    """Re-read official ground bytes; airport/reference labels cannot certify it."""
+    try:
+        from src.config import runtime_cities_by_name, runtime_station_geometry_for_city
+
+        anchor = geometry["providers"]["__anchor_ifs9__"]
+        ground = anchor["source_geometry_proof"]["station_ground_proof"]
+        city = runtime_cities_by_name().get(str(anchor["city"]))
+        if city is None or not isinstance(ground, Mapping):
+            return False
+        if not isinstance(audit, Mapping) or not isinstance(audit.get("anchor_station_ground"), Mapping):
+            return False
+        frozen_audit = audit["anchor_station_ground"]
+        decision = datetime.fromisoformat(str(audit["decision_at"]).replace("Z", "+00:00"))
+        if materialized_at is not None and decision != datetime.fromisoformat(str(materialized_at).replace("Z", "+00:00")):
+            return False
+        possessed = datetime.fromisoformat(str(frozen_audit["checked_at"]).replace("Z", "+00:00"))
+        digest = frozen_audit.get("body_sha256")
+        if (decision.tzinfo is None or possessed.tzinfo is None or possessed > decision
+            or frozen_audit.get("artifact_ref") != "config/hko_station_metadata.html"
+            or not isinstance(digest, str) or len(digest) != 64
+            or any(char not in "0123456789abcdef" for char in digest)):
+            return False
+        station = runtime_station_geometry_for_city(city)
+        facts = ground.get("facts")
+        return (
+            station.get("validity_reason") is None
+            and station.get("ground_status") == "VERIFIED"
+            and ground.get("revision") == "station_ground_roles_v1"
+            and ground.get("status") == "VERIFIED"
+            and isinstance(facts, Mapping)
+            and facts == station.get("ground_facts")
+            and anchor["station_id"] == station["station_id"]
+            and float(anchor["station_elevation_m"]) == float(station["ground_elevation_m"])
+            and float(anchor["station_lat"]) == float(station["lat"])
+            and float(anchor["station_lon"]) == float(station["lon"])
+        )
+    except (KeyError, TypeError, ValueError, OSError):
+        return False
+
+
 def _current_evidence_shape_has_probability_authority(
-    provenance: object,
+    provenance: object, *, materialized_at: object = None,
 ) -> bool:
     """Validate same-cycle target-specific ENS probability authority."""
 
@@ -242,6 +283,8 @@ def _current_evidence_shape_has_probability_authority(
     geometry_hash = hashlib.sha256(json.dumps(geometry, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
     if shape.get("provider_geometry_identity_hash") != geometry_hash:
         return False
+    if not _anchor_station_ground_has_authority(geometry, shape.get("provider_geometry_audit"), materialized_at):
+        return False
     return (
         str(shape.get("semantics_revision") or "")
         in LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS
@@ -250,7 +293,7 @@ def _current_evidence_shape_has_probability_authority(
     )
 
 
-def current_evidence_shape_has_entry_authority(provenance: object) -> bool:
+def current_evidence_shape_has_entry_authority(provenance: object, *, materialized_at: object = None) -> bool:
     """Whether current evidence authorizes a new entry."""
 
     # FAIL-CLOSED GATE CONTRACT
@@ -259,10 +302,10 @@ def current_evidence_shape_has_entry_authority(provenance: object) -> bool:
     # translated, expired, or semantically mismatched shape provenance.
     # RESET: a coherent same-cycle target-specific raw-member shape restores
     # the authority ratified in replacement_final_form section 1d.
-    return _current_evidence_shape_has_probability_authority(provenance)
+    return _current_evidence_shape_has_probability_authority(provenance, materialized_at=materialized_at)
 
 
-def current_evidence_shape_has_held_authority(provenance: object) -> bool:
+def current_evidence_shape_has_held_authority(provenance: object, *, materialized_at: object = None) -> bool:
     """Whether a shape can support reduce-only held-position redecision.
 
     Stale ENS rows remain offline evidence only.  A held position must be
@@ -271,7 +314,7 @@ def current_evidence_shape_has_held_authority(provenance: object) -> bool:
     disagreement as a probability distribution.
     """
 
-    return _current_evidence_shape_has_probability_authority(provenance)
+    return _current_evidence_shape_has_probability_authority(provenance, materialized_at=materialized_at)
 
 
 def tradeable_grade_coverage_sql(
