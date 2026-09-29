@@ -26,6 +26,7 @@ import stat
 import struct
 import time
 from typing import Mapping
+from uuid import uuid4
 
 import httpx
 
@@ -145,11 +146,17 @@ def _read_file(path: Path) -> bytes:
     return body
 
 
-def _decode(path: Path, profile: Mapping[str, object], *, x: int | None = None, y: int | None = None) -> float | None:
+def _decode(body: bytes, profile: Mapping[str, object], *, x: int | None = None, y: int | None = None) -> float | None:
     import fsspec
+    from fsspec.implementations.memory import MemoryFileSystem
     from omfiles import OmFileReader
+    # Decode exactly the immutable bytes that were hashed, not a reopened
+    # filesystem path. A concurrent file A->B->A replacement cannot swap cells.
+    memory = MemoryFileSystem(skip_instance_cache=True)
+    name = f"/zeus-model-surface/{uuid4().hex}.om"
+    memory.pipe_file(name, body)
     try:
-        with OmFileReader(fsspec.open(str(path), mode="rb")) as reader:
+        with OmFileReader(fsspec.core.OpenFile(memory, name, mode="rb")) as reader:
             if reader.shape != (profile["ny"], profile["nx"]):
                 raise _Invalid("MODEL_SURFACE_GRID_SHAPE_MISMATCH")
             if x is not None:
@@ -158,6 +165,8 @@ def _decode(path: Path, profile: Mapping[str, object], *, x: int | None = None, 
         raise
     except (RuntimeError, ValueError, TypeError, OSError, IndexError) as exc:
         raise _Invalid("MODEL_SURFACE_DECODE_INVALID") from exc
+    finally:
+        memory.rm_file(name)
     return None
 
 
@@ -184,7 +193,7 @@ def _capture(manifest: Mapping[str, object], raw: bytes) -> SurfaceAssetCapture:
         "asset_path": str(asset_path), "manifest_path": str(manifest_path), "manifest_sha256": _sha(raw)})
 
 
-def _load(asset: Mapping[str, object], profile: Mapping[str, object]) -> tuple[Mapping[str, object], Path]:
+def _load(asset: Mapping[str, object], profile: Mapping[str, object]) -> tuple[Mapping[str, object], bytes]:
     manifest_path = _owned_path(asset["manifest_path"])
     raw = _read_file(manifest_path)
     if _sha(raw) != asset["manifest_sha256"]:
@@ -202,7 +211,7 @@ def _load(asset: Mapping[str, object], profile: Mapping[str, object]) -> tuple[M
     body = _read_file(path)
     if len(body) != manifest["byte_size"] or _sha(body) != manifest["whole_sha256"]:
         raise _Invalid("MODEL_SURFACE_ASSET_CHANGED")
-    return manifest, path
+    return manifest, body
 
 
 def _scan(profile: Mapping[str, object]) -> tuple[list[SurfaceAssetCapture], list[dict[str, object]]]:
@@ -279,6 +288,7 @@ def read_model_surface_capture(model: str, *, decision_at: datetime | str) -> Su
 
 def _persist_capture(manifest: dict[str, object], body: bytes,
                      profile: Mapping[str, object], prior: SurfaceAssetCapture | None) -> SurfaceAssetCapture:
+    _decode(body, profile)
     path = _safe_path(_asset_name(manifest), exists=False)
     root = _cache_root()
     root.mkdir(parents=True, exist_ok=True)
@@ -286,18 +296,26 @@ def _persist_capture(manifest: dict[str, object], body: bytes,
     valid, invalid = _scan(profile)
     matches = [c for c in valid if c.asset["whole_sha256"] == manifest["whole_sha256"] and _version(c.asset) == _version(manifest)]
     old_capture = max(matches, key=lambda c: _utc(c.asset["recorded_at"])) if matches else None
-    if existing_bytes and _read_file(path) != body:
-        # Only a verified manifest permits repairing this exact owned cache
-        # file. Its authority clocks remain unchanged. No symlink is followed.
-        if old_capture is None:
-            raise _Invalid("MODEL_SURFACE_ASSET_CHANGED")
-        bad_hash = _sha(_read_file(path))
-        quarantine = _safe_path(f"{path.name}.corrupt.{bad_hash}.{time.time_ns()}", exists=False)
+    damaged = False
+    bad_hash = None
+    if existing_bytes:
+        try:
+            cached_body = _read_file(path)
+            damaged = cached_body != body
+            bad_hash = _sha(cached_body) if damaged else None
+        except _Invalid as exc:
+            if str(exc) != "MODEL_SURFACE_INVALID_SIZE":
+                raise
+            damaged = True
+    if damaged:
+        # The exact domain/SHA regular-file path is already checked. Only a
+        # real full200 with validated bytes/shape permits quarantine. Verified
+        # manifests retain their clocks; orphan evidence requires a new receipt.
+        quarantine = _safe_path(f"{path.name}.corrupt.{bad_hash or 'invalid_size'}.{time.time_ns()}", exists=False)
         path.rename(quarantine)
     if not path.exists():
         with path.open("xb") as handle:
             handle.write(body)
-    _decode(path, profile)
     # A real A->B->A transition must not reuse an earlier A possession merely
     # because the server has recycled all A headers and bytes.
     transition = prior is not None and (
@@ -443,9 +461,9 @@ def _cell(profile: Mapping[str, object], lat: object, lon: object) -> dict[str, 
     return {"x": indices[0], "y": indices[1], "selected_latitude": coords[1], "selected_longitude": coords[0]}
 
 
-def _geometry(profile: Mapping[str, object], path: Path, lat: object, lon: object) -> dict[str, object]:
+def _geometry(profile: Mapping[str, object], body: bytes, lat: object, lon: object) -> dict[str, object]:
     cell = _cell(profile, lat, lon)
-    height = _decode(path, profile, x=cell["x"], y=cell["y"])
+    height = _decode(body, profile, x=cell["x"], y=cell["y"])
     if math.isnan(height):
         raise _Invalid("MODEL_SURFACE_NO_DATA")
     if height <= -999:
@@ -464,12 +482,12 @@ def model_surface_witness(model: str, *, selected_latitude: float, selected_long
         if payload["status"] != "READY":
             raise _Invalid(str(payload.get("reason") or "MODEL_SURFACE_ASSET_MISSING"))
         asset = payload["asset"]
-        manifest, path = _load(asset, profile)
+        manifest, body = _load(asset, profile)
         if _utc(manifest["last_modified"]) > _utc(body_captured_at):
             raise _Invalid("MODEL_SURFACE_EPOCH_MISMATCH")
         return {"revision": REVISION, "status": "VERIFIED", "reason": None, "model": model,
                 "body_captured_at": _utc(body_captured_at).isoformat(),
-                "geometry": _geometry(profile, path, selected_latitude, selected_longitude),
+                "geometry": _geometry(profile, body, selected_latitude, selected_longitude),
                 "asset_audit": dict(asset)}
     except (KeyError, ValueError, TypeError, OSError) as exc:
         return {"revision": REVISION, "status": "UNPROVEN", "model": model,
@@ -488,13 +506,13 @@ def validate_model_surface_witness(proof: Mapping[str, object], *, model: str,
         if proof["revision"] != REVISION or _utc(proof["body_captured_at"]) != _utc(body_captured_at):
             raise _Invalid("MODEL_SURFACE_WITNESS_INVALID")
         profile = _profile(model)
-        manifest, path = _load(proof["asset_audit"], profile)
+        manifest, entity = _load(proof["asset_audit"], profile)
         decision, body = _utc(decision_at), _utc(body_captured_at)
         if body > decision or _utc(manifest["recorded_at"]) > decision:
             raise _Invalid("MODEL_SURFACE_NOT_CAUSAL")
         if _utc(manifest["last_modified"]) > body:
             raise _Invalid("MODEL_SURFACE_EPOCH_MISMATCH")
-        if proof["geometry"] != _geometry(profile, path, selected_latitude, selected_longitude):
+        if proof["geometry"] != _geometry(profile, entity, selected_latitude, selected_longitude):
             raise _Invalid("MODEL_SURFACE_CELL_CHANGED")
         return None
     except (KeyError, ValueError, TypeError, OSError) as exc:

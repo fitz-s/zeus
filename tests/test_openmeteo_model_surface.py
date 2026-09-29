@@ -351,3 +351,75 @@ def test_304_without_exact_epoch_identity_requires_full_entity_get(ordinary_stat
         assert _proof(next_capture)["reason"] == "MODEL_SURFACE_EPOCH_MISMATCH"
     else:
         assert next_capture.as_payload() == first.as_payload()
+
+
+def test_verified_byte_snapshot_defeats_real_om_file_a_b_a_race(ordinary_static_http, monkeypatch):
+    from copy import deepcopy
+    entity, _, tmp_path = ordinary_static_http
+    capture = surface.ensure_model_surface("icon_global")
+    path = Path(capture.asset["asset_path"])
+    a = path.read_bytes()
+    data = np.full((1441, 2879), 6, dtype=np.float32)
+    data[720, 1441] = -19  # A's selected point is -20.
+    b_path = tmp_path / "raced-object.om"
+    writer = OmFileWriter(str(b_path))
+    root = writer.write_array(data, chunks=(20, 20), name="HSURF")
+    writer.close(root)
+    b = b_path.read_bytes()
+    original_decode = surface._decode
+    raced = []
+
+    def replace_file_only_while_decoding(snapshot, profile, **kwargs):
+        if "x" not in kwargs:
+            return original_decode(snapshot, profile, **kwargs)
+        path.write_bytes(b)
+        try:
+            raced.append(True)
+            return original_decode(snapshot, profile, **kwargs)
+        finally:
+            path.write_bytes(a)
+
+    monkeypatch.setattr(surface, "_decode", replace_file_only_while_decoding)
+    proof = _proof(capture)
+    assert proof["status"] == "VERIFIED"
+    assert proof["geometry"]["native_grid_elevation_m"] == -20
+    assert _validate(proof) is None
+    forged_b = deepcopy(proof)
+    forged_b["geometry"]["native_grid_elevation_m"] = -19
+    assert _validate(forged_b) == "MODEL_SURFACE_CELL_CHANGED"
+    assert len(raced) == 3
+    assert path.read_bytes() == a
+    assert len(entity["calls"]) == 1
+
+
+@pytest.mark.parametrize("damage", ["zero", "partial", "oversize"])
+@pytest.mark.parametrize("retained_manifest", [True, False])
+def test_real_full_get_recovers_zero_partial_or_oversize_owned_cache(ordinary_static_http, damage, retained_manifest):
+    entity, clock, tmp_path = ordinary_static_http
+    first = surface.ensure_model_surface("icon_global")
+    old_proof = _proof(first)
+    manifest = Path(first.asset["manifest_path"])
+    original_manifest = manifest.read_bytes()
+    if not retained_manifest:
+        manifest.unlink()
+    body_path = Path(first.asset["asset_path"])
+    body_path.write_bytes({"zero": b"", "partial": b"partial-OM", "oversize": b"x"*(8*1024*1024+1)}[damage])
+    assert _validate(old_proof) is not None
+    clock[0] += timedelta(minutes=2)
+    restored = surface.ensure_model_surface("icon_global")
+    assert restored.status == "READY"
+    assert "If-None-Match" not in entity["calls"][-1]
+    assert body_path.read_bytes() == entity["body"]
+    assert list((tmp_path / "static").glob("*.om.corrupt.*"))
+    proof = _proof(restored)
+    assert _validate(proof, decision="2026-09-29T12:03:00+00:00") is None
+    if retained_manifest:
+        assert manifest.read_bytes() == original_manifest
+        assert restored.as_payload() == first.as_payload()
+        assert _validate(old_proof) is None
+    else:
+        assert not manifest.exists()
+        assert restored.asset["manifest_path"] != first.asset["manifest_path"]
+        assert restored.asset["captured_at"] == clock[0].isoformat()
+        assert _validate(proof) == "MODEL_SURFACE_NOT_CAUSAL"
+        assert _validate(old_proof) is not None
