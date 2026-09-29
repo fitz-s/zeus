@@ -1272,7 +1272,7 @@ def _load_persisted_single_runs_payload_cache(*, force: bool = False) -> None:
         if _payload_cache_entry_expired(entry, age_floor):
             continue
         str_key = str(key)
-        _SINGLE_RUNS_PAYLOAD_CACHE.setdefault(str_key, raw_payload)
+        _SINGLE_RUNS_PAYLOAD_CACHE.setdefault(str_key, _cached_physical_payload(raw_payload))
         recorded = datetime.fromisoformat(str(entry["recorded_at"]))
         if recorded.tzinfo is None:
             recorded = recorded.replace(tzinfo=UTC)
@@ -1325,6 +1325,23 @@ def _payload_cache_entry_expired(entry: Mapping[str, object], age_floor: datetim
     return recorded < age_floor
 
 
+def _cached_physical_payload(payload: object) -> object:
+    """Cached bytes retain first possession, never a one-shot network event."""
+    result = copy.deepcopy(payload)
+    def strip(value: object) -> None:
+        if isinstance(value, dict):
+            capture = value.get(_BATCH_PHYSICAL_RESPONSE_KEY)
+            if isinstance(capture, dict):
+                capture.pop("network_capture", None)
+            for child in value.values():
+                strip(child)
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                strip(child)
+    strip(result)
+    return result
+
+
 def _store_single_runs_payload_cache(
     key: str,
     payload: Mapping[str, object],
@@ -1347,7 +1364,7 @@ def _store_single_runs_payload_cache(
     identity a live request will compute (see _recover_single_runs_payload_identity).
     """
     now_dt = datetime.now(UTC)
-    stored = copy.deepcopy(dict(payload))
+    stored = _cached_physical_payload(dict(payload))
     _SINGLE_RUNS_PAYLOAD_CACHE[key] = stored
     _SINGLE_RUNS_PAYLOAD_CACHE_RECORDED_AT[key] = now_dt
     if identity_key is not None and forecast_hours is not None and past_hours is not None:
@@ -1981,7 +1998,7 @@ def _default_live_fetch_batched(
                 target_local_dates=(target_local_date,),
             )
         if cached_payload is not None:
-            payload = copy.deepcopy(cached_payload)
+            payload = _cached_physical_payload(cached_payload)
         else:
             captures, capture_callback, network_captures, network_callback = _physical_response_capture(
                 model=models[0], url=SINGLE_RUNS_FORECAST_URL, params=params, run=run)
@@ -2485,7 +2502,7 @@ def _fetch_single_runs_hourly_payloads_batched(
                 identity_key=identity_keys[index],
                 target_local_dates=target_local_dates,
             )
-        cached.append(entry)
+        cached.append(_cached_physical_payload(entry) if entry is not None else None)
     missing_positions = [index for index, entry in enumerate(cached) if entry is None]
     if missing_positions:
         missing_locations = [locations[index] for index in missing_positions]
@@ -3039,8 +3056,7 @@ def _persist_rows(
             _persist_http_capture_receipt(conn, row, capture, int(artifact[0]))
             seen_http_events.add(event_key)
         row["captured_at"] = str(artifact[1])
-        if station:
-            row["source_available_at"] = str(artifact[2])
+        row["source_available_at"] = str(artifact[2])
     before = conn.total_changes
     placeholders = ",".join("?" for _ in _RMF_INSERT_COLUMNS)
     cols = ",".join(_RMF_INSERT_COLUMNS)

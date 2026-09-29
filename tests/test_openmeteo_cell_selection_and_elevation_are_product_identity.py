@@ -23,10 +23,53 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from contextlib import contextmanager
+from functools import lru_cache
 
 import pytest
 
 from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
+
+
+@lru_cache(maxsize=4)
+def _controlled_native_static_bytes(model):
+    """Real OM encoding on the official served grid; controlled fixture, not live geography."""
+    import tempfile
+    import numpy as np
+    from omfiles import OmFileWriter
+    from src.data.openmeteo_model_surface import _profile
+    profile = _profile(model)
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / "HSURF.om"
+        writer = OmFileWriter(str(path))
+        root = writer.write_array(np.full((profile["ny"], profile["nx"]), 6.0, dtype=np.float32), chunks=(20,20), name="HSURF")
+        writer.close(root)
+        return path.read_bytes()
+
+
+def _selected_test_cell(model, latitude, longitude):
+    from src.data.openmeteo_model_surface import _profile, _float32
+    profile = _profile(model)
+    def cell(value, origin, step):
+        index = int((_float32(value) - _float32(origin)) / _float32(step) + .5)
+        return _float32(_float32(origin) + _float32(_float32(index) * _float32(step)))
+    return cell(latitude, profile["lat_min"], profile["dy"]), cell(longitude, profile["lon_min"], profile["dx"])
+
+
+@pytest.fixture(autouse=True)
+def _controlled_model_static_transport(tmp_path, monkeypatch):
+    from src.data import openmeteo_model_surface as surface
+    from src.data import bayes_precision_fusion_download as dl
+    monkeypatch.setattr(surface, "_cache_root", lambda: tmp_path / "static")
+    monkeypatch.setattr(surface, "_now", lambda: dl.datetime.now(UTC))
+    @contextmanager
+    def stream(method, url, **kwargs):
+        domain = url.split("/data/")[1].split("/")[0]
+        model = next(model for model, definition in surface._PROFILES.items() if definition[0] == domain)
+        body = _controlled_native_static_bytes(model)
+        headers = {"etag": '"controlled-fixture"', "last-modified": "Mon, 01 Jan 2024 00:00:00 GMT", "content-length":str(len(body))}
+        yield SimpleNamespace(status_code=200, headers=headers, iter_raw=lambda **_kwargs:iter((body,)))
+    monkeypatch.setattr(surface.httpx, "stream", stream)
 
 
 def _forecast_db(tmp_path: Path) -> Path:
@@ -114,17 +157,20 @@ def _current_rows(tmp_path, monkeypatch, *, metric="high"):
     return conn, target, cycle
 
 
-def _mock_single_model_http(monkeypatch, dl, *, value, network=False):
+def _mock_single_model_http(monkeypatch, dl, *, value, network=False, hour_count=24):
     dl._SINGLE_RUNS_PAYLOAD_CACHE.clear()
     dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEX.clear()
+    dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEXED_KEYS.clear()
+    dl._SINGLE_RUNS_PAYLOAD_CACHE_RECORDED_AT.clear()
 
     def fetch(url, params, **kwargs):
         assert "," not in params["models"]
-        day = datetime(2026, 6, 9)
-        payload = {"latitude": 48.95, "longitude": 2.45, "elevation": 123,
+        day = datetime(2026, 6, 9 if hour_count == 24 else 8)
+        latitude, longitude = _selected_test_cell(params["models"], float(params["latitude"]), float(params["longitude"]))
+        payload = {"latitude": latitude, "longitude": longitude, "elevation": 123,
             "timezone": "Europe/Paris", "hourly_units": {"temperature_2m": "°C"},
-            "hourly": {"time": [(day + timedelta(hours=i)).isoformat(timespec="minutes") for i in range(24)],
-                       "temperature_2m": [value] * 24}}
+            "hourly": {"time": [(day + timedelta(hours=i)).isoformat(timespec="minutes") for i in range(hour_count)],
+                       "temperature_2m": [value] * hour_count}}
         body = (json.dumps(payload, indent=2) + "\n").encode()
         fetched_at = dl.datetime.now(UTC).timestamp()
         kwargs["capture_entity_body"](body, fetched_at)
@@ -168,6 +214,11 @@ def _persist_exact_provider_body(conn, tmp_path, *, city, metric, target_date, m
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr("src.config.state_path", lambda filename: Path(tmp_path)/"state"/filename)
         _download_time(patch, dl, stamp)
+        from src.data.openmeteo_model_surface import ensure_model_surface
+        ensure_model_surface(model)
+        selected_lat, selected_lon = _selected_test_cell(model, target.latitude, target.longitude)
+        payload.update(latitude=selected_lat, longitude=selected_lon)
+        body = (json.dumps(payload, indent=2)+"\n").encode()
         bound = dl._bind_physical_response(json.loads(body), model=model, url=SINGLE_RUNS_FORECAST_URL,
             params=params, run=run, captures=[(body, stamp.timestamp())],
             network_captures=[(body, stamp.timestamp(), {"content-type": "application/json"})] if network else ())
@@ -568,6 +619,57 @@ def test_real_http_a_b_a_receipts_reset_without_renewing_immutable_raw_or_body(t
     conn.close()
 
 
+@pytest.mark.parametrize("first_metric", ("high", "low"))
+@pytest.mark.parametrize("cache_kind", ("exact", "superset", "old_persisted_superset"))
+def test_bpf_payload_cache_reuse_cannot_mint_a_network_receipt_for_metric_twin(tmp_path, monkeypatch, first_metric, cache_kind):
+    from src.data import bayes_precision_fusion_download as dl
+    import src.data.openmeteo_client as client
+    db = _forecast_db(tmp_path)
+    run = datetime(2026, 6, 8, tzinfo=UTC)
+    target = replace(_target(), metric=first_metric)
+    monkeypatch.setattr("src.config.state_path", lambda filename: tmp_path / "state" / filename)
+    monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {target.city: SimpleNamespace(name=target.city,
+        lat=target.latitude,lon=target.longitude,timezone=target.timezone_name)})
+    cache_path = tmp_path / "payload_cache.json"
+    monkeypatch.setattr(dl, "_single_runs_payload_cache_persistence_enabled", lambda: True)
+    monkeypatch.setattr(dl, "_single_runs_payload_cache_path", lambda: cache_path)
+    _download_time(monkeypatch, dl, run.replace(hour=8))
+    _mock_single_model_http(monkeypatch, dl, value=20, network=True, hour_count=120)
+    network_calls = []
+    original_fetch = client.fetch
+    def counted(*args, **kwargs):
+        network_calls.append(1)
+        return original_fetch(*args, **kwargs)
+    monkeypatch.setattr(client, "fetch", counted)
+    dl.download_bayes_precision_fusion_extra_raw_inputs(forecast_db=db, cycle=run, targets=[target],
+        models=("icon_global",), forecast_hours=120, include_previous_runs=False, prune_after=False)
+    conn = sqlite3.connect(db)
+    first_body = conn.execute("SELECT * FROM raw_forecast_artifacts WHERE data_version='openmeteo_single_model_entity_body_v1'").fetchone()
+    assert conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts WHERE data_version='openmeteo_single_model_http_capture_receipt_v1'").fetchone()[0] == 1
+    if cache_kind == "old_persisted_superset":
+        cached = json.loads(cache_path.read_text())
+        for entry in cached["entries"].values():
+            entry["payload"][dl._BATCH_PHYSICAL_RESPONSE_KEY]["network_capture"] = {
+                "captured_at": run.replace(hour=8).isoformat(), "response_headers": {"content-type": "application/json"}}
+        cache_path.write_text(json.dumps(cached))
+        dl._SINGLE_RUNS_PAYLOAD_CACHE.clear()
+        dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEX.clear()
+        dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEXED_KEYS.clear()
+        dl._SINGLE_RUNS_PAYLOAD_CACHE_RECORDED_AT.clear()
+        dl._load_persisted_single_runs_payload_cache(force=True)
+    _download_time(monkeypatch, dl, run.replace(hour=14))
+    twin = replace(target, metric="low" if first_metric == "high" else "high")
+    result = dl.download_bayes_precision_fusion_extra_raw_inputs(forecast_db=db, cycle=run, targets=[twin],
+        models=("icon_global",), forecast_hours=120 if cache_kind == "exact" else 72,
+        include_previous_runs=False, prune_after=False)
+    assert result["written_row_count"] == 1 and len(network_calls) == 1
+    assert conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts WHERE data_version='openmeteo_single_model_http_capture_receipt_v1'").fetchone()[0] == 1
+    assert conn.execute("SELECT * FROM raw_forecast_artifacts WHERE data_version='openmeteo_single_model_entity_body_v1'").fetchone() == first_body
+    assert {row[0] for row in conn.execute("SELECT captured_at FROM raw_model_forecasts")} == {run.replace(hour=8).isoformat()}
+    assert {row[0] for row in conn.execute("SELECT source_available_at FROM raw_model_forecasts")} == {run.replace(hour=8).isoformat()}
+    conn.close()
+
+
 @pytest.mark.parametrize("damage", (None,"wrong_first_site"))
 def test_single_model_location_batch_persists_and_serves_second_city_both_metrics(tmp_path,monkeypatch,damage):
     from src.data import bayes_precision_fusion_download as dl
@@ -589,6 +691,7 @@ def test_single_model_location_batch_persists_and_serves_second_city_both_metric
         for lat,lon,tz in zip(str(params["latitude"]).split(","),str(params["longitude"]).split(","),str(params["timezone"]).split(","),strict=True):
             day=datetime(2026,6,9)
             latitude,longitude=float(lat),float(lon)
+            latitude,longitude=_selected_test_cell("icon_global",latitude,longitude)
             if damage=="wrong_first_site" and tz=="Europe/Paris":
                 latitude,longitude=0,0
             payload.append({"latitude":latitude,"longitude":longitude,"elevation":100,
