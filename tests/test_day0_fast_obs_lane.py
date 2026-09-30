@@ -1,6 +1,6 @@
 # Created: 2026-06-10
 # Last reused/audited: 2026-09-30
-# Lifecycle: created=2026-06-10; last_reviewed=2026-09-23; last_reused=2026-09-23
+# Lifecycle: created=2026-06-10; last_reviewed=2026-09-30; last_reused=2026-09-30
 # Authority basis: operator green-light 2026-06-10 items A/C/E (free METAR fast
 #   lane, live-obs hook wiring, WU-vs-METAR oracle anomaly guard); day0
 #   first-principles review /tmp/day0_first_principles_review.md §6.2;
