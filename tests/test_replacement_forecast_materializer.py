@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-09-27
-# Lifecycle: created=2026-06-06; last_reviewed=2026-09-27; last_reused=2026-09-27
+# Last reused/audited: 2026-09-30
+# Lifecycle: created=2026-06-06; last_reviewed=2026-09-30; last_reused=2026-09-30
 # Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + Bayes-fusion replacement live layer.
 # Reuse: Run before changing replacement forecast live/experiment write path.
 # Authority basis: Operator-directed replacement forecast simple-switch readiness.
@@ -667,6 +667,54 @@ def _request(
         day0_observed_extreme_unit="C" if day0_observed_extreme_c is not None else None,
         day0_observation_state=day0_observation_state,
     )
+
+
+def _test_current_residual(request, settlement_extreme_c):
+    from src.data.day0_fast_obs import FAST_RESIDUAL_LIKELIHOOD_REVISION, FastStationResidualLikelihood
+    identity = {"semantics_revision":FAST_RESIDUAL_LIKELIHOOD_REVISION,
+        "station_id":"ZSPD", "settlement_channel":"wu_icao_history",
+        "fast_channel":"aviationweather_metar", "unit":"C",
+        "as_of":request.computed_at.isoformat(),
+        "window_start":(request.computed_at-timedelta(days=7)).isoformat(),
+        "matched_pairs":30, "residual_weights_c":((0.0,1.0),),
+        "unknown_weight":0.0, "settlement_extreme_c":settlement_extreme_c}
+    return FastStationResidualLikelihood(**identity,identity_hash=hashlib.sha256(
+        json.dumps(identity,sort_keys=True,separators=(",",":")).encode()).hexdigest())
+
+
+def _install_day0_current_inputs(conn, monkeypatch, request):
+    """Controlled current station/complete hourly inputs, not a carrier/math mock."""
+    from src.data.day0_hourly_vectors import Day0HourlyVector, day0_source_clock_ensemble_member_models
+    from src.state.schema.observation_prints_schema import ensure_table, append_print
+    clock = datetime.fromisoformat(request.day0_observed_extreme_observation_time)
+    ensure_table(conn)
+    value = float(request.day0_observed_extreme_c)
+    append_print(conn, city=request.city, station_id="ZSPD", source_channel="aviationweather_metar",
+                 publish_ts_utc=clock.isoformat(), value_native=value, unit="C",
+                 fetched_at_utc=clock.isoformat(),
+                 raw_report=f"METAR ZSPD {clock:%d%H%M}Z 01008KT 9999 {int(value):02d}/18 Q1014")
+    conn.commit()
+    models = ("ecmwf_ifs", "icon_global")
+    run = _dt(6); available = _dt(7); captured = clock - timedelta(minutes=1)
+    def make(model, index=25, ensemble=False):
+        meta = {"provider_source_cycle_time_utc":run.isoformat(),
+                "provider_source_available_at_utc":available.isoformat(),
+                "fetch_finished_at":captured.isoformat(),
+                "request_hash":"same-ens" if ensemble else model,
+                "provider_run_id":"same-ens" if ensemble else model}
+        return Day0HourlyVector(model=model, city=request.city, target_date=str(request.target_date),
+            timezone_name=request.city_timezone, captured_at=captured.isoformat(),
+            times=tuple(f"{request.target_date}T{hour:02d}:00" for hour in range(24)),
+            temps_c=tuple(value + (index-25)*0.02 for _ in range(24)),
+            source_run_meta_json=json.dumps(meta))
+    vectors=[make(model) for model in models]
+    ensemble=[make(model,index,True) for index,model in enumerate(day0_source_clock_ensemble_member_models())]
+    monkeypatch.setattr("src.data.day0_hourly_vectors.day0_hourly_models_for_city",lambda _:list(models))
+    monkeypatch.setattr("src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
+                        lambda **kw:ensemble if len(kw.get("expected_models") or ())==51 else vectors)
+    monkeypatch.setattr(materializer_mod,"_day0_remaining_vector_witness",
+        lambda *_a,**_kw:_wu_current_carrier_test_witness(city=request.city,target_date=str(request.target_date),
+                                                        metric=request.temperature_metric,at=request.computed_at))
 
 
 def _wu_current_carrier_test_witness(*, city: str, target_date: str, metric: str, at: datetime):
@@ -1838,20 +1886,12 @@ def test_day0_owner_witness_keeps_newer_fast_residual_over_absorbing_frontier(
         day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
         day0_observed_extreme_sample_count=13,
     )
-    likelihood = SimpleNamespace(
-        residual_weights_c=((0.0, 1.0),),
-        unknown_weight=0.0,
-        settlement_extreme_c=absorbing_extreme,
-        identity_hash="1" * 64,
-        as_payload=lambda: {
-            "identity_hash": "1" * 64,
-            "settlement_extreme_c": absorbing_extreme,
-        },
-    )
+    likelihood = _test_current_residual(current, absorbing_extreme)
     monkeypatch.setattr(
         "src.data.day0_fast_obs.build_fast_station_residual_likelihood",
         lambda *args, **kwargs: likelihood,
     )
+    _install_day0_current_inputs(conn, monkeypatch, current)
     witness = _day0_owner_witness(current, seed_file=tmp_path / "fast-owner.json")
     _record_day0_owner(conn, current, witness)
     prepared = _prepare_for_final_write(
@@ -2461,7 +2501,7 @@ def test_runtime_layer_rejects_wilson_or_missing_bounds() -> None:
     ) is False
 
 
-def test_forecast_posteriors_runtime_layer_migration_preserves_legacy_live_rows() -> None:
+def test_forecast_posteriors_runtime_layer_migration_retires_unclassified_legacy_rows() -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute(
@@ -2486,10 +2526,10 @@ def test_forecast_posteriors_runtime_layer_migration_preserves_legacy_live_rows(
     _ensure_forecast_posteriors_runtime_layer(conn)
 
     rows = conn.execute("SELECT posterior_id, runtime_layer, q_json FROM forecast_posteriors").fetchall()
-    assert [dict(row) for row in rows] == [
-        {"posterior_id": 2, "runtime_layer": LIVE_RUNTIME_LAYER, "q_json": '{"good":1}'}
-    ]
-    assert "trade_authority_status" not in {
+    # Legacy LIVE_AUTHORITY alone is not a current runtime certificate. Both
+    # unclassified rows are retired; migration does not relabel their q as live.
+    assert rows == []
+    assert "trade_authority_status" in {
         row["name"] for row in conn.execute("PRAGMA table_info(forecast_posteriors)")
     }
     conn.execute(
@@ -2500,12 +2540,12 @@ def test_forecast_posteriors_runtime_layer_migration_preserves_legacy_live_rows(
         row["runtime_layer"]
         for row in conn.execute("SELECT runtime_layer FROM forecast_posteriors ORDER BY posterior_id")
     ]
-    assert statuses == [LIVE_RUNTIME_LAYER, LIVE_RUNTIME_LAYER]
+    assert statuses == [LIVE_RUNTIME_LAYER]
     _ensure_forecast_posteriors_runtime_layer(conn)
     assert [
         row["runtime_layer"]
         for row in conn.execute("SELECT runtime_layer FROM forecast_posteriors ORDER BY posterior_id")
-    ] == [LIVE_RUNTIME_LAYER, LIVE_RUNTIME_LAYER]
+    ] == [LIVE_RUNTIME_LAYER]
     assert _replacement_is_live_layer(
         replacement_q_mode=REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL,
         q_lcb_map={"cool": 0.1},
@@ -2597,11 +2637,11 @@ def test_forecast_posteriors_runtime_layer_migration_repairs_invalid_observation
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(observation_instants)")}
     posterior_cols = {row["name"] for row in conn.execute("PRAGMA table_info(forecast_posteriors)")}
     assert "running_min" in cols
-    assert "trade_authority_status" not in posterior_cols
+    assert "trade_authority_status" in posterior_cols
     conn.execute("SELECT * FROM observation_hourly_extrema").fetchall()
     conn.execute(
-        "INSERT INTO forecast_posteriors (runtime_layer, q_json) VALUES (?, ?)",
-        (LIVE_RUNTIME_LAYER, "{}"),
+        "INSERT INTO forecast_posteriors (trade_authority_status, runtime_layer, q_json) VALUES (?, ?, ?)",
+        ("LIVE_AUTHORITY", LIVE_RUNTIME_LAYER, "{}"),
     )
 
 
@@ -2684,7 +2724,7 @@ def test_legacy_anchor_schema_migration_does_not_rewrite_legacy_status_columns()
     anchor_status = conn.execute(
         "SELECT trade_authority_status FROM deterministic_forecast_anchors WHERE anchor_id = 1"
     ).fetchone()["trade_authority_status"]
-    assert "trade_authority_status" not in {
+    assert "trade_authority_status" in {
         row["name"] for row in conn.execute("PRAGMA table_info(forecast_posteriors)")
     }
     conn.execute(
@@ -3235,6 +3275,9 @@ def test_materializer_equal_frontier_uses_current_request_identity(
         day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
         day0_observed_extreme_sample_count=12,
     )
+    _install_day0_current_inputs(conn, monkeypatch, prior)
+    likelihood = _test_current_residual(prior, 30.0)
+    monkeypatch.setattr("src.data.day0_fast_obs.build_fast_station_residual_likelihood",lambda *_a,**_kw:likelihood)
     assert materialize_replacement_forecast_live(conn, prior).ok is True
 
     current = replace(
@@ -6910,20 +6953,12 @@ def test_day0_final_writer_uses_frozen_frontier_without_likelihood_recompute(
         day0_observed_extreme_source="wu_api+same_station_fast_tail",
         day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
     )
-    likelihood = SimpleNamespace(
-        residual_weights_c=((0.0, 1.0),),
-        unknown_weight=0.0,
-        settlement_extreme_c=30.0,
-        identity_hash="4" * 64,
-        as_payload=lambda: {
-            "identity_hash": "4" * 64,
-            "settlement_extreme_c": 30.0,
-        },
-    )
+    likelihood = _test_current_residual(provisional, 30.0)
     monkeypatch.setattr(
         "src.data.day0_fast_obs.build_fast_station_residual_likelihood",
         lambda *_args, **_kwargs: likelihood,
     )
+    _install_day0_current_inputs(conn, monkeypatch, provisional)
     prepared = _prepare_for_final_write(conn, provisional)
     monkeypatch.setattr(
         "src.data.day0_fast_obs.build_fast_station_residual_likelihood",
