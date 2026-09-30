@@ -49720,7 +49720,7 @@ def test_hko_minute_mean_normal_tick_wakes_real_seed_without_changing_extreme(tm
         assert not np.array_equal(previous.probability_witness.yes_point_q,held.probability_witness.yes_point_q)
         # A controlled executable book lies between the two *produced* beliefs;
         # no scalar q override makes this stopping-law relationship pass. The
-        # local signal and global fixed-action mean law both have to flip.
+        # local signal and global fixed-action point law both have to flip.
         from src.config import exit_fee_rate
         from src.state.portfolio import ExitContext,Position
         from src.engine.global_auction_universe import _rebind_probability_witness_tokens
@@ -49742,15 +49742,14 @@ def test_hko_minute_mean_normal_tick_wakes_real_seed_without_changing_extreme(tm
                 new_point = family_payoff_point_q(new_witness,bin_id=binding.bin_id,side=side)
                 old_samples = family_payoff_q_samples(old_witness,bin_id=binding.bin_id,side=side)
                 new_samples = family_payoff_q_samples(new_witness,bin_id=binding.bin_id,side=side)
-                old_mean,new_mean = float(old_samples.mean()),float(new_samples.mean())
                 for cents in range(5,96):
                     bid = Decimal(cents)/100
                     net = float(bid-fee_rate*bid*(1-bid))
-                    if max(new_point,new_mean)+.02 < net < min(old_point,old_mean)-.01:
+                    if new_point+.02 < net < old_point-.01:
                         possibilities.append((old_point-new_point,binding,bid,old_point,new_point,
-                                              old_samples,new_samples,old_mean,new_mean))
+                                              old_samples,new_samples))
             assert possibilities, (metric,side,old_witness.yes_point_q,new_witness.yes_point_q)
-            _,binding,bid,old_point,new_point,old_samples,new_samples,old_mean,new_mean = max(
+            _,binding,bid,old_point,new_point,old_samples,new_samples = max(
                 possibilities,key=lambda values:values[0])
             token = binding.yes_token_id if side=="YES" else binding.no_token_id
             position = Position(trade_id=f"normal-{metric}-{side}",market_id=binding.condition_id,
@@ -49791,13 +49790,16 @@ def test_hko_minute_mean_normal_tick_wakes_real_seed_without_changing_extreme(tm
             endowment = CandidatePortfolioEndowment(loss_wealth_floor_usd=Decimal("1000"),
                 win_wealth_floor_usd=Decimal("1010"),current_token_shares=Decimal("10"),
                 ledger_snapshot_id="normal-ledger")
-            for witness,mean,admitted in ((old_witness,old_mean,False),(new_witness,new_mean,True)):
+            for witness,point,admitted in ((old_witness,old_point,False),(new_witness,new_point,True)):
                 proposal = candidate(witness)
                 assert proposal is not None
-                score = _score_global_single_order_sell_expected(proposal,held_probability_mean=mean,
+                score = _score_global_single_order_sell_expected(proposal,held_probability_mean=point,
                     sample_count=witness.yes_q_samples.shape[0],band_alpha=witness.band_alpha,endowment=endowment)
                 assert (score.candidate is not None and not score.rejection_reasons) is admitted
                 if admitted:
+                    assert score.expected_terminal_wealth.held_probability_mean == point
+                    independent_ev = float(score.shares*(bid-curve.fee_model.fee_per_share(bid)-Decimal(str(point))))
+                    assert score.expected_terminal_wealth.expected_ev_usd == pytest.approx(independent_ev,abs=1e-5)
                     assert score.expected_terminal_wealth.expected_ev_usd > 0
                     assert score.expected_terminal_wealth.expected_delta_log_wealth > 0
                     assert score.candidate.probability_witness_identity == new_witness.witness_identity
