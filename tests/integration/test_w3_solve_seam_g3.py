@@ -49655,6 +49655,149 @@ def test_noaa_kord_product_minus_fast_v2_enters_normal_public_certificate(tmp_pa
         fixture.builtin.close()
 
 
+def test_noaa_kord_fast_public_q_reaches_actual_held_and_jit(tmp_path,monkeypatch,_noaa_native_sources):
+    from copy import deepcopy
+    from dataclasses import replace
+    from inspect import signature
+    from src.data import day0_fast_obs as fast,replacement_forecast_materializer as materializer
+    from src.data import day0_hourly_vectors as hourly
+    from src.data import replacement_forecast_bundle_reader as reader
+    from src.events.opportunity_event import OpportunityEvent
+    from src.engine.monitor_refresh import _current_global_held_point_probability
+    kernel_calls, transport_calls, sampler_rows = [], [], []
+    original_builder = hourly.build_day0_remaining_probability_carrier
+    original_transport = materializer._apply_fast_residual_likelihood_to_probability_carrier
+    original_sampler = era._Day0CarrierRowSampler.sample_matrix
+    def builder(**inputs):
+        result = original_builder(**inputs)
+        bound = signature(original_builder).bind(**inputs)
+        bound.apply_defaults()
+        effective = deepcopy(dict(bound.arguments))
+        effective["operator"] = result["operator"]  # Omitted V2 default == explicit strict replay.
+        kernel_calls.append((effective,result))
+        return result
+    def transport(**inputs):
+        result = original_transport(**inputs)
+        transport_calls.append((deepcopy(inputs),result))
+        return result
+    def sample_matrix(sampler,analysis,n_samples,n_members):
+        state = deepcopy(analysis._rng.bit_generator.state)
+        actual = original_sampler(sampler,analysis,n_samples,n_members)
+        replay = np.random.default_rng()
+        replay.bit_generator.state = state
+        index = replay.integers(0,sampler.rows.shape[0],max(0,int(n_samples)))
+        np.testing.assert_array_equal(actual,sampler.rows[index])
+        sampler_rows.append(actual)
+        return actual
+    monkeypatch.setattr(hourly,"build_day0_remaining_probability_carrier",builder)
+    monkeypatch.setattr(materializer,"_apply_fast_residual_likelihood_to_probability_carrier",transport)
+    monkeypatch.setattr(era._Day0CarrierRowSampler,"sample_matrix",sample_matrix)
+    fixture = _kord_normal_prior_fixture(tmp_path,monkeypatch)
+    try:
+        cut,conditioning = _kord_causal_fast_inputs(fixture,monkeypatch)
+        request = replace(fixture.request,computed_at=cut,day0_observation_state=None,
+            day0_observed_extreme_c=conditioning.observed_extreme_c,
+            day0_observed_extreme_source=fast.FAST_RESIDUAL_CONDITIONING_SOURCE_ID,
+            day0_observed_extreme_observation_time=conditioning.observation_time,
+            day0_observed_extreme_sample_count=conditioning.sample_count,day0_observed_extreme_unit=conditioning.unit)
+        fixture.sql_clock[0] = cut
+        result = materializer.materialize_replacement_forecast_live(fixture.conn,request)
+        assert result.ok, result.reason_codes
+        fixture.conn.commit()
+        fixture.result,fixture.request = result,request
+        bundles = _kord_public_bundles(fixture,monkeypatch,at=cut)
+        class ClockType(type):
+            def __instancecheck__(cls,value): return isinstance(value,_dt.datetime)
+        class ConsumerClock(_dt.datetime,metaclass=ClockType):
+            @classmethod
+            def now(cls,tz=None): return cut.astimezone(tz) if tz else cut.replace(tzinfo=None)
+        from src.events import opportunity_event as event_module
+        monkeypatch.setattr(event_module,"datetime",ConsumerClock)
+        from src.state.db import init_schema_world_only
+        init_schema_world_only(fixture.conn)  # Normal event schema in this private all-role fixture DB.
+        source = fast.fast_obs_source_for_city(fixture.city,fixture.request.target_date)
+        prefetch = fast.FastObsPrefetch(eligible=((fixture.city,source,str(request.target_date)),),
+            reports=fixture.current_reports,freshness_status=fast.FETCH_FRESH,cache_age_s=0.0,
+            decision_time=cut,ledger_reports=fixture.current_reports,station_statuses=(("KORD",fast.FETCH_FRESH,0.0),))
+        emitted = fast.Day0FastObsEmitter().emit_prefetched(world_conn=fixture.conn,prefetch=prefetch,
+            received_at=cut.isoformat(),persist_ledger=False)
+        assert emitted > 0
+        row = dict(fixture.conn.execute("SELECT * FROM opportunity_events WHERE event_type='DAY0_EXTREME_UPDATED' "
+            "AND json_extract(payload_json,'$.metric')='low' ORDER BY rowid DESC LIMIT 1").fetchone())
+        event = OpportunityEvent(**{field:row[field] for field in OpportunityEvent.__dataclass_fields__})
+        assert _dt.datetime.fromisoformat(event.created_at) == cut
+        monkeypatch.setattr(reader,"datetime",ConsumerClock)
+        has_observation = era._held_day0_has_canonical_observation(fixture.conn,event=event,decision_time=cut)
+        assert has_observation
+        def forbid_generic_history(*_args,**_kwargs):
+            raise AssertionError("qualified FAST must not query generic AWC/Ogimet survival")
+        monkeypatch.setattr(era,"_provisional_day0_revision_likelihood",forbid_generic_history)
+        prepared = []
+        for purpose in (era._CurrentProbabilityUse.ENTRY,era._CurrentProbabilityUse.HELD_MONITOR,
+                        era._CurrentProbabilityUse.REDUCE_ONLY_EXIT):
+            payload_out = {}
+            prepared.append(era._prepare_current_global_probability_family(event,forecast_conn=fixture.conn,
+                topology_conn=fixture.conn,observation_conn=fixture.conn,decision_time=cut,
+                max_age=_dt.timedelta(seconds=30),allow_unobserved_day0_replacement=not has_observation,
+                allow_provisional_day0_replacement=True,probability_use=purpose,raw_input_hwm_conn=fixture.conn,
+                day0_payload_out=payload_out))
+            assert "_edli_day0_provisional_boundary_survival_probability" not in payload_out
+            assert payload_out["_edli_day0_provisional_revision_likelihood"] == {}
+        persisted = next(iter(bundles.values()))
+        for family in prepared:
+            witness = family.probability_witness
+            assert isinstance(witness,JointOutcomeProbabilityWitness)
+            for index,binding in enumerate(witness.bindings):
+                label = fixture.conn.execute("SELECT range_label FROM market_events WHERE condition_id=?",
+                    (binding.condition_id,)).fetchone()[0]
+                assert witness.yes_point_q[index] == pytest.approx(persisted.q[label],abs=1e-12)
+                for side,direction in (("YES","buy_yes"),("NO","buy_no")):
+                    position = SimpleNamespace(condition_id=binding.condition_id,direction=direction)
+                    assert _current_global_held_point_probability(position,witness) == pytest.approx(
+                        family_payoff_point_q(witness,bin_id=binding.bin_id,side=side),abs=1e-12)
+            np.testing.assert_array_equal(witness.yes_point_q,prepared[0].probability_witness.yes_point_q)
+            np.testing.assert_array_equal(witness.yes_q_samples,prepared[0].probability_witness.yes_q_samples)
+        witness = prepared[2].probability_witness
+        binding = witness.bindings[1]  # Uncertain native 57–58F; not an exact-payoff sibling.
+        curve = ExecutableSellCurve(token_id=binding.yes_token_id,side="YES",snapshot_id="kord-sell-book",
+            book_hash="kord-sell-hash",levels=(BookLevel(price=Decimal(".50"),size=Decimal("1")),),
+            fee_model=FeeModel(fee_rate=Decimal("0")),min_tick=Decimal(".01"),min_order_size=Decimal("1"),
+            quote_ttl=_dt.timedelta(seconds=30))
+        candidate = GlobalSingleOrderSellCandidate(candidate_id="kord-stat-sell",family_key=witness.family_key,
+            bin_id=binding.bin_id,condition_id=binding.condition_id,side="YES",token_id=binding.yes_token_id,
+            position_id="kord-held",held_shares=Decimal("1"),probability_witness_identity=witness.witness_identity,
+            book_snapshot_id=curve.snapshot_id,book_captured_at_utc=cut,execution_curve_identity=executable_curve_identity(curve),
+            ledger_snapshot_id="kord-held-ledger",executable_sell_curve=curve,resolution_identity=witness.resolution_identity,
+            neg_risk=False,**_explicit_sell_maker_terms(curve,capacity=Decimal("1")))
+        rebound,_payload = era._current_global_actuation_prepared_family(event,
+            global_actuation=SimpleNamespace(probability_witness=witness,decision=SimpleNamespace(candidate=candidate)),
+            forecast_conn=fixture.conn,topology_conn=fixture.conn,observation_conn=fixture.conn,decision_time=cut)
+        assert rebound.probability_witness is witness
+        assert rebound.probability_witness.witness_identity == witness.witness_identity
+        producer_inputs,producer_carrier = kernel_calls[0]
+        assert len(kernel_calls) >= 5  # Producer, three real lanes and submit rebind.
+        for inputs,carrier in kernel_calls:
+            assert inputs == producer_inputs
+            assert carrier["content_identity"] == producer_carrier["content_identity"]
+            np.testing.assert_array_equal(carrier["q"],producer_carrier["q"])
+            np.testing.assert_array_equal(carrier["samples"],producer_carrier["samples"])
+            pure = original_builder(**inputs)
+            np.testing.assert_array_equal(pure["samples"],carrier["samples"])
+        # Public authority also replays the base kernel without applying a
+        # second transport. Only producer, three consumer lanes and JIT mix it.
+        assert len(transport_calls) == 5
+        producer_transport = transport_calls[0][1]
+        for inputs,actual in transport_calls:
+            replay = original_transport(**inputs)
+            assert replay == actual == producer_transport
+        assert len(sampler_rows) == 4
+        for family,rows in zip((*prepared,rebound),sampler_rows,strict=True):
+            np.testing.assert_array_equal(family.probability_witness.yes_q_samples,rows)
+    finally:
+        fixture.conn.close()
+        fixture.builtin.close()
+
+
 def test_selected_order_runner_up_trace_binds_final_held_family_proposal(tmp_path,monkeypatch,_hko_clock_native_sources):
     """Real selector/order hook and corpus flush, not a mocked winning score."""
     from src.engine import tier0_auction_corpus as corpus
