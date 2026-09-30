@@ -78,6 +78,7 @@ FORECAST_PIPELINE_HEALTH_JOBS = (
     "replacement_forecast_download",
     "replacement_forecast_live_materialize",
     "replacement_forecast_live_materialize_priority",
+    "openmeteo_ifs9_source_geometry",
 )
 CURRENT_SCHEDULER_HEALTH_KEYS = ("edli_event_reactor",)
 ENTRY_Q_VERSION_LOOKBACK_SECONDS = 2 * 3600

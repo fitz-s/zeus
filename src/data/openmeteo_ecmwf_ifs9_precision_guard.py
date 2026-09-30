@@ -108,6 +108,16 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return radius_km * 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
 
 
+def grid_surface_elevation_m(proof: Mapping[str, object]) -> float:
+    """Surface height of the provider's selected cell.
+
+    HSURF marks a sea cell with the -999 sentinel, which is a class, not a
+    height: a sea cell's surface is sea level (the provider applies no lapse
+    correction to it either).
+    """
+    return 0.0 if proof["cell_is_sea"] else float(proof["raw_grid_elevation_m"])
+
+
 def geometry_proof_authenticity_reason(
     metadata: OpenMeteoIfs9PrecisionMetadata,
     *,
@@ -148,7 +158,9 @@ def geometry_proof_authenticity_reason(
         scope = response.get("_zeus_current_target_scope")
         if isinstance(scope, Mapping) and scope.get("city") != metadata.city:
             return "OM9_SOURCE_RESPONSE_GEOMETRY_MISMATCH"
-        from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
+        from src.data.openmeteo_ecmwf_ifs9_bucket_transport import (
+            same_grid_cell, source_cell_geometry_proof,
+        )
         from src.config import cities_by_name, runtime_station_geometry_for_city
 
         city = cities_by_name.get(metadata.city)
@@ -189,13 +201,12 @@ def geometry_proof_authenticity_reason(
                     return "OM9_SOURCE_GEOMETRY_PROOF_MISMATCH"
             elif claimed != value:
                 return "OM9_SOURCE_GEOMETRY_PROOF_MISMATCH"
-        grid_lon = float(actual["selected_grid_lon"])
-        if grid_lon > 180.0:
-            grid_lon -= 360.0
         if (
-            abs(metadata.nearest_grid_lat - float(actual["selected_grid_lat"])) > 1e-5
-            or abs(metadata.nearest_grid_lon - grid_lon) > 1e-5
-            or abs(metadata.grid_elevation_m - float(actual["raw_grid_elevation_m"])) > 1e-6
+            not same_grid_cell(
+                metadata.nearest_grid_lat, metadata.nearest_grid_lon,
+                float(actual["selected_grid_lat"]), float(actual["selected_grid_lon"]),
+            )
+            or abs(metadata.grid_elevation_m - grid_surface_elevation_m(actual)) > 1e-6
             or metadata.land_sea_mask != ("sea" if actual["cell_is_sea"] else "land")
             or metadata.city_class != ("coastal" if actual["nearby_sea"] else "standard")
             or abs(metadata.nearest_grid_distance_km - _haversine_km(
@@ -262,8 +273,6 @@ def evaluate_openmeteo_ecmwf_ifs9_precision_guard(
     high_risk_bucket = "standard"
     if city_class in {"coastal", "island", "peninsula", "mountain", "valley"}:
         high_risk_bucket = city_class
-    if city_class in {"coastal", "island", "peninsula"} and land_sea not in {"land", "coastal_land"}:
-        reasons.append("OM9_LAND_SEA_HIGH_RISK_FOR_CITY_CLASS")
     if city_class in {"mountain", "valley"} and (elevation_delta is None or abs(elevation_delta) > 100.0):
         reasons.append("OM9_TERRAIN_ELEVATION_REVIEW_REQUIRED")
 

@@ -15,13 +15,14 @@ import contextlib
 import fcntl
 import hashlib
 import json
+import logging
 import math
 import os
 import sqlite3
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -479,8 +480,12 @@ def _precision_metadata(
     city: str, target_date: str, *, anchor_sigma_c: float,
     raw_payload_bytes: bytes,
 ) -> dict[str, object]:
-    from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
-    from src.data.openmeteo_ecmwf_ifs9_precision_guard import _haversine_km
+    from src.data.openmeteo_ecmwf_ifs9_bucket_transport import (
+        same_grid_cell, source_cell_geometry_proof,
+    )
+    from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
+        _haversine_km, grid_surface_elevation_m,
+    )
     from src.config import runtime_station_geometry_for_city
 
     payload = json.loads(raw_payload_bytes)
@@ -518,13 +523,9 @@ def _precision_metadata(
         latitude=float(city_config.lat), longitude=float(city_config.lon),
         target_elevation_m=target_dem,
     )
-    proof_lon = float(source_proof["selected_grid_lon"])
-    if proof_lon > 180.0:
-        proof_lon -= 360.0
-    if (
-        not all(math.isfinite(value) for value in (response_lat, response_lon, target_dem))
-        or abs(response_lat - float(source_proof["selected_grid_lat"])) > 1e-5
-        or abs(response_lon - proof_lon) > 1e-5
+    if not math.isfinite(target_dem) or not same_grid_cell(
+        response_lat, response_lon,
+        float(source_proof["selected_grid_lat"]), float(source_proof["selected_grid_lon"]),
     ):
         raise ValueError("OM9 raw response grid differs from same-source static surface")
     source_proof["raw_payload_sha256"] = hashlib.sha256(raw_payload_bytes).hexdigest()
@@ -554,7 +555,7 @@ def _precision_metadata(
         "target_local_date": target_date,
         "temperature_unit": "celsius",
         "anchor_sigma_c": float(anchor_sigma_c),
-        "grid_elevation_m": source_proof["raw_grid_elevation_m"],
+        "grid_elevation_m": grid_surface_elevation_m(source_proof),
         "station_elevation_m": station_height,
         "land_sea_mask": "sea" if source_proof["cell_is_sea"] else "land",
         "city_class": "coastal" if source_proof["nearby_sea"] else "standard",
@@ -586,6 +587,38 @@ def _write_json(path: Path, payload: object) -> None:
                 os.unlink(tmp)
             except OSError:
                 pass
+
+
+_LOG = logging.getLogger("zeus.replacement_forecast_current_targets")
+SOURCE_GEOMETRY_HEALTH_JOB = "openmeteo_ifs9_source_geometry"
+_SOURCE_GEOMETRY_SKIP_PREFIXES = (
+    "OM9_SOURCE_GEOMETRY_PROOF_UNAVAILABLE:", "OM9_SOURCE_GEOMETRY_LOCAL_BLOCK:",
+)
+
+
+def _publish_source_geometry_faults(
+    skipped: Sequence[Mapping[str, object]], *, certified_cities: set[str],
+) -> None:
+    """A city whose anchor cell fails certification is a named, latched fault.
+
+    It opens on any failed family and closes only when that city certifies a
+    family with none failing, so the city cannot drop out of the anchor table
+    without the forecast-pipeline health surface naming it.
+    """
+    from src.observability.scheduler_health import write_open_faults
+
+    failed: dict[str, str] = {}
+    for row in skipped:
+        reason = str(row.get("reason") or "")
+        if reason.startswith(_SOURCE_GEOMETRY_SKIP_PREFIXES):
+            failed.setdefault(str(row.get("city")), reason)
+    for city, reason in sorted(failed.items()):
+        _LOG.error("OM9 SOURCE GEOMETRY CERTIFICATION FAILED city=%s reason=%s", city, reason)
+    write_open_faults(
+        SOURCE_GEOMETRY_HEALTH_JOB,
+        opened=failed,
+        closed=certified_cities - failed.keys(),
+    )
 
 
 def _current_target_source_geometry_check(
@@ -2370,6 +2403,14 @@ def download_current_target_raw_inputs(
     finally:
         if conn is not None:
             conn.close()
+    if write_db:
+        _publish_source_geometry_faults(
+            skipped_cities,
+            certified_cities={
+                *(str(m.product_metadata.get("city")) for m in manifests),
+                *(city for city, _date, _metric in canonical_reuse),
+            },
+        )
 
     total_row_count = priority_row_count + rotation_row_count
     unscheduled_target_count = max(0, total_row_count - len(targets))

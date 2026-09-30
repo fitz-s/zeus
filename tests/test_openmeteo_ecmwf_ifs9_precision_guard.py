@@ -125,12 +125,15 @@ def test_openmeteo_ifs9_precision_guard_blocks_missing_elevation_landsea_or_far_
     assert "OM9_NEAREST_GRID_DISTANCE_HIGH" in far.reason_codes
 
 
-def test_openmeteo_ifs9_precision_guard_demotes_high_risk_coastal_and_terrain_buckets() -> None:
-    coastal = evaluate_openmeteo_ecmwf_ifs9_precision_guard(_metadata(city_class="coastal", land_sea_mask="sea"))
-    assert coastal.status == "REVIEW_REQUIRED"
+def test_openmeteo_ifs9_precision_guard_serves_provider_sea_cell_and_reviews_terrain() -> None:
+    # The provider serves its sea cell for every coastal request it cannot move
+    # to land; the cell's identity is certified, so it is the anchor, not a ban.
+    coastal = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
+        _metadata(city_class="coastal", land_sea_mask="sea", grid_elevation_m=0.0)
+    )
+    assert coastal.status == "PASS"
     assert coastal.high_risk_bucket == "coastal"
-    assert "OM9_LAND_SEA_HIGH_RISK_FOR_CITY_CLASS" in coastal.reason_codes
-    assert coastal.passable_for_live_materialization is False
+    assert coastal.passable_for_live_materialization is True
 
     mountain = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
         _metadata(city_class="mountain", grid_elevation_m=300.0, station_elevation_m=120.0)

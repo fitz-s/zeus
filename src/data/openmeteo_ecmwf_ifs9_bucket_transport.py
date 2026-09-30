@@ -913,6 +913,26 @@ def _static_surface_sha256(path: str, identity: tuple[int, int, int, int, int]) 
     return digest.hexdigest()
 
 
+# The API serialises cell coordinates computed in Float32 (GaussianGrid.swift
+# getCoordinates); they sit up to 1.8e-5 deg from our float64 recomputation
+# (measured on all 51 cities, 2026-09-30) and one float32 ulp at |lon| >= 128 is
+# 1.5e-5. Adjacent O1280 cells are >= 0.07 deg apart, so 1e-4 deg names exactly
+# one cell: 5x headroom over the rounding, 700x under the spacing.
+GRID_CELL_COORDINATE_TOLERANCE_DEG = 1e-4
+
+
+def same_grid_cell(lat_a: float, lon_a: float, lat_b: float, lon_b: float) -> bool:
+    """Whether two coordinate pairs name the same O1280 cell (any longitude convention)."""
+    values = (lat_a, lon_a, lat_b, lon_b)
+    if not all(math.isfinite(float(value)) for value in values):
+        return False
+    d_lon = (float(lon_a) - float(lon_b) + 180.0) % 360.0 - 180.0
+    return (
+        abs(float(lat_a) - float(lat_b)) <= GRID_CELL_COORDINATE_TOLERANCE_DEG
+        and abs(d_lon) <= GRID_CELL_COORDINATE_TOLERANCE_DEG
+    )
+
+
 def source_cell_geometry_proof(
     *, latitude: float, longitude: float, target_elevation_m: float,
     local_cache: str = HSURF_LOCAL_CACHE,

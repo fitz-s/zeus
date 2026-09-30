@@ -28,6 +28,7 @@ import os
 import tempfile
 import threading
 from datetime import datetime, timezone
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any, Optional
 
 from src.config import state_path
@@ -39,21 +40,10 @@ _SCHEDULER_HEALTH_PATH = state_path("scheduler_jobs_health.json")
 _SCHEDULER_HEALTH_THREAD_LOCK = threading.Lock()
 
 
-def _write_scheduler_health(
-    job_name: str,
-    *,
-    failed: bool,
-    reason: Optional[str] = None,
-    skipped: bool = False,
-    skip_reason: Optional[str] = None,
-    started: bool = False,
-    extra: Optional[dict[str, Any]] = None,
+def _upsert_scheduler_health(
+    job_name: str, update: Callable[[dict, str], None],
 ) -> None:
-    """Atomically upsert a per-job health entry.
-
-    On success: stamps ``last_run_at`` + ``last_success_at`` + ``status=OK``.
-    On failure: stamps ``last_run_at`` + ``last_failure_at`` +
-    ``last_failure_reason`` + ``status=FAILED``.
+    """Apply ``update(entry, now)`` to one job's entry under the file lock.
 
     Never raises — observability writes are best-effort and must not
     mask the primary job exception. Debug-logs on write failure.
@@ -78,32 +68,7 @@ def _write_scheduler_health(
                         existing = {}
 
                 entry = dict(existing.get(job_name) or {})
-                entry["last_run_at"] = now
-                if skipped:
-                    entry["status"] = "SKIPPED"
-                    entry["last_skip_at"] = now
-                    entry["last_skip_reason"] = skip_reason or reason or ""
-                    entry["consecutive_skips"] = int(
-                        entry.get("consecutive_skips") or 0
-                    ) + 1
-                    entry.pop("last_failure_reason", None)
-                elif started:
-                    entry["status"] = "RUNNING"
-                    entry["last_started_at"] = now
-                    entry["consecutive_skips"] = 0
-                    entry.pop("last_failure_reason", None)
-                elif failed:
-                    entry["status"] = "FAILED"
-                    entry["last_failure_at"] = now
-                    entry["last_failure_reason"] = reason or ""
-                    entry["consecutive_skips"] = 0
-                else:
-                    entry["status"] = "OK"
-                    entry["last_success_at"] = now
-                    entry["consecutive_skips"] = 0
-                    entry.pop("last_failure_reason", None)
-                if extra:
-                    entry["business_liveness"] = dict(extra)
+                update(entry, now)
                 existing[job_name] = entry
 
                 fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
@@ -123,6 +88,84 @@ def _write_scheduler_health(
         logger.debug(
             "failed to write scheduler health for %s", job_name, exc_info=True
         )
+
+
+def _write_scheduler_health(
+    job_name: str,
+    *,
+    failed: bool,
+    reason: Optional[str] = None,
+    skipped: bool = False,
+    skip_reason: Optional[str] = None,
+    started: bool = False,
+    extra: Optional[dict[str, Any]] = None,
+) -> None:
+    """Atomically upsert a per-job health entry.
+
+    On success: stamps ``last_run_at`` + ``last_success_at`` + ``status=OK``.
+    On failure: stamps ``last_run_at`` + ``last_failure_at`` +
+    ``last_failure_reason`` + ``status=FAILED``.
+    """
+
+    def update(entry: dict, now: str) -> None:
+        entry["last_run_at"] = now
+        if skipped:
+            entry["status"] = "SKIPPED"
+            entry["last_skip_at"] = now
+            entry["last_skip_reason"] = skip_reason or reason or ""
+            entry["consecutive_skips"] = int(entry.get("consecutive_skips") or 0) + 1
+            entry.pop("last_failure_reason", None)
+        elif started:
+            entry["status"] = "RUNNING"
+            entry["last_started_at"] = now
+            entry["consecutive_skips"] = 0
+            entry.pop("last_failure_reason", None)
+        elif failed:
+            entry["status"] = "FAILED"
+            entry["last_failure_at"] = now
+            entry["last_failure_reason"] = reason or ""
+            entry["consecutive_skips"] = 0
+        else:
+            entry["status"] = "OK"
+            entry["last_success_at"] = now
+            entry["consecutive_skips"] = 0
+            entry.pop("last_failure_reason", None)
+        if extra:
+            entry["business_liveness"] = dict(extra)
+
+    _upsert_scheduler_health(job_name, update)
+
+
+def write_open_faults(
+    job_name: str, *, opened: Mapping[str, str], closed: Iterable[str],
+) -> None:
+    """Latch per-subject faults: the job is FAILED while any fault is open.
+
+    A subject's fault closes only on that subject's own later success, so a
+    pass that never reached it cannot clear it.
+    """
+
+    def update(entry: dict, now: str) -> None:
+        faults = dict(entry.get("open_faults") or {})
+        for subject in closed:
+            faults.pop(subject, None)
+        for subject, reason in opened.items():
+            since = (faults.get(subject) or {}).get("since") or now
+            faults[subject] = {"reason": reason, "since": since, "last_seen": now}
+        entry["open_faults"] = faults
+        entry["last_run_at"] = now
+        if faults:
+            entry["status"] = "FAILED"
+            entry["last_failure_at"] = now
+            entry["last_failure_reason"] = f"{len(faults)} open: " + "; ".join(
+                f"{subject}={fault['reason']}" for subject, fault in sorted(faults.items())
+            )
+        else:
+            entry["status"] = "OK"
+            entry["last_success_at"] = now
+            entry.pop("last_failure_reason", None)
+
+    _upsert_scheduler_health(job_name, update)
 
 
 def read_scheduler_job_health(job_name: str) -> dict[str, Any]:
