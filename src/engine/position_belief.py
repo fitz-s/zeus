@@ -328,6 +328,7 @@ def _certified_replacement_posterior_row(
                {('source_id' if 'source_id' in posterior_columns else 'NULL AS source_id')},
                {('posterior_method' if 'posterior_method' in posterior_columns else 'NULL AS posterior_method')},
                {('provenance_json' if 'provenance_json' in posterior_columns else 'NULL AS provenance_json')},
+               {('openmeteo_anchor_id' if 'openmeteo_anchor_id' in posterior_columns else 'NULL AS openmeteo_anchor_id')},
                dependency_source_run_ids_json
           FROM forecast_posteriors
          WHERE posterior_id = ?
@@ -936,7 +937,8 @@ def load_replacement_belief(
                 f"""
                 SELECT posterior_id, computed_at, q_json, q_lcb_json, q_ucb_json,
                        {source_cycle_expr}, runtime_layer,
-                       {source_id_expr}, {posterior_method_expr}, {provenance_expr}
+                       {source_id_expr}, {posterior_method_expr}, {provenance_expr},
+                       {('openmeteo_anchor_id' if 'openmeteo_anchor_id' in columns else 'NULL AS openmeteo_anchor_id')}
                 FROM forecast_posteriors
                 WHERE city = ? AND target_date = ? AND temperature_metric = ?
                   AND runtime_layer = ?
@@ -1054,7 +1056,8 @@ def load_replacement_belief(
             CURRENT_EVIDENCE_SEMANTICS_REVISION,
         )
         return None
-    if not current_evidence_shape_has_held_authority(provenance, materialized_at=row["computed_at"]):
+    if not current_evidence_shape_has_held_authority(provenance, materialized_at=row["computed_at"],
+        city=city,target_date=target_date,metric=temperature_metric,anchor_id=row["openmeteo_anchor_id"]):
         logger.warning(
             "position_belief: current-evidence shape lacks held authority for %s/%s/%s",
             city,

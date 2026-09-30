@@ -2189,7 +2189,7 @@ def _covering_posterior_input_lag_reason(
             params.append(openmeteo_source_run_id)
     row = conn.execute(
         f"""
-        SELECT p.source_cycle_time, p.computed_at, p.provenance_json
+        SELECT p.source_cycle_time, p.computed_at, p.provenance_json, p.openmeteo_anchor_id
           FROM forecast_posteriors p
          WHERE {' AND '.join(predicates)}
            {posterior_tradeable_grade_clause}
@@ -2211,7 +2211,8 @@ def _covering_posterior_input_lag_reason(
     fusion = provenance.get("bayes_precision_fusion")
     if isinstance(fusion, Mapping) and "current_evidence_shape" in fusion:
         from src.data.replacement_forecast_cycle_policy import current_evidence_shape_has_held_authority
-        if not current_evidence_shape_has_held_authority(provenance, materialized_at=row["computed_at"]):
+        if not current_evidence_shape_has_held_authority(provenance, materialized_at=row["computed_at"],
+            city=city,target_date=target_date,metric=metric,anchor_id=row["openmeteo_anchor_id"]):
             return "basis=current_evidence_probability_authority_invalid"
     from src.data.replacement_input_hwm import replacement_live_input_lag_reason
 

@@ -3353,6 +3353,7 @@ def _bind_provider_geometry_identity(
         metadata = asdict(anchor_metadata)
         audit["anchor_precision_metadata"] = metadata
         audit["anchor_raw_artifact"] = anchor_raw_artifact
+        audit["anchor_ifs9_role"] = "raw_ifs9_and_anchor" if "ecmwf_ifs" in served else "anchor_only"
         keys = ("city", "station_id", "station_lat", "station_lon", "requested_lat", "requested_lon", "nearest_grid_lat", "nearest_grid_lon",
                 "grid_elevation_m", "station_elevation_m", "timezone_name", "native_grid",
                 "delivery_grid_resolution", "temperature_unit", "source_geometry_proof")
@@ -4076,7 +4077,7 @@ def _read_current_evidence_shape(
 
 
 def _fusion_current_evidence_shape_has_live_authority(
-    fusion: object, *, materialized_at: object = None,
+    fusion: object, *, request: ReplacementForecastMaterializeRequest,
 ) -> bool:
     """Apply the shared live shape law at the producer commit boundary."""
 
@@ -4086,7 +4087,10 @@ def _fusion_current_evidence_shape_has_live_authority(
     return current_evidence_shape_has_entry_authority(
         {"bayes_precision_fusion": {"current_evidence_shape": shape,
             "current_value_serving": getattr(fusion, "current_value_serving", None),
-            "used_models": getattr(fusion, "used_models", None)}}, materialized_at=materialized_at,
+            "used_models": getattr(fusion, "used_models", None)},
+            "openmeteo_anchor_artifact_id":request.anchor_artifact_id}, materialized_at=request.computed_at,
+        city=request.city,target_date=_date_text(request.target_date),metric=request.temperature_metric,
+        request_anchor_artifact_id=request.anchor_artifact_id,
     )
 
 
@@ -8161,7 +8165,7 @@ def _compute_posterior_payload(
     # override layer is fail-soft (returns None) so at this seam an absent override reads as
     # STALE_HISTORY_ONLY (the live gate rejects it via BAYES_PRECISION_FUSION_CAPTURE_MISSING regardless).
     current_shape_live = _fusion_current_evidence_shape_has_live_authority(
-        bayes_precision_fusion_override, materialized_at=request.computed_at,
+        bayes_precision_fusion_override, request=request,
     )
     if source_clock_scheme_unavailable:
         capture_status = REPLACEMENT_CAPTURE_STATUS_SOURCE_CLOCK_SCHEME_UNAVAILABLE

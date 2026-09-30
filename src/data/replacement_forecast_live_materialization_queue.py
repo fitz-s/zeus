@@ -1267,7 +1267,7 @@ def _seed_already_covered(
         runtime_layer_clause = "AND runtime_layer = 'live'" if "runtime_layer" in posterior_columns else ""
         posterior = conn.execute(
             f"""
-            SELECT posterior_id, source_cycle_time, computed_at, provenance_json
+            SELECT posterior_id, source_cycle_time, computed_at, provenance_json, openmeteo_anchor_id
             FROM forecast_posteriors
             WHERE source_id = ?
               {runtime_layer_clause}
@@ -1294,7 +1294,8 @@ def _seed_already_covered(
         from src.data.replacement_forecast_cycle_policy import current_evidence_shape_has_held_authority
         fusion = provenance.get("bayes_precision_fusion") if isinstance(provenance, Mapping) else None
         if isinstance(fusion, Mapping) and "current_evidence_shape" in fusion:
-            if not current_evidence_shape_has_held_authority(provenance, materialized_at=posterior["computed_at"]):
+            if not current_evidence_shape_has_held_authority(provenance, materialized_at=posterior["computed_at"],
+                city=city,target_date=target_date,metric=metric,anchor_id=posterior["openmeteo_anchor_id"]):
                 return False
         if str(seed.get("upgrade_trigger") or "").strip() == "held_belief_computed_age_expired":
             required_computed_at = _parse_utc_iso(seed.get("computed_at"))
