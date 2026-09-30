@@ -700,14 +700,15 @@ def build_fast_station_residual_likelihood(
     if observed_at is None or decided_at is None or observed_at > decided_at:
         return None
 
-    from src.config import cities_by_name
+    from src.config import cities_by_name, settlement_source_type_for_city
 
     city_obj = cities_by_name.get(str(city))
     if city_obj is None:
         return None
-    source_type = str(
-        getattr(city_obj, "settlement_source_type", "") or ""
-    ).strip().lower()
+    try:
+        source_type = settlement_source_type_for_city(city_obj, target_date).strip().lower()
+    except ValueError:
+        return None
     if source_type not in _FAST_LANE_SETTLEMENT_SOURCE_TYPES:
         return None
     station = str(getattr(city_obj, "wu_station", "") or "").strip().upper()

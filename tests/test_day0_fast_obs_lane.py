@@ -67,6 +67,176 @@ from src.data.day0_oracle_anomaly import (
 UTC = timezone.utc
 
 
+def _shanghai_transition_prints(monkeypatch, *, target_date, include_wrh=True):
+    """Controlled WU/WRH/AWC bodies through normal parsers and ledger writers.
+
+    This proves product selection, not historical weather or full-q licensing.
+    Query/station/unit are actual configuration; only values and clocks are inputs.
+    """
+    from src.config import cities_by_name
+    from src.data import day0_fast_obs as fast, noaa_wrh_timeseries as wrh
+    from src.data.daily_obs_append import _wu_history_observations, _append_noaa_wrh_prints
+    from src.data.wu_hourly_client import _aggregate_hourly
+    from scripts.obs_live_tick import _hourly_observation_prints, _append_hourly_prints_to_ledger
+    from src.state.schema.observation_prints_schema import ensure_table
+
+    city = cities_by_name["Shanghai"]
+    cutoff = datetime.combine(date.fromisoformat(target_date), datetime.min.time(), UTC) + timedelta(hours=6)
+    assert cutoff.astimezone(ZoneInfo(city.timezone)).date().isoformat() == target_date
+    fetch = cutoff - timedelta(hours=1)
+    observed = [cutoff - timedelta(hours=index) for index in range(24, 4, -1)]
+    conn = sqlite3.connect(":memory:")
+    ensure_table(conn)
+    body = {"metadata": {"location_id": "ZSPD:9:CN", "units": "m"},
+            "observations": [{"obs_id": "ZSPD", "valid_time_gmt": int(at.timestamp()), "temp": 27.0}
+                             for at in observed]}
+    wu_rows = _wu_history_observations(body, icao=city.wu_station, cc="CN", unit=city.settlement_unit)
+    hourly = _aggregate_hourly(wu_rows, icao=city.wu_station, unit=city.settlement_unit,
+        timezone_name=city.timezone, city_name=city.name,
+        start_date=observed[0].date() - timedelta(days=1), end_date=cutoff.date())
+    for row in hourly:
+        _append_hourly_prints_to_ledger(conn, _hourly_observation_prints(row,
+            source_channel="wu_icao_history", fetched_at_utc=fetch.isoformat()))
+    reports = [f"ZSPD {at:%d%H%M}Z 00000KT CAVOK 26/20 Q1010" for at in observed]
+    if include_wrh:
+        wrh_body = {"STATION": [{"STID": "ZSPD", "OBSERVATIONS": {
+            "date_time": [at.astimezone(ZoneInfo(city.timezone)).strftime("%Y-%m-%dT%H:%M:%S%z") for at in observed],
+            "air_temp_set_1": [28.0] * 20, "sea_level_pressure_set_1": [1010] * 20,
+            "metar_set_1": reports}}]}
+        rows = wrh.rows_from_payload(wrh_body, station=city.wu_station)
+        for local_day in {date.fromisoformat(row.local_date) for row in rows}:
+            _append_noaa_wrh_prints(conn, city_name=city.name, station=city.wu_station,
+                unit=city.settlement_unit, rows=rows, target_date_local=local_day,
+                view=city.settlement_page_view, fetch_utc=fetch)
+    awc = fast.parse_metar_api_payload([{"icaoId": "ZSPD", "obsTime": at.timestamp(),
+        "receiptTime": (at + timedelta(minutes=5)).isoformat(), "temp": 26.0,
+        "metarType": "METAR", "rawOb": report} for at, report in zip(observed, reports)])
+
+    class WriterClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fetch.astimezone(tz) if tz else fetch.replace(tzinfo=None)
+
+    monkeypatch.setattr(fast, "datetime", WriterClock)
+    source = fast.fast_obs_source_for_city(city, target_date)
+    assert fast._append_metar_prints_to_ledger(conn, ((city, source, target_date),), awc)
+    assert conn.execute("SELECT source_channel, COUNT(*) FROM observation_prints GROUP BY source_channel ORDER BY source_channel").fetchall() == (
+        [("aviationweather_metar", 20), ("noaa_wrh_zspd", 20), ("wu_icao_history", 20)]
+        if include_wrh else [("aviationweather_metar", 20), ("wu_icao_history", 20)])
+    assert conn.execute("SELECT COUNT(*) FROM observation_prints WHERE julianday(publish_ts_utc)>=julianday(?) OR julianday(fetched_at_utc)>=julianday(?)", (cutoff.isoformat(), cutoff.isoformat())).fetchone()[0] == 0
+    return conn, city, cutoff
+
+
+@pytest.mark.parametrize("target_date,channel,residual", (
+    ("2026-08-23", "wu_icao_history", 1.0),
+    ("2026-08-24", "noaa_wrh_zspd", 2.0),
+    ("2026-10-01", "noaa_wrh_zspd", 2.0),
+))
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_fast_residual_selects_the_target_dates_configured_product(monkeypatch, target_date, channel, residual, metric):
+    from src.config import settlement_source_type_for_city
+
+    conn, city, cutoff = _shanghai_transition_prints(monkeypatch, target_date=target_date)
+    try:
+        original = conn.execute("SELECT * FROM observation_prints ORDER BY id").fetchall()
+        expected_type = "wu_icao" if channel == "wu_icao_history" else "noaa"
+        assert settlement_source_type_for_city(city, target_date) == expected_type
+        model = build_fast_station_residual_likelihood(conn, city=city.name,
+            target_date=target_date, metric=metric, observed_source=FAST_OBS_SOURCE_ID,
+            observation_time=cutoff, decision_time=cutoff)
+        assert model is not None and model.matched_pairs == 20
+        assert model.settlement_channel == channel
+        assert model.residual_weights_c == ((residual, 0.05 ** (1.0 / 20.0)),)
+        assert model.settlement_extreme_c == residual + 26.0
+        assert conn.execute("SELECT * FROM observation_prints ORDER BY id").fetchall() == original
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_before_transition_qualified_wu_pairs_do_not_need_the_future_product(monkeypatch, metric):
+    conn, city, cutoff = _shanghai_transition_prints(monkeypatch, target_date="2026-08-23", include_wrh=False)
+    try:
+        model = build_fast_station_residual_likelihood(conn, city=city.name,
+            target_date="2026-08-23", metric=metric, observed_source=FAST_OBS_SOURCE_ID,
+            observation_time=cutoff, decision_time=cutoff)
+        assert model is not None and model.settlement_channel == "wu_icao_history"
+        assert model.matched_pairs == 20
+        # Same rows cannot claim qualification for the subsequently selected product.
+        assert build_fast_station_residual_likelihood(conn, city=city.name,
+            target_date="2026-08-24", metric=metric, observed_source=FAST_OBS_SOURCE_ID,
+            observation_time=cutoff, decision_time=cutoff) is None
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_scoped_carrier_replay_rejects_a_self_consistent_other_target_product(monkeypatch, metric):
+    """Normal residual identity -> pure carrier -> existing scoped reader seam.
+
+    This is not full forecast/public-q licensing: future inputs are controlled.
+    The wrong carrier is fully rebuilt, not merely damaged by a stale hash.
+    """
+    from src.config import ensemble_n_mc
+    from src.contracts.settlement_semantics import SettlementSemantics
+    from src.data.day0_hourly_vectors import (
+        build_day0_remaining_probability_carrier, day0_remaining_carrier_identity_inputs,
+        DAY0_REMAINING_CARRIER_OPERATOR_V2,
+    )
+    from src.data.replacement_forecast_bundle_reader import _wu_fast_pinned_carrier_reason
+    from src.events.day0_authority import DAY0_REMAINING_CENTER_POLICY
+    from src.signal.ensemble_signal import sigma_instrument_for_city
+    from src.data import day0_fast_obs as fast
+
+    conn, city, cutoff = _shanghai_transition_prints(monkeypatch, target_date="2026-08-23")
+    try:
+        def projection(target):
+            model = build_fast_station_residual_likelihood(conn, city=city.name,
+                target_date=target, metric=metric, observed_source=FAST_OBS_SOURCE_ID,
+                observation_time=cutoff, decision_time=cutoff)
+            assert model is not None
+            likelihood = model.as_payload()
+            # Fast+residual and the unknown tail both meet this product bound.
+            likelihood["scenario_weights"] = [
+                {"observed_bound_c": model.settlement_extreme_c, "weight": 1.0}]
+            current = {"value_native": 26.0, "observed_at_utc": cutoff.isoformat(), "source": FAST_OBS_SOURCE_ID}
+            inputs = day0_remaining_carrier_identity_inputs(city=city.name, unit=city.settlement_unit,
+                decision_time_utc=cutoff.isoformat(), station_id=city.wu_station,
+                preliminary_survival_identity=model.identity_hash)
+            inputs["current_path_state"] = current
+            inputs["day0_remaining_center_policy"] = DAY0_REMAINING_CENTER_POLICY
+            bounds = ((None, 27.0), (28.0, None))
+            carrier = build_day0_remaining_probability_carrier(future_extremes_c=(26.0, 28.0),
+                boundary_scenarios=((None, 1.0),), metric=metric, path_error_sigma_c=0.5,
+                instrument_sigma_c=float(sigma_instrument_for_city(city).to("C").value),
+                bin_bounds_c=bounds, n_point=ensemble_n_mc(), n_samples=500, identity_inputs=inputs,
+                settlement_semantics=SettlementSemantics.for_city(city), operator=DAY0_REMAINING_CARRIER_OPERATOR_V2)
+            conditioning = {"active": True, "source": FAST_RESIDUAL_CONDITIONING_SOURCE_ID,
+                "metric": metric, "unit": "C", "observation_time": cutoff.isoformat(),
+                "observed_extreme_c": 26.0, "sample_count": 20, "fast_residual_likelihood": likelihood}
+            assert fast.validated_fast_residual_day0_conditioning(conditioning) is conditioning
+            return {"q_shape": "fused_day0_fast_residual_likelihood", "day0_provisional_observation": conditioning,
+                "day0_preliminary_report_survival_likelihood": {},
+                "day0_remaining_center_policy": DAY0_REMAINING_CENTER_POLICY, "day0_remaining_center_bias_c": 0.0,
+                "day0_remaining_carrier_probability_cutoff_utc": cutoff.isoformat(), "day0_current_temperature_state": current,
+                "bin_topology": [{"lower_c": low, "upper_c": high} for low, high in bounds],
+                "day0_remaining_carrier_future_extremes_c": (26.0, 28.0), "day0_remaining_carrier_path_error_sigma_c": 0.5,
+                "day0_remaining_carrier_content_identity": carrier["content_identity"],
+                "day0_remaining_carrier_q": carrier["q"], "day0_remaining_carrier_probability_samples": carrier["samples"],
+                "day0_remaining_carrier_operator": carrier["operator"], "day0_remaining_carrier_sample_count": carrier["sample_count"]}
+
+        expected = dict(city=city.name, target_date="2026-08-23", metric=metric, decision_time=cutoff)
+        correct = projection("2026-08-23")
+        assert _wu_fast_pinned_carrier_reason(correct, **expected) is None
+        wrong = projection("2026-08-24")
+        assert wrong["day0_remaining_carrier_content_identity"] != correct["day0_remaining_carrier_content_identity"]
+        assert _wu_fast_pinned_carrier_reason(wrong, **expected) == "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_CARRIER_INVALID"
+        assert projection("2026-08-23") == correct
+        assert _wu_fast_pinned_carrier_reason(correct, **expected) is None
+    finally:
+        conn.close()
+
+
 def _native_product_residual_context(monkeypatch, *, city_name, product_c=14.0, fault=None):
     """Controlled original WRH/AWC bodies through their ordinary print writers.
 
