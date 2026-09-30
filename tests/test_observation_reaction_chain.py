@@ -1,6 +1,6 @@
 # Created: 2026-09-29
 # Last reused/audited: 2026-09-30
-# Authority: REQ-20260929-223929-bf51a2; isolated canonical materializer/reader integration.
+# Authority: REQ-20260930-114240-ee2a70; isolated observation/auction/executor integration.
 """Controlled forecast inputs, real Day0 integration and posterior persistence.
 
 This harness is not production evidence: external forecasts and venue responses
@@ -31,8 +31,269 @@ _materializer_unit_source_surface = fixtures._materializer_unit_source_surface
 trade_schema = exit_fixtures.conn
 
 
+def _auction_from_served_observation(bundle, *, at, trade):
+    """Real coordinator/solver over a complete controlled two-family universe.
+
+    The changed family's point probabilities are the exact served posterior.
+    Books, flat wealth, peer-family probabilities and repeated confidence draws
+    are controlled harness inputs, not claims about a production order book.
+    """
+    import numpy as np
+    from tests.integration import test_w3_solve_seam_g3 as g
+    from src.engine.qkernel_spine_bridge import PreparedGlobalFamily
+    from src.events.opportunity_event import make_opportunity_event
+    from src.solve.solver import JointOutcomeProbabilityWitness, OutcomeTokenBinding
+
+    events=[]
+    for city, identity in ((bundle.city,bundle.posterior_identity_hash),('London','peer-fixture')):
+        template=g._global_scope_event(city=city,source_run_id=identity)
+        payload=json.loads(template.payload_json)
+        payload.update(target_date=bundle.target_date,city_timezone='Asia/Shanghai' if city==bundle.city else 'Europe/London',
+                       captured_at=at.isoformat(),available_at=at.isoformat(),snapshot_hash=identity,
+                       snapshot_id='fixture-'+identity,cycle=bundle.source_cycle_time)
+        events.append(make_opportunity_event(event_type='FORECAST_SNAPSHOT_READY',
+            entity_key=f'{city}|{bundle.target_date}|high',source='observation-auction-harness',
+            observed_at=at.isoformat(),available_at=at.isoformat(),received_at=at.isoformat(),
+            payload=payload,causal_snapshot_id=payload['snapshot_id']))
+    scope=g.current_global_auction_scope_from_events(tuple(events),captured_at_utc=at)
+    wealth=g._test_wealth_witness(ledger_snapshot_id='auction-ledger',position_set_hash='flat',
+        wealth_floor_usd=Decimal('1000'),wealth_ceiling_usd=Decimal('1000'),
+        spendable_cash_usd=Decimal('1000'),reservations_usd=Decimal('0'),
+        collateral_authority='CHAIN',captured_at_utc=at,max_age=timedelta(seconds=30))
+    prepared={};probabilities={};assets=[]
+    for family,event in scope.events_by_family:
+        changed=json.loads(event.payload_json)['city']==bundle.city
+        bins=tuple(sorted(bundle.q))
+        point=np.asarray([bundle.q[b] for b in bins] if changed else [1/len(bins)]*len(bins))
+        bindings=tuple(OutcomeTokenBinding(b,f'{family}:{b}',f'{family}:{b}:YES',f'{family}:{b}:NO') for b in bins)
+        identity=bundle.posterior_identity_hash if changed else 'peer-fixture'
+        fields=dict(family_key=family,bindings=bindings,yes_point_q=point,
+            yes_q_samples=np.tile(point,(400,1)),q_version=identity,
+            resolution_identity='fixture-resolution:'+family,topology_identity=bundle.bin_topology_hash,
+            posterior_identity_hash=identity,source_truth_identity='input:'+identity,
+            authority_certificate_hash='fixture-certificate:'+identity,band_alpha=.05,
+            band_basis='PARAMETER_POSTERIOR_SIMPLEX_V1',captured_at_utc=at)
+        witness=JointOutcomeProbabilityWitness(**fields,max_age=timedelta(seconds=30),
+            witness_identity=g.joint_probability_witness_identity(**fields))
+        probabilities[family]=witness
+        prepared[event.event_id]=PreparedGlobalFamily(decision_id=event.event_id,
+            probability_witness=witness,candidate_seeds=(),posterior_id=bundle.posterior_id if changed else None)
+        for binding in bindings:
+            for side,token in (('YES',binding.yes_token_id),('NO',binding.no_token_id)):
+                price=Decimal('.40') if changed and binding.bin_id=='hot' and side=='YES' else Decimal('.95')
+                curve=g.ExecutableCostCurve(token_id=token,side=side,snapshot_id='book:'+token,
+                    book_hash='hash:'+token,levels=(g.BookLevel(price=price,size=Decimal('100')),),
+                    fee_model=g.FeeModel(fee_rate=Decimal('0')),min_tick=Decimal('.01'),
+                    min_order_size=Decimal('1'),quote_ttl=timedelta(seconds=30))
+                assets.append(g.CurrentGlobalBookAsset(family_key=family,bin_id=binding.bin_id,
+                    condition_id=binding.condition_id,gamma_market_id='gamma:'+binding.condition_id,
+                    market_event_id=event.event_id,side=side,token_id=token,curve=curve,
+                    captured_at_utc=at,neg_risk=False,
+                    bid_levels=(g.BidBookLevel(price=Decimal('.39'),size=Decimal('100')),)))
+    prepared=g.global_batch_runtime._bind_selection_holdings(prepared,
+        portfolio_state=SimpleNamespace(positions=()),wealth_witness=wealth)
+    states=tuple((a.family_key,a.bin_id,a.condition_id,a.side,a.token_id,'EXECUTABLE',
+                  a.curve.book_hash,a.market_event_id,a.gamma_market_id,str(a.neg_risk)) for a in assets)
+    book_id=g.current_global_book_epoch_identity(asset_states=states,captured_at_utc=at)
+    book=g.CurrentGlobalBookEpoch(assets=tuple(assets),asset_states=states,captured_at_utc=at,
+                                 max_age=timedelta(seconds=30),witness_identity=book_id)
+    started=time.monotonic_ns()
+    result=g.select_prepared_global_auction(prepared,
+        selection_epoch_identity='source-cut:'+bundle.posterior_identity_hash,
+        selection_cut_at_utc=at,current_scope=scope,
+        current_scope_identity_resolver=lambda:scope.scope_identity,
+        venue_universe_identity=book_id,current_venue_universe_identity_resolver=lambda:book_id,
+        universe_max_age=timedelta(seconds=30),
+        current_probability_resolver=lambda key:g.CurrentFamilyProbabilityAuthority.from_witness(probabilities[key]),
+        current_execution_resolver=lambda c:g.CurrentExecutionAuthority(token_id=c.token_id,side=c.side,
+            book_snapshot_id=c.book_snapshot_id,execution_curve_identity=c.execution_curve_identity,
+            action=getattr(c,'action','BUY'),neg_risk=c.neg_risk),
+        current_wealth_identity_resolver=lambda:wealth.economic_identity,
+        wealth_witness=wealth,capital_limit_usd=Decimal('100'),fractional_kelly_multiplier=Decimal('.25'),
+        decision_at_utc=at,book_epoch=book)
+    elapsed=(time.monotonic_ns()-started)/1e6
+    assert result.decision.candidate is not None,result.decision
+    winner=result.decision.candidate
+    assert isinstance(winner,g.GlobalSingleOrderCandidate) and winner.bin_id=='hot' and winner.side=='YES'
+    assert probabilities[winner.family_key].q_version==bundle.posterior_identity_hash
+    assert len(probabilities)==2 and len(assets)==12
+    receipt_id=g.global_batch_runtime._store_global_auction_receipt(trade,selected=result,
+        selection_epoch_identity=result.actuation.selection_epoch_identity,
+        selection_cut_at_utc=at,decision_at_utc=at,
+        probability_manifest=tuple((key,w.witness_identity) for key,w in probabilities.items()),
+        full_scope_identity=scope.scope_identity,full_scope_family_keys=tuple(probabilities),
+        probability_ineligible_by_family={},book_epoch_identity=book_id,
+        book_asset_count=len(assets),book_asset_states=states,wealth_witness=wealth,
+        fractional_kelly_multiplier=Decimal('.25'),book_captured_at_utc=at,
+        book_max_age=timedelta(seconds=30),probability_witnesses=probabilities,book_epoch=book,
+        buy_candidates_enabled=True)
+    assert receipt_id is not None
+    trade.commit()
+    result=g.global_batch_runtime._bind_stored_global_auction_receipt(trade,
+        selected=result,decision_log_id=receipt_id)
+    return result,elapsed
+
+
+def _submit_selected_entry(trade, world, auction, bundle, monkeypatch):
+    """Actual frozen-intent entry executor; operational health and venue are fixtures."""
+    from tests import test_executor as entry
+    from src.contracts import DecisionSourceContext
+    from src.execution import executor
+    from src.state.venue_command_repo import get_command, list_events
+
+    decision=auction.decision; candidate=decision.candidate
+    monkeypatch.setattr(entry,'_TEST_CONN',trade)
+    source=DecisionSourceContext(source_id='replacement_0_1',model_family='replacement_0_1',
+        forecast_issue_time=bundle.source_cycle_time,forecast_valid_time=bundle.target_date+'T00:00:00+00:00',
+        forecast_fetch_time=bundle.computed_at,forecast_available_at=bundle.source_available_at,
+        raw_payload_hash=bundle.posterior_identity_hash,posterior_identity_hash=bundle.posterior_identity_hash,
+        degradation_level='OK',forecast_source_role='entry_primary',authority_tier='FORECAST',
+        decision_time=bundle.computed_at,decision_time_status='OK',
+        polymarket_end_anchor_source='gamma_explicit',
+        first_member_observed_time=fixtures._dt(2).isoformat(),run_complete_time=fixtures._dt(2).isoformat())
+    entry._ensure_snapshot(trade,token_id=candidate.token_id,condition_id=candidate.condition_id,
+        snapshot_id='selected-auction-book',final_limit_price=decision.limit_price,
+        snapshot_top_ask=decision.limit_price,snapshot_top_bid=Decimal('.39'))
+    intent=entry._final_execution_intent(token_id=candidate.token_id,direction='buy_yes',
+        size_kind='shares',size_value=decision.shares,submitted_shares=decision.shares,
+        final_limit_price=decision.limit_price,expected_fill_price_before_fee=decision.expected_fill_price_before_fee,
+        order_type='FOK',post_only=False,snapshot_top_ask=decision.limit_price,
+        snapshot_top_bid=Decimal('.39'),snapshot_id='selected-auction-book',
+        resolution_window=bundle.target_date,correlation_key=candidate.family_key,
+        decision_source_context=source)
+    from src.engine.event_reactor_adapter import (_build_event_bound_taker_quality_proof,
+        _global_current_state_execution_economics,CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION)
+    act=auction.actuation
+    cert={'source':'qkernel_spine','decision_id':act.actuation_identity,
+        'receipt_hash':act.auction_receipt_ref.receipt_hash,'side':candidate.side,
+        'candidate_id':candidate.candidate_id,'bin_id':candidate.bin_id,'route_id':'native_taker',
+        'global_auction_receipt':act.auction_receipt_ref.as_payload(),
+        'global_selection_revision':CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
+        'global_candidate_id':candidate.candidate_id,'global_execution_mode':candidate.execution_mode,
+        'global_condition_id':candidate.condition_id,'global_token_id':candidate.token_id,
+        'global_family_key':candidate.family_key,'global_bin_id':candidate.bin_id,
+        'global_probability_witness_identity':candidate.probability_witness_identity,
+        'global_probability_authority':'replacement','global_posterior_id':bundle.posterior_id,
+        'global_book_hash':candidate.executable_cost_curve.book_hash,
+        'global_jit_book_hash':candidate.executable_cost_curve.book_hash,
+        'global_jit_venue_book_hash':candidate.executable_cost_curve.book_hash,
+        'global_jit_book_snapshot_id':candidate.book_snapshot_id,
+        'global_jit_execution_curve_identity':candidate.execution_curve_identity,
+        'global_target_shares':str(decision.shares),'global_expected_cost_usd':str(decision.cost_usd),
+        'global_limit_price':str(decision.limit_price),
+        'global_expected_fill_price_before_fee':str(decision.expected_fill_price_before_fee),
+        'global_max_spend_usd':str(decision.max_spend_usd),'global_optimum_semantics':'CUT_TIME_GLOBAL_OPTIMUM',
+        'global_current_token_shares':str(decision.current_token_shares),
+        'global_full_kelly_target_shares':str(decision.full_kelly_target_shares),
+        'global_fractional_kelly_target_shares':str(decision.fractional_kelly_target_shares),
+        'global_buy_sizing_mode':str(decision.buy_sizing_mode),
+        'optimal_delta_u':decision.expected_growth.expected_delta_log_wealth,
+        'direction_law_ok':True,'coherence_allows':True}
+    for field in ['actuation_identity','winner_event_id','economic_identity','universe_witness_identity',
+                  'wealth_witness_identity','wealth_economic_identity','selection_epoch_identity']:
+        cert['global_'+field]=getattr(act,field)
+    cert['global_selection_cut_at']=act.selection_cut_at_utc.isoformat()
+    cert['global_selection_decision_at']=act.decision_at_utc.isoformat()
+    growth=decision.expected_growth
+    assert growth is not None and decision.expected_terminal_wealth is not None
+    cert.update(global_utility_basis=growth.utility_basis,
+        global_proposal_expected_delta_log_wealth=growth.expected_delta_log_wealth,
+        global_proposal_expected_ev_usd=growth.expected_ev_usd,
+        global_proposal_expected_log_growth_per_hour=growth.expected_log_growth_per_hour,
+        global_proposal_expected_capital_efficiency=growth.expected_capital_efficiency,
+        global_proposal_capital_lock_hours=growth.capital_lock_hours,
+        global_ruin_probability_reduction=growth.ruin_probability_reduction,
+        global_terminal_ruin_probability_reduction=decision.expected_terminal_wealth.ruin_probability_reduction,
+        global_proposal_fill_semantics='IMMEDIATE_FILL',global_fill_probability=1.)
+    economics=_global_current_state_execution_economics(cert,decision=decision,
+        witness=act.probability_witness,decision_time=act.decision_at_utc)
+    from src.decision_kernel.canonicalization import qkernel_global_current_state_rejection_reason
+    assert qkernel_global_current_state_rejection_reason(economics) is None, qkernel_global_current_state_rejection_reason(economics)
+    q=float(economics['payoff_q_action']);lcb=float(economics['payoff_q_lcb'])
+    actionable={
+        'direction':'buy_yes','q_live':q,'q_lcb_5pct':lcb,'candidate_id':candidate.candidate_id,
+        'candidate_bin_id':candidate.bin_id,'selection_authority_applied':'qkernel_spine',
+        'qkernel_execution_economics':economics,
+        'global_auction_receipt':act.auction_receipt_ref.as_payload(),
+        'live_cap_reserved_notional_usd':float(decision.cost_usd),
+        'strategy_key':'forecast_qkernel_entry','min_entry_price':.05,
+        'min_expected_profit_usd':.05,'min_submit_edge_density':.02,
+    }
+    quality=_build_event_bound_taker_quality_proof(actionable_payload=actionable,
+        order_mode='TAKER',fresh_best_bid=.39,fresh_best_ask=float(decision.limit_price))
+    assert quality is not None and quality['passed'],json.dumps(quality)
+    intent=replace(intent,hypothesis_id='observed-auction-selection',q_live=q,q_lcb_5pct=lcb,
+        expected_edge=q-float(decision.expected_fill_price_before_fee),qkernel_execution_economics=economics,
+        taker_quality_proof=quality,selection_authority_applied='qkernel_spine',
+        min_entry_price=.05,min_expected_profit_usd=.05,min_submit_edge_density=.02)
+    # Parent acquisition is a harness boundary. Payload verification, canonical
+    # hash construction and the executor's durable certificate reread are real.
+    from tests.execution.test_entry_actionable_certificate_guard import _valid_actionable_payload
+    from src.decision_kernel.certificate import build_certificate
+    from src.decision_kernel.ledger import DecisionCertificateLedger
+    from src.decision_kernel.verifier import _verify_actionable_payload
+    payload=_valid_actionable_payload()
+    payload.update(actionable,event_id=auction.winner_event_id,causal_snapshot_id=str(bundle.posterior_id),
+        family_id=candidate.family_key,condition_id=candidate.condition_id,token_id=candidate.token_id,
+        executable_snapshot_id=intent.snapshot_id,kelly_size_usd=float(decision.cost_usd),
+        c_fee_adjusted=float(decision.limit_price),c_cost_95pct=float(decision.limit_price),p_fill_lcb=1.,
+        trade_score=q-float(decision.limit_price),action_score=decision.expected_growth.expected_delta_log_wealth)
+    _verify_actionable_payload(SimpleNamespace(payload=payload))
+    certificate=build_certificate(certificate_type='ActionableTradeCertificate',
+        semantic_key='harness:'+candidate.candidate_id,claim_type='actionable_trade',mode='LIVE',
+        decision_time=datetime.fromisoformat(bundle.computed_at),payload=payload,
+        authority_id='controlled-harness-parent',authority_version='1',algorithm_id='global-single-order',algorithm_version='1')
+    DecisionCertificateLedger(world).insert_idempotent(certificate,preverified=True)
+    world.commit()
+    intent=replace(intent,actionable_certificate_hash=certificate.certificate_hash)
+    monkeypatch.setattr('src.state.db.get_world_connection_read_only',
+        lambda:sqlite3.connect(f'file:{world.execute("PRAGMA database_list").fetchone()[2]}?mode=ro',uri=True))
+    # No selection/ranking, probability, command or snapshot check is replaced.
+    # The process-health fixture is explicit, as in executor integration tests.
+    monkeypatch.setattr(executor,'_assert_risk_allocator_allows_submit',lambda _intent:None)
+    monkeypatch.setattr(executor,'_select_risk_allocator_order_type',lambda *_a,**_k:'FOK')
+    monkeypatch.setattr(executor,'_entry_replacement_family_from_snapshot',
+        lambda *_a,**_k:(bundle.city,bundle.target_date,bundle.temperature_metric))
+    submits=[]
+    class FakeEntryVenue:
+        def bind_submission_envelope(self,envelope):self.envelope=envelope
+        def bind_signed_submission_identity_persister(self,persister):self.persister=persister
+        def v2_preflight(self):return None
+        def get_collateral_payload(self):return exit_fixtures._fresh_exit_collateral_payload()
+        def place_limit_order(self,**kwargs):
+            command=trade.execute("SELECT state,q_version FROM venue_commands WHERE decision_id='selected-observation-entry'").fetchone()
+            assert command is not None and command['state']=='SUBMITTING'
+            assert command['q_version']==bundle.posterior_identity_hash
+            assert kwargs['side']=='BUY' and kwargs['token_id']==candidate.token_id
+            assert Decimal(str(kwargs['price']))==decision.limit_price
+            assert Decimal(str(kwargs['size']))==decision.shares
+            submits.append(kwargs)
+            return entry._final_submit_result(self.envelope,order_id='observed-auction-entry')
+    monkeypatch.setattr('src.data.polymarket_client.PolymarketClient',FakeEntryVenue)
+    # Exercise the production cross-DB admission context on isolated paths.
+    from src.state import db as state_db
+    from pathlib import Path
+    trade_path=Path(trade.execute('PRAGMA database_list').fetchone()[2])
+    world_path=Path(world.execute('PRAGMA database_list').fetchone()[2])
+    monkeypatch.setattr(state_db,'_zeus_trade_db_path',lambda:trade_path)
+    monkeypatch.setattr(state_db,'ZEUS_WORLD_DB_PATH',world_path)
+    def entry_connection(**_kwargs):
+        c=sqlite3.connect(trade_path);c.row_factory=sqlite3.Row
+        return c
+    monkeypatch.setattr(state_db,'get_trade_connection',entry_connection)
+    trade.commit()
+    with state_db.trade_connection_with_world_flocked() as entry_conn:
+        result=executor.execute_final_intent(intent,conn=entry_conn,decision_id='selected-observation-entry')
+        entry_conn.commit()
+    assert submits,result.reason
+    trade.commit()
+    assert get_command(trade,result.command_id)['state']=='ACKED',result
+    return result,list_events(trade,result.command_id)
+
+
+@pytest.mark.parametrize('reaction_path',['sell','entry'])
 @pytest.mark.parametrize('incumbent_without_carrier',[False,True])
-def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_path,trade_schema,_materializer_unit_source_surface,incumbent_without_carrier):
+def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_path,trade_schema,_materializer_unit_source_surface,incumbent_without_carrier,reaction_path):
     import scripts.materialize_replacement_forecast_live as cli
     import src.main as main  # Already resident in a warm trading process.
     from src.data import replacement_fusion_upgrade_trigger as delivery
@@ -42,13 +303,17 @@ def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_pa
     from src.state.schema.observation_prints_schema import append_print, ensure_table
 
     caplog.set_level(logging.INFO,logger="zeus.observation_reaction")
-    forecast_path, world_path, trade_path = (tmp_path/name for name in ('forecast.db','world.db','trade.db'))
+    forecast_path, world_path, trade_path = (tmp_path/name for name in ('zeus-forecasts.db','zeus-world.db','zeus_trades.db'))
     seed=fixtures._conn()
     conn=sqlite3.connect(forecast_path);conn.row_factory=sqlite3.Row
     seed.backup(conn);seed.close()
     trade=sqlite3.connect(trade_path);trade.row_factory=sqlite3.Row
     trade_schema.backup(trade)
-    world=sqlite3.connect(world_path);ensure_table(world);world.commit()
+    world=sqlite3.connect(world_path);ensure_table(world)
+    from src.state.ledger import apply_architecture_kernel_schema
+    apply_architecture_kernel_schema(world);world.commit()
+    monkeypatch.setattr('src.state.db.get_world_connection',
+        lambda *a,**kw: sqlite3.connect(world_path))
     # Production-like ownership: writes use distinct WORLD/FORECAST/TRADE files.
     # Only WORLD is attached read-only while preparing a posterior.
     conn.execute('ATTACH DATABASE ? AS world',(f'file:{world_path}?mode=ro',))
@@ -174,10 +439,17 @@ def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_pa
     assert abs(sum(read.bundle.q.values())-1)<1e-9
     q_served_monotonic=time.monotonic_ns()
 
-    # The scenario requests a reduce-only SELL after serving the revised q;
-    # global-auction selection policy is deliberately outside this harness.
-    # Only the venue client is fake; command/envelope/collateral checks,
-    # intent-before-side-effect ordering and ACK journal are production code.
+    auction,auction_ms=_auction_from_served_observation(read.bundle,at=now,trade=trade)
+    print('MEASURED_GLOBAL_AUCTION',json.dumps({'auction_ms':auction_ms,
+        'candidate_count':auction.decision.candidate_input_count,
+        'selected_action':'BUY',
+        'selected_token':auction.decision.candidate.token_id,
+        'selected_shares':str(auction.decision.shares)}))
+
+    # ENTRY consumes the actual global-auction winner through the executor and
+    # durable certificate/receipt closure. SELL remains a separate reduce-only
+    # boundary test, not the auction's choice. External venue and forecast
+    # acquisition/parent preparation are controlled harness inputs.
     submitted=[]
     class FakeVenue:
         def bind_submission_envelope(self,envelope): self.envelope=envelope
@@ -191,15 +463,18 @@ def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_pa
             return exit_fixtures._fake_submit_result(self.envelope,order_id='fixture-venue-order')
     monkeypatch.setattr('src.data.polymarket_client.PolymarketClient',FakeVenue)
     try:
-        order=execute_exit_order(create_exit_order_intent(
+        if reaction_path=='entry':
+            order,journal=_submit_selected_entry(trade,world,auction,read.bundle,monkeypatch)
+        else:
+            order=execute_exit_order(create_exit_order_intent(
             trade_id='source-reaction-held',token_id=exit_fixtures.YES_TOKEN,shares=5,
             current_price=0.75,best_bid=0.74,exact_limit_price=0.75,submit_order_type='GTC',
             executable_snapshot_id=snapshot_id,
             executable_snapshot_hash=exit_fixtures._snapshot_hash(trade,snapshot_id),
             executable_snapshot_min_tick_size=Decimal('0.01'),executable_snapshot_min_order_size=Decimal('0.01'),
             executable_snapshot_neg_risk=False),conn=trade,decision_id='source-reaction-decision',
-            q_version=read.bundle.posterior_identity_hash)
-        assert submitted,order
+                q_version=read.bundle.posterior_identity_hash)
+            assert submitted,order
         trade.commit()
         command=get_command(trade,order.command_id)
         assert command['state']=='ACKED',order
@@ -224,6 +499,7 @@ def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_pa
     assert trace['command_id']==order.command_id
     assert any(event['event_id']==trace['event_id'] for event in journal)
     measured={"posterior_id":response['posterior_id'],
+        "reaction_path":reaction_path,"auction_ms":auction_ms,
         "receipt_to_world_ms":world_committed_at_ms-response_received_at_ms,
         "world_to_posterior_ms":trace["posterior_ready_at_ms"]-world_committed_at_ms,
         "materialize_ms":(materialized-started)/1e6,
