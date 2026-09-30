@@ -59,6 +59,7 @@ from src.data.replacement_forecast_materializer import (
 from src.state.db import _create_readiness_state
 from src.state.schema.v2_schema import apply_canonical_schema
 from tests.test_replacement_forecast_materializer import _hko_source_surface, _hko_native_surfaces, _hko_precision_guard, _hko_dt
+from tests.test_replacement_forecast_materializer import _conn as _hko_canonical_conn, _hko_request, _install_hko_live_fusion
 
 pytestmark = pytest.mark.usefixtures("_hko_source_surface")
 
@@ -85,19 +86,32 @@ def _surface_identity(*, decision_at=None) -> dict:
     }
 
 
-def test_entry_held_and_sql_coverage_require_same_land_grid_identity() -> None:
+def _licensed_current_context(monkeypatch):
+    """Controlled math/ENS; normal same-DB body/native/ground/anchor evidence."""
+    from src.data.station_ground_evidence import forecast_db_from_connection
+    conn = _hko_canonical_conn()
+    request = _install_hko_live_fusion(monkeypatch, conn=conn,
+        request=_hko_request(source_cycle_time=_hko_dt(6), computed_at=_hko_dt(12), expires_at=_hko_dt(14)))
+    result = materialize_replacement_forecast_live(conn, request)
+    assert result.ok, result.reason_codes
+    conn.commit()
+    provenance = json.loads(conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_id=?",
+        (result.posterior_id,)).fetchone()[0])
+    scope = dict(materialized_at=request.computed_at, city=request.city,
+        target_date=request.target_date.isoformat(), metric=request.temperature_metric,
+        anchor_id=result.anchor_id, forecast_db=forecast_db_from_connection(conn))
+    assert current_evidence_shape_has_entry_authority(provenance, **scope)
+    assert current_evidence_shape_has_held_authority(provenance, **scope)
+    return conn, request, provenance, scope
+
+
+def test_entry_held_and_sql_coverage_require_same_land_grid_identity(monkeypatch) -> None:
+    physical, request, baseline, scope = _licensed_current_context(monkeypatch)
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE posterior (q_lcb_json TEXT, q_ucb_json TEXT, provenance_json TEXT)")
-    shape = {
-        "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
-        "source_cycle_time": "2026-09-30T06:00:00+00:00",
-        "shape_lag_hours": 0.0,
-        "translation_applied": False,
-        **_surface_identity(),
-    }
     coverage = tradeable_grade_coverage_sql(
         posterior_columns={"q_lcb_json", "q_ucb_json", "provenance_json"},
-        decision_time=_hko_dt(7),
+        decision_time=request.computed_at,
     )
     for changed, expected in (
         ({}, True),
@@ -106,32 +120,36 @@ def test_entry_held_and_sql_coverage_require_same_land_grid_identity() -> None:
         ({"grid_surface_evidence_revision": "old-grid"}, False),
         ({"semantics_revision": "ensemble_center_scenarios_v5"}, False),
     ):
-        candidate = {**shape, **changed}
-        provenance = {
-            "q_lcb_basis": "fused_center_bootstrap_p05",
-            "bayes_precision_fusion": {"current_evidence_shape": candidate},
-        }
-        assert current_evidence_shape_has_entry_authority(provenance, materialized_at=_hko_dt(7)) is expected
-        assert current_evidence_shape_has_held_authority(provenance, materialized_at=_hko_dt(7)) is expected
+        provenance = json.loads(json.dumps(baseline))
+        provenance["bayes_precision_fusion"]["current_evidence_shape"].update(changed)
+        assert current_evidence_shape_has_entry_authority(provenance, **scope) is expected
+        assert current_evidence_shape_has_held_authority(provenance, **scope) is expected
         conn.execute("DELETE FROM posterior")
         conn.execute("INSERT INTO posterior VALUES ('{}', '{}', ?)", (json.dumps(provenance),))
         assert bool(conn.execute(f"SELECT count(*) FROM posterior WHERE 1=1 {coverage}").fetchone()[0]) is expected
     conn.close()
+    physical.close()
 
 
-def test_selected_land_cell_changes_current_shape_hash_without_changing_math() -> None:
+def test_selected_land_cell_changes_current_shape_hash_without_changing_math(monkeypatch) -> None:
+    from src.data import replacement_forecast_materializer as materializer
+    from src.data.replacement_current_value_serving import read_current_instrument_values
+    conn, request, baseline, scope = _licensed_current_context(monkeypatch)
+    served = read_current_instrument_values(conn, city=request.city, metric=request.temperature_metric,
+        target_date=request.target_date.isoformat(), source_cycle_time_iso=request.source_cycle_time.isoformat(),
+        decision_time_iso=request.computed_at.isoformat())
+    actual = materializer._replacement_bayes_precision_fusion_override()
+    # The values are the already-licensed body's controlled physical inputs;
+    # the original purpose is math invariance under geometry identity, not .6/.4.
     inputs = {
         "snapshot_id": 17,
-        "source_cycle_time": "2026-09-30T06:00:00+00:00",
-        "source_available_at": "2026-09-30T06:30:00+00:00",
-        "members_c": tuple(20.0 + n * .05 for n in range(51)),
-        "provider_values_c": {"ecmwf_ifs9": 21.0, "icon": 22.0},
-        "provider_weights": {"ecmwf_ifs9": .6, "icon": .4},
-        "provider_cycles": {
-            "ecmwf_ifs9": "2026-09-30T06:00:00+00:00",
-            "icon": "2026-09-30T06:00:00+00:00",
-        },
-        "center_c": 21.5,
+        "source_cycle_time": request.source_cycle_time.isoformat(),
+        "source_available_at": actual.current_evidence_shape["source_available_at"],
+        "members_c": actual.current_evidence_members_c,
+        "provider_values_c": {model:value.value_c for model,value in served.items()},
+        "provider_weights": dict.fromkeys(served, .5),
+        "provider_cycles": dict.fromkeys(served, request.source_cycle_time.isoformat()),
+        "center_c": actual.anchor_value_c,
     }
     no_geometry = _current_evidence_shape_from_values(**inputs)
     first = _current_evidence_shape_from_values(**inputs,
@@ -141,14 +159,19 @@ def test_selected_land_cell_changes_current_shape_hash_without_changing_math() -
         grid_surface_evidence_revision=GRID_SURFACE_EVIDENCE_REVISION,
         grid_surface_evidence_identity_hash="b" * 64)
     from src.data.replacement_forecast_materializer import _bind_provider_geometry_identity
-    first = _bind_provider_geometry_identity(first, {}, anchor_metadata=_hko_precision_guard().metadata, decision_at=_hko_dt(7))
-    second = _bind_provider_geometry_identity(second, {}, anchor_metadata=_hko_precision_guard().metadata, decision_at=_hko_dt(7))
+    audit = baseline["bayes_precision_fusion"]["current_evidence_shape"]["provider_geometry_audit"]
+    binding = dict(anchor_metadata=request.openmeteo_precision_guard.metadata, decision_at=request.computed_at,
+        station_ground_evidence=audit["anchor_station_ground"], anchor_raw_artifact=audit["anchor_raw_artifact"],
+        station_ground_target_coverage=audit["anchor_station_ground_target_coverage"])
+    first = _bind_provider_geometry_identity(first, served, **binding)
+    second = _bind_provider_geometry_identity(second, served, **binding)
     assert first.predictive_sigma_c == second.predictive_sigma_c == no_geometry.predictive_sigma_c
     assert len({first.shape_hash, second.shape_hash, no_geometry.shape_hash}) == 3
-    assert current_evidence_shape_has_entry_authority({"bayes_precision_fusion": {
-        "current_evidence_shape": no_geometry.as_payload()}}, materialized_at=_hko_dt(7)) is False
-    assert current_evidence_shape_has_entry_authority({"bayes_precision_fusion": {
-        "current_evidence_shape": first.as_payload()}}, materialized_at=_hko_dt(7)) is True
+    for candidate, expected in ((first, True), (no_geometry, False)):
+        provenance = json.loads(json.dumps(baseline))
+        provenance["bayes_precision_fusion"]["current_evidence_shape"] = candidate.as_payload()
+        assert current_evidence_shape_has_entry_authority(provenance, **scope) is expected
+    conn.close()
 
 
 @pytest.mark.parametrize(
@@ -188,36 +211,18 @@ def test_shape_cycle_timestamp_accepts_canonical_aware_iso(cycle_text: str) -> N
     assert current_evidence_shape_source_cycle_time(provenance) is not None
 
 
-def test_current_evidence_semantics_is_probability_identity_and_coverage() -> None:
-    current = {
-        "q_lcb_basis": "fused_center_bootstrap_p05",
-        "bayes_precision_fusion": {
-            "current_evidence_shape": {
-                "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
-                "shape_lag_hours": 0.0,
-                "source_cycle_time": "2026-09-30T06:00:00+00:00",
-                "stale_shape_reused": False,
-                "translation_applied": False,
-                **_surface_identity(),
-            }
-        }
-    }
+def test_current_evidence_semantics_is_probability_identity_and_coverage(monkeypatch) -> None:
+    physical, request, current, scope = _licensed_current_context(monkeypatch)
+    current["bayes_precision_fusion"]["current_evidence_shape"]["stale_shape_reused"] = False
     stale = {
         "bayes_precision_fusion": {
             "current_evidence_shape": {"semantics_revision": "older-law"}
         }
     }
-    stale_reused = {
-        "bayes_precision_fusion": {
-            "current_evidence_shape": {
-                "semantics_revision": STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
-                "shape_lag_hours": 6.0,
-                "source_cycle_time": "2026-09-30T00:00:00+00:00",
-                "stale_shape_reused": True,
-                "translation_applied": False,
-            }
-        }
-    }
+    stale_reused = json.loads(json.dumps(current))
+    stale_reused["bayes_precision_fusion"]["current_evidence_shape"].update(
+        semantics_revision=STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
+        shape_lag_hours=6.0, source_cycle_time="2026-09-30T00:00:00+00:00", stale_shape_reused=True)
     inconsistent_transport = {
         "bayes_precision_fusion": {
             "current_evidence_shape": {
@@ -251,18 +256,18 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage() -> No
     assert current_evidence_shape_semantics_mismatch(ambiguous_v2_transport) is True
     assert current_evidence_shape_semantics_mismatch(stale) is True
     assert current_evidence_shape_semantics_mismatch({}) is False
-    assert current_evidence_shape_has_entry_authority(current, materialized_at=_hko_dt(7)) is True
-    assert current_evidence_shape_has_held_authority(current, materialized_at=_hko_dt(7)) is True
+    assert current_evidence_shape_has_entry_authority(current, **scope) is True
+    assert current_evidence_shape_has_held_authority(current, **scope) is True
     for proof in ({}, {"grid_surface_evidence_identity_hash": "a" * 63},
                   {"grid_surface_evidence_revision": "old-mask"}):
         missing_proof = json.loads(json.dumps(current))
         missing_proof["bayes_precision_fusion"]["current_evidence_shape"].update(proof)
         if not proof:
             missing_proof["bayes_precision_fusion"]["current_evidence_shape"].pop("grid_surface_evidence_identity_hash")
-        assert current_evidence_shape_has_entry_authority(missing_proof, materialized_at=_hko_dt(7)) is False
-        assert current_evidence_shape_has_held_authority(missing_proof, materialized_at=_hko_dt(7)) is False
-    assert current_evidence_shape_has_entry_authority(stale_reused, materialized_at=_hko_dt(7)) is False
-    assert current_evidence_shape_has_held_authority(stale_reused, materialized_at=_hko_dt(7)) is False
+        assert current_evidence_shape_has_entry_authority(missing_proof, **scope) is False
+        assert current_evidence_shape_has_held_authority(missing_proof, **scope) is False
+    assert current_evidence_shape_has_entry_authority(stale_reused, **scope) is False
+    assert current_evidence_shape_has_held_authority(stale_reused, **scope) is False
 
     clause = tradeable_grade_coverage_sql(
         posterior_columns={"q_lcb_json", "q_ucb_json", "provenance_json"},
@@ -325,7 +330,7 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage() -> No
     stale_over_bound["bayes_precision_fusion"]["current_evidence_shape"][
         "source_cycle_time"
     ] = "2026-09-29T05:59:56+00:00"
-    negative_lag = json.loads(json.dumps(stale_reused))
+    negative_lag = json.loads(json.dumps(current))
     negative_lag["bayes_precision_fusion"]["current_evidence_shape"][
         "shape_lag_hours"
     ] = -0.001
@@ -359,36 +364,36 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage() -> No
     assert is_tradeable(omitted_stale) is True
     assert is_tradeable(stale_reused) is False
     assert is_tradeable(stale_at_bound) is False
-    assert current_evidence_shape_has_entry_authority(stale_at_bound, materialized_at=_hko_dt(7)) is False
+    assert current_evidence_shape_has_entry_authority(stale_at_bound, **scope) is False
     assert is_tradeable(stale_over_bound) is False
-    assert current_evidence_shape_has_entry_authority(stale_over_bound, materialized_at=_hko_dt(7)) is False
+    assert current_evidence_shape_has_entry_authority(stale_over_bound, **scope) is False
     assert is_tradeable(negative_lag) is False
-    assert current_evidence_shape_has_entry_authority(negative_lag, materialized_at=_hko_dt(7)) is False
+    assert current_evidence_shape_has_entry_authority(negative_lag, **scope) is False
     assert is_tradeable(missing_lag) is False
-    assert current_evidence_shape_has_entry_authority(missing_lag, materialized_at=_hko_dt(7)) is False
+    assert current_evidence_shape_has_entry_authority(missing_lag, **scope) is False
     for invalid_cycle in (missing_cycle, naive_cycle, future_cycle, old_cycle):
         assert is_tradeable(invalid_cycle) is False
-    assert current_evidence_shape_has_entry_authority(missing_cycle, materialized_at=_hko_dt(7)) is False
-    assert current_evidence_shape_has_held_authority(naive_cycle, materialized_at=_hko_dt(7)) is False
+    assert current_evidence_shape_has_entry_authority(missing_cycle, **scope) is False
+    assert current_evidence_shape_has_held_authority(naive_cycle, **scope) is False
     for malformed_stale in (
         stale_missing_flag,
         stale_translated,
         stale_wrong_revision,
     ):
         assert is_tradeable(malformed_stale) is False
-        assert current_evidence_shape_has_entry_authority(malformed_stale, materialized_at=_hko_dt(7)) is False
+        assert current_evidence_shape_has_entry_authority(malformed_stale, **scope) is False
     for malformed in malformed_shapes:
         assert is_tradeable(malformed) is False
-        assert current_evidence_shape_has_entry_authority(malformed, materialized_at=_hko_dt(7)) is False
+        assert current_evidence_shape_has_entry_authority(malformed, **scope) is False
 
     for nonfinite_lag in (float("nan"), float("inf"), float("-inf")):
-        malformed = json.loads(json.dumps(stale_reused))
+        malformed = json.loads(json.dumps(current))
         malformed["bayes_precision_fusion"]["current_evidence_shape"][
             "shape_lag_hours"
         ] = nonfinite_lag
         assert is_tradeable(malformed) is False
-        assert current_evidence_shape_has_entry_authority(malformed, materialized_at=_hko_dt(7)) is False
-        assert current_evidence_shape_has_held_authority(malformed, materialized_at=_hko_dt(7)) is False
+        assert current_evidence_shape_has_entry_authority(malformed, **scope) is False
+        assert current_evidence_shape_has_held_authority(malformed, **scope) is False
 
     conn.execute("DELETE FROM posterior")
     conn.execute(
@@ -405,6 +410,8 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage() -> No
         alias="p.",
     )
     assert "AND 0 = 1" in missing_provenance_clause
+    conn.close()
+    physical.close()
 
 
 @dataclass(frozen=True)
