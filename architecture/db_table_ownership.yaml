@@ -901,6 +901,21 @@ tables:
       label_available_at is > 30 days old; an unlabelled family is never
       deleted.
 
+  - name: day0_receipt_blob
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema_trade_only
+    pk_col: heavy_sha256
+    notes: >
+      Content-addressed (sha256, PRIMARY KEY) zstd-3 canonical-JSON store of the
+      bulky Day0 monitor-receipt witnesses (statistical_probability_conditioning,
+      day0_causal_evidence_bundle, day0_remaining_vector_witness). Written once per
+      distinct content by src/state/day0_receipt_store.py inside
+      append_many_and_project's transaction; position_events.payload_json keeps
+      observation.heavy_sha256 instead. Immutable; never deleted (position_events
+      rows are never evicted).
+
   - name: tier0_family_topology
     db: trade
     schema_class: trade_class

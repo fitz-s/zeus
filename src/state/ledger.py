@@ -4,6 +4,7 @@ from pathlib import Path
 import sqlite3
 
 from src.architecture.decorators import capability, protects
+from src.state.day0_receipt_store import externalize_event_payload
 from src.state.fill_dedup import canonical_trade_fact_cte
 from src.state.projection import (
     CANONICAL_POSITION_CURRENT_COLUMNS,
@@ -823,6 +824,7 @@ def append_many_and_project(
     conn.execute(f"SAVEPOINT {sp_name}")
     try:
         for event in prepared_events:
+            externalize_event_payload(conn, event)
             conn.execute(
                 f"""
                 INSERT INTO {event_table} ({", ".join(CANONICAL_POSITION_EVENT_COLUMNS)})

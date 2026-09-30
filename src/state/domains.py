@@ -187,6 +187,7 @@ CANONICAL_OWNER: dict[str, Domain] = {
     'tier0_family_label': Domain.TRADE,
     'tier0_family_snapshot': Domain.TRADE,
     'tier0_family_topology': Domain.TRADE,
+    'day0_receipt_blob': Domain.TRADE,
     'token_price_log': Domain.TRADE,
     'token_suppression': Domain.TRADE,
     'token_suppression_history': Domain.TRADE,

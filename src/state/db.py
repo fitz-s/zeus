@@ -7337,6 +7337,10 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     # labels: src.execution.post_trade_capital family settlement fold.
     from src.state.schema.tier0_auction_corpus_schema import ensure_tables as _ensure_tier0_auction_corpus_tables
     _ensure_tier0_auction_corpus_tables(conn)
+    # Content-addressed Day0 receipt witnesses (position_events slimming).
+    # Sole writer: src.state.ledger.append_many_and_project via day0_receipt_store.
+    from src.state.day0_receipt_store import ensure_table as _ensure_day0_receipt_blob
+    _ensure_day0_receipt_blob(conn)
     try:
         conn.execute("ALTER TABLE trade_decisions ADD COLUMN env TEXT NOT NULL DEFAULT 'live';")
     except sqlite3.OperationalError:
