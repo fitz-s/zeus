@@ -137,7 +137,7 @@ def _hko_source_surface(tmp_path, monkeypatch, _hko_native_surfaces):
 
 
 @pytest.fixture
-def _hko_native_surfaces(tmp_path, monkeypatch, request):
+def _hko_native_surfaces(tmp_path, monkeypatch, request=None):
     """Ordinary loopback whole-OM captures for explicit global and US domains."""
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -146,7 +146,7 @@ def _hko_native_surfaces(tmp_path, monkeypatch, request):
     from src.data import openmeteo_model_surface as surface
 
     bodies = {}
-    frontier = "_target_frontier_native_surfaces" in request.fixturenames
+    frontier = request is not None and "_target_frontier_native_surfaces" in request.fixturenames
     models = (("icon_global", "ukmo_global_deterministic_10km") if frontier else
               ("icon_global", "ukmo_global_deterministic_10km", "gfs_hrrr", "ncep_nbm_conus",
                "icon_d2", "meteofrance_arome_france_hd"))
@@ -191,8 +191,14 @@ def _hko_native_surfaces(tmp_path, monkeypatch, request):
 
 
 @pytest.fixture
-def _target_frontier_native_surfaces(_hko_native_surfaces):
+def _target_frontier_native_surfaces(tmp_path, monkeypatch, request):
     """TEST_ONLY_SYNTHETIC_EXTERNAL_CONDITION: legal source/cut, not Shanghai q."""
+    native_surfaces = _hko_native_surfaces.__wrapped__(tmp_path, monkeypatch, request)
+    next(native_surfaces)
+    try:
+        yield
+    finally:
+        native_surfaces.close()
 
 
 def _hko_raw_openmeteo_bytes() -> bytes:
