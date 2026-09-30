@@ -48659,6 +48659,16 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, pri
     conn = _hourly_schema_conn(db)
     conn.row_factory = sqlite3.Row
     apply_canonical_schema(conn, forecast_tables=True)
+    # Control the actual canonical INSERT event in this private forecast DB,
+    # including the manifest writer's SQL default; never backdate stored rows.
+    sql_clock = [captured+timedelta(minutes=1)]
+    def canonical_insert_clock(fmt, value):
+        if (fmt,value) == ("%Y-%m-%dT%H:%M:%f+00:00","now"):
+            return sql_clock[0].isoformat(timespec="milliseconds")
+        from contextlib import closing
+        with closing(sqlite3.connect(":memory:")) as builtins:
+            return builtins.execute("SELECT strftime(?,?)",(fmt,value)).fetchone()[0]
+    conn.create_function("strftime",2,canonical_insert_clock)
     ensure_prints(conn)
     _create_source_run(conn)
     _create_source_run_coverage(conn)
@@ -48853,11 +48863,15 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, pri
     dl._SINGLE_RUNS_PAYLOAD_CACHE.clear()
     dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEX.clear()
     conn.commit()
-    anchor_capture = dl.download_bayes_precision_fusion_extra_raw_inputs(forecast_db=db,cycle=cycle,
-        targets=[dl.BayesPrecisionFusionDownloadTarget(city=city.name,target_date=target.isoformat(),metric=metric,
-            latitude=station["lat"],longitude=station["lon"],timezone_name=city.timezone,lead_days=1)],
-        models=("ecmwf_ifs",),frozen_source_runs={"ecmwf_ifs":(cycle,captured)},
-        include_previous_runs=False,prune_after=False)
+    # The controlled writer's actual record clock must precede this fixed cut;
+    # a current wall clock cannot prove possession at the fixture's old cut.
+    with monkeypatch.context() as capture_clock:
+        capture_clock.setattr(dl,"datetime",RawClock)
+        anchor_capture = dl.download_bayes_precision_fusion_extra_raw_inputs(forecast_db=db,cycle=cycle,
+            targets=[dl.BayesPrecisionFusionDownloadTarget(city=city.name,target_date=target.isoformat(),metric=metric,
+                latitude=station["lat"],longitude=station["lon"],timezone_name=city.timezone,lead_days=1)],
+            models=("ecmwf_ifs",),frozen_source_runs={"ecmwf_ifs":(cycle,captured)},
+            include_previous_runs=False,prune_after=False)
     assert anchor_capture["written_row_count"] == 1
     from scripts.download_replacement_forecast_current_targets import _precision_metadata
     # The real producer parses the retained official HKO ground entity body;
@@ -48877,6 +48891,9 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, pri
         "openmeteo_payload_json":str(artifact_path),"precision_metadata_json":str(precision_path),
         "manifest_json":str(manifest_path)})
     artifact_id = write_manifest_to_db(conn,manifest)
+    anchor_recorded = conn.execute("SELECT recorded_at FROM raw_forecast_artifacts WHERE artifact_id=?",
+        (artifact_id,)).fetchone()[0]
+    assert captured <= datetime.fromisoformat(anchor_recorded) <= cut
     manifest = replace(manifest,product_metadata={**manifest.product_metadata,"artifact_id":artifact_id})
     write_manifest(manifest,manifest_path)
     assert metadata.source_geometry_proof["station_ground_proof"]["facts"] == station["ground_facts"]
@@ -48904,6 +48921,7 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, pri
         day0_observed_extreme_c=observed_extreme_native,day0_observed_extreme_source="hko_hourly_accumulator",
         day0_observed_extreme_observation_time="2026-09-30T06:10:00+00:00",
         day0_observed_extreme_sample_count=2,day0_observed_extreme_unit="C")
+    sql_clock[0] = cut
     result = materialize_replacement_forecast_live(conn,request)
     assert result.ok, result.reason_codes
     from src.data.producer_readiness import build_producer_readiness_for_scope
@@ -48922,7 +48940,7 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, pri
     conn.commit()
     return SimpleNamespace(conn=conn,db=db,city=city,request=request,result=result,cut=cut,bins=bins,
                            anchor_request=anchor_request,artifact_path=artifact_path,manifest_dir=manifest_dir,
-                           write_provider_cohort=write_provider_cohort)
+                           write_provider_cohort=write_provider_cohort,sql_clock=sql_clock)
 
 
 @pytest.mark.parametrize("metric",("high","low"))
@@ -49324,12 +49342,14 @@ def test_selected_order_runner_up_trace_binds_final_held_family_proposal(tmp_pat
                 refused = [row for row in actual_selected.decision.candidate_evaluations
                     if row.token_id==first.decision.candidate.token_id]
                 assert refused and all(row.rejection_reason==refusal for row in refused)
-                row = trade.execute("""SELECT c.winner_candidate_id,cf.probability_witness_identity,t.payload,s.payload
+                row = trade.execute("""SELECT c.winner_candidate_id,cf.probability_witness_identity,t.payload,s.payload,
+                    c.selection_epoch_identity,c.decision_log_id
                     FROM tier0_auction_cut c JOIN tier0_cut_family cf ON cf.cut_seq=c.cut_seq
                     JOIN tier0_family_topology t ON t.topology_seq=cf.topology_seq
                     JOIN tier0_family_snapshot s ON s.state_seq=cf.state_seq WHERE c.status='SELECTED'
                     ORDER BY c.cut_seq DESC LIMIT 1""").fetchone()
                 assert row is not None and row[0] == winner.candidate_id
+                assert row[4] == actual_selected.actuation.selection_epoch_identity
                 topology,snapshot = corpus.decode_payload(row[2]),corpus.decode_payload(row[3])
                 bindings = topology["bindings"]
                 column = next(index for index,binding in enumerate(bindings) if binding[0]==winner.bin_id)
@@ -49337,13 +49357,20 @@ def test_selected_order_runner_up_trace_binds_final_held_family_proposal(tmp_pat
                 winner_legs = [leg for leg in snapshot["legs"]
                     if leg[:4]==[column,winner.side,"BUY",winner.execution_mode] and leg[4]=="SELECTED"]
                 assert len(winner_legs)==1
-                # q_served is optional sealed-calibration metadata, not the raw
-                # fixed-action q. The existing candidate receipt owns q_raw.
+                # All cuts own this frozen raw simplex. The legacy candidate
+                # table deliberately records full receipts only; a recursive
+                # compact DELTA must instead bind the final corpus cut.
+                selected_point = snapshot["raw_yes_q"][column]
+                if winner.side == "NO": selected_point = 1.0-selected_point
+                assert selected_point == family_payoff_point_q(consumer,bin_id=winner.bin_id,side=winner.side)
                 native = trade.execute("""SELECT token_id,q_raw FROM tier0_candidate_set_provenance
                     WHERE selection_epoch_identity=? AND candidate_id=? LIMIT 1""",
                     (actual_selected.actuation.selection_epoch_identity,winner.candidate_id)).fetchone()
-                assert native[0] == winner.token_id
-                assert native[1] == family_payoff_point_q(consumer,bin_id=winner.bin_id,side=winner.side)
+                if native is not None:
+                    assert native == (winner.token_id,selected_point)
+                else:
+                    mode = trade.execute("SELECT mode FROM decision_log WHERE rowid=?",(row[5],)).fetchone()[0]
+                    assert mode == "global_single_order_auction_delta"
                 stored = snapshot.get("held_sell_point_traces",[])
                 assert bool(stored) is (fault=="none")
                 for trace in stored:
@@ -49698,6 +49725,7 @@ def test_hko_minute_mean_normal_tick_wakes_real_seed_without_changing_extreme(tm
         assert poller._current_etag == "one-minute-body" and poller._etag is None
         from scripts import materialize_replacement_forecast_live as materializer_script
         monkeypatch.setattr(materializer_script,"datetime",WriteClock)
+        fixture.sql_clock[0] = written
         code,out,logs = materializer_script._run_one(Path(report["seed_file"]),commit=True,
             init_schema=False,conn=fixture.conn,capture_logs=True,publish_wake=True,schema_ready=True,
             writer_lock=materializer_script._forecast_writer_lock)
@@ -49979,7 +50007,8 @@ def test_day0_conditional_high_keeps_its_existing_extra_variance(unit, scale):
 
 
 @pytest.mark.parametrize("metric,raw", (("high", 32.9), ("low", 27.4)))
-def test_hko_normal_producer_and_reactor_consume_one_physical_kernel(tmp_path, monkeypatch, metric, raw):
+@pytest.mark.parametrize("shuffled", (False, True))
+def test_hko_normal_producer_and_reactor_consume_one_physical_kernel(tmp_path, monkeypatch, metric, raw, shuffled):
     """Real writers/authority; controlled HTTP/51-ENS inputs, no q override."""
     from src.data import day0_hourly_vectors as hourly
     from src.events.triggers.day0_extreme_updated import (
@@ -50001,7 +50030,7 @@ def test_hko_normal_producer_and_reactor_consume_one_physical_kernel(tmp_path, m
         return result
     monkeypatch.setattr(hourly, "build_day0_remaining_probability_carrier", observe)
     fixture = _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric,
-        observed_extreme_native=raw, shuffled_conditions=True)
+        observed_extreme_native=raw, shuffled_conditions=shuffled)
     try:
         producer, producer_result = calls[-1]
         source_calls = len(calls)
@@ -50031,11 +50060,17 @@ def test_hko_normal_producer_and_reactor_consume_one_physical_kernel(tmp_path, m
                 probability_use=use, raw_input_hwm_conn=fixture.conn, day0_payload_out=payload)
             consumer, consumer_result = calls[-1]
             assert len(calls) > source_calls
-            for key in ("future_extremes_c", "final_extreme_centers_c", "boundary_scenarios",
-                        "metric", "path_error_sigma_c", "instrument_sigma_c", "bin_bounds_c",
-                        "operator", "n_point", "n_samples", "remaining_center_bias_native",
-                        "settlement_semantics", "resolver_terminal"):
+            assert consumer.keys() == producer.keys()
+            for key in consumer.keys() - {"bin_bounds_c", "identity_inputs", "operator"}:
                 assert consumer[key] == producer[key], key
+            # The producer's None requests normal operator selection; the
+            # consumer names that persisted choice explicitly.
+            assert consumer_result["operator"] == producer_result["operator"]
+            producer_bounds = producer["bin_bounds_c"]
+            consumer_bounds = consumer["bin_bounds_c"]
+            assert len(set(producer_bounds)) == len(producer_bounds) == len(consumer_bounds)
+            assert set(consumer_bounds) == set(producer_bounds)
+            indexes = [producer_bounds.index(bound) for bound in consumer_bounds]
             # Clock/source/current state identities are separate from the
             # mathematical kernel and must also match, not merely its hash.
             assert consumer["identity_inputs"] == producer["identity_inputs"]
@@ -50055,8 +50090,16 @@ def test_hko_normal_producer_and_reactor_consume_one_physical_kernel(tmp_path, m
             expected = [q[fixture.conn.execute("SELECT range_label FROM market_events WHERE condition_id=?",
                 (item.condition_id,)).fetchone()[0]] for item in witness.bindings]
             np.testing.assert_allclose(witness.yes_point_q, expected, rtol=0, atol=1e-12)
-            np.testing.assert_array_equal(consumer_result["q"], producer_result["q"])
-            np.testing.assert_array_equal(consumer_result["samples"], producer_result["samples"])
+            np.testing.assert_allclose(consumer_result["q"], np.asarray(producer_result["q"])[indexes],
+                rtol=0, atol=1e-15)
+            # Ordered bins participate in the draw seed.  An actual shuffled
+            # topology changes that seed, not its physical source kernel. Replay
+            # the same producer inputs in that exact consumer order, rather
+            # than pretending its confidence draws must keep the old seed.
+            ordered_producer = actual_builder(**{**producer,"bin_bounds_c":consumer_bounds})
+            np.testing.assert_array_equal(consumer_result["samples"], ordered_producer["samples"])
+            if not shuffled:
+                np.testing.assert_array_equal(consumer_result["samples"], producer_result["samples"])
             # Early statistical calls possess sourced observations, not the
             # yet-to-be-built complete probability output binding.
             early = {key:value for key,value in payload.items() if key != "_edli_global_day0_binding"}
@@ -50087,7 +50130,13 @@ def test_hko_normal_producer_and_reactor_consume_one_physical_kernel(tmp_path, m
                 assert _current_global_held_point_probability(position, held) == pytest.approx(
                     family_payoff_point_q(entry, bin_id=item.bin_id, side=side), abs=1e-12)
         old_version = "day0-semrev:day0_settlement_channel_revision_model_v30_smooth_center_bias_observation_clock_city_instrument_variance_v1:old-cache"
-        obsolete = replace(prepared_by_use[0], probability_witness=replace(entry,q_version=old_version))
+        from src.solve.solver import joint_probability_witness_identity
+        old_fields = {name:getattr(entry,name)
+            for name in inspect.signature(joint_probability_witness_identity).parameters}
+        old_fields["q_version"] = old_version
+        old_witness = replace(entry,q_version=old_version,
+            witness_identity=joint_probability_witness_identity(**old_fields))
+        obsolete = replace(prepared_by_use[0], probability_witness=old_witness)
         namespace = "normal-hko-physical-boundary-reset"
         era._store_global_probability_family_cache(namespace,family_key=entry.family_key,
             event_id=event.event_id,family_binding_hash=entry.family_binding_identity,
