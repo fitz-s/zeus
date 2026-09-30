@@ -1403,7 +1403,7 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
             raise
         except Exception:
             held_priority = {}
-        held_legacy_candidates = (
+        physical_recovery_candidates = (
             _held_legacy_physical_proof_recovery_candidates(Path(str(forecast_db)), held_priority,
                 decision_time=decision_time, deadline_monotonic=deadline_monotonic)
             if held_priority and not capture_when_covered and frozen_source_runs is None and models is None
@@ -1446,6 +1446,8 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                 held_priority=held_priority,
                 deadline_monotonic=deadline_monotonic,
                 cohort_backtrack_candidates=cohort_backtrack_candidates,
+                physical_recovery_candidates=(physical_recovery_candidates
+                    if frozen_source_runs is None and models is None else None),
             )
         )
         missing_scopes = None if coverage is None else coverage[0]
@@ -1471,11 +1473,11 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                 capture_when_covered
                 or missing_scopes is None
                 or (row.city, row.temperature_metric, row.target_date) in missing_scopes
-                or (row.city, row.target_date, row.temperature_metric) in held_legacy_candidates
+                or (row.city, row.target_date, row.temperature_metric) in physical_recovery_candidates
             )
             and (
                 (city_cfg := cities_by_name.get(row.city)) is None
-                or (row.city, row.target_date, row.temperature_metric) in held_legacy_candidates
+                or (row.city, row.target_date, row.temperature_metric) in physical_recovery_candidates
                 or _source_cycle_can_cover_local_decision_window(
                     cycle=cycle,
                     target_date=row.target_date,
@@ -1623,11 +1625,11 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                     ):
                         candidate = next(
                             (
-                                held_legacy_candidates.get((target.city, target.target_date, target.metric))
+                                physical_recovery_candidates.get((target.city, target.target_date, target.metric))
                                 or cohort_backtrack_candidates.get((target.city, target.metric, target.target_date))
                                 for target in rotated_targets
                                 if (target.city, target.target_date) == first_group
-                                and (held_legacy_candidates.get((target.city, target.target_date, target.metric))
+                                and (physical_recovery_candidates.get((target.city, target.target_date, target.metric))
                                     or cohort_backtrack_candidates.get((target.city, target.metric, target.target_date))) is not None
                             ),
                             None,
@@ -1645,12 +1647,12 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                                 for target in rotated_targets
                                 if (target.city, target.target_date) == first_group
                                 and (
-                                    (held_legacy_candidates.get((target.city, target.target_date, target.metric)) or ())[:3] == candidate[:3]
+                                    (physical_recovery_candidates.get((target.city, target.target_date, target.metric)) or ())[:3] == candidate[:3]
                                     if capture_reason
                                     else cohort_backtrack_candidates.get((target.city, target.metric, target.target_date)) == candidate
                                 )
                             )
-                            capture_ids = tuple(held_legacy_candidates[(target.city, target.target_date, target.metric)][3]
+                            capture_ids = tuple(physical_recovery_candidates[(target.city, target.target_date, target.metric)][3]
                                 for target in archive_targets) if capture_reason else ()
                             archive_budget = max(
                                 0.0, deadline_monotonic - time.monotonic()
@@ -3408,6 +3410,7 @@ def _extras_coverage_missing(
     held_priority: Mapping[tuple[str, str, str], int] | None = None,
     deadline_monotonic: float | None = None,
     cohort_backtrack_candidates: dict[tuple[str, str, str], tuple[str, datetime]] | None = None,
+    physical_recovery_candidates: dict[tuple[str, str, str], tuple[str, datetime, str, int]] | None = None,
 ) -> tuple[set[tuple[str, str, str]], int] | None:
     """Return scopes missing causal current-center and coherent single-runs inputs.
 
@@ -3433,6 +3436,7 @@ def _extras_coverage_missing(
             _served_source_clock_row,
             current_value_serving_schema,
             read_freshest_coherent_instrument_values,
+            physical_capture_debt_reason,
         )
         from src.data.replacement_forecast_cycle_policy import (  # noqa: PLC0415
             cycle_age_outside_bound,
@@ -3570,6 +3574,8 @@ def _extras_coverage_missing(
                 )
                 current_values: dict[str, float] = {}
                 current_cycles: dict[str, datetime] = {}
+                served_models: set[str] = set()
+                rejected_proofs: dict[str, tuple[str, datetime, str, int]] = {}
                 for row in rows:
                     served = _served_source_clock_row(
                         row, schema=schema,
@@ -3577,8 +3583,20 @@ def _extras_coverage_missing(
                         single_runs_decision_time=now,
                     )
                     if served is None:
+                        # This is the already scoped coverage stream, not a
+                        # second all-city native scan. Only a rejected actual
+                        # immutable row may enter the shared cost classifier.
+                        model = str(row[1])
+                        if (physical_recovery_candidates is not None and model in expected
+                            and model not in served_models and model not in rejected_proofs):
+                            reason = physical_capture_debt_reason(conn,raw_model_forecast_id=int(row[0]),
+                                decision_time_iso=now.isoformat(),deadline_monotonic=deadline_monotonic)
+                            if reason is not None:
+                                run = datetime.fromisoformat(str(row[4]).replace("Z","+00:00"))
+                                rejected_proofs[model] = (model,run,reason,int(row[0]))
                         continue
                     model, value = served
+                    served_models.add(model)
                     try:
                         run = datetime.fromisoformat(
                             value.served_cycle.replace("Z", "+00:00")
@@ -3591,6 +3609,14 @@ def _extras_coverage_missing(
                     if run in expected.get(model, ()):
                         current_values.setdefault(model, value.value_c)
                         current_cycles.setdefault(model, run)
+                if physical_recovery_candidates is not None:
+                    # A healthy same-model row makes an older unused bad row
+                    # irrelevant. Two other healthy families, however, cannot
+                    # permanently hide this missing source's exact repair debt.
+                    repair = next((candidate for model,candidate in rejected_proofs.items()
+                        if model not in served_models),None)
+                    if repair is not None:
+                        physical_recovery_candidates.setdefault((city,target_date,metric),repair)
                 # A physically possible, requestable preferred source remains
                 # capture debt even when a different family pair can fall back.
                 # An impossible preferred regional must not block the fallback.
