@@ -2,21 +2,15 @@
 # Last reused or audited: 2026-09-30
 # Authority basis: Day0 remaining-center settlement residual study 2026-09-24;
 #   docs/authority/replacement_final_form_2026_06_09.md "Day0 conditional
-#   remaining-path operator" (settlement-graded remaining-member center shift);
-#   2026-09-30 continuity repair (Helsinki band-edge q jump).
-"""Contracts for the Day0 remaining-carrier center shift.
+#   remaining-path operator"; operator directive 2026-09-30 forbids fitted
+#   affine shifts in live probability while preserving offline fit analysis.
+"""Offline remaining-center math and the explicit unshifted live policy.
 
-(a) a warm shift moves q the fitted direction, in the point q AND the draws;
-(b) artifact absent -> q, samples and identity are byte-identical to the pre-change
-    carrier (golden values captured from the unmodified builder);
-(c) a degF carrier receives the shift scaled by 9/5;
-(d) a metric without a curve serves no shift and says so; the retired step-table
-    schema is refused;
-(e) the Day0 semantics revision is bumped and stamped into q_version;
-(f) the served shift is continuous in local hour: unchanged evidence across a band
-    edge cannot move q by a step;
-plus: the boundary and the typed final centers never move, and the entry and held
-adapter rebuilds apply the same lookup and stamp the same provenance.
+Offline artifact lookup, interpolation, unit scaling and pure-builder goldens
+remain tested. Live ENTRY/held rebuilding and replay never read or inject that
+fit: they bind an explicit numeric-zero policy into a new construction identity.
+Observed boundaries, typed final centers and lawful current-state conditioning
+retain their separate quantities and roles.
 """
 
 from __future__ import annotations
@@ -301,15 +295,15 @@ def test_shift_equals_moving_only_the_remaining_members() -> None:
     assert shifted["q"] != moved_final["q"]
 
 
-def test_fahrenheit_adapter_rebuild_scales_the_shift_by_nine_fifths(
+def test_live_fahrenheit_adapter_does_not_apply_the_offline_shift(
     tmp_path, monkeypatch
 ) -> None:
     calls = _run_adapter_rebuild(tmp_path, monkeypatch, "entry_current_remaining_path", 0.5)
 
-    assert calls[0]["remaining_center_bias_native"] == pytest.approx(0.5 * 9.0 / 5.0)
+    assert calls[0]["remaining_center_bias_native"] == 0.0
 
 
-# Adapter wiring: one lookup, both callers, replay binds the persisted shift -------
+# Live adapter wiring: no fitted lookup, explicit policy, strict replay ------------
 
 
 def _noaa_likelihood(station: str, cutoff: str) -> dict:
@@ -342,29 +336,33 @@ FUTURE_C = (28.5, 29.0, 30.5, 31.25)
 BOUNDS_F = [(None, 77)] + [(v, v + 1) for v in range(78, 96, 2)] + [(96, None)]
 
 
-def _atlanta_payload(authority_kind: str) -> tuple[dict, SimpleNamespace]:
+def _atlanta_payload(authority_kind: str, *, city_name="Atlanta", metric="high") -> tuple[dict, SimpleNamespace]:
     from src.types.market import Bin
 
+    city = runtime_cities_by_name()[city_name]
+    unit = city.settlement_unit
+    bounds = BOUNDS_F if unit == "F" else [(None, 25), *[(v, v) for v in range(26, 36)], (36, None)]
+    boundary = 84.0 if unit == "F" else (84.0 - 32.0) * 5.0 / 9.0
     cutoff = DECISION.isoformat()
     family = SimpleNamespace(
-        city="Atlanta",
+        city=city_name,
         target_date="2026-09-24",
-        metric="high",
+        metric=metric,
         candidates=[
-            SimpleNamespace(bin=Bin(low, high, "F", f"bin-{i}"))
-            for i, (low, high) in enumerate(BOUNDS_F)
+            SimpleNamespace(bin=Bin(low, high, unit, f"bin-{i}"))
+            for i, (low, high) in enumerate(bounds)
         ],
     )
     payload = {
-        "metric": "high",
+        "metric": metric,
         "target_date": "2026-09-24",
-        "rounded_value": 84.0,
+        "rounded_value": boundary,
         "settlement_source": "aviationweather_metar",
         "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
-        "_edli_day0_probability_boundary_native": 84.0,
+        "_edli_day0_probability_boundary_native": boundary,
         "_edli_day0_source_clock_predictive_sigma_native": 1.2,
         "_edli_day0_provisional_boundary_survival_probability": 0.95,
-        "_edli_day0_provisional_revision_likelihood": _noaa_likelihood("KATL", cutoff),
+        "_edli_day0_provisional_revision_likelihood": _noaa_likelihood(city.wu_station, cutoff),
         "_edli_day0_remaining_vector_witness": {
             "vector_id": "same-vector",
             "expected_models": ["ecmwf_ifs"],
@@ -386,14 +384,15 @@ def _atlanta_payload(authority_kind: str) -> tuple[dict, SimpleNamespace]:
     return payload, family
 
 
-def _run_adapter_rebuild(tmp_path, monkeypatch, authority_kind: str, b_c: float | None):
+def _run_adapter_rebuild(tmp_path, monkeypatch, authority_kind: str, b_c: float | None,
+                         *, city_name="Atlanta", metric="high"):
     import src.data.day0_hourly_vectors as hourly
     import src.engine.event_reactor_adapter as era
 
     if b_c is None:
         monkeypatch.setattr(mod, "artifact_path", lambda: tmp_path / "absent.json")
     else:
-        _install(tmp_path, monkeypatch, _artifact(high=_flat(b_c)))
+        _install(tmp_path, monkeypatch, _artifact(**{metric: _flat(b_c)}))
     monkeypatch.setattr(era, "_day0_extra_member_sigma_native", lambda **_kwargs: 0.7)
     original = hourly.build_day0_remaining_probability_carrier
     calls: list[dict] = []
@@ -403,11 +402,11 @@ def _run_adapter_rebuild(tmp_path, monkeypatch, authority_kind: str, b_c: float 
         return original(**kwargs)
 
     monkeypatch.setattr(hourly, "build_day0_remaining_probability_carrier", recording)
-    payload, family = _atlanta_payload(authority_kind)
+    payload, family = _atlanta_payload(authority_kind, city_name=city_name, metric=metric)
     era._rebuild_decision_time_day0_carrier(
         payload=payload,
         family=family,
-        unit="F",
+        unit=runtime_cities_by_name()[city_name].settlement_unit,
         decision_time=DECISION,
         future_extremes_c=FUTURE_C,
         authority_kind=authority_kind,
@@ -429,16 +428,17 @@ def _run_adapter_rebuild(tmp_path, monkeypatch, authority_kind: str, b_c: float 
         "held_a_prime",
     ),
 )
-def test_entry_and_held_rebuilds_apply_and_stamp_the_same_shift(
+def test_entry_and_held_rebuilds_ignore_nonzero_fit_and_stamp_current_unshifted_policy(
     tmp_path, monkeypatch, authority_kind
 ) -> None:
     calls = _run_adapter_rebuild(tmp_path, monkeypatch, authority_kind, 0.5)
     builder_kwargs, payload = calls[0], calls[-1]
 
-    assert builder_kwargs["remaining_center_bias_native"] == pytest.approx(0.9)
-    assert payload["_edli_day0_remaining_center_bias_c"] == 0.5
-    assert payload["_edli_day0_remaining_bias_status"] == APPLIED
-    assert str(payload["_edli_day0_remaining_bias_artifact"]).startswith("2026-09-24:")
+    assert builder_kwargs["remaining_center_bias_native"] == 0.0
+    assert payload["_edli_day0_remaining_center_bias_c"] == 0.0
+    assert payload["_edli_day0_remaining_center_policy"] == "unshifted_live_v1"
+    assert builder_kwargs["identity_inputs"]["day0_remaining_center_policy"] == "unshifted_live_v1"
+    assert payload["_edli_day0_remaining_bias_artifact"] is None
     # The persisted member vector stays unshifted (the fitter's residual basis).
     assert payload["_edli_day0_remaining_carrier_future_extremes_c"] == list(FUTURE_C)
 
@@ -451,11 +451,33 @@ def test_adapter_rebuild_without_artifact_is_unshifted_and_says_so(
     )
 
     assert calls[0]["remaining_center_bias_native"] == 0.0
-    assert calls[-1]["_edli_day0_remaining_bias_status"] == ARTIFACT_UNAVAILABLE
+    assert calls[-1]["_edli_day0_remaining_center_policy"] == "unshifted_live_v1"
     assert calls[-1]["_edli_day0_remaining_center_bias_c"] == 0.0
 
 
-def test_replay_reproduces_the_persisted_shift_not_a_fresh_lookup(
+@pytest.mark.parametrize("city_name", ("Atlanta", "Paris"))
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_live_cf_high_low_point_draws_and_identity_ignore_fit_artifact_changes(
+    tmp_path, monkeypatch, city_name, metric
+):
+    first = _run_adapter_rebuild(tmp_path, monkeypatch, "entry_current_remaining_path", 0.7,
+                                 city_name=city_name, metric=metric)
+    first_payload = first[-1]
+    mod.reset_cache()
+    second = _run_adapter_rebuild(tmp_path, monkeypatch, "entry_current_remaining_path", -0.9,
+                                  city_name=city_name, metric=metric)
+    second_payload = second[-1]
+    mod.reset_cache()
+    absent = _run_adapter_rebuild(tmp_path, monkeypatch, "entry_current_remaining_path", None,
+                                  city_name=city_name, metric=metric)
+    assert first[0]["remaining_center_bias_native"] == second[0]["remaining_center_bias_native"] == 0.0
+    for key in ("_edli_day0_remaining_carrier_q", "_edli_day0_remaining_probability_samples",
+                "_edli_day0_remaining_content_identity"):
+        assert first_payload[key] == second_payload[key] == absent[-1][key]
+    assert first_payload["_edli_day0_remaining_carrier_future_extremes_c"] == list(FUTURE_C)
+
+
+def test_current_replay_reproduces_explicit_unshifted_carrier_not_a_fresh_lookup(
     tmp_path, monkeypatch
 ) -> None:
     import src.engine.event_reactor_adapter as era
@@ -482,6 +504,33 @@ def test_replay_reproduces_the_persisted_shift_not_a_fresh_lookup(
     assert replay.tolist() == pytest.approx(payload["_edli_day0_remaining_carrier_q"])
 
 
+def test_live_rebuild_does_not_read_an_available_offline_fit(tmp_path, monkeypatch):
+    def forbidden_lookup(**kwargs):
+        raise AssertionError("LIVE_FITTED_REMAINING_CENTER_LOOKUP")
+
+    monkeypatch.setattr(mod, "day0_remaining_bias", forbidden_lookup)
+    calls = _run_adapter_rebuild(tmp_path, monkeypatch, "entry_current_remaining_path", 0.5)
+    assert calls[0]["remaining_center_bias_native"] == 0.0
+
+
+@pytest.mark.parametrize("bias", (None, True, "0", float("nan"), float("inf"), 0.5))
+def test_current_replay_rejects_malformed_or_shifted_declared_carrier(tmp_path, monkeypatch, bias):
+    import src.engine.event_reactor_adapter as era
+    from src.types.market import Bin
+
+    payload = _run_adapter_rebuild(tmp_path, monkeypatch, "entry_current_remaining_path", None)[-1]
+    payload["_edli_day0_remaining_center_policy"] = "unshifted_live_v1"
+    payload["_edli_day0_remaining_center_bias_c"] = bias
+    city = runtime_cities_by_name()["Atlanta"]
+    with pytest.raises(ValueError, match="CENTER_POLICY"):
+        era._day0_remaining_p_raw_vector(
+            np.asarray(FUTURE_C) * 9.0 / 5.0 + 32.0,
+            city=city, settlement_semantics=SettlementSemantics.for_city(city),
+            bins=[Bin(low, high, "F", f"bin-{i}") for i, (low, high) in enumerate(BOUNDS_F)],
+            payload=payload, extra_member_sigma=0.0, decision_time=DECISION,
+        )
+
+
 # (e) ---------------------------------------------------------------------------
 
 
@@ -493,8 +542,8 @@ def test_semantics_revision_is_bumped_and_stamped() -> None:
     )
 
     assert DAY0_PROBABILITY_SEMANTICS_REVISION in {
-        "day0_settlement_channel_revision_model_v28_smooth_center_bias_v1",
-        "day0_resolver_terminal_composition_v27_smooth_center_bias_v1",
+        "day0_settlement_channel_revision_model_v33_unshifted_remaining_observation_clock_city_instrument_native_boundary_v1",
+        "day0_resolver_terminal_composition_v32_unshifted_remaining_observation_clock_city_instrument_native_boundary_v1",
     }
     stamped = bind_day0_probability_semantics("q-hash")
     assert day0_probability_semantics_revision(stamped) == DAY0_PROBABILITY_SEMANTICS_REVISION

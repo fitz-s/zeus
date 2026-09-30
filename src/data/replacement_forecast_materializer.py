@@ -78,7 +78,6 @@ from src.data.replacement_input_hwm import (
 )
 from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
 from src.calibration import center_debias_live_fit
-from src.calibration.day0_remaining_bias import day0_remaining_bias
 from src.contracts.availability_time import proof_of_possession_available_at
 from src.contracts.replacement_pipeline_files import (
     DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS,
@@ -1409,13 +1408,21 @@ def _day0_noaa_preliminary_carrier(
     Their source-specific revision models supply the survival weight; the
     no-survival branch leaves the future path unclamped. Missing evidence or
     future members is a family-scoped failure, never permission to use a
-    full-day Normal. ``remaining_center_bias_c`` is the degC shift from
-    ``src.calibration.day0_remaining_bias`` for the remaining-hourly members.
+    full-day Normal. Live construction never applies a fitted center shift.
     """
     source = str(request.day0_observed_extreme_source or "").strip().lower()
     noaa_preliminary = _is_noaa_preliminary_source(source)
     hko_provisional = _is_hko_provisional_source(source)
-    from src.events.day0_authority import DAY0_WU_FAST_RESIDUAL_SOURCE
+    from src.events.day0_authority import (
+        DAY0_WU_FAST_RESIDUAL_SOURCE, DAY0_REMAINING_CENTER_POLICY,
+        current_day0_remaining_center_policy_has_authority,
+    )
+
+    if not current_day0_remaining_center_policy_has_authority({
+        "day0_remaining_center_policy": DAY0_REMAINING_CENTER_POLICY,
+        "day0_remaining_center_bias_c": remaining_center_bias_c,
+    }):
+        raise ValueError("DAY0_REMAINING_CENTER_POLICY_NOT_CURRENT")
 
     wu_fast_residual = source == DAY0_WU_FAST_RESIDUAL_SOURCE
     if not (noaa_preliminary or hko_provisional or wu_fast_residual):
@@ -1604,6 +1611,7 @@ def _day0_noaa_preliminary_carrier(
         preliminary_survival_identity=str(likelihood["identity_hash"]),
     )
     identity_inputs["current_path_state"] = current_state.identity()
+    identity_inputs["day0_remaining_center_policy"] = DAY0_REMAINING_CENTER_POLICY
     if conditional_high_shape_identity is not None:
         identity_inputs["conditional_high_shape_identity"] = (
             conditional_high_shape_identity
@@ -1646,7 +1654,7 @@ def _day0_noaa_preliminary_carrier(
         identity_inputs=identity_inputs,
         settlement_semantics=semantics,
         resolver_terminal=resolver_terminal,
-        remaining_center_bias_native=float(remaining_center_bias_c) * native_scale,
+        remaining_center_bias_native=0.0,
     )
     carrier["current_path_state"] = current_state.identity()
     clock_evidence = getattr(current_state, "clock_evidence", None)
@@ -7335,13 +7343,14 @@ def _compute_posterior_payload(
                         fusion=bayes_precision_fusion_override,
                     )
                 )
-                _day0_remaining_bias = day0_remaining_bias(
-                    city=request.city,
-                    metric=metric,
-                    decision_time=_to_utc(request.computed_at, field_name="computed_at"),
-                    timezone_name=request.city_timezone,
-                )
-                _day0_remaining_bias_provenance = _day0_remaining_bias.provenance()
+                from src.events.day0_authority import DAY0_REMAINING_CENTER_POLICY
+
+                _day0_remaining_bias_provenance = {
+                    "day0_remaining_center_policy": DAY0_REMAINING_CENTER_POLICY,
+                    "day0_remaining_center_bias_c": 0.0,
+                    "day0_remaining_bias_status": "unshifted_live_policy",
+                    "day0_remaining_bias_artifact": None,
+                }
                 _day0_shared_carrier, _day0_shared_carrier_likelihood = (
                     _day0_noaa_preliminary_carrier(
                         conn,
@@ -7354,7 +7363,7 @@ def _compute_posterior_payload(
                             float(evidence["forecast_value_c"])
                             for evidence in _day0_shared_carrier_station_extremes
                         ),
-                        remaining_center_bias_c=_day0_remaining_bias.shift_c,
+                        remaining_center_bias_c=0.0,
                         conditional_high_shape_identity=(
                             None if _day0_conditional_high_shape is None
                             else _day0_conditional_high_shape.identity
@@ -8377,8 +8386,7 @@ def _compute_posterior_payload(
                     }
                     if _day0_conditional_high_shape is not None else {}
                 ),
-                # The persisted future extremes stay UNSHIFTED (the bias fitter's
-                # residual basis); the shift and its artifact ride beside them.
+                # Current live policy leaves the remaining members unshifted.
                 **_day0_remaining_bias_provenance,
                 "day0_remaining_carrier_probability_cutoff_utc": _carrier_cutoff,
                 "day0_preliminary_report_survival_likelihood": (

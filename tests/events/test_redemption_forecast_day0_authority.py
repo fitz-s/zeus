@@ -39,21 +39,23 @@ def test_hko_observation_clock_revision_does_not_relabel_old_certificates():
         "day0_resolver_terminal_composition_v29_smooth_center_bias_observation_clock_city_instrument_variance_v1",
         "day0_settlement_channel_revision_model_v31_smooth_center_bias_observation_clock_city_instrument_native_boundary_v1",
         "day0_resolver_terminal_composition_v30_smooth_center_bias_observation_clock_city_instrument_native_boundary_v1",
+        "day0_settlement_channel_revision_model_v32_smooth_center_bias_observation_clock_city_instrument_native_boundary_v1",
+        "day0_resolver_terminal_composition_v31_smooth_center_bias_observation_clock_city_instrument_native_boundary_v1",
     ):
         old = f"day0-semrev:{previous}:immutable-entry-certificate"
         assert day0_probability_semantics_revision(old) != DAY0_PROBABILITY_SEMANTICS_REVISION
         assert bind_day0_probability_semantics(old) == old
 
 
-def test_product_residual_joint_revision_preserves_all_existing_operator_suffixes(monkeypatch):
+def test_unshifted_joint_revision_preserves_clock_instrument_and_native_boundary(monkeypatch):
     from src.events import day0_authority as authority
 
-    suffix = "smooth_center_bias_observation_clock_city_instrument_native_boundary_v1"
-    assert authority.DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL == f"day0_settlement_channel_revision_model_v32_{suffix}"
-    assert authority.DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER == f"day0_resolver_terminal_composition_v31_{suffix}"
+    suffix = "observation_clock_city_instrument_native_boundary_v1"
+    assert authority.DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL == f"day0_settlement_channel_revision_model_v33_unshifted_remaining_{suffix}"
+    assert authority.DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER == f"day0_resolver_terminal_composition_v32_unshifted_remaining_{suffix}"
     for current_revision, previous_revision in (
-        (authority.DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL, f"day0_settlement_channel_revision_model_v31_{suffix}"),
-        (authority.DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER, f"day0_resolver_terminal_composition_v30_{suffix}"),
+        (authority.DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL, f"day0_settlement_channel_revision_model_v32_smooth_center_bias_{suffix}"),
+        (authority.DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER, f"day0_resolver_terminal_composition_v31_smooth_center_bias_{suffix}"),
     ):
         monkeypatch.setattr(authority, "DAY0_PROBABILITY_SEMANTICS_REVISION", current_revision)
         old = f"day0-semrev:{previous_revision}:immutable-source-certificate"
@@ -62,6 +64,37 @@ def test_product_residual_joint_revision_preserves_all_existing_operator_suffixe
         rebuilt = authority.bind_day0_probability_semantics("immutable-source-certificate")
         assert authority.day0_probability_semantics_revision(rebuilt) == current_revision
         assert rebuilt != old
+
+
+@pytest.mark.parametrize("edli", (False, True))
+@pytest.mark.parametrize("bias,accepted", (
+    (0, True), (0.0, True), (-0.0, True),
+    (None, False), (True, False), ("0", False),
+    (float("nan"), False), (float("inf"), False), (10 ** 400, False), (0.2, False),
+))
+def test_declared_live_center_policy_requires_true_finite_numeric_zero(edli, bias, accepted):
+    from src.events.day0_authority import current_day0_remaining_center_policy_has_authority
+
+    prefix = "_edli_" if edli else ""
+    payload = {prefix + "day0_remaining_center_policy": "unshifted_live_v1",
+               prefix + "day0_remaining_center_bias_c": bias}
+    assert current_day0_remaining_center_policy_has_authority(payload, edli=edli) is accepted
+
+
+def test_old_zero_carrier_is_not_restamped_and_noncarrier_remains_ordinary():
+    from src.events.day0_authority import current_day0_remaining_center_policy_has_authority
+    from src.data.replacement_forecast_bundle_reader import _day0_carrier_identity_reason
+
+    ordinary = {"q_shape": "fused_normal_direct"}
+    assert current_day0_remaining_center_policy_has_authority(ordinary)
+    assert _day0_carrier_identity_reason(ordinary) is None
+    old = {"day0_remaining_carrier_content_identity": "old-unshifted-content",
+           "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+           "day0_remaining_center_bias_c": 0.0}
+    original = dict(old)
+    assert not current_day0_remaining_center_policy_has_authority(old)
+    assert _day0_carrier_identity_reason(old) == "REPLACEMENT_DAY0_REMAINING_CENTER_POLICY_NOT_CURRENT"
+    assert old == original
 
 
 def _forecast(**overrides):

@@ -43,10 +43,10 @@ DAY0_HELD_PINNED_RECOMPUTE_GLOBAL_AUTHORITY = (
 # revision (a provisional carrier that cannot compose fails closed rather than
 # fall back).
 DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL = (
-    "day0_settlement_channel_revision_model_v32_smooth_center_bias_observation_clock_city_instrument_native_boundary_v1"
+    "day0_settlement_channel_revision_model_v33_unshifted_remaining_observation_clock_city_instrument_native_boundary_v1"
 )
 DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER = (
-    "day0_resolver_terminal_composition_v31_smooth_center_bias_observation_clock_city_instrument_native_boundary_v1"
+    "day0_resolver_terminal_composition_v32_unshifted_remaining_observation_clock_city_instrument_native_boundary_v1"
 )
 
 
@@ -98,9 +98,51 @@ DAY0_MONOTONE_SETTLEMENT_BOUND = "MONOTONE_SETTLEMENT_BOUND"
 DAY0_FINAL_DAILY_SETTLEMENT = "FINAL_DAILY_SETTLEMENT"
 DAY0_UNKNOWN_FINALITY = "UNKNOWN"
 DAY0_WU_FAST_RESIDUAL_SOURCE = "wu_api+same_station_fast_tail"
+DAY0_REMAINING_CENTER_POLICY = "unshifted_live_v1"
 DAY0_ABSORBING_FINALITIES = frozenset(
     {DAY0_MONOTONE_SETTLEMENT_BOUND, DAY0_FINAL_DAILY_SETTLEMENT}
 )
+
+
+def current_day0_remaining_center_policy_has_authority(
+    provenance: object, *, edli: bool = False,
+) -> bool:
+    """Require explicit unshifted construction for declared current carriers.
+
+    SCOPE: this declared Day0 carrier. DRAIN: normal seed/cache rebuilding.
+    RESET: a new current-policy certificate; never restamp a legacy zero shift.
+    Ordinary noncarrier forecasts do not acquire a Day0 policy requirement.
+    """
+    if not isinstance(provenance, Mapping):
+        return False
+    prefix = "_edli_" if edli else ""
+    policy_key = prefix + "day0_remaining_center_policy"
+    bias_key = prefix + "day0_remaining_center_bias_c"
+    identity_key = ("_edli_day0_remaining_content_identity" if edli
+                    else "day0_remaining_carrier_content_identity")
+    operator_key = ("_edli_day0_probability_operator" if edli
+                    else "day0_remaining_carrier_operator")
+    shape = provenance.get("q_shape")
+    declared = any(key in provenance for key in (
+        identity_key, operator_key, policy_key, bias_key,
+        prefix + "day0_remaining_bias_status", prefix + "day0_remaining_bias_artifact",
+    )) or isinstance(shape, str) and shape in {
+        "day0_remaining_shared_carrier_v1", "day0_remaining_shared_carrier_v2",
+        "day0_remaining_shared_carrier_v3", "day0_remaining_shared_carrier_resolver_v1",
+        "fused_day0_fast_residual_likelihood",
+    }
+    if not declared:
+        return True
+    policy = provenance.get(policy_key)
+    bias = provenance.get(bias_key)
+    if (not isinstance(policy, str) or policy != DAY0_REMAINING_CENTER_POLICY
+            or isinstance(bias, bool) or not isinstance(bias, (int, float))):
+        return False
+    try:
+        value = float(bias)
+    except OverflowError:
+        return False
+    return math.isfinite(value) and value == 0.0
 
 
 def bind_day0_probability_semantics(q_version: object) -> str:

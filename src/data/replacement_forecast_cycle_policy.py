@@ -443,6 +443,10 @@ def _current_evidence_shape_has_probability_authority(
 ) -> bool:
     """Validate same-cycle target-specific ENS probability authority."""
 
+    from src.events.day0_authority import current_day0_remaining_center_policy_has_authority
+
+    if not current_day0_remaining_center_policy_has_authority(provenance):
+        return False
     shape = _current_evidence_shape(provenance)
     if shape is None:
         return False
@@ -752,6 +756,26 @@ def tradeable_grade_coverage_sql(
             else ""
         )
         + ")))"
+    )
+    from src.events.day0_authority import DAY0_REMAINING_CENTER_POLICY
+
+    policy_type = f"json_type({provenance_expr}, '$.day0_remaining_center_policy')"
+    policy_value = f"json_extract({provenance_expr}, '$.day0_remaining_center_policy')"
+    bias_type = f"json_type({provenance_expr}, '$.day0_remaining_center_bias_c')"
+    bias_value = f"json_extract({provenance_expr}, '$.day0_remaining_center_bias_c')"
+    # Same declaration and strict numeric-zero law as the Python authority gate.
+    fragments.append(
+        "AND (("
+        f"{carrier_identity_type} IS NULL AND {carrier_operator_type} IS NULL AND "
+        f"{policy_type} IS NULL AND {bias_type} IS NULL AND "
+        f"json_type({provenance_expr}, '$.day0_remaining_bias_status') IS NULL AND "
+        f"json_type({provenance_expr}, '$.day0_remaining_bias_artifact') IS NULL AND "
+        f"COALESCE({carrier_shape_value}, '') NOT IN ("
+        "'day0_remaining_shared_carrier_v1', 'day0_remaining_shared_carrier_v2', "
+        "'day0_remaining_shared_carrier_v3', 'day0_remaining_shared_carrier_resolver_v1', "
+        "'fused_day0_fast_residual_likelihood')) OR ("
+        f"{policy_type} = 'text' AND {policy_value} = '{DAY0_REMAINING_CENTER_POLICY}' AND "
+        f"{bias_type} IN ('integer', 'real') AND {bias_value} = 0))"
     )
     return "\n              ".join(fragments)
 

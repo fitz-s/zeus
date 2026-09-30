@@ -3151,8 +3151,11 @@ def _blocked_attempt_fingerprint(
             logic_revisions[path.name] = (stat.st_mtime_ns, stat.st_size)
         except OSError:
             logic_revisions[path.name] = None
+    from src.events.day0_authority import DAY0_REMAINING_CENTER_POLICY
+
     canonical = json.dumps(
         {
+            "day0_remaining_center_policy": DAY0_REMAINING_CENTER_POLICY,
             "request": {
                 key: value
                 for key, value in payload.items()

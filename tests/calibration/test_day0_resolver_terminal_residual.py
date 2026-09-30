@@ -503,14 +503,15 @@ def test_switch_off_resolver_input_is_none_and_revision_is_unchanged(monkeypatch
         decision_time=CUTOFF, boundary_native=30.0, members_native=(30.0,), settlement_semantics=C_SEM,
         artifact_file=artifact,
     ) is None
-    assert day0_authority.DAY0_PROBABILITY_SEMANTICS_REVISION == (
-        "day0_settlement_channel_revision_model_v25_land_grid_v3"
+    assert day0_authority._current_day0_probability_semantics_revision() == (
+        day0_authority.DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL
     )
-    assert day0_authority.DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL == (
-        "day0_settlement_channel_revision_model_v25_land_grid_v3"
+    monkeypatch.setattr("src.config.day0_resolver_terminal_residual_enabled", lambda: True)
+    assert day0_authority._current_day0_probability_semantics_revision() == (
+        day0_authority.DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER
     )
-    assert day0_authority.DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER == (
-        "day0_resolver_terminal_composition_v24_land_grid_v3"
+    assert day0_authority.DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER != (
+        day0_authority.DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL
     )
 
 
@@ -786,7 +787,7 @@ def test_resolver_carrier_replays_byte_identically_from_persisted_input():
 
 
 def test_resolver_composition_shifts_template_before_censoring_at_observed():
-    """The live center shift moves the remaining members first; the censor at A and
+    """The offline pure-builder shift moves remaining members first; the censor at A and
     the terminal composition come after, so non-violation mass is still exactly s."""
     inp = _input(
         levels=(("L0|x", 300, 4, 1.0), ("L1|x", 120, 2, 80.0), ("L2|x", 40, 1, 80.0), ("L3|x", 9, 0, 80.0)),
@@ -820,8 +821,8 @@ def test_resolver_composition_shifts_template_before_censoring_at_observed():
     assert sum(shifted["q"][:observed_index]) == pytest.approx(1.0 - inp.nonviolation_probability, abs=1e-12)
 
 
-def test_switch_on_replay_corpus_rebuild_composes_shift_then_resolver(monkeypatch):
-    """The replay corpus re-scores through the same adapter rebuild: shift, censor, compose."""
+def test_switch_on_replay_corpus_rebuild_composes_unshifted_then_resolver(monkeypatch):
+    """Current rebuild preserves resolver composition without the offline fit."""
     from tests.calibration import test_probability_replay_corpus as corpus_fixture
     import src.calibration.day0_remaining_bias as bias_mod
     import src.engine.event_reactor_adapter as era
@@ -849,9 +850,10 @@ def test_switch_on_replay_corpus_rebuild_composes_shift_then_resolver(monkeypatc
     monkeypatch.setattr(era, "_rebuild_decision_time_day0_carrier", spy)
     observation = corpus_fixture._observation()
     q, reason, _ = corpus_fixture._replay_state(observation)
-    assert reason is None and shifts
+    assert reason is None and not shifts
     assert captured["_edli_day0_probability_operator"] == DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER
-    assert captured["_edli_day0_remaining_center_bias_c"] == -0.3
+    assert captured["_edli_day0_remaining_center_bias_c"] == 0.0
+    assert captured["_edli_day0_remaining_center_policy"] == "unshifted_live_v1"
     assert Day0ResolverTerminalInput.from_payload(captured["_edli_day0_resolver_terminal_input"]) == inp
     carrier_q = captured["_edli_day0_remaining_carrier_q"]
     # LOW, A = R(9.0) = 9: non-violation = bins <= 9 ("8 or below", "9").

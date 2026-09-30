@@ -102,6 +102,10 @@ class _HeldContinuityStatus(StrEnum):
 def _day0_carrier_identity_reason(provenance: Mapping[str, Any]) -> str | None:
     """Require current identity whenever the posterior declares a shared carrier."""
 
+    from src.events.day0_authority import current_day0_remaining_center_policy_has_authority
+
+    if not current_day0_remaining_center_policy_has_authority(provenance):
+        return "REPLACEMENT_DAY0_REMAINING_CENTER_POLICY_NOT_CURRENT"
     identity_field = "day0_remaining_carrier_content_identity"
     operator_field = "day0_remaining_carrier_operator"
     has_identity = identity_field in provenance
@@ -419,6 +423,10 @@ def _wu_fast_pinned_carrier_reason(
 ) -> str | None:
     """Reproduce the fast likelihood's exact source and carrier identity."""
 
+    from src.events.day0_authority import current_day0_remaining_center_policy_has_authority
+
+    if not current_day0_remaining_center_policy_has_authority(provenance):
+        return "REPLACEMENT_DAY0_REMAINING_CENTER_POLICY_NOT_CURRENT"
     # SCOPE: this held family's exact pinned WU-fast posterior. DRAIN: normal
     # materialization writes a new source-bound posterior if this immutable row
     # is incomplete. RESET: a nested likelihood and full carrier that this
@@ -496,6 +504,9 @@ def _wu_fast_pinned_carrier_reason(
             station_id=station, preliminary_survival_identity=likelihood["identity_hash"],
         )
         identity_inputs["current_path_state"] = current_path
+        from src.events.day0_authority import DAY0_REMAINING_CENTER_POLICY
+
+        identity_inputs["day0_remaining_center_policy"] = DAY0_REMAINING_CENTER_POLICY
         conditional_identity = provenance.get("day0_conditional_high_shape_identity")
         conditional_witness = provenance.get("day0_conditional_high_shape_witness")
         conditional_basis = provenance.get("day0_remaining_variance_basis")
@@ -534,7 +545,7 @@ def _wu_fast_pinned_carrier_reason(
             identity_inputs=identity_inputs,
             settlement_semantics=SettlementSemantics.for_city(city_obj),
             operator=str(provenance["day0_remaining_carrier_operator"]),
-            remaining_center_bias_native=float(provenance.get("day0_remaining_center_bias_c") or 0.0) * scale,
+            remaining_center_bias_native=0.0,
         )
     except (KeyError, TypeError, ValueError, OverflowError):
         return "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_CARRIER_INVALID"

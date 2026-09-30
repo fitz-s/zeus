@@ -1,8 +1,8 @@
 # Purpose: Verify forecast-cycle eligibility, coverage and current-carrier reseeding.
 # Reuse: Run when changing posterior cycle authority or seed coverage and drain rules.
 # Created: 2026-06-10
-# Last reused or audited: 2026-09-29
-# Lifecycle: created=2026-06-10; last_reviewed=2026-09-29; last_reused=2026-09-29
+# Last reused or audited: 2026-09-30
+# Lifecycle: created=2026-06-10; last_reviewed=2026-09-30; last_reused=2026-09-30
 # Authority basis: operator staleness/cycle-physics directive 2026-06-10 (bounded re-materialization
 #   staleness gate at materialization, fail-closed; cycle-phase provenance treats all standard
 #   00Z/06Z/12Z/18Z cycles as live-eligible synoptic); 2026-08-19 causal
@@ -671,6 +671,11 @@ def test_day0_carrier_coverage_requires_complete_current_v2_pair() -> None:
         ),
     )
     for carrier, expected in cases:
+        # Current structural positives must also declare the current center
+        # construction; old zero/missing-policy rejection is tested separately.
+        if carrier and expected:
+            carrier = {**carrier, "day0_remaining_center_policy": "unshifted_live_v1",
+                       "day0_remaining_center_bias_c": 0.0}
         conn.execute("DELETE FROM posterior")
         conn.execute(
             "INSERT INTO posterior VALUES (?, ?, ?)",
@@ -680,6 +685,73 @@ def test_day0_carrier_coverage_requires_complete_current_v2_pair() -> None:
             f"SELECT count(*) FROM posterior WHERE 1=1 {clause}"
         ).fetchone()[0]
         assert bool(count) is expected, carrier
+
+
+def test_live_unshifted_policy_python_and_sql_coverage_share_strict_types(monkeypatch) -> None:
+    """Same lawful body/geometry; only the carrier construction claim changes."""
+    physical, request, baseline, scope = _licensed_current_context(monkeypatch)
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE posterior (q_lcb_json TEXT, q_ucb_json TEXT, provenance_json TEXT)")
+    coverage = tradeable_grade_coverage_sql(
+        posterior_columns={"q_lcb_json", "q_ucb_json", "provenance_json"},
+        decision_time=request.computed_at,
+    )
+    current = {"day0_remaining_center_policy": "unshifted_live_v1",
+               "day0_remaining_center_bias_c": 0.0}
+    cases = [({}, True), (current, True),
+             ({"day0_remaining_center_bias_c": 0.0}, False),
+             ({"day0_remaining_center_policy": "unshifted_live_v1"}, False),
+             ({**current, "day0_remaining_center_policy": "old-live-policy"}, False)]
+    cases.extend(({**current, "day0_remaining_center_bias_c": bias}, accepted)
+                 for bias, accepted in ((0, True), (-0.0, True), (None, False),
+                                        (True, False), ("0", False),
+                                        (float("nan"), False), (float("inf"), False),
+                                        (0.5, False)))
+    for changed, expected in cases:
+        provenance = {**baseline, **changed}
+        assert current_evidence_shape_has_entry_authority(provenance, **scope) is expected
+        assert current_evidence_shape_has_held_authority(provenance, **scope) is expected
+        conn.execute("DELETE FROM posterior")
+        conn.execute("INSERT INTO posterior VALUES ('{}', '{}', ?)", (json.dumps(provenance),))
+        assert bool(conn.execute(f"SELECT count(*) FROM posterior WHERE 1=1 {coverage}").fetchone()[0]) is expected
+    conn.close()
+    physical.close()
+
+
+def test_same_raw_live_policy_transition_retries_without_mtime_churn(tmp_path, monkeypatch) -> None:
+    """Real canonical inputs stay immutable; policy alone clears old suppression."""
+    from pathlib import Path
+    from src.events import day0_authority
+    from src.data import replacement_forecast_live_materialization_queue as queue
+
+    physical, request, _, scope = _licensed_current_context(monkeypatch)
+    original = physical.execute("SELECT * FROM raw_model_forecasts").fetchall()
+    payload = dict(city=request.city, target_date=request.target_date.isoformat(),
+                   temperature_metric=request.temperature_metric,
+                   source_cycle_time=request.source_cycle_time.isoformat(),
+                   computed_at=request.computed_at.isoformat())
+    before_payload = dict(payload)
+    real_stat = Path.stat
+    stable_stats = {}
+
+    def fixed_stat(path, *args, **kwargs):
+        if str(path) not in stable_stats:
+            stable_stats[str(path)] = real_stat(path, *args, **kwargs)
+        return stable_stats[str(path)]
+
+    monkeypatch.setattr(Path, "stat", fixed_stat)
+    def fingerprint():
+        return queue._blocked_attempt_fingerprint(input_json=tmp_path / "seed.json",
+            forecast_db=scope["forecast_db"], payload=payload)
+    with monkeypatch.context() as previous_policy:
+        previous_policy.setattr(day0_authority, "DAY0_REMAINING_CENTER_POLICY", "old-fitted-live-policy")
+        before = fingerprint()
+    after = fingerprint()
+    assert before is not None and after is not None
+    assert before != after == fingerprint()
+    assert payload == before_payload
+    assert physical.execute("SELECT * FROM raw_model_forecasts").fetchall() == original
+    physical.close()
 
 
 def test_day0_v3_coverage_rejects_malformed_provider_and_infinite_value() -> None:
