@@ -978,6 +978,212 @@ def source_cell_geometry_proof(
     }
 
 
+def _o1280_snapshot_cell(body: bytes, *, latitude: float, longitude: float,
+        target_elevation_m: float) -> dict[str, object]:
+    """Decode the same immutable byte snapshot that was hashed, never reopen a path."""
+    import fsspec
+    from fsspec.implementations.memory import MemoryFileSystem
+    from omfiles import OmFileReader
+    from uuid import uuid4
+
+    if any(isinstance(v, bool) or not math.isfinite(float(v)) for v in
+           (latitude, longitude, target_elevation_m)):
+        raise ValueError("invalid O1280 source geometry")
+    if not -90<=latitude<=90 or not -180<=longitude<=180 or not -500<=target_elevation_m<=9000:
+        raise ValueError("invalid O1280 source geometry range")
+    memory = MemoryFileSystem(skip_instance_cache=True)
+    name = f"/zeus-o1280-snapshot/{uuid4().hex}.om"
+    memory.pipe_file(name, body)
+    try:
+        with OmFileReader(fsspec.core.OpenFile(memory, name, mode="rb")) as reader:
+            if reader.shape != (1, O1280_TOTAL_POINTS):
+                raise ValueError("O1280 source static shape mismatch")
+            def elevation(index):
+                value = float(reader[0:1, index:index+1].reshape(-1)[0])
+                if not math.isfinite(value):
+                    raise ValueError("non-finite O1280 source elevation")
+                return value
+            cell = select_terrain_optimised_point(latitude, longitude, target_elevation_m,
+                read_elevation=elevation)
+            raw_elevation=elevation(cell.flat_index)
+            if raw_elevation>=9999:
+                raise ValueError("O1280 source native elevation unavailable")
+            nearby, _, _ = om_get_surrounding_gridpoints(latitude, longitude)
+            return {"revision":"openmeteo_ifs9_o1280_source_cell_v1",
+                "selected_flat_index":cell.flat_index, "selected_grid_lat":cell.grid_latitude,
+                "selected_grid_lon":cell.grid_longitude_east,
+                "raw_grid_elevation_m":raw_elevation,
+                "effective_grid_elevation_m":cell.model_elevation_m,
+                "target_dem_elevation_m":target_elevation_m, "cell_is_sea":cell.is_sea,
+                "cell_is_center":cell.is_center, "nearby_sea":any(elevation(index)<=SEA_SENTINEL_M for index in nearby)}
+    finally:
+        memory.rm_file(name)
+
+
+def _o1280_snapshot_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _o1280_snapshot_write(path, body: bytes) -> None:
+    """Complete a content-addressed regular file before publishing its reference."""
+    import os
+    import tempfile
+    from pathlib import Path
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        raise ValueError("O1280 immutable source path is a symlink")
+    if path.exists():
+        if not path.is_file():
+            raise ValueError("O1280 immutable source path is not regular")
+        if path.read_bytes() == body:
+            return
+        path.rename(path.with_name(f"{path.name}.damaged.{time.time_ns()}"))
+    descriptor, temporary = tempfile.mkstemp(prefix=".o1280-source-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            if path.is_symlink() or path.read_bytes() != body:
+                raise ValueError("O1280 immutable source race")
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def _o1280_snapshot_root():
+    from src.config import state_path
+    return state_path("static")
+
+
+def _read_o1280_snapshot(audit: Mapping[str, object], *, decision_at: object) -> bytes:
+    import hashlib
+    from pathlib import Path
+    root = _o1280_snapshot_root().resolve()
+    path, manifest_path = Path(str(audit["asset_path"])), Path(str(audit["manifest_path"]))
+    sha, manifest_sha = str(audit["whole_sha256"]), str(audit["manifest_sha256"])
+    if any(len(value)!=64 or any(c not in "0123456789abcdef" for c in value) for value in (sha, manifest_sha)):
+        raise ValueError("invalid O1280 immutable source hash")
+    if (path.parent.resolve()!=root or manifest_path.parent.resolve()!=root or path.is_symlink() or manifest_path.is_symlink()
+        or path.name!=f"ecmwf_ifs_o1280_hsurf.{sha}.om"
+        or manifest_path.name!=f"ecmwf_ifs_o1280_hsurf.{sha}.{manifest_sha}.manifest.json"):
+        raise ValueError("invalid O1280 immutable source identity")
+    if not 0<path.stat().st_size<=16*1024*1024 or not 0<manifest_path.stat().st_size<=64*1024:
+        raise ValueError("invalid O1280 immutable source size")
+    manifest_body = manifest_path.read_bytes()
+    if not 0<len(manifest_body)<=64*1024:
+        raise ValueError("invalid O1280 immutable manifest size")
+    if hashlib.sha256(manifest_body).hexdigest()!=manifest_sha:
+        raise ValueError("invalid O1280 immutable manifest hash")
+    manifest = json.loads(manifest_body)
+    expected = {key:value for key,value in audit.items() if key not in ("asset_path","manifest_path","manifest_sha256")}
+    if (manifest!=expected or manifest["revision"]!="openmeteo_ifs9_o1280_static_snapshot_v1"
+        or manifest["model"]!="ecmwf_ifs" or manifest["native_grid"]!="O1280"
+        or manifest["point_count"]!=O1280_TOTAL_POINTS
+        or manifest["possession_role"]!="local_static_snapshot_not_http_capture"):
+        raise ValueError("invalid O1280 immutable manifest contract")
+    clocks = [datetime.fromisoformat(str(value).replace("Z","+00:00")) for value in
+              (manifest["possessed_at"],manifest["recorded_at"],decision_at)]
+    if any(value.tzinfo is None for value in clocks) or not clocks[0]<=clocks[1]<=clocks[2]:
+        raise ValueError("O1280 immutable source not possessed at decision")
+    body = path.read_bytes()
+    if (not 0<len(body)<=16*1024*1024 or isinstance(manifest["byte_size"],bool) or len(body)!=manifest["byte_size"]
+        or hashlib.sha256(body).hexdigest()!=sha):
+        raise ValueError("invalid O1280 immutable entity body")
+    return body
+
+
+def capture_source_cell_geometry_proof(*, latitude: float, longitude: float,
+        target_elevation_m: float, local_cache: str | None = None) -> dict[str, object]:
+    """Normal producer freezes already-owned O1280 bytes; no HTTP or DB write.
+
+    Its local possession clock is independent of the forecast's original issue
+    and capture. A reader never calls this function or backdates a new snapshot.
+    Same verified bytes reuse first possession; damaged evidence is retained and
+    a new hash-sealed manifest can authorize only a genuinely new decision cut.
+    """
+    import hashlib
+    from pathlib import Path
+    original = Path(local_cache or HSURF_LOCAL_CACHE)
+    if original.is_symlink() or not original.is_file() or not 0<original.stat().st_size<=16*1024*1024:
+        raise ValueError("O1280 local static unavailable")
+    body = original.read_bytes()
+    if not 0<len(body)<=16*1024*1024:
+        raise ValueError("O1280 local static size changed")
+    geometry = _o1280_snapshot_cell(body, latitude=latitude, longitude=longitude, target_elevation_m=target_elevation_m)
+    sha = hashlib.sha256(body).hexdigest()
+    root = _o1280_snapshot_root()
+    asset_path = root/f"ecmwf_ifs_o1280_hsurf.{sha}.om"
+    _o1280_snapshot_write(asset_path, body)
+    possession = _o1280_snapshot_now()
+    if possession.tzinfo is None:
+        raise ValueError("O1280 local possession clock is naive")
+    now = possession.astimezone(timezone.utc).isoformat()
+    candidates = []
+    damaged = []
+    for candidate in root.glob(f"ecmwf_ifs_o1280_hsurf.{sha}.*.manifest.json"):
+        try:
+            encoded = candidate.read_bytes()
+            audit = {**json.loads(encoded), "asset_path":str(asset_path), "manifest_path":str(candidate),
+                     "manifest_sha256":hashlib.sha256(encoded).hexdigest()}
+            if _read_o1280_snapshot(audit, decision_at=now)!=body:
+                raise ValueError("O1280 source changed")
+            candidates.append(audit)
+        except (OSError,ValueError,KeyError,TypeError):
+            if candidate.is_symlink():
+                raise ValueError("O1280 immutable manifest is a symlink")
+            damaged.append(candidate.name)
+            candidate.rename(candidate.with_name(f"{candidate.name}.damaged.{time.time_ns()}"))
+    if candidates and not damaged:
+        audit = max(candidates,key=lambda value:str(value["recorded_at"]))
+    else:
+        manifest = {"revision":"openmeteo_ifs9_o1280_static_snapshot_v1", "model":"ecmwf_ifs",
+            "native_grid":"O1280", "point_count":O1280_TOTAL_POINTS, "whole_sha256":sha,
+            "byte_size":len(body), "possession_role":"local_static_snapshot_not_http_capture",
+            "possessed_at":now, "recorded_at":now}
+        if damaged:
+            manifest["recovery_of"] = sorted(damaged)
+        encoded = json.dumps(manifest,sort_keys=True,separators=(",",":")).encode()
+        manifest_sha = hashlib.sha256(encoded).hexdigest()
+        manifest_path = root/f"ecmwf_ifs_o1280_hsurf.{sha}.{manifest_sha}.manifest.json"
+        _o1280_snapshot_write(manifest_path,encoded)
+        audit = {**manifest,"asset_path":str(asset_path),"manifest_path":str(manifest_path),"manifest_sha256":manifest_sha}
+    return {**geometry,"static_hsurf_sha256":sha,"static_asset_audit":audit}
+
+
+def validate_source_cell_geometry_proof(proof: Mapping[str,object], *, latitude: float,
+        longitude: float, target_elevation_m: float, decision_at: object) -> str | None:
+    """Replay this frozen O1280 source's own bytes and complete cell facts, read-only."""
+    try:
+        body = _read_o1280_snapshot(proof["static_asset_audit"],decision_at=decision_at)
+        if proof["static_hsurf_sha256"]!=proof["static_asset_audit"]["whole_sha256"]:
+            return "OM9_FROZEN_SOURCE_STATIC_IDENTITY_MISMATCH"
+        actual = _o1280_snapshot_cell(body,latitude=latitude,longitude=longitude,target_elevation_m=target_elevation_m)
+        for key,value in actual.items():
+            claimed = proof.get(key)
+            if isinstance(value,bool):
+                if not isinstance(claimed,bool) or claimed!=value:
+                    return "OM9_FROZEN_SOURCE_CELL_MISMATCH"
+            elif isinstance(value,(int,float)):
+                if (isinstance(claimed,bool) or not isinstance(claimed,(int,float))
+                    or (isinstance(value,int) and not isinstance(claimed,int))
+                    or not math.isfinite(float(claimed)) or claimed!=value):
+                    return "OM9_FROZEN_SOURCE_CELL_MISMATCH"
+            elif claimed!=value:
+                return "OM9_FROZEN_SOURCE_CELL_MISMATCH"
+        grid_lon = float(actual["selected_grid_lon"])
+        if grid_lon>180:
+            grid_lon-=360
+        if actual["cell_is_sea"] or not math.isclose(float(actual["selected_grid_lat"]),latitude,abs_tol=1e-5) or not math.isclose(grid_lon,longitude,abs_tol=1e-5):
+            return "OM9_FROZEN_SOURCE_SELECTED_CELL_MISMATCH"
+        return None
+    except (KeyError,IndexError,TypeError,ValueError,OSError,RuntimeError):
+        return "OM9_FROZEN_SOURCE_STATIC_UNAVAILABLE"
+
+
 def download_hsurf_static_field(*, local_cache: str = HSURF_LOCAL_CACHE) -> str:
     """One-time copy of HSURF.om to ``state/static/`` (small, 2.48 MB). Returns the path.
 

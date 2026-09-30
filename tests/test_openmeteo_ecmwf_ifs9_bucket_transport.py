@@ -48,6 +48,117 @@ from src.data.openmeteo_ecmwf_ifs9_bucket_transport import (
 UTC = timezone.utc
 
 
+def _actual_o1280_static_fixture(tmp_path, monkeypatch):
+    import numpy as np
+    from omfiles import OmFileWriter
+    from src.data import openmeteo_ecmwf_ifs9_bucket_transport as transport
+    path = tmp_path/"original.om"
+    data = np.full((1,transport.O1280_TOTAL_POINTS),32,dtype=np.float32)
+    def write():
+        writer = OmFileWriter(str(path))
+        root = writer.write_array(data,chunks=(1,10000),name="HSURF")
+        writer.close(root)
+    write()
+    clock = [datetime(2026,9,30,12,tzinfo=UTC)]
+    monkeypatch.setattr(transport,"_o1280_snapshot_root",lambda:tmp_path/"static")
+    monkeypatch.setattr(transport,"_o1280_snapshot_now",lambda:clock[0])
+    points,_,center = transport.om_get_surrounding_gridpoints(22.3,114.17)
+    point = transport.om_get_coordinates(points[center])
+    kwargs = dict(latitude=point.grid_latitude,longitude=point.grid_longitude_east,target_elevation_m=32.,local_cache=str(path))
+    return transport,path,data,write,clock,kwargs
+
+
+@pytest.mark.parametrize("key",("selected_flat_index","selected_grid_lat","selected_grid_lon",
+    "raw_grid_elevation_m","effective_grid_elevation_m","target_dem_elevation_m","cell_is_sea","cell_is_center","nearby_sea","revision"))
+def test_frozen_o1280_complete_cell_cannot_be_replaced_by_missing_or_wrong_facts(tmp_path,monkeypatch,key):
+    from copy import deepcopy
+    transport,_,_,_,_,kwargs = _actual_o1280_static_fixture(tmp_path,monkeypatch)
+    proof = transport.capture_source_cell_geometry_proof(**kwargs)
+    args={key:kwargs[key] for key in ("latitude","longitude","target_elevation_m")}
+    args["decision_at"]="2026-09-30T12:01:00Z"
+    assert transport.validate_source_cell_geometry_proof(proof,**args) is None
+    missing=deepcopy(proof)
+    missing.pop(key)
+    assert transport.validate_source_cell_geometry_proof(missing,**args) is not None
+    wrong=deepcopy(proof)
+    wrong[key]=not proof[key] if isinstance(proof[key],bool) else proof[key]+1 if isinstance(proof[key],(int,float)) else "wrong"
+    assert transport.validate_source_cell_geometry_proof(wrong,**args) is not None
+    assert transport.validate_source_cell_geometry_proof({"revision":proof["revision"],"cell_is_sea":False},**args) is not None
+
+
+def test_frozen_o1280_own_snapshot_replays_after_other_cell_edit_without_clock_renewal(tmp_path,monkeypatch):
+    from pathlib import Path
+    transport,path,data,write,clock,kwargs = _actual_o1280_static_fixture(tmp_path,monkeypatch)
+    a=transport.capture_source_cell_geometry_proof(**kwargs)
+    args={key:kwargs[key] for key in ("latitude","longitude","target_elevation_m")}
+    assert transport.validate_source_cell_geometry_proof(a,**args,decision_at="2026-09-30T11:59:59Z") is not None
+    assert transport.validate_source_cell_geometry_proof(a,**args,decision_at="2026-09-30T12:00:00Z") is None
+    clock[0]=datetime(2026,9,30,13,tzinfo=UTC)
+    assert transport.capture_source_cell_geometry_proof(**kwargs)==a
+    data[0,0]=99
+    write()
+    b=transport.capture_source_cell_geometry_proof(**kwargs)
+    assert a["static_hsurf_sha256"]!=b["static_hsurf_sha256"]
+    semantic=lambda proof:{key:value for key,value in proof.items() if key not in ("static_hsurf_sha256","static_asset_audit")}
+    assert semantic(a)==semantic(b)
+    assert transport.validate_source_cell_geometry_proof(a,**args,decision_at="2026-09-30T12:00:00Z") is None
+    assert transport.validate_source_cell_geometry_proof(b,**args,decision_at="2026-09-30T12:00:00Z") is not None
+    # A mutable source edit cannot change frozen A's own cell or bytes.
+    data[0,a["selected_flat_index"]]=80
+    write()
+    assert transport.validate_source_cell_geometry_proof(a,**args,decision_at="2026-09-30T14:00:00Z") is None
+    # Missing/corrupt frozen bytes fail closed. Normal local capture can repair
+    # exact canonical A bytes without inventing HTTP or renewing first clocks.
+    owned=Path(a["static_asset_audit"]["asset_path"])
+    owned.unlink()
+    assert transport.validate_source_cell_geometry_proof(a,**args,decision_at="2026-09-30T14:00:00Z") is not None
+    data[:]=32
+    write()
+    restored=transport.capture_source_cell_geometry_proof(**kwargs)
+    assert restored==a
+    assert transport.validate_source_cell_geometry_proof(a,**args,decision_at="2026-09-30T12:00:00Z") is None
+
+
+def test_frozen_o1280_hash_and_decode_share_one_byte_snapshot(tmp_path,monkeypatch):
+    from pathlib import Path
+    transport,_,data,write,_,kwargs = _actual_o1280_static_fixture(tmp_path,monkeypatch)
+    a=transport.capture_source_cell_geometry_proof(**kwargs)
+    owned=Path(a["static_asset_audit"]["asset_path"])
+    original=owned.read_bytes()
+    data[0,a["selected_flat_index"]]=80
+    write()
+    replacement=Path(kwargs["local_cache"]).read_bytes()
+    decode=transport._o1280_snapshot_cell
+    def racing(body,**args):
+        owned.write_bytes(replacement)
+        try:
+            return decode(body,**args)
+        finally:
+            owned.write_bytes(original)
+    monkeypatch.setattr(transport,"_o1280_snapshot_cell",racing)
+    args={key:kwargs[key] for key in ("latitude","longitude","target_elevation_m")}
+    assert transport.validate_source_cell_geometry_proof(a,**args,decision_at="2026-09-30T12:01:00Z") is None
+
+
+def test_frozen_o1280_bad_manifest_requires_new_local_possession_not_http_or_old_cut(tmp_path,monkeypatch):
+    from pathlib import Path
+    transport,_,_,_,clock,kwargs = _actual_o1280_static_fixture(tmp_path,monkeypatch)
+    a=transport.capture_source_cell_geometry_proof(**kwargs)
+    args={key:kwargs[key] for key in ("latitude","longitude","target_elevation_m")}
+    Path(a["static_asset_audit"]["manifest_path"]).write_bytes(b"damaged-controlled-manifest")
+    assert transport.validate_source_cell_geometry_proof(a,**args,decision_at="2026-09-30T12:01:00Z") is not None
+    clock[0]=datetime(2026,9,30,14,tzinfo=UTC)
+    recovered=transport.capture_source_cell_geometry_proof(**kwargs)
+    assert recovered["static_hsurf_sha256"]==a["static_hsurf_sha256"]
+    assert recovered["static_asset_audit"]["possession_role"]=="local_static_snapshot_not_http_capture"
+    assert recovered["static_asset_audit"]["possessed_at"]==clock[0].isoformat()
+    assert recovered["static_asset_audit"]["recovery_of"]
+    assert transport.validate_source_cell_geometry_proof(recovered,**args,decision_at="2026-09-30T12:01:00Z") is not None
+    assert transport.validate_source_cell_geometry_proof(recovered,**args,decision_at="2026-09-30T14:01:00Z") is None
+    clock[0]=datetime(2026,9,30,15,tzinfo=UTC)
+    assert transport.capture_source_cell_geometry_proof(**kwargs)==recovered
+
+
 def test_bucket_point_reader_pool_reuses_valid_time_reader_and_closes() -> None:
     opened: list[tuple[str, str]] = []
     readers: list[object] = []
@@ -590,7 +701,8 @@ def test_resolve_anchor_payload_ladder_degrades_rung1_400_then_rung2_then_rung3(
     monkeypatch.setattr(
         "src.data.openmeteo_ecmwf_ifs9_anchor.fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped",
         lambda r, **kwargs: (
-            {"hourly": {"time": [], "temperature_2m": []}},
+            {"utc_offset_seconds":28800,"hourly_units":{"temperature_2m":"°C"},
+             "hourly":{"time":[f"2026-06-13T{hour:02d}:00" for hour in range(24)],"temperature_2m":[25.]*24}},
             {"run_authority": "meta_stamped"},
         ),
     )
