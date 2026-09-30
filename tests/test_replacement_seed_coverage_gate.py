@@ -34,6 +34,7 @@ import json
 import hashlib
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -197,33 +198,69 @@ def test_null_q_lcb_posterior_does_not_satisfy_coverage(tmp_path) -> None:
     assert _seed_already_covered(forecast_db=db_path, seed=_seed()) is False
 
 
-def test_tradeable_posterior_with_fresh_readiness_is_covered(tmp_path) -> None:
+def _seed_from_certificate(normal, *, conditioning=False):
+    request = normal.request
+    seed = dict(city=request.city, target_date=str(request.target_date),
+        temperature_metric=request.temperature_metric, computed_at=request.computed_at.isoformat(),
+        baseline_source_run_id=request.baseline_source_run_id,
+        openmeteo_source_run_id=request.openmeteo_source_run_id)
+    if conditioning:
+        observed_at = request.day0_observed_extreme_observation_time
+        seed.update(day0_observed_extreme_c=request.day0_observed_extreme_c,
+            day0_observed_extreme_source=request.day0_observed_extreme_source,
+            day0_observed_extreme_observation_time=(observed_at.isoformat()
+                if isinstance(observed_at, datetime) else observed_at),
+            day0_observed_extreme_unit=request.day0_observed_extreme_unit)
+    return seed
+
+
+@pytest.fixture
+def _normal_seed_certificate(tmp_path, monkeypatch, request):
+    """Read-import the actual HIGH/LOW collector/public worlds, never retag a quantity."""
+    from tests.test_replacement_forecast_bundle_reader import _shanghai_reader_current_certificate
+    from src.data.station_ground_evidence import forecast_db_from_connection
+
+    metric = getattr(request.node, "callspec", SimpleNamespace(params={})).params.get("metric", "high")
+    source = None
+    if metric == "low":
+        normal = request.getfixturevalue("_normal_kord_fast_coverage")
+    else:
+        source = _shanghai_reader_current_certificate.__wrapped__(tmp_path, monkeypatch)
+        normal = next(source)
+    builtin = sqlite3.connect(":memory:")
+    try:
+        cut = normal.request.computed_at
+        # Consumer wall time is the declared private decision cut. It does not
+        # renew any published source/receipt/posterior/expiry field.
+        normal.conn.create_function("strftime", 2, lambda fmt, value:
+            cut.isoformat(timespec="milliseconds")
+            if (fmt, value) == ("%Y-%m-%dT%H:%M:%f+00:00", "now") else
+            cut.strftime(fmt) if (fmt, value) == ("%Y-%m-%dT%H:%M:%S", "now") else
+            builtin.execute("SELECT strftime(?,?)", (fmt, value)).fetchone()[0])
+        yield SimpleNamespace(conn=normal.conn, db=forecast_db_from_connection(normal.conn),
+            request=normal.request, cut=cut)
+    finally:
+        if source is not None:
+            next(source, None)
+        builtin.close()
+
+
+def test_tradeable_posterior_with_fresh_readiness_is_covered(_normal_seed_certificate) -> None:
     """A tradeable-grade (q_lcb non-NULL) posterior + fresh readiness DOES count as coverage."""
-    db_path = _db(tmp_path)
-    _insert_posterior(db_path, q_lcb_json=json.dumps({"cold": 0.1, "warm": 0.7}))
-    _insert_readiness(db_path, expires_at=datetime.now(UTC) + timedelta(hours=3))
-    assert _seed_already_covered(forecast_db=db_path, seed=_seed()) is True
+    normal = _normal_seed_certificate
+    assert _seed_already_covered(forecast_db=normal.db, forecast_conn=normal.conn,
+        seed=_seed_from_certificate(normal)) is True
 
 
 def test_coverage_gate_preserves_indexed_computed_at_order(
-    tmp_path, monkeypatch
+    _normal_seed_certificate,
 ) -> None:
-    import src.data.replacement_forecast_live_materialization_queue as queue
-
-    db_path = _db(tmp_path)
-    _insert_posterior(db_path, q_lcb_json=json.dumps({"cold": 0.1, "warm": 0.7}))
-    _insert_readiness(db_path, expires_at=datetime.now(UTC) + timedelta(hours=3))
+    normal = _normal_seed_certificate
     trace: list[str] = []
-
-    def _connect(path, **_kwargs):
-        conn = sqlite3.connect(path)
-        conn.row_factory = sqlite3.Row
-        conn.set_trace_callback(trace.append)
-        return conn
-
-    monkeypatch.setattr(queue, "_queue_read_only_connection", _connect)
-
-    assert _seed_already_covered(forecast_db=db_path, seed=_seed()) is True
+    normal.conn.set_trace_callback(trace.append)
+    assert _seed_already_covered(forecast_db=normal.db, forecast_conn=normal.conn,
+        seed=_seed_from_certificate(normal)) is True
+    normal.conn.set_trace_callback(None)
     posterior_query = next(
         statement
         for statement in trace
@@ -359,72 +396,36 @@ def test_newer_day0_observation_seed_does_not_satisfy_coverage(tmp_path) -> None
         assert _seed_already_covered(forecast_db=db_path, seed=seed) is False
 
 
-def test_day0_seed_coverage_requires_exact_conditioning_identity(tmp_path) -> None:
-    db_path = _db(tmp_path)
-    _insert_posterior(db_path, q_lcb_json=json.dumps({"cold": 0.1, "warm": 0.7}))
-    _insert_readiness(db_path, expires_at=datetime.now(UTC) + timedelta(hours=3))
-    seed = {
-        **_seed(),
-        "computed_at": "2026-06-06T03:00:00+00:00",
-        "day0_observed_extreme_c": 31.0,
-        "day0_observed_extreme_source": "aviationweather_metar",
-        "day0_observed_extreme_observation_time": "2026-06-06T02:00:00+00:00",
-        "day0_observed_extreme_unit": "C",
-    }
+def test_day0_seed_coverage_requires_exact_conditioning_identity(_normal_kord_fast_coverage) -> None:
+    """Actual LOW FAST authority; every requested identity field remains exact."""
+    from src.data.replacement_cycle_advance_trigger import _active_day0_provisional_or_conditioning
 
-    def set_conditioning(provenance_key: str, **overrides) -> None:
-        conditioning = {
-            "active": True,
-            "metric": _METRIC,
-            "source": "aviationweather_metar",
-            "observed_extreme_c": 31.0,
-            "observation_time": "2026-06-06T02:00:00+00:00",
-            "unit": "C",
-            **overrides,
-        }
-        conn = sqlite3.connect(db_path)
-        conn.execute(
-            "UPDATE forecast_posteriors SET provenance_json = ?",
-            (
-                json.dumps(
-                    {
-                        "q_lcb_basis": "fused_center_bootstrap_p05",
-                        "bayes_precision_fusion": {
-                            "used_models": ["gfs_global"],
-                            "current_evidence_shape": {
-                                **_current_geometry_fixture(),
-                                "semantics_revision": (
-                                    CURRENT_EVIDENCE_SEMANTICS_REVISION
-                                ),
-                                "shape_lag_hours": 0.0,
-                                "source_cycle_time": "2026-06-06T00:00:00+00:00",
-                                "stale_shape_reused": False,
-                                "translation_applied": False,
-                            },
-                        },
-                        provenance_key: conditioning,
-                    }
-                ),
-            ),
-        )
-        conn.commit()
-        conn.close()
-
-    for provenance_key in ("day0_conditioning", "day0_provisional_observation"):
-        set_conditioning(provenance_key)
-        assert _seed_already_covered(forecast_db=db_path, seed=seed) is True
-
-        set_conditioning(provenance_key, source="wu_icao_history")
-        assert _seed_already_covered(forecast_db=db_path, seed=seed) is False
-
-        set_conditioning(provenance_key, observed_extreme_c=30.0)
-        assert _seed_already_covered(forecast_db=db_path, seed=seed) is False
-
-        set_conditioning(provenance_key, metric="low")
-        assert _seed_already_covered(forecast_db=db_path, seed=seed) is False
-
-        set_conditioning(provenance_key, unit="F")
-        assert _seed_already_covered(forecast_db=db_path, seed=seed) is False
+    normal = _normal_kord_fast_coverage
+    seed = _seed_from_certificate(normal, conditioning=True)
+    row = dict(normal.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+        (normal.result.posterior_id,)).fetchone())
+    provenance = json.loads(row["provenance_json"])
+    matching = dict(_active_day0_provisional_or_conditioning(provenance))
+    assert _seed_already_covered(forecast_db=normal.db, forecast_conn=normal.conn, seed=seed) is True
+    # Both legacy selector branches still enforce the same identity. Only
+    # the actual active FAST branch is claimed to carry public authority.
+    for key in ("day0_conditioning", "day0_provisional_observation"):
+        assert _day0_seed_matches_conditioning(seed,
+            _active_day0_provisional_or_conditioning({key: matching}))
+    for field, changed in (
+        ("day0_observed_extreme_source", "wu_icao_history"),
+        ("day0_observed_extreme_c", seed["day0_observed_extreme_c"] + 1),
+        ("temperature_metric", "high"),
+        ("day0_observed_extreme_unit", "C" if seed["day0_observed_extreme_unit"] == "F" else "F"),
+        ("day0_observed_extreme_observation_time",
+            (datetime.fromisoformat(seed["day0_observed_extreme_observation_time"])
+                - timedelta(minutes=1)).isoformat()),
+    ):
+        assert _seed_already_covered(forecast_db=normal.db, forecast_conn=normal.conn,
+            seed={**seed, field: changed}) is False, field
+    assert _seed_already_covered(forecast_db=normal.db, forecast_conn=normal.conn, seed=seed) is True
+    assert dict(normal.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+        (normal.result.posterior_id,)).fetchone()) == row
 
 
 def test_day0_coverage_identity_never_matches_incomplete_evidence() -> None:
@@ -1018,44 +1019,29 @@ def test_nontransaction_scalar_artifact_hwm_uses_product_cycle_partition() -> No
 
 @pytest.mark.parametrize("conditioned", [False, True])
 @pytest.mark.parametrize("metric", ["high", "low"])
-@pytest.mark.parametrize("posterior_time, expected", [
-    ("2026-06-06T01:30:00+00:00", False),
-    ("2026-06-06T02:00:00+00:00", True),
-    ("2026-06-06T02:30:00+00:00", True),
+@pytest.mark.parametrize("posterior_offset_minutes, expected", [
+    (-1, False),
+    (0, True),
+    (1, True),
 ])
 def test_recompute_seed_requires_posterior_at_or_after_requested_clock(
-    tmp_path, metric, posterior_time, expected, conditioned,
+    _normal_seed_certificate, metric, posterior_offset_minutes, expected, conditioned,
 ):
-    db_path = _db(tmp_path)
-    _insert_posterior(db_path, q_lcb_json=json.dumps({"cold": 0.1, "warm": 0.7}))
-    _insert_readiness(db_path, expires_at=datetime.now(UTC) + timedelta(hours=3))
-    with sqlite3.connect(db_path) as conn:
-        conn.execute("UPDATE forecast_posteriors SET computed_at=?, temperature_metric=?",
-                     (posterior_time, metric))
-        conn.execute("UPDATE readiness_state SET provenance_json=json_set(provenance_json, '$.temperature_metric', ?)",
-                     (metric,))
-    seed = {**_seed(), "temperature_metric": metric}
-    if conditioned:
-        seed.update({
-            "day0_observed_extreme_c": 31.0 if metric == "high" else 12.0,
-            "day0_observed_extreme_source": "aviationweather_metar",
-            "day0_observed_extreme_observation_time": "2026-06-06T01:00:00+00:00",
-            "day0_observed_extreme_unit": "C",
-        })
-        conditioning = {
-            "metric": metric, "source": seed["day0_observed_extreme_source"],
-            "observed_extreme_c": seed["day0_observed_extreme_c"],
-            "observation_time": seed["day0_observed_extreme_observation_time"], "unit": "C",
-        }
-        with sqlite3.connect(db_path) as conn:
-            conn.execute("UPDATE forecast_posteriors SET provenance_json=json_set(provenance_json, '$.day0_conditioning', json(?))",
-                         (json.dumps(conditioning),))
-    assert _seed_already_covered(forecast_db=db_path, seed=seed) is True
+    normal = _normal_seed_certificate
+    assert normal.request.temperature_metric == metric
+    row_before = [tuple(row) for row in normal.conn.execute("SELECT * FROM forecast_posteriors ORDER BY posterior_id")]
+    seed = _seed_from_certificate(normal, conditioning=conditioned)
+    # Keep the licensed certificate and its clocks immutable. The requested
+    # recomputation is before/equal/after that real publication, all after
+    # native/FAST first possession, rather than relabelling June rows H/L.
+    seed["computed_at"] = (normal.cut - timedelta(minutes=posterior_offset_minutes)).isoformat()
+    assert _seed_already_covered(forecast_db=normal.db, forecast_conn=normal.conn, seed=seed) is True
     seed["upgrade_trigger"] = "held_belief_computed_age_expired"
-    assert _seed_already_covered(forecast_db=db_path, seed=seed) is expected
+    assert _seed_already_covered(forecast_db=normal.db, forecast_conn=normal.conn, seed=seed) is expected
     if conditioned:
         seed["day0_observed_extreme_c"] += 1.0
-        assert _seed_already_covered(forecast_db=db_path, seed=seed) is False
+        assert _seed_already_covered(forecast_db=normal.db, forecast_conn=normal.conn, seed=seed) is False
+    assert [tuple(row) for row in normal.conn.execute("SELECT * FROM forecast_posteriors ORDER BY posterior_id")] == row_before
 
 
 @pytest.fixture
