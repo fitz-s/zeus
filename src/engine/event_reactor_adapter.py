@@ -28777,7 +28777,6 @@ def _posterior_bound_multimodel_members(
     ):
         from src.data.replacement_forecast_materializer import (
             _bayes_precision_fusion_city_local_lead_days,
-            _configured_scheme_sources,
             _freshest_declared_provider_representatives,
         )
         from src.forecast.model_selection import source_physically_eligible
@@ -28795,9 +28794,15 @@ def _posterior_bound_multimodel_members(
                 lead_days=lead_days,
             )
         }
+        # Replay the producer's pinned scheme, never the currently ACTIVE one: a
+        # weekly artifact rotation between produce and replay must not change the
+        # kept source set and forge an identity drift.
+        pinned_weights = scheme.get("configured_weights")
+        if not isinstance(pinned_weights, Mapping) or not pinned_weights:
+            _fail("model_identity_drift:pinned_scheme_missing")
+            return None
         selected_current = _freshest_declared_provider_representatives(
-            eligible_current,
-            configured=_configured_scheme_sources(str(family.city), str(family.metric)),
+            eligible_current, configured=tuple(str(m) for m in pinned_weights),
         )
         if set(scheme["configured_current_sources"]) != set(
             scheme["configured_sources"]

@@ -1139,6 +1139,36 @@ def test_source_clock_partial_current_producer_to_jit(
         conn, family=family, decision_time=decision,
         source_cycle_time=run.isoformat(), provenance=provenance, **posterior_kwargs,
     ) is not None
+    if hrrr_absent:
+        # A weekly rotation of the ACTIVE scheme between produce and replay must
+        # not change the replayed source set: replay uses the pinned scheme.
+        rotated = CityOneScheme(
+            city=city, scheme_status="ACTIVE",
+            final_sources=("ncep_nbm_conus", "icon_global"),
+            weights={"ncep_nbm_conus": 0.5, "icon_global": 0.5}, sample_n=30,
+            walkforward_pass=True, one_scheme_status="GRID_CAP10_LIVE_READY",
+        )
+        monkeypatch.setattr(
+            "src.strategy.live_inference.source_clock_city_weights.scheme_for_city",
+            lambda *_args, **_kwargs: rotated,
+        )
+        assert adapter._posterior_bound_spine_inputs(
+            conn, family=family, decision_time=decision,
+            source_cycle_time=run.isoformat(), provenance=provenance, **posterior_kwargs,
+        ) is not None
+        monkeypatch.setattr(
+            "src.strategy.live_inference.source_clock_city_weights.scheme_for_city",
+            lambda *_args, **_kwargs: scheme,
+        )
+        unpinned = json.loads(json.dumps(provenance))
+        unpinned["bayes_precision_fusion"]["source_clock_one_scheme"].pop("configured_weights")
+        unpinned_reason: dict[str, str] = {}
+        assert adapter._posterior_bound_multimodel_members(
+            conn, family=family, decision_time=decision,
+            source_cycle_time=run.isoformat(), provenance=unpinned,
+            reason_out=unpinned_reason, **posterior_kwargs,
+        ) is None
+        assert unpinned_reason == {"reason": "model_identity_drift:pinned_scheme_missing"}
     if missing_hrrr and not shadowed_hrrr:
         for field, value in (
             ("missing_sources", []),
@@ -1232,6 +1262,330 @@ def test_source_clock_partial_current_producer_to_jit(
         ) is None
         # HRRR is consumed directly now, so its newer row names itself.
         assert reason == {"reason": "model_identity_drift:gfs_hrrr"}
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize(("configured", "newer_sibling"), (
+    # Scheme weights the LESS specific family member; the more specific one is newer.
+    (("icon_global", "ncep_nbm_conus"), "gfs_hrrr"),
+    (("ecmwf_ifs", "ncep_nbm_conus"), "gfs_hrrr"),
+    (("ncep_nbm_conus", "ukmo_global_deterministic_10km"), "gfs_hrrr"),
+    # Scheme weights the MORE specific member; the less specific one is newer.
+    (("gfs_hrrr", "icon_global", "ukmo_global_deterministic_10km"), "ncep_nbm_conus"),
+))
+def test_source_clock_uses_exactly_the_scheme_sources_whatever_sibling_is_newer(
+    monkeypatch: pytest.MonkeyPatch, metric: str,
+    configured: tuple[str, ...], newer_sibling: str,
+) -> None:
+    """One law: a posterior's source set is the city scheme's weighted sources.
+
+    A newer same-family sibling the scheme does not weight must neither replace a
+    weighted source nor be added, whichever of the two is the more specific model.
+    """
+    from src.config import runtime_cities_by_name
+    from src.strategy.live_inference.source_clock_city_weights import CityOneScheme
+
+    conn = _conn()
+    city = "Chicago"
+    run = datetime(2026, 9, 30, 6, tzinfo=UTC)
+    decision = run + timedelta(hours=5)
+    rows = [(model, run) for model in dict.fromkeys(("ecmwf_ifs", *configured))]
+    rows.append((newer_sibling, run + timedelta(hours=4)))
+    for index, (model, cycle) in enumerate(rows):
+        conn.execute(
+            """INSERT INTO raw_model_forecasts (
+                model, city, target_date, metric, source_cycle_time,
+                source_available_at, captured_at, recorded_at, lead_days,
+                forecast_value_c, endpoint, coverage_status
+            ) VALUES (?, ?, '2026-10-01', ?, ?, ?, ?, ?, 1, ?, 'single_runs', 'COVERED')""",
+            (model, city, metric, cycle.isoformat(),
+             (cycle + timedelta(minutes=5)).isoformat(),
+             (cycle + timedelta(minutes=10)).isoformat(),
+             (cycle + timedelta(minutes=11)).isoformat(), 20.0 + index),
+        )
+    scheme = CityOneScheme(
+        city=city, scheme_status="ACTIVE", final_sources=configured,
+        weights=dict.fromkeys(configured, 1.0 / len(configured)), sample_n=30,
+        walkforward_pass=True, one_scheme_status="GRID_CAP10_LIVE_READY",
+    )
+    monkeypatch.setattr(
+        "src.strategy.live_inference.source_clock_city_weights.scheme_for_city",
+        lambda *_args, **_kwargs: scheme,
+    )
+    capture = SimpleNamespace(
+        has_extras=True, anchor_z=20.0, anchor_tau0=1.0,
+        likelihood=tuple(SimpleNamespace(
+            model=model, z=22.0, train_residuals=(), n_train=0, residuals_by_date={},
+        ) for model, _cycle in rows if model != "ecmwf_ifs"),
+        disagree_var=0.0, anchor_raw_m2_native=None, anchor_raw_n_train=0,
+        dropped_models=(),
+        selection=SimpleNamespace(excluded_regionals=(), dropped_aliases=()),
+    )
+    monkeypatch.setattr(
+        "src.data.bayes_precision_fusion_capture.capture_bayes_precision_instruments",
+        lambda **_kwargs: capture,
+    )
+    monkeypatch.setattr(
+        "src.forecast.bayes_precision_fusion.fuse_bayes_precision_posterior",
+        lambda **_kwargs: SimpleNamespace(
+            sd=0.5, method="TEST_FUSION",
+            used_models=tuple(x.model for x in capture.likelihood), regional_models=(),
+        ),
+    )
+
+    class _Shape:
+        center_sigma_c = 0.5
+        predictive_sigma_c = 1.2
+        members_c = tuple(20.0 + x * 0.1 for x in range(51))
+
+        @staticmethod
+        def as_payload() -> dict[str, object]:
+            return {"source": "test-current-ens-shape", "provider_count": 2}
+
+    monkeypatch.setattr(materializer_mod, "_read_current_evidence_shape", lambda *_a, **_kw: _Shape())
+    request = replace(
+        _request(), city=city, city_id=city,
+        city_timezone=runtime_cities_by_name()[city].timezone,
+        temperature_metric=metric, target_date=date(2026, 10, 1),
+        source_cycle_time=run, computed_at=decision,
+    )
+
+    override = materializer_mod._replacement_bayes_precision_fusion_override(
+        request, metric=metric, anchor_value_corrected_c=20.0, conn=conn,
+    )
+
+    assert override is not None
+    assert override.method == "SOURCE_CLOCK_FIXED_WEIGHT"
+    assert set(override.used_models) == set(configured)
+    assert newer_sibling not in override.used_models
+
+
+def test_partial_current_replay_uses_the_pinned_scheme_not_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replay must judge drift with the producer's pinned scheme, not ACTIVE.
+
+    The producer's scheme weights icon/ukmo/gfs_hrrr; HRRR is missing so the
+    posterior is partial-current.  When HRRR later arrives (older cycle than a new
+    NBM row) the pinned scheme names the drift.  A replay that re-resolved a
+    rotated ACTIVE (weighting NBM) would collapse HRRR away and miss it.
+    """
+    from src.config import runtime_cities_by_name
+    from src.engine import event_reactor_adapter as adapter
+    from src.strategy.live_inference.source_clock_city_weights import CityOneScheme
+
+    conn = _conn()
+    city = "Los Angeles"
+    metric = "high"
+    run = datetime(2026, 9, 27, 18, tzinfo=UTC)
+    decision = run + timedelta(hours=1)
+    configured = ("icon_global", "ukmo_global_deterministic_10km", "gfs_hrrr")
+    for index, model in enumerate(("ecmwf_ifs", "icon_global", "ukmo_global_deterministic_10km")):
+        conn.execute(
+            """INSERT INTO raw_model_forecasts (
+                model, city, target_date, metric, source_cycle_time,
+                source_available_at, captured_at, recorded_at, lead_days,
+                forecast_value_c, endpoint, coverage_status
+            ) VALUES (?, ?, '2026-09-29', ?, ?, ?, ?, ?, 2, ?, 'single_runs', 'COVERED')""",
+            (model, city, metric, run.isoformat(),
+             (run + timedelta(minutes=5)).isoformat(),
+             (run + timedelta(minutes=10)).isoformat(),
+             (run + timedelta(minutes=11)).isoformat(), 20.0 + index),
+        )
+    scheme = CityOneScheme(
+        city=city, scheme_status="ACTIVE", final_sources=configured,
+        weights=dict.fromkeys(configured, 1.0 / len(configured)), sample_n=30,
+        walkforward_pass=True, one_scheme_status="GRID_CAP10_LIVE_READY",
+    )
+    monkeypatch.setattr(
+        "src.strategy.live_inference.source_clock_city_weights.scheme_for_city",
+        lambda *_args, **_kwargs: scheme,
+    )
+    capture = SimpleNamespace(
+        has_extras=True, anchor_z=20.0, anchor_tau0=1.0,
+        likelihood=tuple(SimpleNamespace(
+            model=model, z=22.0, train_residuals=(), n_train=0, residuals_by_date={},
+        ) for model in ("icon_global", "ukmo_global_deterministic_10km")),
+        disagree_var=0.0, anchor_raw_m2_native=None, anchor_raw_n_train=0,
+        dropped_models=(),
+        selection=SimpleNamespace(excluded_regionals=(), dropped_aliases=()),
+    )
+    monkeypatch.setattr(
+        "src.data.bayes_precision_fusion_capture.capture_bayes_precision_instruments",
+        lambda **_kwargs: capture,
+    )
+    monkeypatch.setattr(
+        "src.forecast.bayes_precision_fusion.fuse_bayes_precision_posterior",
+        lambda **_kwargs: SimpleNamespace(
+            sd=0.5, method="TEST_FUSION",
+            used_models=("icon_global", "ukmo_global_deterministic_10km"), regional_models=(),
+        ),
+    )
+
+    class _Shape:
+        center_sigma_c = 0.5
+        predictive_sigma_c = 1.2
+        members_c = tuple(20.0 + x * 0.1 for x in range(51))
+
+        @staticmethod
+        def as_payload() -> dict[str, object]:
+            return {"source": "test-current-ens-shape", "provider_count": 2}
+
+    monkeypatch.setattr(materializer_mod, "_read_current_evidence_shape", lambda *_a, **_kw: _Shape())
+    request = replace(
+        _request(), city=city, city_id=city,
+        city_timezone=runtime_cities_by_name()[city].timezone,
+        temperature_metric=metric, target_date=date(2026, 9, 29),
+        source_cycle_time=run, computed_at=decision,
+    )
+    override = materializer_mod._replacement_bayes_precision_fusion_override(
+        request, metric=metric, anchor_value_corrected_c=20.0, conn=conn,
+    )
+    assert override is not None
+    scheme_proof = override.source_clock_one_scheme
+    assert scheme_proof["fallback_reason"] == "configured_current_provider_set_incomplete"
+    provenance = {"bayes_precision_fusion": {
+        "used_models": list(override.used_models),
+        "current_value_serving": override.current_value_serving,
+        "source_clock_one_scheme": scheme_proof,
+        "decorrelated_providers_expected": override.decorrelated_providers_expected,
+        "decorrelated_providers_served": override.decorrelated_providers_served,
+        "decorrelated_providers_complete": override.decorrelated_providers_complete,
+    }}
+    family = SimpleNamespace(city=city, target_date="2026-09-29", metric=metric)
+    # Replay time: an OLD HRRR row (served but not newest) and a NEWER NBM row
+    # exist.  The producer's pinned scheme weights HRRR, so its collapse keeps
+    # HRRR and the configured-current set gains it -> genuine drift is named.
+    # ACTIVE has rotated to weight NBM instead; a replay that re-resolved ACTIVE
+    # would drop HRRR as the stale sibling and silently miss that drift.
+    for model, cycle, value in (
+        ("gfs_hrrr", run - timedelta(hours=1), 21.0),
+        ("ncep_nbm_conus", run, 24.0),
+    ):
+        conn.execute(
+            """INSERT INTO raw_model_forecasts (
+                model, city, target_date, metric, source_cycle_time,
+                source_available_at, captured_at, recorded_at, lead_days,
+                forecast_value_c, endpoint, coverage_status
+            ) VALUES (?, ?, '2026-09-29', ?, ?, ?, ?, ?, 2, ?, 'single_runs', 'COVERED')""",
+            (model, city, metric, cycle.isoformat(),
+             (decision + timedelta(minutes=1)).isoformat(),
+             (decision + timedelta(minutes=1)).isoformat(),
+             (decision + timedelta(minutes=1)).isoformat(), value),
+        )
+    rotated = CityOneScheme(
+        city=city, scheme_status="ACTIVE",
+        final_sources=("icon_global", "ukmo_global_deterministic_10km", "ncep_nbm_conus"),
+        weights={
+            "icon_global": 1 / 3, "ukmo_global_deterministic_10km": 1 / 3,
+            "ncep_nbm_conus": 1 / 3,
+        },
+        sample_n=30, walkforward_pass=True, one_scheme_status="GRID_CAP10_LIVE_READY",
+    )
+    monkeypatch.setattr(
+        "src.strategy.live_inference.source_clock_city_weights.scheme_for_city",
+        lambda *_args, **_kwargs: rotated,
+    )
+    later = decision + timedelta(minutes=2)
+    pinned_reason: dict[str, str] = {}
+    assert adapter._posterior_bound_multimodel_members(
+        conn, family=family, decision_time=later,
+        source_cycle_time=run.isoformat(), provenance=provenance,
+        reason_out=pinned_reason, posterior_computed_at=decision,
+    ) is None
+    assert pinned_reason == {"reason": "model_identity_drift:configured_current_sources"}
+
+
+def test_source_clock_scheme_pinned_once_per_posterior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Selection, collapse and fixed-weight center use ONE scheme resolution.
+
+    A weekly ACTIVE rotation landing mid-computation must not hand the center a
+    different basket than the one that selected the sources, and the posterior
+    must pin the basket it used.
+    """
+    from src.config import runtime_cities_by_name
+    from src.strategy.live_inference.source_clock_city_weights import CityOneScheme
+
+    conn = _conn()
+    city = "Chicago"
+    run = datetime(2026, 9, 30, 6, tzinfo=UTC)
+    for index, model in enumerate(("ecmwf_ifs", "icon_global", "ncep_nbm_conus")):
+        conn.execute(
+            """INSERT INTO raw_model_forecasts (
+                model, city, target_date, metric, source_cycle_time,
+                source_available_at, captured_at, recorded_at, lead_days,
+                forecast_value_c, endpoint, coverage_status
+            ) VALUES (?, ?, '2026-10-01', 'low', ?, ?, ?, ?, 1, ?, 'single_runs', 'COVERED')""",
+            (model, city, run.isoformat(), (run + timedelta(minutes=5)).isoformat(),
+             (run + timedelta(minutes=10)).isoformat(),
+             (run + timedelta(minutes=11)).isoformat(), 17.0 + index),
+        )
+    first = CityOneScheme(
+        city=city, scheme_status="ACTIVE", final_sources=("icon_global", "ncep_nbm_conus"),
+        weights={"icon_global": 0.5, "ncep_nbm_conus": 0.5}, sample_n=30,
+        walkforward_pass=True, one_scheme_status="GRID_CAP10_LIVE_READY",
+    )
+    rotated = CityOneScheme(
+        city=city, scheme_status="ACTIVE", final_sources=("ecmwf_ifs", "icon_global"),
+        weights={"ecmwf_ifs": 0.5, "icon_global": 0.5}, sample_n=30,
+        walkforward_pass=True, one_scheme_status="GRID_CAP10_LIVE_READY",
+    )
+    calls: list[int] = []
+
+    def rotating(*_args, **_kwargs):
+        calls.append(1)
+        return first if len(calls) == 1 else rotated
+
+    monkeypatch.setattr(
+        "src.strategy.live_inference.source_clock_city_weights.scheme_for_city", rotating,
+    )
+    capture = SimpleNamespace(
+        has_extras=True, anchor_z=17.0, anchor_tau0=1.0,
+        likelihood=tuple(SimpleNamespace(
+            model=model, z=17.5, train_residuals=(), n_train=0, residuals_by_date={},
+        ) for model in ("icon_global", "ncep_nbm_conus")),
+        disagree_var=0.0, anchor_raw_m2_native=None, anchor_raw_n_train=0,
+        dropped_models=(),
+        selection=SimpleNamespace(excluded_regionals=(), dropped_aliases=()),
+    )
+    monkeypatch.setattr(
+        "src.data.bayes_precision_fusion_capture.capture_bayes_precision_instruments",
+        lambda **_kwargs: capture,
+    )
+    monkeypatch.setattr(
+        "src.forecast.bayes_precision_fusion.fuse_bayes_precision_posterior",
+        lambda **_kwargs: SimpleNamespace(
+            sd=0.5, method="TEST_FUSION",
+            used_models=("icon_global", "ncep_nbm_conus"), regional_models=(),
+        ),
+    )
+
+    class _Shape:
+        center_sigma_c = 0.5
+        predictive_sigma_c = 1.2
+        members_c = tuple(17.0 + x * 0.1 for x in range(51))
+
+        @staticmethod
+        def as_payload() -> dict[str, object]:
+            return {"source": "test-current-ens-shape", "provider_count": 2}
+
+    monkeypatch.setattr(materializer_mod, "_read_current_evidence_shape", lambda *_a, **_kw: _Shape())
+    request = replace(
+        _request(), city=city, city_id=city,
+        city_timezone=runtime_cities_by_name()[city].timezone,
+        temperature_metric="low", target_date=date(2026, 10, 1),
+        source_cycle_time=run, computed_at=run + timedelta(hours=1),
+    )
+
+    override = materializer_mod._replacement_bayes_precision_fusion_override(
+        request, metric="low", anchor_value_corrected_c=17.0, conn=conn,
+    )
+
+    assert override is not None
+    assert set(override.used_models) == {"icon_global", "ncep_nbm_conus"}
+    assert override.source_clock_one_scheme["configured_weights"] == dict(first.weights)
 
 
 def test_posterior_identity_binds_day0_carrier_operator_and_content(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3535,6 +3889,46 @@ def test_wu_composite_missing_fusion_retains_typed_capture_missing(
     )
     assert result.live_eligible is False
     assert result.replacement_q_mode == "BAYES_PRECISION_FUSION_CAPTURE_MISSING"
+
+
+def test_unreadable_source_clock_scheme_fails_the_family_by_name(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A scheme artifact that cannot be read is a named family failure everywhere.
+
+    The materializer must not crash, must not silently serve a scheme-less source
+    set, and must name the reason in the posterior receipt; the upgrade trigger
+    must see nothing newly capturable for the same family.
+    """
+    import logging
+
+    from src.data import replacement_fusion_upgrade_trigger as trigger
+
+    def broken(*_args, **_kwargs):
+        raise ValueError("ACTIVE.json sha256 mismatch")
+
+    monkeypatch.setattr(
+        "src.strategy.live_inference.source_clock_city_weights.scheme_for_city", broken,
+    )
+    request = _request(computed_at=datetime(2026, 6, 7, 18, tzinfo=UTC))
+    conn = _conn()
+    with caplog.at_level(logging.WARNING, logger="zeus.replacement_bayes_precision_fusion"):
+        result = materializer_mod._compute_posterior_payload(
+            conn, request, metric="high", anchor_id=1,
+        )
+    assert result.live_eligible is False
+    assert result.capture_status == "SOURCE_CLOCK_SCHEME_UNAVAILABLE"
+    assert "CAPTURE:SOURCE_CLOCK_SCHEME_UNAVAILABLE" in (
+        materializer_mod._posterior_block_sub_reason_codes(result)
+    )
+    assert any(
+        "SOURCE_CLOCK_SCHEME_UNAVAILABLE" in record.getMessage()
+        for record in caplog.records
+    )
+    assert trigger._capturable_inputs_for_scope(
+        conn, city=request.city, target_date=str(request.target_date),
+        metric="high", source_cycle_iso=request.source_cycle_time.isoformat(),
+    ) == {}
 
 
 def test_legacy_wu_fast_posterior_without_current_carrier_cannot_replay() -> None:

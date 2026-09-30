@@ -301,3 +301,48 @@ def test_polygons_load_from_config() -> None:
     assert "icon_d2" in polys
     assert "meteofrance_arome_france_hd" in polys
     assert polys["icon_d2"].max_lead_days == 1
+
+
+CHICAGO = (41.9786, -87.9048)
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize(("coords", "present", "configured", "rep", "dropped"), (
+    # NCEP: scheme weights NBM, HRRR is the more specific in-domain member.
+    (CHICAGO, ("ecmwf_ifs", "icon_global", "ncep_nbm_conus", "gfs_hrrr"),
+     ("icon_global", "ncep_nbm_conus"), "ncep_nbm_conus", "gfs_hrrr"),
+    # ICON: scheme weights icon_global, icon_d2 is the in-domain regional.
+    (PARIS, ("ecmwf_ifs", "icon_global", "icon_d2", "ukmo_global_deterministic_10km"),
+     ("ecmwf_ifs", "icon_global"), "icon_global", "icon_d2"),
+    # ICON: scheme weights icon_global, icon_eu is the in-domain nest.
+    (MADRID, ("ecmwf_ifs", "icon_global", "icon_eu"),
+     ("ecmwf_ifs", "icon_global"), "icon_global", "icon_eu"),
+    # UKMO: scheme weights the global, the 2km UK nest is present in London.
+    (LONDON, ("ecmwf_ifs", "ukmo_global_deterministic_10km", "ukmo_uk_deterministic_2km",
+              "icon_global"),
+     ("ukmo_global_deterministic_10km", "icon_global"),
+     "ukmo_global_deterministic_10km", "ukmo_uk_deterministic_2km"),
+))
+def test_select_models_representative_is_the_scheme_member(
+    coords, present, configured, rep, dropped,
+) -> None:
+    """One law: within a provider family the scheme-weighted member is the rep.
+
+    Specificity order still decides families the scheme does not weight, and one
+    representative per family still holds.
+    """
+    selection = select_models(
+        present_models={model: 20.0 for model in present},
+        lat=coords[0], lon=coords[1], lead_days=1, configured=configured,
+    )
+    assert rep in selection.used_models
+    assert dropped not in selection.used_models
+    unweighted = select_models(
+        present_models={model: 20.0 for model in present},
+        lat=coords[0], lon=coords[1], lead_days=1,
+    )
+    # Without a scheme the most specific member still wins (unchanged).
+    assert dropped in unweighted.used_models
+    assert rep not in unweighted.used_models

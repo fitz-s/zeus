@@ -37,7 +37,7 @@ from __future__ import annotations
 import functools
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Iterable, Mapping, Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 POLYGON_CONFIG_PATH = PROJECT_ROOT / "config" / "model_domain_polygons.yaml"
@@ -362,8 +362,14 @@ def select_models(
     lead_days: int,
     alias_series: Mapping[str, Sequence[float]] | None = None,
     polygons: Mapping[str, DomainPolygon] | None = None,
+    configured: Iterable[str] = (),
 ) -> SelectedModelSet:
     """Apply §4 steps (1)-(2): eligibility, decorrelated provider reps, regional polygon gate.
+
+    ``configured`` names the sources the city's active source-clock scheme weights.
+    Within a provider family the scheme's eligible member is the representative;
+    specificity order decides only for families the scheme does not weight.  One
+    representative per family still holds, so a scheme never double-counts a provider.
     ``present_models`` maps model_name -> today's value for the models that successfully fetched
     (fail-soft drop already applied upstream). ``alias_series`` is accepted for caller
     compatibility but ignored — the alias-dedup probe (icon_seamless) was removed from the
@@ -432,9 +438,13 @@ def select_models(
             )
         return member in present  # pure global: always eligible when present
 
+    scheme_sources = frozenset(str(model) for model in configured)
     dropped_provider_dups: list[str] = []
     for family in PROVIDER_FAMILIES:
         family_rep: str | None = next(
+            (m for m in family if m in scheme_sources and _family_member_eligible(m)),
+            None,
+        ) or next(
             (m for m in family if _family_member_eligible(m)), None
         )
         dropped_provider_dups.extend(
@@ -442,6 +452,13 @@ def select_models(
             for m in GLOBAL_LIKELIHOOD_MODELS
             if m in family and m in present and m != family_rep and m not in dropped_aliases
         )
+        if family_rep is not None:
+            # A scheme-chosen global rep displaces an in-domain regional sibling too.
+            displaced = [
+                m for m in regional_experts if m in family and m != family_rep
+            ]
+            regional_experts = [m for m in regional_experts if m not in displaced]
+            dropped_provider_dups.extend(displaced)
 
     # ---- decorrelated global likelihood reps (spec order), minus aliases and provider dups ----
     suppressed_globals = set(dropped_provider_dups)

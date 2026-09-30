@@ -127,6 +127,9 @@ REPLACEMENT_CAPTURE_STATUS_DB_READ_ERROR = "DB_READ_ERROR"
 REPLACEMENT_CAPTURE_STATUS_CURRENT_EVIDENCE_NOT_LIVE = (
     "CURRENT_EVIDENCE_NOT_LIVE"
 )
+REPLACEMENT_CAPTURE_STATUS_SOURCE_CLOCK_SCHEME_UNAVAILABLE = (
+    "SOURCE_CLOCK_SCHEME_UNAVAILABLE"
+)
 REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET = "REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"
 STALE_DAY0_ENQUEUE_OWNER = "STALE_DAY0_ENQUEUE_OWNER"
 
@@ -4167,13 +4170,39 @@ def _bayes_precision_fusion_lead_bucket(lead_days: int) -> str:
     return "L4P"
 
 
-def _configured_scheme_sources(city: str, metric: str) -> tuple[str, ...]:
-    """Sources the city's active source-clock scheme weights (empty when none)."""
+class SourceClockSchemeUnavailable(RuntimeError):
+    """The city's source-clock scheme could not be resolved (named, never silent)."""
+
+
+def _resolve_source_clock_scheme(city: str, metric: str) -> object | None:
+    """The one scheme resolution every producer site uses.
+
+    ``None`` means the city has no scheme (a normal state).  A resolution failure
+    is not "no scheme": it is logged once, by name, with the family, and raised
+    as ``SourceClockSchemeUnavailable`` so each caller fails that family closed
+    instead of silently serving a different source set.
+    """
     from src.strategy.live_inference.source_clock_city_weights import (  # noqa: PLC0415
         scheme_for_city,
     )
 
-    scheme = scheme_for_city(city, metric=metric)
+    try:
+        return scheme_for_city(city, metric=metric)
+    except Exception as exc:  # noqa: BLE001 - converted to one named failure
+        import logging  # noqa: PLC0415
+
+        logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
+            "SOURCE_CLOCK_SCHEME_UNAVAILABLE city=%s metric=%s exc=%s: %s",
+            city, metric, type(exc).__name__, exc,
+        )
+        raise SourceClockSchemeUnavailable(
+            f"SOURCE_CLOCK_SCHEME_UNAVAILABLE:{city}:{metric}"
+        ) from exc
+
+
+def _configured_scheme_sources(city: str, metric: str) -> tuple[str, ...]:
+    """Sources the city's active source-clock scheme weights (empty when none)."""
+    scheme = _resolve_source_clock_scheme(city, metric)
     return () if scheme is None else tuple(str(source) for source in scheme.weights)
 
 
@@ -4294,6 +4323,13 @@ def _replacement_bayes_precision_fusion_override(
         )
         from src.forecast.model_selection import source_physically_eligible  # noqa: PLC0415
 
+        # ONE scheme resolution per posterior: the representative collapse, model
+        # selection and the fixed-weight center all use this exact scheme, and its
+        # sources/weights are pinned into provenance for replay.
+        _scheme = _resolve_source_clock_scheme(request.city, metric)
+        _scheme_sources: tuple[str, ...] = (
+            () if _scheme is None else tuple(str(source) for source in _scheme.weights)
+        )
         served_current: dict[str, object] = {}
         persisted_current: dict[str, tuple[float, int]] = {}
         if conn is not None:
@@ -4314,8 +4350,7 @@ def _replacement_bayes_precision_fusion_override(
                 )
             }
             served_current = _freshest_declared_provider_representatives(
-                served_current,
-                configured=_configured_scheme_sources(request.city, metric),
+                served_current, configured=_scheme_sources,
             )
             persisted_current = {
                 m: (s.value_c, s.raw_model_forecast_id) for m, s in served_current.items()
@@ -4383,6 +4418,7 @@ def _replacement_bayes_precision_fusion_override(
             history_provider=history_provider, live_fetch=_persisted_then_injected_fetch,
             decision_utc=computed_at,
             model_available_at=model_available_at,
+            configured=_scheme_sources,
         )
         if not capture.has_extras:
             # K3 ANTIBODY (2026-06-09): all multi-model extras absent. This is a wiring failure
@@ -4623,9 +4659,7 @@ def _replacement_bayes_precision_fusion_override(
             from src.strategy.live_inference.source_clock_city_weights import (  # noqa: PLC0415
                 GRID_AWARE_ARTIFACT_NAME,
                 fixed_weight_center_from_values,
-                scheme_for_city,
             )
-            _scheme = scheme_for_city(request.city, metric=metric)
             _eligible_scheme_models = (
                 () if _scheme is None else tuple(
                     str(model) for model in _scheme.weights
@@ -4766,6 +4800,7 @@ def _replacement_bayes_precision_fusion_override(
                         city=request.city,
                         values_c_by_source=_source_values,
                         metric=metric,
+                        scheme=_scheme,
                     )
                     if _source_clock_center is None:
                         try:
@@ -5286,6 +5321,8 @@ def _replacement_bayes_precision_fusion_override(
                 _source_clock_current_shape, "member_bounds_c", None
             ),
         )
+    except SourceClockSchemeUnavailable:
+        raise  # a named family failure, surfaced by the caller's capture status
     except Exception as exc:  # fail-soft: never break blocked-candidate materialization
         try:
             import logging  # noqa: PLC0415
@@ -6893,9 +6930,17 @@ def _compute_posterior_payload(
     # composes AFTER the EB bias layer; downstream EMOS + bin integration are unchanged.
     raw_anchor_value_c = request.openmeteo_anchor.high_c if metric == "high" else request.openmeteo_anchor.low_c
     anchor_value_corrected_c = float(raw_anchor_value_c) - (0.0 if bias_shift_c is None else float(bias_shift_c))
-    bayes_precision_fusion_override = _replacement_bayes_precision_fusion_override(
-        request, metric=metric, anchor_value_corrected_c=anchor_value_corrected_c, conn=conn
-    )
+    source_clock_scheme_unavailable = False
+    try:
+        bayes_precision_fusion_override = _replacement_bayes_precision_fusion_override(
+            request, metric=metric, anchor_value_corrected_c=anchor_value_corrected_c,
+            conn=conn,
+        )
+    except SourceClockSchemeUnavailable:
+        # SCOPE: this family. DRAIN: a readable scheme artifact. RESET: the next
+        # attempt resolves it. Named in the receipt; never another source set.
+        bayes_precision_fusion_override = None
+        source_clock_scheme_unavailable = True
     target_date = _date_text(request.target_date)
     source_cycle_time = _to_utc(request.source_cycle_time, field_name="source_cycle_time").isoformat()
     # C1-AVAIL-CLOCK (2026-06-16): the posterior's source_available_at is PROOF OF POSSESSION =
@@ -8005,7 +8050,9 @@ def _compute_posterior_payload(
     current_shape_live = _fusion_current_evidence_shape_has_live_authority(
         bayes_precision_fusion_override
     )
-    if bayes_precision_fusion_override is None:
+    if source_clock_scheme_unavailable:
+        capture_status = REPLACEMENT_CAPTURE_STATUS_SOURCE_CLOCK_SCHEME_UNAVAILABLE
+    elif bayes_precision_fusion_override is None:
         capture_status = REPLACEMENT_CAPTURE_STATUS_STALE_HISTORY_ONLY
     elif not current_shape_live:
         capture_status = REPLACEMENT_CAPTURE_STATUS_CURRENT_EVIDENCE_NOT_LIVE

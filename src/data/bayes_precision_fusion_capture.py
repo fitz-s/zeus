@@ -362,6 +362,7 @@ def capture_bayes_precision_instruments(
     decision_utc: datetime | None = None,
     model_available_at: Mapping[str, str | datetime | None] | None = None,
     apply_grid_representativeness: bool = False,
+    configured: Sequence[str] = (),
 ) -> BayesPrecisionFusionCaptureResult:
     """F1 — fetch the extras fail-soft, EB-correct, gate, and build fusion inputs.
 
@@ -483,6 +484,7 @@ def capture_bayes_precision_instruments(
     selection = select_models(
         present_models=present_values,
         lat=latitude, lon=longitude, lead_days=lead_days,
+        configured=configured,
     )
 
     # ---- EB-correct + build instruments for the SELECTED set (globals then regionals) ----

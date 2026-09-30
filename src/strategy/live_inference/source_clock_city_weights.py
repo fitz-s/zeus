@@ -346,8 +346,13 @@ def fixed_weight_center_from_values(
     values_c_by_source: Mapping[str, float],
     path: str | Path | None = None,
     metric: str | None = None,
+    scheme: CityOneScheme | None = None,
 ) -> FixedWeightCenter | None:
-    scheme = scheme_for_city(city, path=path, metric=metric)
+    """``scheme``: the caller's already-resolved scheme.  A producer passes the one
+    scheme it pinned for the posterior so a mid-computation artifact rotation cannot
+    give the center a different basket than the source selection used."""
+    if scheme is None:
+        scheme = scheme_for_city(city, path=path, metric=metric)
     if scheme is None:
         return None
     used: dict[str, float] = {}

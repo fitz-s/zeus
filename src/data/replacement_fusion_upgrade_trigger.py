@@ -313,6 +313,7 @@ def _capturable_inputs_for_scope(
         read_current_instrument_values,
     )
     from src.data.replacement_forecast_materializer import (  # noqa: PLC0415
+        SourceClockSchemeUnavailable,
         _bayes_precision_fusion_city_local_lead_days,
         _configured_scheme_sources,
         _freshest_declared_provider_representatives,
@@ -349,12 +350,16 @@ def _capturable_inputs_for_scope(
                         model, lat=float(config.lat), lon=float(config.lon), lead_days=lead,
                     )
                 }
-        # Match the materializer's physical and same-provider cycle selection: an older
-        # HRRR row is not a capturable revision when the newer NBM row replaces it.
+        # Match the materializer's physical and same-provider cycle selection with the
+        # same scheme: a scheme-weighted source is kept whatever sibling is newer.
         selected = _freshest_declared_provider_representatives(
             served, configured=_configured_scheme_sources(city, metric)
         )
         return {model: int(value.raw_model_forecast_id) for model, value in selected.items()}
+    except SourceClockSchemeUnavailable:
+        # Already logged by name at resolution; the materializer blocks the same
+        # family with the same reason, so nothing is newly capturable here.
+        return {}
     except Exception:
         return {}
 
