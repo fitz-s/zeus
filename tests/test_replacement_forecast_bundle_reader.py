@@ -1673,29 +1673,121 @@ def test_live_reader_accepts_only_complete_current_day0_carrier_pair(
         persisted.close()
 
 
-@pytest.mark.parametrize(("carrier","accepted"),[
-    pytest.param(carrier,accepted,id=f"carrier{index}-{accepted}")
-    for index,(carrier,accepted) in enumerate(_CURRENT_CARRIER_PAIR_CASES)
-    if carrier and _source_specific_carrier_case(carrier)
-])
-@pytest.mark.parametrize("purpose",tuple(ReplacementForecastAuthorityPurpose))
-def test_live_reader_source_specific_carrier_cases_keep_their_original_obligation(
-    carrier,accepted,purpose,
-):
-    # These six original fast-residual cases retain their own source path.
-    # A normal HKO V2/V3 certificate cannot substitute for this obligation.
-    provenance = {**_live_provenance(), **carrier}
-    row = {
-        "runtime_layer": LIVE_RUNTIME_LAYER,
-        "q_lcb_json": "{\"cold\":0.1,\"warm\":0.7}",
-        "q_ucb_json": "{\"cold\":0.3,\"warm\":0.9}",
-        "provenance_json": json.dumps(provenance),
-    }
-    result = reader._live_grade_provenance(
-        row,
-        authority_purpose=purpose,
+@pytest.fixture(scope="module")
+def _normal_fast_reader_template(tmp_path_factory):
+    """Licensed KORD V2, not a label applied to an unrelated city's carrier."""
+    from dataclasses import replace
+    from tests.integration.test_w3_solve_seam_g3 import (
+        _noaa_native_sources, _kord_normal_prior_fixture,
+        _kord_causal_fast_inputs, _kord_public_bundles,
     )
-    assert (result is not None) is accepted, carrier
+    from src.data import day0_fast_obs as fast, replacement_forecast_materializer as materializer
+    from src.data.station_ground_evidence import forecast_db_from_connection
+
+    root = tmp_path_factory.mktemp("reader-kord-fast")
+    with pytest.MonkeyPatch.context() as inputs:
+        native = _noaa_native_sources.__wrapped__(root, inputs)
+        next(native)
+        normal = None
+        try:
+            normal = _kord_normal_prior_fixture(root, inputs)
+            _kord_public_bundles(normal, inputs, at=normal.cut)
+            cut, conditioning = _kord_causal_fast_inputs(normal, inputs)
+            normal.request = replace(normal.request, computed_at=cut, day0_observation_state=None,
+                day0_observed_extreme_c=conditioning.observed_extreme_c,
+                day0_observed_extreme_source=fast.FAST_RESIDUAL_CONDITIONING_SOURCE_ID,
+                day0_observed_extreme_observation_time=conditioning.observation_time,
+                day0_observed_extreme_sample_count=conditioning.sample_count,
+                day0_observed_extreme_unit=conditioning.unit)
+            normal.sql_clock[0] = cut
+            normal.result = materializer.materialize_replacement_forecast_live(normal.conn, normal.request)
+            assert normal.result.ok, normal.result.reason_codes
+            normal.conn.commit()
+            bundles = _kord_public_bundles(normal, inputs, at=cut)
+            row = dict(normal.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+                (normal.result.posterior_id,)).fetchone())
+            proof = json.loads(row["provenance_json"])
+            assert proof["q_shape"] == "fused_day0_fast_residual_likelihood"
+            assert proof["day0_remaining_carrier_operator"] == reader.DAY0_REMAINING_CARRIER_OPERATOR_V2
+            assert proof["day0_remaining_carrier_final_extremes_c"] == []
+            assert proof["day0_remaining_carrier_station_extreme_providers"] == []
+            assert all(bundle.posterior_id == row["posterior_id"] for bundle in bundles.values())
+            yield row, forecast_db_from_connection(normal.conn)
+            assert dict(normal.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+                (row["posterior_id"],)).fetchone()) == row
+        finally:
+            if normal is not None:
+                normal.conn.close()
+                normal.builtin.close()
+            next(native, None)
+
+
+@pytest.mark.parametrize(("carrier", "accepted"), [
+    pytest.param(carrier, accepted, id=f"carrier{index}-{accepted}")
+    for index, (carrier, accepted) in enumerate(_CURRENT_CARRIER_PAIR_CASES)
+    if index == 16
+])
+@pytest.mark.parametrize("purpose", tuple(ReplacementForecastAuthorityPurpose))
+def test_live_reader_source_specific_carrier_cases_keep_their_original_obligation(
+    carrier, accepted, purpose, _normal_fast_reader_template,
+):
+    # Original FAST V2 structure is now tested with its complete normal source
+    # certificate, not synthetic probabilities or a manufactured READY marker.
+    row, namespace = _normal_fast_reader_template
+    proof = json.loads(row["provenance_json"])
+    assert proof["q_shape"] == carrier["q_shape"]
+    assert proof["day0_remaining_carrier_operator"] == carrier["day0_remaining_carrier_operator"]
+    assert proof["day0_remaining_carrier_final_extremes_c"] == carrier["day0_remaining_carrier_final_extremes_c"]
+    assert proof["day0_remaining_carrier_station_extreme_providers"] == carrier["day0_remaining_carrier_station_extreme_providers"]
+    assert (reader._live_grade_provenance(
+        row, authority_purpose=purpose, forecast_db=namespace,
+    ) is not None) is accepted
+
+
+@pytest.mark.parametrize(("carrier", "accepted"), [
+    pytest.param(carrier, accepted, id=f"carrier{index}-{accepted}")
+    for index, (carrier, accepted) in enumerate(_CURRENT_CARRIER_PAIR_CASES)
+    if index in (15, 17)
+])
+@pytest.mark.parametrize("purpose", tuple(ReplacementForecastAuthorityPurpose))
+def test_fast_carrier_format_compatibility_does_not_grant_public_probability_authority(
+    carrier, accepted, purpose, _normal_fast_reader_template,
+):
+    from src.events.day0_authority import DAY0_REMAINING_CENTER_POLICY
+
+    # These original format inputs are not licensed certificates. FAST V3 is
+    # still supported, but matching-final source/public reachability is not
+    # proved by KORD's no-final-provider V2 producer.
+    format_input = {**carrier, "day0_remaining_center_policy": DAY0_REMAINING_CENTER_POLICY,
+        "day0_remaining_center_bias_c": 0.0}
+    assert (reader._day0_carrier_identity_reason(format_input) is None) is accepted
+    original, namespace = _normal_fast_reader_template
+    row = dict(original)
+    proof = json.loads(row["provenance_json"])
+    if "day0_remaining_carrier_operator" not in carrier:
+        proof.pop("day0_remaining_carrier_operator")
+        proof.pop("day0_remaining_carrier_content_identity")
+    else:
+        # A typed V3 declaration cannot turn V2's empty, actually consumed final
+        # sources into a matching-final license. Only this copied input changes.
+        proof.update({key: value for key, value in carrier.items()
+            if key != "day0_remaining_carrier_content_identity"})
+    row["provenance_json"] = json.dumps(proof)
+    context = dict(city=original["city"], target_date=original["target_date"],
+        metric=original["temperature_metric"],
+        decision_time=datetime.fromisoformat(original["computed_at"]))
+    # Generic live-grade is not the complete FAST pin gate. Check the exact
+    # stricter authorization component used by the public held consumer, with
+    # a healthy source first; this is not a full-wrapper negative replay.
+    assert reader._held_pinned_provenance_reason(
+        json.loads(original["provenance_json"]), **context,
+    ) is None
+    reason = reader._held_pinned_provenance_reason(proof, **context)
+    assert reason == (
+        "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_CARRIER_INVALID"
+        if "day0_remaining_carrier_operator" not in carrier
+        else "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_CARRIER_IDENTITY_MISMATCH"
+    ), purpose
 
 
 @pytest.fixture(scope="module")
