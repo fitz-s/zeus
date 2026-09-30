@@ -3672,12 +3672,12 @@ def test_forecast_posteriors_runtime_layer_migration_refuses_legacy_labels_and_p
         row["runtime_layer"]
         for row in conn.execute("SELECT runtime_layer FROM forecast_posteriors ORDER BY posterior_id")
     ]
-    assert statuses == [LIVE_RUNTIME_LAYER]
+    assert statuses == [LIVE_RUNTIME_LAYER, LIVE_RUNTIME_LAYER]
     _ensure_forecast_posteriors_runtime_layer(conn)
     assert [
         row["runtime_layer"]
         for row in conn.execute("SELECT runtime_layer FROM forecast_posteriors ORDER BY posterior_id")
-    ] == [LIVE_RUNTIME_LAYER]
+    ] == [LIVE_RUNTIME_LAYER, LIVE_RUNTIME_LAYER]
     assert _replacement_is_live_layer(
         replacement_q_mode=REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL,
         q_lcb_map={"cool": 0.1},

@@ -278,14 +278,17 @@ def test_same_cycle_queue_coverage_waits_for_consumed_current_state(monkeypatch,
                 posterior_id INTEGER PRIMARY KEY, source_id TEXT, runtime_layer TEXT,
                 city TEXT, target_date TEXT, temperature_metric TEXT,
                 dependency_source_run_ids_json TEXT, source_cycle_time TEXT,
-                computed_at TEXT, provenance_json TEXT
+                computed_at TEXT, provenance_json TEXT, openmeteo_anchor_id INTEGER
             );
             CREATE TABLE readiness_state (
                 strategy_key TEXT, status TEXT, provenance_json TEXT,
                 dependency_json TEXT
             );
         """)
-        conn.execute("INSERT INTO forecast_posteriors VALUES (1, ?, 'live', 'Helsinki', "
+        conn.execute("INSERT INTO forecast_posteriors "
+                     "(posterior_id, source_id, runtime_layer, city, target_date, "
+                     "temperature_metric, dependency_source_run_ids_json, source_cycle_time, "
+                     "computed_at, provenance_json) VALUES (1, ?, 'live', 'Helsinki', "
                      "'2026-09-27', 'high', ?, '2026-09-27T09:00:00+00:00', "
                      "'2026-09-27T12:26:00+00:00', ?)",
                      (queue.SOURCE_ID,
