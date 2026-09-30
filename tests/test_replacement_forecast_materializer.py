@@ -137,7 +137,7 @@ def _hko_source_surface(tmp_path, monkeypatch, _hko_native_surfaces):
 
 
 @pytest.fixture
-def _hko_native_surfaces(tmp_path, monkeypatch, request=None):
+def _hko_native_surfaces(tmp_path, monkeypatch, request=None, *, static_captured_at=None):
     """Ordinary loopback whole-OM captures for explicit global and US domains."""
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -167,8 +167,9 @@ def _hko_native_surfaces(tmp_path, monkeypatch, request=None):
             self.send_response(200)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("ETag", '"'+hashlib.sha256(body).hexdigest()+'"')
-            self.send_header("Last-Modified", "Fri, 05 Jun 2026 22:00:00 GMT" if frontier
-                             else "Tue, 29 Sep 2026 22:00:00 GMT")
+            modified = (static_captured_at-timedelta(hours=1)).strftime("%a, %d %b %Y %H:%M:%S GMT") if static_captured_at else (
+                "Fri, 05 Jun 2026 22:00:00 GMT" if frontier else "Tue, 29 Sep 2026 22:00:00 GMT")
+            self.send_header("Last-Modified", modified)
             self.end_headers()
             self.wfile.write(body)
         def log_message(self, *_args):
@@ -178,7 +179,8 @@ def _hko_native_surfaces(tmp_path, monkeypatch, request=None):
     thread.start()
     monkeypatch.setattr(surface, "_asset_url", lambda domain: f"http://127.0.0.1:{server.server_port}/{domain}")
     monkeypatch.setattr(surface, "_cache_root", lambda: tmp_path / "native-static")
-    monkeypatch.setattr(surface, "_now", lambda: _dt(2, 50) if frontier else _hko_dt(0)-timedelta(hours=1))
+    monkeypatch.setattr(surface, "_now", lambda: static_captured_at or (
+        _dt(2, 50) if frontier else _hko_dt(0)-timedelta(hours=1)))
     try:
         for model in models:
             capture = surface.ensure_model_surface(model)
@@ -199,6 +201,74 @@ def _target_frontier_native_surfaces(tmp_path, monkeypatch, request):
         yield
     finally:
         native_surfaces.close()
+
+
+@pytest.fixture
+def _historical_shanghai_component_surface(tmp_path, monkeypatch):
+    """TEST_ONLY_SYNTHETIC_EXTERNAL_CONDITION, not retained June source evidence."""
+    import src.data.openmeteo_ecmwf_ifs9_bucket_transport as transport
+    static_cut = _dt(0)-timedelta(hours=1)
+    native = _hko_native_surfaces.__wrapped__(tmp_path,monkeypatch,static_captured_at=static_cut)
+    next(native)
+    physical = _hko_source_surface.__wrapped__(tmp_path,monkeypatch,None)
+    next(physical)
+    monkeypatch.setattr(transport,"_o1280_snapshot_now",lambda:static_cut)
+    try:
+        yield
+    finally:
+        physical.close()
+        native.close()
+
+
+def _synthetic_historical_shanghai_ground_registry(tmp_path, monkeypatch, name):
+    """New hypothetical external body, never backdate the retained Sep30 bytes."""
+    import src.config as config
+    assert name == "Shanghai"
+    lat,lon = "31.143378","121.805214"
+    identity = "30137822"
+    payload = {"TEST_ONLY_SYNTHETIC_EXTERNAL_CONDITION": "hypothetical June station response",
+        "stationCollection":{"definitions":[{"defType":"elevations","abbr":"GROUND",
+            "description":"ELEVATION OF THE GROUND"}],"stations":[{
+            "ncdcStnId":identity,"header":{"preferredName":"TEST ONLY HYPOTHETICAL PUDONG",
+                "latitude_dec":lat,"longitude_dec":lon,"por":{"endDate":"Present"}},
+            "identifiers":[{"idType":"ICAO","id":"ZSPD"},{"idType":"NCDCSTNID","id":identity}],
+            "location":{"ncdcstnId":identity,"latitudes":[{"latitude_dec":lat}],
+                "longitudes":[{"longitude_dec":lon}],"latLonPairs":[{"latitude_dec":lat,"longitude_dec":lon}],
+                "elevations":[{"elevationType":"GROUND","elevationFeet":"15","elevationMeters":"4.5"}],
+                "geoInfo":{"ncdcstnId":identity},"nwsInfo":{"ncdcstnId":identity}}}]}}
+    raw = json.dumps(payload,sort_keys=True).encode()
+    assert raw != (config.PROJECT_ROOT/"config/noaa_homr_zspd_station.json").read_bytes()
+    facts = config.station_ground_facts_from_bytes(source_kind=config.HOMR_INTERNATIONAL_GROUND_SOURCE_KIND,
+        station_id="ZSPD",raw_body=raw)
+    assert facts is not None and facts["elevation_m"] == 4.5
+    # Registered transport filename inside the private config only; bytes and
+    # their explicit hypothetical marker are independent of the real asset.
+    artifact = tmp_path/"noaa_homr_zspd_station.json"
+    artifact.write_bytes(raw)
+    rows = json.loads((config.PROJECT_ROOT/"config/station_precise_coords.json").read_text())
+    captured = _dt(0)-timedelta(hours=1)
+    rows[name]["station_ground_proof"] = {**facts,"artifact_ref":f"config/{artifact.name}",
+        "body_sha256":hashlib.sha256(raw).hexdigest(),"checked_at":captured.isoformat(),
+        "query_date":"2026-06-05","query_url":f"{config.HOMR_GROUND_SOURCE_URL}?qid=ICAO%3AZSPD&qidMod=is&current=true&date=2026-06-05&phrData=false"}
+    registry = tmp_path/"station_precise_coords.json"
+    registry.write_text(json.dumps(rows))
+    (tmp_path/"cities.json").write_bytes((config.PROJECT_ROOT/"config/cities.json").read_bytes())
+    monkeypatch.setattr(config,"CONFIG_DIR",tmp_path)
+    return registry,artifact,rows
+
+
+def _historical_shanghai_component_request(tmp_path, monkeypatch, *, metric="high", computed_at=None):
+    """Normal physical proof under explicit hypothetical history; controlled ENS."""
+    conn,request = _shanghai_current_owner_request(tmp_path,monkeypatch,metric=metric,
+        target_date=date(2026,6,7),source_cycle_time=_dt(0),computed_at=computed_at or _dt(18),
+        ground_recorded_at=_dt(0)-timedelta(minutes=30),
+        ground_captured_at=_dt(0)-timedelta(hours=1),
+        ground_registry_factory=_synthetic_historical_shanghai_ground_registry,record_observed_prints=False)
+    request = replace(request,day0_observed_extreme_c=None,day0_observed_extreme_source=None,
+        day0_observed_extreme_observation_time=None,day0_observed_extreme_sample_count=None,
+        day0_observed_extreme_unit=None)
+    assert materializer_mod._precision_guard_block_reason(request,conn) == ()
+    return conn,request
 
 
 def _hko_raw_openmeteo_bytes() -> bytes:
@@ -2524,7 +2594,8 @@ def test_missing_day0_hourly_carrier_is_a_blocked_input(
 def _shanghai_current_owner_request(tmp_path, monkeypatch, *, metric="high",
     target_date=date(2026,10,2),source_cycle_time=datetime(2026,10,1,tzinfo=UTC),
     computed_at=None,first_compute_at=None,expires_at=None,observed_extreme=None,
-    observed_sample_count=12,ground_recorded_at=None):
+    observed_sample_count=12,ground_recorded_at=None,ground_registry_factory=None,
+    ground_captured_at=None,record_observed_prints=True):
     """Normal owned ground/anchor/provider proof with controlled ENS/math inputs.
 
     The actual HOMR body was captured Sep30. Move the entire external forecast
@@ -2537,7 +2608,8 @@ def _shanghai_current_owner_request(tmp_path, monkeypatch, *, metric="high",
     from tests.test_config import _official_international_homr_registry
     from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _selected_test_cell
 
-    _official_international_homr_registry(tmp_path, monkeypatch, "Shanghai")
+    registry_factory = ground_registry_factory or _official_international_homr_registry
+    registry_factory(tmp_path, monkeypatch, "Shanghai")
     assert metric in {"high","low"}
     cycle = source_cycle_time
     computed = computed_at or cycle+timedelta(hours=18)
@@ -2557,7 +2629,7 @@ def _shanghai_current_owner_request(tmp_path, monkeypatch, *, metric="high",
     evidence = ground.read_current_station_ground_evidence(db, city="Shanghai", decision_at=computed)
     captured = datetime.fromisoformat(evidence["captured_at"].replace("Z", "+00:00"))
     recorded = datetime.fromisoformat(evidence["recorded_at"])
-    assert captured == datetime(2026, 9, 30, 12, 52, 1, tzinfo=UTC)
+    assert captured == (ground_captured_at or datetime(2026, 9, 30, 12, 52, 1, tzinfo=UTC))
     assert captured <= recorded == ground_recorded <= first <= computed
     city = runtime_cities_by_name()["Shanghai"]
     station = runtime_station_geometry_for_city(city, effective_at=computed)
@@ -2601,7 +2673,7 @@ def _shanghai_current_owner_request(tmp_path, monkeypatch, *, metric="high",
         assert tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_forecast_artifacts ORDER BY artifact_id")) == first_entities
         assert tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id")) == first_raw
     assert request.city == "Shanghai" and request.openmeteo_precision_guard.passable_for_live_materialization
-    if request.day0_observed_extreme_c is not None:
+    if record_observed_prints and request.day0_observed_extreme_c is not None:
         _append_shanghai_owner_prints(conn,request)
     return conn,request
 
@@ -4035,13 +4107,14 @@ def test_materializer_write_replaces_retracted_same_source_high(monkeypatch: pyt
     assert regression_provenance["day0_conditioning"]["observation_time"] == _dt(18, 10).isoformat()
 
 
+@pytest.mark.usefixtures("_historical_shanghai_component_surface")
 def test_wu_newer_snapshot_retracts_stale_source_frontier(
+    tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Shenzhen antibody: WU 37 -> 36 must not leave the posterior pinned at 37."""
-    conn = _conn()
-    _install_live_fusion(monkeypatch)
-    first = _request(
+    conn,basis = _historical_shanghai_component_request(tmp_path,monkeypatch)
+    first = replace(basis,
         computed_at=_dt(18),
         expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
         day0_observed_extreme_c=37.0,
