@@ -387,6 +387,22 @@ def _physical_artifact_candidates(conn: sqlite3.Connection, row: Mapping[str, ob
 def _read_product_identity_at_cutoff(conn: sqlite3.Connection, raw: object, *, deadline_monotonic: float | None = None) -> str:
     """Complete same-issued scan; an observed repair covers only its old unknown-bad prefix."""
     row = json.loads(str(raw))
+    if row.get("physical_proof_cutoff") is not None and _legacy_hko_context(row):
+        deadline = time.monotonic() + _PHYSICAL_CAPTURE_SCAN_BUDGET_SECONDS
+        if deadline_monotonic is not None:
+            deadline = min(deadline, deadline_monotonic)
+        candidates = conn.execute(f"SELECT {_ARTIFACT_IDENTITY_JSON_SQL} FROM raw_forecast_artifacts a "
+            "WHERE source_id=? AND product_id=? AND source_cycle_time=? AND data_version=?",
+            (row["source_id"], row["product_id"], row["source_cycle_time"], "station_forecast_entity_body_v1"))
+        def captured_entities():
+            try:
+                for item in candidates:
+                    if time.monotonic() >= deadline:
+                        raise CurrentValueServingReadUnavailable("physical_capture_scan_budget_exceeded")
+                    yield json.loads(item[0])
+            finally:
+                candidates.close()
+        return json.dumps(_physical_artifact_at_cutoff(row, captured_entities()), separators=(",", ":"))
     if row.get("physical_proof_cutoff") is None or not all(row.get(key) is not None for key in (
         "source_id", "product_id", "source_cycle_time", "latitude_requested", "longitude_requested", "timezone_requested"
     )):
@@ -581,7 +597,8 @@ def _source_clock_product_has_authority(raw: object, *, lead_days: int | None) -
                 and (model != "cwa_township_hourly_high" or row.get("metric") == "high")
                 and (model != "cwa_township_hourly_low" or row.get("metric") == "low")
             )
-            return typed and _station_response_has_authority(row)
+            view = _station_capture_view(row) if typed else None
+            return view is not None and _station_response_has_authority(view)
         from src.config import runtime_cities_by_name
         from src.data.bayes_precision_fusion_history_provider import raw_product_matches_live_source
 
@@ -784,6 +801,71 @@ def _station_response_has_authority(row: Mapping[str, object]) -> bool:
         return value is not None and math.isfinite(float(value)) and math.isclose(float(value), float(row["forecast_value_c"]), abs_tol=1e-9)
     except (ImportError, KeyError, TypeError, ValueError, OSError, json.JSONDecodeError):
         return False
+
+
+def _legacy_hko_context(row: Mapping[str, object]) -> bool:
+    """Only the former metric-local HKO transport, never generic NULL-coordinate rows."""
+    try:
+        import hashlib
+        from src.config import runtime_cities_by_name
+        from src.data.station_forecast_adapter import _HKO_ENDPOINT
+        city = runtime_cities_by_name().get(str(row["city"]))
+        if (city is None or city.settlement_source_type != "hko" or row["metric"] not in ("high", "low")
+                or row.get("artifact_id") is not None or row.get("raw_sha256") is not None
+                or any(row[key] != value for key, value in {
+                    "model": "hko_fnd", "provider": "hong_kong_observatory",
+                    "source_id": "hko_fnd_single_runs", "product_id": "hko_fnd::single_runs",
+                    "source_family": "station_official_forecast", "model_name": "hko_fnd",
+                    "endpoint": "single_runs", "endpoint_mode": "single_runs",
+                    "cell_selection": "station_official_forecast", "elevation_param": "station",
+                    "downscaling_policy": "agency_mos", "timezone_requested": city.timezone,
+                }.items())):
+            return False
+        params = {"city": row["city"], "dataType": "fnd", "lang": "en",
+                  "metric": row["metric"], "timezone": city.timezone}
+        encoded = json.dumps(params, sort_keys=True, separators=(",", ":"))
+        if json.loads(str(row["request_params_json"])) != params or row["request_url_hash"] != hashlib.sha256(f"{_HKO_ENDPOINT}?{encoded}".encode()).hexdigest():
+            return False
+        domain = {"provider": "hong_kong_observatory", "model_name": "hko_fnd", "city": row["city"],
+                  "endpoint_mode": "single_runs", "cell_selection": "station_official_forecast"}
+        if row["model_domain_hash"] != hashlib.sha256(json.dumps(domain, sort_keys=True, separators=(",", ":")).encode()).hexdigest():
+            return False
+        lat, lon = row["latitude_requested"], row["longitude_requested"]
+        return (lat is None and lon is None) or (lat == city.lat and lon == city.lon)
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _station_capture_view(row: Mapping[str, object]) -> dict[str, object] | None:
+    if row.get("artifact_id") is not None:
+        return dict(row)
+    if not _legacy_hko_context(row):
+        return None
+    try:
+        from src.data.station_forecast_adapter import _HKO_ENDPOINT
+        artifact = row["physical_artifact"]
+        if (not isinstance(artifact, Mapping) or artifact["data_version"] != "station_forecast_entity_body_v1"
+                or artifact["request_url"] != _HKO_ENDPOINT):
+            return None
+        params = json.loads(str(artifact["request_params_json"]))
+        if params != {"city": row["city"], "dataType": "fnd", "lang": "en", "timezone": row["timezone_requested"]}:
+            return None
+        decision = datetime.fromisoformat(str(row["physical_proof_cutoff"]).replace("Z", "+00:00"))
+        clocks = []
+        for key in ("source_cycle_time", "source_available_at", "captured_at", "recorded_at"):
+            stamp = datetime.fromisoformat(str(row[key]).replace("Z", "+00:00"))
+            if key == "recorded_at" and stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            if stamp.tzinfo is None or stamp > decision:
+                return None
+            clocks.append(stamp)
+        if not clocks[0] <= clocks[1] <= clocks[2] <= clocks[3]:
+            return None
+        return {**row, "artifact_id": artifact["artifact_id"], "raw_sha256": artifact["sha256"],
+            **{key: artifact[key] for key in ("source_available_at", "captured_at", "recorded_at")},
+            "recorded_station_product_identity": {key: row[key] for key in _PRODUCT_IDENTITY_COLUMNS}}
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _physical_response_has_authority(row: Mapping[str, object], *, _require_surface: bool = True) -> bool:
@@ -1417,6 +1499,10 @@ def _physical_response_provenance(row: Mapping[str, object]) -> Mapping[str, obj
         row = _revalidated_legacy_product_row(row)
         if row is None:
             return None
+    else:
+        row = _station_capture_view(row)
+        if row is None:
+            return None
     artifact = row.get("physical_artifact")
     if not isinstance(artifact, dict):
         return None
@@ -1424,7 +1510,10 @@ def _physical_response_provenance(row: Mapping[str, object]) -> Mapping[str, obj
         evidence = json.loads(str(artifact["metadata"]))["station_response"]
         proof = next(proof for proof in evidence["items"] if all(proof.get(key) == row[key]
             for key in ("model", "city", "metric", "target_date", "source_cycle_time", "provider")))
-        return {**proof, "artifact_id": row["artifact_id"], "entity_body_sha256": artifact["sha256"]}
+        return {**proof, "artifact_id": row["artifact_id"], "entity_body_sha256": artifact["sha256"],
+                "proof_recorded_at": artifact["recorded_at"],
+                **({"recorded_station_product_identity": row["recorded_station_product_identity"]}
+                   if "recorded_station_product_identity" in row else {})}
     metadata = json.loads(str(artifact["metadata"]))["physical_response"]
     params = metadata["request_params"]
     index = next(i for i, (lat, lon, tz) in enumerate(zip(

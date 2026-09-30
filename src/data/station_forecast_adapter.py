@@ -317,6 +317,9 @@ def _station_response_capture(
     clean_url = urlunsplit((parts.scheme, parts.netloc.split("@")[-1], parts.path,
                            urlencode([(k, v) for k, v in parse_qsl(parts.query) if safe(k)]), ""))
     params = {str(key): value for key, value in request_params.items() if safe(str(key))}
+    if endpoint == _HKO_ENDPOINT:
+        # Both quantities are derived from one official HTTP request.
+        params.pop("metric", None)
     digest = hashlib.sha256(raw_body).hexdigest()
     path = state_path(str(Path("replacement_forecast_live") / "raw_manifests" /
                           f"station_forecast_response_{digest}.body"))
@@ -360,6 +363,11 @@ def _row_to_rmf_dict(
         "city": row.city,
         "timezone": city_timezone,
     }
+    if row.model == "hko_fnd" and provider == "hong_kong_observatory" and endpoint == _HKO_ENDPOINT:
+        expected = {"dataType": "fnd", "lang": "en", "city": row.city, "timezone": city_timezone}
+        if dict(params) != expected and dict(params) != {**expected, "metric": row.metric}:
+            raise ValueError("HKO FND request context differs from the official transport")
+        params = {**expected, "metric": row.metric}
     request_params_json = json.dumps(
         params, sort_keys=True, separators=(",", ":")
     )
@@ -553,8 +561,7 @@ def ingest_hko_fnd_live(
         latitude=latitude,
         longitude=longitude,
         captured_at=product.captured_at,
-        request_params={"dataType": "fnd", "lang": "en", "city": city, "timezone": city_timezone,
-                        "response_sha256": hashlib.sha256(product.raw_json).hexdigest()},
+        request_params={"dataType": "fnd", "lang": "en", "city": city, "timezone": city_timezone},
         raw_body=product.raw_json, station_response_items=items,
     )
 

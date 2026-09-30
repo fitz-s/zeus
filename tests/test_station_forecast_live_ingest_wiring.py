@@ -1,8 +1,8 @@
 # Created: 2026-06-29
-# Lifecycle: created=2026-06-29; last_reviewed=2026-09-29; last_reused=2026-09-29
+# Lifecycle: created=2026-06-29; last_reviewed=2026-09-30; last_reused=2026-09-30
 # Purpose: Lock config-driven station forecast ingest, dual-metric HKO capture, and reseed wiring.
 # Reuse: Run for station forecast source, dispatcher, cadence, or replacement reseed changes.
-# Last reused/audited: 2026-09-29
+# Last reused/audited: 2026-09-30
 # Authority basis: operator directive "加数据" (add CWA/HKO station-forecast data to the
 #   live forecast cycle); src/data/station_forecast_adapter.py single_runs persist contract;
 #   config/station_forecast_sources.json adapter_kind dispatch seam.
@@ -1106,3 +1106,86 @@ def test_hourly_product_accepts_equal_clocks_and_optional_sent():
             sent_time=sent,
         )
         assert product.issue_time == product.update_time == product.captured_at
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+@pytest.mark.parametrize("fault", [None, "value", "city", "metric", "issue", "timezone", "body"])
+def test_hko_same_issue_entity_recovers_only_its_immutable_legacy_context(monkeypatch, tmp_path, metric, fault):
+    import urllib.request
+    from datetime import datetime, timedelta, timezone
+    from src.data import replacement_current_value_serving as serving
+    from src.data.replacement_forecast_current_target_plan import _fusion_current_value_count
+    from src import config
+
+    private_state = config.validate_test_state_root(tmp_path)
+    monkeypatch.setenv(config.TEST_STATE_ROOT_ENV, str(private_state))
+    monkeypatch.setattr(config, "_TEST_STATE_ROOT", private_state)
+    monkeypatch.setattr(config, "STATE_DIR", private_state)
+
+    clock = [datetime(2026, 7, 23, 10, 15, tzinfo=timezone.utc)]
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0].astimezone(tz) if tz else clock[0].replace(tzinfo=None)
+    body = (json.dumps({"updateTime": "2026-07-23T10:14:00+00:00", "weatherForecast": [{
+        "forecastDate": "20260724", "forecastMaxtemp": {"value": 33, "unit": "C"},
+        "forecastMintemp": {"value": 27, "unit": "C"}}]}, indent=2) + "\n").encode()
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *_args): pass
+        def read(self): return body
+    calls = []
+    def http(request, **_kwargs):
+        calls.append(request.full_url)
+        return Response()
+    monkeypatch.setattr(urllib.request, "urlopen", http)
+    monkeypatch.setattr(adapter, "datetime", Clock)
+    monkeypatch.setattr("src.data.bayes_precision_fusion_download.datetime", Clock)
+    conn = _hourly_schema_conn(tmp_path / "legacy-fnd.db")
+    try:
+        rows = adapter.parse_hko_fnd_payload(json.loads(body), city="Hong Kong", metric=metric,
+            city_timezone="Asia/Hong_Kong", captured_at=clock[0].isoformat())
+        assert adapter.persist_station_forecast_rows(conn, rows, provider="hong_kong_observatory",
+            endpoint=adapter._HKO_ENDPOINT, city_timezone="Asia/Hong_Kong", captured_at=clock[0].isoformat()) == 1
+        conn.commit()
+        original = conn.execute("SELECT * FROM raw_model_forecasts").fetchall()
+        assert conn.execute("SELECT artifact_id,raw_sha256,latitude_requested,longitude_requested FROM raw_model_forecasts").fetchone() == (None, None, None, None)
+        issue = rows[0].source_cycle_time
+        def read(cut):
+            return serving.read_current_instrument_values(conn, city="Hong Kong", metric=metric,
+                target_date="2026-07-24", source_cycle_time_iso=issue,
+                decision_time_iso=cut.isoformat(), include_station_sources=True)
+        oldcut = clock[0] + timedelta(seconds=1)
+        assert read(oldcut) == {}
+        clock[0] += timedelta(minutes=5)
+        assert adapter.ingest_hko_fnd_live(conn, metrics=(metric,)) == 0
+        conn.commit()
+        cut = clock[0] + timedelta(seconds=1)
+        current = read(cut)
+        assert current["hko_fnd"].value_c == (33 if metric == "high" else 27)
+        assert conn.execute("SELECT * FROM raw_model_forecasts").fetchall() == original
+        assert read(oldcut) == {}
+        assert _fusion_current_value_count(conn, city="Hong Kong", target_date="2026-07-24",
+            temperature_metric=metric, source_cycle_time=issue, decision_time=cut) == 1
+        artifacts = conn.execute("SELECT * FROM raw_forecast_artifacts").fetchall()
+        clock[0] += timedelta(minutes=5)
+        assert adapter.ingest_hko_fnd_live(conn, metrics=(metric,)) == 0
+        conn.commit()
+        assert conn.execute("SELECT * FROM raw_forecast_artifacts").fetchall() == artifacts
+        assert conn.execute("SELECT * FROM raw_model_forecasts").fetchall() == original
+        assert len(calls) == 2
+        if fault is None:
+            return
+        schema = serving.current_value_serving_schema(conn)
+        raw = conn.execute(f"SELECT {serving._product_identity_select(schema, decision_iso=cut.isoformat())} FROM raw_model_forecasts").fetchone()[0]
+        typed = json.loads(serving._read_product_identity_at_cutoff(conn, raw))
+        if fault == "value": typed["forecast_value_c"] += 1
+        elif fault == "city": typed["city"] = "Shanghai"
+        elif fault == "metric": typed["metric"] = "low" if metric == "high" else "high"
+        elif fault == "issue": typed["source_cycle_time"] = "2026-07-23T10:13:00+00:00"
+        elif fault == "timezone": typed["timezone_requested"] = "UTC"
+        else: Path(typed["physical_artifact"]["artifact_path"]).write_bytes(b"{}")
+        assert not serving._source_clock_product_has_authority(json.dumps(typed), lead_days=1)
+        assert conn.execute("SELECT * FROM raw_model_forecasts").fetchall() == original
+    finally:
+        conn.close()
