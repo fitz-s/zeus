@@ -207,6 +207,7 @@ from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
 from src.contracts.venue_submission_envelope import (
     assert_live_order_size,
     assert_live_order_unit_price,
+    resting_limit_violation,
 )
 from src.contracts.executable_cost_curve import (
     BidBookLevel,
@@ -13347,7 +13348,7 @@ def _global_buy_candidate_from_raw_book(
         current_precliff_liquidation_capacity,
         executable_curve_identity,
         maker_fill_candidate_binding_identity,
-        passive_buy_proposal_curve,
+        passive_buy_proposal_at_limit,
     )
 
     proposal = None
@@ -13419,14 +13420,15 @@ def _global_buy_candidate_from_raw_book(
             selected_witness.assert_current_at(
                 validated_at_utc if validated_at_utc is not None else datetime.now(UTC)
             )
-            proposal = passive_buy_proposal_curve(
+            # The selected limit stays authority while the current book still
+            # admits it (resting_limit_violation); a flickering top bid below it
+            # changes neither the limit, its cashflow, nor its ask distance.
+            proposal = passive_buy_proposal_at_limit(
                 curve,
                 native_bid_levels=bid_levels,
+                limit=selected_witness.limit_price,
             )
-            if (
-                proposal is None
-                or proposal.levels[0].price != selected_witness.limit_price
-            ):
+            if proposal is None:
                 raise ValueError("current_limit_or_cashflow_changed")
             from src.engine.global_batch_runtime import _maker_fill_distance_band
 
@@ -16704,41 +16706,30 @@ def _global_preflight_candidate_mode_receipt(
     if order_mode != "MAKER":
         return receipt
     try:
-        from src.decision_kernel.certificates.execution import (
-            _branch_limit_price,
-            _side_for_direction,
-        )
-
-        limit_price = _branch_limit_price(
-            side=_side_for_direction(str(receipt.direction or "")),
-            order_mode="MAKER",
-            reservation=float(receipt.c_fee_adjusted),
-            best_bid=fresh_best_bid,
-            best_ask=fresh_best_ask,
-            tick_size=float(curve.min_tick),
-            passive_maker_context=None,
-        )
-        assert_live_order_unit_price(limit_price)
         economics = receipt.qkernel_execution_economics
         selected_limit = (
-            _optional_float(economics.get("global_limit_price"))
+            economics.get("global_limit_price")
             if isinstance(economics, Mapping)
             else None
         )
-        if selected_limit is None or not math.isclose(
-            float(limit_price),
+        if selected_limit is None:
+            raise ValueError("selected maker limit missing")
+        assert_live_order_unit_price(selected_limit)
+        violation = resting_limit_violation(
             selected_limit,
-            rel_tol=0.0,
-            abs_tol=max(float(curve.min_tick) / 2.0, 1e-12),
-        ):
+            best_bid=fresh_best_bid,
+            best_ask=fresh_best_ask,
+        )
+        if violation is not None:
             return dataclass_replace(
                 receipt,
                 submitted=False,
                 side_effect_status="NO_SUBMIT",
                 reason=(
                     "GLOBAL_PREFLIGHT_CANDIDATE_MODE_FLIPPED:"
-                    "MAKER_LIMIT_SUPERSEDED:"
-                    f"selected={selected_limit}:current={limit_price}"
+                    f"MAKER_LIMIT_SUPERSEDED:{violation}:"
+                    f"selected={selected_limit}:"
+                    f"bid={fresh_best_bid}:ask={fresh_best_ask}"
                 ),
                 proof_accepted=False,
             )

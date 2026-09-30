@@ -40,6 +40,39 @@ def assert_live_order_unit_price(price: Decimal | str | float) -> Decimal:
     return value
 
 
+def resting_limit_violation(
+    limit: Decimal | str | float,
+    *,
+    best_bid: Decimal | str | float | None,
+    best_ask: Decimal | str | float | None,
+) -> str | None:
+    """The book law for a resting (post-only) limit; ``None`` means it is valid.
+
+    A resting limit is valid against a book iff it lies in the inclusive live
+    band and strictly inside the spread: above the best bid (otherwise it is
+    not top of book, outside the population a maker fill witness samples) and
+    below the best ask (otherwise it crosses). An absent side is an open bound.
+    """
+
+    try:
+        value = Decimal(str(limit))
+        bid = None if best_bid is None else Decimal(str(best_bid))
+        ask = None if best_ask is None else Decimal(str(best_ask))
+    except Exception:  # noqa: BLE001 - any unparsable price is not a valid limit
+        return "price_invalid"
+    if not value.is_finite() or any(
+        side is not None and not side.is_finite() for side in (bid, ask)
+    ):
+        return "price_invalid"
+    if not LIVE_ORDER_MIN_UNIT_PRICE <= value <= LIVE_ORDER_MAX_UNIT_PRICE:
+        return "outside_live_band"
+    if bid is not None and value <= bid:
+        return "at_or_below_best_bid"
+    if ask is not None and value >= ask:
+        return "at_or_above_best_ask"
+    return None
+
+
 def assert_live_order_size(
     size: Decimal | str | float,
     min_order_size: Decimal | str | float,

@@ -21682,16 +21682,35 @@ def test_global_maker_winner_keeps_auction_mode_and_revalidates_exact_limit(
         lambda _economics: True,
     )
 
-    stable = era._global_preflight_candidate_mode_receipt(
-        event,
-        receipt,
-        current_candidate=SimpleNamespace(executable_cost_curve=curve),
-        fresh_best_bid=0.46,
-        fresh_best_ask=0.52,
-        checked_at_utc=at,
-    )
+    def preflight(bid, ask):
+        return era._global_preflight_candidate_mode_receipt(
+            event,
+            receipt,
+            current_candidate=SimpleNamespace(executable_cost_curve=curve),
+            fresh_best_bid=bid,
+            fresh_best_ask=ask,
+            checked_at_utc=at,
+        )
 
-    assert stable is receipt
+    # The top bid retreats below the selected limit: the limit is still strictly
+    # inside the spread, so it stays the authority (no bid+tick recompute).
+    assert preflight(0.38, 0.52) is receipt
+    assert preflight(0.409, 0.52) is receipt
+    for bid, ask, violation in (
+        (0.41, 0.52, "at_or_below_best_bid"),
+        (0.46, 0.52, "at_or_below_best_bid"),
+        (0.38, 0.41, "at_or_above_best_ask"),
+    ):
+        rejected = preflight(bid, ask)
+        assert rejected.proof_accepted is False
+        assert rejected.side_effect_status == "NO_SUBMIT"
+        assert rejected.reason.startswith(
+            "GLOBAL_PREFLIGHT_CANDIDATE_MODE_FLIPPED:"
+            f"MAKER_LIMIT_SUPERSEDED:{violation}:"
+        )
+        assert era._global_preflight_block_status(rejected.reason) == (
+            "CANDIDATE_BLOCKED"
+        )
 
 
 def test_global_preflight_falls_through_non_actionable_winner_before_mode_redecision(
@@ -43841,6 +43860,75 @@ def test_global_buy_jit_maker_distance_band_edge_is_inclusive(
         )
         assert rebound.proposal_cost_curve.levels[0].price == Decimal("0.401")
         assert rebound.maker_fill_witness.limit_price == Decimal("0.401")
+
+
+def test_global_buy_jit_bid_retreat_keeps_selected_maker_limit():
+    """HK-low shape: the top bid flickers down below the selected limit. The
+    limit is still strictly inside the spread, the ask and so the fill-distance
+    band are unchanged: keep the limit and rebuild the witness at it."""
+
+    selected = _current_maker_buy_candidate()
+    authority = _jit_market_authority(selected, tick="0.001", min_order_size="5")
+
+    rebound = era._global_buy_candidate_from_raw_book(
+        selected,
+        {
+            "asset_id": selected.token_id,
+            "tick_size": "0.001",
+            "min_order_size": "5",
+            "bids": [{"price": "0.38", "size": "100"}],
+            "asks": [{"price": "0.60", "size": "80"}],
+        },
+        captured_at_utc=authority.snapshot.captured_at,
+        market_authority=authority,
+    )
+
+    assert rebound.proposal_cost_curve.levels[0].price == Decimal("0.401")
+    assert rebound.maker_fill_witness.limit_price == Decimal("0.401")
+    assert rebound.maker_fill_witness.outcomes == (
+        selected.maker_fill_witness.outcomes
+    )
+    assert rebound.maker_fill_witness.book_hash == (
+        authority.snapshot.raw_orderbook_hash
+    )
+    from src.solve.solver import _maker_witness_rejection
+
+    assert _maker_witness_rejection(
+        rebound, decision_at_utc=authority.snapshot.captured_at
+    ) is None
+
+
+@pytest.mark.parametrize(
+    ("bid", "ask"),
+    (
+        ("0.401", "0.60"),  # bid rises to the limit: no longer top of book
+        ("0.45", "0.60"),  # bid rises through the limit
+        ("0.38", "0.401"),  # ask falls to the limit: would cross
+    ),
+    ids=("bid-at-limit", "bid-above-limit", "ask-at-limit"),
+)
+def test_global_buy_jit_maker_limit_outside_current_spread_rejects(bid, ask):
+    selected = _current_maker_buy_candidate()
+    authority = _jit_market_authority(selected, tick="0.001", min_order_size="5")
+
+    with pytest.raises(ValueError) as exc_info:
+        era._global_buy_candidate_from_raw_book(
+            selected,
+            {
+                "asset_id": selected.token_id,
+                "tick_size": "0.001",
+                "min_order_size": "5",
+                "bids": [{"price": bid, "size": "100"}],
+                "asks": [{"price": ask, "size": "100"}],
+            },
+            captured_at_utc=authority.snapshot.captured_at,
+            market_authority=authority,
+        )
+
+    assert str(exc_info.value) == (
+        "GLOBAL_BUY_JIT_MAKER_WITNESS_SUPERSEDED:"
+        "ValueError:current_limit_or_cashflow_changed"
+    )
 
 
 def test_global_buy_jit_changed_maker_limit_requires_reauction():

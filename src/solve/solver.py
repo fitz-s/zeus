@@ -90,6 +90,7 @@ from src.contracts.strategy_capital_allocation import (
 from src.contracts.venue_submission_envelope import (
     LIVE_ORDER_MAX_UNIT_PRICE,
     LIVE_ORDER_MIN_UNIT_PRICE,
+    resting_limit_violation,
 )
 from src.solve.exits import ZeroWealthOutcomeError
 from src.solve.types import (
@@ -348,20 +349,38 @@ def passive_buy_proposal_curve(
     *,
     native_bid_levels: Sequence[BidBookLevel | BookLevel],
 ) -> ExecutableCostCurve | None:
-    """Price one post-only BUY with current pre-cliff liquidation capacity."""
+    """Price one post-only BUY one tick above the current best bid."""
 
     bids = tuple(native_bid_levels)
     if not bids:
         return None
     best_bid = max(Decimal(level.price) for level in bids)
-    maker_price = best_bid + Decimal(curve.min_tick)
-    best_ask = Decimal(curve.levels[0].price)
-    liquidation_capacity = current_precliff_liquidation_capacity(bids)
-    proposal_capacity = liquidation_capacity
+    return passive_buy_proposal_at_limit(
+        curve,
+        native_bid_levels=bids,
+        limit=best_bid + Decimal(curve.min_tick),
+    )
+
+
+def passive_buy_proposal_at_limit(
+    curve: ExecutableCostCurve,
+    *,
+    native_bid_levels: Sequence[BidBookLevel | BookLevel],
+    limit: Decimal,
+) -> ExecutableCostCurve | None:
+    """Rest one post-only BUY at ``limit`` iff the current book admits it.
+
+    ``resting_limit_violation`` is the single book law; capacity is the same
+    book's current pre-cliff liquidation capacity.
+    """
+
+    bids = tuple(native_bid_levels)
+    best_bid = max((Decimal(level.price) for level in bids), default=None)
+    best_ask = Decimal(curve.levels[0].price) if curve.levels else None
+    proposal_capacity = current_precliff_liquidation_capacity(bids)
     if (
-        not _live_unit_price_in_band(maker_price)
-        or maker_price <= best_bid
-        or maker_price >= best_ask
+        resting_limit_violation(limit, best_bid=best_bid, best_ask=best_ask)
+        is not None
         or not proposal_capacity.is_finite()
         or proposal_capacity < Decimal(curve.min_order_size)
     ):
@@ -375,7 +394,7 @@ def passive_buy_proposal_curve(
         # than the same captured book can currently liquidate above the venue
         # floor.  A floor bid is executable now but provides no downward-tick
         # redecision slack.  This witness does not claim that bids persist.
-        levels=(BookLevel(price=maker_price, size=proposal_capacity),),
+        levels=(BookLevel(price=Decimal(limit), size=proposal_capacity),),
         # See passive_sell_proposal_curve: current maker authority uses the
         # exact submitted limit, without an assumed fee or rebate.
         fee_model=FeeModel(fee_rate=Decimal("0")),
