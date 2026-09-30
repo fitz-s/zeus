@@ -768,12 +768,14 @@ def test_fractional_kelly_targets_final_holding_instead_of_reallocating_each_epo
     )
 
 
-def test_fractional_kelly_rejects_a_positive_subminimum_target():
+def test_fractional_kelly_rejects_a_positive_subminimum_target_outside_full_kelly():
+    # Edge 0.005 at 0.49: full Kelly is ~2.0 shares, below the 3-share $1
+    # taker lot, so the lot would exceed full Kelly and the target stays refused.
     candidate = _global_candidate(
         candidate_id="fractional-below-minimum",
         family="fractional-below-minimum",
         side="YES",
-        q=0.51,
+        q=0.495,
         levels=(("0.49", "1000"),),
         min_order="1",
     )
@@ -795,12 +797,11 @@ def test_fractional_kelly_rejects_a_positive_subminimum_target():
     assert rejection is not None
     assert rejection.candidate_id == candidate.candidate_id
     assert rejection.probe_kind == "MINIMUM_MARKETABLE"
-    assert rejection.probe_shares >= Decimal("1")
+    assert rejection.probe_shares == Decimal("3.00")
+    assert rejection.full_kelly_target_shares < rejection.probe_shares
     assert Decimal("0") < rejection.remaining_fractional_target_shares < (
         rejection.probe_shares
     )
-    assert rejection.probe_robust_delta_log_wealth > 0
-    assert rejection.probe_robust_ev_usd > 0
 
 
 def test_fractional_kelly_does_not_turn_7_015625_target_into_a_five_share_buy():
@@ -841,7 +842,7 @@ def test_subminimum_fractional_kelly_rejection_is_exactly_symmetric_for_yes_and_
         candidate_id="repair-yes",
         family="repair-yes",
         side="YES",
-        q=0.51,
+        q=0.495,
         levels=(("0.49", "1000"),),
         min_order="1",
     )
@@ -849,7 +850,7 @@ def test_subminimum_fractional_kelly_rejection_is_exactly_symmetric_for_yes_and_
         candidate_id="repair-no",
         family="repair-no",
         side="NO",
-        q=0.51,
+        q=0.495,
         levels=(("0.49", "1000"),),
         min_order="1",
     )
@@ -915,11 +916,16 @@ def test_subminimum_target_never_emits_a_minimum_lot_repair_certificate():
         cap="100",
         multiplier="0.001",
     )
-    assert decision.candidate is None
-    assert decision.shares == 0
+    # The retired repair certificate stays retired; the small-capital lot is
+    # a plain FRACTIONAL-law decision proven by the shared predicate.
     assert decision.buy_minimum_marketable_repair is None
-    assert decision.rejection_reasons[candidate.candidate_id] == (
-        "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT"
+    assert decision.buy_sizing_mode == "SMALL_CAPITAL_MINIMUM_LOT"
+    assert decision.shares == Decimal("10")
+    assert S.small_capital_minimum_lot_admits(
+        current_token_shares=decision.current_token_shares,
+        full_kelly_target_shares=decision.full_kelly_target_shares,
+        fractional_kelly_target_shares=decision.fractional_kelly_target_shares,
+        minimum_lot_shares=decision.shares,
     )
 
 
@@ -2333,9 +2339,9 @@ def test_positive_sell_still_beats_a_discrete_repair_buy():
 
     assert decision.candidate is sell
     assert evaluations[sell.candidate_id].status == "SELECTED"
-    assert evaluations[repair_buy.candidate_id].status == "REJECTED"
-    assert evaluations[repair_buy.candidate_id].rejection_reason == (
-        "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT"
+    assert evaluations[repair_buy.candidate_id].status == "SCORED"
+    assert evaluations[repair_buy.candidate_id].buy_sizing_mode == (
+        "SMALL_CAPITAL_MINIMUM_LOT"
     )
 
 
@@ -5837,7 +5843,7 @@ def test_global_single_order_fractional_kelly_bounds_final_holding_for_both_side
     assert capacity_bounded.shares < fractional_yes.shares
 
 
-def test_global_single_order_rejects_cheap_minimum_lot_above_fractional_target():
+def test_global_single_order_admits_cheap_minimum_lot_only_inside_full_kelly():
     candidate = _global_candidate(
         candidate_id="cheap-depth",
         family="cheap-depth",
@@ -5864,11 +5870,14 @@ def test_global_single_order_rejects_cheap_minimum_lot_above_fractional_target()
         multiplier="0.00001",
     )
 
-    assert decision.candidate is None
-    assert decision.shares == 0
-    assert decision.rejection_reasons[candidate.candidate_id] == (
-        "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT"
-    )
+    # One $1-notional lot (20 shares at 0.05) against a full Kelly in the
+    # thousands: only the cheapest level, never a walk up the book.
+    assert decision.candidate is candidate
+    assert decision.buy_sizing_mode == "SMALL_CAPITAL_MINIMUM_LOT"
+    assert decision.shares == Decimal("20.00")
+    assert decision.limit_price == Decimal("0.050")
+    assert decision.shares <= decision.full_kelly_target_shares
+    assert decision.fractional_kelly_target_shares < decision.shares
 
 
 def test_global_single_order_capacity_frontier_never_shrinks_on_a_deeper_price_jump():

@@ -2987,6 +2987,63 @@ def _positive_common_expected_growth(
     )
 
 
+SMALL_CAPITAL_MINIMUM_LOT = "SMALL_CAPITAL_MINIMUM_LOT"
+
+
+def small_capital_minimum_lot_admits(
+    *,
+    current_token_shares: Decimal,
+    full_kelly_target_shares: Decimal,
+    fractional_kelly_target_shares: Decimal,
+    minimum_lot_shares: Decimal,
+) -> bool:
+    """Whether one venue minimum lot may replace a positive sub-lot target.
+
+    The one law shared by the single-order sizer, the family joint planner and
+    both BUY validators (operator approval 2026-09-30: only while capital is
+    small). With holding ``h``, full-Kelly holding ``T``, multiplier ``κ`` and
+    minimum lot ``L`` it admits exactly one lot iff::
+
+        h < κT < L   and   h + L <= T
+
+    ``κT < L`` is the small-capital condition. ``T`` is full-Kelly shares per
+    dollar of wealth times wealth, ``T = f*·W``, so ``κT < L`` is
+    ``W < L / (κ·f*)``: the dollar threshold is per candidate, derived from
+    its own edge and price, and the repair switches itself off once wealth
+    lets the fractional target reach one lot. ``h + L <= T`` keeps the final
+    holding inside full Kelly, so admission needs ``W >= (h + L) / f*``; the
+    active band is at most a factor ``1/κ`` of wealth wide.
+
+    The comparison is the fractional TARGET ``κT`` against ``L``, never the
+    remaining increment ``κT - h``. The retired 2026-07 repair compared the
+    increment, so once capital was large (``κT >= L``) any sub-lot sliver of
+    a nearly reached target still rounded up to a whole lot, at every wealth.
+    ``h < κT < L`` admits at most one lot per token: after it fills,
+    ``h >= L > κT`` and the target is reached. Economics, price band, cash,
+    caps and depth are not relaxed here; every caller applies them to the lot
+    unchanged.
+    """
+
+    values = tuple(
+        Decimal(value)
+        for value in (
+            current_token_shares,
+            full_kelly_target_shares,
+            fractional_kelly_target_shares,
+            minimum_lot_shares,
+        )
+    )
+    if not all(value.is_finite() for value in values):
+        return False
+    held, full, fractional, lot = values
+    return (
+        held >= 0
+        and lot > 0
+        and held < fractional < lot
+        and held + lot <= full
+    )
+
+
 @dataclass(frozen=True)
 class GlobalBuyMinimumMarketableRepair:
     """Legacy receipt shape for the retired minimum-lot BUY exception."""
@@ -3517,6 +3574,7 @@ class GlobalSingleOrderCandidateEvaluation:
         "FRACTIONAL_TARGET",
         "FAMILY_JOINT_FRACTIONAL_TARGET",
         "MINIMUM_MARKETABLE_DISCRETE_REPAIR",
+        "SMALL_CAPITAL_MINIMUM_LOT",
     ] = "NOT_APPLICABLE"
     resolution_at_utc: datetime | None = None
     capital_lock_hours: float | None = None
@@ -3929,7 +3987,16 @@ class GlobalSingleOrderCandidateEvaluation:
                 or self.fractional_kelly_target_shares
                 > self.full_kelly_target_shares
             )
-            if repair is None:
+            if repair is None and self.buy_sizing_mode == SMALL_CAPITAL_MINIMUM_LOT:
+                sizing_invalid = not small_capital_minimum_lot_admits(
+                    current_token_shares=self.current_token_shares,
+                    full_kelly_target_shares=self.full_kelly_target_shares,
+                    fractional_kelly_target_shares=(
+                        self.fractional_kelly_target_shares
+                    ),
+                    minimum_lot_shares=self.shares,
+                )
+            elif repair is None:
                 sizing_invalid = self.shares > (
                     self.fractional_kelly_target_shares
                     - self.current_token_shares
@@ -4015,6 +4082,7 @@ class GlobalSingleOrderDecision:
         "FRACTIONAL_TARGET",
         "FAMILY_JOINT_FRACTIONAL_TARGET",
         "MINIMUM_MARKETABLE_DISCRETE_REPAIR",
+        "SMALL_CAPITAL_MINIMUM_LOT",
     ] = "NOT_APPLICABLE"
     resolution_at_utc: datetime | None = None
     capital_lock_hours: float | None = None
@@ -4246,7 +4314,21 @@ class GlobalSingleOrderDecision:
             ExpectedBuyTerminalWealthCertificate,
         )
         repair = self.buy_minimum_marketable_repair
-        if repair is None:
+        if repair is None and self.buy_sizing_mode == SMALL_CAPITAL_MINIMUM_LOT:
+            lot = _single_order_legal_minimum_lot(self.candidate)
+            sizing_invalid = (
+                lot is None
+                or self.shares != lot
+                or not small_capital_minimum_lot_admits(
+                    current_token_shares=self.current_token_shares,
+                    full_kelly_target_shares=self.full_kelly_target_shares,
+                    fractional_kelly_target_shares=(
+                        self.fractional_kelly_target_shares
+                    ),
+                    minimum_lot_shares=lot,
+                )
+            )
+        elif repair is None:
             sizing_invalid = self.shares > (
                 self.fractional_kelly_target_shares
                 - self.current_token_shares
@@ -4920,6 +5002,18 @@ def _single_order_min_buy_shares(
     return minimum if minimum <= depth else None
 
 
+def _single_order_legal_minimum_lot(
+    candidate: GlobalSingleOrderCandidate,
+) -> Decimal | None:
+    """The smallest venue-legal BUY: maker ``min_order_size``, taker notional."""
+
+    raw_min = _single_order_min_buy_shares(candidate)
+    if raw_min is None:
+        return None
+    legal = _single_order_venue_legal_neighbor(candidate, raw_min, at_most=False)
+    return raw_min if legal is None else legal
+
+
 def _single_order_min_sell_shares(
     candidate: GlobalSingleOrderSellCandidate,
 ) -> Decimal:
@@ -5487,13 +5581,31 @@ def plan_family_joint_buy_targets(
             if raw_min is not None
             else None
         )
-        if (
-            legal is None
-            or raw_min is None
-            or legal_min is None
-            or legal < legal_min
-        ):
+        if raw_min is None or legal_min is None:
             continue
+        if legal is None or legal < legal_min:
+            # The same law as the single-order sizer; the lot keeps the
+            # candidate's cash/allocator cap and the live price band, and the
+            # joint log-wealth and fractional-budget checks below still bind.
+            try:
+                lot_limit, lot_fill, _lot_spend = _single_order_execution_boundary(
+                    candidate, legal_min,
+                )
+            except ValueError:
+                continue
+            if not (
+                legal_min <= candidate_caps[index]
+                and _live_unit_price_in_band(lot_limit)
+                and _live_unit_price_in_band(lot_fill)
+                and small_capital_minimum_lot_admits(
+                    current_token_shares=held,
+                    full_kelly_target_shares=full_target,
+                    fractional_kelly_target_shares=fractional_target,
+                    minimum_lot_shares=legal_min,
+                )
+            ):
+                continue
+            legal = legal_min
         desired.append((index, legal))
         target_by_index[index] = (full_target, fractional_target)
     if not desired:
@@ -5901,6 +6013,103 @@ def _global_buy_rounding_safe_prefix_metrics(
     return delta_log_wealth, expected_value
 
 
+def _single_order_small_capital_lot(
+    candidate: GlobalSingleOrderCandidate,
+    *,
+    lot_shares: Decimal,
+    max_shares: Decimal,
+    spend_limit: Decimal,
+    held_shares: Decimal,
+    multiplier: Decimal,
+    q_samples: np.ndarray,
+    band_alpha: float,
+    robust_q: float,
+    wealth_floor_usd: Decimal,
+    wealth_ceiling_usd: Decimal,
+) -> GlobalSingleOrderDecision | None:
+    """Admit one minimum lot under ``small_capital_minimum_lot_admits`` or None.
+
+    Only the fractional-target-below-lot rejection is relaxed. The lot keeps
+    every other admission law of the fractional sizer: depth, allocator/cash
+    capacity, the live price band, positive log-wealth, EV and efficiency, and
+    the rounding-safe fill-prefix proof.
+    """
+
+    if lot_shares > max_shares:
+        return None
+    try:
+        robust_du, robust_ev, efficiency, cost = _single_order_metrics(
+            candidate,
+            q_samples=q_samples,
+            shares=lot_shares,
+            wealth_floor_usd=wealth_floor_usd,
+            wealth_ceiling_usd=wealth_ceiling_usd,
+            alpha=band_alpha,
+            robust_q=robust_q,
+        )
+        limit_price, expected_fill_price, max_spend = (
+            _single_order_execution_boundary(candidate, lot_shares)
+        )
+        risk_unit_cost = _global_buy_risk_reference_unit_cost(candidate, limit_price)
+        full_target = _global_buy_kelly_reference_target(
+            held_shares=held_shares,
+            robust_q=robust_q,
+            wealth_floor_usd=wealth_floor_usd,
+            wealth_ceiling_usd=wealth_ceiling_usd,
+            risk_unit_cost=risk_unit_cost,
+        )
+        prefix_du, prefix_ev = _global_buy_rounding_safe_prefix_metrics(
+            q=robust_q,
+            shares=lot_shares,
+            unit_cost=risk_unit_cost,
+            loss_baseline=wealth_floor_usd,
+            win_baseline=wealth_ceiling_usd,
+        )
+    except (ArithmeticError, ValueError):
+        return None
+    fractional_target = full_target * multiplier
+    if not (
+        small_capital_minimum_lot_admits(
+            current_token_shares=held_shares,
+            full_kelly_target_shares=full_target,
+            fractional_kelly_target_shares=fractional_target,
+            minimum_lot_shares=lot_shares,
+        )
+        and robust_du > 0.0
+        and robust_ev > _ROBUST_EV_EPS_USD
+        and efficiency > 0.0
+        and prefix_du > 0.0
+        and prefix_ev > _ROBUST_EV_EPS_USD
+        and _live_unit_price_in_band(limit_price)
+        and _live_unit_price_in_band(expected_fill_price)
+        and max_spend <= spend_limit
+    ):
+        return None
+    return GlobalSingleOrderDecision(
+        candidate=candidate,
+        shares=lot_shares,
+        cost_usd=cost,
+        robust_delta_log_wealth=robust_du,
+        robust_ev_usd=robust_ev,
+        capital_efficiency=efficiency,
+        no_trade_reason=None,
+        limit_price=limit_price,
+        expected_fill_price_before_fee=expected_fill_price,
+        max_spend_usd=max_spend,
+        current_token_shares=held_shares,
+        full_kelly_target_shares=full_target,
+        fractional_kelly_target_shares=fractional_target,
+        buy_sizing_mode=SMALL_CAPITAL_MINIMUM_LOT,
+        terminal_wealth=_binary_terminal_wealth_certificate(
+            robust_q=robust_q,
+            shares=lot_shares,
+            cost_usd=cost,
+            wealth_floor_usd=wealth_floor_usd,
+            wealth_ceiling_usd=wealth_ceiling_usd,
+        ),
+    )
+
+
 def _score_global_single_order(
     candidate: GlobalSingleOrderCandidate,
     *,
@@ -6269,6 +6478,22 @@ def _score_global_single_order(
         else first_reference_target if first_reference_target is not None else held_shares
     )
     fractional_target = reference_target * multiplier
+    if best is None and not risk_target_reached and risk_target_below_minimum:
+        lot = _single_order_small_capital_lot(
+            candidate,
+            lot_shares=legal_min_shares,
+            max_shares=actual_max_shares,
+            spend_limit=spend_limit,
+            held_shares=held_shares,
+            multiplier=multiplier,
+            q_samples=q_samples,
+            band_alpha=band_alpha,
+            robust_q=robust_q,
+            wealth_floor_usd=wealth_floor_usd,
+            wealth_ceiling_usd=wealth_ceiling_usd,
+        )
+        if lot is not None:
+            return lot
     if best is None and risk_target_reached:
         reason = "FRACTIONAL_KELLY_TARGET_REACHED"
     elif best is None and risk_target_below_minimum:
@@ -8611,7 +8836,11 @@ def select_global_single_order(
                     replace(
                         fixed,
                         current_token_shares=target.current_token_shares,
-                        buy_sizing_mode="FAMILY_JOINT_FRACTIONAL_TARGET",
+                        buy_sizing_mode=(
+                            SMALL_CAPITAL_MINIMUM_LOT
+                            if fixed.buy_sizing_mode == SMALL_CAPITAL_MINIMUM_LOT
+                            else "FAMILY_JOINT_FRACTIONAL_TARGET"
+                        ),
                         payoff_q_correction=joint_correction,
                     )
                 )
