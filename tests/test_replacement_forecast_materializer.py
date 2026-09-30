@@ -1041,6 +1041,99 @@ def _install_live_fusion(
     monkeypatch.setattr(materializer_mod, "_replacement_bayes_precision_fusion_override", lambda *args, **kwargs: override)
 
 
+def _fixture_native_shape_identity(conn, request, monkeypatch, *, members_c):
+    """TEST_ONLY controlled extracted windows, ordinary native authority writer.
+
+    No GRIB/network acquisition is claimed. The release calendar, parser,
+    canonical snapshot/run/coverage and returned identity are not mocked.
+    """
+    from zoneinfo import ZoneInfo
+    from src.config import runtime_cities_by_name, runtime_coordinate_manifest_json
+    from src.data import ecmwf_open_data as native
+    from src.state.db import init_schema_forecasts
+    from tests.test_opendata_writes_v2_table import _make_opendata_high_payload
+    from tests.test_ingest_grib_source_run_context import _complete_low_window_payload
+    from src.contracts.ensemble_snapshot_provenance import ECMWF_OPENDATA_LOW_DATA_VERSION
+    city = runtime_cities_by_name()[request.city]
+    cycle = request.source_cycle_time
+    metric = request.temperature_metric
+    captured = cycle + (timedelta(hours=6, minutes=41) if cycle.hour in (0, 12)
+                        else timedelta(hours=4, minutes=46))
+    assert captured <= request.computed_at, (cycle, captured, request.computed_at)
+    init_schema_forecasts(conn)
+    start = datetime.combine(request.target_date, datetime.min.time(), tzinfo=ZoneInfo(city.timezone))
+    end = (start + timedelta(days=1)).astimezone(UTC)
+    start = start.astimezone(UTC)
+    selected = (round(city.lat*4)/4, round(city.lon*4)/4)
+    if metric == "high":
+        body = _make_opendata_high_payload(str(request.target_date), cycle.isoformat(),
+            local_day_start_iso=start.isoformat(), local_day_end_iso=end.isoformat(),
+            nearest_grid_lat=selected[0], nearest_grid_lon=selected[1])
+        subdir, track = "open_ens_mx2t6_localday_max", "mx2t6_high"
+    else:
+        body = _complete_low_window_payload(city.name, city.timezone, str(request.target_date), cycle.isoformat())
+        body["data_version"] = ECMWF_OPENDATA_LOW_DATA_VERSION
+        subdir, track = "open_ens_mn2t6_localday_min", "mn2t6_low"
+    grid = json.loads(_fixture_ens_surface_provenance(city_name=city.name,
+        cycle=cycle.isoformat(), selected_coords=selected, decision_at=captured))["grid_surface_evidence"]
+    grid["mask_source_fetched_at"] = captured.isoformat()
+    manifest_sha = hashlib.sha256(runtime_coordinate_manifest_json().encode()).hexdigest()
+    lead = (request.target_date-cycle.date()).days
+    body.update(city=city.name, lat=city.lat, lon=city.lon, timezone=city.timezone,
+        unit=city.settlement_unit, members_unit=city.settlement_unit, lead_day=lead,
+        nearest_grid_lat=selected[0], nearest_grid_lon=selected[1],
+        generated_at=captured.isoformat(), manifest_sha256=manifest_sha, manifest_hash=manifest_sha,
+        grid_surface_evidence=grid)
+    body["selected_step_ranges"] = body["selected_step_ranges_inner"]
+    for member, value_c in zip(body["members"], members_c, strict=True):
+        value = value_c if city.settlement_unit == "C" else value_c*1.8+32
+        boundary = value-.2 if metric == "high" else value+.2
+        member.update(value_native_unit=value,
+            **{f"inner_{'max' if metric == 'high' else 'min'}_native_unit": value,
+               f"boundary_{'max' if metric == 'high' else 'min'}_native_unit":
+                   boundary if member["boundary_step_ranges"] else None})
+        if metric == "high":
+            for window in member["native_windows"]:
+                interval = f"{window['start_step_hours']}-{window['end_step_hours']}"
+                window["value_native_unit"] = value if interval in member["inner_step_ranges"] else boundary
+    db = Path(conn.execute("PRAGMA database_list").fetchone()[2])
+    root = db.parent / "controlled-native-ens"
+    directory = (root / "raw" / "coordinate_manifests" / manifest_sha / subdir /
+                 city.name.lower().replace(" ", "-") /
+                 native._cycle_extract_dir_name(run_date=cycle.date(), run_hour=cycle.hour))
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{subdir}_target_{request.target_date}_lead_{lead}.json"
+    serialized = json.dumps(body, sort_keys=True)
+    if path.exists():
+        assert path.read_text() == serialized, "one issued native input cannot change with provider center"
+    else:
+        path.write_text(serialized)
+    class ClockType(type):
+        def __instancecheck__(cls, value): return isinstance(value, datetime)
+    class NativeClock(datetime, metaclass=ClockType):
+        @classmethod
+        def now(cls, tz=None): return captured.astimezone(tz or UTC)
+    with monkeypatch.context() as ingress:
+        ingress.setattr(native, "datetime", NativeClock)
+        ingress.setattr(native._ingest_grib_module, "_now_utc_iso", lambda: captured.isoformat())
+        decision, release = native._select_cycle_for_track(track=track, now_utc=captured)
+        assert decision is native.FetchDecision.FETCH_ALLOWED and release["selected_cycle_time"] == cycle
+        collected = native.collect_open_ens_cycle(track=track, skip_download=True, skip_extract=True,
+            grid_surface_source_evidence=grid, conn=conn, now_utc=captured,
+            _paths=native._resolve_opendata_paths(source_root=root, environ={}))
+    assert collected["status"] == "ok", collected
+    row = dict(conn.execute("SELECT * FROM ensemble_snapshots WHERE source_run_id=? AND city=? AND target_date=? AND temperature_metric=?",
+        (collected["source_run_id"], city.name, str(request.target_date), metric)).fetchone())
+    assert row["source_cycle_time"] == cycle.isoformat()
+    actual_members = tuple(json.loads(row["members_json"]))
+    if city.settlement_unit == "F":
+        actual_members = tuple((value-32)/1.8 for value in actual_members)
+    assert actual_members == pytest.approx(tuple(members_c))
+    from src.contracts.ensemble_snapshot_provenance import grid_surface_evidence_identity_hash
+    surface = json.loads(row["provenance_json"])["grid_surface_evidence"]
+    return row, grid_surface_evidence_identity_hash(surface)
+
+
 def _install_hko_live_fusion(monkeypatch, **kwargs):
     """Lawful ground/geometry write seam; not a claim of normal provider capture."""
     request = kwargs.pop("request", None) or _hko_request(source_cycle_time=_hko_dt(6), computed_at=_hko_dt(10), expires_at=_hko_dt(12))
@@ -1054,17 +1147,18 @@ def _install_hko_live_fusion(monkeypatch, **kwargs):
         return request  # Legacy downstream seam, not current proof authority.
     original = materializer_mod._replacement_bayes_precision_fusion_override()
     members = original.current_evidence_members_c
+    native_row, native_surface_hash = _fixture_native_shape_identity(conn, request, monkeypatch, members_c=members)
     within = sum((value-25.0)**2 for value in members)/len(members)
     delta = math.sqrt(original.predictive_sigma_c**2-within)
     values = {"icon_global":25.0-delta,"ukmo_global_deterministic_10km":25.0+delta}
     served = _hko_current_provider_inputs(request,values,conn=conn,selected_cells=selected_cells)
     shape = materializer_mod._current_evidence_shape_from_values(
-        snapshot_id=kwargs.get("snapshot_id",9001),source_cycle_time=kwargs["shape_cycle_time"].isoformat(),
-        source_available_at=(request.source_cycle_time+timedelta(hours=1)).isoformat(),members_c=members,
+        snapshot_id=native_row["snapshot_id"],source_cycle_time=kwargs["shape_cycle_time"].isoformat(),
+        source_available_at=native_row["source_available_at"],members_c=members,
         provider_values_c=values,provider_weights=dict.fromkeys(values,.5),center_c=25.0,
         provider_cycles=dict.fromkeys(values,request.source_cycle_time.isoformat()),
         carrier_cycle_time=request.source_cycle_time.isoformat(),
-        grid_surface_evidence_revision="ecmwf_ens_land_cell_selection_v1",grid_surface_evidence_identity_hash="a"*64)
+        grid_surface_evidence_revision="ecmwf_ens_land_cell_selection_v1",grid_surface_evidence_identity_hash=native_surface_hash)
     if kwargs.get("shape_lag_hours"):
         shape = replace(shape,shape_lag_hours=kwargs["shape_lag_hours"],
             source_cycle_time=(request.source_cycle_time-timedelta(hours=kwargs["shape_lag_hours"])).isoformat())
@@ -2878,6 +2972,20 @@ def test_day0_owner_witness_allows_current_owner_posterior_write(
 ) -> None:
     """Unchanged owner writes once; current NOAA fixture is not June WU licensing."""
     conn, request = _shanghai_current_owner_request(tmp_path,monkeypatch)
+    # Positive-first native possession: this component's controlled 51-member
+    # input now passes the ordinary collector, not an invented snapshot 9001.
+    from src.data.replacement_forecast_source_run_identity import native_coordinate_certificate_reason
+    fusion = materializer_mod._replacement_bayes_precision_fusion_override()
+    shape = fusion.current_evidence_shape
+    assert native_coordinate_certificate_reason(conn,shape=shape,city=request.city,
+        target_date=request.target_date,metric=request.temperature_metric) is None
+    assert materializer_mod._fusion_current_evidence_shape_has_live_authority(fusion,request=request,conn=conn)
+    missing = {**shape, "snapshot_id": 9001}
+    assert conn.execute("SELECT 1 FROM ensemble_snapshots WHERE snapshot_id=9001").fetchone() is None
+    assert native_coordinate_certificate_reason(conn,shape=missing,city=request.city,
+        target_date=request.target_date,metric=request.temperature_metric) == "REPLACEMENT_CURRENT_COORDINATE_SNAPSHOT_MISSING"
+    assert not materializer_mod._fusion_current_evidence_shape_has_live_authority(
+        replace(fusion,current_evidence_shape=missing),request=request,conn=conn)
     witness = _day0_owner_witness(request, seed_file=tmp_path / "owner-a.json")
     _record_day0_owner(conn, request, witness)
     prepared = _prepare_for_final_write(
