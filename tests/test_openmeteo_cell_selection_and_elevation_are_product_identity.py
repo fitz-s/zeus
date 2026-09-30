@@ -232,7 +232,7 @@ def _persist_exact_provider_body(conn, tmp_path, *, city, metric, target_date, m
     return int(row["artifact_id"])
 
 
-def _normal_ifs9_owned_product(tmp_path, monkeypatch, metric):
+def _normal_ifs9_owned_product(tmp_path, monkeypatch, metric, *, legacy=False):
     """Ordinary body/raw writer with actual full O1280 decoding, not a proof stub."""
     from tests.test_openmeteo_ecmwf_ifs9_bucket_transport import _actual_o1280_static_fixture
     from src.config import runtime_cities_by_name
@@ -276,8 +276,45 @@ def _normal_ifs9_owned_product(tmp_path, monkeypatch, metric):
         conn.commit()
         return read_current_instrument_values(conn, city=target.city, metric=metric, target_date=target.target_date,
             source_cycle_time_iso=run.isoformat(), decision_time_iso=(clock[0] + timedelta(minutes=1)).isoformat())["ecmwf_ifs"]
-    served = persist(1)
+    persist.payload = payload
+    if legacy:
+        _download_time(monkeypatch, dl, clock[0] - timedelta(minutes=5))
+        identity = dl._bayes_precision_fusion_product_identity("ecmwf_ifs", "single_runs", target)
+        identity.update(elevation_param="requested", downscaling_policy="none",
+            model_domain_hash=dl._model_domain_hash(provider=dl.OPENMETEO_PROVIDER, model_name="ecmwf_ifs",
+                cell_selection="land", elevation_param="requested", downscaling_policy="none", endpoint_mode="single_runs"))
+        old = (clock[0] - timedelta(minutes=5)).isoformat()
+        assert dl._persist_rows(conn, [dict(model="ecmwf_ifs", city=target.city, metric=metric,
+            target_date=target.target_date, source_cycle_time=run.isoformat(), source_available_at=old,
+            captured_at=old, lead_days=1, forecast_value_c=20., endpoint="single_runs", **identity)]) == 1
+        conn.commit()
+    served = persist(0 if legacy else 1)
     return conn, served, persist, data, write, clock
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("legacy", (False, True))
+def test_frozen_ifs9_keeps_original_raw_identity_when_equal_value_body_is_recaptured(tmp_path, monkeypatch, metric, legacy):
+    from src.data.replacement_current_value_serving import frozen_ifs9_response_has_authority, provider_geometry_projection
+    conn, a, persist, _, _, clock = _normal_ifs9_owned_product(tmp_path, monkeypatch, metric, legacy=legacy)
+    raw = conn.execute("SELECT * FROM raw_model_forecasts").fetchall()
+    assert frozen_ifs9_response_has_authority(a.physical_response, provider_geometry_projection(a.physical_response),
+        decision_at=(clock[0]+timedelta(minutes=1)).isoformat())
+    original_identity = a.physical_response["frozen_product_identity"]
+    assert original_identity["artifact_id"] == (None if legacy else a.physical_response["artifact_id"])
+    # A real new hourly body can have the same daily scalar. It must retain the
+    # immutable old raw/body identity as well as its new entity and HTTP receipt.
+    persist.payload["hourly"]["temperature_2m"][2] = 19. if metric=="high" else 21.
+    clock[0] += timedelta(minutes=2)
+    b = persist(0)
+    assert b.physical_response["entity_body_sha256"] != a.physical_response["entity_body_sha256"]
+    assert b.physical_response["frozen_product_identity"] == original_identity
+    assert frozen_ifs9_response_has_authority(b.physical_response, provider_geometry_projection(b.physical_response),
+        decision_at=(clock[0]+timedelta(minutes=1)).isoformat())
+    assert frozen_ifs9_response_has_authority(a.physical_response, provider_geometry_projection(a.physical_response),
+        decision_at="2026-09-30T12:01:00Z")
+    assert conn.execute("SELECT * FROM raw_model_forecasts").fetchall() == raw
+    conn.close()
 
 
 @pytest.mark.parametrize("metric", ("high", "low"))

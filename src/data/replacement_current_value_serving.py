@@ -1062,6 +1062,7 @@ def _current_model_surface_witness(row: Mapping[str, object], geometry: Mapping[
 
 def _physical_response_provenance(row: Mapping[str, object]) -> Mapping[str, object] | None:
     row = _physical_artifact_at_cutoff(row)
+    original_identity = {key: row[key] for key in _PRODUCT_IDENTITY_COLUMNS}
     if not _is_station_model(str(row["model"])):
         row = _revalidated_legacy_product_row(row)
         if row is None:
@@ -1110,7 +1111,7 @@ def _physical_response_provenance(row: Mapping[str, object]) -> Mapping[str, obj
         "native_grid_elevation_m": None, "native_surface": "UNKNOWN",
         "representativeness_status": "UNPROVEN", **metadata["locations"][index],
         "model_surface_witness": surface,
-        **({"frozen_product_identity":{key:row[key] for key in _PRODUCT_IDENTITY_COLUMNS},
+        **({"frozen_product_identity":original_identity,
             "frozen_entity_body":dict(row.get("frozen_http_capture_receipt") or artifact)} if row["model"]=="ecmwf_ifs" else {}),
         **{key: surface_geometry[key] for key in ("native_surface", "native_grid_elevation_m") if key in surface_geometry}}
 
