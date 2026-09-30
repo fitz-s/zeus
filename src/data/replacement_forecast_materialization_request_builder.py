@@ -134,7 +134,7 @@ def _bins(rows: object, *, settlement_step_c: float = 1.0) -> list[dict[str, obj
 
 
 def _precision_ready(
-    path: Path, *, raw_payload_path: Path,
+    path: Path, *, raw_payload_path: Path, decision_at: datetime,
 ) -> tuple[Mapping[str, object], tuple[str, ...]]:
     metadata_payload = _json_file(path)
     raw_bytes = raw_payload_path.read_bytes()
@@ -159,7 +159,7 @@ def _precision_ready(
     except (KeyError, TypeError, ValueError):
         return metadata_payload, ("OM9_SOURCE_RESPONSE_GEOMETRY_UNAVAILABLE",)
     guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
-        metadata, raw_payload_bytes=raw_bytes,
+        metadata, raw_payload_bytes=raw_bytes, decision_at=decision_at,
     )
     if not guard.passable_for_live_materialization:
         return metadata_payload, ("OM9_PRECISION_GUARD_NOT_LIVE_PASS_REQUEST_BUILD", *guard.reason_codes)
@@ -243,7 +243,7 @@ def build_replacement_forecast_materialization_request(
     precision_metadata_json = _existing_path(payload, "precision_metadata_json", base_dir=base_path)
     raw_payload_path = Path(_existing_path(payload, "openmeteo_payload_json", base_dir=base_path))
     _, precision_reasons = _precision_ready(
-        Path(precision_metadata_json), raw_payload_path=raw_payload_path,
+        Path(precision_metadata_json), raw_payload_path=raw_payload_path, decision_at=computed_at,
     )
     if precision_reasons:
         return ReplacementForecastMaterializationRequestBuildResult(
@@ -396,6 +396,7 @@ def build_materialize_request_dataclass(
         raise ValueError("OM9_SOURCE_RESPONSE_GEOMETRY_MISMATCH")
     precision_guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
         precision_metadata, raw_payload_bytes=raw_bytes,
+        decision_at=_dt(request_json.get("computed_at"), field_name="computed_at"),
     )
 
     def _opt_float(key: str) -> float | None:

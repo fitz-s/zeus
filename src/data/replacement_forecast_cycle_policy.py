@@ -35,6 +35,7 @@ import hashlib
 import math
 import os
 import re
+import sqlite3
 from collections.abc import Mapping
 from datetime import datetime, timezone
 
@@ -250,6 +251,98 @@ def _anchor_station_ground_has_authority(geometry: Mapping[str, object], audit: 
         return False
 
 
+def _anchor_ifs9_response_has_authority(geometry: Mapping[str, object], audit: object, *, materialized_at: object) -> bool:
+    """The soft anchor replays its own canonical body/cell, including anchor-only IFS roles.
+
+    SCOPE: one certificate's anchor. DRAIN: its ordinary source producer freezes
+    owned static bytes before a new seed is computed. RESET: complete own body,
+    request and static proof possessed by that new cut; no old certificate relabel.
+    """
+    try:
+        from pathlib import Path
+        from datetime import date
+        from src.state.db import _connect_read_only
+        from src.data.replacement_current_value_serving import _ARTIFACT_IDENTITY_JSON_SQL
+        from src.data.openmeteo_ecmwf_ifs9_anchor import (
+            SOURCE_ID, PRODUCT_ID, HIGH_DATA_VERSION, LOW_DATA_VERSION, SINGLE_RUNS_FORECAST_URL,
+            extract_openmeteo_ecmwf_ifs9_localday_anchor,
+        )
+        from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
+            OpenMeteoIfs9PrecisionMetadata, evaluate_openmeteo_ecmwf_ifs9_precision_guard,
+        )
+        if materialized_at is None or not isinstance(audit, Mapping):
+            return False
+        artifact = audit["anchor_raw_artifact"]
+        if not isinstance(artifact, Mapping):
+            return False
+        metadata = OpenMeteoIfs9PrecisionMetadata(**audit["anchor_precision_metadata"])
+        anchor = geometry["providers"]["__anchor_ifs9__"]
+        conn = _connect_read_only(Path(str(artifact["forecast_db"])))
+        try:
+            row = conn.execute(f"SELECT {_ARTIFACT_IDENTITY_JSON_SQL} FROM raw_forecast_artifacts a WHERE a.artifact_id=?",
+                (artifact["artifact_id"],)).fetchone()
+        finally:
+            conn.close()
+        if row is None or json.loads(row[0]) != {key:value for key,value in artifact.items() if key != "forecast_db"}:
+            return False
+        stamps = []
+        for key in ("source_cycle_time", "source_available_at", "captured_at", "recorded_at"):
+            stamp = datetime.fromisoformat(str(artifact[key]).replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                if key != "recorded_at":
+                    return False
+                stamp = stamp.replace(tzinfo=UTC)
+            stamps.append(stamp.astimezone(UTC))
+        decision = datetime.fromisoformat(str(materialized_at).replace("Z", "+00:00"))
+        if decision.tzinfo is None or not stamps[0] <= stamps[1] <= stamps[2] <= stamps[3] <= decision:
+            return False
+        product = json.loads(artifact["metadata"])
+        metric = product["metric"]
+        if (metric not in ("high", "low") or artifact["source_id"] != SOURCE_ID or artifact["product_id"] != PRODUCT_ID
+            or artifact["data_version"] != (HIGH_DATA_VERSION if metric == "high" else LOW_DATA_VERSION)
+            or artifact["request_url"] != SINGLE_RUNS_FORECAST_URL
+            or product["city"] != metadata.city or product["target_date"] != str(metadata.target_local_date)):
+            return False
+        params = json.loads(artifact["request_params_json"])
+        if (params["models"] != "ecmwf_ifs" or params["hourly"] != "temperature_2m"
+            or params["temperature_unit"] != "celsius" or params["cell_selection"] != "land" or "elevation" in params
+            or float(params["latitude"]) != metadata.requested_lat or float(params["longitude"]) != metadata.requested_lon
+            or params["timezone"] != metadata.timezone_name
+            or datetime.fromisoformat(str(params["run"])).replace(tzinfo=UTC) != stamps[0]):
+            return False
+        path = Path(str(artifact["artifact_path"]))
+        if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= 8*1024*1024:
+            return False
+        body = path.read_bytes()
+        if len(body) != artifact["byte_size"] or hashlib.sha256(body).hexdigest() != artifact["sha256"]:
+            return False
+        payload = json.loads(body)
+        if payload["hourly_units"]["temperature_2m"] != "°C":
+            return False
+        extracted = extract_openmeteo_ecmwf_ifs9_localday_anchor(payload,
+            city_timezone=metadata.timezone_name, target_local_date=date.fromisoformat(str(metadata.target_local_date)),
+            source_cycle_time=stamps[0], require_full_localday=True)
+        if extracted.sample_count < 23:
+            return False
+        if not isinstance(metadata.source_geometry_proof, Mapping):
+            return False
+        stable_proof = {key:value for key,value in metadata.source_geometry_proof.items()
+            if key not in ("station_registry_sha256", "static_hsurf_sha256", "static_asset_audit")
+            and not any(clock in key for clock in ("fetched", "captured", "payload_sha", "manifest_sha", "recorded", "cycle", "available"))}
+        ground = stable_proof.get("station_ground_proof")
+        if isinstance(ground, Mapping):
+            stable_proof["station_ground_proof"] = {key:ground[key] for key in ("revision", "status", "reason", "facts") if key in ground}
+        if anchor["source_geometry_proof"] != stable_proof:
+            return False
+        fields = ("city", "station_id", "station_lat", "station_lon", "requested_lat", "requested_lon", "nearest_grid_lat", "nearest_grid_lon",
+                  "grid_elevation_m", "station_elevation_m", "timezone_name", "native_grid", "delivery_grid_resolution", "temperature_unit")
+        if any(anchor[key] != getattr(metadata, key) for key in fields):
+            return False
+        return evaluate_openmeteo_ecmwf_ifs9_precision_guard(metadata, raw_payload_bytes=body, decision_at=decision).passable_for_live_materialization
+    except (KeyError, IndexError, TypeError, ValueError, OSError, sqlite3.Error):
+        return False
+
+
 def _current_evidence_shape_has_probability_authority(
     provenance: object, *, materialized_at: object = None,
 ) -> bool:
@@ -294,6 +387,8 @@ def _current_evidence_shape_has_probability_authority(
     if shape.get("provider_geometry_identity_hash") != geometry_hash:
         return False
     if not _anchor_station_ground_has_authority(geometry, shape.get("provider_geometry_audit"), materialized_at):
+        return False
+    if not _anchor_ifs9_response_has_authority(geometry, shape.get("provider_geometry_audit"), materialized_at=materialized_at):
         return False
     try:
         payload = json.loads(provenance) if isinstance(provenance, str) else provenance

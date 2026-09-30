@@ -292,6 +292,103 @@ def _normal_ifs9_owned_product(tmp_path, monkeypatch, metric, *, legacy=False):
     return conn, served, persist, data, write, clock
 
 
+def _normal_anchor_only_ifs9(tmp_path, monkeypatch, metric):
+    """The current-target producer owns this anchor's actual body and frozen O1280."""
+    from dataclasses import dataclass
+    from tests.test_station_ground_evidence import _setup, _archive
+    from tests.test_openmeteo_ecmwf_ifs9_bucket_transport import _actual_o1280_static_fixture
+    import src.config as config
+    import scripts.download_replacement_forecast_current_targets as producer
+    from src.data.openmeteo_ecmwf_ifs9_anchor import OpenMeteoEcmwfIfs9AnchorRequest, build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest
+    from src.data.raw_forecast_artifact_manifest import write_manifest_to_db
+    from src.data.openmeteo_ecmwf_ifs9_precision_guard import OpenMeteoIfs9PrecisionMetadata
+    from src.data.replacement_current_value_serving import _ARTIFACT_IDENTITY_JSON_SQL
+    from src.data.replacement_forecast_materializer import _bind_provider_geometry_identity
+
+    db, _, _, _, _ = _setup(tmp_path, monkeypatch)
+    entity = _archive(db)
+    transport, path, _, _, clock, _ = _actual_o1280_static_fixture(tmp_path, monkeypatch)
+    # Fixture producer clock precedes actual SQLite INSERT; no old cut is
+    # restamped, and the canonical tuple's independent recorded clock is read.
+    clock[0] = datetime.now(UTC) - timedelta(minutes=1)
+    monkeypatch.setattr(transport, "HSURF_LOCAL_CACHE", str(path))
+    monkeypatch.setattr(config, "state_path", lambda filename: tmp_path / "state" / filename)
+    city = config.runtime_cities_by_name()["Hong Kong"]
+    points, _, center = transport.om_get_surrounding_gridpoints(city.lat, city.lon)
+    selected = transport.om_get_coordinates(points[center])
+    run = clock[0].replace(hour=clock[0].hour//6*6, minute=0, second=0, microsecond=0)
+    target = clock[0].astimezone(__import__("zoneinfo").ZoneInfo(city.timezone)).date() + timedelta(days=1)
+    payload = {"latitude":selected.grid_latitude,"longitude":selected.grid_longitude_east,"elevation":32.,
+        "timezone":city.timezone,"utc_offset_seconds":28800,"hourly_units":{"temperature_2m":"°C"},
+        "hourly":{"time":[datetime.combine(target,datetime.min.time()).replace(hour=i).isoformat(timespec="minutes") for i in range(24)],
+            "temperature_2m":[20.]*24}}
+    raw = (json.dumps(payload,indent=2)+"\n").encode()
+    raw_path=tmp_path/"anchor.json"
+    raw_path.write_bytes(raw)
+    metadata = OpenMeteoIfs9PrecisionMetadata(**producer._precision_metadata(
+        city.name, target.isoformat(), anchor_sigma_c=3., raw_payload_bytes=raw))
+    manifest = build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(raw_path,
+        request=OpenMeteoEcmwfIfs9AnchorRequest(city.lat,city.lon,run,city.timezone),metric=metric,
+        source_available_at=clock[0],captured_at=clock[0],
+        product_metadata={"city":city.name,"target_date":target.isoformat()})
+    conn=sqlite3.connect(db)
+    aid=write_manifest_to_db(conn,manifest)
+    conn.commit()
+    artifact={**json.loads(conn.execute(f"SELECT {_ARTIFACT_IDENTITY_JSON_SQL} FROM raw_forecast_artifacts a WHERE artifact_id=?",(aid,)).fetchone()[0]),"forecast_db":str(db)}
+    cut=max(datetime.now(UTC),clock[0])+timedelta(minutes=1)
+    @dataclass(frozen=True)
+    class Shape:
+        shape_hash: str="current-shape"
+        provider_geometry_evidence: object=None
+        provider_geometry_identity_hash: object=None
+        provider_geometry_audit: object=None
+    bound=_bind_provider_geometry_identity(Shape(),{},anchor_metadata=metadata,decision_at=cut,
+        station_ground_evidence=entity,anchor_raw_artifact=artifact)
+    conn.close()
+    return bound,raw_path,cut
+
+
+@pytest.mark.parametrize("metric",("high","low"))
+@pytest.mark.parametrize("damage",("missing","cell","request","static","body","scope","model","old_cut","none_cut","borrowed_cell"))
+def test_anchor_only_ifs9_replays_its_own_normal_body_request_cell_and_cut(tmp_path,monkeypatch,metric,damage):
+    from copy import deepcopy
+    from src.data.replacement_forecast_cycle_policy import _anchor_ifs9_response_has_authority
+    bound,path,cut=_normal_anchor_only_ifs9(tmp_path,monkeypatch,metric)
+    geometry=deepcopy(bound.provider_geometry_evidence)
+    audit=deepcopy(bound.provider_geometry_audit)
+    assert _anchor_ifs9_response_has_authority(geometry,audit,materialized_at=cut.isoformat())
+    proof=audit["anchor_precision_metadata"]["source_geometry_proof"]
+    if damage=="missing":
+        del audit["anchor_raw_artifact"]
+    elif damage=="cell":
+        proof["selected_flat_index"]+=1
+    elif damage=="request":
+        audit["anchor_precision_metadata"]["requested_lat"]+=.01
+    elif damage=="static":
+        Path(proof["static_asset_audit"]["asset_path"]).unlink()
+    elif damage=="body":
+        path.write_bytes(path.read_bytes()+b" ")
+    elif damage=="scope":
+        audit["anchor_precision_metadata"]["target_local_date"]="2030-01-01"
+    elif damage=="model":
+        audit["anchor_raw_artifact"]["product_id"]="ecmwf_ifs"
+    elif damage=="borrowed_cell":
+        from src.data.openmeteo_ecmwf_ifs9_bucket_transport import select_terrain_optimised_point,capture_source_cell_geometry_proof,HSURF_LOCAL_CACHE
+        other=select_terrain_optimised_point(22.8,114.8,32.,local_cache=HSURF_LOCAL_CACHE)
+        borrowed=capture_source_cell_geometry_proof(latitude=other.grid_latitude,
+            longitude=(other.grid_longitude_east+180)%360-180,target_elevation_m=32.,
+            requested_latitude=22.8,requested_longitude=114.8)
+        proof.update(borrowed)
+        geometry["providers"]["__anchor_ifs9__"]["source_geometry_proof"].update({key:value for key,value in borrowed.items()
+            if key not in ("static_asset_audit","static_hsurf_sha256")})
+    elif damage=="none_cut":
+        assert not _anchor_ifs9_response_has_authority(geometry,audit,materialized_at=None)
+        return
+    else:
+        cut=datetime.fromisoformat(proof["static_asset_audit"]["possessed_at"])-timedelta(microseconds=1)
+    assert not _anchor_ifs9_response_has_authority(geometry,audit,materialized_at=cut.isoformat())
+
+
 @pytest.mark.parametrize("metric", ("high", "low"))
 @pytest.mark.parametrize("legacy", (False, True))
 def test_frozen_ifs9_keeps_original_raw_identity_when_equal_value_body_is_recaptured(tmp_path, monkeypatch, metric, legacy):

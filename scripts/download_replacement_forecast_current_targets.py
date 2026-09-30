@@ -481,7 +481,7 @@ def _precision_metadata(
     raw_payload_bytes: bytes,
 ) -> dict[str, object]:
     from src.data.openmeteo_ecmwf_ifs9_bucket_transport import (
-        same_grid_cell, source_cell_geometry_proof,
+        same_grid_cell, capture_source_cell_geometry_proof,
     )
     from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
         _haversine_km, grid_surface_elevation_m,
@@ -519,9 +519,10 @@ def _precision_metadata(
         target_dem = float(payload["elevation"])
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("OM9 raw response geometry invalid") from exc
-    source_proof = source_cell_geometry_proof(
-        latitude=float(city_config.lat), longitude=float(city_config.lon),
+    source_proof = capture_source_cell_geometry_proof(
+        latitude=response_lat, longitude=response_lon,
         target_elevation_m=target_dem,
+        requested_latitude=float(city_config.lat), requested_longitude=float(city_config.lon),
     )
     if not math.isfinite(target_dem) or not same_grid_cell(
         response_lat, response_lon,
@@ -642,6 +643,7 @@ def _current_target_source_geometry_check(
         )
         result = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
             OpenMeteoIfs9PrecisionMetadata(**precision), raw_payload_bytes=raw,
+            decision_at=datetime.now(tz=UTC),
         )
     except (KeyError, TypeError, ValueError, ImportError, OSError) as exc:
         detail = str(exc)
@@ -728,6 +730,7 @@ def _current_target_artifact_source_proof(
             return False
         return evaluate_openmeteo_ecmwf_ifs9_precision_guard(
             OpenMeteoIfs9PrecisionMetadata(**stored), raw_payload_bytes=raw,
+            decision_at=datetime.now(tz=UTC),
         ).passable_for_live_materialization
     except (OSError, TypeError, ValueError, KeyError, ImportError, AttributeError):
         return False

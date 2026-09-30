@@ -1136,6 +1136,7 @@ def _materialize(
     precision_guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
         OpenMeteoIfs9PrecisionMetadata(**dict(precision_payload)),
         raw_payload_bytes=openmeteo_raw_payload_bytes,
+        decision_at=_dt(str(payload["computed_at"]), field_name="computed_at"),
     )
     request = ReplacementForecastMaterializeRequest(
         city=str(payload["city"]),

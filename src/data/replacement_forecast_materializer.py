@@ -766,11 +766,12 @@ def _precision_guard_block_reason(
                 request.openmeteo_anchor.source_cycle_time,
                 field_name="openmeteo_source_cycle_time",
             ),
+            require_full_localday=True,
         )
         if extracted != request.openmeteo_anchor:
             return ("OM9_SOURCE_RESPONSE_ANCHOR_MISMATCH",)
         validated = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
-            guard.metadata, raw_payload_bytes=raw_bytes,
+            guard.metadata, raw_payload_bytes=raw_bytes, decision_at=request.computed_at,
         )
     except (TypeError, ValueError, KeyError, AttributeError, UnicodeDecodeError):
         return ("OM9_SOURCE_RESPONSE_INVALID",)
@@ -3337,6 +3338,7 @@ def _bind_provider_geometry_identity(
     shape: _CurrentEvidenceShape, served: Mapping[str, object],
     *, anchor_metadata: object | None = None, decision_at: datetime | str | None = None,
     station_ground_evidence: Mapping[str, object] | None = None,
+    anchor_raw_artifact: Mapping[str, object] | None = None,
 ) -> _CurrentEvidenceShape:
     """Stable actual provider geometry, independent of capture IDs/clocks/batch shape."""
     from dataclasses import replace
@@ -3349,6 +3351,8 @@ def _bind_provider_geometry_identity(
             projection[str(model)] = provider_geometry_projection(proof)
     if anchor_metadata is not None:
         metadata = asdict(anchor_metadata)
+        audit["anchor_precision_metadata"] = metadata
+        audit["anchor_raw_artifact"] = anchor_raw_artifact
         keys = ("city", "station_id", "station_lat", "station_lon", "requested_lat", "requested_lon", "nearest_grid_lat", "nearest_grid_lon",
                 "grid_elevation_m", "station_elevation_m", "timezone_name", "native_grid",
                 "delivery_grid_resolution", "temperature_unit", "source_geometry_proof")
@@ -5195,6 +5199,15 @@ def _replacement_bayes_precision_fusion_override(
         ground_entity = None if ground_db is None else read_current_station_ground_evidence(
             ground_db, city=request.city, decision_at=computed_at,
         )
+        anchor_raw_artifact = None
+        if conn is not None and request.anchor_artifact_id is not None:
+            from src.data.replacement_current_value_serving import _ARTIFACT_IDENTITY_JSON_SQL
+            anchor_row = conn.execute(
+                f"SELECT {_ARTIFACT_IDENTITY_JSON_SQL} FROM raw_forecast_artifacts a WHERE a.artifact_id=?",
+                (request.anchor_artifact_id,),
+            ).fetchone()
+            if anchor_row is not None and ground_db is not None:
+                anchor_raw_artifact = {**json.loads(anchor_row[0]), "forecast_db": str(ground_db)}
         _source_clock_current_shape = _bind_provider_geometry_identity(
             _source_clock_current_shape,
             {model: value for model, value in served_current.items()
@@ -5202,6 +5215,7 @@ def _replacement_bayes_precision_fusion_override(
             anchor_metadata=getattr(request.openmeteo_precision_guard, "metadata", None),
             decision_at=computed_at,
             station_ground_evidence=ground_entity,
+            anchor_raw_artifact=anchor_raw_artifact,
         )
         if _source_clock_payload is not None:
             _source_clock_payload["current_evidence_shape"] = _source_clock_current_shape.as_payload()

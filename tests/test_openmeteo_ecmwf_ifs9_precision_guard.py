@@ -15,11 +15,18 @@ import pytest
 
 from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
     OpenMeteoIfs9PrecisionMetadata,
-    evaluate_openmeteo_ecmwf_ifs9_precision_guard,
+    evaluate_openmeteo_ecmwf_ifs9_precision_guard as _evaluate_guard,
 )
 
 
 UTC = timezone.utc
+
+
+def evaluate_openmeteo_ecmwf_ifs9_precision_guard(metadata, **kwargs):
+    # Each point-of-use test supplies its independent analysis cut. Explicit
+    # None remains None so the shared missing-cut refusal is testable.
+    kwargs.setdefault("decision_at", datetime.now(UTC))
+    return _evaluate_guard(metadata, **kwargs)
 
 
 @pytest.fixture(autouse=True)
@@ -182,21 +189,28 @@ def _official_hko_precision(tmp_path, monkeypatch):
     import src.data.openmeteo_ecmwf_ifs9_bucket_transport as transport
     from tests.test_config import _official_hko_registry
     registry, artifact, rows = _official_hko_registry(tmp_path, monkeypatch)
-    raw = json.dumps({"latitude": 22.3, "longitude": 114.17, "elevation": 28.0,
-                      "timezone": "Asia/Hong_Kong"}).encode()
-    cell = {
-        "revision": "openmeteo_ifs9_o1280_source_cell_v1",
-        "static_hsurf_sha256": "static-v1", "selected_flat_index": 12,
-        "selected_grid_lat": 22.3, "selected_grid_lon": 114.17,
-        "raw_grid_elevation_m": 30.0, "effective_grid_elevation_m": 30.0,
-        "target_dem_elevation_m": 28.0, "cell_is_sea": False,
-        "cell_is_center": False, "nearby_sea": False,
-    }
-    monkeypatch.setattr(transport, "source_cell_geometry_proof", lambda **_kwargs: dict(cell))
+    raw = _actual_precision_body(tmp_path, monkeypatch, "Hong Kong", native_height=32., target_dem=28.)
     metadata = OpenMeteoIfs9PrecisionMetadata(**dl._precision_metadata(
         "Hong Kong", "2026-09-29", anchor_sigma_c=3.0, raw_payload_bytes=raw,
     ))
-    return metadata, raw, cell, registry, artifact, rows
+    return metadata, raw, metadata.source_geometry_proof, registry, artifact, rows
+
+
+def _actual_precision_body(tmp_path, monkeypatch, city_name, *, native_height, target_dem):
+    import json
+    from datetime import timedelta
+    import src.config as config
+    from tests.test_openmeteo_ecmwf_ifs9_bucket_transport import _actual_o1280_static_fixture
+    transport,path,data,write,clock,_ = _actual_o1280_static_fixture(tmp_path,monkeypatch)
+    clock[0] = datetime.now(UTC)-timedelta(minutes=1)
+    data[:] = native_height
+    write()
+    monkeypatch.setattr(transport,"HSURF_LOCAL_CACHE",str(path))
+    monkeypatch.setattr(config,"state_path",lambda name:tmp_path/"state"/name)
+    city=config.cities_by_name[city_name]
+    selected=transport.select_terrain_optimised_point(city.lat,city.lon,target_dem,local_cache=str(path))
+    return json.dumps({"latitude":selected.grid_latitude,"longitude":(selected.grid_longitude_east+180)%360-180,
+        "elevation":target_dem,"timezone":city.timezone}).encode()
 
 
 def _official_kord_precision(tmp_path, monkeypatch):
@@ -207,22 +221,11 @@ def _official_kord_precision(tmp_path, monkeypatch):
     from tests.test_config import _official_kord_registry
     registry, artifact, rows = _official_kord_registry(tmp_path, monkeypatch)
     city = config.cities_by_name["Chicago"]
-    raw = json.dumps({"latitude": city.lat, "longitude": city.lon, "elevation": 204.8,
-                      "timezone": city.timezone}).encode()
-    cell = {
-        "revision": "openmeteo_ifs9_o1280_source_cell_v1",
-        "static_hsurf_sha256": "controlled-static-v1", "selected_flat_index": 12,
-        "selected_grid_lat": city.lat, "selected_grid_lon": city.lon,
-        "raw_grid_elevation_m": 205.0, "effective_grid_elevation_m": 205.0,
-        "target_dem_elevation_m": 204.8, "cell_is_sea": False,
-        "cell_is_center": False, "nearby_sea": False,
-    }
-    # Controlled native HSURF fixture, not a ground/precision authority stub.
-    monkeypatch.setattr(transport, "source_cell_geometry_proof", lambda **_kwargs: dict(cell))
+    raw = _actual_precision_body(tmp_path,monkeypatch,"Chicago",native_height=205.,target_dem=204.8)
     metadata = OpenMeteoIfs9PrecisionMetadata(**dl._precision_metadata(
         "Chicago", "2026-09-30", anchor_sigma_c=3.0, raw_payload_bytes=raw,
     ))
-    return metadata, raw, cell, registry, artifact, rows
+    return metadata, raw, metadata.source_geometry_proof, registry, artifact, rows
 
 
 def test_source_geometry_kord_producer_uses_verified_ground_not_reference_height(tmp_path, monkeypatch):
@@ -294,18 +297,8 @@ def test_source_geometry_producer_uses_actual_response_and_precise_station(monke
     monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
 
     requested = cities_by_name["Manila"]
-    response = {"latitude": 14.516696, "longitude": 121.05752,
-                "elevation": 13.0, "timezone": "Asia/Manila"}
-    raw = json.dumps(response, separators=(",", ":")).encode()
-    cell = {
-        "revision": "openmeteo_ifs9_o1280_source_cell_v1",
-        "static_hsurf_sha256": "fixture-static-hash", "selected_flat_index": 491,
-        "selected_grid_lat": response["latitude"], "selected_grid_lon": response["longitude"],
-        "raw_grid_elevation_m": -7.0, "effective_grid_elevation_m": 13.0,
-        "target_dem_elevation_m": 13.0, "cell_is_sea": False,
-        "cell_is_center": True, "nearby_sea": False,
-    }
-    monkeypatch.setattr(transport, "source_cell_geometry_proof", lambda **_kwargs: dict(cell))
+    raw = _actual_precision_body(tmp_path,monkeypatch,"Manila",native_height=-7.,target_dem=13.)
+    response = json.loads(raw)
     precision = dl._precision_metadata("Manila", "2026-09-27", anchor_sigma_c=3.0,
                                        raw_payload_bytes=raw)
     assert precision["station_id"] == "RPLL"
@@ -324,7 +317,7 @@ def test_source_geometry_producer_uses_actual_response_and_precise_station(monke
     assert precision["source_geometry_proof"]["raw_payload_sha256"] == hashlib.sha256(raw).hexdigest()
 
     altered = {**response, "latitude": float(requested.lat) + 0.2}
-    with pytest.raises(ValueError, match="raw response grid differs"):
+    with pytest.raises(ValueError, match="response cell does not match"):
         dl._precision_metadata("Manila", "2026-09-27", anchor_sigma_c=3.0,
                                raw_payload_bytes=json.dumps(altered).encode())
 
@@ -354,16 +347,22 @@ def test_source_geometry_corrupt_static_direct_guard_returns_typed_block(
     monkeypatch, tmp_path,
 ) -> None:
     import src.data.openmeteo_ecmwf_ifs9_bucket_transport as transport
-    real_source_cell = transport.source_cell_geometry_proof
     metadata, raw, *_ = _official_hko_precision(tmp_path, monkeypatch)
-    malformed = tmp_path / "hsurf.om"
+    from pathlib import Path
+    malformed = Path(metadata.source_geometry_proof["static_asset_audit"]["asset_path"])
     malformed.write_bytes(b"not-an-om-file")
-    monkeypatch.setattr(transport, "source_cell_geometry_proof", lambda **kwargs: real_source_cell(
-        **kwargs, local_cache=str(malformed),
-    ))
     result = evaluate_openmeteo_ecmwf_ifs9_precision_guard(metadata, raw_payload_bytes=raw)
     assert result.status == "BLOCK"
     assert "OM9_SOURCE_GEOMETRY_PROOF_UNAVAILABLE" in result.reason_codes
+
+
+def test_source_geometry_requires_independent_cut_and_rejects_later_owned_static(tmp_path,monkeypatch):
+    from datetime import timedelta
+    metadata,raw,*_= _official_hko_precision(tmp_path,monkeypatch)
+    assert "OM9_SOURCE_GEOMETRY_DECISION_CUT_REQUIRED" in _evaluate_guard(metadata,raw_payload_bytes=raw).reason_codes
+    own = datetime.fromisoformat(metadata.source_geometry_proof["static_asset_audit"]["possessed_at"])
+    assert not _evaluate_guard(metadata,raw_payload_bytes=raw,decision_at=own-timedelta(microseconds=1)).passable_for_live_materialization
+    assert _evaluate_guard(metadata,raw_payload_bytes=raw,decision_at=own+timedelta(minutes=1)).passable_for_live_materialization
 
 
 def test_source_geometry_ground_missing_then_normal_registry_reload_recovers(tmp_path, monkeypatch):

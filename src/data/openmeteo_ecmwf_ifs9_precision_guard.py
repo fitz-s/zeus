@@ -122,6 +122,7 @@ def geometry_proof_authenticity_reason(
     metadata: OpenMeteoIfs9PrecisionMetadata,
     *,
     raw_payload_bytes: bytes | None = None,
+    decision_at: datetime | str | None = None,
 ) -> str | None:
     """Validate the provider's actual cell against the local surface and station.
 
@@ -139,6 +140,8 @@ def geometry_proof_authenticity_reason(
         return "OM9_SOURCE_RESPONSE_BYTES_MISSING"
     if hashlib.sha256(raw_payload_bytes).hexdigest() != raw_sha:
         return "OM9_SOURCE_RESPONSE_IDENTITY_MISMATCH"
+    if decision_at is None:
+        return "OM9_SOURCE_GEOMETRY_DECISION_CUT_REQUIRED"
     try:
         response = json.loads(raw_payload_bytes)
         if not isinstance(response, Mapping):
@@ -159,7 +162,7 @@ def geometry_proof_authenticity_reason(
         if isinstance(scope, Mapping) and scope.get("city") != metadata.city:
             return "OM9_SOURCE_RESPONSE_GEOMETRY_MISMATCH"
         from src.data.openmeteo_ecmwf_ifs9_bucket_transport import (
-            same_grid_cell, source_cell_geometry_proof,
+            same_grid_cell, validate_source_cell_geometry_proof,
         )
         from src.config import cities_by_name, runtime_station_geometry_for_city, station_ground_source_artifact_ref
 
@@ -218,18 +221,15 @@ def geometry_proof_authenticity_reason(
         target_dem = float(proof["target_dem_elevation_m"])
         if not math.isfinite(target_dem):
             return "OM9_TARGET_DEM_INVALID"
-        actual = source_cell_geometry_proof(
-            latitude=metadata.requested_lat,
-            longitude=metadata.requested_lon,
+        reason = validate_source_cell_geometry_proof(
+            proof, latitude=response_lat, longitude=response_lon,
             target_elevation_m=target_dem,
+            requested_latitude=metadata.requested_lat, requested_longitude=metadata.requested_lon,
+            decision_at=decision_at,
         )
-        for key, value in actual.items():
-            claimed = proof.get(key)
-            if isinstance(value, float):
-                if not isinstance(claimed, (int, float)) or not math.isfinite(float(claimed)) or abs(float(claimed) - value) > 1e-6:
-                    return "OM9_SOURCE_GEOMETRY_PROOF_MISMATCH"
-            elif claimed != value:
-                return "OM9_SOURCE_GEOMETRY_PROOF_MISMATCH"
+        if reason is not None:
+            return "OM9_SOURCE_GEOMETRY_PROOF_MISMATCH" if reason.endswith("MISMATCH") else "OM9_SOURCE_GEOMETRY_PROOF_UNAVAILABLE"
+        actual = proof
         if (
             not same_grid_cell(
                 metadata.nearest_grid_lat, metadata.nearest_grid_lon,
@@ -252,6 +252,7 @@ def geometry_proof_authenticity_reason(
 def evaluate_openmeteo_ecmwf_ifs9_precision_guard(
     metadata: OpenMeteoIfs9PrecisionMetadata,
     *, raw_payload_bytes: bytes | None = None,
+    decision_at: datetime | str | None = None,
 ) -> OpenMeteoIfs9PrecisionGuardResult:
     """Evaluate whether OM9 anchor metadata is safe enough for live materialization."""
 
@@ -295,7 +296,7 @@ def evaluate_openmeteo_ecmwf_ifs9_precision_guard(
         reasons.append("OM9_NEAREST_GRID_DISTANCE_HIGH")
     if metadata.anchor_sigma_c <= 0.0:
         reasons.append("OM9_ANCHOR_SIGMA_INVALID")
-    source_reason = geometry_proof_authenticity_reason(metadata, raw_payload_bytes=raw_payload_bytes)
+    source_reason = geometry_proof_authenticity_reason(metadata, raw_payload_bytes=raw_payload_bytes, decision_at=decision_at)
     if source_reason is not None:
         reasons.append(source_reason)
 
@@ -322,6 +323,7 @@ def evaluate_openmeteo_ecmwf_ifs9_precision_guard(
         "OM9_SOURCE_RESPONSE_IDENTITY_MISSING",
         "OM9_SOURCE_RESPONSE_BYTES_MISSING",
         "OM9_SOURCE_RESPONSE_IDENTITY_MISMATCH",
+        "OM9_SOURCE_GEOMETRY_DECISION_CUT_REQUIRED",
         "OM9_SOURCE_RESPONSE_GEOMETRY_UNAVAILABLE",
         "OM9_SOURCE_RESPONSE_GEOMETRY_MISMATCH",
         "OM9_STATION_SOURCE_AUDIT_MISSING",
