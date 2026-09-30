@@ -77,6 +77,9 @@ response_store: OpenMeteoResponseStore | None = runtime_response_store()
 # How long a caller waits for another process's in-flight twin before paying itself.
 IN_FLIGHT_WAIT_SECONDS = 20.0
 IN_FLIGHT_POLL_SECONDS = 0.25
+PHYSICAL_CAPTURE_DEBT_REASONS = frozenset({
+    "ENTITY_BODY_MISSING", "HTTP_CAPTURE_RECEIPT_MISSING", "MODEL_SURFACE_EPOCH_AFTER_BODY",
+})
 
 
 class OpenMeteoRetryClass(str, Enum):
@@ -508,7 +511,7 @@ def fetch(
     a new network capture.
     """
     if require_network_capture and (
-        network_capture_reason not in {"ENTITY_BODY_MISSING", "HTTP_CAPTURE_RECEIPT_MISSING", "MODEL_SURFACE_EPOCH_AFTER_BODY"}
+        network_capture_reason not in PHYSICAL_CAPTURE_DEBT_REASONS
         or capture_entity_body is None or capture_network_response is None
     ):
         raise ValueError("actual network capture requires typed physical-proof debt and both capture callbacks")

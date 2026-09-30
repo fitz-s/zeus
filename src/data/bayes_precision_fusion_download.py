@@ -1811,6 +1811,15 @@ def _fetch_standard_meta_stamped_payloads(
 _BATCH_PHYSICAL_RESPONSE_KEY = "__physical_response_capture_v1"
 
 
+def _network_capture_kwargs(reason: str | None) -> dict[str, object]:
+    if reason is None:
+        return {}
+    from src.data.openmeteo_client import PHYSICAL_CAPTURE_DEBT_REASONS
+    if not isinstance(reason, str) or reason not in PHYSICAL_CAPTURE_DEBT_REASONS:
+        raise ValueError("physical_capture_debt: unknown reason")
+    return {"require_network_capture": True, "network_capture_reason": reason}
+
+
 def _physical_response_capture(
     *, model: str, url: str, params: Mapping[str, object], run: datetime,
 ) -> tuple[list[tuple[bytes, float]], Callable[[bytes, float], None], list[tuple[bytes, float, Mapping[str, str]]], Callable[[bytes, float, Mapping[str, str]], None]]:
@@ -1871,13 +1880,15 @@ def _bind_physical_response(
                    "timezone": str(clean_params["timezone"]).split(",")[index]}
                   for index, item in enumerate(items) if isinstance(item, Mapping)]
     if model == "ecmwf_ifs" and params.get("models") == "ecmwf_ifs":
-        from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
+        from src.data.openmeteo_ecmwf_ifs9_bucket_transport import capture_source_cell_geometry_proof
         for geometry in geometries:
             try:
-                proof = source_cell_geometry_proof(
+                proof = capture_source_cell_geometry_proof(
                     latitude=float(geometry["selected_latitude"]),
                     longitude=float(geometry["selected_longitude"]),
-                    target_elevation_m=float(geometry["target_dem_elevation_m"]))
+                    target_elevation_m=float(geometry["target_dem_elevation_m"]),
+                    requested_latitude=float(geometry["requested_latitude"]),
+                    requested_longitude=float(geometry["requested_longitude"]))
             except FileNotFoundError:
                 continue  # No download or fabricated native proof.
             selected_lon = (float(proof["selected_grid_lon"]) + 180) % 360 - 180
@@ -1928,6 +1939,7 @@ def _default_live_fetch_batched(
     allow_per_model_fallback: bool = True,
     allow_standard_meta_fallback: bool = True,
     deadline_monotonic: float | None = None,
+    network_capture_reason: str | None = None,
 ) -> dict[str, tuple[float | None, float | None]]:
     """R1+R2: ONE single-runs call for ALL `models` at (city, target_date, cycle).
 
@@ -1937,6 +1949,9 @@ def _default_live_fetch_batched(
     failure falls back to one request per model so one unsupported batched combination cannot
     suppress the whole live current-cycle capture.
     """
+    capture_kwargs = _network_capture_kwargs(network_capture_reason)
+    if capture_kwargs and len(models) != 1:
+        raise ValueError("physical_capture_debt: capture tranche requires one model")
     if len(models) > 1:
         combined: dict[str, object] = {}
         keyed_evidence: dict[str, dict[str, object]] = {}
@@ -2006,7 +2021,7 @@ def _default_live_fetch_batched(
             longitude=longitude,
             timezone_name=timezone_name,
         )
-        cached_payload = _SINGLE_RUNS_PAYLOAD_CACHE.get(cache_key)
+        cached_payload = None if capture_kwargs else _SINGLE_RUNS_PAYLOAD_CACHE.get(cache_key)
         if cached_payload is not None and (not cached_payload.get(_BATCH_PHYSICAL_RESPONSE_KEY) or not _single_runs_payload_has_reusable_hourly_axis(
             cached_payload,
             models=models,
@@ -2015,7 +2030,7 @@ def _default_live_fetch_batched(
             run=run,
         )):
             cached_payload = None
-        if cached_payload is None:
+        if cached_payload is None and not capture_kwargs:
             cached_payload = _lookup_single_runs_superset_payload(
                 models=models,
                 om_ids=tuple(om_ids),
@@ -2041,6 +2056,7 @@ def _default_live_fetch_batched(
                 fast_fail_429=True,
                 capture_entity_body=capture_callback,
                 capture_network_response=network_callback,
+                **capture_kwargs,
                 **_deadline_fetch_kwargs(deadline_monotonic),
             )
             payload = _bind_physical_response(payload, model=models[0],
@@ -2065,7 +2081,7 @@ def _default_live_fetch_batched(
         batched_outcome = _typed_transport_outcome(exc)
         single_runs_quota = _is_quota_transport_error(batched_error_text)
         if (
-            allow_standard_meta_fallback
+            not capture_kwargs and allow_standard_meta_fallback
             and len(models) == 1
             and (models == ["ncep_nbm_conus"] or single_runs_quota)
         ):
@@ -2104,6 +2120,9 @@ def _default_live_fetch_batched(
                 batched_error_text = (
                     f"{batched_error_text}; standard_meta_stamped_failed={fallback_exc}"
                 )
+        if capture_kwargs:
+            # Exact proof debt cannot change endpoint/product or replay an event.
+            return {_BATCH_TRANSPORT_ERROR_KEY: _batch_transport_error(exc)}
         if single_runs_quota:
             _LOG.warning(
                 "BAYES_PRECISION_FUSION batched single_runs fetch hit quota/rate-limit "
@@ -2215,9 +2234,14 @@ def _default_live_fetch_locations_batched(
     source_available_at: datetime | str | None = None,
     allow_standard_meta_fallback: bool = True,
     deadline_monotonic: float | None = None,
+    network_capture_reason: str | None = None,
 ) -> list[dict[date, dict[str, tuple[float | None, float | None]]]]:
     """Fetch one run per city and parse every requested target date from its payload."""
 
+    capture_kwargs = _network_capture_kwargs(network_capture_reason)
+    if capture_kwargs and len(models) != 1:
+        raise ValueError("physical_capture_debt: capture tranche requires one model")
+    scoped_kwargs = {"network_capture_reason": network_capture_reason} if capture_kwargs else {}
     if not locations:
         return []
     if len(models) > 1:
@@ -2244,6 +2268,7 @@ def _default_live_fetch_locations_batched(
             run=run,
             forecast_hours=forecast_hours,
             deadline_monotonic=deadline_monotonic,
+            **scoped_kwargs,
         )
         return [
             {
@@ -2264,7 +2289,7 @@ def _default_live_fetch_locations_batched(
     except Exception as exc:
         single_runs_quota = _is_quota_transport_error(exc)
         if (
-            allow_standard_meta_fallback
+            not capture_kwargs and allow_standard_meta_fallback
             and len(models) == 1
             and (models == ["ncep_nbm_conus"] or single_runs_quota)
         ):
@@ -2328,6 +2353,7 @@ def _default_live_fetch_locations_batched(
                 source_available_at=source_available_at,
                 allow_standard_meta_fallback=allow_standard_meta_fallback,
                 deadline_monotonic=deadline_monotonic,
+                **scoped_kwargs,
             ) + _default_live_fetch_locations_batched(
                 models=models,
                 locations=locations[midpoint:],
@@ -2336,6 +2362,7 @@ def _default_live_fetch_locations_batched(
                 source_available_at=source_available_at,
                 allow_standard_meta_fallback=allow_standard_meta_fallback,
                 deadline_monotonic=deadline_monotonic,
+                **scoped_kwargs,
             )
         error = {_BATCH_TRANSPORT_ERROR_KEY: _batch_transport_error(exc)}
         return [
@@ -2444,6 +2471,7 @@ def _fetch_single_runs_hourly_payloads_batched(
     forecast_hours: int,
     deadline_monotonic: float | None = None,
     past_hours: int = 0,
+    network_capture_reason: str | None = None,
 ) -> tuple[Mapping[str, object], ...]:
     """Read-through cache in front of the raw single-runs transport.
 
@@ -2485,6 +2513,9 @@ def _fetch_single_runs_hourly_payloads_batched(
     (72,1) payload and the first 72 rows of the real (120,0) payload for the same
     identity.
     """
+    capture_kwargs = _network_capture_kwargs(network_capture_reason)
+    if capture_kwargs and len(models) != 1:
+        raise ValueError("physical_capture_debt: capture tranche requires one model")
     if not models or not locations:
         return ()
     om_ids = tuple(OPENMETEO_MODEL_IDS.get(model, model) for model in models)
@@ -2513,6 +2544,9 @@ def _fetch_single_runs_hourly_payloads_batched(
     ]
     cached: list[Mapping[str, object] | None] = []
     for index, key in enumerate(cache_keys):
+        if capture_kwargs:
+            cached.append(None)
+            continue
         entry = _SINGLE_RUNS_PAYLOAD_CACHE.get(key)
         latitude, longitude, timezone_name, target_local_dates = locations[index]
         if entry is not None and (not entry.get(_BATCH_PHYSICAL_RESPONSE_KEY) or not _single_runs_payload_has_reusable_hourly_axis(
@@ -2547,6 +2581,7 @@ def _fetch_single_runs_hourly_payloads_batched(
             forecast_hours=forecast_hours,
             deadline_monotonic=deadline_monotonic,
             past_hours=past_hours,
+            **({"network_capture_reason": network_capture_reason} if capture_kwargs else {}),
         )
         for index, payload in zip(missing_positions, fetched, strict=True):
             cached[index] = payload
@@ -2576,6 +2611,7 @@ def _fetch_single_runs_hourly_payloads_batched_uncached(
     forecast_hours: int,
     deadline_monotonic: float | None = None,
     past_hours: int = 0,
+    network_capture_reason: str | None = None,
 ) -> tuple[Mapping[str, object], ...]:
     """Fetch raw, exact-run hourly payloads using the canonical BPF transport.
 
@@ -2616,6 +2652,7 @@ def _fetch_single_runs_hourly_payloads_batched_uncached(
         fast_fail_429=True,
         capture_entity_body=capture_callback,
         capture_network_response=network_callback,
+        **_network_capture_kwargs(network_capture_reason),
         **_deadline_fetch_kwargs(deadline_monotonic),
     )
     payload = _bind_physical_response(payload, model=models[0],
@@ -3215,6 +3252,139 @@ def _persist_chunk_with_lock_retry(
     return written, pruned
 
 
+def _validated_capture_debt(
+    *, forecast_db: Path, reason: str | None, raw_ids: Sequence[int],
+    models: Sequence[str], targets: Sequence[BayesPrecisionFusionDownloadTarget],
+    frozen_source_runs: Mapping[str, object] | None, decision_time: datetime,
+    deadline_monotonic: float | None, revalidate_legacy_capture: bool,
+    injected_fetch: bool, include_previous_runs: bool,
+) -> dict[int, dict[str, object]]:
+    """One exact same-issued tranche; a rejected proof is not generic refresh authority."""
+    if reason is None and isinstance(raw_ids, Sequence) and not isinstance(raw_ids, (str, bytes)) and not raw_ids:
+        return {}
+    _network_capture_kwargs(reason)
+    if (reason is None or not isinstance(raw_ids, Sequence) or not raw_ids or isinstance(raw_ids, (str, bytes))
+            or any(type(raw_id) is not int or raw_id <= 0 for raw_id in raw_ids)):
+        raise ValueError("physical_capture_debt: reason and positive integer raw IDs are required")
+    ids = tuple(dict.fromkeys(raw_ids))
+    target_by_scope: dict[tuple[str, str, str], BayesPrecisionFusionDownloadTarget] = {}
+    for target in targets:
+        scope = (target.city, target.target_date, target.metric)
+        if scope in target_by_scope and target_by_scope[scope] != target:
+            raise ValueError("physical_capture_debt: conflicting duplicate target request identity")
+        target_by_scope[scope] = target
+    if (injected_fetch or include_previous_runs or len(models) != 1
+            or frozen_source_runs is None or set(frozen_source_runs) != set(models)
+            or not ids or len(ids) > len(target_by_scope)):
+        raise ValueError("physical_capture_debt: exact single-model frozen target tranche required")
+    source_run = frozen_source_runs[models[0]]
+    if isinstance(source_run, _DerivedOffGridSingleRunsRun):
+        run = source_run.run
+    elif isinstance(source_run, (tuple, list)) and len(source_run) == 2:
+        run = source_run[0]
+    else:
+        raise ValueError("physical_capture_debt: invalid frozen run")
+    from datetime import datetime as datetime_type
+    if not isinstance(run, datetime_type) or run.utcoffset() is None:
+        raise ValueError("physical_capture_debt: aware issued run required")
+    run_iso = run.astimezone(UTC).isoformat()
+    from src.state.db import _connect_read_only
+    from src.data.replacement_current_value_serving import physical_capture_debt_reason
+    records: dict[int, dict[str, object]] = {}
+    conn = None
+    try:
+        conn = _connect_read_only(forecast_db, deadline_monotonic=deadline_monotonic)
+        conn.row_factory = sqlite3.Row
+        if deadline_monotonic is not None:
+            conn.set_progress_handler(lambda: int(time.monotonic() >= deadline_monotonic), 1000)
+        marks = ",".join("?" for _ in ids)
+        for row in conn.execute(f"SELECT * FROM raw_model_forecasts WHERE raw_model_forecast_id IN ({marks})", ids):
+            raw = dict(row)
+            raw_id = int(raw["raw_model_forecast_id"])
+            scope = (raw["city"], raw["target_date"], raw["metric"])
+            target = target_by_scope.get(scope)
+            if (target is None or raw["model"] != models[0] or raw["endpoint"] != "single_runs"
+                    or raw["source_cycle_time"] != run_iso or raw["lead_days"] != target.lead_days):
+                raise ValueError(f"physical_capture_debt: raw_id={raw_id} scope mismatch")
+            expected = _bayes_precision_fusion_product_identity(models[0], "single_runs", target)
+            if (revalidate_legacy_capture and raw["artifact_id"] is None
+                    and raw["elevation_param"] == "requested" and raw["downscaling_policy"] == "none"):
+                expected.update(elevation_param="requested", downscaling_policy="none",
+                    model_domain_hash=_model_domain_hash(provider=expected["provider"],
+                        model_name=expected["model_name"], cell_selection=expected["cell_selection"],
+                        elevation_param="requested", downscaling_policy="none", endpoint_mode="single_runs"))
+            if any(raw.get(key) != value for key, value in expected.items()):
+                raise ValueError(f"physical_capture_debt: raw_id={raw_id} product/request mismatch")
+            actual_reason = physical_capture_debt_reason(conn, raw_model_forecast_id=raw_id,
+                decision_time_iso=decision_time.isoformat(), deadline_monotonic=deadline_monotonic)
+            if actual_reason != reason:
+                raise ValueError(f"physical_capture_debt: raw_id={raw_id} no matching recoverable proof debt")
+            raw["receipt_frontier_id"] = int(conn.execute(
+                "SELECT COALESCE(MAX(artifact_id),0) FROM raw_forecast_artifacts"
+                " WHERE source_id=? AND product_id=? AND source_cycle_time=?"
+                " AND data_version='openmeteo_single_model_http_capture_receipt_v1'",
+                (raw["source_id"], raw["product_id"], run_iso),
+            ).fetchone()[0])
+            records[raw_id] = raw
+        if set(records) != set(ids) or {tuple(raw[key] for key in ("city", "target_date", "metric"))
+                for raw in records.values()} != set(target_by_scope):
+            raise ValueError("physical_capture_debt: missing raw IDs or mixed healthy target scope")
+    except (sqlite3.Error, OSError, TimeoutError) as exc:
+        raise ValueError("physical_capture_debt: exact canonical validation unavailable") from exc
+    finally:
+        if conn is not None:
+            conn.close()
+    return records
+
+
+def _recovered_capture_debt_ids(
+    forecast_db: Path, records: Mapping[int, Mapping[str, object]], rows: Sequence[Mapping[str, object]],
+    *, deadline_monotonic: float | None,
+) -> set[int]:
+    """Only committed new network receipts which now serve authorize proof progress."""
+    captures = {tuple(row[key] for key in _RMF_LOGICAL_KEY_COLUMNS): row.get("_physical_response")
+                for row in rows}
+    from src.state.db import _connect_read_only
+    from src.data.replacement_current_value_serving import (
+        current_value_serving_schema, _product_identity_select,
+        _read_product_identity_at_cutoff, _source_clock_product_has_authority,
+    )
+    recovered: set[int] = set()
+    conn = _connect_read_only(forecast_db, deadline_monotonic=deadline_monotonic)
+    try:
+        conn.row_factory = sqlite3.Row
+        if deadline_monotonic is not None:
+            conn.set_progress_handler(lambda: int(time.monotonic() >= deadline_monotonic), 1000)
+        schema = current_value_serving_schema(conn)
+        identity = _product_identity_select(schema, decision_iso=datetime.now(UTC).isoformat())
+        for raw_id, raw in records.items():
+            capture = captures.get(tuple(raw[key] for key in _RMF_LOGICAL_KEY_COLUMNS))
+            event = capture.get("network_capture") if isinstance(capture, Mapping) else None
+            if not isinstance(event, Mapping):
+                continue  # Cache bytes and callbacks without a real 200 are not receipts.
+            receipt = conn.execute(
+                "SELECT artifact_id FROM raw_forecast_artifacts WHERE source_id=? AND product_id=?"
+                " AND source_cycle_time=? AND data_version='openmeteo_single_model_http_capture_receipt_v1'"
+                " AND artifact_id>? AND captured_at=? AND request_url=? AND request_params_json=?"
+                " AND json_extract(artifact_metadata_json,'$.physical_http_capture_receipt.body_sha256')=? LIMIT 1",
+                (raw["source_id"], raw["product_id"], raw["source_cycle_time"], raw["receipt_frontier_id"],
+                 event["captured_at"], capture["request_url"],
+                 json.dumps(capture["request_params"], sort_keys=True), capture["sha256"]),
+            ).fetchone()
+            if receipt is None:
+                continue
+            candidate = conn.execute(f"SELECT {identity} FROM raw_model_forecasts WHERE raw_model_forecast_id=?",
+                (raw_id,)).fetchone()
+            if candidate is not None and _source_clock_product_has_authority(
+                _read_product_identity_at_cutoff(conn, candidate[0], deadline_monotonic=deadline_monotonic),
+                lead_days=int(raw["lead_days"]),
+            ):
+                recovered.add(raw_id)
+    finally:
+        conn.close()
+    return recovered
+
+
 def download_bayes_precision_fusion_extra_raw_inputs(
     *,
     forecast_db: Path,
@@ -3235,6 +3405,8 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     ] | None = None,
     quota_lane: str = "source_clock",
     revalidate_legacy_capture: bool = False,
+    network_capture_reason: str | None = None,
+    capture_debt_raw_ids: Sequence[int] = (),
 ) -> dict[str, object]:
     """Capture (forward single_runs + fixed-lead previous_runs) the 8 extra OM models for each
     current target and persist into raw_model_forecasts on a SINGLE zeus-forecasts.db connection
@@ -3323,6 +3495,19 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     timebox_unpersisted_row_count = 0
     prune_skipped_timebox = False
     persist_schema_ready = False
+
+    # SCOPE: exact raw IDs and their same-issued model/request/target tranche.
+    # DRAIN: existing bounded producer, quota leases and normal retry cadence.
+    # RESET: a real 200 receipt plus serving authority; ordinary cache then resumes.
+    # Validation stays outside preload's ordinary fail-open fallback.
+    capture_debt = _validated_capture_debt(forecast_db=Path(forecast_db),
+        reason=network_capture_reason, raw_ids=capture_debt_raw_ids,
+        models=requested_models, targets=target_list, frozen_source_runs=frozen_source_runs,
+        decision_time=captured_at, deadline_monotonic=wall_clock_deadline,
+        revalidate_legacy_capture=revalidate_legacy_capture, injected_fetch=_use_legacy_per_model,
+        include_previous_runs=include_previous_runs)
+    capture_scope_kwargs = {"network_capture_reason": network_capture_reason} if capture_debt else {}
+    recovered_capture_ids: set[int] = set()
 
     # Static evidence acquisition is a normal producer prerequisite, not a
     # network side effect of a probability reader. Unsupported/failed cells
@@ -3425,6 +3610,13 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                             run=older, source_available_at=None,
                             availability_from_successful_possession=True,
                         )
+    if capture_debt:
+        for raw_id, raw in capture_debt.items():
+            request = target_requests.get((raw["model"], raw["city"], raw["target_date"]))
+            if request is None or request.run.isoformat() != raw["source_cycle_time"]:
+                raise ValueError(f"physical_capture_debt: raw_id={raw_id} target issued run changed")
+        # A proof repair cannot silently expand to a different archive candidate.
+        older_target_requests.clear()
     target_cities = tuple(sorted({target.city for target in target_list}))
     target_dates = tuple(sorted({target.target_date for target in target_list}))
     request_cycles = tuple(
@@ -3489,6 +3681,8 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                     ):
                         if not _source_clock_product_has_authority(_read_product_identity_at_cutoff(_ro, candidate[-1], deadline_monotonic=wall_clock_deadline), lead_days=int(candidate[-2])):
                             persisted_cycle_keys.discard(tuple(candidate[:6]))
+                for raw in capture_debt.values():
+                    persisted_cycle_keys.discard(tuple(raw[key] for key in _RMF_LOGICAL_KEY_COLUMNS))
                 persisted_keys = {
                     (model, city, target_date, metric, endpoint)
                     for model, city, target_date, metric, source_cycle_time, endpoint
@@ -3521,7 +3715,9 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                 }
         finally:
             _ro.close()
-    except Exception:
+    except Exception as exc:
+        if capture_debt:
+            raise ValueError("physical_capture_debt: exact canonical preload unavailable") from exc
         persisted_cycle_keys = set()
         persisted_keys = set()
         prev_runs_done = set()
@@ -3740,6 +3936,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                             if wall_clock_deadline is not None
                             else None
                         ),
+                        **capture_scope_kwargs,
                     )
                 location_batch_count += 1
                 location_count += len(chunk)
@@ -3950,6 +4147,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                             allow_per_model_fallback=allow_single_runs_fallback,
                             allow_standard_meta_fallback=not possession_bound,
                             deadline_monotonic=wall_clock_deadline,
+                            **capture_scope_kwargs,
                         )
                 single_transport_error = sv_map.pop(_BATCH_TRANSPORT_ERROR_KEY, None)
                 single_transport_provenance = sv_map.pop(
@@ -4179,7 +4377,21 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                 break
             persist_schema_ready = True
             total_written += chunk_written
-            if chunk_written > 0 or (revalidate_legacy_capture and any(row.get("artifact_id") is not None for row in rows)):
+            proof_progress = False
+            if capture_debt:
+                try:
+                    recovered = _recovered_capture_debt_ids(Path(forecast_db), capture_debt, rows,
+                        deadline_monotonic=wall_clock_deadline)
+                except (sqlite3.Error, OSError, ValueError, TimeoutError) as exc:
+                    recovered = set()
+                    transport_errors.append(f"physical_capture_debt:committed_proof_read_unavailable:{type(exc).__name__}")
+                recovered_capture_ids.update(recovered)
+                pending_families = {tuple(capture_debt[raw_id][key] for key in ("city", "target_date", "metric"))
+                                    for raw_id in recovered}
+                proof_progress = bool(recovered)
+            committed_progress = proof_progress if capture_debt else (chunk_written > 0 or (
+                revalidate_legacy_capture and any(row.get("artifact_id") is not None for row in rows)))
+            if committed_progress:
                 committed_families.update(pending_families)
                 # This normal path prefilters persisted identities; an
                 # independent writer could still win INSERT OR IGNORE while
@@ -4294,7 +4506,9 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         )
         else "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
     )
-    return {
+    if capture_debt and set(capture_debt) != recovered_capture_ids and not timeboxed:
+        status = "BAYES_PRECISION_FUSION_EXTRA_PHYSICAL_PROOF_UNRECOVERED"
+    report = {
         "status": status,
         "cycle": cycle_iso,
         "forecast_db": str(forecast_db),
@@ -4346,3 +4560,8 @@ def download_bayes_precision_fusion_extra_raw_inputs(
             for scope, cycles in sorted(committed_single_runs_cycles.items())
         },
     }
+    if capture_debt:
+        report.update(physical_capture_reason=network_capture_reason,
+            physical_capture_recovered_raw_ids=tuple(sorted(recovered_capture_ids)),
+            physical_capture_unrecovered_raw_ids=tuple(sorted(set(capture_debt) - recovered_capture_ids)))
+    return report

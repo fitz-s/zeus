@@ -30,6 +30,36 @@ import pytest
 from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
 
 
+@pytest.fixture(autouse=True)
+def _isolated_source_transports(tmp_path, monkeypatch):
+    """The producer's static prerequisite is also transport, not an implicit live test dependency."""
+    from src.data import openmeteo_client as client
+    from src.data import openmeteo_model_surface as surface
+    from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _controlled_model_static_transport
+    _controlled_model_static_transport.__wrapped__(tmp_path, monkeypatch)
+    controlled_stream = surface.httpx.stream
+    allowed_urls = {surface._asset_url(profile[0]) for profile in surface._PROFILES.values()}
+    def static_stream(method, url, **kwargs):
+        if method != "GET" or url not in allowed_urls:
+            raise AssertionError("unexpected external static HTTP must not leave the test")
+        return controlled_stream(method, url, **kwargs)
+    monkeypatch.setattr(surface.httpx, "stream", static_stream)
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("tests must supply an explicit inert forecast HTTP provider")
+    monkeypatch.setattr(client._SHARED_HTTP_CLIENT, "get", forbidden)
+
+
+@pytest.mark.parametrize("transport", ("forecast", "static"))
+def test_unexpected_real_http_is_blocked_at_transport_before_any_artifact(tmp_path, transport):
+    from src.data import openmeteo_client as client, openmeteo_model_surface as surface
+    with pytest.raises(AssertionError, match="HTTP"):
+        if transport == "forecast":
+            client._SHARED_HTTP_CLIENT.get("https://unexpected.invalid/v1/forecast")
+        else:
+            surface.httpx.stream("GET", "https://unexpected.invalid/HSURF.om")
+    assert list(tmp_path.rglob("*")) == []
+
+
 def _forecast_db(tmp_path: Path) -> Path:
     db = tmp_path / "zeus-forecasts.db"
     conn = sqlite3.connect(str(db))
@@ -4549,3 +4579,540 @@ def test_superseded_run_horizon_gap_is_memoized_after_one_request(
     assert all(
         scope[3] != latest.isoformat() for scope in dl._EXACT_RUN_UNMATERIALIZABLE_MEMO
     )
+
+
+@pytest.mark.parametrize("path", ("single", "locations"))
+@pytest.mark.parametrize("reason", (
+    "ENTITY_BODY_MISSING", "HTTP_CAPTURE_RECEIPT_MISSING", "MODEL_SURFACE_EPOCH_AFTER_BODY",
+))
+def test_exact_capture_transport_bypasses_only_its_bpf_cache(monkeypatch, path, reason):
+    """Transport contract only; producer/classifier authorization is tested separately."""
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_client as client
+
+    _fresh_single_runs_cache_process(dl)
+    calls = []
+    payload = _two_day_single_runs_payload()
+
+    def fetch(_url, params, **kwargs):
+        calls.append((dict(params), kwargs.get("require_network_capture", False),
+                      kwargs.get("network_capture_reason")))
+        encoded = json.dumps(payload).encode()
+        at = datetime.now(UTC).timestamp()
+        kwargs["capture_entity_body"](encoded, at)
+        kwargs["capture_network_response"](encoded, at, {"etag": '"fixture"'})
+        return json.loads(encoded)
+
+    monkeypatch.setattr(client, "fetch", fetch)
+    kwargs = dict(models=["icon_global"], run=datetime(2026, 9, 5, 18, tzinfo=UTC),
+                  forecast_hours=120)
+    if path == "single":
+        invoke = dl._default_live_fetch_batched
+        kwargs.update(latitude=1.35019, longitude=103.994003,
+                      timezone_name="Asia/Singapore", target_local_date=date(2026, 9, 6))
+    else:
+        invoke = dl._default_live_fetch_locations_batched
+        kwargs["locations"] = [(1.35019, 103.994003, "Asia/Singapore", (date(2026, 9, 6),))]
+    invoke(**kwargs)
+    assert len(calls) == 1
+    invoke(**kwargs, network_capture_reason=reason)
+    assert len(calls) == 2 and calls[-1][1:] == (True, reason)
+    invoke(**kwargs)
+    assert len(calls) == 2, "a cleared request returns to ordinary zero-cost cache reuse"
+
+
+@pytest.mark.parametrize("path", ("single", "locations"))
+def test_exact_capture_expired_deadline_does_not_spend_or_mint_event(monkeypatch, path):
+    import src.data.bayes_precision_fusion_download as dl
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("expired capture budget must not reach HTTP")
+    monkeypatch.setattr("src.data.openmeteo_client.fetch", forbidden)
+    kwargs = dict(models=["icon_global"], run=datetime(2026, 9, 5, 18, tzinfo=UTC),
+        forecast_hours=120, deadline_monotonic=time.monotonic() - 1,
+        network_capture_reason="ENTITY_BODY_MISSING")
+    if path == "single":
+        result = dl._default_live_fetch_batched(**kwargs, latitude=1.35019, longitude=103.994003,
+            timezone_name="Asia/Singapore", target_local_date=date(2026, 9, 6))
+    else:
+        result = dl._default_live_fetch_locations_batched(**kwargs,
+            locations=[(1.35019, 103.994003, "Asia/Singapore", (date(2026, 9, 6),))])[0][date(2026, 9, 6)]
+    assert dl._BATCH_TRANSPORT_ERROR_KEY in result
+    assert dl._BATCH_PHYSICAL_RESPONSE_KEY not in result
+
+
+@pytest.mark.parametrize("reason,ids", (
+    ("ENTITY_BODY_MISSING", ()), (None, (1,)), ("unknown", (1,)),
+    ("ENTITY_BODY_MISSING", (True,)), ("ENTITY_BODY_MISSING", (-1,)),
+    (None, 0), (None, None), ("ENTITY_BODY_MISSING", 1),
+))
+def test_capture_debt_bad_contract_is_rejected_before_acquisition(tmp_path, monkeypatch, reason, ids):
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_model_surface as surface
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("invalid debt must not start any source acquisition")
+
+    monkeypatch.setattr(surface, "ensure_model_surface", forbidden)
+    with pytest.raises(ValueError, match="physical_capture_debt"):
+        dl.download_bayes_precision_fusion_extra_raw_inputs(
+            forecast_db=_forecast_db(tmp_path),
+            cycle=datetime(2026, 9, 29, 0, tzinfo=UTC), targets=_targets(),
+            models=("icon_global",), include_previous_runs=False,
+            frozen_source_runs={"icon_global": (datetime(2026, 9, 29, 0, tzinfo=UTC),
+                datetime(2026, 9, 29, 4, tzinfo=UTC))},
+            network_capture_reason=reason, capture_debt_raw_ids=ids,
+        )
+
+
+def _real_capture_world(tmp_path, monkeypatch, path, metric="high"):
+    """Actual ground/static bytes, canonical writer, quota/store and HTTP client; only HTTP is fake."""
+    from types import SimpleNamespace
+    from zoneinfo import ZoneInfo
+    import src.config as config
+    from src.data import bayes_precision_fusion_download as dl, openmeteo_client as client
+    from src.data.openmeteo_quota import OpenMeteoQuotaTracker
+    from src.data.openmeteo_response_store import OpenMeteoResponseStore
+    from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import (
+        _controlled_model_static_transport, _selected_test_cell,
+    )
+    from tests.test_station_ground_evidence import _setup, _archive
+
+    db, *_ = _setup(tmp_path, monkeypatch, "Chicago")
+    _archive(db, "Chicago")
+    db, *_ = _setup(tmp_path, monkeypatch, "Hong Kong")
+    _archive(db, "Hong Kong")
+    _controlled_model_static_transport.__wrapped__(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "state_path", lambda name: tmp_path / "state" / name)
+    clock = [datetime(2026, 9, 29, 22, 5, tzinfo=UTC)]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0].astimezone(tz or UTC)
+
+    monkeypatch.setattr(dl, "datetime", Clock)
+    monkeypatch.setattr(client.time, "time", lambda: clock[0].timestamp())
+    monkeypatch.setattr(OpenMeteoQuotaTracker, "_shared_enabled", lambda self: self._state_path is not None)
+    tracker = OpenMeteoQuotaTracker(state_path=tmp_path / "quota.json")
+    store = OpenMeteoResponseStore(tmp_path / "answers.db")
+    monkeypatch.setattr(dl, "_BPF_OPENMETEO_QUOTA_TRACKER", tracker)
+    monkeypatch.setattr(client, "response_store", store)
+    run = datetime(2026, 9, 29, 12, tzinfo=UTC)
+    cities = config.runtime_cities_by_name()
+    calls = []
+
+    class Provider:
+        value = 20.0
+        def get(self, url, *, params=None, timeout=None):
+            request = httpx.Request("GET", url)
+            if url.endswith("/meta.json"):
+                return httpx.Response(200, json={
+                    "last_run_initialisation_time": run.timestamp(),
+                    "last_run_modification_time": run.replace(hour=16).timestamp(),
+                    "last_run_availability_time": run.replace(hour=16).timestamp()}, request=request)
+            calls.append(dict(params))
+            payloads = []
+            for lat, lon, zone in zip(str(params["latitude"]).split(","),
+                    str(params["longitude"]).split(","), str(params["timezone"]).split(","), strict=True):
+                selected_lat, selected_lon = _selected_test_cell("icon_global", float(lat), float(lon))
+                day = datetime(2026, 9, 30)
+                offset = int(day.replace(tzinfo=ZoneInfo(zone)).utcoffset().total_seconds())
+                payloads.append({"latitude": selected_lat, "longitude": selected_lon,
+                    "elevation": 123.0, "timezone": zone, "utc_offset_seconds": offset,
+                    "hourly_units": {"temperature_2m": "°C"},
+                    "hourly": {"time": [(day + timedelta(hours=i)).isoformat(timespec="minutes") for i in range(24)],
+                        "temperature_2m": [self.value - 10 if i == 0 else self.value if i == 12 else self.value - 5
+                            for i in range(24)]}})
+            return httpx.Response(200, json=payloads if len(payloads) > 1 else payloads[0],
+                headers={"content-type": "application/json", "etag": '"same-entity"'}, request=request)
+
+    provider = Provider()
+    monkeypatch.setattr(client, "_SHARED_HTTP_CLIENT", provider)
+    _fresh_single_runs_cache_process(dl)
+    targets = [dl.BayesPrecisionFusionDownloadTarget(city=city, metric=metric, target_date="2026-09-30",
+        lead_days=1, latitude=cities[city].lat, longitude=cities[city].lon, timezone_name=cities[city].timezone)
+        for city in ("Hong Kong", "Chicago", "Paris")]
+    kwargs = dict(forecast_db=db, cycle=run, models=("icon_global",), include_previous_runs=False,
+        prune_after=False, allow_single_runs_fallback=path == "single",
+        frozen_source_runs={"icon_global": (run, run.replace(hour=16))}, max_wall_clock_seconds=5)
+    if path == "locations":
+        assert dl.download_bayes_precision_fusion_extra_raw_inputs(**kwargs, targets=targets[:2])["written_row_count"] == 2
+        assert dl.download_bayes_precision_fusion_extra_raw_inputs(**kwargs, targets=targets[2:])["written_row_count"] == 1
+    else:
+        assert dl.download_bayes_precision_fusion_extra_raw_inputs(**kwargs, targets=targets)["written_row_count"] == 3
+    return SimpleNamespace(db=db, run=run, clock=clock, targets=targets, kwargs=kwargs,
+        calls=calls, tracker=tracker, provider=provider)
+
+
+@pytest.mark.parametrize("path", ("single", "locations"))
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("reason", (
+    "ENTITY_BODY_MISSING", "HTTP_CAPTURE_RECEIPT_MISSING", "MODEL_SURFACE_EPOCH_AFTER_BODY",
+))
+def test_real_capture_debt_recovers_same_issued_rows_and_leaves_neighbor_cost_zero(tmp_path, monkeypatch, path, metric, reason):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from src.data import bayes_precision_fusion_download as dl, openmeteo_model_surface as surface
+    from src.data.replacement_current_value_serving import physical_capture_debt_reason, read_current_instrument_values
+    from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _controlled_native_static_bytes
+
+    world = _real_capture_world(tmp_path, monkeypatch, path, metric)
+    debt_targets = world.targets[:1] if path == "single" else world.targets[:2]
+    with sqlite3.connect(world.db) as conn:
+        raw_ids = tuple(conn.execute("SELECT raw_model_forecast_id FROM raw_model_forecasts WHERE city=?", (t.city,)).fetchone()[0]
+                        for t in debt_targets)
+        before = conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall()
+        receipt_count = conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts WHERE data_version='openmeteo_single_model_http_capture_receipt_v1'").fetchone()[0]
+        if reason == "ENTITY_BODY_MISSING":
+            for raw_id in raw_ids:
+                body = conn.execute("SELECT a.artifact_path FROM raw_forecast_artifacts a JOIN raw_model_forecasts r ON r.artifact_id=a.artifact_id WHERE r.raw_model_forecast_id=?", (raw_id,)).fetchone()[0]
+                Path(body).unlink(missing_ok=True)
+        elif reason == "HTTP_CAPTURE_RECEIPT_MISSING":
+            body_ids = tuple(conn.execute("SELECT artifact_id FROM raw_model_forecasts WHERE raw_model_forecast_id=?", (raw_id,)).fetchone()[0]
+                             for raw_id in raw_ids)
+            marks = ",".join("?" for _ in body_ids)
+            conn.execute("DELETE FROM raw_forecast_artifacts WHERE data_version='openmeteo_single_model_http_capture_receipt_v1'"
+                f" AND json_extract(artifact_metadata_json,'$.physical_http_capture_receipt.body_artifact_id') IN ({marks})", body_ids)
+            conn.commit()
+            receipt_count = conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts WHERE data_version='openmeteo_single_model_http_capture_receipt_v1'").fetchone()[0]
+        else:
+            entity = _controlled_native_static_bytes("icon_global")
+            @contextmanager
+            def stream(*_args, **_kwargs):
+                yield SimpleNamespace(status_code=200, headers={"etag": '"new-epoch"',
+                    "last-modified": "Tue, 29 Sep 2026 23:00:00 GMT", "content-length": str(len(entity))},
+                    iter_raw=lambda **_: iter((entity,)))
+            monkeypatch.setattr(surface.httpx, "stream", stream)
+            world.clock[0] = datetime(2026, 9, 29, 23, 15, tzinfo=UTC)
+            assert surface.ensure_model_surface("icon_global").status == "READY"
+        world.clock[0] = datetime(2026, 9, 29, 23, 30, tzinfo=UTC)
+        for raw_id in raw_ids:
+            assert physical_capture_debt_reason(conn, raw_model_forecast_id=raw_id,
+                decision_time_iso=world.clock[0].isoformat()) == reason
+    old_calls, old_quota = len(world.calls), world.tracker.calls_today()
+    report = dl.download_bayes_precision_fusion_extra_raw_inputs(**world.kwargs, targets=debt_targets,
+        network_capture_reason=reason, capture_debt_raw_ids=raw_ids)
+    assert report["written_row_count"] == 0
+    assert report["physical_capture_recovered_raw_ids"] == tuple(sorted(raw_ids)), report
+    assert report["physical_capture_unrecovered_raw_ids"] == ()
+    assert set(report["committed_families"]) == {(t.city, t.target_date, t.metric) for t in debt_targets}
+    assert len(world.calls) == old_calls + 1
+    assert world.tracker.calls_today() == old_quota + len(debt_targets)
+    assert str(world.targets[-1].latitude) not in str(world.calls[-1]["latitude"])
+    with sqlite3.connect(world.db) as conn:
+        assert conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall() == before
+        assert conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts WHERE data_version='openmeteo_single_model_http_capture_receipt_v1'").fetchone()[0] > receipt_count
+        for raw_id, target in zip(raw_ids, debt_targets, strict=True):
+            assert physical_capture_debt_reason(conn, raw_model_forecast_id=raw_id,
+                decision_time_iso=world.clock[0].isoformat()) is None
+            served = read_current_instrument_values(conn, city=target.city, metric=target.metric,
+                target_date=target.target_date, source_cycle_time_iso=world.run.isoformat(),
+                decision_time_iso=world.clock[0].isoformat())
+            assert "icon_global" in served
+            assert served["icon_global"].physical_response["capture_receipt_artifact_id"]
+    dl.download_bayes_precision_fusion_extra_raw_inputs(**world.kwargs, targets=world.targets)
+    assert len(world.calls) == old_calls + 1 and world.tracker.calls_today() == old_quota + len(debt_targets)
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("damage", ("receipt_file", "captured_at", "source_available_at", "recorded_at",
+    "future_captured_at", "future_source_available_at", "future_recorded_at", "all_clocks", "receipt_metadata"))
+def test_real_damaged_receipt_is_reacquired_without_rewriting_raw_truth(tmp_path, monkeypatch, damage, metric):
+    from src.data import bayes_precision_fusion_download as dl
+    from src.data.replacement_current_value_serving import physical_capture_debt_reason, read_current_instrument_values
+    world = _real_capture_world(tmp_path, monkeypatch, "single", metric)
+    target = world.targets[0]
+    with sqlite3.connect(world.db) as conn:
+        raw_id, body_id = conn.execute("SELECT raw_model_forecast_id,artifact_id FROM raw_model_forecasts WHERE city=?", (target.city,)).fetchone()
+        before = conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall()
+        assert physical_capture_debt_reason(conn, raw_model_forecast_id=raw_id,
+            decision_time_iso=world.clock[0].isoformat()) is None
+        assert "icon_global" in read_current_instrument_values(conn, city=target.city, metric=target.metric,
+            target_date=target.target_date, source_cycle_time_iso=world.run.isoformat(),
+            decision_time_iso=world.clock[0].isoformat())
+        receipt_id, receipt_path = conn.execute("SELECT artifact_id,artifact_path FROM raw_forecast_artifacts"
+            " WHERE data_version='openmeteo_single_model_http_capture_receipt_v1'"
+            " AND json_extract(artifact_metadata_json,'$.physical_http_capture_receipt.body_artifact_id')=?", (body_id,)).fetchone()
+        if damage == "receipt_file":
+            Path(receipt_path).write_bytes(b"damaged private receipt")
+        elif damage in ("captured_at", "source_available_at", "recorded_at"):
+            conn.execute(f"UPDATE raw_forecast_artifacts SET {damage}='not-a-clock' WHERE artifact_id=?", (receipt_id,))
+        elif damage.startswith("future_"):
+            conn.execute(f"UPDATE raw_forecast_artifacts SET {damage.removeprefix('future_')}='2026-09-30T10:00:00Z' WHERE artifact_id=?", (receipt_id,))
+        elif damage == "all_clocks":
+            conn.execute("UPDATE raw_forecast_artifacts SET captured_at='not-a-clock',"
+                "source_available_at='not-a-clock',recorded_at='not-a-clock' WHERE artifact_id=?", (receipt_id,))
+        else:
+            conn.execute("UPDATE raw_forecast_artifacts SET artifact_metadata_json='{}' WHERE artifact_id=?", (receipt_id,))
+        conn.commit()
+        world.clock[0] = datetime(2026, 9, 29, 23, 30, tzinfo=UTC)
+        assert physical_capture_debt_reason(conn, raw_model_forecast_id=raw_id,
+            decision_time_iso=world.clock[0].isoformat()) == "HTTP_CAPTURE_RECEIPT_MISSING"
+        assert "icon_global" not in read_current_instrument_values(conn, city=target.city, metric=target.metric,
+            target_date=target.target_date, source_cycle_time_iso=world.run.isoformat(),
+            decision_time_iso=world.clock[0].isoformat())
+    old_calls = len(world.calls)
+    report = dl.download_bayes_precision_fusion_extra_raw_inputs(**world.kwargs, targets=[target],
+        network_capture_reason="HTTP_CAPTURE_RECEIPT_MISSING", capture_debt_raw_ids=(raw_id,))
+    assert len(world.calls) == old_calls + 1
+    assert report["written_row_count"] == 0 and report["physical_capture_recovered_raw_ids"] == (raw_id,), report
+    with sqlite3.connect(world.db) as conn:
+        assert conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall() == before
+        assert physical_capture_debt_reason(conn, raw_model_forecast_id=raw_id,
+            decision_time_iso=world.clock[0].isoformat()) is None
+        assert "icon_global" in read_current_instrument_values(conn, city=target.city, metric=target.metric,
+            target_date=target.target_date, source_cycle_time_iso=world.run.isoformat(),
+            decision_time_iso=world.clock[0].isoformat())
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("mismatch", ("missing_id", "model", "run", "mixed_neighbor", "coordinates", "request", "ground", "metric", "conflicting_duplicate", "date", "provider"))
+def test_real_capture_debt_scope_mismatch_never_becomes_all_fetch(tmp_path, monkeypatch, mismatch, metric):
+    from dataclasses import replace
+    from src.data import bayes_precision_fusion_download as dl
+    from src.data.replacement_current_value_serving import physical_capture_debt_reason
+    world = _real_capture_world(tmp_path, monkeypatch, "single", metric)
+    target = world.targets[0]
+    reason = "HTTP_CAPTURE_RECEIPT_MISSING"
+    with sqlite3.connect(world.db) as conn:
+        raw_id, body_id = conn.execute("SELECT raw_model_forecast_id,artifact_id FROM raw_model_forecasts WHERE city=?", (target.city,)).fetchone()
+        conn.execute("DELETE FROM raw_forecast_artifacts WHERE data_version='openmeteo_single_model_http_capture_receipt_v1'"
+            " AND json_extract(artifact_metadata_json,'$.physical_http_capture_receipt.body_artifact_id')=?", (body_id,))
+        conn.commit()
+        world.clock[0] = datetime(2026, 9, 29, 23, 30, tzinfo=UTC)
+        assert physical_capture_debt_reason(conn, raw_model_forecast_id=raw_id,
+            decision_time_iso=world.clock[0].isoformat()) == reason
+        if mismatch == "request":
+            conn.execute("UPDATE raw_model_forecasts SET request_url_hash='foreign' WHERE raw_model_forecast_id=?", (raw_id,))
+        elif mismatch == "provider":
+            conn.execute("UPDATE raw_model_forecasts SET provider='foreign' WHERE raw_model_forecast_id=?", (raw_id,))
+        elif mismatch == "ground":
+            conn.execute("DELETE FROM raw_forecast_artifacts WHERE data_version NOT IN"
+                " ('openmeteo_single_model_entity_body_v1','openmeteo_single_model_http_capture_receipt_v1')")
+        conn.commit()
+    kwargs = {**world.kwargs, "targets": [target], "network_capture_reason": reason, "capture_debt_raw_ids": (raw_id,)}
+    if mismatch == "missing_id":
+        kwargs["capture_debt_raw_ids"] = (raw_id + 1000,)
+    elif mismatch == "model":
+        kwargs.update(models=("ukmo_global_deterministic_10km",),
+            frozen_source_runs={"ukmo_global_deterministic_10km": (world.run, world.run.replace(hour=16))})
+    elif mismatch == "run":
+        kwargs["frozen_source_runs"] = {"icon_global": (world.run.replace(hour=18), world.run.replace(hour=19))}
+    elif mismatch == "mixed_neighbor":
+        kwargs["targets"] = [target, world.targets[-1]]
+    elif mismatch == "coordinates":
+        kwargs["targets"] = [replace(target, latitude=target.latitude + .125)]
+    elif mismatch == "conflicting_duplicate":
+        kwargs["targets"] = [replace(target, latitude=target.latitude + .125), target]
+    elif mismatch == "metric":
+        kwargs["targets"] = [replace(target, metric="low" if metric == "high" else "high")]
+    elif mismatch == "date":
+        kwargs["targets"] = [replace(target, target_date="2026-10-01")]
+    old_calls, old_quota = len(world.calls), world.tracker.calls_today()
+    with pytest.raises(ValueError, match="physical_capture_debt"):
+        dl.download_bayes_precision_fusion_extra_raw_inputs(**kwargs)
+    assert len(world.calls) == old_calls and world.tracker.calls_today() == old_quota
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_real_capture_debt_accepts_identical_duplicate_target_without_extra_cost(tmp_path, monkeypatch, metric):
+    from src.data import bayes_precision_fusion_download as dl
+    from src.data.replacement_current_value_serving import physical_capture_debt_reason
+    world = _real_capture_world(tmp_path, monkeypatch, "single", metric)
+    target = world.targets[0]
+    with sqlite3.connect(world.db) as conn:
+        raw_id, body_id = conn.execute("SELECT raw_model_forecast_id,artifact_id FROM raw_model_forecasts WHERE city=?", (target.city,)).fetchone()
+        conn.execute("DELETE FROM raw_forecast_artifacts WHERE data_version='openmeteo_single_model_http_capture_receipt_v1'"
+            " AND json_extract(artifact_metadata_json,'$.physical_http_capture_receipt.body_artifact_id')=?", (body_id,))
+        conn.commit()
+        world.clock[0] = datetime(2026, 9, 29, 23, 30, tzinfo=UTC)
+        assert physical_capture_debt_reason(conn, raw_model_forecast_id=raw_id,
+            decision_time_iso=world.clock[0].isoformat()) == "HTTP_CAPTURE_RECEIPT_MISSING"
+    calls, quota = len(world.calls), world.tracker.calls_today()
+    report = dl.download_bayes_precision_fusion_extra_raw_inputs(**world.kwargs, targets=[target, target],
+        network_capture_reason="HTTP_CAPTURE_RECEIPT_MISSING", capture_debt_raw_ids=(raw_id,))
+    assert report["physical_capture_recovered_raw_ids"] == (raw_id,)
+    assert len(world.calls) == calls + 1 and world.tracker.calls_today() == quota + 1
+
+
+def test_real_fresh_changed_value_receipt_is_not_proof_recovery(tmp_path, monkeypatch):
+    from src.data import bayes_precision_fusion_download as dl
+    from src.data.replacement_current_value_serving import physical_capture_debt_reason
+    world = _real_capture_world(tmp_path, monkeypatch, "single")
+    target = world.targets[0]
+    with sqlite3.connect(world.db) as conn:
+        raw_id, body_id = conn.execute("SELECT raw_model_forecast_id,artifact_id FROM raw_model_forecasts WHERE city=?", (target.city,)).fetchone()
+        before = conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall()
+        conn.execute("DELETE FROM raw_forecast_artifacts WHERE data_version='openmeteo_single_model_http_capture_receipt_v1'"
+            " AND json_extract(artifact_metadata_json,'$.physical_http_capture_receipt.body_artifact_id')=?", (body_id,))
+        conn.commit()
+    world.clock[0] = datetime(2026, 9, 29, 23, 30, tzinfo=UTC)
+    world.provider.value = 21.0
+    kwargs = {**world.kwargs, "targets": [target], "network_capture_reason": "HTTP_CAPTURE_RECEIPT_MISSING",
+              "capture_debt_raw_ids": (raw_id,)}
+    report = dl.download_bayes_precision_fusion_extra_raw_inputs(**kwargs)
+    assert report["written_row_count"] == 0 and report["committed_families"] == ()
+    assert report["physical_capture_recovered_raw_ids"] == ()
+    assert report["physical_capture_unrecovered_raw_ids"] == (raw_id,)
+    assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_PHYSICAL_PROOF_UNRECOVERED"
+    with sqlite3.connect(world.db) as conn:
+        assert conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall() == before
+        assert physical_capture_debt_reason(conn, raw_model_forecast_id=raw_id,
+            decision_time_iso=world.clock[0].isoformat()) is None
+    calls = len(world.calls)
+    with pytest.raises(ValueError, match="no matching recoverable proof debt"):
+        dl.download_bayes_precision_fusion_extra_raw_inputs(**kwargs)
+    assert len(world.calls) == calls, "same-issued value changes are not an unlimited refresh loop"
+
+
+def test_real_capture_preload_failure_does_not_fall_open_to_universe(tmp_path, monkeypatch):
+    from src.data import bayes_precision_fusion_download as dl
+    world = _real_capture_world(tmp_path, monkeypatch, "single")
+    target = world.targets[0]
+    with sqlite3.connect(world.db) as conn:
+        raw_id, body_id = conn.execute("SELECT raw_model_forecast_id,artifact_id FROM raw_model_forecasts WHERE city=?", (target.city,)).fetchone()
+        conn.execute("DELETE FROM raw_forecast_artifacts WHERE data_version='openmeteo_single_model_http_capture_receipt_v1'"
+            " AND json_extract(artifact_metadata_json,'$.physical_http_capture_receipt.body_artifact_id')=?", (body_id,))
+        conn.commit()
+    world.clock[0] = datetime(2026, 9, 29, 23, 30, tzinfo=UTC)
+    def broken(*_args, **_kwargs):
+        raise sqlite3.OperationalError("private preflight fault")
+    monkeypatch.setattr("src.state.db._connect", broken)
+    calls, quota = len(world.calls), world.tracker.calls_today()
+    with pytest.raises(ValueError, match="physical_capture_debt: exact canonical preload unavailable"):
+        dl.download_bayes_precision_fusion_extra_raw_inputs(**world.kwargs, targets=[target],
+            network_capture_reason="HTTP_CAPTURE_RECEIPT_MISSING", capture_debt_raw_ids=(raw_id,))
+    assert len(world.calls) == calls and world.tracker.calls_today() == quota
+
+
+def test_real_capture_validation_db_failure_is_scoped_before_acquisition(tmp_path, monkeypatch):
+    from src.data import bayes_precision_fusion_download as dl
+    from src.data.replacement_current_value_serving import physical_capture_debt_reason
+    world = _real_capture_world(tmp_path, monkeypatch, "single")
+    target = world.targets[0]
+    with sqlite3.connect(world.db) as conn:
+        raw_id, body_id = conn.execute("SELECT raw_model_forecast_id,artifact_id FROM raw_model_forecasts WHERE city=?", (target.city,)).fetchone()
+        conn.execute("DELETE FROM raw_forecast_artifacts WHERE data_version='openmeteo_single_model_http_capture_receipt_v1'"
+            " AND json_extract(artifact_metadata_json,'$.physical_http_capture_receipt.body_artifact_id')=?", (body_id,))
+        conn.commit()
+        world.clock[0] = datetime(2026, 9, 29, 23, 30, tzinfo=UTC)
+        assert physical_capture_debt_reason(conn, raw_model_forecast_id=raw_id,
+            decision_time_iso=world.clock[0].isoformat()) == "HTTP_CAPTURE_RECEIPT_MISSING"
+    def broken(*_args, **_kwargs):
+        raise sqlite3.OperationalError("private validation fault")
+    monkeypatch.setattr("src.state.db._connect_read_only", broken)
+    calls, quota = len(world.calls), world.tracker.calls_today()
+    with pytest.raises(ValueError, match="physical_capture_debt: exact canonical validation unavailable"):
+        dl.download_bayes_precision_fusion_extra_raw_inputs(**world.kwargs, targets=[target],
+            network_capture_reason="HTTP_CAPTURE_RECEIPT_MISSING", capture_debt_raw_ids=(raw_id,))
+    assert len(world.calls) == calls and world.tracker.calls_today() == quota
+
+
+def _bind_owned_ifs9_response(tmp_path, monkeypatch, *, terrain_neighbor=False):
+    from src.data import bayes_precision_fusion_download as dl
+    from src.data.openmeteo_ecmwf_ifs9_anchor import SINGLE_RUNS_FORECAST_URL
+    from tests.test_openmeteo_ecmwf_ifs9_bucket_transport import _actual_o1280_static_fixture
+    transport, path, data, write, clock, args = _actual_o1280_static_fixture(tmp_path, monkeypatch)
+    args.update(requested_latitude=22.3, requested_longitude=114.17)
+    if terrain_neighbor:
+        data[:] = 1500
+        points, _, center = transport.om_get_surrounding_gridpoints(22.3, 114.17)
+        neighbor = next(index for index in points if index != points[center])
+        data[0, neighbor] = 425
+        write()
+        point = transport.om_get_coordinates(neighbor)
+        args.update(latitude=point.grid_latitude, longitude=point.grid_longitude_east, target_elevation_m=413.)
+    monkeypatch.setattr(transport, "HSURF_LOCAL_CACHE", str(path))
+    monkeypatch.setattr("src.config.state_path", lambda name: tmp_path / "state" / name)
+    lon = (args["longitude"] + 180) % 360 - 180
+    payload = {"latitude": args["latitude"], "longitude": lon, "elevation": args["target_elevation_m"],
+        "timezone": "Asia/Hong_Kong", "utc_offset_seconds": 28800,
+        "hourly_units": {"temperature_2m": "°C"}, "hourly": {
+            "time": [f"2026-09-30T{hour:02d}:00" for hour in range(24)], "temperature_2m": [32.0] * 24}}
+    params = {"latitude": 22.3, "longitude": 114.17, "models": "ecmwf_ifs", "timezone": "Asia/Hong_Kong",
+        "hourly": "temperature_2m", "temperature_unit": "celsius", "cell_selection": "land", "run": "2026-09-29T12:00"}
+    def bind():
+        body = json.dumps(payload).encode()
+        return dl._bind_physical_response(json.loads(body), model="ecmwf_ifs", url=SINGLE_RUNS_FORECAST_URL,
+            params=params, run=datetime(2026, 9, 29, 12, tzinfo=UTC), captures=[(body, clock[0].timestamp())])
+    return transport, path, clock, args, payload, bind
+
+
+def test_actual_ifs9_producer_freezes_only_its_owned_static_without_http(tmp_path, monkeypatch):
+    from src.data import bayes_precision_fusion_download as dl
+    transport, path, clock, args, _payload, bind = _bind_owned_ifs9_response(tmp_path, monkeypatch)
+    bound = bind()
+    capture = bound[dl._BATCH_PHYSICAL_RESPONSE_KEY]
+    proof = capture["locations"][0]["source_cell_geometry_proof"]
+    assert "network_capture" not in capture
+    assert proof["static_asset_audit"]["possession_role"] == "local_static_snapshot_not_http_capture"
+    assert transport.validate_source_cell_geometry_proof(proof, latitude=args["latitude"],
+        longitude=args["longitude"], target_elevation_m=args["target_elevation_m"],
+        requested_latitude=args["requested_latitude"], requested_longitude=args["requested_longitude"],
+        decision_at=clock[0].isoformat()) is None
+    assert transport.validate_source_cell_geometry_proof(proof, latitude=args["latitude"],
+        longitude=args["longitude"], target_elevation_m=args["target_elevation_m"],
+        requested_latitude=args["requested_latitude"], requested_longitude=args["requested_longitude"],
+        decision_at=(clock[0] - timedelta(seconds=1)).isoformat()) is not None
+    path.unlink()
+    assert transport.validate_source_cell_geometry_proof(proof, latitude=args["latitude"],
+        longitude=args["longitude"], target_elevation_m=args["target_elevation_m"],
+        requested_latitude=args["requested_latitude"], requested_longitude=args["requested_longitude"],
+        decision_at=clock[0].isoformat()) is None, "readers use their own frozen original bytes"
+    Path(proof["static_asset_audit"]["asset_path"]).unlink()
+    assert transport.validate_source_cell_geometry_proof(proof, latitude=args["latitude"],
+        longitude=args["longitude"], target_elevation_m=args["target_elevation_m"],
+        requested_latitude=args["requested_latitude"], requested_longitude=args["requested_longitude"],
+        decision_at=clock[0].isoformat()) is not None, "missing owned frozen bytes cannot serve"
+
+
+@pytest.mark.parametrize("fault", ("clock", "selected_cell"))
+def test_actual_ifs9_owned_capture_rejects_bad_clock_or_field_binding(tmp_path, monkeypatch, fault):
+    from src.data import bayes_precision_fusion_download as dl
+    transport, _path, clock, args, payload, bind = _bind_owned_ifs9_response(tmp_path, monkeypatch)
+    proof = bind()[dl._BATCH_PHYSICAL_RESPONSE_KEY]["locations"][0]["source_cell_geometry_proof"]
+    assert transport.validate_source_cell_geometry_proof(proof, latitude=args["latitude"],
+        longitude=args["longitude"], target_elevation_m=args["target_elevation_m"],
+        requested_latitude=args["requested_latitude"], requested_longitude=args["requested_longitude"],
+        decision_at=clock[0].isoformat()) is None
+    changed = {**proof, "raw_grid_elevation_m": proof["raw_grid_elevation_m"] + 1}
+    assert transport.validate_source_cell_geometry_proof(changed, latitude=args["latitude"],
+        longitude=args["longitude"], target_elevation_m=args["target_elevation_m"],
+        requested_latitude=args["requested_latitude"], requested_longitude=args["requested_longitude"],
+        decision_at=clock[0].isoformat()) is not None
+    if fault == "clock":
+        clock[0] = clock[0].replace(tzinfo=None)
+        match = "possession clock is naive"
+    else:
+        payload["latitude"] += .125
+        match = "response.*does not match"
+    with pytest.raises(ValueError, match=match):
+        bind()
+
+
+def test_actual_ifs9_producer_replays_requested_center_not_selected_neighbor(tmp_path, monkeypatch):
+    from src.data import bayes_precision_fusion_download as dl
+    transport, _path, clock, args, payload, bind = _bind_owned_ifs9_response(tmp_path, monkeypatch, terrain_neighbor=True)
+    capture = bind()[dl._BATCH_PHYSICAL_RESPONSE_KEY]
+    proof = capture["locations"][0]["source_cell_geometry_proof"]
+    assert proof["raw_grid_elevation_m"] == proof["effective_grid_elevation_m"] == 425
+    assert proof["cell_is_center"] is False and proof["target_dem_elevation_m"] == 413
+    validation = {key: args[key] for key in ("latitude", "longitude", "target_elevation_m", "requested_latitude", "requested_longitude")}
+    assert transport.validate_source_cell_geometry_proof(proof, **validation, decision_at=clock[0].isoformat()) is None
+    assert capture["locations"][0]["requested_latitude"] == 22.3
+    assert "network_capture" not in capture
+    validation.update(requested_latitude=args["latitude"], requested_longitude=args["longitude"])
+    assert transport.validate_source_cell_geometry_proof(proof, **validation, decision_at=clock[0].isoformat()) is not None
+    payload["latitude"] += .125
+    with pytest.raises(ValueError, match="response.*does not match"):
+        bind()
+
+
+def test_actual_ifs9_missing_original_static_remains_diagnostic_without_native_authority(tmp_path, monkeypatch):
+    from src.data import bayes_precision_fusion_download as dl
+    _transport, path, _clock, _args, _payload, bind = _bind_owned_ifs9_response(tmp_path, monkeypatch)
+    path.unlink()
+    capture = bind()[dl._BATCH_PHYSICAL_RESPONSE_KEY]
+    assert "source_cell_geometry_proof" not in capture["locations"][0]
+    assert capture["native_surface"] == "UNKNOWN" and "network_capture" not in capture
+    assert not (tmp_path / "static").exists()

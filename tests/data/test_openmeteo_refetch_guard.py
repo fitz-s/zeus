@@ -631,6 +631,42 @@ def test_typed_physical_proof_debt_obtains_real_200_under_original_request_and_q
     assert replay == refreshed and len(events) == 2 and world.provider.data_calls == 2
 
 
+@pytest.mark.parametrize("status", (304, 429, 500))
+def test_force_capture_non_200_never_emits_entity_or_network_event(world, monkeypatch, status):
+    proc = world.process()
+    world.fetch(proc)
+    original_get = world.provider.get
+
+    def get(url, *, params=None, timeout=None):
+        if urlsplit(url).path.endswith("/static/meta.json"):
+            return original_get(url, params=params, timeout=timeout)
+        world.provider.data_calls += 1
+        return httpx.Response(status, json={"reason": "fixture refusal"},
+                              request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(world.provider, "get", get)
+    entities, events = [], []
+    with pytest.raises(httpx.HTTPError):
+        world.fetch(proc, capture_entity_body=lambda *args: entities.append(args),
+            capture_network_response=lambda *args: events.append(args),
+            require_network_capture=True, network_capture_reason="HTTP_CAPTURE_RECEIPT_MISSING",
+            fast_fail_429=True)
+    assert world.provider.data_calls == 2
+    assert entities == events == []
+
+
+def test_force_capture_does_not_bypass_a_denied_quota_lease(world, monkeypatch):
+    proc = world.process()
+    world.fetch(proc)
+    monkeypatch.setattr(proc[0], "acquire_request", lambda *_args, **_kwargs: (False, "daily_limit", None))
+    events = []
+    with pytest.raises(om.OpenMeteoLocalPreflightQuotaDenied):
+        world.fetch(proc, capture_entity_body=lambda *_: None,
+            capture_network_response=lambda *args: events.append(args),
+            require_network_capture=True, network_capture_reason="ENTITY_BODY_MISSING")
+    assert world.provider.data_calls == 1 and events == []
+
+
 def test_unknown_or_unwitnessed_force_capture_is_not_a_generic_refresh_entry(world):
     with pytest.raises(ValueError, match="typed physical-proof debt"):
         world.fetch(world.process(), require_network_capture=True, network_capture_reason="ground_missing")
