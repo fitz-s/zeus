@@ -134,6 +134,68 @@ def _auction_from_served_observation(bundle, *, at, trade):
     return result,elapsed
 
 
+def _seed_prior_rest(trade, forecasts, *, city, target_date, at):
+    """A previous run's already-acknowledged order is an explicit input fixture."""
+    from tests import test_executor as entry
+    from tests import test_venue_command_repo as commands
+    from src.state.venue_command_repo import insert_submission_envelope
+    token='prior-rest-token';command='prior-rest';venue='prior-venue'
+    stamp=(at-timedelta(minutes=1)).isoformat()
+    sid=entry._ensure_snapshot(trade,token_id=token,condition_id='cond-'+token,
+        snapshot_id='prior-rest-book',final_limit_price=Decimal('.50'))
+    envelope=commands._make_envelope(token_id=token,price=Decimal('.50'),size=Decimal('10'))
+    envelope=envelope.with_updates(condition_id='cond-'+token,order_type='GTC',post_only=True)
+    insert_submission_envelope(trade,envelope,envelope_id='prior-rest-envelope')
+    trade.execute('INSERT INTO venue_commands '
+        '(command_id,snapshot_id,envelope_id,position_id,decision_id,idempotency_key,intent_kind,'
+        'market_id,token_id,side,size,price,venue_order_id,state,created_at,updated_at,q_version) '
+        'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        (command,sid,'prior-rest-envelope','prior-position','prior-decision','prior-idempotency',
+         'ENTRY','cond-'+token,token,'BUY',10,.50,venue,'ACKED',stamp,stamp,'a'*64))
+    trade.execute('INSERT INTO venue_order_facts '
+        '(venue_order_id,command_id,state,remaining_size,matched_size,source,observed_at,local_sequence,raw_payload_hash) '
+        "VALUES (?,?,'LIVE','10','0','FAKE_VENUE',?,1,?)",(venue,command,stamp,'f'*64))
+    trade.execute('INSERT INTO venue_command_events '
+        '(event_id,command_id,sequence_no,event_type,occurred_at,payload_json,state_after) '
+        "VALUES ('prior-acked',?,1,'SUBMIT_ACKED',?,?,'ACKED')",(command,stamp,json.dumps({'venue_order_id':venue})))
+    forecasts.execute('INSERT INTO market_events '
+        '(market_slug,city,target_date,temperature_metric,condition_id,token_id) VALUES (?,?,?,?,?,?)',
+        ('prior-rest-market',city,target_date,'high','cond-'+token,token))
+    trade.commit();forecasts.commit()
+
+
+def _cancel_prior_rest(trade, forecasts, *, bundle, at):
+    """Real C3 classification/batch cancellation; denied budget cannot authorize replacement."""
+    from src.execution.staleness_cancel import run_c3_staleness_cancel_cycle, read_current_family_q_versions
+    family=(bundle.city,bundle.target_date,bundle.temperature_metric)
+    assert read_current_family_q_versions(forecasts,(family,),now=at)[family]==bundle.posterior_identity_hash
+    class Venue:
+        def __init__(self): self.calls=[]
+        def cancel_orders_batch(self, ids):
+            assert ids==['prior-venue']
+            assert trade.execute("SELECT state FROM venue_commands WHERE command_id='prior-rest'").fetchone()[0]=='CANCEL_PENDING'
+            self.calls.append(ids)
+            return [{'canceled':True,'orderID':'prior-venue'}]
+    class Budget:
+        allowed=False
+        def try_acquire(self,_request_class):
+            return SimpleNamespace(granted=self.allowed,decision=SimpleNamespace(value='DENIED'))
+    venue=Venue();budget=Budget();started=time.monotonic_ns()
+    denied=run_c3_staleness_cancel_cycle(trade,trade,forecasts,venue,now=at,rate_budget=budget)
+    assert denied['cancel_set_size']==1,denied
+    assert not denied['confirmed_families'] and not venue.calls
+    assert trade.execute('SELECT COUNT(*) FROM venue_commands').fetchone()[0]==1
+    budget.allowed=True
+    confirmed=run_c3_staleness_cancel_cycle(trade,trade,forecasts,venue,now=at,rate_budget=budget)
+    assert confirmed['confirmed_families']=={family},confirmed
+    assert trade.execute("SELECT state FROM venue_commands WHERE command_id='prior-rest'").fetchone()[0]=='CANCELLED'
+    trade.commit()
+    assert venue.calls==[['prior-venue']]
+    replay=run_c3_staleness_cancel_cycle(trade,trade,forecasts,venue,now=at,rate_budget=budget)
+    assert replay['cancel_set_size']==0 and len(venue.calls)==1
+    return (time.monotonic_ns()-started)/1e6
+
+
 def _submit_selected_entry(trade, world, auction, bundle, monkeypatch):
     """Actual frozen-intent entry executor; operational health and venue are fixtures."""
     from tests import test_executor as entry
@@ -267,6 +329,8 @@ def _submit_selected_entry(trade, world, auction, bundle, monkeypatch):
             assert kwargs['side']=='BUY' and kwargs['token_id']==candidate.token_id
             assert Decimal(str(kwargs['price']))==decision.limit_price
             assert Decimal(str(kwargs['size']))==decision.shares
+            prior=trade.execute("SELECT state FROM venue_commands WHERE command_id='prior-rest'").fetchone()
+            assert prior is None or prior[0]=='CANCELLED'
             submits.append(kwargs)
             return entry._final_submit_result(self.envelope,order_id='observed-auction-entry')
     monkeypatch.setattr('src.data.polymarket_client.PolymarketClient',FakeEntryVenue)
@@ -291,7 +355,7 @@ def _submit_selected_entry(trade, world, auction, bundle, monkeypatch):
     return result,list_events(trade,result.command_id)
 
 
-@pytest.mark.parametrize('reaction_path',['sell','entry'])
+@pytest.mark.parametrize('reaction_path',['sell','entry','replace'])
 @pytest.mark.parametrize('incumbent_without_carrier',[False,True])
 def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_path,trade_schema,_materializer_unit_source_surface,incumbent_without_carrier,reaction_path):
     import scripts.materialize_replacement_forecast_live as cli
@@ -322,10 +386,7 @@ def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_pa
         orderbook_top_bid='0.74',orderbook_top_ask='0.75')
     trade.execute("INSERT INTO position_current(position_id,phase,market_id,city,target_date,temperature_metric,chain_state,chain_shares,chain_cost_basis_usd,updated_at) VALUES('source-reaction-held','active','condition-test','Shanghai','2026-06-07','high','synced',5,2,'2026-06-06T18:00:00Z')")
     trade.commit()
-    source_models=('ecmwf_ifs9','gfs','icon')
-    fixtures._install_live_fusion(monkeypatch,snapshot_id=1,
-        current_serving={model:{'raw_model_forecast_id':101+index,'served_via':'single_runs'}
-                         for index,model in enumerate(source_models)})
+    source_models=('ecmwf_ifs9','gfs','icon','gem','jma')
     for index,model in enumerate(source_models):
         conn.execute('''INSERT INTO raw_model_forecasts
             (raw_model_forecast_id,model,city,target_date,metric,source_cycle_time,
@@ -333,8 +394,21 @@ def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_pa
             VALUES(?,?,'Shanghai','2026-06-07','high',?,?,?,1,25.0,'single_runs',?,'COVERED')''',
             (101+index,model,fixtures._dt(0).isoformat(),fixtures._dt(3).isoformat(),
              fixtures._dt(3).isoformat(),fixtures._dt(3).isoformat()))
+    from src.data.replacement_current_value_serving import read_current_instrument_values
+    serving=read_current_instrument_values(conn,city='Shanghai',metric='high',
+        target_date='2026-06-07',source_cycle_time_iso=fixtures._dt(0).isoformat(),
+        decision_time_iso=fixtures._dt(4).isoformat())
+    assert set(serving)==set(source_models)
+    fixtures._install_live_fusion(monkeypatch,snapshot_id=1,
+        current_serving={model:value.as_provenance() for model,value in serving.items()})
+    original_override=fixtures.materializer_mod._replacement_bayes_precision_fusion_override
+    monkeypatch.setattr(fixtures.materializer_mod,'_replacement_bayes_precision_fusion_override',
+        lambda *args,**kw: replace(original_override(*args,**kw),
+            raw_model_forecast_ids=tuple(range(101,106))))
     reader_fixtures._insert_ensemble_snapshot(conn,snapshot_id=1,
         source_cycle_time=fixtures._dt(0),available_at=fixtures._dt(2))
+    # End fixture preparation before the independent WORLD evidence writer.
+    conn.commit()
     if incumbent_without_carrier:
         incumbent=materialize_replacement_forecast_live(conn,fixtures._request())
         assert incumbent.ok,incumbent
@@ -345,6 +419,8 @@ def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_pa
     request=fixtures._request(computed_at=now,expires_at=datetime(2026,6,7,2,tzinfo=timezone.utc),
         day0_observed_extreme_c=31.0,day0_observed_extreme_source="aviationweather_metar",
         day0_observed_extreme_observation_time=fixtures._dt(18,5).isoformat())
+    if reaction_path=='replace':
+        _seed_prior_rest(trade,conn,city=request.city,target_date=str(request.target_date),at=now)
     response_received_at_ms=time.time_ns()//1_000_000
     append_print(world,city='Shanghai',station_id='ZSPD',source_channel='aviationweather_metar',
         publish_ts_utc=fixtures._dt(18,5).isoformat(),value_native=30.0,unit='C',
@@ -439,6 +515,8 @@ def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_pa
     assert abs(sum(read.bundle.q.values())-1)<1e-9
     q_served_monotonic=time.monotonic_ns()
 
+    cancel_ms=(_cancel_prior_rest(trade,conn,bundle=read.bundle,at=now)
+               if reaction_path=='replace' else None)
     auction,auction_ms=_auction_from_served_observation(read.bundle,at=now,trade=trade)
     print('MEASURED_GLOBAL_AUCTION',json.dumps({'auction_ms':auction_ms,
         'candidate_count':auction.decision.candidate_input_count,
@@ -463,7 +541,7 @@ def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_pa
             return exit_fixtures._fake_submit_result(self.envelope,order_id='fixture-venue-order')
     monkeypatch.setattr('src.data.polymarket_client.PolymarketClient',FakeVenue)
     try:
-        if reaction_path=='entry':
+        if reaction_path in {'entry','replace'}:
             order,journal=_submit_selected_entry(trade,world,auction,read.bundle,monkeypatch)
         else:
             order=execute_exit_order(create_exit_order_intent(
@@ -499,6 +577,7 @@ def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_pa
     assert trace['command_id']==order.command_id
     assert any(event['event_id']==trace['event_id'] for event in journal)
     measured={"posterior_id":response['posterior_id'],
+        "cancel_confirm_and_replay_ms":cancel_ms,
         "reaction_path":reaction_path,"auction_ms":auction_ms,
         "receipt_to_world_ms":world_committed_at_ms-response_received_at_ms,
         "world_to_posterior_ms":trace["posterior_ready_at_ms"]-world_committed_at_ms,
