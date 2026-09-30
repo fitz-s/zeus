@@ -4757,18 +4757,24 @@ def test_day0_current_path_revision_separates_old_q_cohort() -> None:
     """Mechanism stamps preserve old attribution, never relabel it as current."""
     from src.events.day0_authority import (
         DAY0_PROBABILITY_SEMANTICS_REVISION,
+        DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER,
+        DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL,
         bind_day0_probability_semantics,
         day0_probability_semantics_revision,
     )
 
     stamped = bind_day0_probability_semantics("current-path-cert")
     assert day0_probability_semantics_revision(stamped) == DAY0_PROBABILITY_SEMANTICS_REVISION
+    assert stamped == f"day0-semrev:{DAY0_PROBABILITY_SEMANTICS_REVISION}:current-path-cert"
+    assert DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL != DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER
     assert DAY0_PROBABILITY_SEMANTICS_REVISION in {
-        "day0_settlement_channel_revision_model_v29_smooth_center_bias_observation_clock_v1",
-        "day0_resolver_terminal_composition_v28_smooth_center_bias_observation_clock_v1",
+        DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL,
+        DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER,
     }
     assert bind_day0_probability_semantics(stamped) == stamped
     for old_revision in (
+        "day0_settlement_channel_revision_model_v29_smooth_center_bias_observation_clock_v1",
+        "day0_resolver_terminal_composition_v28_smooth_center_bias_observation_clock_v1",
         "day0_settlement_channel_revision_model_v28_hko_observation_clock_v1",
         "day0_resolver_terminal_composition_v27_hko_observation_clock_v1",
         "day0_settlement_channel_revision_model_v28_smooth_center_bias_v1",
