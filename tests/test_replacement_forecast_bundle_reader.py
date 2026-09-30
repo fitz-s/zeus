@@ -3402,22 +3402,11 @@ def test_hwm_helpers_do_not_retype_schema_errors(helper: str, needle: str) -> No
 
 
 def test_raw_hwm_does_not_label_current_value_read_failure_as_raw_unavailable(
-    monkeypatch,
+    monkeypatch, _shanghai_reader_current_certificate,
 ) -> None:
-    conn = _conn()
-    posterior_id = _insert_posterior(conn)
-    consumed = {
-        "gfs": {
-            "raw_model_forecast_id": 1,
-            "served_cycle": _dt(0).isoformat(),
-            "captured_at": _dt(0, 5).isoformat(),
-            "served_via": "single_runs",
-        }
-    }
-    conn.execute(
-        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
-        (json.dumps(_with_current_value_serving(consumed)), posterior_id),
-    )
+    normal = _shanghai_reader_current_certificate
+    row = normal.row
+    provenance = json.loads(row["provenance_json"])
 
     import src.data.replacement_current_value_serving as serving
 
@@ -3428,27 +3417,19 @@ def test_raw_hwm_does_not_label_current_value_read_failure_as_raw_unavailable(
     monkeypatch.setattr(serving, "read_current_instrument_values", fail_read)
     with pytest.raises(ReplacementInputHwmReadUnavailable) as blocked:
         _exact_current_value_serving_lag(
-            conn,
-            city="Shanghai",
-            target_date="2026-06-07",
-            metric="high",
-            decision_time=_dt(4),
-            posterior_computed_at=_dt(0, 5),
-            provenance=_with_current_value_serving(consumed),
+            normal.conn, city=row["city"], target_date=row["target_date"],
+            metric=row["temperature_metric"], decision_time=normal.request.computed_at,
+            posterior_computed_at=normal.request.computed_at, provenance=provenance,
         )
     assert isinstance(blocked.value.__cause__, CurrentValueServingReadUnavailable)
     assert isinstance(blocked.value.__cause__.__cause__, sqlite3.OperationalError)
     assert str(blocked.value) == "interrupted"
 
     reason = replacement_live_input_lag_reason(
-        conn,
-        city="Shanghai",
-        target_date="2026-06-07",
-        metric="high",
-        decision_time=_dt(4),
-        posterior_source_cycle_time=_dt(0),
-        posterior_computed_at=_dt(0, 5),
-        posterior_provenance=_with_current_value_serving(consumed),
+        normal.conn, city=row["city"], target_date=row["target_date"],
+        metric=row["temperature_metric"], decision_time=normal.request.computed_at,
+        posterior_source_cycle_time=normal.request.source_cycle_time,
+        posterior_computed_at=normal.request.computed_at, posterior_provenance=provenance,
     )
 
     assert reason == (
@@ -3457,35 +3438,38 @@ def test_raw_hwm_does_not_label_current_value_read_failure_as_raw_unavailable(
     assert "raw_hwm_unavailable" not in reason
 
 
-def test_raw_hwm_successful_empty_selection_still_reports_raw_unavailable() -> None:
-    conn = _conn()
-    consumed = {
-        "gfs": {
-            "raw_model_forecast_id": 1,
-            "served_cycle": _dt(0).isoformat(),
-            "captured_at": _dt(0, 5).isoformat(),
-            "served_via": "single_runs",
-        }
-    }
+def test_raw_hwm_successful_empty_selection_still_reports_raw_unavailable(
+    _shanghai_reader_current_certificate,
+) -> None:
+    normal = _shanghai_reader_current_certificate
+    row = normal.row
+    # Simulate a successful but empty provider SELECT, not a read error or an
+    # unlicensed cross-city certificate. All real source tuples remain intact.
+    class EmptyCursor:
+        def __init__(self,cursor): self.cursor = cursor
+        def fetchall(self):
+            self.cursor.fetchall()
+            return []
+        def __getattr__(self,name): return getattr(self.cursor,name)
+    class EmptyProviderRead:
+        def execute(self,sql,params=()):
+            cursor = normal.conn.execute(sql,params)
+            return EmptyCursor(cursor) if "FROM RAW_MODEL_FORECASTS" in " ".join(sql.upper().split()) else cursor
+        def __getattr__(self,name): return getattr(normal.conn,name)
+    empty = EmptyProviderRead()
     assert read_current_instrument_values(
-        conn,
-        city="Shanghai",
-        metric="high",
-        target_date="2026-07-07",
-        source_cycle_time_iso=_dt(0).isoformat(),
+        empty, city=row["city"], metric=row["temperature_metric"],
+        target_date=row["target_date"], source_cycle_time_iso=normal.request.source_cycle_time.isoformat(),
         include_station_sources=True,
-        decision_time_iso=_dt(4).isoformat(),
+        decision_time_iso=normal.request.computed_at.isoformat(),
     ) == {}
 
     reason = replacement_live_input_lag_reason(
-        conn,
-        city="Shanghai",
-        target_date="2026-07-07",
-        metric="high",
-        decision_time=_dt(4),
-        posterior_source_cycle_time=_dt(0),
-        posterior_computed_at=_dt(0, 5),
-        posterior_provenance=_with_current_value_serving(consumed),
+        empty, city=row["city"], target_date=row["target_date"],
+        metric=row["temperature_metric"], decision_time=normal.request.computed_at,
+        posterior_source_cycle_time=normal.request.source_cycle_time,
+        posterior_computed_at=normal.request.computed_at,
+        posterior_provenance=json.loads(row["provenance_json"]),
     )
 
     assert reason is not None
@@ -4227,32 +4211,12 @@ def test_raw_hwm_fails_closed_on_unverifiable_current_value_provenance() -> None
     assert "current_value_serving_provenance_unverifiable" in result.reason_code
 
 
-def test_raw_hwm_reuses_bound_posterior_provenance(monkeypatch) -> None:
+def test_raw_hwm_reuses_bound_posterior_provenance(
+    monkeypatch, _shanghai_reader_current_certificate,
+) -> None:
     import src.data.replacement_forecast_bundle_reader as reader
 
-    conn = _conn()
-    posterior_id = _insert_posterior(conn)
-    consumed: dict[str, dict[str, object]] = {}
-    for model in ("ecmwf_ifs", "gfs"):
-        _insert_raw_model_forecast(
-            conn,
-            model=model,
-            source_cycle_time=_dt(0),
-            captured_at=_dt(0, 5),
-            source_available_at=_dt(0, 5),
-        )
-        consumed[model] = {
-            "raw_model_forecast_id": int(
-                conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-            ),
-            "served_cycle": _dt(0).isoformat(),
-            "captured_at": _dt(0, 5).isoformat(),
-            "served_via": "single_runs",
-        }
-    conn.execute(
-        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
-        (json.dumps(_with_current_value_serving(consumed)), posterior_id),
-    )
+    normal = _shanghai_reader_current_certificate
     traced: list[str] = []
     provenance_parses = 0
     original_json_mapping = reader._json_mapping
@@ -4264,20 +4228,11 @@ def test_raw_hwm_reuses_bound_posterior_provenance(monkeypatch) -> None:
         return original_json_mapping(value, field_name=field_name)
 
     monkeypatch.setattr(reader, "_json_mapping", counted_json_mapping)
-    conn.set_trace_callback(traced.append)
-
-    result = read_replacement_forecast_bundle(
-        conn,
-        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
-        readiness=_readiness(posterior_id=posterior_id),
-        city="Shanghai",
-        target_date="2026-06-07",
-        temperature_metric="high",
-        decision_time=_dt(4),
-        current_bin_topology_hash="topology-hash",
-        enforce_raw_input_hwm=True,
-    )
-    conn.set_trace_callback(None)
+    normal.conn.set_trace_callback(traced.append)
+    try:
+        result = read_replacement_forecast_bundle(normal.conn,**normal.kwargs)
+    finally:
+        normal.conn.set_trace_callback(None)
 
     assert result.ok is True
     duplicate_provenance_reads = [
@@ -4294,7 +4249,26 @@ def test_raw_hwm_reuses_bound_posterior_provenance(monkeypatch) -> None:
         if statement.lstrip().upper().startswith("SELECT")
         and "FROM FORECAST_POSTERIORS" in statement.upper()
     ]
-    assert len(posterior_reads) == 1
+    full_reads = [statement for statement in posterior_reads
+        if " ".join(statement.upper().split()).startswith("SELECT * FROM FORECAST_POSTERIORS")]
+    assert len(full_reads) == 1
+    # The source-owned anchor-only gate independently resolves the canonical FK
+    # from this namespace. This is not a second certificate selection or parse.
+    fk_reads = [statement for statement in posterior_reads
+        if " ".join(statement.upper().split()).startswith(
+            "SELECT COMPUTED_AT,PROVENANCE_JSON,OPENMETEO_ANCHOR_ID FROM FORECAST_POSTERIORS")]
+    assert len(fk_reads) == 1
+    assert len(posterior_reads) == len(full_reads)+len(fk_reads)
+    statement = fk_reads[0]
+    assert f"city='{normal.row['city']}'" in statement
+    assert f"target_date='{normal.row['target_date']}'" in statement
+    assert f"temperature_metric='{normal.row['temperature_metric']}'" in statement
+    assert f"datetime(computed_at)=datetime('{normal.row['computed_at']}')" in statement
+    bound = normal.conn.execute(statement).fetchall()
+    assert len(bound) == 1
+    assert bound[0][0] == normal.row["computed_at"]
+    assert json.loads(bound[0][1]) == json.loads(normal.row["provenance_json"])
+    assert bound[0][2] == normal.row["openmeteo_anchor_id"]
 
 
 def _coverage_identity_conn(
