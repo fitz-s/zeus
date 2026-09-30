@@ -49243,6 +49243,120 @@ def test_geoblocked_actual_adapter_keeps_held_point_trace_lanes(tmp_path,monkeyp
         tmp_path,monkeypatch,"high","none",_hko_clock_native_sources,inspect_cut=inspect_cut)
 
 
+def test_hko_held_missing_maker_witness_keeps_lawful_taker_ranked_and_jit(
+    tmp_path,monkeypatch,_hko_clock_native_sources,
+):
+    """Normal held probability; synthetic executable book/wealth, no venue IO."""
+    from src.events.triggers.day0_extreme_updated import (
+        build_day0_extreme_updated_event,observation_instant_row_to_day0_observation,
+    )
+    from src.contracts.settlement_semantics import SettlementSemantics
+    from src.engine.global_auction_universe import _rebind_probability_witness_tokens
+    from src.solve.solver import global_sell_candidate_from_holding,global_sell_execution_terms
+    from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
+    fixture = _hko_clock_normal_materializer_fixture(tmp_path,monkeypatch,"high")
+    try:
+        original = dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+            (fixture.result.posterior_id,)).fetchone())
+        observation = observation_instant_row_to_day0_observation(dict(fixture.conn.execute(
+            "SELECT * FROM observation_instants ORDER BY utc_timestamp DESC LIMIT 1").fetchone()),metric="high")
+        event = build_day0_extreme_updated_event(observation=observation,
+            settlement_semantics=SettlementSemantics.for_city(fixture.city),decision_time=fixture.cut,
+            received_at=fixture.cut.isoformat())
+        prepared = era._prepare_current_global_probability_family(event,forecast_conn=fixture.conn,
+            topology_conn=fixture.conn,observation_conn=fixture.conn,decision_time=fixture.cut,
+            max_age=FRESHNESS_WINDOW_DEFAULT,allow_provisional_day0_replacement=True,
+            probability_use=era._CurrentProbabilityUse.HELD_MONITOR,raw_input_hwm_conn=fixture.conn)
+        probability = prepared.probability_witness
+        token_map = {b.condition_id:(b.yes_token_id,f"maker-control-no-{i}")
+            for i,b in enumerate(probability.bindings)}
+        probability = _rebind_probability_witness_tokens(probability,token_map_by_condition=token_map,
+            required_token_ids=frozenset(token for pair in token_map.values() for token in pair))
+        candidates = [b for b in probability.bindings
+            if .10 < family_payoff_point_q(probability,bin_id=b.bin_id,side="YES") < .8]
+        assert candidates
+        binding = min(candidates,key=lambda b:family_payoff_point_q(probability,bin_id=b.bin_id,side="YES"))
+        holding = SimpleNamespace(position_id="maker-control-held",family_key=probability.family_key,
+            bin_id=binding.bin_id,side="YES",token_id=binding.yes_token_id,shares=Decimal("10"))
+        position = SimpleNamespace(trade_id=holding.position_id,position_id=holding.position_id,
+            condition_id=binding.condition_id,direction="buy_yes",token_id=binding.yes_token_id,
+            no_token_id=binding.no_token_id,shares=Decimal("10"),chain_shares=Decimal("10"),
+            cost_basis_usd=Decimal("5"),city=fixture.city.name,target_date="2026-09-30",
+            temperature_metric="high",bin_label=binding.bin_id)
+        portfolio = PortfolioState(positions=[position],authority="canonical_db",authority_scope="runtime_exposure")
+        at = fixture.cut
+        wealth = _test_wealth_witness(ledger_snapshot_id="maker-control-ledger",position_set_hash="maker-control-position",
+            wealth_floor_usd=Decimal("1000"),wealth_ceiling_usd=Decimal("1010"),spendable_cash_usd=Decimal("1000"),
+            reservations_usd=Decimal("0"),collateral_authority="CHAIN",captured_at_utc=at,
+            max_age=_dt.timedelta(seconds=30),native_holdings_micro=((binding.yes_token_id,10000000),),
+            native_commitments_micro=())
+        family = bridge.PreparedGlobalFamily(decision_id=prepared.decision_id,probability_witness=probability,
+            candidate_seeds=(),posterior_id=fixture.result.posterior_id,
+            day0_exit_authority_status=prepared.day0_exit_authority_status,
+            day0_exit_authority_reason=prepared.day0_exit_authority_reason,
+            sell_action_authority_identity=prepared.sell_action_authority_identity)
+        assert not family.maker_fill_witnesses
+        families = global_batch_runtime._bind_selection_holdings({event.event_id:family},
+            portfolio_state=portfolio,wealth_witness=wealth)
+        scope = current_global_auction_scope_from_events((event,),captured_at_utc=at)
+        for bid,admitted in ((Decimal(".94"),True),(Decimal(".05"),False)):
+            curve = ExecutableSellCurve(token_id=holding.token_id,side="YES",snapshot_id=f"maker-control-book-{bid}",
+                book_hash=f"maker-control-hash-{bid}",levels=(BidBookLevel(price=bid,size=Decimal("10")),),
+                fee_model=FeeModel(fee_rate=Decimal("0")),min_tick=Decimal(".01"),min_order_size=Decimal("1"),
+                quote_ttl=_dt.timedelta(seconds=30))
+            maker = global_sell_execution_terms(curve,capacity=holding.shares,required_mode="MAKER_REST")
+            assert maker == (None,"MAKER_REST",0.,"CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE",None)
+            assert global_sell_candidate_from_holding(holding,probability_witness=probability,
+                ledger_snapshot_id=wealth.ledger_snapshot_id,executable_sell_curve=curve,
+                book_captured_at_utc=at,neg_risk=False,execution_mode="MAKER_REST") is None
+            states = tuple((probability.family_key,b.bin_id,b.condition_id,side,token,
+                "NO_ASK",curve.book_hash,event.event_id,f"gamma-{b.condition_id}","False")
+                for b in probability.bindings for side,token in (("YES",b.yes_token_id),("NO",b.no_token_id)))
+            book = CurrentGlobalBookEpoch(assets=(),sell_assets=(CurrentGlobalSellAsset(
+                family_key=probability.family_key,bin_id=binding.bin_id,condition_id=binding.condition_id,
+                gamma_market_id=f"gamma-{binding.condition_id}",market_event_id=event.event_id,side="YES",
+                token_id=holding.token_id,curve=curve,captured_at_utc=at,neg_risk=False),),
+                asset_states=states,captured_at_utc=at,max_age=_dt.timedelta(seconds=30),
+                witness_identity=current_global_book_epoch_identity(asset_states=states,captured_at_utc=at))
+            ranked = select_prepared_global_auction(families,selection_epoch_identity=f"maker-control-{bid}",
+                selection_cut_at_utc=at,current_scope=scope,current_scope_identity_resolver=lambda:scope.scope_identity,
+                venue_universe_identity=book.witness_identity,current_venue_universe_identity_resolver=lambda:book.witness_identity,
+                universe_max_age=book.max_age,current_probability_resolver=lambda _:CurrentFamilyProbabilityAuthority.from_witness(probability),
+                current_execution_resolver=lambda candidate:book.execution_authority(candidate,checked_at_utc=at),
+                current_wealth_identity_resolver=lambda:wealth.economic_identity,wealth_witness=wealth,
+                capital_limit_usd=Decimal("100"),decision_at_utc=at,book_epoch=book)
+            assert {row.execution_mode for row in ranked.decision.candidate_evaluations
+                if row.position_id==holding.position_id} == {"TAKER_LIMIT"}
+            assert ranked.holding_coverage[0].status == "EVALUATED"
+            if not admitted:
+                assert float(bid)-family_payoff_point_q(probability,bin_id=binding.bin_id,side="YES") < 0
+                assert ranked.decision.candidate is None
+                assert ranked.actuation is None
+                assert any(row.rejection_reason for row in ranked.decision.candidate_evaluations)
+                continue
+            selected = ranked.decision.candidate
+            assert isinstance(selected,GlobalSingleOrderSellCandidate)
+            assert selected.position_id == holding.position_id and selected.execution_mode == "TAKER_LIMIT"
+            assert selected.probability_witness_identity == probability.witness_identity
+            assert ranked.decision.capital_action_mode == "IMMEDIATE_TAKER_SELL" and ranked.actuation is not None
+            assert ranked.decision.expected_terminal_wealth.expected_ev_usd > 0
+            assert ranked.decision.expected_terminal_wealth.expected_delta_log_wealth > 0
+            market = _jit_market_authority(selected,tick=".01",min_order_size="1")
+            market = replace(market,snapshot=replace(market.snapshot,captured_at=at,
+                freshness_deadline=at+_dt.timedelta(seconds=30)))
+            rebound = era._global_sell_candidate_from_raw_book(selected,
+                {"asset_id":selected.token_id,"tick_size":".01","min_order_size":"1",
+                 "bids":[{"price":str(bid),"size":"10"}],"asks":[]},
+                captured_at_utc=at,market_authority=market)
+            authority = GlobalSellExecutionAuthority.from_current(actuation=ranked.actuation,jit_candidate=rebound)
+            assert rebound.execution_mode == "TAKER_LIMIT" and authority.limit_price() == bid
+            assert rebound.probability_witness_identity == probability.witness_identity
+        assert dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+            (fixture.result.posterior_id,)).fetchone()) == original
+    finally:
+        fixture.conn.close()
+
+
 def _kord_normal_prior_fixture(tmp_path, monkeypatch, *, target_date=None):
     """Ordinary KORD physical writers; controlled forecasts/ENS, not live weather."""
     from dataclasses import replace
