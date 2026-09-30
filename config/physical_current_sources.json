@@ -284,15 +284,64 @@
       "settlement_grade": true,
       "value_identity_proof": {
         "city": "Tokyo",
-        "channel": "jma",
-        "n_pairs": 23,
-        "n_exact": 23,
+        "channel": "jma_amedas",
+        "n_pairs": 143,
+        "n_exact": 143,
         "mismatches": [],
-        "version_conflicts": [],
-        "report_path": "artifacts/fast_obs_audit/source_identity_report.json"
+        "window_start": "2026-09-27T17:30:00+00:00",
+        "window_end": "2026-09-30T16:30:00+00:00",
+        "report_path": "artifacts/fast_obs_audit/round3_window/comparison.json"
       },
       "proof_scope": "Short recorded windows under contract unit/rounding law. Exact-clock equality is admission evidence, not a guarantee for all future values or a latency ranking.",
-      "authority_note": "Exact same-station/UTC-time rounded value comparison: 23/23; no separate instrument certificate required."
+      "authority_note": "Exact same-station/UTC-time rounded value comparison: 23/23; no separate instrument certificate required.",
+      "latency_evidence": {
+        "report_path": "artifacts/fast_obs_audit/round3_origin_measurements.json",
+        "strict_leads_vs_awc": 1,
+        "first_proven_lead": {
+          "observation": "2026-09-30T17:30:00+00:00",
+          "candidate": {
+            "city": "Tokyo",
+            "station": "RJTT",
+            "channel": "jma_amedas",
+            "observed_at": "2026-09-30T17:30:00+00:00",
+            "negative_request_at": "2026-09-30T17:36:10.365615+00:00",
+            "positive_receipt_at": "2026-09-30T17:37:07.316833+00:00",
+            "lag_lower_ms": 370365.615,
+            "lag_upper_ms": 427316.833
+          },
+          "comparators": [
+            {
+              "channel": "awc",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Tokyo",
+                "station": "RJTT",
+                "channel": "awc",
+                "observed_at": "2026-09-30T17:30:00+00:00",
+                "negative_request_at": "2026-09-30T17:39:03.278746+00:00",
+                "positive_receipt_at": "2026-09-30T17:40:03.035007+00:00",
+                "lag_lower_ms": 543278.7459999999,
+                "lag_upper_ms": 603035.007
+              }
+            },
+            {
+              "channel": "resolver",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Tokyo",
+                "station": "RJTT",
+                "channel": "resolver",
+                "observed_at": "2026-09-30T17:30:00+00:00",
+                "negative_request_at": "2026-09-30T17:41:01.336446+00:00",
+                "positive_receipt_at": "2026-09-30T17:43:13.288783+00:00",
+                "lag_lower_ms": 661336.446,
+                "lag_upper_ms": 793288.7829999999
+              }
+            }
+          ]
+        },
+        "limitation": "Measured transitions, not all-time latency domination."
+      }
     },
     {
       "provider": "eccc_swob",
@@ -309,15 +358,64 @@
       "settlement_grade": true,
       "value_identity_proof": {
         "city": "Toronto",
-        "channel": "eccc",
-        "n_pairs": 6,
-        "n_exact": 6,
+        "channel": "eccc_swob",
+        "n_pairs": 51,
+        "n_exact": 51,
         "mismatches": [],
-        "version_conflicts": [],
-        "report_path": "artifacts/fast_obs_audit/source_identity_report.json"
+        "window_start": "2026-09-27T18:00:00+00:00",
+        "window_end": "2026-09-30T16:00:00+00:00",
+        "report_path": "artifacts/fast_obs_audit/round3_window/comparison.json"
       },
       "proof_scope": "Short recorded windows under contract unit/rounding law. Exact-clock equality is admission evidence, not a guarantee for all future values or a latency ranking.",
-      "authority_note": "Exact same-station/UTC-time rounded value comparison: 6/6; no separate instrument certificate required."
+      "authority_note": "Exact same-station/UTC-time rounded value comparison: 6/6; no separate instrument certificate required.",
+      "latency_evidence": {
+        "report_path": "artifacts/fast_obs_audit/round3_origin_measurements.json",
+        "strict_leads_vs_awc": 1,
+        "first_proven_lead": {
+          "observation": "2026-09-30T18:00:00+00:00",
+          "candidate": {
+            "city": "Toronto",
+            "station": "CYYZ",
+            "channel": "eccc_swob",
+            "observed_at": "2026-09-30T18:00:00+00:00",
+            "negative_request_at": "2026-09-30T18:01:03.071422+00:00",
+            "positive_receipt_at": "2026-09-30T18:02:02.544911+00:00",
+            "lag_lower_ms": 63071.422,
+            "lag_upper_ms": 122544.911
+          },
+          "comparators": [
+            {
+              "channel": "awc",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Toronto",
+                "station": "CYYZ",
+                "channel": "awc",
+                "observed_at": "2026-09-30T18:00:00+00:00",
+                "negative_request_at": "2026-09-30T18:07:04.021237+00:00",
+                "positive_receipt_at": "2026-09-30T18:08:03.349032+00:00",
+                "lag_lower_ms": 424021.23699999996,
+                "lag_upper_ms": 483349.032
+              }
+            },
+            {
+              "channel": "resolver",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Toronto",
+                "station": "CYYZ",
+                "channel": "resolver",
+                "observed_at": "2026-09-30T18:00:00+00:00",
+                "negative_request_at": "2026-09-30T18:08:03.398930+00:00",
+                "positive_receipt_at": "2026-09-30T18:09:02.160612+00:00",
+                "lag_lower_ms": 483398.93,
+                "lag_upper_ms": 542160.612
+              }
+            }
+          ]
+        },
+        "limitation": "Measured transitions, not all-time latency domination."
+      }
     },
     {
       "provider": "imgw_synop",

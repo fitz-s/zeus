@@ -1,0 +1,964 @@
+{
+  "window_start": "2026-09-30T17:28:01.318107+00:00",
+  "window_end": "2026-09-30T18:17:08.844599+00:00",
+  "rounds": 50,
+  "distinct_samples": 743,
+  "bounded_transitions": 137,
+  "interval_method": "last observed negative request through first positive complete response; negative lower bounds are retained, not relabeled zero latency",
+  "results": [
+    {
+      "city": "Panama City",
+      "station": "MPMG",
+      "channel": "aac_metar",
+      "n_pairs": 2,
+      "n_exact": 2,
+      "mismatches": [],
+      "pairs": [
+        {
+          "time": "2026-09-30T17:00:00+00:00",
+          "candidate_values_c": [
+            31.0
+          ],
+          "resolver_values_c": [
+            31.0
+          ],
+          "candidate_contract": [
+            31
+          ],
+          "resolver_contract": [
+            31
+          ],
+          "match": true
+        },
+        {
+          "time": "2026-09-30T18:00:00+00:00",
+          "candidate_values_c": [
+            31.0
+          ],
+          "resolver_values_c": [
+            31.0
+          ],
+          "candidate_contract": [
+            31
+          ],
+          "resolver_contract": [
+            31
+          ],
+          "match": true
+        }
+      ],
+      "races": [
+        {
+          "observation": "2026-09-30T18:00:00+00:00",
+          "candidate": {
+            "city": "Panama City",
+            "station": "MPMG",
+            "channel": "aac_metar",
+            "observed_at": "2026-09-30T18:00:00+00:00",
+            "negative_request_at": "2026-09-30T17:58:08.143218+00:00",
+            "positive_receipt_at": "2026-09-30T18:01:12.003006+00:00",
+            "lag_lower_ms": -111856.78199999999,
+            "lag_upper_ms": 72003.006
+          },
+          "comparators": [
+            {
+              "channel": "awc",
+              "verdict": "INTERVALS_OVERLAP",
+              "interval": {
+                "city": "Panama City",
+                "station": "MPMG",
+                "channel": "awc",
+                "observed_at": "2026-09-30T18:00:00+00:00",
+                "negative_request_at": "2026-09-30T17:59:13.751878+00:00",
+                "positive_receipt_at": "2026-09-30T18:00:08.793752+00:00",
+                "lag_lower_ms": -46248.122,
+                "lag_upper_ms": 8793.752
+              }
+            },
+            {
+              "channel": "resolver",
+              "verdict": "INTERVALS_OVERLAP",
+              "interval": {
+                "city": "Panama City",
+                "station": "MPMG",
+                "channel": "resolver",
+                "observed_at": "2026-09-30T18:00:00+00:00",
+                "negative_request_at": "2026-09-30T17:59:14.061274+00:00",
+                "positive_receipt_at": "2026-09-30T18:00:09.643371+00:00",
+                "lag_lower_ms": -45938.726,
+                "lag_upper_ms": 9643.371000000001
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "city": "Toronto",
+      "station": "CYYZ",
+      "channel": "eccc_swob",
+      "n_pairs": 2,
+      "n_exact": 2,
+      "mismatches": [],
+      "pairs": [
+        {
+          "time": "2026-09-30T17:00:00+00:00",
+          "candidate_values_c": [
+            22.2
+          ],
+          "resolver_values_c": [
+            22.0
+          ],
+          "candidate_contract": [
+            22
+          ],
+          "resolver_contract": [
+            22
+          ],
+          "match": true
+        },
+        {
+          "time": "2026-09-30T18:00:00+00:00",
+          "candidate_values_c": [
+            22.3
+          ],
+          "resolver_values_c": [
+            22.0
+          ],
+          "candidate_contract": [
+            22
+          ],
+          "resolver_contract": [
+            22
+          ],
+          "match": true
+        }
+      ],
+      "races": [
+        {
+          "observation": "2026-09-30T18:00:00+00:00",
+          "candidate": {
+            "city": "Toronto",
+            "station": "CYYZ",
+            "channel": "eccc_swob",
+            "observed_at": "2026-09-30T18:00:00+00:00",
+            "negative_request_at": "2026-09-30T18:01:03.071422+00:00",
+            "positive_receipt_at": "2026-09-30T18:02:02.544911+00:00",
+            "lag_lower_ms": 63071.422,
+            "lag_upper_ms": 122544.911
+          },
+          "comparators": [
+            {
+              "channel": "awc",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Toronto",
+                "station": "CYYZ",
+                "channel": "awc",
+                "observed_at": "2026-09-30T18:00:00+00:00",
+                "negative_request_at": "2026-09-30T18:07:04.021237+00:00",
+                "positive_receipt_at": "2026-09-30T18:08:03.349032+00:00",
+                "lag_lower_ms": 424021.23699999996,
+                "lag_upper_ms": 483349.032
+              }
+            },
+            {
+              "channel": "resolver",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Toronto",
+                "station": "CYYZ",
+                "channel": "resolver",
+                "observed_at": "2026-09-30T18:00:00+00:00",
+                "negative_request_at": "2026-09-30T18:08:03.398930+00:00",
+                "positive_receipt_at": "2026-09-30T18:09:02.160612+00:00",
+                "lag_lower_ms": 483398.93,
+                "lag_upper_ms": 542160.612
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "city": "Tokyo",
+      "station": "RJTT",
+      "channel": "jma_amedas",
+      "n_pairs": 7,
+      "n_exact": 7,
+      "mismatches": [],
+      "pairs": [
+        {
+          "time": "2026-09-30T15:00:00+00:00",
+          "candidate_values_c": [
+            18.1
+          ],
+          "resolver_values_c": [
+            18.0
+          ],
+          "candidate_contract": [
+            18
+          ],
+          "resolver_contract": [
+            18
+          ],
+          "match": true
+        },
+        {
+          "time": "2026-09-30T15:30:00+00:00",
+          "candidate_values_c": [
+            18.0
+          ],
+          "resolver_values_c": [
+            18.0
+          ],
+          "candidate_contract": [
+            18
+          ],
+          "resolver_contract": [
+            18
+          ],
+          "match": true
+        },
+        {
+          "time": "2026-09-30T16:00:00+00:00",
+          "candidate_values_c": [
+            18.1
+          ],
+          "resolver_values_c": [
+            18.0
+          ],
+          "candidate_contract": [
+            18
+          ],
+          "resolver_contract": [
+            18
+          ],
+          "match": true
+        },
+        {
+          "time": "2026-09-30T16:30:00+00:00",
+          "candidate_values_c": [
+            18.5
+          ],
+          "resolver_values_c": [
+            19.0
+          ],
+          "candidate_contract": [
+            19
+          ],
+          "resolver_contract": [
+            19
+          ],
+          "match": true
+        },
+        {
+          "time": "2026-09-30T17:00:00+00:00",
+          "candidate_values_c": [
+            18.7
+          ],
+          "resolver_values_c": [
+            19.0
+          ],
+          "candidate_contract": [
+            19
+          ],
+          "resolver_contract": [
+            19
+          ],
+          "match": true
+        },
+        {
+          "time": "2026-09-30T17:30:00+00:00",
+          "candidate_values_c": [
+            19.0
+          ],
+          "resolver_values_c": [
+            19.0
+          ],
+          "candidate_contract": [
+            19
+          ],
+          "resolver_contract": [
+            19
+          ],
+          "match": true
+        },
+        {
+          "time": "2026-09-30T18:00:00+00:00",
+          "candidate_values_c": [
+            19.1
+          ],
+          "resolver_values_c": [
+            19.0
+          ],
+          "candidate_contract": [
+            19
+          ],
+          "resolver_contract": [
+            19
+          ],
+          "match": true
+        }
+      ],
+      "races": [
+        {
+          "observation": "2026-09-30T17:30:00+00:00",
+          "candidate": {
+            "city": "Tokyo",
+            "station": "RJTT",
+            "channel": "jma_amedas",
+            "observed_at": "2026-09-30T17:30:00+00:00",
+            "negative_request_at": "2026-09-30T17:36:10.365615+00:00",
+            "positive_receipt_at": "2026-09-30T17:37:07.316833+00:00",
+            "lag_lower_ms": 370365.615,
+            "lag_upper_ms": 427316.833
+          },
+          "comparators": [
+            {
+              "channel": "awc",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Tokyo",
+                "station": "RJTT",
+                "channel": "awc",
+                "observed_at": "2026-09-30T17:30:00+00:00",
+                "negative_request_at": "2026-09-30T17:39:03.278746+00:00",
+                "positive_receipt_at": "2026-09-30T17:40:03.035007+00:00",
+                "lag_lower_ms": 543278.7459999999,
+                "lag_upper_ms": 603035.007
+              }
+            },
+            {
+              "channel": "resolver",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Tokyo",
+                "station": "RJTT",
+                "channel": "resolver",
+                "observed_at": "2026-09-30T17:30:00+00:00",
+                "negative_request_at": "2026-09-30T17:41:01.336446+00:00",
+                "positive_receipt_at": "2026-09-30T17:43:13.288783+00:00",
+                "lag_lower_ms": 661336.446,
+                "lag_upper_ms": 793288.7829999999
+              }
+            }
+          ]
+        },
+        {
+          "observation": "2026-09-30T17:40:00+00:00",
+          "candidate": {
+            "city": "Tokyo",
+            "station": "RJTT",
+            "channel": "jma_amedas",
+            "observed_at": "2026-09-30T17:40:00+00:00",
+            "negative_request_at": "2026-09-30T17:46:10.681611+00:00",
+            "positive_receipt_at": "2026-09-30T17:47:02.544975+00:00",
+            "lag_lower_ms": 370681.611,
+            "lag_upper_ms": 422544.97500000003
+          },
+          "comparators": []
+        },
+        {
+          "observation": "2026-09-30T17:50:00+00:00",
+          "candidate": {
+            "city": "Tokyo",
+            "station": "RJTT",
+            "channel": "jma_amedas",
+            "observed_at": "2026-09-30T17:50:00+00:00",
+            "negative_request_at": "2026-09-30T17:57:16.616822+00:00",
+            "positive_receipt_at": "2026-09-30T17:58:15.526389+00:00",
+            "lag_lower_ms": 436616.822,
+            "lag_upper_ms": 495526.38899999997
+          },
+          "comparators": []
+        },
+        {
+          "observation": "2026-09-30T18:00:00+00:00",
+          "candidate": {
+            "city": "Tokyo",
+            "station": "RJTT",
+            "channel": "jma_amedas",
+            "observed_at": "2026-09-30T18:00:00+00:00",
+            "negative_request_at": "2026-09-30T17:59:14.611518+00:00",
+            "positive_receipt_at": "2026-09-30T18:07:04.851619+00:00",
+            "lag_lower_ms": -45388.482,
+            "lag_upper_ms": 424851.619
+          },
+          "comparators": [
+            {
+              "channel": "awc",
+              "verdict": "INTERVALS_OVERLAP",
+              "interval": {
+                "city": "Tokyo",
+                "station": "RJTT",
+                "channel": "awc",
+                "observed_at": "2026-09-30T18:00:00+00:00",
+                "negative_request_at": "2026-09-30T18:05:08.410804+00:00",
+                "positive_receipt_at": "2026-09-30T18:06:23.377073+00:00",
+                "lag_lower_ms": 308410.804,
+                "lag_upper_ms": 383377.073
+              }
+            },
+            {
+              "channel": "resolver",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Tokyo",
+                "station": "RJTT",
+                "channel": "resolver",
+                "observed_at": "2026-09-30T18:00:00+00:00",
+                "negative_request_at": "2026-09-30T18:08:03.398930+00:00",
+                "positive_receipt_at": "2026-09-30T18:09:02.160612+00:00",
+                "lag_lower_ms": 483398.93,
+                "lag_upper_ms": 542160.612
+              }
+            }
+          ]
+        },
+        {
+          "observation": "2026-09-30T18:10:00+00:00",
+          "candidate": {
+            "city": "Tokyo",
+            "station": "RJTT",
+            "channel": "jma_amedas",
+            "observed_at": "2026-09-30T18:10:00+00:00",
+            "negative_request_at": "2026-09-30T18:16:02.091873+00:00",
+            "positive_receipt_at": "2026-09-30T18:17:01.747132+00:00",
+            "lag_lower_ms": 362091.873,
+            "lag_upper_ms": 421747.13200000004
+          },
+          "comparators": []
+        }
+      ]
+    },
+    {
+      "city": "Busan",
+      "station": "RKPK",
+      "channel": "kma_amo_raw_metar",
+      "n_pairs": 5,
+      "n_exact": 5,
+      "mismatches": [],
+      "pairs": [
+        {
+          "time": "2026-09-30T14:00:00+00:00",
+          "candidate_values_c": [
+            20.0
+          ],
+          "resolver_values_c": [
+            20.0
+          ],
+          "candidate_contract": [
+            20
+          ],
+          "resolver_contract": [
+            20
+          ],
+          "match": true
+        },
+        {
+          "time": "2026-09-30T15:00:00+00:00",
+          "candidate_values_c": [
+            20.0
+          ],
+          "resolver_values_c": [
+            20.0
+          ],
+          "candidate_contract": [
+            20
+          ],
+          "resolver_contract": [
+            20
+          ],
+          "match": true
+        },
+        {
+          "time": "2026-09-30T16:00:00+00:00",
+          "candidate_values_c": [
+            19.0
+          ],
+          "resolver_values_c": [
+            19.0
+          ],
+          "candidate_contract": [
+            19
+          ],
+          "resolver_contract": [
+            19
+          ],
+          "match": true
+        },
+        {
+          "time": "2026-09-30T17:00:00+00:00",
+          "candidate_values_c": [
+            19.0
+          ],
+          "resolver_values_c": [
+            19.0
+          ],
+          "candidate_contract": [
+            19
+          ],
+          "resolver_contract": [
+            19
+          ],
+          "match": true
+        },
+        {
+          "time": "2026-09-30T18:00:00+00:00",
+          "candidate_values_c": [
+            18.0
+          ],
+          "resolver_values_c": [
+            18.0
+          ],
+          "candidate_contract": [
+            18
+          ],
+          "resolver_contract": [
+            18
+          ],
+          "match": true
+        }
+      ],
+      "races": [
+        {
+          "observation": "2026-09-30T18:00:00+00:00",
+          "candidate": {
+            "city": "Busan",
+            "station": "RKPK",
+            "channel": "kma_amo_raw_metar",
+            "observed_at": "2026-09-30T18:00:00+00:00",
+            "negative_request_at": "2026-09-30T18:00:03.194810+00:00",
+            "positive_receipt_at": "2026-09-30T18:01:13.612319+00:00",
+            "lag_lower_ms": 3194.81,
+            "lag_upper_ms": 73612.319
+          },
+          "comparators": [
+            {
+              "channel": "awc",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Busan",
+                "station": "RKPK",
+                "channel": "awc",
+                "observed_at": "2026-09-30T18:00:00+00:00",
+                "negative_request_at": "2026-09-30T18:04:27.831570+00:00",
+                "positive_receipt_at": "2026-09-30T18:05:08.734576+00:00",
+                "lag_lower_ms": 267831.57,
+                "lag_upper_ms": 308734.576
+              }
+            },
+            {
+              "channel": "resolver",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Busan",
+                "station": "RKPK",
+                "channel": "resolver",
+                "observed_at": "2026-09-30T18:00:00+00:00",
+                "negative_request_at": "2026-09-30T18:08:03.398930+00:00",
+                "positive_receipt_at": "2026-09-30T18:09:02.160612+00:00",
+                "lag_lower_ms": 483398.93,
+                "lag_upper_ms": 542160.612
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "city": "Seoul",
+      "station": "RKSI",
+      "channel": "kma_amo_raw_metar",
+      "n_pairs": 10,
+      "n_exact": 10,
+      "mismatches": [],
+      "pairs": [
+        {
+          "time": "2026-09-30T13:30:00+00:00",
+          "candidate_values_c": [
+            20.0
+          ],
+          "resolver_values_c": [
+            20.0
+          ],
+          "candidate_contract": [
+            20
+          ],
+          "resolver_contract": [
+            20
+          ],
+          "match": true
+        },
+        {
+          "time": "2026-09-30T14:00:00+00:00",
+          "candidate_values_c": [
+            19.0
+          ],
+          "resolver_values_c": [
+            19.0
+          ],
+          "candidate_contract": [
+            19
+          ],
+          "resolver_contract": [
+            19
+          ],
+          "match": true
+        },
+        {
+          "time": "2026-09-30T14:30:00+00:00",
+          "candidate_values_c": [
+            19.0
+          ],
+          "resolver_values_c": [
+            19.0
+          ],
+          "candidate_contract": [
+            19
+          ],
+          "resolver_contract": [
+            19
+          ],
+          "match": true
+        },
+        {
+          "time": "2026-09-30T15:00:00+00:00",
+          "candidate_values_c": [
+            19.0
+          ],
+          "resolver_values_c": [
+            19.0
+          ],
+          "candidate_contract": [
+            19
+          ],
+          "resolver_contract": [
+            19
+          ],
+          "match": true
+        },
+        {
+          "time": "2026-09-30T15:30:00+00:00",
+          "candidate_values_c": [
+            19.0
+          ],
+          "resolver_values_c": [
+            19.0
+          ],
+          "candidate_contract": [
+            19
+          ],
+          "resolver_contract": [
+            19
+          ],
+          "match": true
+        },
+        {
+          "time": "2026-09-30T16:00:00+00:00",
+          "candidate_values_c": [
+            18.0
+          ],
+          "resolver_values_c": [
+            18.0
+          ],
+          "candidate_contract": [
+            18
+          ],
+          "resolver_contract": [
+            18
+          ],
+          "match": true
+        },
+        {
+          "time": "2026-09-30T16:30:00+00:00",
+          "candidate_values_c": [
+            18.0
+          ],
+          "resolver_values_c": [
+            18.0
+          ],
+          "candidate_contract": [
+            18
+          ],
+          "resolver_contract": [
+            18
+          ],
+          "match": true
+        },
+        {
+          "time": "2026-09-30T17:00:00+00:00",
+          "candidate_values_c": [
+            18.0
+          ],
+          "resolver_values_c": [
+            18.0
+          ],
+          "candidate_contract": [
+            18
+          ],
+          "resolver_contract": [
+            18
+          ],
+          "match": true
+        },
+        {
+          "time": "2026-09-30T17:30:00+00:00",
+          "candidate_values_c": [
+            18.0
+          ],
+          "resolver_values_c": [
+            18.0
+          ],
+          "candidate_contract": [
+            18
+          ],
+          "resolver_contract": [
+            18
+          ],
+          "match": true
+        },
+        {
+          "time": "2026-09-30T18:00:00+00:00",
+          "candidate_values_c": [
+            17.0
+          ],
+          "resolver_values_c": [
+            17.0
+          ],
+          "candidate_contract": [
+            17
+          ],
+          "resolver_contract": [
+            17
+          ],
+          "match": true
+        }
+      ],
+      "races": [
+        {
+          "observation": "2026-09-30T17:30:00+00:00",
+          "candidate": {
+            "city": "Seoul",
+            "station": "RKSI",
+            "channel": "kma_amo_raw_metar",
+            "observed_at": "2026-09-30T17:30:00+00:00",
+            "negative_request_at": "2026-09-30T17:29:05.770052+00:00",
+            "positive_receipt_at": "2026-09-30T17:30:06.601835+00:00",
+            "lag_lower_ms": -54229.948,
+            "lag_upper_ms": 6601.835
+          },
+          "comparators": [
+            {
+              "channel": "awc",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Seoul",
+                "station": "RKSI",
+                "channel": "awc",
+                "observed_at": "2026-09-30T17:30:00+00:00",
+                "negative_request_at": "2026-09-30T17:35:06.519900+00:00",
+                "positive_receipt_at": "2026-09-30T17:36:09.809246+00:00",
+                "lag_lower_ms": 306519.9,
+                "lag_upper_ms": 369809.246
+              }
+            },
+            {
+              "channel": "resolver",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Seoul",
+                "station": "RKSI",
+                "channel": "resolver",
+                "observed_at": "2026-09-30T17:30:00+00:00",
+                "negative_request_at": "2026-09-30T17:35:06.815693+00:00",
+                "positive_receipt_at": "2026-09-30T17:36:10.353952+00:00",
+                "lag_lower_ms": 306815.693,
+                "lag_upper_ms": 370353.952
+              }
+            }
+          ]
+        },
+        {
+          "observation": "2026-09-30T18:00:00+00:00",
+          "candidate": {
+            "city": "Seoul",
+            "station": "RKSI",
+            "channel": "kma_amo_raw_metar",
+            "observed_at": "2026-09-30T18:00:00+00:00",
+            "negative_request_at": "2026-09-30T18:00:01.472697+00:00",
+            "positive_receipt_at": "2026-09-30T18:01:13.226783+00:00",
+            "lag_lower_ms": 1472.697,
+            "lag_upper_ms": 73226.783
+          },
+          "comparators": [
+            {
+              "channel": "awc",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Seoul",
+                "station": "RKSI",
+                "channel": "awc",
+                "observed_at": "2026-09-30T18:00:00+00:00",
+                "negative_request_at": "2026-09-30T18:04:27.831570+00:00",
+                "positive_receipt_at": "2026-09-30T18:05:08.734576+00:00",
+                "lag_lower_ms": 267831.57,
+                "lag_upper_ms": 308734.576
+              }
+            },
+            {
+              "channel": "resolver",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Seoul",
+                "station": "RKSI",
+                "channel": "resolver",
+                "observed_at": "2026-09-30T18:00:00+00:00",
+                "negative_request_at": "2026-09-30T18:08:03.398930+00:00",
+                "positive_receipt_at": "2026-09-30T18:09:02.160612+00:00",
+                "lag_lower_ms": 483398.93,
+                "lag_upper_ms": 542160.612
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "city": "Manila",
+      "station": "RPLL",
+      "channel": "pagasa_metar",
+      "n_pairs": 5,
+      "n_exact": 5,
+      "mismatches": [],
+      "pairs": [
+        {
+          "time": "2026-09-30T14:00:00+00:00",
+          "candidate_values_c": [
+            30.0
+          ],
+          "resolver_values_c": [
+            30.0
+          ],
+          "candidate_contract": [
+            30
+          ],
+          "resolver_contract": [
+            30
+          ],
+          "match": true
+        },
+        {
+          "time": "2026-09-30T15:00:00+00:00",
+          "candidate_values_c": [
+            30.0
+          ],
+          "resolver_values_c": [
+            30.0
+          ],
+          "candidate_contract": [
+            30
+          ],
+          "resolver_contract": [
+            30
+          ],
+          "match": true
+        },
+        {
+          "time": "2026-09-30T16:00:00+00:00",
+          "candidate_values_c": [
+            29.0
+          ],
+          "resolver_values_c": [
+            29.0
+          ],
+          "candidate_contract": [
+            29
+          ],
+          "resolver_contract": [
+            29
+          ],
+          "match": true
+        },
+        {
+          "time": "2026-09-30T17:00:00+00:00",
+          "candidate_values_c": [
+            29.0
+          ],
+          "resolver_values_c": [
+            29.0
+          ],
+          "candidate_contract": [
+            29
+          ],
+          "resolver_contract": [
+            29
+          ],
+          "match": true
+        },
+        {
+          "time": "2026-09-30T18:00:00+00:00",
+          "candidate_values_c": [
+            29.0
+          ],
+          "resolver_values_c": [
+            29.0
+          ],
+          "candidate_contract": [
+            29
+          ],
+          "resolver_contract": [
+            29
+          ],
+          "match": true
+        }
+      ],
+      "races": [
+        {
+          "observation": "2026-09-30T18:00:00+00:00",
+          "candidate": {
+            "city": "Manila",
+            "station": "RPLL",
+            "channel": "pagasa_metar",
+            "observed_at": "2026-09-30T18:00:00+00:00",
+            "negative_request_at": "2026-09-30T18:05:01.503881+00:00",
+            "positive_receipt_at": "2026-09-30T18:06:33.042082+00:00",
+            "lag_lower_ms": 301503.881,
+            "lag_upper_ms": 393042.082
+          },
+          "comparators": [
+            {
+              "channel": "awc",
+              "verdict": "SLOWER",
+              "interval": {
+                "city": "Manila",
+                "station": "RPLL",
+                "channel": "awc",
+                "observed_at": "2026-09-30T18:00:00+00:00",
+                "negative_request_at": "2026-09-30T18:01:01.476616+00:00",
+                "positive_receipt_at": "2026-09-30T18:02:17.314250+00:00",
+                "lag_lower_ms": 61476.616,
+                "lag_upper_ms": 137314.25
+              }
+            },
+            {
+              "channel": "resolver",
+              "verdict": "SLOWER",
+              "interval": {
+                "city": "Manila",
+                "station": "RPLL",
+                "channel": "resolver",
+                "observed_at": "2026-09-30T18:00:00+00:00",
+                "negative_request_at": "2026-09-30T18:02:01.488317+00:00",
+                "positive_receipt_at": "2026-09-30T18:03:25.574393+00:00",
+                "lag_lower_ms": 121488.317,
+                "lag_upper_ms": 205574.39299999998
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

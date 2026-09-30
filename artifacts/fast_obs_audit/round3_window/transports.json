@@ -1,0 +1,803 @@
+[
+  {
+    "city": "Tokyo",
+    "channel": "resolver",
+    "error_class": "TypeError",
+    "detail": "fetch_wrh_timeseries() missing 1 required keyword-only argument: 'token'"
+  },
+  {
+    "city": "Toronto",
+    "channel": "resolver",
+    "error_class": "TypeError",
+    "detail": "fetch_wrh_timeseries() missing 1 required keyword-only argument: 'token'"
+  },
+  {
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20260928_00.json",
+    "request_at": "2026-09-30T16:54:55.605199+00:00",
+    "receipt_at": "2026-09-30T16:54:56.217859+00:00",
+    "status": 200,
+    "http_ms": 612.654,
+    "sha256": "ad1b8c1b55cf30e5a80e4ceebac305f7a10aebbb13248c0e89b1c4629cb31872"
+  },
+  {
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20260928_03.json",
+    "request_at": "2026-09-30T16:54:56.974885+00:00",
+    "receipt_at": "2026-09-30T16:54:57.451790+00:00",
+    "status": 200,
+    "http_ms": 476.893875,
+    "sha256": "141af19decccde47ef578abf959e2dc3cab5e7a0cdd1f7d03cdabdbd02077fd8"
+  },
+  {
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20260928_06.json",
+    "request_at": "2026-09-30T16:54:58.207296+00:00",
+    "receipt_at": "2026-09-30T16:54:58.674025+00:00",
+    "status": 200,
+    "http_ms": 466.725417,
+    "sha256": "559074e5c1397e6238b3b87b0826122fa978f79dceaebbd554489dad15510526"
+  },
+  {
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20260928_09.json",
+    "request_at": "2026-09-30T16:54:59.433013+00:00",
+    "receipt_at": "2026-09-30T16:54:59.938127+00:00",
+    "status": 200,
+    "http_ms": 505.1125,
+    "sha256": "be5ad2e0d406977644ce7a9db69805094df101cb51b8bd5944002ddda48bb5b8"
+  },
+  {
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20260928_12.json",
+    "request_at": "2026-09-30T16:55:00.694863+00:00",
+    "receipt_at": "2026-09-30T16:55:01.273895+00:00",
+    "status": 200,
+    "http_ms": 579.0175,
+    "sha256": "f9a411e1513dba241d196f006f00eb69c0f19743a968c58b9ed9d1f26e612913"
+  },
+  {
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20260928_15.json",
+    "request_at": "2026-09-30T16:55:02.033301+00:00",
+    "receipt_at": "2026-09-30T16:55:02.511358+00:00",
+    "status": 200,
+    "http_ms": 478.056,
+    "sha256": "369eb05b212a3a9956d8230eb7a9ede6595a4e87408acc9be516082a08e733fb"
+  },
+  {
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20260928_18.json",
+    "request_at": "2026-09-30T16:55:03.265229+00:00",
+    "receipt_at": "2026-09-30T16:55:03.783634+00:00",
+    "status": 200,
+    "http_ms": 518.401917,
+    "sha256": "b11479ddb94ae64d02b7d5fcc17a389a70275a387f794f4ed16d8e07282c4565"
+  },
+  {
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20260928_21.json",
+    "request_at": "2026-09-30T16:55:04.537542+00:00",
+    "receipt_at": "2026-09-30T16:55:05.053431+00:00",
+    "status": 200,
+    "http_ms": 515.879833,
+    "sha256": "aaa3d2480321e52477545363345a85ca78b2a55c7ce30cbdfef9d146e2f93a1f"
+  },
+  {
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20260929_00.json",
+    "request_at": "2026-09-30T16:55:05.811228+00:00",
+    "receipt_at": "2026-09-30T16:55:06.263862+00:00",
+    "status": 200,
+    "http_ms": 452.640125,
+    "sha256": "d5f37bcc5c8cbb1bac54d97e6e22c3f54735fe232c4f45939d1b087f20289407"
+  },
+  {
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20260929_03.json",
+    "request_at": "2026-09-30T16:55:07.019513+00:00",
+    "receipt_at": "2026-09-30T16:55:07.496573+00:00",
+    "status": 200,
+    "http_ms": 477.061458,
+    "sha256": "d7cec39598cc3e22b14cabbfd8f5e21b7db3e90ae937621f90e8ef8c432a85b4"
+  },
+  {
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20260929_06.json",
+    "request_at": "2026-09-30T16:55:08.254590+00:00",
+    "receipt_at": "2026-09-30T16:55:08.744622+00:00",
+    "status": 200,
+    "http_ms": 490.036041,
+    "sha256": "f087a9c1bb70f05554ad65044de7b710425ff295a8f95c87c059ff55e6d1798e"
+  },
+  {
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20260929_09.json",
+    "request_at": "2026-09-30T16:55:09.498744+00:00",
+    "receipt_at": "2026-09-30T16:55:09.967342+00:00",
+    "status": 200,
+    "http_ms": 468.612958,
+    "sha256": "beb8debafd4d8e701774d1ddb8662b01573de82c62adb57bb76c29d102bdf9eb"
+  },
+  {
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20260929_12.json",
+    "request_at": "2026-09-30T16:55:10.724273+00:00",
+    "receipt_at": "2026-09-30T16:55:11.177528+00:00",
+    "status": 200,
+    "http_ms": 453.258542,
+    "sha256": "9738664e35b915f4ad1096eb66d4bff277f18a6ff77a5a4c64d9f54e20b85544"
+  },
+  {
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20260929_15.json",
+    "request_at": "2026-09-30T16:55:11.937196+00:00",
+    "receipt_at": "2026-09-30T16:55:12.419342+00:00",
+    "status": 200,
+    "http_ms": 482.153459,
+    "sha256": "4a4c6d4e3b59f66ddc48866a4b17587be20dde9ac5ad196cafc318c6d6ceb31f"
+  },
+  {
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20260929_18.json",
+    "request_at": "2026-09-30T16:55:13.175947+00:00",
+    "receipt_at": "2026-09-30T16:55:13.689932+00:00",
+    "status": 200,
+    "http_ms": 513.996208,
+    "sha256": "6b8d7b69b2dabea7e8f89d6b7dac14973b09f04473755c63f3dbc51a9569e9bf"
+  },
+  {
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20260929_21.json",
+    "request_at": "2026-09-30T16:55:14.448062+00:00",
+    "receipt_at": "2026-09-30T16:55:14.925246+00:00",
+    "status": 200,
+    "http_ms": 477.191292,
+    "sha256": "d679879bc875328c59b0877be4ad2f7ce7f192465b3fc1910c069ddd328f3eed"
+  },
+  {
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20260930_00.json",
+    "request_at": "2026-09-30T16:55:15.681144+00:00",
+    "receipt_at": "2026-09-30T16:55:16.147553+00:00",
+    "status": 200,
+    "http_ms": 466.412375,
+    "sha256": "74ecead69249d05f09f9d04df00a69362020f72533c484458a7563d4f74f033a"
+  },
+  {
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20260930_03.json",
+    "request_at": "2026-09-30T16:55:16.902594+00:00",
+    "receipt_at": "2026-09-30T16:55:17.339569+00:00",
+    "status": 200,
+    "http_ms": 436.986917,
+    "sha256": "dad064797ce693f9c1834b35e42cc40d461a78dfb70172256551fd7138fd400c"
+  },
+  {
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20260930_06.json",
+    "request_at": "2026-09-30T16:55:18.096754+00:00",
+    "receipt_at": "2026-09-30T16:55:18.620820+00:00",
+    "status": 200,
+    "http_ms": 524.0745,
+    "sha256": "564707ca398ebe4dcba6389936926ffa4628b770861854d5d2765da8c2e6868a"
+  },
+  {
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20260930_09.json",
+    "request_at": "2026-09-30T16:55:19.376259+00:00",
+    "receipt_at": "2026-09-30T16:55:19.873572+00:00",
+    "status": 200,
+    "http_ms": 497.328917,
+    "sha256": "4b513300e1e514fe51a71e8329a64d8ab52046a21c92a4b821182393bbb944d8"
+  },
+  {
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20260930_12.json",
+    "request_at": "2026-09-30T16:55:20.628487+00:00",
+    "receipt_at": "2026-09-30T16:55:21.079412+00:00",
+    "status": 200,
+    "http_ms": 450.936041,
+    "sha256": "7a48c7ab3511c9b3f2fe58f15759442f9a6b46606caa8b789cdd77a7a22c445c"
+  },
+  {
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20260930_15.json",
+    "request_at": "2026-09-30T16:55:21.833706+00:00",
+    "receipt_at": "2026-09-30T16:55:22.299864+00:00",
+    "status": 200,
+    "http_ms": 466.166083,
+    "sha256": "3f32f1e0cf5d97a040e74bb31c55261fb1da9c8cde5cb9fba9f84e55e6edeffe"
+  },
+  {
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20260930_18.json",
+    "request_at": "2026-09-30T16:55:23.053274+00:00",
+    "receipt_at": "2026-09-30T16:55:23.510158+00:00",
+    "status": 200,
+    "http_ms": 456.891333,
+    "sha256": "841baae2d2e5be92e2bd8705800e1a686d9f9c53502c184a43408b3a9392b1ff"
+  },
+  {
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20260930_21.json",
+    "request_at": "2026-09-30T16:55:24.264648+00:00",
+    "receipt_at": "2026-09-30T16:55:24.730650+00:00",
+    "status": 200,
+    "http_ms": 466.015459,
+    "sha256": "ac0855423ca3b43dcae90650d6888a99f257b3cfd6316a21d0da647db37cbe38"
+  },
+  {
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20261001_00.json",
+    "request_at": "2026-09-30T16:55:25.484421+00:00",
+    "receipt_at": "2026-09-30T16:55:25.509780+00:00",
+    "status": 200,
+    "http_ms": 25.372917,
+    "sha256": "4084e41daf142d3bfcca07d68cf3360b31f273a33d57866ad2f47d064ca5c698"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/20260930/CYYZ/",
+    "request_at": "2026-09-30T16:55:26.266811+00:00",
+    "receipt_at": "2026-09-30T16:55:26.368231+00:00",
+    "status": 200,
+    "http_ms": 101.432708,
+    "sha256": "c815c26721d2cc7da8a57ce1c9e88d863b0762b0d4597e0d0d0481531203b482"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/20260930/CYYZ/2026-09-30-0000-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:27.126588+00:00",
+    "receipt_at": "2026-09-30T16:55:27.156296+00:00",
+    "status": 200,
+    "http_ms": 29.721708,
+    "sha256": "220db7d5ae7cf540ddcd43ef0a539bba795eba6c75b0dedca48adda52fcc8439"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/20260930/CYYZ/2026-09-30-0100-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:27.915672+00:00",
+    "receipt_at": "2026-09-30T16:55:27.948068+00:00",
+    "status": 200,
+    "http_ms": 32.412083,
+    "sha256": "44cb49e3961dc7e4a7c1830c46f6580d876464205f02522fda4b4b440b3a6f88"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/20260930/CYYZ/2026-09-30-0200-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:28.702520+00:00",
+    "receipt_at": "2026-09-30T16:55:28.732175+00:00",
+    "status": 200,
+    "http_ms": 29.6705,
+    "sha256": "c123498753dd34614d7c9cbefbf75352d1a0302ce2fbe1c7c416b5559daffded"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/20260930/CYYZ/2026-09-30-0300-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:29.488263+00:00",
+    "receipt_at": "2026-09-30T16:55:29.517743+00:00",
+    "status": 200,
+    "http_ms": 29.484791,
+    "sha256": "04c1b7c4bb41a41b60ca77f17b7c61d4a29bcf7d98b19d5f94784da74ae18fc8"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/20260930/CYYZ/2026-09-30-0400-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:30.277890+00:00",
+    "receipt_at": "2026-09-30T16:55:30.336024+00:00",
+    "status": 200,
+    "http_ms": 58.14375,
+    "sha256": "f2bb37da7808112249ac5abd61a66b49bc410737ff3356cf190762269a547dcb"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/20260930/CYYZ/2026-09-30-0500-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:31.092179+00:00",
+    "receipt_at": "2026-09-30T16:55:31.125186+00:00",
+    "status": 200,
+    "http_ms": 33.025875,
+    "sha256": "a06d86880cdff99a856807fa8d4be79b265071aa3980f192c0d436d1ddde4c11"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/20260930/CYYZ/2026-09-30-0600-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:31.880377+00:00",
+    "receipt_at": "2026-09-30T16:55:32.010917+00:00",
+    "status": 200,
+    "http_ms": 130.550416,
+    "sha256": "7a0d4d73b95dda3b67b8d151ea345e9014eb6131568c388fc6f4f4040a98101d"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/20260930/CYYZ/2026-09-30-0612-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:32.767680+00:00",
+    "receipt_at": "2026-09-30T16:55:32.798413+00:00",
+    "status": 200,
+    "http_ms": 30.74875,
+    "sha256": "5e17386c683c9909594267ae2d19d12650b5ddd314dcab6be10aeddb13bbe8ac"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/20260930/CYYZ/2026-09-30-0700-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:33.555095+00:00",
+    "receipt_at": "2026-09-30T16:55:33.588226+00:00",
+    "status": 200,
+    "http_ms": 33.1325,
+    "sha256": "d92d86c0211bbd0a49dbe9d1aa9ed4444643355be5d232a3ca0b820d7d983c75"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/20260930/CYYZ/2026-09-30-0709-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:34.344534+00:00",
+    "receipt_at": "2026-09-30T16:55:34.377162+00:00",
+    "status": 200,
+    "http_ms": 32.742208,
+    "sha256": "90274c76d3807f71651a4372e49adaff135a0ca12fdc21bb9e3b4497059f10e1"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/20260930/CYYZ/2026-09-30-0731-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:35.133001+00:00",
+    "receipt_at": "2026-09-30T16:55:35.334853+00:00",
+    "status": 200,
+    "http_ms": 201.865917,
+    "sha256": "4afb744060366347182ca6d95d47cbd8c2120caaee197de1cd0f01efc1457e15"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/20260930/CYYZ/2026-09-30-0800-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:36.090078+00:00",
+    "receipt_at": "2026-09-30T16:55:36.120747+00:00",
+    "status": 200,
+    "http_ms": 30.675292,
+    "sha256": "5d92dc4493e599a4adb362319f4dc195d9ef79b54b8db79c48349346222930c2"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/20260930/CYYZ/2026-09-30-0900-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:36.873717+00:00",
+    "receipt_at": "2026-09-30T16:55:36.905050+00:00",
+    "status": 200,
+    "http_ms": 31.344416,
+    "sha256": "bb56eaa7fb8d5e10bae3ee92507029ed6dbec04a740935e8c4f57cfb17ec5606"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/20260930/CYYZ/2026-09-30-1000-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:37.659922+00:00",
+    "receipt_at": "2026-09-30T16:55:37.695536+00:00",
+    "status": 200,
+    "http_ms": 35.622542,
+    "sha256": "d80d6809505d99ca00af75d79d112426117f29edb52a0f42bd27eaa54af0af30"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/20260930/CYYZ/2026-09-30-1100-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:38.451924+00:00",
+    "receipt_at": "2026-09-30T16:55:38.992009+00:00",
+    "status": 200,
+    "http_ms": 540.092334,
+    "sha256": "f5de0df249979ed3f5304c9aafd13df776c361909370dac90bbe238fa5e269a0"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/20260930/CYYZ/2026-09-30-1200-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:39.748482+00:00",
+    "receipt_at": "2026-09-30T16:55:40.271590+00:00",
+    "status": 200,
+    "http_ms": 523.092083,
+    "sha256": "c389d90cd250ea8f70fa5d89bff96e14d0b954ff64c16630e54bd216883627a7"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/20260930/CYYZ/2026-09-30-1300-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:41.027215+00:00",
+    "receipt_at": "2026-09-30T16:55:41.307495+00:00",
+    "status": 200,
+    "http_ms": 280.284791,
+    "sha256": "3e7b86d1bef653c5441805e61c9fc5f8d8d317e8c8cd143b27bd151fae5bbef5"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/20260930/CYYZ/2026-09-30-1400-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:42.062925+00:00",
+    "receipt_at": "2026-09-30T16:55:42.685958+00:00",
+    "status": 200,
+    "http_ms": 623.049583,
+    "sha256": "243a258c813fe7acf4810ab97a51812dfab9ce03d9a880a8f095132252e81dc9"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/20260930/CYYZ/2026-09-30-1500-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:43.442960+00:00",
+    "receipt_at": "2026-09-30T16:55:43.728758+00:00",
+    "status": 200,
+    "http_ms": 285.802875,
+    "sha256": "6691e6d9c0962a4f1b2b4c3555ab760a7b2aea9f072f6db7cd39154fe6f62876"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/20260930/CYYZ/2026-09-30-1600-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:44.480814+00:00",
+    "receipt_at": "2026-09-30T16:55:44.524646+00:00",
+    "status": 200,
+    "http_ms": 43.839958,
+    "sha256": "ccd6e7a4b4acf54ead5966b4ff8efc73c78c4f63826901cfd579c3c03841c2c9"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/20260929/CYYZ/",
+    "request_at": "2026-09-30T16:55:45.280116+00:00",
+    "receipt_at": "2026-09-30T16:55:45.387558+00:00",
+    "status": 404,
+    "http_ms": 107.459,
+    "sha256": "80c3fe2ae1062abf56456f52518bd670f9ec3917b7f85e152b347ac6b6faf880"
+  },
+  {
+    "channel": "eccc_swob",
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/20260929/CYYZ/",
+    "error_class": "HTTPStatusError"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260928/WXO-DD/observations/swob-ml/20260928/CYYZ/",
+    "request_at": "2026-09-30T16:55:45.387798+00:00",
+    "receipt_at": "2026-09-30T16:55:45.468449+00:00",
+    "status": 200,
+    "http_ms": 80.6745,
+    "sha256": "16fe0d9652c0abea0a686c707a33b0ebb023bd4fa1264351c340afcd351643fc"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260928/WXO-DD/observations/swob-ml/20260928/CYYZ/2026-09-28-0000-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:46.221109+00:00",
+    "receipt_at": "2026-09-30T16:55:46.261631+00:00",
+    "status": 200,
+    "http_ms": 40.536833,
+    "sha256": "a87b4f77d122581e8aac9511eab833a9311bbbba0382b4f41826861f1f756d47"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260928/WXO-DD/observations/swob-ml/20260928/CYYZ/2026-09-28-0100-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:47.017282+00:00",
+    "receipt_at": "2026-09-30T16:55:47.055920+00:00",
+    "status": 200,
+    "http_ms": 38.654625,
+    "sha256": "858dc92d3f1d33734306480591db7be8f166b90a670bd8edbe2c2c5974a3421f"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260928/WXO-DD/observations/swob-ml/20260928/CYYZ/2026-09-28-0200-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:47.812327+00:00",
+    "receipt_at": "2026-09-30T16:55:47.862015+00:00",
+    "status": 200,
+    "http_ms": 49.710709,
+    "sha256": "6253c474dbb3f2a393de969d18467e7ac9d4bdf70aa722b32dd45562464b31f4"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260928/WXO-DD/observations/swob-ml/20260928/CYYZ/2026-09-28-0226-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:48.617020+00:00",
+    "receipt_at": "2026-09-30T16:55:48.724120+00:00",
+    "status": 200,
+    "http_ms": 107.108459,
+    "sha256": "cefd1ce021477a543b9fb4e17fca1c089f8355f5c52834af4a36679d5a0b5ad1"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260928/WXO-DD/observations/swob-ml/20260928/CYYZ/2026-09-28-0300-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:49.476692+00:00",
+    "receipt_at": "2026-09-30T16:55:49.508258+00:00",
+    "status": 200,
+    "http_ms": 31.586208,
+    "sha256": "86cf11013994d8a6733c804e532b1e07320b0b5964d9448d7ed7ad6214602a1e"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260928/WXO-DD/observations/swob-ml/20260928/CYYZ/2026-09-28-0400-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:50.283379+00:00",
+    "receipt_at": "2026-09-30T16:55:50.464023+00:00",
+    "status": 200,
+    "http_ms": 180.654,
+    "sha256": "bba897d53d44e5a03002a8122a722e861318c0538d97764c68bf3de40f0946a6"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260928/WXO-DD/observations/swob-ml/20260928/CYYZ/2026-09-28-0500-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:51.217869+00:00",
+    "receipt_at": "2026-09-30T16:55:51.297898+00:00",
+    "status": 200,
+    "http_ms": 80.039583,
+    "sha256": "65741793ac5d4975b6250c08b18d176ea91d4b6446c45852a82458312e197b50"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260928/WXO-DD/observations/swob-ml/20260928/CYYZ/2026-09-28-0600-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:52.056415+00:00",
+    "receipt_at": "2026-09-30T16:55:52.446690+00:00",
+    "status": 200,
+    "http_ms": 390.284084,
+    "sha256": "6bba7a6f9100c17968da511e7370f1ca8b846d75f5657fdef63782152ce5c1a6"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260928/WXO-DD/observations/swob-ml/20260928/CYYZ/2026-09-28-0700-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:53.202997+00:00",
+    "receipt_at": "2026-09-30T16:55:53.413774+00:00",
+    "status": 200,
+    "http_ms": 210.797,
+    "sha256": "9033d3e1d27e9ac281f0319bb0fdbeb51a9b7365059af37d08d50a88624c607e"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260928/WXO-DD/observations/swob-ml/20260928/CYYZ/2026-09-28-0800-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:54.169264+00:00",
+    "receipt_at": "2026-09-30T16:55:54.291898+00:00",
+    "status": 200,
+    "http_ms": 122.658791,
+    "sha256": "8506846e6979f2d6ddadfc487c7f6ee479ed76b8829968f4abb629fe605eec48"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260928/WXO-DD/observations/swob-ml/20260928/CYYZ/2026-09-28-0900-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:55.044029+00:00",
+    "receipt_at": "2026-09-30T16:55:55.077104+00:00",
+    "status": 200,
+    "http_ms": 33.085584,
+    "sha256": "892e96c7bdb23e91e727d1483eb02307a60ae7ecf0c19d0b5104b04d13e7ad4e"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260928/WXO-DD/observations/swob-ml/20260928/CYYZ/2026-09-28-1000-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:55.833782+00:00",
+    "receipt_at": "2026-09-30T16:55:55.905990+00:00",
+    "status": 200,
+    "http_ms": 72.22875,
+    "sha256": "922ae9ef702ddcb99ff1a2fe3ece59d520fc819ea714c5238389b71f63320310"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260928/WXO-DD/observations/swob-ml/20260928/CYYZ/2026-09-28-1100-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:56.659353+00:00",
+    "receipt_at": "2026-09-30T16:55:56.690859+00:00",
+    "status": 200,
+    "http_ms": 31.525083,
+    "sha256": "6893b002e6d1bf03c03031b74276a960a9f0f04c0896984efa2fbd35ce3d9b05"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260928/WXO-DD/observations/swob-ml/20260928/CYYZ/2026-09-28-1200-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:57.447616+00:00",
+    "receipt_at": "2026-09-30T16:55:57.526094+00:00",
+    "status": 200,
+    "http_ms": 78.573958,
+    "sha256": "8787492690352fc079e0349c492607944ea0c55f03b21be6259b01c8ddde6514"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260928/WXO-DD/observations/swob-ml/20260928/CYYZ/2026-09-28-1300-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:58.280857+00:00",
+    "receipt_at": "2026-09-30T16:55:58.321515+00:00",
+    "status": 200,
+    "http_ms": 40.677792,
+    "sha256": "79b1015bce44f0898549e362b0ab7df9c95c978db4409a35b2ac24ffdc562265"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260928/WXO-DD/observations/swob-ml/20260928/CYYZ/2026-09-28-1400-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:59.078213+00:00",
+    "receipt_at": "2026-09-30T16:55:59.238975+00:00",
+    "status": 200,
+    "http_ms": 160.783125,
+    "sha256": "1dea7c32e797436927d59c1b84126659eac19b6a2618ddcbfb330fd0e8f00b44"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260928/WXO-DD/observations/swob-ml/20260928/CYYZ/2026-09-28-1500-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:55:59.995784+00:00",
+    "receipt_at": "2026-09-30T16:56:00.037049+00:00",
+    "status": 200,
+    "http_ms": 41.274959,
+    "sha256": "d7f33b6d1f03aa4ceb6776f4121b862a38bb99b4e3ab683c8bc5851d780452f9"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260928/WXO-DD/observations/swob-ml/20260928/CYYZ/2026-09-28-1600-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:00.790072+00:00",
+    "receipt_at": "2026-09-30T16:56:00.909353+00:00",
+    "status": 200,
+    "http_ms": 119.294542,
+    "sha256": "eb6c4841be1b910a07e0b46f225edb929cbcc1f6fa240ac2b78e5bcaade9c07a"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260928/WXO-DD/observations/swob-ml/20260928/CYYZ/2026-09-28-1700-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:01.664824+00:00",
+    "receipt_at": "2026-09-30T16:56:01.824246+00:00",
+    "status": 200,
+    "http_ms": 159.440542,
+    "sha256": "668935edfd7e8b1acf115fdcfdf0e15614dc0e0f17f2dcb200834504eca01b25"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260928/WXO-DD/observations/swob-ml/20260928/CYYZ/2026-09-28-1800-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:02.578142+00:00",
+    "receipt_at": "2026-09-30T16:56:02.622009+00:00",
+    "status": 200,
+    "http_ms": 43.879792,
+    "sha256": "432c363f4b7fe7188e393ad3f3a7d282ec3cf81eac574886b1d018a0944f42ba"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260928/WXO-DD/observations/swob-ml/20260928/CYYZ/2026-09-28-1900-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:03.380141+00:00",
+    "receipt_at": "2026-09-30T16:56:03.422918+00:00",
+    "status": 200,
+    "http_ms": 42.792708,
+    "sha256": "b9b8a4de56f0fe81a594b6e01da8ba5b98cbad7b67e24656df36aecede0bb0eb"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260928/WXO-DD/observations/swob-ml/20260928/CYYZ/2026-09-28-2000-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:04.179441+00:00",
+    "receipt_at": "2026-09-30T16:56:04.222258+00:00",
+    "status": 200,
+    "http_ms": 42.836916,
+    "sha256": "7c790c7a28a329bfaf8a660eda6b0f5a6cadbffe2944caacac78345739ccb867"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260928/WXO-DD/observations/swob-ml/20260928/CYYZ/2026-09-28-2100-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:04.978538+00:00",
+    "receipt_at": "2026-09-30T16:56:05.035746+00:00",
+    "status": 200,
+    "http_ms": 57.21825,
+    "sha256": "06d4e8ff131fa1d34e369e38cb3a663bcec9300d1af351b307a76b84e918375d"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260928/WXO-DD/observations/swob-ml/20260928/CYYZ/2026-09-28-2200-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:05.790834+00:00",
+    "receipt_at": "2026-09-30T16:56:05.823709+00:00",
+    "status": 200,
+    "http_ms": 32.898208,
+    "sha256": "595394453273f931a6aebb8b47b8a220ff6de72256d888121dd315883afc87ae"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260928/WXO-DD/observations/swob-ml/20260928/CYYZ/2026-09-28-2300-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:06.580272+00:00",
+    "receipt_at": "2026-09-30T16:56:06.623152+00:00",
+    "status": 200,
+    "http_ms": 42.880209,
+    "sha256": "54a4c60a7c123bb65bb1f248da18eed1f7a6416275f93327336ec45e2a87a00f"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260927/WXO-DD/observations/swob-ml/20260927/CYYZ/",
+    "request_at": "2026-09-30T16:56:07.379595+00:00",
+    "receipt_at": "2026-09-30T16:56:07.435451+00:00",
+    "status": 200,
+    "http_ms": 55.879583,
+    "sha256": "60cb95a55a225e7aea9ea2a0082793648358b22560df0508a4606aa67c6885e3"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260927/WXO-DD/observations/swob-ml/20260927/CYYZ/2026-09-27-0000-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:08.213386+00:00",
+    "receipt_at": "2026-09-30T16:56:08.247843+00:00",
+    "status": 200,
+    "http_ms": 34.470208,
+    "sha256": "3ea21963523fcd46d9e5f6b2ec570690695105a2dfff067d9d27d09d6c3ce529"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260927/WXO-DD/observations/swob-ml/20260927/CYYZ/2026-09-27-0100-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:09.003898+00:00",
+    "receipt_at": "2026-09-30T16:56:09.196996+00:00",
+    "status": 200,
+    "http_ms": 193.112083,
+    "sha256": "faaf7ffff89180eb13bedc610ab1097c58fcfed17330e1ab7046ed703a8a55ed"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260927/WXO-DD/observations/swob-ml/20260927/CYYZ/2026-09-27-0200-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:09.952165+00:00",
+    "receipt_at": "2026-09-30T16:56:09.987981+00:00",
+    "status": 200,
+    "http_ms": 35.862708,
+    "sha256": "cc201e21ed574e8e3ab07d278dad90b58ec6596a091375aaa43d53cd2d97a36c"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260927/WXO-DD/observations/swob-ml/20260927/CYYZ/2026-09-27-0300-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:10.741725+00:00",
+    "receipt_at": "2026-09-30T16:56:10.935321+00:00",
+    "status": 200,
+    "http_ms": 193.611584,
+    "sha256": "c398a5ffa28fc443a6a6d2f587c6b3c0a660de8348c45159fa343c8474de539a"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260927/WXO-DD/observations/swob-ml/20260927/CYYZ/2026-09-27-0400-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:11.689439+00:00",
+    "receipt_at": "2026-09-30T16:56:11.724759+00:00",
+    "status": 200,
+    "http_ms": 35.331458,
+    "sha256": "e1ff2622078edcd66191a64f04be47347260d9a67dd551ad34d4459e59c1c9bf"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260927/WXO-DD/observations/swob-ml/20260927/CYYZ/2026-09-27-0500-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:12.477376+00:00",
+    "receipt_at": "2026-09-30T16:56:12.511286+00:00",
+    "status": 200,
+    "http_ms": 33.92175,
+    "sha256": "32f15e990d353566e42a6069a89a8e4bd932f93419e6f928d32c9a777f2e76df"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260927/WXO-DD/observations/swob-ml/20260927/CYYZ/2026-09-27-0600-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:13.267389+00:00",
+    "receipt_at": "2026-09-30T16:56:13.305194+00:00",
+    "status": 200,
+    "http_ms": 37.826209,
+    "sha256": "c6671055fa9d0a3b50775cebefd113b8ade05520e071d6dcab84a520f82cabb3"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260927/WXO-DD/observations/swob-ml/20260927/CYYZ/2026-09-27-0700-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:14.060750+00:00",
+    "receipt_at": "2026-09-30T16:56:14.095971+00:00",
+    "status": 200,
+    "http_ms": 35.23625,
+    "sha256": "b66ff0f1b5f7a456a9c5105673563acea43afd7b0a78604b291e5b243175344d"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260927/WXO-DD/observations/swob-ml/20260927/CYYZ/2026-09-27-0800-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:14.851761+00:00",
+    "receipt_at": "2026-09-30T16:56:14.891416+00:00",
+    "status": 200,
+    "http_ms": 39.693625,
+    "sha256": "e0df124f04450b48f57b05b03d9412fd256110ee0d4c26b32fc322ba756dd207"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260927/WXO-DD/observations/swob-ml/20260927/CYYZ/2026-09-27-0900-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:15.646151+00:00",
+    "receipt_at": "2026-09-30T16:56:15.769457+00:00",
+    "status": 200,
+    "http_ms": 123.319875,
+    "sha256": "a68862096bed08902dd0664a26666694c75639eb90fd8a0d448309182ad9768d"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260927/WXO-DD/observations/swob-ml/20260927/CYYZ/2026-09-27-1000-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:16.522776+00:00",
+    "receipt_at": "2026-09-30T16:56:16.564262+00:00",
+    "status": 200,
+    "http_ms": 41.509875,
+    "sha256": "2bc96d53db16ccaaad9ead98f0adcb65d841b120bed004a62d65a5293ec0814b"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260927/WXO-DD/observations/swob-ml/20260927/CYYZ/2026-09-27-1100-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:17.319949+00:00",
+    "receipt_at": "2026-09-30T16:56:17.354757+00:00",
+    "status": 200,
+    "http_ms": 34.817,
+    "sha256": "b7ac728bbe96b055c5c23b9806f9b3e3514e8b8d8da61fe6b98c29085ffb852a"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260927/WXO-DD/observations/swob-ml/20260927/CYYZ/2026-09-27-1200-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:18.112002+00:00",
+    "receipt_at": "2026-09-30T16:56:18.145029+00:00",
+    "status": 200,
+    "http_ms": 33.040167,
+    "sha256": "829c2a27b6962074ca89008977762087767647d77ee4caa780eb92d6eababf62"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260927/WXO-DD/observations/swob-ml/20260927/CYYZ/2026-09-27-1300-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:18.902220+00:00",
+    "receipt_at": "2026-09-30T16:56:18.933650+00:00",
+    "status": 200,
+    "http_ms": 31.442541,
+    "sha256": "b2d4956c1d62330e3d29bc374d0e42bbb419b5ea84c504f489f46ca9501cd9ec"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260927/WXO-DD/observations/swob-ml/20260927/CYYZ/2026-09-27-1400-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:19.689746+00:00",
+    "receipt_at": "2026-09-30T16:56:19.722738+00:00",
+    "status": 200,
+    "http_ms": 33.009,
+    "sha256": "651af528479e7741ba4f7ba8eef34273bbb2cc14ed9c98b4416991bf31cc9fe0"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260927/WXO-DD/observations/swob-ml/20260927/CYYZ/2026-09-27-1500-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:20.478218+00:00",
+    "receipt_at": "2026-09-30T16:56:20.510997+00:00",
+    "status": 200,
+    "http_ms": 32.770792,
+    "sha256": "f1e16422fc13fb161da53a213f65f5779d342a19bbd2d826f9e5df7bc4f40e76"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260927/WXO-DD/observations/swob-ml/20260927/CYYZ/2026-09-27-1600-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:21.262566+00:00",
+    "receipt_at": "2026-09-30T16:56:21.292684+00:00",
+    "status": 200,
+    "http_ms": 30.12075,
+    "sha256": "3ac3e668ef86e2d99145ac1a3c5375db75da2118b719d22b025ef01b63dd2e8c"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260927/WXO-DD/observations/swob-ml/20260927/CYYZ/2026-09-27-1700-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:22.045990+00:00",
+    "receipt_at": "2026-09-30T16:56:22.079598+00:00",
+    "status": 200,
+    "http_ms": 33.62275,
+    "sha256": "89c1ffd64304da4d8656980e3d1738d8c3800e405a119880ff08820aba961e26"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260927/WXO-DD/observations/swob-ml/20260927/CYYZ/2026-09-27-1800-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:22.835992+00:00",
+    "receipt_at": "2026-09-30T16:56:22.868517+00:00",
+    "status": 200,
+    "http_ms": 32.553209,
+    "sha256": "c528d994c7593b752760e4a6dec7e7931c72ca9d65a2ecd1d7bfe2264636f34a"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260927/WXO-DD/observations/swob-ml/20260927/CYYZ/2026-09-27-1900-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:23.623329+00:00",
+    "receipt_at": "2026-09-30T16:56:23.655793+00:00",
+    "status": 200,
+    "http_ms": 32.467625,
+    "sha256": "61d506e8fb32a93a1da5c9fda5a01636e51742c2dc220233aaa5ae2863ff34c6"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260927/WXO-DD/observations/swob-ml/20260927/CYYZ/2026-09-27-2000-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:24.411682+00:00",
+    "receipt_at": "2026-09-30T16:56:24.444015+00:00",
+    "status": 200,
+    "http_ms": 32.3475,
+    "sha256": "e57bbcd220067fb9ce4dfae2929539ee115368362f9d48bb7b6f8f01f1466212"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260927/WXO-DD/observations/swob-ml/20260927/CYYZ/2026-09-27-2100-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:25.198366+00:00",
+    "receipt_at": "2026-09-30T16:56:25.230354+00:00",
+    "status": 200,
+    "http_ms": 32.009584,
+    "sha256": "eb32c1e1f698718ebca8f9887b72cbf9613374f53dea54ed742249cbb344d30c"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260927/WXO-DD/observations/swob-ml/20260927/CYYZ/2026-09-27-2200-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:25.987140+00:00",
+    "receipt_at": "2026-09-30T16:56:26.023369+00:00",
+    "status": 200,
+    "http_ms": 36.23775,
+    "sha256": "12933ba9c5880b410d06dc6bb1afe7e3b05cb2dc7d76d2e0db81f026706a431f"
+  },
+  {
+    "url": "https://dd.weather.gc.ca/20260927/WXO-DD/observations/swob-ml/20260927/CYYZ/2026-09-27-2300-CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T16:56:26.779943+00:00",
+    "receipt_at": "2026-09-30T16:56:26.825922+00:00",
+    "status": 200,
+    "http_ms": 45.989583,
+    "sha256": "3d146d1596135d4c7960bf8f94630e57b629dfad3f980342ba1622820f3ca7ca"
+  }
+]

@@ -15,6 +15,22 @@ from src.data.station_temperature_adapters import parse_station_payload, valid_s
 ROOT = Path(__file__).parent / "fixtures" / "station_temperature"
 NOW = datetime(2026, 9, 30, 5, tzinfo=timezone.utc)
 
+@pytest.mark.parametrize("provider", ["jma_amedas", "eccc_swob"])
+def test_promoted_origins_have_extended_identity_and_measured_latency_lead(provider):
+    """A historical fetch proves equality, not publication latency; require both artifacts."""
+    data = json.loads(REGISTRY_PATH.read_text())
+    row = next(r for r in data["sources"] if r["provider"] == provider)
+    proof = row["value_identity_proof"]
+    assert row["settlement_grade"] is True
+    assert proof["n_pairs"] >= 48 and proof["n_exact"] == proof["n_pairs"]
+    assert proof["mismatches"] == []
+    race = row["latency_evidence"]["first_proven_lead"]
+    awc = next(c for c in race["comparators"] if c["channel"] == "awc")
+    assert awc["verdict"] == "FASTER"
+    assert race["candidate"]["observed_at"] == awc["interval"]["observed_at"]
+    assert race["candidate"]["lag_upper_ms"] < awc["interval"]["lag_lower_ms"]
+
+
 @pytest.mark.parametrize("provider,fixture", [
     ("jma_amedas", "jma"), ("eccc_swob", "eccc"), ("imgw_synop", "imgw"),
     ("dwd_cdc", "dwd"), ("wu_station_current", "wu_current"),
@@ -86,9 +102,19 @@ def test_every_configured_promotion_matches_committed_pair_evidence():
             assert row['settlement_grade'] and row['unit']=='F'
             assert row['source_channel']=='noaa_wrh_'+row['station_id'].lower()
             continue  # Existing native resolver, not an alternate-channel promotion.
-        actual=measured[(row['station_id'],proof['channel'])]
+        evidence_path=proof.get('report_path')
+        evidence=json.loads((REGISTRY_PATH.parents[1]/evidence_path).read_text()) if evidence_path else report
+        if isinstance(evidence,list):
+            matches=[r for r in evidence if r['city']==proof['city'] and r['channel']==proof['channel']]
+            assert len(matches)==1
+            actual=matches[0]
+            proven=actual['n_pairs']>0 and actual['n_pairs']==actual['n_exact'] and not actual['mismatches']
+            assert len({p['time'] for p in actual['pairs']})==actual['n_pairs']
+        else:
+            actual=measured[(row['station_id'],proof['channel'])]
+            proven=actual['value_identity_proven']
         assert (proof['n_pairs'],proof['n_exact'])==(actual['n_pairs'],actual['n_exact'])
-        assert row['settlement_grade']==actual['value_identity_proven']
+        assert row['settlement_grade']==proven
     imgw=next(r for r in load_physical_current_sources()[0] if r.provider=='imgw_synop')
     assert imgw.settlement_grade is False  # Exact-time observed mismatch, not geography.
 

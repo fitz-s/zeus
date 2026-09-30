@@ -1,0 +1,1372 @@
+[
+  {
+    "city": "Seoul",
+    "station": "RKSI",
+    "channel": "kma_amo_raw_metar",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:29:05.770052+00:00",
+    "positive_receipt_at": "2026-09-30T17:30:06.601835+00:00",
+    "lag_lower_ms": -54229.948,
+    "lag_upper_ms": 6601.835
+  },
+  {
+    "city": "Amsterdam",
+    "station": "EHAM",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T17:25:00+00:00",
+    "negative_request_at": "2026-09-30T17:29:08.452897+00:00",
+    "positive_receipt_at": "2026-09-30T17:30:07.804365+00:00",
+    "lag_lower_ms": 248452.897,
+    "lag_upper_ms": 307804.365
+  },
+  {
+    "city": "Karachi",
+    "station": "OPKC",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:31:04.309688+00:00",
+    "positive_receipt_at": "2026-09-30T17:32:03.927658+00:00",
+    "lag_lower_ms": 64309.687999999995,
+    "lag_upper_ms": 123927.658
+  },
+  {
+    "city": "Panama City",
+    "station": "MPMG",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:27:00+00:00",
+    "negative_request_at": "2026-09-30T17:31:04.309688+00:00",
+    "positive_receipt_at": "2026-09-30T17:32:03.927658+00:00",
+    "lag_lower_ms": 244309.688,
+    "lag_upper_ms": 303927.658
+  },
+  {
+    "city": "Singapore",
+    "station": "WSSS",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:31:04.309688+00:00",
+    "positive_receipt_at": "2026-09-30T17:32:03.927658+00:00",
+    "lag_lower_ms": 64309.687999999995,
+    "lag_upper_ms": 123927.658
+  },
+  {
+    "city": "Lucknow",
+    "station": "VILK",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:32:03.550709+00:00",
+    "positive_receipt_at": "2026-09-30T17:33:01.915501+00:00",
+    "lag_lower_ms": 123550.709,
+    "lag_upper_ms": 181915.50100000002
+  },
+  {
+    "city": "Paris",
+    "station": "LFPB",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:32:03.550709+00:00",
+    "positive_receipt_at": "2026-09-30T17:33:01.915501+00:00",
+    "lag_lower_ms": 123550.709,
+    "lag_upper_ms": 181915.50100000002
+  },
+  {
+    "city": "Warsaw",
+    "station": "EPWA",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:32:03.550709+00:00",
+    "positive_receipt_at": "2026-09-30T17:33:01.915501+00:00",
+    "lag_lower_ms": 123550.709,
+    "lag_upper_ms": 181915.50100000002
+  },
+  {
+    "city": "Panama City",
+    "station": "MPMG",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T17:27:00+00:00",
+    "negative_request_at": "2026-09-30T17:32:03.973881+00:00",
+    "positive_receipt_at": "2026-09-30T17:33:02.334705+00:00",
+    "lag_lower_ms": 303973.881,
+    "lag_upper_ms": 362334.70499999996
+  },
+  {
+    "city": "Karachi",
+    "station": "OPKC",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:32:03.973881+00:00",
+    "positive_receipt_at": "2026-09-30T17:33:02.334705+00:00",
+    "lag_lower_ms": 123973.88100000001,
+    "lag_upper_ms": 182334.70500000002
+  },
+  {
+    "city": "Singapore",
+    "station": "WSSS",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:32:03.973881+00:00",
+    "positive_receipt_at": "2026-09-30T17:33:02.334705+00:00",
+    "lag_lower_ms": 123973.88100000001,
+    "lag_upper_ms": 182334.70500000002
+  },
+  {
+    "city": "Chicago",
+    "station": "KORD",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:31:00+00:00",
+    "negative_request_at": "2026-09-30T17:33:01.347179+00:00",
+    "positive_receipt_at": "2026-09-30T17:34:10.779108+00:00",
+    "lag_lower_ms": 121347.179,
+    "lag_upper_ms": 190779.108
+  },
+  {
+    "city": "Auckland",
+    "station": "NZAA",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:35:06.519900+00:00",
+    "positive_receipt_at": "2026-09-30T17:36:09.809246+00:00",
+    "lag_lower_ms": 306519.9,
+    "lag_upper_ms": 369809.246
+  },
+  {
+    "city": "Beijing",
+    "station": "ZBAA",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:35:06.519900+00:00",
+    "positive_receipt_at": "2026-09-30T17:36:09.809246+00:00",
+    "lag_lower_ms": 306519.9,
+    "lag_upper_ms": 369809.246
+  },
+  {
+    "city": "Guangzhou",
+    "station": "ZGGG",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:35:06.519900+00:00",
+    "positive_receipt_at": "2026-09-30T17:36:09.809246+00:00",
+    "lag_lower_ms": 306519.9,
+    "lag_upper_ms": 369809.246
+  },
+  {
+    "city": "Jakarta",
+    "station": "WIHH",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:35:06.519900+00:00",
+    "positive_receipt_at": "2026-09-30T17:36:09.809246+00:00",
+    "lag_lower_ms": 306519.9,
+    "lag_upper_ms": 369809.246
+  },
+  {
+    "city": "Madrid",
+    "station": "LEMD",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:35:06.519900+00:00",
+    "positive_receipt_at": "2026-09-30T17:36:09.809246+00:00",
+    "lag_lower_ms": 306519.9,
+    "lag_upper_ms": 369809.246
+  },
+  {
+    "city": "Moscow",
+    "station": "UUWW",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:35:06.519900+00:00",
+    "positive_receipt_at": "2026-09-30T17:36:09.809246+00:00",
+    "lag_lower_ms": 306519.9,
+    "lag_upper_ms": 369809.246
+  },
+  {
+    "city": "Seoul",
+    "station": "RKSI",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:35:06.519900+00:00",
+    "positive_receipt_at": "2026-09-30T17:36:09.809246+00:00",
+    "lag_lower_ms": 306519.9,
+    "lag_upper_ms": 369809.246
+  },
+  {
+    "city": "Shanghai",
+    "station": "ZSPD",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:35:06.519900+00:00",
+    "positive_receipt_at": "2026-09-30T17:36:09.809246+00:00",
+    "lag_lower_ms": 306519.9,
+    "lag_upper_ms": 369809.246
+  },
+  {
+    "city": "Wellington",
+    "station": "NZWN",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:35:06.519900+00:00",
+    "positive_receipt_at": "2026-09-30T17:36:09.809246+00:00",
+    "lag_lower_ms": 306519.9,
+    "lag_upper_ms": 369809.246
+  },
+  {
+    "city": "Warsaw",
+    "station": "EPWA",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:35:06.815693+00:00",
+    "positive_receipt_at": "2026-09-30T17:36:10.353952+00:00",
+    "lag_lower_ms": 306815.693,
+    "lag_upper_ms": 370353.952
+  },
+  {
+    "city": "Paris",
+    "station": "LFPB",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:35:06.815693+00:00",
+    "positive_receipt_at": "2026-09-30T17:36:10.353952+00:00",
+    "lag_lower_ms": 306815.693,
+    "lag_upper_ms": 370353.952
+  },
+  {
+    "city": "Wellington",
+    "station": "NZWN",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:35:06.815693+00:00",
+    "positive_receipt_at": "2026-09-30T17:36:10.353952+00:00",
+    "lag_lower_ms": 306815.693,
+    "lag_upper_ms": 370353.952
+  },
+  {
+    "city": "Seoul",
+    "station": "RKSI",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:35:06.815693+00:00",
+    "positive_receipt_at": "2026-09-30T17:36:10.353952+00:00",
+    "lag_lower_ms": 306815.693,
+    "lag_upper_ms": 370353.952
+  },
+  {
+    "city": "Moscow",
+    "station": "UUWW",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:35:06.815693+00:00",
+    "positive_receipt_at": "2026-09-30T17:36:10.353952+00:00",
+    "lag_lower_ms": 306815.693,
+    "lag_upper_ms": 370353.952
+  },
+  {
+    "city": "Lucknow",
+    "station": "VILK",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:35:06.815693+00:00",
+    "positive_receipt_at": "2026-09-30T17:36:10.353952+00:00",
+    "lag_lower_ms": 306815.693,
+    "lag_upper_ms": 370353.952
+  },
+  {
+    "city": "Tokyo",
+    "station": "RJTT",
+    "channel": "jma_amedas",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:36:10.365615+00:00",
+    "positive_receipt_at": "2026-09-30T17:37:07.316833+00:00",
+    "lag_lower_ms": 370365.615,
+    "lag_upper_ms": 427316.833
+  },
+  {
+    "city": "Madrid",
+    "station": "LEMD",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:38:04.637211+00:00",
+    "positive_receipt_at": "2026-09-30T17:39:03.858591+00:00",
+    "lag_lower_ms": 484637.21099999995,
+    "lag_upper_ms": 543858.591
+  },
+  {
+    "city": "Beijing",
+    "station": "ZBAA",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:38:04.637211+00:00",
+    "positive_receipt_at": "2026-09-30T17:39:03.858591+00:00",
+    "lag_lower_ms": 484637.21099999995,
+    "lag_upper_ms": 543858.591
+  },
+  {
+    "city": "Guangzhou",
+    "station": "ZGGG",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:38:04.637211+00:00",
+    "positive_receipt_at": "2026-09-30T17:39:03.858591+00:00",
+    "lag_lower_ms": 484637.21099999995,
+    "lag_upper_ms": 543858.591
+  },
+  {
+    "city": "Shanghai",
+    "station": "ZSPD",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:38:04.637211+00:00",
+    "positive_receipt_at": "2026-09-30T17:39:03.858591+00:00",
+    "lag_lower_ms": 484637.21099999995,
+    "lag_upper_ms": 543858.591
+  },
+  {
+    "city": "Kuala Lumpur",
+    "station": "WMKK",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:39:03.278746+00:00",
+    "positive_receipt_at": "2026-09-30T17:40:03.035007+00:00",
+    "lag_lower_ms": 543278.7459999999,
+    "lag_upper_ms": 603035.007
+  },
+  {
+    "city": "Tokyo",
+    "station": "RJTT",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:39:03.278746+00:00",
+    "positive_receipt_at": "2026-09-30T17:40:03.035007+00:00",
+    "lag_lower_ms": 543278.7459999999,
+    "lag_upper_ms": 603035.007
+  },
+  {
+    "city": "Tokyo",
+    "station": "RJTT",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:41:01.336446+00:00",
+    "positive_receipt_at": "2026-09-30T17:43:13.288783+00:00",
+    "lag_lower_ms": 661336.446,
+    "lag_upper_ms": 793288.7829999999
+  },
+  {
+    "city": "Kuala Lumpur",
+    "station": "WMKK",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T17:30:00+00:00",
+    "negative_request_at": "2026-09-30T17:41:01.336446+00:00",
+    "positive_receipt_at": "2026-09-30T17:43:13.288783+00:00",
+    "lag_lower_ms": 661336.446,
+    "lag_upper_ms": 793288.7829999999
+  },
+  {
+    "city": "Tokyo",
+    "station": "RJTT",
+    "channel": "jma_amedas",
+    "observed_at": "2026-09-30T17:40:00+00:00",
+    "negative_request_at": "2026-09-30T17:46:10.681611+00:00",
+    "positive_receipt_at": "2026-09-30T17:47:02.544975+00:00",
+    "lag_lower_ms": 370681.611,
+    "lag_upper_ms": 422544.97500000003
+  },
+  {
+    "city": "Helsinki",
+    "station": "EFHK",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:50:00+00:00",
+    "negative_request_at": "2026-09-30T17:49:15.783745+00:00",
+    "positive_receipt_at": "2026-09-30T17:51:16.503129+00:00",
+    "lag_lower_ms": -44216.255,
+    "lag_upper_ms": 76503.129
+  },
+  {
+    "city": "Tel Aviv",
+    "station": "LLBG",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:50:00+00:00",
+    "negative_request_at": "2026-09-30T17:49:15.783745+00:00",
+    "positive_receipt_at": "2026-09-30T17:51:16.503129+00:00",
+    "lag_lower_ms": -44216.255,
+    "lag_upper_ms": 76503.129
+  },
+  {
+    "city": "Chicago",
+    "station": "KORD",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:51:00+00:00",
+    "negative_request_at": "2026-09-30T17:53:03.403326+00:00",
+    "positive_receipt_at": "2026-09-30T17:54:01.812233+00:00",
+    "lag_lower_ms": 123403.326,
+    "lag_upper_ms": 181812.23299999998
+  },
+  {
+    "city": "Munich",
+    "station": "EDDM",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:50:00+00:00",
+    "negative_request_at": "2026-09-30T17:53:03.403326+00:00",
+    "positive_receipt_at": "2026-09-30T17:54:01.812233+00:00",
+    "lag_lower_ms": 183403.326,
+    "lag_upper_ms": 241812.23299999998
+  },
+  {
+    "city": "NYC",
+    "station": "KLGA",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:51:00+00:00",
+    "negative_request_at": "2026-09-30T17:53:03.403326+00:00",
+    "positive_receipt_at": "2026-09-30T17:54:01.812233+00:00",
+    "lag_lower_ms": 123403.326,
+    "lag_upper_ms": 181812.23299999998
+  },
+  {
+    "city": "Helsinki",
+    "station": "EFHK",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T17:50:00+00:00",
+    "negative_request_at": "2026-09-30T17:53:03.572291+00:00",
+    "positive_receipt_at": "2026-09-30T17:54:02.283459+00:00",
+    "lag_lower_ms": 183572.291,
+    "lag_upper_ms": 242283.459
+  },
+  {
+    "city": "Tel Aviv",
+    "station": "LLBG",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T17:50:00+00:00",
+    "negative_request_at": "2026-09-30T17:53:03.572291+00:00",
+    "positive_receipt_at": "2026-09-30T17:54:02.283459+00:00",
+    "lag_lower_ms": 183572.291,
+    "lag_upper_ms": 242283.459
+  },
+  {
+    "city": "Ankara",
+    "station": "LTAC",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:50:00+00:00",
+    "negative_request_at": "2026-09-30T17:54:01.434497+00:00",
+    "positive_receipt_at": "2026-09-30T17:55:21.774737+00:00",
+    "lag_lower_ms": 241434.497,
+    "lag_upper_ms": 321774.737
+  },
+  {
+    "city": "Atlanta",
+    "station": "KATL",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:52:00+00:00",
+    "negative_request_at": "2026-09-30T17:54:01.434497+00:00",
+    "positive_receipt_at": "2026-09-30T17:55:21.774737+00:00",
+    "lag_lower_ms": 121434.49699999999,
+    "lag_upper_ms": 201774.737
+  },
+  {
+    "city": "Austin",
+    "station": "KAUS",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:53:00+00:00",
+    "negative_request_at": "2026-09-30T17:54:01.434497+00:00",
+    "positive_receipt_at": "2026-09-30T17:55:21.774737+00:00",
+    "lag_lower_ms": 61434.497,
+    "lag_upper_ms": 141774.737
+  },
+  {
+    "city": "Dallas",
+    "station": "KDAL",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:53:00+00:00",
+    "negative_request_at": "2026-09-30T17:54:01.434497+00:00",
+    "positive_receipt_at": "2026-09-30T17:55:21.774737+00:00",
+    "lag_lower_ms": 61434.497,
+    "lag_upper_ms": 141774.737
+  },
+  {
+    "city": "Houston",
+    "station": "KHOU",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:53:00+00:00",
+    "negative_request_at": "2026-09-30T17:54:01.434497+00:00",
+    "positive_receipt_at": "2026-09-30T17:55:21.774737+00:00",
+    "lag_lower_ms": 61434.497,
+    "lag_upper_ms": 141774.737
+  },
+  {
+    "city": "Istanbul",
+    "station": "LTFM",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:50:00+00:00",
+    "negative_request_at": "2026-09-30T17:54:01.434497+00:00",
+    "positive_receipt_at": "2026-09-30T17:55:21.774737+00:00",
+    "lag_lower_ms": 241434.497,
+    "lag_upper_ms": 321774.737
+  },
+  {
+    "city": "London",
+    "station": "EGLC",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:50:00+00:00",
+    "negative_request_at": "2026-09-30T17:54:01.434497+00:00",
+    "positive_receipt_at": "2026-09-30T17:55:21.774737+00:00",
+    "lag_lower_ms": 241434.497,
+    "lag_upper_ms": 321774.737
+  },
+  {
+    "city": "Los Angeles",
+    "station": "KLAX",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:53:00+00:00",
+    "negative_request_at": "2026-09-30T17:54:01.434497+00:00",
+    "positive_receipt_at": "2026-09-30T17:55:21.774737+00:00",
+    "lag_lower_ms": 61434.497,
+    "lag_upper_ms": 141774.737
+  },
+  {
+    "city": "Miami",
+    "station": "KMIA",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:53:00+00:00",
+    "negative_request_at": "2026-09-30T17:55:21.486284+00:00",
+    "positive_receipt_at": "2026-09-30T17:56:30.930608+00:00",
+    "lag_lower_ms": 141486.284,
+    "lag_upper_ms": 210930.608
+  },
+  {
+    "city": "Milan",
+    "station": "LIMC",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:50:00+00:00",
+    "negative_request_at": "2026-09-30T17:55:21.486284+00:00",
+    "positive_receipt_at": "2026-09-30T17:56:30.930608+00:00",
+    "lag_lower_ms": 321486.284,
+    "lag_upper_ms": 390930.608
+  },
+  {
+    "city": "Seattle",
+    "station": "KSEA",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:53:00+00:00",
+    "negative_request_at": "2026-09-30T17:55:21.486284+00:00",
+    "positive_receipt_at": "2026-09-30T17:56:30.930608+00:00",
+    "lag_lower_ms": 141486.284,
+    "lag_upper_ms": 210930.608
+  },
+  {
+    "city": "Munich",
+    "station": "EDDM",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T17:50:00+00:00",
+    "negative_request_at": "2026-09-30T17:55:01.445042+00:00",
+    "positive_receipt_at": "2026-09-30T17:56:31.523064+00:00",
+    "lag_lower_ms": 301445.042,
+    "lag_upper_ms": 391523.06399999995
+  },
+  {
+    "city": "London",
+    "station": "EGLC",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T17:50:00+00:00",
+    "negative_request_at": "2026-09-30T17:55:01.445042+00:00",
+    "positive_receipt_at": "2026-09-30T17:56:31.523064+00:00",
+    "lag_lower_ms": 301445.042,
+    "lag_upper_ms": 391523.06399999995
+  },
+  {
+    "city": "Milan",
+    "station": "LIMC",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T17:50:00+00:00",
+    "negative_request_at": "2026-09-30T17:55:01.445042+00:00",
+    "positive_receipt_at": "2026-09-30T17:56:31.523064+00:00",
+    "lag_lower_ms": 301445.042,
+    "lag_upper_ms": 391523.06399999995
+  },
+  {
+    "city": "Ankara",
+    "station": "LTAC",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T17:50:00+00:00",
+    "negative_request_at": "2026-09-30T17:55:01.445042+00:00",
+    "positive_receipt_at": "2026-09-30T17:56:31.523064+00:00",
+    "lag_lower_ms": 301445.042,
+    "lag_upper_ms": 391523.06399999995
+  },
+  {
+    "city": "Istanbul",
+    "station": "LTFM",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T17:50:00+00:00",
+    "negative_request_at": "2026-09-30T17:55:01.445042+00:00",
+    "positive_receipt_at": "2026-09-30T17:56:31.523064+00:00",
+    "lag_lower_ms": 301445.042,
+    "lag_upper_ms": 391523.06399999995
+  },
+  {
+    "city": "Amsterdam",
+    "station": "EHAM",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:55:00+00:00",
+    "negative_request_at": "2026-09-30T17:57:15.844202+00:00",
+    "positive_receipt_at": "2026-09-30T17:58:14.748184+00:00",
+    "lag_lower_ms": 135844.202,
+    "lag_upper_ms": 194748.184
+  },
+  {
+    "city": "Tokyo",
+    "station": "RJTT",
+    "channel": "jma_amedas",
+    "observed_at": "2026-09-30T17:50:00+00:00",
+    "negative_request_at": "2026-09-30T17:57:16.616822+00:00",
+    "positive_receipt_at": "2026-09-30T17:58:15.526389+00:00",
+    "lag_lower_ms": 436616.822,
+    "lag_upper_ms": 495526.38899999997
+  },
+  {
+    "city": "Mexico City",
+    "station": "MMMX",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:52:00+00:00",
+    "negative_request_at": "2026-09-30T17:59:13.751878+00:00",
+    "positive_receipt_at": "2026-09-30T18:00:08.793752+00:00",
+    "lag_lower_ms": 433751.87799999997,
+    "lag_upper_ms": 488793.752
+  },
+  {
+    "city": "Panama City",
+    "station": "MPMG",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T17:59:13.751878+00:00",
+    "positive_receipt_at": "2026-09-30T18:00:08.793752+00:00",
+    "lag_lower_ms": -46248.122,
+    "lag_upper_ms": 8793.752
+  },
+  {
+    "city": "San Francisco",
+    "station": "KSFO",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:56:00+00:00",
+    "negative_request_at": "2026-09-30T17:59:13.751878+00:00",
+    "positive_receipt_at": "2026-09-30T18:00:08.793752+00:00",
+    "lag_lower_ms": 193751.878,
+    "lag_upper_ms": 248793.752
+  },
+  {
+    "city": "Sao Paulo",
+    "station": "SBGR",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T17:59:13.751878+00:00",
+    "positive_receipt_at": "2026-09-30T18:00:08.793752+00:00",
+    "lag_lower_ms": -46248.122,
+    "lag_upper_ms": 8793.752
+  },
+  {
+    "city": "Panama City",
+    "station": "MPMG",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T17:59:14.061274+00:00",
+    "positive_receipt_at": "2026-09-30T18:00:09.643371+00:00",
+    "lag_lower_ms": -45938.726,
+    "lag_upper_ms": 9643.371000000001
+  },
+  {
+    "city": "Amsterdam",
+    "station": "EHAM",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T17:55:00+00:00",
+    "negative_request_at": "2026-09-30T17:59:14.061274+00:00",
+    "positive_receipt_at": "2026-09-30T18:00:09.643371+00:00",
+    "lag_lower_ms": 254061.274,
+    "lag_upper_ms": 309643.371
+  },
+  {
+    "city": "Panama City",
+    "station": "MPMG",
+    "channel": "aac_metar",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T17:58:08.143218+00:00",
+    "positive_receipt_at": "2026-09-30T18:01:12.003006+00:00",
+    "lag_lower_ms": -111856.78199999999,
+    "lag_upper_ms": 72003.006
+  },
+  {
+    "city": "Seoul",
+    "station": "RKSI",
+    "channel": "kma_amo_raw_metar",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:00:01.472697+00:00",
+    "positive_receipt_at": "2026-09-30T18:01:13.226783+00:00",
+    "lag_lower_ms": 1472.697,
+    "lag_upper_ms": 73226.783
+  },
+  {
+    "city": "Busan",
+    "station": "RKPK",
+    "channel": "kma_amo_raw_metar",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:00:03.194810+00:00",
+    "positive_receipt_at": "2026-09-30T18:01:13.612319+00:00",
+    "lag_lower_ms": 3194.81,
+    "lag_upper_ms": 73612.319
+  },
+  {
+    "city": "Toronto",
+    "station": "CYYZ",
+    "channel": "eccc_swob",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:01:03.071422+00:00",
+    "positive_receipt_at": "2026-09-30T18:02:02.544911+00:00",
+    "lag_lower_ms": 63071.422,
+    "lag_upper_ms": 122544.911
+  },
+  {
+    "city": "Jeddah",
+    "station": "OEJN",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:01:01.476616+00:00",
+    "positive_receipt_at": "2026-09-30T18:02:17.314250+00:00",
+    "lag_lower_ms": 61476.616,
+    "lag_upper_ms": 137314.25
+  },
+  {
+    "city": "Karachi",
+    "station": "OPKC",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:01:01.476616+00:00",
+    "positive_receipt_at": "2026-09-30T18:02:17.314250+00:00",
+    "lag_lower_ms": 61476.616,
+    "lag_upper_ms": 137314.25
+  },
+  {
+    "city": "Lucknow",
+    "station": "VILK",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:01:01.476616+00:00",
+    "positive_receipt_at": "2026-09-30T18:02:17.314250+00:00",
+    "lag_lower_ms": 61476.616,
+    "lag_upper_ms": 137314.25
+  },
+  {
+    "city": "Manila",
+    "station": "RPLL",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:01:01.476616+00:00",
+    "positive_receipt_at": "2026-09-30T18:02:17.314250+00:00",
+    "lag_lower_ms": 61476.616,
+    "lag_upper_ms": 137314.25
+  },
+  {
+    "city": "Paris",
+    "station": "LFPB",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:01:01.476616+00:00",
+    "positive_receipt_at": "2026-09-30T18:02:17.314250+00:00",
+    "lag_lower_ms": 61476.616,
+    "lag_upper_ms": 137314.25
+  },
+  {
+    "city": "Singapore",
+    "station": "WSSS",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:01:01.476616+00:00",
+    "positive_receipt_at": "2026-09-30T18:02:17.314250+00:00",
+    "lag_lower_ms": 61476.616,
+    "lag_upper_ms": 137314.25
+  },
+  {
+    "city": "Lagos",
+    "station": "DNMM",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:02:16.953704+00:00",
+    "positive_receipt_at": "2026-09-30T18:03:24.831395+00:00",
+    "lag_lower_ms": 3736953.704,
+    "lag_upper_ms": 3804831.395
+  },
+  {
+    "city": "Warsaw",
+    "station": "EPWA",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:02:16.953704+00:00",
+    "positive_receipt_at": "2026-09-30T18:03:24.831395+00:00",
+    "lag_lower_ms": 136953.704,
+    "lag_upper_ms": 204831.395
+  },
+  {
+    "city": "Mexico City",
+    "station": "MMMX",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T17:52:00+00:00",
+    "negative_request_at": "2026-09-30T18:02:01.488317+00:00",
+    "positive_receipt_at": "2026-09-30T18:03:25.574393+00:00",
+    "lag_lower_ms": 601488.317,
+    "lag_upper_ms": 685574.393
+  },
+  {
+    "city": "Jeddah",
+    "station": "OEJN",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:02:01.488317+00:00",
+    "positive_receipt_at": "2026-09-30T18:03:25.574393+00:00",
+    "lag_lower_ms": 121488.317,
+    "lag_upper_ms": 205574.39299999998
+  },
+  {
+    "city": "Karachi",
+    "station": "OPKC",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:02:01.488317+00:00",
+    "positive_receipt_at": "2026-09-30T18:03:25.574393+00:00",
+    "lag_lower_ms": 121488.317,
+    "lag_upper_ms": 205574.39299999998
+  },
+  {
+    "city": "Manila",
+    "station": "RPLL",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:02:01.488317+00:00",
+    "positive_receipt_at": "2026-09-30T18:03:25.574393+00:00",
+    "lag_lower_ms": 121488.317,
+    "lag_upper_ms": 205574.39299999998
+  },
+  {
+    "city": "Lucknow",
+    "station": "VILK",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:02:01.488317+00:00",
+    "positive_receipt_at": "2026-09-30T18:03:25.574393+00:00",
+    "lag_lower_ms": 121488.317,
+    "lag_upper_ms": 205574.39299999998
+  },
+  {
+    "city": "Singapore",
+    "station": "WSSS",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:02:01.488317+00:00",
+    "positive_receipt_at": "2026-09-30T18:03:25.574393+00:00",
+    "lag_lower_ms": 121488.317,
+    "lag_upper_ms": 205574.39299999998
+  },
+  {
+    "city": "Buenos Aires",
+    "station": "SAEZ",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:03:24.490772+00:00",
+    "positive_receipt_at": "2026-09-30T18:04:28.234512+00:00",
+    "lag_lower_ms": 204490.772,
+    "lag_upper_ms": 268234.512
+  },
+  {
+    "city": "Madrid",
+    "station": "LEMD",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:03:24.490772+00:00",
+    "positive_receipt_at": "2026-09-30T18:04:28.234512+00:00",
+    "lag_lower_ms": 204490.772,
+    "lag_upper_ms": 268234.512
+  },
+  {
+    "city": "Moscow",
+    "station": "UUWW",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:03:24.490772+00:00",
+    "positive_receipt_at": "2026-09-30T18:04:28.234512+00:00",
+    "lag_lower_ms": 204490.772,
+    "lag_upper_ms": 268234.512
+  },
+  {
+    "city": "Auckland",
+    "station": "NZAA",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:04:27.831570+00:00",
+    "positive_receipt_at": "2026-09-30T18:05:08.734576+00:00",
+    "lag_lower_ms": 267831.57,
+    "lag_upper_ms": 308734.576
+  },
+  {
+    "city": "Busan",
+    "station": "RKPK",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:04:27.831570+00:00",
+    "positive_receipt_at": "2026-09-30T18:05:08.734576+00:00",
+    "lag_lower_ms": 267831.57,
+    "lag_upper_ms": 308734.576
+  },
+  {
+    "city": "Seoul",
+    "station": "RKSI",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:04:27.831570+00:00",
+    "positive_receipt_at": "2026-09-30T18:05:08.734576+00:00",
+    "lag_lower_ms": 267831.57,
+    "lag_upper_ms": 308734.576
+  },
+  {
+    "city": "Wellington",
+    "station": "NZWN",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:04:27.831570+00:00",
+    "positive_receipt_at": "2026-09-30T18:05:08.734576+00:00",
+    "lag_lower_ms": 267831.57,
+    "lag_upper_ms": 308734.576
+  },
+  {
+    "city": "Beijing",
+    "station": "ZBAA",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:05:08.410804+00:00",
+    "positive_receipt_at": "2026-09-30T18:06:23.377073+00:00",
+    "lag_lower_ms": 308410.804,
+    "lag_upper_ms": 383377.073
+  },
+  {
+    "city": "Cape Town",
+    "station": "FACT",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:05:08.410804+00:00",
+    "positive_receipt_at": "2026-09-30T18:06:23.377073+00:00",
+    "lag_lower_ms": 308410.804,
+    "lag_upper_ms": 383377.073
+  },
+  {
+    "city": "Guangzhou",
+    "station": "ZGGG",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:05:08.410804+00:00",
+    "positive_receipt_at": "2026-09-30T18:06:23.377073+00:00",
+    "lag_lower_ms": 308410.804,
+    "lag_upper_ms": 383377.073
+  },
+  {
+    "city": "Jakarta",
+    "station": "WIHH",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:05:08.410804+00:00",
+    "positive_receipt_at": "2026-09-30T18:06:23.377073+00:00",
+    "lag_lower_ms": 308410.804,
+    "lag_upper_ms": 383377.073
+  },
+  {
+    "city": "Shanghai",
+    "station": "ZSPD",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:05:08.410804+00:00",
+    "positive_receipt_at": "2026-09-30T18:06:23.377073+00:00",
+    "lag_lower_ms": 308410.804,
+    "lag_upper_ms": 383377.073
+  },
+  {
+    "city": "Tokyo",
+    "station": "RJTT",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:05:08.410804+00:00",
+    "positive_receipt_at": "2026-09-30T18:06:23.377073+00:00",
+    "lag_lower_ms": 308410.804,
+    "lag_upper_ms": 383377.073
+  },
+  {
+    "city": "Warsaw",
+    "station": "EPWA",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:05:08.785195+00:00",
+    "positive_receipt_at": "2026-09-30T18:06:23.861620+00:00",
+    "lag_lower_ms": 308785.195,
+    "lag_upper_ms": 383861.62
+  },
+  {
+    "city": "Paris",
+    "station": "LFPB",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:05:08.785195+00:00",
+    "positive_receipt_at": "2026-09-30T18:06:23.861620+00:00",
+    "lag_lower_ms": 308785.195,
+    "lag_upper_ms": 383861.62
+  },
+  {
+    "city": "Manila",
+    "station": "RPLL",
+    "channel": "pagasa_metar",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:05:01.503881+00:00",
+    "positive_receipt_at": "2026-09-30T18:06:33.042082+00:00",
+    "lag_lower_ms": 301503.881,
+    "lag_upper_ms": 393042.082
+  },
+  {
+    "city": "Tokyo",
+    "station": "RJTT",
+    "channel": "jma_amedas",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T17:59:14.611518+00:00",
+    "positive_receipt_at": "2026-09-30T18:07:04.851619+00:00",
+    "lag_lower_ms": -45388.482,
+    "lag_upper_ms": 424851.619
+  },
+  {
+    "city": "Chengdu",
+    "station": "ZUUU",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:07:04.021237+00:00",
+    "positive_receipt_at": "2026-09-30T18:08:03.349032+00:00",
+    "lag_lower_ms": 424021.23699999996,
+    "lag_upper_ms": 483349.032
+  },
+  {
+    "city": "Chicago",
+    "station": "KORD",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:05:00+00:00",
+    "negative_request_at": "2026-09-30T18:07:04.021237+00:00",
+    "positive_receipt_at": "2026-09-30T18:08:03.349032+00:00",
+    "lag_lower_ms": 124021.237,
+    "lag_upper_ms": 183349.032
+  },
+  {
+    "city": "Chongqing",
+    "station": "ZUCK",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:07:04.021237+00:00",
+    "positive_receipt_at": "2026-09-30T18:08:03.349032+00:00",
+    "lag_lower_ms": 424021.23699999996,
+    "lag_upper_ms": 483349.032
+  },
+  {
+    "city": "Qingdao",
+    "station": "ZSQD",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:07:04.021237+00:00",
+    "positive_receipt_at": "2026-09-30T18:08:03.349032+00:00",
+    "lag_lower_ms": 424021.23699999996,
+    "lag_upper_ms": 483349.032
+  },
+  {
+    "city": "Shenzhen",
+    "station": "ZGSZ",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:07:04.021237+00:00",
+    "positive_receipt_at": "2026-09-30T18:08:03.349032+00:00",
+    "lag_lower_ms": 424021.23699999996,
+    "lag_upper_ms": 483349.032
+  },
+  {
+    "city": "Toronto",
+    "station": "CYYZ",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:07:04.021237+00:00",
+    "positive_receipt_at": "2026-09-30T18:08:03.349032+00:00",
+    "lag_lower_ms": 424021.23699999996,
+    "lag_upper_ms": 483349.032
+  },
+  {
+    "city": "Wuhan",
+    "station": "ZHHH",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:07:04.021237+00:00",
+    "positive_receipt_at": "2026-09-30T18:08:03.349032+00:00",
+    "lag_lower_ms": 424021.23699999996,
+    "lag_upper_ms": 483349.032
+  },
+  {
+    "city": "Zhengzhou",
+    "station": "ZHCC",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:07:04.021237+00:00",
+    "positive_receipt_at": "2026-09-30T18:08:03.349032+00:00",
+    "lag_lower_ms": 424021.23699999996,
+    "lag_upper_ms": 483349.032
+  },
+  {
+    "city": "Toronto",
+    "station": "CYYZ",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:08:03.398930+00:00",
+    "positive_receipt_at": "2026-09-30T18:09:02.160612+00:00",
+    "lag_lower_ms": 483398.93,
+    "lag_upper_ms": 542160.612
+  },
+  {
+    "city": "Cape Town",
+    "station": "FACT",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:08:03.398930+00:00",
+    "positive_receipt_at": "2026-09-30T18:09:02.160612+00:00",
+    "lag_lower_ms": 483398.93,
+    "lag_upper_ms": 542160.612
+  },
+  {
+    "city": "Madrid",
+    "station": "LEMD",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:08:03.398930+00:00",
+    "positive_receipt_at": "2026-09-30T18:09:02.160612+00:00",
+    "lag_lower_ms": 483398.93,
+    "lag_upper_ms": 542160.612
+  },
+  {
+    "city": "Wellington",
+    "station": "NZWN",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:08:03.398930+00:00",
+    "positive_receipt_at": "2026-09-30T18:09:02.160612+00:00",
+    "lag_lower_ms": 483398.93,
+    "lag_upper_ms": 542160.612
+  },
+  {
+    "city": "Tokyo",
+    "station": "RJTT",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:08:03.398930+00:00",
+    "positive_receipt_at": "2026-09-30T18:09:02.160612+00:00",
+    "lag_lower_ms": 483398.93,
+    "lag_upper_ms": 542160.612
+  },
+  {
+    "city": "Busan",
+    "station": "RKPK",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:08:03.398930+00:00",
+    "positive_receipt_at": "2026-09-30T18:09:02.160612+00:00",
+    "lag_lower_ms": 483398.93,
+    "lag_upper_ms": 542160.612
+  },
+  {
+    "city": "Seoul",
+    "station": "RKSI",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:08:03.398930+00:00",
+    "positive_receipt_at": "2026-09-30T18:09:02.160612+00:00",
+    "lag_lower_ms": 483398.93,
+    "lag_upper_ms": 542160.612
+  },
+  {
+    "city": "Buenos Aires",
+    "station": "SAEZ",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:08:03.398930+00:00",
+    "positive_receipt_at": "2026-09-30T18:09:02.160612+00:00",
+    "lag_lower_ms": 483398.93,
+    "lag_upper_ms": 542160.612
+  },
+  {
+    "city": "Sao Paulo",
+    "station": "SBGR",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:08:03.398930+00:00",
+    "positive_receipt_at": "2026-09-30T18:09:02.160612+00:00",
+    "lag_lower_ms": 483398.93,
+    "lag_upper_ms": 542160.612
+  },
+  {
+    "city": "Moscow",
+    "station": "UUWW",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:08:03.398930+00:00",
+    "positive_receipt_at": "2026-09-30T18:09:02.160612+00:00",
+    "lag_lower_ms": 483398.93,
+    "lag_upper_ms": 542160.612
+  },
+  {
+    "city": "Beijing",
+    "station": "ZBAA",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:08:03.398930+00:00",
+    "positive_receipt_at": "2026-09-30T18:09:02.160612+00:00",
+    "lag_lower_ms": 483398.93,
+    "lag_upper_ms": 542160.612
+  },
+  {
+    "city": "Guangzhou",
+    "station": "ZGGG",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:08:03.398930+00:00",
+    "positive_receipt_at": "2026-09-30T18:09:02.160612+00:00",
+    "lag_lower_ms": 483398.93,
+    "lag_upper_ms": 542160.612
+  },
+  {
+    "city": "Shenzhen",
+    "station": "ZGSZ",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:08:03.398930+00:00",
+    "positive_receipt_at": "2026-09-30T18:09:02.160612+00:00",
+    "lag_lower_ms": 483398.93,
+    "lag_upper_ms": 542160.612
+  },
+  {
+    "city": "Zhengzhou",
+    "station": "ZHCC",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:08:03.398930+00:00",
+    "positive_receipt_at": "2026-09-30T18:09:02.160612+00:00",
+    "lag_lower_ms": 483398.93,
+    "lag_upper_ms": 542160.612
+  },
+  {
+    "city": "Wuhan",
+    "station": "ZHHH",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:08:03.398930+00:00",
+    "positive_receipt_at": "2026-09-30T18:09:02.160612+00:00",
+    "lag_lower_ms": 483398.93,
+    "lag_upper_ms": 542160.612
+  },
+  {
+    "city": "Shanghai",
+    "station": "ZSPD",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:08:03.398930+00:00",
+    "positive_receipt_at": "2026-09-30T18:09:02.160612+00:00",
+    "lag_lower_ms": 483398.93,
+    "lag_upper_ms": 542160.612
+  },
+  {
+    "city": "Qingdao",
+    "station": "ZSQD",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:08:03.398930+00:00",
+    "positive_receipt_at": "2026-09-30T18:09:02.160612+00:00",
+    "lag_lower_ms": 483398.93,
+    "lag_upper_ms": 542160.612
+  },
+  {
+    "city": "Chongqing",
+    "station": "ZUCK",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:08:03.398930+00:00",
+    "positive_receipt_at": "2026-09-30T18:09:02.160612+00:00",
+    "lag_lower_ms": 483398.93,
+    "lag_upper_ms": 542160.612
+  },
+  {
+    "city": "Chengdu",
+    "station": "ZUUU",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:08:03.398930+00:00",
+    "positive_receipt_at": "2026-09-30T18:09:02.160612+00:00",
+    "lag_lower_ms": 483398.93,
+    "lag_upper_ms": 542160.612
+  },
+  {
+    "city": "Kuala Lumpur",
+    "station": "WMKK",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:08:01.524786+00:00",
+    "positive_receipt_at": "2026-09-30T18:09:21.089991+00:00",
+    "lag_lower_ms": 481524.786,
+    "lag_upper_ms": 561089.991
+  },
+  {
+    "city": "Taipei",
+    "station": "RCSS",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:08:01.524786+00:00",
+    "positive_receipt_at": "2026-09-30T18:09:21.089991+00:00",
+    "lag_lower_ms": 481524.786,
+    "lag_upper_ms": 561089.991
+  },
+  {
+    "city": "Lagos",
+    "station": "DNMM",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:09:20.614974+00:00",
+    "positive_receipt_at": "2026-09-30T18:11:10.299734+00:00",
+    "lag_lower_ms": 560614.9739999999,
+    "lag_upper_ms": 670299.7339999999
+  },
+  {
+    "city": "Kuala Lumpur",
+    "station": "WMKK",
+    "channel": "resolver",
+    "observed_at": "2026-09-30T18:00:00+00:00",
+    "negative_request_at": "2026-09-30T18:11:10.351118+00:00",
+    "positive_receipt_at": "2026-09-30T18:12:15.492957+00:00",
+    "lag_lower_ms": 670351.118,
+    "lag_upper_ms": 735492.957
+  },
+  {
+    "city": "Tokyo",
+    "station": "RJTT",
+    "channel": "jma_amedas",
+    "observed_at": "2026-09-30T18:10:00+00:00",
+    "negative_request_at": "2026-09-30T18:16:02.091873+00:00",
+    "positive_receipt_at": "2026-09-30T18:17:01.747132+00:00",
+    "lag_lower_ms": 362091.873,
+    "lag_upper_ms": 421747.13200000004
+  },
+  {
+    "city": "Denver",
+    "station": "KBKF",
+    "channel": "awc",
+    "observed_at": "2026-09-30T17:58:00+00:00",
+    "negative_request_at": "2026-09-30T18:15:01.583482+00:00",
+    "positive_receipt_at": "2026-09-30T18:17:08.844599+00:00",
+    "lag_lower_ms": 1021583.482,
+    "lag_upper_ms": 1148844.599
+  },
+  {
+    "city": "Seattle",
+    "station": "KSEA",
+    "channel": "awc",
+    "observed_at": "2026-09-30T18:12:00+00:00",
+    "negative_request_at": "2026-09-30T18:15:01.583482+00:00",
+    "positive_receipt_at": "2026-09-30T18:17:08.844599+00:00",
+    "lag_lower_ms": 181583.48200000002,
+    "lag_upper_ms": 308844.59900000005
+  }
+]

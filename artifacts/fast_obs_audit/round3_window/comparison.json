@@ -1,0 +1,1768 @@
+[
+  {
+    "city": "Tokyo",
+    "channel": "jma_amedas",
+    "n_pairs": 143,
+    "n_exact": 143,
+    "mismatches": [],
+    "pairs": [
+      {
+        "time": "2026-09-27T17:30:00+00:00",
+        "candidate_c": 22.7,
+        "resolver_c": 23.0,
+        "candidate_contract": 23,
+        "resolver_contract": 23,
+        "match": true,
+        "body_sha256": "ad1b8c1b55cf30e5a80e4ceebac305f7a10aebbb13248c0e89b1c4629cb31872"
+      },
+      {
+        "time": "2026-09-27T18:00:00+00:00",
+        "candidate_c": 22.7,
+        "resolver_c": 23.0,
+        "candidate_contract": 23,
+        "resolver_contract": 23,
+        "match": true,
+        "body_sha256": "141af19decccde47ef578abf959e2dc3cab5e7a0cdd1f7d03cdabdbd02077fd8"
+      },
+      {
+        "time": "2026-09-27T18:30:00+00:00",
+        "candidate_c": 23.0,
+        "resolver_c": 23.0,
+        "candidate_contract": 23,
+        "resolver_contract": 23,
+        "match": true,
+        "body_sha256": "141af19decccde47ef578abf959e2dc3cab5e7a0cdd1f7d03cdabdbd02077fd8"
+      },
+      {
+        "time": "2026-09-27T19:00:00+00:00",
+        "candidate_c": 23.3,
+        "resolver_c": 23.0,
+        "candidate_contract": 23,
+        "resolver_contract": 23,
+        "match": true,
+        "body_sha256": "141af19decccde47ef578abf959e2dc3cab5e7a0cdd1f7d03cdabdbd02077fd8"
+      },
+      {
+        "time": "2026-09-27T19:30:00+00:00",
+        "candidate_c": 23.3,
+        "resolver_c": 23.0,
+        "candidate_contract": 23,
+        "resolver_contract": 23,
+        "match": true,
+        "body_sha256": "141af19decccde47ef578abf959e2dc3cab5e7a0cdd1f7d03cdabdbd02077fd8"
+      },
+      {
+        "time": "2026-09-27T20:00:00+00:00",
+        "candidate_c": 23.7,
+        "resolver_c": 24.0,
+        "candidate_contract": 24,
+        "resolver_contract": 24,
+        "match": true,
+        "body_sha256": "141af19decccde47ef578abf959e2dc3cab5e7a0cdd1f7d03cdabdbd02077fd8"
+      },
+      {
+        "time": "2026-09-27T20:30:00+00:00",
+        "candidate_c": 23.7,
+        "resolver_c": 24.0,
+        "candidate_contract": 24,
+        "resolver_contract": 24,
+        "match": true,
+        "body_sha256": "141af19decccde47ef578abf959e2dc3cab5e7a0cdd1f7d03cdabdbd02077fd8"
+      },
+      {
+        "time": "2026-09-27T21:00:00+00:00",
+        "candidate_c": 24.1,
+        "resolver_c": 24.0,
+        "candidate_contract": 24,
+        "resolver_contract": 24,
+        "match": true,
+        "body_sha256": "559074e5c1397e6238b3b87b0826122fa978f79dceaebbd554489dad15510526"
+      },
+      {
+        "time": "2026-09-27T21:30:00+00:00",
+        "candidate_c": 24.3,
+        "resolver_c": 24.0,
+        "candidate_contract": 24,
+        "resolver_contract": 24,
+        "match": true,
+        "body_sha256": "559074e5c1397e6238b3b87b0826122fa978f79dceaebbd554489dad15510526"
+      },
+      {
+        "time": "2026-09-27T22:00:00+00:00",
+        "candidate_c": 24.0,
+        "resolver_c": 24.0,
+        "candidate_contract": 24,
+        "resolver_contract": 24,
+        "match": true,
+        "body_sha256": "559074e5c1397e6238b3b87b0826122fa978f79dceaebbd554489dad15510526"
+      },
+      {
+        "time": "2026-09-27T22:30:00+00:00",
+        "candidate_c": 23.2,
+        "resolver_c": 23.0,
+        "candidate_contract": 23,
+        "resolver_contract": 23,
+        "match": true,
+        "body_sha256": "559074e5c1397e6238b3b87b0826122fa978f79dceaebbd554489dad15510526"
+      },
+      {
+        "time": "2026-09-27T23:00:00+00:00",
+        "candidate_c": 22.6,
+        "resolver_c": 23.0,
+        "candidate_contract": 23,
+        "resolver_contract": 23,
+        "match": true,
+        "body_sha256": "559074e5c1397e6238b3b87b0826122fa978f79dceaebbd554489dad15510526"
+      },
+      {
+        "time": "2026-09-27T23:30:00+00:00",
+        "candidate_c": 22.5,
+        "resolver_c": 23.0,
+        "candidate_contract": 23,
+        "resolver_contract": 23,
+        "match": true,
+        "body_sha256": "559074e5c1397e6238b3b87b0826122fa978f79dceaebbd554489dad15510526"
+      },
+      {
+        "time": "2026-09-28T00:00:00+00:00",
+        "candidate_c": 22.4,
+        "resolver_c": 22.0,
+        "candidate_contract": 22,
+        "resolver_contract": 22,
+        "match": true,
+        "body_sha256": "be5ad2e0d406977644ce7a9db69805094df101cb51b8bd5944002ddda48bb5b8"
+      },
+      {
+        "time": "2026-09-28T00:30:00+00:00",
+        "candidate_c": 23.3,
+        "resolver_c": 23.0,
+        "candidate_contract": 23,
+        "resolver_contract": 23,
+        "match": true,
+        "body_sha256": "be5ad2e0d406977644ce7a9db69805094df101cb51b8bd5944002ddda48bb5b8"
+      },
+      {
+        "time": "2026-09-28T01:00:00+00:00",
+        "candidate_c": 23.5,
+        "resolver_c": 24.0,
+        "candidate_contract": 24,
+        "resolver_contract": 24,
+        "match": true,
+        "body_sha256": "be5ad2e0d406977644ce7a9db69805094df101cb51b8bd5944002ddda48bb5b8"
+      },
+      {
+        "time": "2026-09-28T01:30:00+00:00",
+        "candidate_c": 24.1,
+        "resolver_c": 24.0,
+        "candidate_contract": 24,
+        "resolver_contract": 24,
+        "match": true,
+        "body_sha256": "be5ad2e0d406977644ce7a9db69805094df101cb51b8bd5944002ddda48bb5b8"
+      },
+      {
+        "time": "2026-09-28T02:00:00+00:00",
+        "candidate_c": 23.5,
+        "resolver_c": 24.0,
+        "candidate_contract": 24,
+        "resolver_contract": 24,
+        "match": true,
+        "body_sha256": "be5ad2e0d406977644ce7a9db69805094df101cb51b8bd5944002ddda48bb5b8"
+      },
+      {
+        "time": "2026-09-28T02:30:00+00:00",
+        "candidate_c": 25.5,
+        "resolver_c": 26.0,
+        "candidate_contract": 26,
+        "resolver_contract": 26,
+        "match": true,
+        "body_sha256": "be5ad2e0d406977644ce7a9db69805094df101cb51b8bd5944002ddda48bb5b8"
+      },
+      {
+        "time": "2026-09-28T03:00:00+00:00",
+        "candidate_c": 24.8,
+        "resolver_c": 25.0,
+        "candidate_contract": 25,
+        "resolver_contract": 25,
+        "match": true,
+        "body_sha256": "f9a411e1513dba241d196f006f00eb69c0f19743a968c58b9ed9d1f26e612913"
+      },
+      {
+        "time": "2026-09-28T03:30:00+00:00",
+        "candidate_c": 25.8,
+        "resolver_c": 26.0,
+        "candidate_contract": 26,
+        "resolver_contract": 26,
+        "match": true,
+        "body_sha256": "f9a411e1513dba241d196f006f00eb69c0f19743a968c58b9ed9d1f26e612913"
+      },
+      {
+        "time": "2026-09-28T04:00:00+00:00",
+        "candidate_c": 25.3,
+        "resolver_c": 25.0,
+        "candidate_contract": 25,
+        "resolver_contract": 25,
+        "match": true,
+        "body_sha256": "f9a411e1513dba241d196f006f00eb69c0f19743a968c58b9ed9d1f26e612913"
+      },
+      {
+        "time": "2026-09-28T04:30:00+00:00",
+        "candidate_c": 24.7,
+        "resolver_c": 25.0,
+        "candidate_contract": 25,
+        "resolver_contract": 25,
+        "match": true,
+        "body_sha256": "f9a411e1513dba241d196f006f00eb69c0f19743a968c58b9ed9d1f26e612913"
+      },
+      {
+        "time": "2026-09-28T05:00:00+00:00",
+        "candidate_c": 25.1,
+        "resolver_c": 25.0,
+        "candidate_contract": 25,
+        "resolver_contract": 25,
+        "match": true,
+        "body_sha256": "f9a411e1513dba241d196f006f00eb69c0f19743a968c58b9ed9d1f26e612913"
+      },
+      {
+        "time": "2026-09-28T05:30:00+00:00",
+        "candidate_c": 25.6,
+        "resolver_c": 26.0,
+        "candidate_contract": 26,
+        "resolver_contract": 26,
+        "match": true,
+        "body_sha256": "f9a411e1513dba241d196f006f00eb69c0f19743a968c58b9ed9d1f26e612913"
+      },
+      {
+        "time": "2026-09-28T06:00:00+00:00",
+        "candidate_c": 25.1,
+        "resolver_c": 25.0,
+        "candidate_contract": 25,
+        "resolver_contract": 25,
+        "match": true,
+        "body_sha256": "369eb05b212a3a9956d8230eb7a9ede6595a4e87408acc9be516082a08e733fb"
+      },
+      {
+        "time": "2026-09-28T06:30:00+00:00",
+        "candidate_c": 25.3,
+        "resolver_c": 25.0,
+        "candidate_contract": 25,
+        "resolver_contract": 25,
+        "match": true,
+        "body_sha256": "369eb05b212a3a9956d8230eb7a9ede6595a4e87408acc9be516082a08e733fb"
+      },
+      {
+        "time": "2026-09-28T07:00:00+00:00",
+        "candidate_c": 24.5,
+        "resolver_c": 25.0,
+        "candidate_contract": 25,
+        "resolver_contract": 25,
+        "match": true,
+        "body_sha256": "369eb05b212a3a9956d8230eb7a9ede6595a4e87408acc9be516082a08e733fb"
+      },
+      {
+        "time": "2026-09-28T07:30:00+00:00",
+        "candidate_c": 24.5,
+        "resolver_c": 25.0,
+        "candidate_contract": 25,
+        "resolver_contract": 25,
+        "match": true,
+        "body_sha256": "369eb05b212a3a9956d8230eb7a9ede6595a4e87408acc9be516082a08e733fb"
+      },
+      {
+        "time": "2026-09-28T08:00:00+00:00",
+        "candidate_c": 24.9,
+        "resolver_c": 25.0,
+        "candidate_contract": 25,
+        "resolver_contract": 25,
+        "match": true,
+        "body_sha256": "369eb05b212a3a9956d8230eb7a9ede6595a4e87408acc9be516082a08e733fb"
+      },
+      {
+        "time": "2026-09-28T08:30:00+00:00",
+        "candidate_c": 24.9,
+        "resolver_c": 25.0,
+        "candidate_contract": 25,
+        "resolver_contract": 25,
+        "match": true,
+        "body_sha256": "369eb05b212a3a9956d8230eb7a9ede6595a4e87408acc9be516082a08e733fb"
+      },
+      {
+        "time": "2026-09-28T09:00:00+00:00",
+        "candidate_c": 24.1,
+        "resolver_c": 24.0,
+        "candidate_contract": 24,
+        "resolver_contract": 24,
+        "match": true,
+        "body_sha256": "b11479ddb94ae64d02b7d5fcc17a389a70275a387f794f4ed16d8e07282c4565"
+      },
+      {
+        "time": "2026-09-28T09:30:00+00:00",
+        "candidate_c": 23.3,
+        "resolver_c": 23.0,
+        "candidate_contract": 23,
+        "resolver_contract": 23,
+        "match": true,
+        "body_sha256": "b11479ddb94ae64d02b7d5fcc17a389a70275a387f794f4ed16d8e07282c4565"
+      },
+      {
+        "time": "2026-09-28T10:00:00+00:00",
+        "candidate_c": 23.3,
+        "resolver_c": 23.0,
+        "candidate_contract": 23,
+        "resolver_contract": 23,
+        "match": true,
+        "body_sha256": "b11479ddb94ae64d02b7d5fcc17a389a70275a387f794f4ed16d8e07282c4565"
+      },
+      {
+        "time": "2026-09-28T10:30:00+00:00",
+        "candidate_c": 23.1,
+        "resolver_c": 23.0,
+        "candidate_contract": 23,
+        "resolver_contract": 23,
+        "match": true,
+        "body_sha256": "b11479ddb94ae64d02b7d5fcc17a389a70275a387f794f4ed16d8e07282c4565"
+      },
+      {
+        "time": "2026-09-28T11:00:00+00:00",
+        "candidate_c": 23.0,
+        "resolver_c": 23.0,
+        "candidate_contract": 23,
+        "resolver_contract": 23,
+        "match": true,
+        "body_sha256": "b11479ddb94ae64d02b7d5fcc17a389a70275a387f794f4ed16d8e07282c4565"
+      },
+      {
+        "time": "2026-09-28T11:30:00+00:00",
+        "candidate_c": 22.7,
+        "resolver_c": 23.0,
+        "candidate_contract": 23,
+        "resolver_contract": 23,
+        "match": true,
+        "body_sha256": "b11479ddb94ae64d02b7d5fcc17a389a70275a387f794f4ed16d8e07282c4565"
+      },
+      {
+        "time": "2026-09-28T12:00:00+00:00",
+        "candidate_c": 23.0,
+        "resolver_c": 23.0,
+        "candidate_contract": 23,
+        "resolver_contract": 23,
+        "match": true,
+        "body_sha256": "aaa3d2480321e52477545363345a85ca78b2a55c7ce30cbdfef9d146e2f93a1f"
+      },
+      {
+        "time": "2026-09-28T12:30:00+00:00",
+        "candidate_c": 22.5,
+        "resolver_c": 23.0,
+        "candidate_contract": 23,
+        "resolver_contract": 23,
+        "match": true,
+        "body_sha256": "aaa3d2480321e52477545363345a85ca78b2a55c7ce30cbdfef9d146e2f93a1f"
+      },
+      {
+        "time": "2026-09-28T13:00:00+00:00",
+        "candidate_c": 22.6,
+        "resolver_c": 23.0,
+        "candidate_contract": 23,
+        "resolver_contract": 23,
+        "match": true,
+        "body_sha256": "aaa3d2480321e52477545363345a85ca78b2a55c7ce30cbdfef9d146e2f93a1f"
+      },
+      {
+        "time": "2026-09-28T13:30:00+00:00",
+        "candidate_c": 23.1,
+        "resolver_c": 23.0,
+        "candidate_contract": 23,
+        "resolver_contract": 23,
+        "match": true,
+        "body_sha256": "aaa3d2480321e52477545363345a85ca78b2a55c7ce30cbdfef9d146e2f93a1f"
+      },
+      {
+        "time": "2026-09-28T14:00:00+00:00",
+        "candidate_c": 22.8,
+        "resolver_c": 23.0,
+        "candidate_contract": 23,
+        "resolver_contract": 23,
+        "match": true,
+        "body_sha256": "aaa3d2480321e52477545363345a85ca78b2a55c7ce30cbdfef9d146e2f93a1f"
+      },
+      {
+        "time": "2026-09-28T14:30:00+00:00",
+        "candidate_c": 22.7,
+        "resolver_c": 23.0,
+        "candidate_contract": 23,
+        "resolver_contract": 23,
+        "match": true,
+        "body_sha256": "aaa3d2480321e52477545363345a85ca78b2a55c7ce30cbdfef9d146e2f93a1f"
+      },
+      {
+        "time": "2026-09-28T15:00:00+00:00",
+        "candidate_c": 22.5,
+        "resolver_c": 23.0,
+        "candidate_contract": 23,
+        "resolver_contract": 23,
+        "match": true,
+        "body_sha256": "d5f37bcc5c8cbb1bac54d97e6e22c3f54735fe232c4f45939d1b087f20289407"
+      },
+      {
+        "time": "2026-09-28T15:30:00+00:00",
+        "candidate_c": 22.7,
+        "resolver_c": 23.0,
+        "candidate_contract": 23,
+        "resolver_contract": 23,
+        "match": true,
+        "body_sha256": "d5f37bcc5c8cbb1bac54d97e6e22c3f54735fe232c4f45939d1b087f20289407"
+      },
+      {
+        "time": "2026-09-28T16:00:00+00:00",
+        "candidate_c": 22.5,
+        "resolver_c": 23.0,
+        "candidate_contract": 23,
+        "resolver_contract": 23,
+        "match": true,
+        "body_sha256": "d5f37bcc5c8cbb1bac54d97e6e22c3f54735fe232c4f45939d1b087f20289407"
+      },
+      {
+        "time": "2026-09-28T16:30:00+00:00",
+        "candidate_c": 22.2,
+        "resolver_c": 22.0,
+        "candidate_contract": 22,
+        "resolver_contract": 22,
+        "match": true,
+        "body_sha256": "d5f37bcc5c8cbb1bac54d97e6e22c3f54735fe232c4f45939d1b087f20289407"
+      },
+      {
+        "time": "2026-09-28T17:00:00+00:00",
+        "candidate_c": 22.0,
+        "resolver_c": 22.0,
+        "candidate_contract": 22,
+        "resolver_contract": 22,
+        "match": true,
+        "body_sha256": "d5f37bcc5c8cbb1bac54d97e6e22c3f54735fe232c4f45939d1b087f20289407"
+      },
+      {
+        "time": "2026-09-28T17:30:00+00:00",
+        "candidate_c": 22.3,
+        "resolver_c": 22.0,
+        "candidate_contract": 22,
+        "resolver_contract": 22,
+        "match": true,
+        "body_sha256": "d5f37bcc5c8cbb1bac54d97e6e22c3f54735fe232c4f45939d1b087f20289407"
+      },
+      {
+        "time": "2026-09-28T18:00:00+00:00",
+        "candidate_c": 22.2,
+        "resolver_c": 22.0,
+        "candidate_contract": 22,
+        "resolver_contract": 22,
+        "match": true,
+        "body_sha256": "d7cec39598cc3e22b14cabbfd8f5e21b7db3e90ae937621f90e8ef8c432a85b4"
+      },
+      {
+        "time": "2026-09-28T18:30:00+00:00",
+        "candidate_c": 22.3,
+        "resolver_c": 22.0,
+        "candidate_contract": 22,
+        "resolver_contract": 22,
+        "match": true,
+        "body_sha256": "d7cec39598cc3e22b14cabbfd8f5e21b7db3e90ae937621f90e8ef8c432a85b4"
+      },
+      {
+        "time": "2026-09-28T19:00:00+00:00",
+        "candidate_c": 22.3,
+        "resolver_c": 22.0,
+        "candidate_contract": 22,
+        "resolver_contract": 22,
+        "match": true,
+        "body_sha256": "d7cec39598cc3e22b14cabbfd8f5e21b7db3e90ae937621f90e8ef8c432a85b4"
+      },
+      {
+        "time": "2026-09-28T19:30:00+00:00",
+        "candidate_c": 22.3,
+        "resolver_c": 22.0,
+        "candidate_contract": 22,
+        "resolver_contract": 22,
+        "match": true,
+        "body_sha256": "d7cec39598cc3e22b14cabbfd8f5e21b7db3e90ae937621f90e8ef8c432a85b4"
+      },
+      {
+        "time": "2026-09-28T20:00:00+00:00",
+        "candidate_c": 22.3,
+        "resolver_c": 22.0,
+        "candidate_contract": 22,
+        "resolver_contract": 22,
+        "match": true,
+        "body_sha256": "d7cec39598cc3e22b14cabbfd8f5e21b7db3e90ae937621f90e8ef8c432a85b4"
+      },
+      {
+        "time": "2026-09-28T20:30:00+00:00",
+        "candidate_c": 22.4,
+        "resolver_c": 22.0,
+        "candidate_contract": 22,
+        "resolver_contract": 22,
+        "match": true,
+        "body_sha256": "d7cec39598cc3e22b14cabbfd8f5e21b7db3e90ae937621f90e8ef8c432a85b4"
+      },
+      {
+        "time": "2026-09-28T21:00:00+00:00",
+        "candidate_c": 22.5,
+        "resolver_c": 23.0,
+        "candidate_contract": 23,
+        "resolver_contract": 23,
+        "match": true,
+        "body_sha256": "f087a9c1bb70f05554ad65044de7b710425ff295a8f95c87c059ff55e6d1798e"
+      },
+      {
+        "time": "2026-09-28T21:30:00+00:00",
+        "candidate_c": 22.4,
+        "resolver_c": 22.0,
+        "candidate_contract": 22,
+        "resolver_contract": 22,
+        "match": true,
+        "body_sha256": "f087a9c1bb70f05554ad65044de7b710425ff295a8f95c87c059ff55e6d1798e"
+      },
+      {
+        "time": "2026-09-28T22:00:00+00:00",
+        "candidate_c": 21.6,
+        "resolver_c": 22.0,
+        "candidate_contract": 22,
+        "resolver_contract": 22,
+        "match": true,
+        "body_sha256": "f087a9c1bb70f05554ad65044de7b710425ff295a8f95c87c059ff55e6d1798e"
+      },
+      {
+        "time": "2026-09-28T22:30:00+00:00",
+        "candidate_c": 21.0,
+        "resolver_c": 21.0,
+        "candidate_contract": 21,
+        "resolver_contract": 21,
+        "match": true,
+        "body_sha256": "f087a9c1bb70f05554ad65044de7b710425ff295a8f95c87c059ff55e6d1798e"
+      },
+      {
+        "time": "2026-09-28T23:00:00+00:00",
+        "candidate_c": 21.1,
+        "resolver_c": 21.0,
+        "candidate_contract": 21,
+        "resolver_contract": 21,
+        "match": true,
+        "body_sha256": "f087a9c1bb70f05554ad65044de7b710425ff295a8f95c87c059ff55e6d1798e"
+      },
+      {
+        "time": "2026-09-28T23:30:00+00:00",
+        "candidate_c": 20.9,
+        "resolver_c": 21.0,
+        "candidate_contract": 21,
+        "resolver_contract": 21,
+        "match": true,
+        "body_sha256": "f087a9c1bb70f05554ad65044de7b710425ff295a8f95c87c059ff55e6d1798e"
+      },
+      {
+        "time": "2026-09-29T00:00:00+00:00",
+        "candidate_c": 20.8,
+        "resolver_c": 21.0,
+        "candidate_contract": 21,
+        "resolver_contract": 21,
+        "match": true,
+        "body_sha256": "beb8debafd4d8e701774d1ddb8662b01573de82c62adb57bb76c29d102bdf9eb"
+      },
+      {
+        "time": "2026-09-29T00:30:00+00:00",
+        "candidate_c": 20.9,
+        "resolver_c": 21.0,
+        "candidate_contract": 21,
+        "resolver_contract": 21,
+        "match": true,
+        "body_sha256": "beb8debafd4d8e701774d1ddb8662b01573de82c62adb57bb76c29d102bdf9eb"
+      },
+      {
+        "time": "2026-09-29T01:00:00+00:00",
+        "candidate_c": 20.6,
+        "resolver_c": 21.0,
+        "candidate_contract": 21,
+        "resolver_contract": 21,
+        "match": true,
+        "body_sha256": "beb8debafd4d8e701774d1ddb8662b01573de82c62adb57bb76c29d102bdf9eb"
+      },
+      {
+        "time": "2026-09-29T01:30:00+00:00",
+        "candidate_c": 20.9,
+        "resolver_c": 21.0,
+        "candidate_contract": 21,
+        "resolver_contract": 21,
+        "match": true,
+        "body_sha256": "beb8debafd4d8e701774d1ddb8662b01573de82c62adb57bb76c29d102bdf9eb"
+      },
+      {
+        "time": "2026-09-29T02:00:00+00:00",
+        "candidate_c": 20.8,
+        "resolver_c": 21.0,
+        "candidate_contract": 21,
+        "resolver_contract": 21,
+        "match": true,
+        "body_sha256": "beb8debafd4d8e701774d1ddb8662b01573de82c62adb57bb76c29d102bdf9eb"
+      },
+      {
+        "time": "2026-09-29T02:30:00+00:00",
+        "candidate_c": 20.4,
+        "resolver_c": 20.0,
+        "candidate_contract": 20,
+        "resolver_contract": 20,
+        "match": true,
+        "body_sha256": "beb8debafd4d8e701774d1ddb8662b01573de82c62adb57bb76c29d102bdf9eb"
+      },
+      {
+        "time": "2026-09-29T03:00:00+00:00",
+        "candidate_c": 20.2,
+        "resolver_c": 20.0,
+        "candidate_contract": 20,
+        "resolver_contract": 20,
+        "match": true,
+        "body_sha256": "9738664e35b915f4ad1096eb66d4bff277f18a6ff77a5a4c64d9f54e20b85544"
+      },
+      {
+        "time": "2026-09-29T03:30:00+00:00",
+        "candidate_c": 19.9,
+        "resolver_c": 20.0,
+        "candidate_contract": 20,
+        "resolver_contract": 20,
+        "match": true,
+        "body_sha256": "9738664e35b915f4ad1096eb66d4bff277f18a6ff77a5a4c64d9f54e20b85544"
+      },
+      {
+        "time": "2026-09-29T04:00:00+00:00",
+        "candidate_c": 20.2,
+        "resolver_c": 20.0,
+        "candidate_contract": 20,
+        "resolver_contract": 20,
+        "match": true,
+        "body_sha256": "9738664e35b915f4ad1096eb66d4bff277f18a6ff77a5a4c64d9f54e20b85544"
+      },
+      {
+        "time": "2026-09-29T04:30:00+00:00",
+        "candidate_c": 20.0,
+        "resolver_c": 20.0,
+        "candidate_contract": 20,
+        "resolver_contract": 20,
+        "match": true,
+        "body_sha256": "9738664e35b915f4ad1096eb66d4bff277f18a6ff77a5a4c64d9f54e20b85544"
+      },
+      {
+        "time": "2026-09-29T05:00:00+00:00",
+        "candidate_c": 20.2,
+        "resolver_c": 20.0,
+        "candidate_contract": 20,
+        "resolver_contract": 20,
+        "match": true,
+        "body_sha256": "9738664e35b915f4ad1096eb66d4bff277f18a6ff77a5a4c64d9f54e20b85544"
+      },
+      {
+        "time": "2026-09-29T05:30:00+00:00",
+        "candidate_c": 20.2,
+        "resolver_c": 20.0,
+        "candidate_contract": 20,
+        "resolver_contract": 20,
+        "match": true,
+        "body_sha256": "9738664e35b915f4ad1096eb66d4bff277f18a6ff77a5a4c64d9f54e20b85544"
+      },
+      {
+        "time": "2026-09-29T06:00:00+00:00",
+        "candidate_c": 20.3,
+        "resolver_c": 20.0,
+        "candidate_contract": 20,
+        "resolver_contract": 20,
+        "match": true,
+        "body_sha256": "4a4c6d4e3b59f66ddc48866a4b17587be20dde9ac5ad196cafc318c6d6ceb31f"
+      },
+      {
+        "time": "2026-09-29T06:30:00+00:00",
+        "candidate_c": 19.6,
+        "resolver_c": 20.0,
+        "candidate_contract": 20,
+        "resolver_contract": 20,
+        "match": true,
+        "body_sha256": "4a4c6d4e3b59f66ddc48866a4b17587be20dde9ac5ad196cafc318c6d6ceb31f"
+      },
+      {
+        "time": "2026-09-29T07:00:00+00:00",
+        "candidate_c": 19.6,
+        "resolver_c": 20.0,
+        "candidate_contract": 20,
+        "resolver_contract": 20,
+        "match": true,
+        "body_sha256": "4a4c6d4e3b59f66ddc48866a4b17587be20dde9ac5ad196cafc318c6d6ceb31f"
+      },
+      {
+        "time": "2026-09-29T07:30:00+00:00",
+        "candidate_c": 19.7,
+        "resolver_c": 20.0,
+        "candidate_contract": 20,
+        "resolver_contract": 20,
+        "match": true,
+        "body_sha256": "4a4c6d4e3b59f66ddc48866a4b17587be20dde9ac5ad196cafc318c6d6ceb31f"
+      },
+      {
+        "time": "2026-09-29T08:00:00+00:00",
+        "candidate_c": 20.0,
+        "resolver_c": 20.0,
+        "candidate_contract": 20,
+        "resolver_contract": 20,
+        "match": true,
+        "body_sha256": "4a4c6d4e3b59f66ddc48866a4b17587be20dde9ac5ad196cafc318c6d6ceb31f"
+      },
+      {
+        "time": "2026-09-29T08:30:00+00:00",
+        "candidate_c": 19.9,
+        "resolver_c": 20.0,
+        "candidate_contract": 20,
+        "resolver_contract": 20,
+        "match": true,
+        "body_sha256": "4a4c6d4e3b59f66ddc48866a4b17587be20dde9ac5ad196cafc318c6d6ceb31f"
+      },
+      {
+        "time": "2026-09-29T09:00:00+00:00",
+        "candidate_c": 20.0,
+        "resolver_c": 20.0,
+        "candidate_contract": 20,
+        "resolver_contract": 20,
+        "match": true,
+        "body_sha256": "6b8d7b69b2dabea7e8f89d6b7dac14973b09f04473755c63f3dbc51a9569e9bf"
+      },
+      {
+        "time": "2026-09-29T09:30:00+00:00",
+        "candidate_c": 19.2,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "6b8d7b69b2dabea7e8f89d6b7dac14973b09f04473755c63f3dbc51a9569e9bf"
+      },
+      {
+        "time": "2026-09-29T10:00:00+00:00",
+        "candidate_c": 19.0,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "6b8d7b69b2dabea7e8f89d6b7dac14973b09f04473755c63f3dbc51a9569e9bf"
+      },
+      {
+        "time": "2026-09-29T10:30:00+00:00",
+        "candidate_c": 18.8,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "6b8d7b69b2dabea7e8f89d6b7dac14973b09f04473755c63f3dbc51a9569e9bf"
+      },
+      {
+        "time": "2026-09-29T11:00:00+00:00",
+        "candidate_c": 19.1,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "6b8d7b69b2dabea7e8f89d6b7dac14973b09f04473755c63f3dbc51a9569e9bf"
+      },
+      {
+        "time": "2026-09-29T11:30:00+00:00",
+        "candidate_c": 18.7,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "6b8d7b69b2dabea7e8f89d6b7dac14973b09f04473755c63f3dbc51a9569e9bf"
+      },
+      {
+        "time": "2026-09-29T12:00:00+00:00",
+        "candidate_c": 18.2,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "d679879bc875328c59b0877be4ad2f7ce7f192465b3fc1910c069ddd328f3eed"
+      },
+      {
+        "time": "2026-09-29T12:30:00+00:00",
+        "candidate_c": 18.1,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "d679879bc875328c59b0877be4ad2f7ce7f192465b3fc1910c069ddd328f3eed"
+      },
+      {
+        "time": "2026-09-29T13:00:00+00:00",
+        "candidate_c": 17.9,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "d679879bc875328c59b0877be4ad2f7ce7f192465b3fc1910c069ddd328f3eed"
+      },
+      {
+        "time": "2026-09-29T13:30:00+00:00",
+        "candidate_c": 18.2,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "d679879bc875328c59b0877be4ad2f7ce7f192465b3fc1910c069ddd328f3eed"
+      },
+      {
+        "time": "2026-09-29T14:00:00+00:00",
+        "candidate_c": 17.9,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "d679879bc875328c59b0877be4ad2f7ce7f192465b3fc1910c069ddd328f3eed"
+      },
+      {
+        "time": "2026-09-29T14:30:00+00:00",
+        "candidate_c": 17.8,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "d679879bc875328c59b0877be4ad2f7ce7f192465b3fc1910c069ddd328f3eed"
+      },
+      {
+        "time": "2026-09-29T15:00:00+00:00",
+        "candidate_c": 17.6,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "74ecead69249d05f09f9d04df00a69362020f72533c484458a7563d4f74f033a"
+      },
+      {
+        "time": "2026-09-29T15:30:00+00:00",
+        "candidate_c": 17.6,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "74ecead69249d05f09f9d04df00a69362020f72533c484458a7563d4f74f033a"
+      },
+      {
+        "time": "2026-09-29T16:00:00+00:00",
+        "candidate_c": 17.6,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "74ecead69249d05f09f9d04df00a69362020f72533c484458a7563d4f74f033a"
+      },
+      {
+        "time": "2026-09-29T16:30:00+00:00",
+        "candidate_c": 17.6,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "74ecead69249d05f09f9d04df00a69362020f72533c484458a7563d4f74f033a"
+      },
+      {
+        "time": "2026-09-29T17:00:00+00:00",
+        "candidate_c": 17.7,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "74ecead69249d05f09f9d04df00a69362020f72533c484458a7563d4f74f033a"
+      },
+      {
+        "time": "2026-09-29T17:30:00+00:00",
+        "candidate_c": 17.7,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "74ecead69249d05f09f9d04df00a69362020f72533c484458a7563d4f74f033a"
+      },
+      {
+        "time": "2026-09-29T18:00:00+00:00",
+        "candidate_c": 17.8,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "dad064797ce693f9c1834b35e42cc40d461a78dfb70172256551fd7138fd400c"
+      },
+      {
+        "time": "2026-09-29T18:30:00+00:00",
+        "candidate_c": 18.0,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "dad064797ce693f9c1834b35e42cc40d461a78dfb70172256551fd7138fd400c"
+      },
+      {
+        "time": "2026-09-29T19:00:00+00:00",
+        "candidate_c": 18.4,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "dad064797ce693f9c1834b35e42cc40d461a78dfb70172256551fd7138fd400c"
+      },
+      {
+        "time": "2026-09-29T19:30:00+00:00",
+        "candidate_c": 18.5,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "dad064797ce693f9c1834b35e42cc40d461a78dfb70172256551fd7138fd400c"
+      },
+      {
+        "time": "2026-09-29T20:00:00+00:00",
+        "candidate_c": 18.5,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "dad064797ce693f9c1834b35e42cc40d461a78dfb70172256551fd7138fd400c"
+      },
+      {
+        "time": "2026-09-29T20:30:00+00:00",
+        "candidate_c": 18.6,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "dad064797ce693f9c1834b35e42cc40d461a78dfb70172256551fd7138fd400c"
+      },
+      {
+        "time": "2026-09-29T21:00:00+00:00",
+        "candidate_c": 18.6,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "564707ca398ebe4dcba6389936926ffa4628b770861854d5d2765da8c2e6868a"
+      },
+      {
+        "time": "2026-09-29T21:30:00+00:00",
+        "candidate_c": 18.6,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "564707ca398ebe4dcba6389936926ffa4628b770861854d5d2765da8c2e6868a"
+      },
+      {
+        "time": "2026-09-29T22:00:00+00:00",
+        "candidate_c": 18.7,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "564707ca398ebe4dcba6389936926ffa4628b770861854d5d2765da8c2e6868a"
+      },
+      {
+        "time": "2026-09-29T22:30:00+00:00",
+        "candidate_c": 18.8,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "564707ca398ebe4dcba6389936926ffa4628b770861854d5d2765da8c2e6868a"
+      },
+      {
+        "time": "2026-09-29T23:00:00+00:00",
+        "candidate_c": 18.8,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "564707ca398ebe4dcba6389936926ffa4628b770861854d5d2765da8c2e6868a"
+      },
+      {
+        "time": "2026-09-29T23:30:00+00:00",
+        "candidate_c": 18.9,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "564707ca398ebe4dcba6389936926ffa4628b770861854d5d2765da8c2e6868a"
+      },
+      {
+        "time": "2026-09-30T00:00:00+00:00",
+        "candidate_c": 18.7,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "4b513300e1e514fe51a71e8329a64d8ab52046a21c92a4b821182393bbb944d8"
+      },
+      {
+        "time": "2026-09-30T00:30:00+00:00",
+        "candidate_c": 19.0,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "4b513300e1e514fe51a71e8329a64d8ab52046a21c92a4b821182393bbb944d8"
+      },
+      {
+        "time": "2026-09-30T01:00:00+00:00",
+        "candidate_c": 19.3,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "4b513300e1e514fe51a71e8329a64d8ab52046a21c92a4b821182393bbb944d8"
+      },
+      {
+        "time": "2026-09-30T01:30:00+00:00",
+        "candidate_c": 19.6,
+        "resolver_c": 20.0,
+        "candidate_contract": 20,
+        "resolver_contract": 20,
+        "match": true,
+        "body_sha256": "4b513300e1e514fe51a71e8329a64d8ab52046a21c92a4b821182393bbb944d8"
+      },
+      {
+        "time": "2026-09-30T02:00:00+00:00",
+        "candidate_c": 19.5,
+        "resolver_c": 20.0,
+        "candidate_contract": 20,
+        "resolver_contract": 20,
+        "match": true,
+        "body_sha256": "4b513300e1e514fe51a71e8329a64d8ab52046a21c92a4b821182393bbb944d8"
+      },
+      {
+        "time": "2026-09-30T02:30:00+00:00",
+        "candidate_c": 19.4,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "4b513300e1e514fe51a71e8329a64d8ab52046a21c92a4b821182393bbb944d8"
+      },
+      {
+        "time": "2026-09-30T03:00:00+00:00",
+        "candidate_c": 19.9,
+        "resolver_c": 20.0,
+        "candidate_contract": 20,
+        "resolver_contract": 20,
+        "match": true,
+        "body_sha256": "7a48c7ab3511c9b3f2fe58f15759442f9a6b46606caa8b789cdd77a7a22c445c"
+      },
+      {
+        "time": "2026-09-30T03:30:00+00:00",
+        "candidate_c": 20.2,
+        "resolver_c": 20.0,
+        "candidate_contract": 20,
+        "resolver_contract": 20,
+        "match": true,
+        "body_sha256": "7a48c7ab3511c9b3f2fe58f15759442f9a6b46606caa8b789cdd77a7a22c445c"
+      },
+      {
+        "time": "2026-09-30T04:00:00+00:00",
+        "candidate_c": 19.5,
+        "resolver_c": 20.0,
+        "candidate_contract": 20,
+        "resolver_contract": 20,
+        "match": true,
+        "body_sha256": "7a48c7ab3511c9b3f2fe58f15759442f9a6b46606caa8b789cdd77a7a22c445c"
+      },
+      {
+        "time": "2026-09-30T04:30:00+00:00",
+        "candidate_c": 19.7,
+        "resolver_c": 20.0,
+        "candidate_contract": 20,
+        "resolver_contract": 20,
+        "match": true,
+        "body_sha256": "7a48c7ab3511c9b3f2fe58f15759442f9a6b46606caa8b789cdd77a7a22c445c"
+      },
+      {
+        "time": "2026-09-30T05:00:00+00:00",
+        "candidate_c": 19.4,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "7a48c7ab3511c9b3f2fe58f15759442f9a6b46606caa8b789cdd77a7a22c445c"
+      },
+      {
+        "time": "2026-09-30T05:30:00+00:00",
+        "candidate_c": 19.6,
+        "resolver_c": 20.0,
+        "candidate_contract": 20,
+        "resolver_contract": 20,
+        "match": true,
+        "body_sha256": "7a48c7ab3511c9b3f2fe58f15759442f9a6b46606caa8b789cdd77a7a22c445c"
+      },
+      {
+        "time": "2026-09-30T06:00:00+00:00",
+        "candidate_c": 19.6,
+        "resolver_c": 20.0,
+        "candidate_contract": 20,
+        "resolver_contract": 20,
+        "match": true,
+        "body_sha256": "3f32f1e0cf5d97a040e74bb31c55261fb1da9c8cde5cb9fba9f84e55e6edeffe"
+      },
+      {
+        "time": "2026-09-30T06:30:00+00:00",
+        "candidate_c": 19.8,
+        "resolver_c": 20.0,
+        "candidate_contract": 20,
+        "resolver_contract": 20,
+        "match": true,
+        "body_sha256": "3f32f1e0cf5d97a040e74bb31c55261fb1da9c8cde5cb9fba9f84e55e6edeffe"
+      },
+      {
+        "time": "2026-09-30T07:00:00+00:00",
+        "candidate_c": 19.4,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "3f32f1e0cf5d97a040e74bb31c55261fb1da9c8cde5cb9fba9f84e55e6edeffe"
+      },
+      {
+        "time": "2026-09-30T07:30:00+00:00",
+        "candidate_c": 19.0,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "3f32f1e0cf5d97a040e74bb31c55261fb1da9c8cde5cb9fba9f84e55e6edeffe"
+      },
+      {
+        "time": "2026-09-30T08:00:00+00:00",
+        "candidate_c": 18.7,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "3f32f1e0cf5d97a040e74bb31c55261fb1da9c8cde5cb9fba9f84e55e6edeffe"
+      },
+      {
+        "time": "2026-09-30T08:30:00+00:00",
+        "candidate_c": 18.8,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "3f32f1e0cf5d97a040e74bb31c55261fb1da9c8cde5cb9fba9f84e55e6edeffe"
+      },
+      {
+        "time": "2026-09-30T09:00:00+00:00",
+        "candidate_c": 18.6,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "841baae2d2e5be92e2bd8705800e1a686d9f9c53502c184a43408b3a9392b1ff"
+      },
+      {
+        "time": "2026-09-30T09:30:00+00:00",
+        "candidate_c": 18.5,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "841baae2d2e5be92e2bd8705800e1a686d9f9c53502c184a43408b3a9392b1ff"
+      },
+      {
+        "time": "2026-09-30T10:00:00+00:00",
+        "candidate_c": 18.5,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "841baae2d2e5be92e2bd8705800e1a686d9f9c53502c184a43408b3a9392b1ff"
+      },
+      {
+        "time": "2026-09-30T10:30:00+00:00",
+        "candidate_c": 18.2,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "841baae2d2e5be92e2bd8705800e1a686d9f9c53502c184a43408b3a9392b1ff"
+      },
+      {
+        "time": "2026-09-30T11:00:00+00:00",
+        "candidate_c": 18.1,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "841baae2d2e5be92e2bd8705800e1a686d9f9c53502c184a43408b3a9392b1ff"
+      },
+      {
+        "time": "2026-09-30T11:30:00+00:00",
+        "candidate_c": 18.2,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "841baae2d2e5be92e2bd8705800e1a686d9f9c53502c184a43408b3a9392b1ff"
+      },
+      {
+        "time": "2026-09-30T12:00:00+00:00",
+        "candidate_c": 18.1,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "ac0855423ca3b43dcae90650d6888a99f257b3cfd6316a21d0da647db37cbe38"
+      },
+      {
+        "time": "2026-09-30T12:30:00+00:00",
+        "candidate_c": 17.9,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "ac0855423ca3b43dcae90650d6888a99f257b3cfd6316a21d0da647db37cbe38"
+      },
+      {
+        "time": "2026-09-30T13:00:00+00:00",
+        "candidate_c": 18.0,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "ac0855423ca3b43dcae90650d6888a99f257b3cfd6316a21d0da647db37cbe38"
+      },
+      {
+        "time": "2026-09-30T13:30:00+00:00",
+        "candidate_c": 17.9,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "ac0855423ca3b43dcae90650d6888a99f257b3cfd6316a21d0da647db37cbe38"
+      },
+      {
+        "time": "2026-09-30T14:00:00+00:00",
+        "candidate_c": 18.0,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "ac0855423ca3b43dcae90650d6888a99f257b3cfd6316a21d0da647db37cbe38"
+      },
+      {
+        "time": "2026-09-30T14:30:00+00:00",
+        "candidate_c": 18.1,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "ac0855423ca3b43dcae90650d6888a99f257b3cfd6316a21d0da647db37cbe38"
+      },
+      {
+        "time": "2026-09-30T15:00:00+00:00",
+        "candidate_c": 18.1,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "4084e41daf142d3bfcca07d68cf3360b31f273a33d57866ad2f47d064ca5c698"
+      },
+      {
+        "time": "2026-09-30T15:30:00+00:00",
+        "candidate_c": 18.0,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "4084e41daf142d3bfcca07d68cf3360b31f273a33d57866ad2f47d064ca5c698"
+      },
+      {
+        "time": "2026-09-30T16:00:00+00:00",
+        "candidate_c": 18.1,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "4084e41daf142d3bfcca07d68cf3360b31f273a33d57866ad2f47d064ca5c698"
+      },
+      {
+        "time": "2026-09-30T16:30:00+00:00",
+        "candidate_c": 18.5,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "4084e41daf142d3bfcca07d68cf3360b31f273a33d57866ad2f47d064ca5c698"
+      }
+    ],
+    "first_availability": "UNKNOWN_HISTORICAL_FETCH_NOT_PUBLICATION"
+  },
+  {
+    "city": "Toronto",
+    "channel": "eccc_swob",
+    "n_pairs": 51,
+    "n_exact": 51,
+    "mismatches": [],
+    "pairs": [
+      {
+        "time": "2026-09-27T18:00:00+00:00",
+        "candidate_c": 23.4,
+        "resolver_c": 23.0,
+        "candidate_contract": 23,
+        "resolver_contract": 23,
+        "match": true,
+        "body_sha256": "c528d994c7593b752760e4a6dec7e7931c72ca9d65a2ecd1d7bfe2264636f34a"
+      },
+      {
+        "time": "2026-09-27T19:00:00+00:00",
+        "candidate_c": 23.7,
+        "resolver_c": 24.0,
+        "candidate_contract": 24,
+        "resolver_contract": 24,
+        "match": true,
+        "body_sha256": "61d506e8fb32a93a1da5c9fda5a01636e51742c2dc220233aaa5ae2863ff34c6"
+      },
+      {
+        "time": "2026-09-27T20:00:00+00:00",
+        "candidate_c": 23.6,
+        "resolver_c": 24.0,
+        "candidate_contract": 24,
+        "resolver_contract": 24,
+        "match": true,
+        "body_sha256": "e57bbcd220067fb9ce4dfae2929539ee115368362f9d48bb7b6f8f01f1466212"
+      },
+      {
+        "time": "2026-09-27T21:00:00+00:00",
+        "candidate_c": 22.4,
+        "resolver_c": 22.0,
+        "candidate_contract": 22,
+        "resolver_contract": 22,
+        "match": true,
+        "body_sha256": "eb32c1e1f698718ebca8f9887b72cbf9613374f53dea54ed742249cbb344d30c"
+      },
+      {
+        "time": "2026-09-27T22:00:00+00:00",
+        "candidate_c": 21.9,
+        "resolver_c": 22.0,
+        "candidate_contract": 22,
+        "resolver_contract": 22,
+        "match": true,
+        "body_sha256": "12933ba9c5880b410d06dc6bb1afe7e3b05cb2dc7d76d2e0db81f026706a431f"
+      },
+      {
+        "time": "2026-09-27T23:00:00+00:00",
+        "candidate_c": 21.9,
+        "resolver_c": 22.0,
+        "candidate_contract": 22,
+        "resolver_contract": 22,
+        "match": true,
+        "body_sha256": "3d146d1596135d4c7960bf8f94630e57b629dfad3f980342ba1622820f3ca7ca"
+      },
+      {
+        "time": "2026-09-28T00:00:00+00:00",
+        "candidate_c": 20.3,
+        "resolver_c": 20.0,
+        "candidate_contract": 20,
+        "resolver_contract": 20,
+        "match": true,
+        "body_sha256": "a87b4f77d122581e8aac9511eab833a9311bbbba0382b4f41826861f1f756d47"
+      },
+      {
+        "time": "2026-09-28T01:00:00+00:00",
+        "candidate_c": 19.5,
+        "resolver_c": 20.0,
+        "candidate_contract": 20,
+        "resolver_contract": 20,
+        "match": true,
+        "body_sha256": "858dc92d3f1d33734306480591db7be8f166b90a670bd8edbe2c2c5974a3421f"
+      },
+      {
+        "time": "2026-09-28T02:00:00+00:00",
+        "candidate_c": 19.4,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "6253c474dbb3f2a393de969d18467e7ac9d4bdf70aa722b32dd45562464b31f4"
+      },
+      {
+        "time": "2026-09-28T02:26:00+00:00",
+        "candidate_c": 17.6,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "cefd1ce021477a543b9fb4e17fca1c089f8355f5c52834af4a36679d5a0b5ad1"
+      },
+      {
+        "time": "2026-09-28T03:00:00+00:00",
+        "candidate_c": 16.4,
+        "resolver_c": 16.0,
+        "candidate_contract": 16,
+        "resolver_contract": 16,
+        "match": true,
+        "body_sha256": "86cf11013994d8a6733c804e532b1e07320b0b5964d9448d7ed7ad6214602a1e"
+      },
+      {
+        "time": "2026-09-28T04:00:00+00:00",
+        "candidate_c": 16.0,
+        "resolver_c": 16.0,
+        "candidate_contract": 16,
+        "resolver_contract": 16,
+        "match": true,
+        "body_sha256": "bba897d53d44e5a03002a8122a722e861318c0538d97764c68bf3de40f0946a6"
+      },
+      {
+        "time": "2026-09-28T05:00:00+00:00",
+        "candidate_c": 16.0,
+        "resolver_c": 16.0,
+        "candidate_contract": 16,
+        "resolver_contract": 16,
+        "match": true,
+        "body_sha256": "65741793ac5d4975b6250c08b18d176ea91d4b6446c45852a82458312e197b50"
+      },
+      {
+        "time": "2026-09-28T06:00:00+00:00",
+        "candidate_c": 16.1,
+        "resolver_c": 16.0,
+        "candidate_contract": 16,
+        "resolver_contract": 16,
+        "match": true,
+        "body_sha256": "6bba7a6f9100c17968da511e7370f1ca8b846d75f5657fdef63782152ce5c1a6"
+      },
+      {
+        "time": "2026-09-28T07:00:00+00:00",
+        "candidate_c": 16.4,
+        "resolver_c": 16.0,
+        "candidate_contract": 16,
+        "resolver_contract": 16,
+        "match": true,
+        "body_sha256": "9033d3e1d27e9ac281f0319bb0fdbeb51a9b7365059af37d08d50a88624c607e"
+      },
+      {
+        "time": "2026-09-28T08:00:00+00:00",
+        "candidate_c": 16.2,
+        "resolver_c": 16.0,
+        "candidate_contract": 16,
+        "resolver_contract": 16,
+        "match": true,
+        "body_sha256": "8506846e6979f2d6ddadfc487c7f6ee479ed76b8829968f4abb629fe605eec48"
+      },
+      {
+        "time": "2026-09-28T09:00:00+00:00",
+        "candidate_c": 15.8,
+        "resolver_c": 16.0,
+        "candidate_contract": 16,
+        "resolver_contract": 16,
+        "match": true,
+        "body_sha256": "892e96c7bdb23e91e727d1483eb02307a60ae7ecf0c19d0b5104b04d13e7ad4e"
+      },
+      {
+        "time": "2026-09-28T10:00:00+00:00",
+        "candidate_c": 15.7,
+        "resolver_c": 16.0,
+        "candidate_contract": 16,
+        "resolver_contract": 16,
+        "match": true,
+        "body_sha256": "922ae9ef702ddcb99ff1a2fe3ece59d520fc819ea714c5238389b71f63320310"
+      },
+      {
+        "time": "2026-09-28T11:00:00+00:00",
+        "candidate_c": 15.4,
+        "resolver_c": 15.0,
+        "candidate_contract": 15,
+        "resolver_contract": 15,
+        "match": true,
+        "body_sha256": "6893b002e6d1bf03c03031b74276a960a9f0f04c0896984efa2fbd35ce3d9b05"
+      },
+      {
+        "time": "2026-09-28T12:00:00+00:00",
+        "candidate_c": 15.7,
+        "resolver_c": 16.0,
+        "candidate_contract": 16,
+        "resolver_contract": 16,
+        "match": true,
+        "body_sha256": "8787492690352fc079e0349c492607944ea0c55f03b21be6259b01c8ddde6514"
+      },
+      {
+        "time": "2026-09-28T13:00:00+00:00",
+        "candidate_c": 15.9,
+        "resolver_c": 16.0,
+        "candidate_contract": 16,
+        "resolver_contract": 16,
+        "match": true,
+        "body_sha256": "79b1015bce44f0898549e362b0ab7df9c95c978db4409a35b2ac24ffdc562265"
+      },
+      {
+        "time": "2026-09-28T14:00:00+00:00",
+        "candidate_c": 17.0,
+        "resolver_c": 17.0,
+        "candidate_contract": 17,
+        "resolver_contract": 17,
+        "match": true,
+        "body_sha256": "1dea7c32e797436927d59c1b84126659eac19b6a2618ddcbfb330fd0e8f00b44"
+      },
+      {
+        "time": "2026-09-28T15:00:00+00:00",
+        "candidate_c": 17.9,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "d7f33b6d1f03aa4ceb6776f4121b862a38bb99b4e3ab683c8bc5851d780452f9"
+      },
+      {
+        "time": "2026-09-28T16:00:00+00:00",
+        "candidate_c": 18.8,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "eb6c4841be1b910a07e0b46f225edb929cbcc1f6fa240ac2b78e5bcaade9c07a"
+      },
+      {
+        "time": "2026-09-28T17:00:00+00:00",
+        "candidate_c": 19.6,
+        "resolver_c": 20.0,
+        "candidate_contract": 20,
+        "resolver_contract": 20,
+        "match": true,
+        "body_sha256": "668935edfd7e8b1acf115fdcfdf0e15614dc0e0f17f2dcb200834504eca01b25"
+      },
+      {
+        "time": "2026-09-28T18:00:00+00:00",
+        "candidate_c": 21.3,
+        "resolver_c": 21.0,
+        "candidate_contract": 21,
+        "resolver_contract": 21,
+        "match": true,
+        "body_sha256": "432c363f4b7fe7188e393ad3f3a7d282ec3cf81eac574886b1d018a0944f42ba"
+      },
+      {
+        "time": "2026-09-28T19:00:00+00:00",
+        "candidate_c": 20.8,
+        "resolver_c": 21.0,
+        "candidate_contract": 21,
+        "resolver_contract": 21,
+        "match": true,
+        "body_sha256": "b9b8a4de56f0fe81a594b6e01da8ba5b98cbad7b67e24656df36aecede0bb0eb"
+      },
+      {
+        "time": "2026-09-28T20:00:00+00:00",
+        "candidate_c": 18.9,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "7c790c7a28a329bfaf8a660eda6b0f5a6cadbffe2944caacac78345739ccb867"
+      },
+      {
+        "time": "2026-09-28T21:00:00+00:00",
+        "candidate_c": 18.4,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "06d4e8ff131fa1d34e369e38cb3a663bcec9300d1af351b307a76b84e918375d"
+      },
+      {
+        "time": "2026-09-28T22:00:00+00:00",
+        "candidate_c": 18.1,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "595394453273f931a6aebb8b47b8a220ff6de72256d888121dd315883afc87ae"
+      },
+      {
+        "time": "2026-09-28T23:00:00+00:00",
+        "candidate_c": 17.9,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "54a4c60a7c123bb65bb1f248da18eed1f7a6416275f93327336ec45e2a87a00f"
+      },
+      {
+        "time": "2026-09-30T00:00:00+00:00",
+        "candidate_c": 18.1,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "220db7d5ae7cf540ddcd43ef0a539bba795eba6c75b0dedca48adda52fcc8439"
+      },
+      {
+        "time": "2026-09-30T01:00:00+00:00",
+        "candidate_c": 17.9,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "44cb49e3961dc7e4a7c1830c46f6580d876464205f02522fda4b4b440b3a6f88"
+      },
+      {
+        "time": "2026-09-30T02:00:00+00:00",
+        "candidate_c": 17.4,
+        "resolver_c": 17.0,
+        "candidate_contract": 17,
+        "resolver_contract": 17,
+        "match": true,
+        "body_sha256": "c123498753dd34614d7c9cbefbf75352d1a0302ce2fbe1c7c416b5559daffded"
+      },
+      {
+        "time": "2026-09-30T03:00:00+00:00",
+        "candidate_c": 17.6,
+        "resolver_c": 18.0,
+        "candidate_contract": 18,
+        "resolver_contract": 18,
+        "match": true,
+        "body_sha256": "04c1b7c4bb41a41b60ca77f17b7c61d4a29bcf7d98b19d5f94784da74ae18fc8"
+      },
+      {
+        "time": "2026-09-30T04:00:00+00:00",
+        "candidate_c": 16.6,
+        "resolver_c": 17.0,
+        "candidate_contract": 17,
+        "resolver_contract": 17,
+        "match": true,
+        "body_sha256": "f2bb37da7808112249ac5abd61a66b49bc410737ff3356cf190762269a547dcb"
+      },
+      {
+        "time": "2026-09-30T05:00:00+00:00",
+        "candidate_c": 16.5,
+        "resolver_c": 17.0,
+        "candidate_contract": 17,
+        "resolver_contract": 17,
+        "match": true,
+        "body_sha256": "a06d86880cdff99a856807fa8d4be79b265071aa3980f192c0d436d1ddde4c11"
+      },
+      {
+        "time": "2026-09-30T06:00:00+00:00",
+        "candidate_c": 16.1,
+        "resolver_c": 16.0,
+        "candidate_contract": 16,
+        "resolver_contract": 16,
+        "match": true,
+        "body_sha256": "7a0d4d73b95dda3b67b8d151ea345e9014eb6131568c388fc6f4f4040a98101d"
+      },
+      {
+        "time": "2026-09-30T06:12:00+00:00",
+        "candidate_c": 16.1,
+        "resolver_c": 16.0,
+        "candidate_contract": 16,
+        "resolver_contract": 16,
+        "match": true,
+        "body_sha256": "5e17386c683c9909594267ae2d19d12650b5ddd314dcab6be10aeddb13bbe8ac"
+      },
+      {
+        "time": "2026-09-30T07:00:00+00:00",
+        "candidate_c": 15.4,
+        "resolver_c": 15.0,
+        "candidate_contract": 15,
+        "resolver_contract": 15,
+        "match": true,
+        "body_sha256": "d92d86c0211bbd0a49dbe9d1aa9ed4444643355be5d232a3ca0b820d7d983c75"
+      },
+      {
+        "time": "2026-09-30T07:09:00+00:00",
+        "candidate_c": 15.5,
+        "resolver_c": 16.0,
+        "candidate_contract": 16,
+        "resolver_contract": 16,
+        "match": true,
+        "body_sha256": "90274c76d3807f71651a4372e49adaff135a0ca12fdc21bb9e3b4497059f10e1"
+      },
+      {
+        "time": "2026-09-30T07:31:00+00:00",
+        "candidate_c": 15.3,
+        "resolver_c": 15.0,
+        "candidate_contract": 15,
+        "resolver_contract": 15,
+        "match": true,
+        "body_sha256": "4afb744060366347182ca6d95d47cbd8c2120caaee197de1cd0f01efc1457e15"
+      },
+      {
+        "time": "2026-09-30T08:00:00+00:00",
+        "candidate_c": 15.0,
+        "resolver_c": 15.0,
+        "candidate_contract": 15,
+        "resolver_contract": 15,
+        "match": true,
+        "body_sha256": "5d92dc4493e599a4adb362319f4dc195d9ef79b54b8db79c48349346222930c2"
+      },
+      {
+        "time": "2026-09-30T09:00:00+00:00",
+        "candidate_c": 14.7,
+        "resolver_c": 15.0,
+        "candidate_contract": 15,
+        "resolver_contract": 15,
+        "match": true,
+        "body_sha256": "bb56eaa7fb8d5e10bae3ee92507029ed6dbec04a740935e8c4f57cfb17ec5606"
+      },
+      {
+        "time": "2026-09-30T10:00:00+00:00",
+        "candidate_c": 14.0,
+        "resolver_c": 14.0,
+        "candidate_contract": 14,
+        "resolver_contract": 14,
+        "match": true,
+        "body_sha256": "d80d6809505d99ca00af75d79d112426117f29edb52a0f42bd27eaa54af0af30"
+      },
+      {
+        "time": "2026-09-30T11:00:00+00:00",
+        "candidate_c": 14.5,
+        "resolver_c": 15.0,
+        "candidate_contract": 15,
+        "resolver_contract": 15,
+        "match": true,
+        "body_sha256": "f5de0df249979ed3f5304c9aafd13df776c361909370dac90bbe238fa5e269a0"
+      },
+      {
+        "time": "2026-09-30T12:00:00+00:00",
+        "candidate_c": 15.6,
+        "resolver_c": 16.0,
+        "candidate_contract": 16,
+        "resolver_contract": 16,
+        "match": true,
+        "body_sha256": "c389d90cd250ea8f70fa5d89bff96e14d0b954ff64c16630e54bd216883627a7"
+      },
+      {
+        "time": "2026-09-30T13:00:00+00:00",
+        "candidate_c": 16.1,
+        "resolver_c": 16.0,
+        "candidate_contract": 16,
+        "resolver_contract": 16,
+        "match": true,
+        "body_sha256": "3e7b86d1bef653c5441805e61c9fc5f8d8d317e8c8cd143b27bd151fae5bbef5"
+      },
+      {
+        "time": "2026-09-30T14:00:00+00:00",
+        "candidate_c": 17.4,
+        "resolver_c": 17.0,
+        "candidate_contract": 17,
+        "resolver_contract": 17,
+        "match": true,
+        "body_sha256": "243a258c813fe7acf4810ab97a51812dfab9ce03d9a880a8f095132252e81dc9"
+      },
+      {
+        "time": "2026-09-30T15:00:00+00:00",
+        "candidate_c": 18.6,
+        "resolver_c": 19.0,
+        "candidate_contract": 19,
+        "resolver_contract": 19,
+        "match": true,
+        "body_sha256": "6691e6d9c0962a4f1b2b4c3555ab760a7b2aea9f072f6db7cd39154fe6f62876"
+      },
+      {
+        "time": "2026-09-30T16:00:00+00:00",
+        "candidate_c": 20.1,
+        "resolver_c": 20.0,
+        "candidate_contract": 20,
+        "resolver_contract": 20,
+        "match": true,
+        "body_sha256": "ccd6e7a4b4acf54ead5966b4ff8efc73c78c4f63826901cfd579c3c03841c2c9"
+      }
+    ],
+    "first_availability": "UNKNOWN_HISTORICAL_FETCH_NOT_PUBLICATION"
+  }
+]
