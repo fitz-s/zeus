@@ -4978,6 +4978,20 @@ fill-prefix proof, the joint fractional budget, and
 `SMALL_CAPITAL_MINIMUM_LOT`, with no repair certificate or receipt schema
 change.
 
+Aggregate bound (operator decision 2026-09-30: "只要round up到交易所接收的最小
+下注金额就可以成功交易订单这难道不是最简单解"). An independent review (F1) noted
+that each lot is bounded per token only: resting maker lots never enter the
+family joint planner, and the global solver reads no heat or correlation caps.
+A whole-book `committed + lot <= κ × allocated equity` gate was built and then
+reverted on the operator's decision, because the 09-30 book ($16.79 committed
+against a $4.00 κ budget) meant the repair never fired. The repair is the
+plain round-up to the venue minimum. The aggregate of repair lots is bounded
+by spendable cash and the allocator's per-candidate capacity, including the
+10% single-position cap (`max_single_position_pct × allocated equity` per
+token). The worst case is about all spendable cash at risk if every lot loses.
+Every other law still binds each lot unchanged: positive EV and log-growth
+after fees, the price band, and the fill-prefix proof.
+
 The 07-19 flaw this avoids: the retired repair compared the remaining
 increment `κT - h` with `L` rather than the target `κT`. At any wealth, a
 nearly reached target therefore rounded up by a whole lot, which is how a
