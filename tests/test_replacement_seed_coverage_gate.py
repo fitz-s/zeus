@@ -206,12 +206,23 @@ def _seed_from_certificate(normal, *, conditioning=False):
         openmeteo_source_run_id=request.openmeteo_source_run_id)
     if conditioning:
         observed_at = request.day0_observed_extreme_observation_time
+        assert observed_at is not None and request.day0_observed_extreme_c is not None, (
+            "Conditioned coverage requires a real metric-specific Day0 collector/public world")
         seed.update(day0_observed_extreme_c=request.day0_observed_extreme_c,
             day0_observed_extreme_source=request.day0_observed_extreme_source,
             day0_observed_extreme_observation_time=(observed_at.isoformat()
                 if isinstance(observed_at, datetime) else observed_at),
             day0_observed_extreme_unit=request.day0_observed_extreme_unit)
     return seed
+
+
+def _pin_seed_consumer_now(conn, cut, builtin):
+    """Declared private SQL consumer time, without renewing any stored clock."""
+    conn.create_function("strftime", 2, lambda fmt, value:
+        cut.isoformat(timespec="milliseconds")
+        if (fmt, value) == ("%Y-%m-%dT%H:%M:%f+00:00", "now") else
+        cut.strftime(fmt) if (fmt, value) == ("%Y-%m-%dT%H:%M:%S", "now") else
+        builtin.execute("SELECT strftime(?,?)", (fmt, value)).fetchone()[0])
 
 
 @pytest.fixture
@@ -232,17 +243,41 @@ def _normal_seed_certificate(tmp_path, monkeypatch, request):
         cut = normal.request.computed_at
         # Consumer wall time is the declared private decision cut. It does not
         # renew any published source/receipt/posterior/expiry field.
-        normal.conn.create_function("strftime", 2, lambda fmt, value:
-            cut.isoformat(timespec="milliseconds")
-            if (fmt, value) == ("%Y-%m-%dT%H:%M:%f+00:00", "now") else
-            cut.strftime(fmt) if (fmt, value) == ("%Y-%m-%dT%H:%M:%S", "now") else
-            builtin.execute("SELECT strftime(?,?)", (fmt, value)).fetchone()[0])
+        _pin_seed_consumer_now(normal.conn, cut, builtin)
         yield SimpleNamespace(conn=normal.conn, db=forecast_db_from_connection(normal.conn),
             request=normal.request, cut=cut)
     finally:
         if source is not None:
             next(source, None)
         builtin.close()
+
+
+@pytest.fixture
+def _normal_ordinary_kord_seed_certificate(tmp_path, monkeypatch):
+    """Reuse the approved ordinary WRH setup, before its offline-fit experiment."""
+    import inspect
+    from tests import test_day0_remaining_day_pricing as ordinary
+
+    # One existing normal collector/WRH-trigger/materializer/public setup.
+    # This thin read-import changes neither its forecast inputs nor authority;
+    # it only yields the world before that test starts the unrelated fit twin.
+    name = "test_ordinary_wrh_amber_current_kernel_ignores_age_fit"
+    setup = inspect.getsource(getattr(ordinary, name))
+    setup = setup[:setup.index("        # A real, hash-sealed controlled offline artifact;")]
+    setup = setup.replace(f"def {name}(", "def _ordinary_seed_world(", 1)
+    setup += """        fixture.cut = cut
+        _pin_seed_consumer_now(fixture.conn, cut, fixture.builtin)
+        yield fixture
+    finally:
+        if fixture is not None:
+            fixture.conn.close()
+            fixture.builtin.close()
+        next(native, None)
+"""
+    namespace = dict(vars(ordinary))
+    namespace["_pin_seed_consumer_now"] = _pin_seed_consumer_now
+    exec(compile(setup, ordinary.__file__, "exec"), namespace)
+    yield from namespace["_ordinary_seed_world"](tmp_path.resolve(), monkeypatch)
 
 
 def test_tradeable_posterior_with_fresh_readiness_is_covered(_normal_seed_certificate) -> None:
@@ -401,6 +436,7 @@ def test_day0_seed_coverage_requires_exact_conditioning_identity(_normal_kord_fa
     from src.data.replacement_cycle_advance_trigger import _active_day0_provisional_or_conditioning
 
     normal = _normal_kord_fast_coverage
+    _pin_seed_consumer_now(normal.conn, normal.cut, normal.builtin)
     seed = _seed_from_certificate(normal, conditioning=True)
     row = dict(normal.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
         (normal.result.posterior_id,)).fetchone())
@@ -469,71 +505,56 @@ def test_day0_coverage_identity_never_matches_incomplete_evidence() -> None:
             assert _day0_seed_matches_conditioning(seed_missing, conditioning_missing) is False
 
 
-def test_day0_coverage_prefers_active_provisional_over_fallback_conditioning(tmp_path) -> None:
+def test_day0_coverage_prefers_active_provisional_over_fallback_conditioning(
+    _normal_ordinary_kord_seed_certificate,
+) -> None:
     """Queue coverage uses the same active-provisional identity as drained-marker completion."""
-    db_path = _db(tmp_path)
-    _insert_posterior(db_path, q_lcb_json=json.dumps({"cold": 0.1, "warm": 0.7}))
-    _insert_readiness(db_path, expires_at=datetime.now(UTC) + timedelta(hours=3))
-    seed = {
-        **_seed(),
-        "computed_at": "2026-06-06T03:00:00+00:00",
-        "day0_observed_extreme_c": 31.0,
-        "day0_observed_extreme_source": "aviationweather_metar",
-        "day0_observed_extreme_observation_time": "2026-06-06T02:00:00+00:00",
-        "day0_observed_extreme_unit": "C",
-    }
-    matching = {
-        "active": True,
-        "metric": _METRIC,
-        "source": "aviationweather_metar",
-        "observed_extreme_c": 31.0,
-        "observation_time": "2026-06-06T02:00:00+00:00",
-        "unit": "C",
-    }
+    from src.data.replacement_cycle_advance_trigger import _active_day0_provisional_or_conditioning
+
+    normal = _normal_ordinary_kord_seed_certificate
+    seed = _seed_from_certificate(normal, conditioning=True)
+    conn = normal.conn
+    row = dict(conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+        (normal.result.posterior_id,)).fetchone())
+    proof = json.loads(row["provenance_json"])
+    matching = dict(_active_day0_provisional_or_conditioning(proof))
+    assert matching["source"] == "noaa_wrh_kord"
+    assert "fast_residual_likelihood" not in matching
+    assert _seed_already_covered(forecast_db=normal.db, forecast_conn=conn, seed=seed) is True
     stale = {
-        "metric": _METRIC,
+        "metric": normal.request.temperature_metric,
         "source": "stale_fallback",
         "observed_extreme_c": 0.0,
-        "observation_time": "2026-06-06T01:00:00+00:00",
-        "unit": "F",
+        "observation_time": (normal.cut - timedelta(hours=1)).isoformat(),
+        "unit": "C",
     }
 
     def set_provenance(*, provisional: dict[str, object], conditioning: dict[str, object]) -> None:
-        conn = sqlite3.connect(db_path)
-        conn.execute(
-            "UPDATE forecast_posteriors SET provenance_json = ?",
-            (
-                json.dumps(
-                    {
-                        "q_lcb_basis": "fused_center_bootstrap_p05",
-                        "bayes_precision_fusion": {
-                            "used_models": ["gfs_global"],
-                            "current_evidence_shape": {
-                                **_current_geometry_fixture(),
-                                "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
-                                "shape_lag_hours": 0.0,
-                                "source_cycle_time": "2026-06-06T00:00:00+00:00",
-                                "stale_shape_reused": False,
-                                "translation_applied": False,
-                            },
-                        },
-                        "day0_provisional_observation": provisional,
-                        "day0_conditioning": conditioning,
-                    }
-                ),
-            ),
-        )
+        varied = {**proof, "day0_provisional_observation": provisional,
+            "day0_conditioning": conditioning}
+        conn.execute("PRAGMA query_only=OFF")
+        conn.execute("UPDATE forecast_posteriors SET provenance_json=? WHERE posterior_id=?",
+            (json.dumps(varied), row["posterior_id"]))
         conn.commit()
-        conn.close()
+    try:
+        set_provenance(provisional=matching, conditioning=stale)
+        assert _seed_already_covered(forecast_db=normal.db, forecast_conn=conn, seed=seed) is True
 
-    set_provenance(provisional=matching, conditioning=stale)
-    assert _seed_already_covered(forecast_db=db_path, seed=seed) is True
+        set_provenance(provisional={**stale, "active": True}, conditioning=matching)
+        assert _seed_already_covered(forecast_db=normal.db, forecast_conn=conn, seed=seed) is False
 
-    set_provenance(provisional={**stale, "active": True}, conditioning=matching)
-    assert _seed_already_covered(forecast_db=db_path, seed=seed) is False
-
-    set_provenance(provisional={**stale, "active": False}, conditioning=matching)
-    assert _seed_already_covered(forecast_db=db_path, seed=seed) is True
+        set_provenance(provisional={**stale, "active": False}, conditioning=matching)
+        assert _seed_already_covered(forecast_db=normal.db, forecast_conn=conn, seed=seed) is True
+    finally:
+        # Only this private selector-metadata attack varies; source/native/q
+        # proof and the original published tuple are restored exactly.
+        conn.execute("PRAGMA query_only=OFF")
+        conn.execute("UPDATE forecast_posteriors SET provenance_json=? WHERE posterior_id=?",
+            (row["provenance_json"], row["posterior_id"]))
+        conn.commit()
+    assert dict(conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+        (row["posterior_id"],)).fetchone()) == row
+    assert _seed_already_covered(forecast_db=normal.db, forecast_conn=conn, seed=seed) is True
 
 
 def test_consumed_regional_clock_newer_than_anchor_cycle_is_covered(tmp_path) -> None:
