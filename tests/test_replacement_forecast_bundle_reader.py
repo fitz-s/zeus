@@ -1354,7 +1354,7 @@ def _live_provenance() -> dict[str, object]:
 
 
 @pytest.fixture
-def _generic_reader_current_row(tmp_path,monkeypatch):
+def _generic_reader_current_row(tmp_path,monkeypatch,request):
     """Normal source authority for generic reader-format faults, not a city contract.
 
     The underlying HKO writer uses retained official ground bytes, ordinary
@@ -1365,21 +1365,63 @@ def _generic_reader_current_row(tmp_path,monkeypatch):
         _hko_clock_native_sources,_hko_clock_normal_materializer_fixture,
     )
     from src.data.station_ground_evidence import forecast_db_from_connection
+    from src.data.replacement_forecast_readiness import latest_replacement_readiness
     source = _hko_clock_native_sources.__wrapped__(tmp_path,monkeypatch)
     next(source)
     try:
-        normal = _hko_clock_normal_materializer_fixture(tmp_path,monkeypatch,"high")
+        normal = _hko_clock_normal_materializer_fixture(tmp_path,monkeypatch,"high",
+            include_target_station_forecast=getattr(request,"param",True))
         try:
             row = dict(normal.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
                 (normal.result.posterior_id,)).fetchone())
             namespace = forecast_db_from_connection(normal.conn)
+            readiness = latest_replacement_readiness(normal.conn,city=normal.city.name,
+                target_date=normal.request.target_date.isoformat(),temperature_metric="high",
+                decision_time=normal.cut)
+            assert readiness is not None
+            baseline = next(item for item in readiness.dependency_json["dependencies"] if item["role"] == "baseline_b0")
+            assert baseline["source_run_id"] == normal.request.baseline_source_run_id
+            assert baseline["source_available_at"] == normal.request.baseline_source_available_at.isoformat()
+            snapshot = normal.conn.execute("SELECT source_run_id FROM ensemble_snapshots WHERE snapshot_id=1").fetchone()
+            assert snapshot[0] == baseline["source_run_id"]
+            class ClockType(type):
+                def __instancecheck__(cls,value):
+                    return isinstance(value,datetime)
+            class ReaderClock(datetime,metaclass=ClockType):
+                @classmethod
+                def now(cls,tz=None):
+                    return normal.cut.astimezone(tz) if tz else normal.cut.replace(tzinfo=None)
             for purpose in ReplacementForecastAuthorityPurpose:
                 assert reader._live_grade_provenance(row,authority_purpose=purpose,forecast_db=namespace) is not None
+                with monkeypatch.context() as clock:
+                    clock.setattr(reader,"datetime",ReaderClock)
+                    public = read_replacement_forecast_bundle(normal.conn,baseline_bundle=None,
+                        readiness=readiness,city=normal.city.name,target_date=normal.request.target_date,
+                        temperature_metric="high",decision_time=normal.cut,
+                        current_bin_topology_hash=row["bin_topology_hash"],require_baseline_bundle=False,
+                        enforce_raw_input_hwm=True,raw_input_hwm_conn=normal.conn,authority_purpose=purpose)
+                assert public.ok,public.reason_code
+                assert public.bundle.posterior_id == normal.result.posterior_id
+                assert public.bundle.baseline_source_run_id == baseline["source_run_id"]
             yield row,namespace
         finally:
             normal.conn.close()
     finally:
         next(source,None)
+
+
+@pytest.mark.parametrize("_generic_reader_current_row",[False],indirect=True)
+@pytest.mark.parametrize("purpose",tuple(ReplacementForecastAuthorityPurpose))
+def test_live_reader_accepts_normal_hourly_v2_without_a_station_final_center(
+    purpose,_generic_reader_current_row,
+):
+    row,namespace = _generic_reader_current_row
+    provenance = json.loads(row["provenance_json"])
+    assert provenance["q_shape"] == "day0_remaining_shared_carrier_v2"
+    assert provenance["day0_remaining_carrier_operator"] == "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2"
+    assert provenance["day0_remaining_carrier_final_extremes_c"] == []
+    assert provenance["day0_remaining_carrier_station_extreme_providers"] == []
+    assert reader._live_grade_provenance(row,authority_purpose=purpose,forecast_db=namespace) is not None
 
 
 @pytest.mark.parametrize("purpose", tuple(ReplacementForecastAuthorityPurpose))

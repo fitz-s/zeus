@@ -48638,7 +48638,8 @@ def _hko_clock_native_sources(tmp_path, monkeypatch):
 
 
 def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, prior_hour=12,
-                                           observed_extreme_native=None, shuffled_conditions=False):
+                                           observed_extreme_native=None, shuffled_conditions=False,
+                                           include_target_station_forecast=True):
     """Normal writers + controlled source receipts; no probability authority mock.
 
     The 51-member GRIB/land-mask input is a causal toy receipt, not a claim of
@@ -48797,8 +48798,12 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, pri
                 include_previous_runs=False,prune_after=False)
             assert downloaded["written_row_count"] == 4
     write_provider_cohort(cycle,captured)
+    # The alternate ordinary product covers the next day only. It is a
+    # legitimate nonempty response, not a fabricated empty-container license
+    # for the target day and not a hand-selected carrier operator.
     body = json.dumps({"updateTime":issued.isoformat(),"weatherForecast":[{
-        "forecastDate":"20260930","forecastMaxtemp":{"value":33,"unit":"C"},
+        "forecastDate":"20260930" if include_target_station_forecast else "20261001",
+        "forecastMaxtemp":{"value":33,"unit":"C"},
         "forecastMintemp":{"value":27,"unit":"C"}}]}, indent=2).encode()
     class Response:
         def __enter__(self): return self
@@ -48844,10 +48849,9 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, pri
     times = [f"2026-09-30T{hour:02d}:00" for hour in range(24)]
     vector_at = cut-timedelta(minutes=2)
     vector_cycle = cut.replace(hour=0,minute=0)
-    for i, model in enumerate((*hourly.day0_hourly_models_for_city(city),
-                              *hourly.day0_source_clock_ensemble_member_models())):
-        ensemble = model in hourly.day0_source_clock_ensemble_member_models()
-        api_model = "ecmwf_ifs025_ensemble" if ensemble else OPENMETEO_MODEL_IDS.get(model,model)
+    provider_models = hourly.day0_hourly_models_for_city(city)
+    for i, model in enumerate(provider_models):
+        api_model = OPENMETEO_MODEL_IDS.get(model,model)
         values = [32.0+(i%5)*.05+(1.0 if 14<=h<=18 else -.5) for h in range(24)]
         payload = {"timezone":city.timezone,"utc_offset_seconds":28800,
             "hourly":{"time":times,"temperature_2m":values},"hourly_units":{"temperature_2m":"°C"}}
@@ -48864,6 +48868,36 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, pri
         assert len(vectors) == 1
         assert hourly.persist_day0_hourly_vectors(vectors,target_date=target.isoformat(),conn=conn,
             request_hash=request_hash,endpoint=endpoint,now=cut) == 1
+    # The ENS product is one control+50-member entity/capture, not 51 unrelated
+    # per-model requests. The ordinary fetch/parser owns its shared identity.
+    from src.data import openmeteo_model_updates as updates
+    ensemble_hourly = {"time":times}
+    for member in range(51):
+        key = "temperature_2m" if member == 0 else f"temperature_2m_member{member:02d}"
+        ensemble_hourly[key] = [32.0+((member+len(provider_models))%5)*.05+
+            (1.0 if 14<=hour<=18 else -.5) for hour in range(24)]
+    ensemble_body = json.dumps({"latitude":city.lat,"longitude":city.lon,
+        "timezone":city.timezone,"utc_offset_seconds":28800,"hourly":ensemble_hourly,
+        "hourly_units":{key:"°C" for key in ensemble_hourly if key != "time"}}).encode()
+    ensemble_meta = {"last_run_initialisation_time":vector_cycle.isoformat(),
+        "last_run_availability_time":(vector_cycle+timedelta(hours=1)).isoformat(),
+        "last_run_modification_time":(vector_cycle+timedelta(hours=1)).isoformat(),
+        "update_interval_seconds":21600,"temporal_resolution_seconds":3600}
+    def ensemble_http(_url,_params,**kwargs):
+        if "capture_entity_body" in kwargs:
+            kwargs["capture_entity_body"](ensemble_body,vector_at.timestamp())
+        if "capture_network_response" in kwargs:
+            kwargs["capture_network_response"](ensemble_body,vector_at.timestamp(),{"content-type":"application/json"})
+        return json.loads(ensemble_body)
+    with monkeypatch.context() as fetch:
+        fetch.setattr(updates,"_fetch_openmeteo",lambda *_a,**_kw:json.loads(json.dumps(ensemble_meta)))
+        fetch.setattr("src.data.openmeteo_client.fetch",ensemble_http)
+        fetch.setattr(hourly,"_day0_utc_now",lambda:vector_at)
+        ensemble_vectors,ensemble_hash = hourly.fetch_day0_source_clock_ensemble_vectors(city,now=vector_at)
+    assert len(ensemble_vectors) == 51
+    assert {json.loads(row.source_run_meta_json)["request_hash"] for row in ensemble_vectors} == {ensemble_hash}
+    assert hourly.persist_day0_hourly_vectors(ensemble_vectors,target_date=target.isoformat(),conn=conn,
+        request_hash=ensemble_hash,endpoint=hourly.OPENMETEO_ENSEMBLE_URL,now=cut) == 51
     from src.data import openmeteo_ecmwf_ifs9_bucket_transport as source_surface
     cell = source_surface.source_cell_geometry_proof(latitude=city.lat,longitude=city.lon,
         target_elevation_m=station["elevation_m"])
