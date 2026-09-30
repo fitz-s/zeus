@@ -7893,6 +7893,187 @@ def test_hourly_ensemble_fetch_binds_one_provider_run(
     ]
 
 
+@pytest.mark.parametrize(
+    ("now", "boundary", "expected"),
+    [
+        # No boundary in hand: the constant one-hour reach.
+        (datetime(2026, 9, 30, 15, 26, tzinfo=UTC), None, 1),
+        # Boundary inside the current hour: the anchor is this hour.
+        (datetime(2026, 9, 30, 15, 26, tzinfo=UTC),
+         datetime(2026, 9, 30, 15, 5, tzinfo=UTC), 1),
+        # Live Denver 2026-09-30: METAR at 13:58Z, decision at 15:26Z.  The
+        # anchor 13:00Z lies two hours before 15:00Z, plus the rollover hour.
+        (datetime(2026, 9, 30, 15, 26, tzinfo=UTC),
+         datetime(2026, 9, 30, 13, 58, tzinfo=UTC), 3),
+        # Exactly on the hour: that hour is the anchor.
+        (datetime(2026, 9, 30, 15, 26, tzinfo=UTC),
+         datetime(2026, 9, 30, 12, 0, tzinfo=UTC), 4),
+    ],
+)
+def test_day0_hourly_past_hours_reaches_the_causal_anchor(now, boundary, expected):
+    from src.data.day0_hourly_vectors import day0_hourly_past_hours
+
+    assert day0_hourly_past_hours(
+        decision_time=now, window_start=boundary, timezone_name="America/Denver"
+    ) == expected
+
+
+def test_day0_hourly_past_hours_follows_half_hour_offset_zones():
+    """Kolkata's local hour starts at :30 UTC; the gap is measured locally."""
+    from src.data.day0_hourly_vectors import day0_hourly_past_hours
+
+    # 15:26Z = 20:56 IST; boundary 13:20Z = 18:50 IST; anchor 18:00 IST is
+    # two hours before 20:00 IST.
+    assert day0_hourly_past_hours(
+        decision_time=datetime(2026, 9, 30, 15, 26, tzinfo=UTC),
+        window_start=datetime(2026, 9, 30, 13, 20, tzinfo=UTC),
+        timezone_name="Asia/Kolkata",
+    ) == 3
+
+
+def _rolling_now_hourly(now: datetime, tz: str, past_hours: int, hours: int):
+    """Model the Ensemble/Forecast APIs: the axis starts at local now - past_hours."""
+    start = now.astimezone(ZoneInfo(tz)).replace(minute=0, second=0, microsecond=0)
+    start -= timedelta(hours=past_hours)
+    return [
+        (start + timedelta(hours=offset)).strftime("%Y-%m-%dT%H:%M")
+        for offset in range(hours + past_hours)
+    ]
+
+
+def test_hourly_ensemble_fetch_reaches_back_to_an_hours_old_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Denver 2026-09-30: the last print was 88 minutes old at the decision.
+
+    A request without past_hours started at the current hour, so every 51-member
+    carrier failed the remaining-window gate (``available=51 expected=51``) and
+    the conditional HIGH shape stayed ENSEMBLE_UNAVAILABLE for hours.  The
+    request must reach the boundary's anchor hour and the carrier must pass the
+    same strict read the persist path runs.
+    """
+    import src.data.openmeteo_client as openmeteo_client
+    from src.data.day0_hourly_vectors import (
+        DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+        DAY0_HOURLY_FORECAST_HOURS,
+        day0_source_clock_ensemble_member_models,
+        fetch_day0_source_clock_ensemble_vectors,
+        select_ready_day0_hourly_vectors,
+    )
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+
+    now = datetime(2026, 9, 30, 15, 26, tzinfo=UTC)
+    boundary = datetime(2026, 9, 30, 13, 58, tzinfo=UTC)
+    denver = SimpleNamespace(
+        name="Denver", timezone="America/Denver", settlement_unit="F",
+        lat=39.8467, lon=-104.6562,
+    )
+    update = OpenMeteoModelUpdate(
+        model="ecmwf_ifs025_ensemble",
+        last_run_initialisation_time=now - timedelta(hours=9),
+        last_run_availability_time=now - timedelta(hours=2),
+        last_run_modification_time=now - timedelta(hours=2),
+    )
+    monkeypatch.setattr(
+        "src.data.openmeteo_model_updates.fetch_model_updates",
+        lambda *_a, **_kw: (update,),
+    )
+    fetched_params: dict = {}
+
+    def fake_fetch(_url, params, **_kwargs):
+        fetched_params.update(params)
+        times = _rolling_now_hourly(
+            now, "America/Denver", int(params.get("past_hours") or 0),
+            int(params["forecast_hours"]),
+        )
+        hourly = {"time": times, "temperature_2m": [20.0] * len(times)}
+        for index in range(1, 51):
+            hourly[f"temperature_2m_member{index:02d}"] = [20.0] * len(times)
+        return {"hourly": hourly}
+
+    monkeypatch.setattr(openmeteo_client, "fetch", fake_fetch)
+    monkeypatch.setattr(
+        "src.data.day0_hourly_vectors._day0_utc_now", lambda: now
+    )
+
+    vectors, request_hash = fetch_day0_source_clock_ensemble_vectors(
+        denver, now=now, window_start=boundary
+    )
+
+    assert request_hash and len(vectors) == 51
+    assert fetched_params["past_hours"] == 3
+    assert fetched_params["forecast_hours"] == DAY0_HOURLY_FORECAST_HOURS
+    assert select_ready_day0_hourly_vectors(
+        vectors, target_date="2026-09-30", now=now,
+        expected_models=day0_source_clock_ensemble_member_models(),
+        require_expected=True,
+        max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+        remaining_window_start=boundary,
+        require_complete_remaining_window=True,
+    ) == vectors
+
+
+def test_standard_endpoint_request_reaches_back_to_the_causal_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The standard deterministic fallback shares the rolling-now axis; the
+    pinned Single Runs endpoint ignores past_hours and keeps the constant."""
+    import src.data.bayes_precision_fusion_download as download
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+    from src.data.day0_hourly_vectors import (
+        DAY0_HOURLY_PAST_HOURS,
+        _day0_exact_run_payloads,
+    )
+
+    now = datetime(2026, 9, 30, 15, 26, tzinfo=UTC)
+    boundary = datetime(2026, 9, 30, 13, 58, tzinfo=UTC)
+    run = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(
+        "src.data.openmeteo_model_updates.fetch_model_updates",
+        lambda requested, **_kwargs: tuple(
+            OpenMeteoModelUpdate(
+                model=model,
+                last_run_initialisation_time=run,
+                last_run_availability_time=now + timedelta(minutes=30),
+                last_run_modification_time=None,
+            )
+            for model in requested
+        ),
+    )
+    payload = {"hourly": {"time": ["2026-09-30T00:00"], "temperature_2m": [1.0]}}
+    standard_calls: list[dict] = []
+
+    def standard(**kwargs):
+        standard_calls.append(kwargs)
+        return (
+            (payload,),
+            SimpleNamespace(run=run, source_available_at=now, modification_time=now),
+        )
+
+    single_calls: list[dict] = []
+
+    def single_runs(**kwargs):
+        single_calls.append(kwargs)
+        return (payload,)
+
+    monkeypatch.setattr(download, "_fetch_single_runs_hourly_payloads_batched", single_runs)
+    monkeypatch.setattr(download, "_fetch_standard_meta_stamped_payloads", standard)
+    denver = SimpleNamespace(
+        name="Denver", timezone="America/Denver", settlement_unit="F",
+        lat=39.8467, lon=-104.6562,
+    )
+
+    _fetched, identity = _day0_exact_run_payloads(
+        city=denver, models=["ecmwf_ifs"], decision_time=now, timeout_s=2.0,
+        causal_boundary_utc=boundary,
+    )
+
+    assert not single_calls
+    assert [call["past_hours"] for call in standard_calls] == [3]
+    assert identity["past_hours"] == 3
+    assert DAY0_HOURLY_PAST_HOURS == 1
+
+
 def test_source_clock_reader_rejects_legacy_deterministic_metadata_domain():
     """An old HRES-stamped ENS row cannot sponsor current source-clock authority."""
     import src.data.day0_hourly_vectors as day0

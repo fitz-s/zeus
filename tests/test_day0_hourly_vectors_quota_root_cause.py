@@ -1518,7 +1518,7 @@ def test_ensemble_fetch_skips_http_when_current_run_already_persisted(monkeypatc
 
     monkeypatch.setattr(day0, "_probe_day0_source_clock_ensemble_run_hwm", fake_probe_hwm)
 
-    def fake_fetch_ensemble(city_arg, *, now=None, timeout_s=None):
+    def fake_fetch_ensemble(city_arg, *, now=None, timeout_s=None, window_start=None):
         ensemble_calls["n"] += 1
         return (
             [
@@ -1635,7 +1635,7 @@ def test_complete_ensemble_bundle_persists_when_deterministic_bundle_is_unavaila
         ),
     )
 
-    def fake_fetch_ensemble(city_arg, *, now=None, timeout_s=None):
+    def fake_fetch_ensemble(city_arg, *, now=None, timeout_s=None, window_start=None):
         ensemble_calls["n"] += 1
         return (
             [_ensemble_member_vector(city_arg, member, run, avail, now) for member in members],

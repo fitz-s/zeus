@@ -134,7 +134,9 @@ DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES = 60.0
 DAY0_HOURLY_FORECAST_HOURS = 72
 # The current observation can fall between provider grid hours.  Keep the last
 # real provider hour so current-state conditioning has a causal innovation
-# anchor after a refresh; never interpolate or stitch one across runs.
+# anchor after a refresh; never interpolate or stitch one across runs.  This is
+# the reach-back beyond the causal gap (``day0_hourly_past_hours``), absorbing
+# an hour rollover between the decision clock and the provider's "now".
 DAY0_HOURLY_PAST_HOURS = 1
 INCOMPLETE_BUNDLE_RETRY_INTERVAL_S = 45.0
 INCOMPLETE_BUNDLE_RETRY_MAX_INTERVAL_S = DEFAULT_REFRESH_INTERVAL_S
@@ -2586,6 +2588,36 @@ class Day0RunEndpointSelection:
     reason: str
 
 
+def day0_hourly_past_hours(
+    *,
+    decision_time: datetime,
+    window_start: datetime | None,
+    timezone_name: str,
+) -> int:
+    """Hours a rolling-"now" hourly request must reach back to hold the anchor.
+
+    The standard Forecast and Ensemble APIs start their hourly axis at the
+    current local hour minus ``past_hours``.  The conditioning consumer needs
+    the last grid hour at or before the causal observation boundary, which
+    lags the clock by however long the last print is old.  A constant reach
+    served only boundaries inside the current hour; the gap is derived here.
+
+    The provider documents ``past_hours`` as any integer > 0 with no maximum
+    (open-meteo.com/en/docs and /en/docs/ensemble-api).  The coverage gate
+    already requires the boundary to lie on the target local day, so the gap
+    is bounded by that day, not by a cap.
+    """
+
+    if window_start is None or window_start.tzinfo is None:
+        return DAY0_HOURLY_PAST_HOURS
+    tz = ZoneInfo(timezone_name)
+    current_hour = decision_time.astimezone(tz).replace(
+        minute=0, second=0, microsecond=0
+    )
+    gap_s = (current_hour - window_start.astimezone(tz)).total_seconds()
+    return max(0, math.ceil(gap_s / 3600.0)) + DAY0_HOURLY_PAST_HOURS
+
+
 def _select_day0_run_endpoint(
     *,
     run: datetime,
@@ -2697,6 +2729,11 @@ def _day0_exact_run_payloads(
         day0_hourly_target_dates_for_refresh(city=city, decision_time=decision_time),
     )
     captured_at = decision_time.astimezone(UTC).isoformat()
+    past_hours = day0_hourly_past_hours(
+        decision_time=decision_time,
+        window_start=causal_boundary_utc,
+        timezone_name=location[2],
+    )
     fetched: list[tuple[str, Mapping[str, object], dict[str, object]]] = []
     request_identity: dict[str, object] = {
         "endpoint": OPENMETEO_FORECAST_URL,
@@ -2706,7 +2743,7 @@ def _day0_exact_run_payloads(
         "timezone": location[2],
         "hourly": "temperature_2m",
         "forecast_hours": DAY0_HOURLY_FORECAST_HOURS,
-        "past_hours": DAY0_HOURLY_PAST_HOURS,
+        "past_hours": past_hours,
         "temperature_unit": "celsius",
         "cell_selection": "land",
         "models": [],
@@ -2751,6 +2788,8 @@ def _day0_exact_run_payloads(
                     models=[model], locations=[location], run=run,
                     forecast_hours=DAY0_HOURLY_FORECAST_HOURS,
                     deadline_monotonic=deadline_monotonic,
+                    # Single Runs starts at ``run`` and ignores past_hours;
+                    # a varying value would only fragment its payload cache.
                     past_hours=DAY0_HOURLY_PAST_HOURS,
                 )
                 payload = payloads[0]
@@ -2761,7 +2800,7 @@ def _day0_exact_run_payloads(
                         source_available_at=available_at,
                         forecast_hours=DAY0_HOURLY_FORECAST_HOURS,
                         deadline_monotonic=deadline_monotonic,
-                        past_hours=DAY0_HOURLY_PAST_HOURS,
+                        past_hours=past_hours,
                     )
                     payload = payloads[0]
                     run = transport.run.astimezone(UTC)
@@ -2792,7 +2831,7 @@ def _day0_exact_run_payloads(
                     source_available_at=available_at,
                     forecast_hours=DAY0_HOURLY_FORECAST_HOURS,
                     deadline_monotonic=deadline_monotonic,
-                    past_hours=DAY0_HOURLY_PAST_HOURS,
+                    past_hours=past_hours,
                 )
                 payload = payloads[0]
                 run = transport.run.astimezone(UTC)
@@ -3027,8 +3066,12 @@ def fetch_day0_source_clock_ensemble_vectors(
     *,
     now: Optional[datetime] = None,
     timeout_s: float = DEFAULT_FETCH_TIMEOUT_S,
+    window_start: Optional[datetime] = None,
 ) -> tuple[list[Day0HourlyVector], str]:
     """Fetch one possession-bracketed 51-member hourly ENS carrier.
+
+    ``window_start`` is the earliest causal boundary the carrier must cover;
+    the request reaches back to its anchor hour (``day0_hourly_past_hours``).
 
     The provider metadata is read before and after the response.  A run change
     inside that bracket discards the payload, so a local fetch clock can never
@@ -3070,6 +3113,11 @@ def fetch_day0_source_clock_ensemble_vectors(
             "models": DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
             "timezone": str(getattr(city, "timezone")),
             "forecast_hours": DAY0_HOURLY_FORECAST_HOURS,
+            "past_hours": day0_hourly_past_hours(
+                decision_time=decision_time,
+                window_start=window_start,
+                timezone_name=str(getattr(city, "timezone")),
+            ),
             "temperature_unit": "celsius",
             "cell_selection": "land",
         }
@@ -5060,6 +5108,14 @@ def maybe_refresh_day0_hourly_vectors(
                                 city,
                                 now=source_decision_time,
                                 timeout_s=timeout_s,
+                                window_start=min(
+                                    (
+                                        start
+                                        for start in ensemble_window_starts.values()
+                                        if start is not None
+                                    ),
+                                    default=None,
+                                ),
                             )
                         )
                     except Exception as exc:  # noqa: BLE001 - preserve deterministic sibling
