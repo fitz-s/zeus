@@ -122,8 +122,39 @@ def _read_body_dependency(dependency: Mapping[str, object], *, conn: sqlite3.Con
     return body
 
 
-def _archive_recovery(conn, prepared, old_id, deadline):
-    """Append actual manifest bytes; never amend a damaged body's metadata."""
+def _latest_candidate(conn, station_id, decision, deadline):
+    rows = conn.execute("SELECT artifact_id,artifact_metadata_json,captured_at,recorded_at FROM raw_forecast_artifacts WHERE source_id=? AND data_version IN (?,?)", (f"station_ground::{station_id}", KIND, MANIFEST_KIND))
+    latest = None
+    while batch := rows.fetchmany(32):
+        _check(deadline)
+        for artifact_id, metadata, captured_at, recorded_at in batch:
+            recorded = _stamp(recorded_at)
+            if recorded > decision:
+                continue
+            captured = _stamp(captured_at)
+            if captured > recorded:
+                raise ValueError("ground source capture is after canonical possession")
+            # Actual source event precedes canonical write order. A delayed
+            # old response cannot roll back a newer source snapshot. Metadata
+            # is deliberately not parsed until this candidate is selected.
+            candidate = (captured, recorded, int(artifact_id), metadata)
+            if latest is None or candidate[:3] > latest[:3]:
+                latest = candidate
+    return latest
+
+
+def _candidate_evidence(candidate, now, deadline):
+    if candidate is None:
+        return None
+    try:
+        evidence = json.loads(str(candidate[3]))["station_ground_evidence"]
+        return read_frozen_station_ground_evidence(evidence, decision_at=now, deadline_monotonic=deadline)
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _archive_manifest(conn, prepared, old_id, deadline, *, role, prior):
+    """Append a typed confirmation/recovery; the original body stays immutable."""
     from src.config import station_ground_facts_from_bytes
     name, source_kind, station_id, facts, audit, digest, body, body_path, captured = prepared
     now = datetime.now(UTC)
@@ -135,20 +166,11 @@ def _archive_recovery(conn, prepared, old_id, deadline):
         or dependency["data_version"] != KIND or dependency["request_url"] != facts["source_url"]
         or json.loads(str(dependency["request_params_json"])) != {"source_kind": source_kind, "station_id": station_id}
         or station_ground_facts_from_bytes(source_kind=source_kind, station_id=station_id, raw_body=original_body) != facts):
-        raise ValueError("ground recovery original entity is unbound")
-    # An existing valid recovery for this exact body/invalid-metadata/facts
-    # combination keeps its own first canonical possession on every poll.
-    for row in conn.execute("SELECT artifact_metadata_json FROM raw_forecast_artifacts WHERE source_id=? AND product_id=? AND data_version=? ORDER BY artifact_id DESC", (source_id, product_id, MANIFEST_KIND)):
-        _check(deadline)
-        try:
-            existing = json.loads(str(row[0]))["station_ground_evidence"]
-            if existing["input_bodies"] == {"ground": dependency} and existing["facts"] == facts:
-                if read_frozen_station_ground_evidence(existing, decision_at=now, deadline_monotonic=deadline) is not None:
-                    return existing
-                break  # newest matching recovery is invalid, not an older fallback
-        except (KeyError, TypeError, ValueError):
-            break
-    original = str(dependency["captured_at"])
+        raise ValueError("ground manifest original entity is unbound")
+    if captured < _stamp(dependency["captured_at"]) or (prior is not None and captured < prior[0]):
+        raise ValueError("old source capture cannot restore newer ground evidence")
+    previous = _body_dependency(conn, prior[2] if prior is not None else int(old_id))
+    original = captured.isoformat()
     payload = {"revision": MANIFEST_KIND, "source_id": source_id, "product_id": product_id,
         "source_kind": source_kind, "station_id": station_id, "body_sha256": digest,
         "byte_size": len(body), "body_path": str(body_path), "source_url": facts["source_url"],
@@ -157,8 +179,13 @@ def _archive_recovery(conn, prepared, old_id, deadline):
         "captured_at": original, "recorded_at": now.isoformat(), "facts": facts,
         "facts_identity": ground_facts_identity(facts), "source_audit": audit,
         "forecast_db": str(Path(conn.execute("PRAGMA database_list").fetchone()[2]).resolve()),
-        "input_bodies": {"ground": dependency}, "recovery_of": {
-            "artifact_id": int(old_id), "invalid_metadata_sha256": dependency["original_metadata_sha256"]}}
+        "input_bodies": {"ground": dependency}, "manifest_role": role,
+        "previous_source_evidence": previous}
+    if role == "canonical_metadata_recovery":
+        payload["recovery_of"] = {"artifact_id": previous["artifact_id"],
+            "invalid_metadata_sha256": previous["original_metadata_sha256"]}
+    elif role != "source_capture_confirmation" or captured <= _stamp(previous["captured_at"]):
+        raise ValueError("ground confirmation requires a genuinely newer source capture")
     manifest = _encoded(payload)
     manifest_sha = hashlib.sha256(manifest).hexdigest()
     manifest_path = _store_root() / f"{station_id}.{manifest_sha}.manifest.json"
@@ -181,6 +208,9 @@ def _archive_entity(conn, prepared, forecast_db, deadline):
     source_id, product_id = f"station_ground::{station_id}", f"station_ground::{source_kind}::{station_id}"
     old = conn.execute("SELECT artifact_id,artifact_metadata_json FROM raw_forecast_artifacts WHERE source_id=? AND product_id=? AND data_version=? AND sha256=? ORDER BY artifact_id LIMIT 1", (source_id, product_id, KIND, digest)).fetchone()
     if old is not None:
+        now = datetime.now(UTC)
+        latest = _latest_candidate(conn, station_id, now, deadline)
+        latest_evidence = _candidate_evidence(latest, now, deadline)
         try:
             evidence = json.loads(str(old[1]))["station_ground_evidence"]
             manifest = _encoded({key:value for key,value in evidence.items() if key not in {"manifest_path", "manifest_sha256"}})
@@ -188,11 +218,26 @@ def _archive_entity(conn, prepared, forecast_db, deadline):
             if manifest_path.parent.resolve() != _store_root() or hashlib.sha256(manifest).hexdigest() != evidence["manifest_sha256"]:
                 raise ValueError("station ground canonical manifest identity differs")
             _write_immutable(manifest_path, manifest)
-            if read_frozen_station_ground_evidence(evidence, decision_at=datetime.now(UTC), deadline_monotonic=deadline) is None:
+            if read_frozen_station_ground_evidence(evidence, decision_at=now, deadline_monotonic=deadline) is None:
                 raise ValueError("station ground canonical entity is invalid")
-            return evidence
         except (KeyError, TypeError, ValueError):
-            return _archive_recovery(conn, prepared, old[0], deadline)
+            if latest_evidence is not None and latest_evidence["facts"] == facts:
+                return latest_evidence
+            return _archive_manifest(conn, prepared, old[0], deadline,
+                role="canonical_metadata_recovery", prior=latest)
+        # Exact canonical file restoration above can make this very same
+        # immutable candidate readable again; it does not create possession.
+        latest_evidence = _candidate_evidence(latest, now, deadline)
+        if latest_evidence is not None and latest_evidence["facts"] == facts:
+            return latest_evidence  # same facts/capture polling never mints an event
+        if latest is None:
+            return evidence
+        if latest_evidence is None and captured < latest[0]:
+            raise ValueError("old source capture cannot hide invalid latest ground evidence")
+        if captured < latest[0] or (latest_evidence is not None and captured == latest[0]):
+            return evidence  # old config/source response cannot wash a newer transition
+        return _archive_manifest(conn, prepared, old[0], deadline,
+            role="source_capture_confirmation" if latest_evidence is not None else "canonical_metadata_recovery", prior=latest)
     recorded, original = datetime.now(UTC).isoformat(), captured.isoformat()
     cursor = conn.execute("""INSERT INTO raw_forecast_artifacts
         (source_id,product_id,data_version,source_cycle_time,source_available_at,captured_at,
@@ -378,6 +423,9 @@ def _read_manifest_evidence(evidence, *, decision_at, deadline_monotonic=None):
         or evidence["source_audit"]["artifact_ref"] != evidence["approved_artifact_ref"]
         or isinstance(evidence["artifact_id"], bool) or not isinstance(evidence["artifact_id"], int)):
         return None
+    capture = _stamp(evidence["captured_at"])
+    if not capture == _stamp(evidence["source_cycle_time"]) == _stamp(evidence["source_available_at"]):
+        return None
     _check(deadline)
     conn = _connect_read_only(Path(str(evidence["forecast_db"])), deadline_monotonic=deadline)
     try:
@@ -398,12 +446,34 @@ def _read_manifest_evidence(evidence, *, decision_at, deadline_monotonic=None):
             or dependency["artifact_path"] != evidence["body_path"] or dependency["byte_size"] != evidence["byte_size"]
             or dependency["request_url"] != evidence["source_url"]
             or _stamp(dependency["recorded_at"]) > _stamp(evidence["recorded_at"])
-            or dependency["captured_at"] != evidence["captured_at"]
-            or dependency["source_cycle_time"] != evidence["source_cycle_time"]
-            or dependency["source_available_at"] != evidence["source_available_at"]
+            or _stamp(dependency["captured_at"]) > capture
             or json.loads(str(dependency["request_params_json"])) != {"source_kind": evidence["source_kind"], "station_id": evidence["station_id"]}
-            or evidence["recovery_of"] != {"artifact_id": dependency["artifact_id"], "invalid_metadata_sha256": dependency["original_metadata_sha256"]}):
+        ):
             return None
+        role = evidence.get("manifest_role")
+        if role is None:
+            # Exact old metadata-recovery manifests keep their original clocks;
+            # this is not compatibility for an unbound entity or new capture.
+            if dependency["captured_at"] != evidence["captured_at"] or evidence["recovery_of"] != {"artifact_id": dependency["artifact_id"], "invalid_metadata_sha256": dependency["original_metadata_sha256"]}:
+                return None
+        else:
+            previous = evidence["previous_source_evidence"]
+            if (_body_dependency(conn, previous["artifact_id"]) != previous
+                or previous["source_id"] != evidence["source_id"]
+                or previous["product_id"] != evidence["product_id"]
+                or previous["data_version"] not in {KIND, MANIFEST_KIND}
+                or not _stamp(previous["captured_at"]) <= _stamp(previous["recorded_at"]) <= _stamp(evidence["recorded_at"])
+                or _stamp(previous["captured_at"]) > capture
+                or capture != _stamp(evidence["source_audit"]["checked_at"])):
+                return None
+            if role == "source_capture_confirmation":
+                if "recovery_of" in evidence or capture <= _stamp(previous["captured_at"]):
+                    return None
+            elif role == "canonical_metadata_recovery":
+                if evidence["recovery_of"] != {"artifact_id": previous["artifact_id"], "invalid_metadata_sha256": previous["original_metadata_sha256"]}:
+                    return None
+            else:
+                return None
         facts = station_ground_facts_from_bytes(source_kind=evidence["source_kind"], station_id=evidence["station_id"], raw_body=body)
         if facts != evidence["facts"] or facts is None or ground_facts_identity(facts) != evidence["facts_identity"]:
             return None
@@ -429,22 +499,9 @@ def read_current_station_ground_evidence(forecast_db: Path, *, city: str, decisi
     conn = None
     try:
         conn = _connect_read_only(Path(forecast_db), deadline_monotonic=deadline)
-        rows = conn.execute("SELECT artifact_metadata_json,recorded_at,artifact_id FROM raw_forecast_artifacts WHERE source_id=? AND data_version IN (?,?) ORDER BY artifact_id DESC", (f"station_ground::{station_id}",KIND,MANIFEST_KIND))
-        latest = None
-        while batch := rows.fetchmany(32):
-            _check(deadline)
-            for row in batch:
-                recorded = _stamp(row[1])
-                if recorded > cutoff:
-                    continue
-                # Select independently recorded candidates before parsing their
-                # claimed metadata. A malformed latest entity cannot reveal an
-                # older valid entity by disappearing from the candidate set.
-                candidate = (recorded,int(row[2]),row[0])
-                if latest is None or candidate[:2] > latest[:2]:
-                    latest = candidate
+        latest = _latest_candidate(conn, station_id, cutoff, deadline)
         _check(deadline)
-        evidence = None if latest is None else json.loads(str(latest[2]))["station_ground_evidence"]
+        evidence = None if latest is None else json.loads(str(latest[3]))["station_ground_evidence"]
     except (KeyError, TypeError, ValueError, OSError, sqlite3.Error, TimeoutError):
         return None
     finally:

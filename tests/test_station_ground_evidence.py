@@ -382,3 +382,98 @@ def test_real_sqlite_writer_error_remains_visible_and_rolls_back_whole_transacti
         ground.archive_station_ground_evidence(db, ["Hong Kong", "Chicago"])
     with sqlite3.connect(db) as conn:
         assert conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_normal_actual_source_a_b_a_confirmation_resets_without_renewing_original_body(tmp_path, monkeypatch, metric):
+    from src.data.replacement_forecast_cycle_policy import _anchor_station_ground_has_authority as authority
+    from src.data.replacement_forecast_live_materialization_queue import _blocked_attempt_fingerprint
+    db, registry, official_body, claims, clock = _setup(tmp_path, monkeypatch)
+    original_body = official_body.read_bytes()
+    a = _archive(db)
+    def fingerprint(cut):
+        return _blocked_attempt_fingerprint(input_json=tmp_path / "seed.json", forecast_db=db,
+            payload={"forecast_db": str(db), "city": "Hong Kong", "target_date": "2026-09-30",
+                "temperature_metric": metric, "source_cycle_time": "2026-09-29T18:00:00Z", "computed_at": cut})
+    fp_a = fingerprint("2026-09-29T22:00:00Z")
+    with sqlite3.connect(db) as conn:
+        original_row = conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?", (a["artifact_id"],)).fetchone()
+    clock[0] = datetime(2026, 9, 29, 23, tzinfo=UTC)
+    body_b = original_body.replace(b'<td class="td1_normal_class">32</td>', b'<td class="td1_normal_class">33</td>', 1)
+    _update_official(registry, official_body, claims, body_b, "2026-09-29T22:30:00Z")
+    b = _archive(db)
+    fp_b = fingerprint("2026-09-29T23:00:00Z")
+    assert fp_b != fp_a
+    clock[0] = datetime(2026, 9, 30, tzinfo=UTC)
+    # This timestamp represents a newly acquired official A response, not a
+    # local verification of the old file. Its body is deliberately identical.
+    _update_official(registry, official_body, claims, original_body, "2026-09-29T23:30:00Z")
+    confirmed = _archive(db)
+    assert confirmed["revision"] == ground.MANIFEST_KIND
+    assert confirmed["manifest_role"] == "source_capture_confirmation"
+    assert "recovery_of" not in confirmed
+    assert confirmed["input_bodies"]["ground"]["artifact_id"] == a["artifact_id"]
+    assert confirmed["input_bodies"]["ground"]["captured_at"] == a["captured_at"]
+    assert confirmed["captured_at"] == "2026-09-29T23:30:00+00:00"
+    assert confirmed["recorded_at"] == "2026-09-30T00:00:00+00:00"
+    assert confirmed["facts_identity"] == a["facts_identity"]
+    assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at="2026-09-29T23:59:59Z") == b
+    assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at="2026-09-30T00:00:00Z") == confirmed
+    assert ground.read_frozen_station_ground_evidence(a, decision_at="2026-09-29T22:00:00Z") == a
+    bound = _bound_entity(confirmed, "2026-09-30T00:00:00Z")
+    assert authority(bound.provider_geometry_evidence, bound.provider_geometry_audit, "2026-09-30T00:00:00Z")
+    assert bound.shape_hash == _bound_entity(a, "2026-09-29T22:00:00Z").shape_hash
+    assert fingerprint("2026-09-29T23:59:59Z") == fp_b
+    assert fingerprint("2026-09-30T00:00:00Z") == fp_a
+    clock[0] = datetime(2026, 9, 30, 1, tzinfo=UTC)
+    assert _archive(db) == confirmed  # repeated same actual capture is not an event
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?", (a["artifact_id"],)).fetchone() == original_row
+        assert conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts").fetchone()[0] == 3
+
+
+def test_late_canonical_write_and_old_source_config_cannot_roll_back_newer_ground_capture(tmp_path, monkeypatch):
+    db, registry, official_body, claims, clock = _setup(tmp_path, monkeypatch)
+    body_a = official_body.read_bytes()
+    a = _archive(db)
+    clock[0] = datetime(2026, 9, 29, 23, tzinfo=UTC)
+    body_b = body_a.replace(b'<td class="td1_normal_class">32</td>', b'<td class="td1_normal_class">33</td>', 1)
+    _update_official(registry, official_body, claims, body_b, "2026-09-29T22:30:00Z")
+    b = _archive(db)
+    clock[0] = datetime(2026, 9, 30, tzinfo=UTC)
+    _update_official(registry, official_body, claims, body_a, a["captured_at"])
+    _archive(db)
+    assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at="2026-09-30T00:00:00Z") == b
+    # A genuinely different old source body can arrive late in canonical
+    # storage. Source capture, not write order, determines current currency.
+    _update_official(registry, official_body, claims, body_a + b"<!-- late old source response -->", "2026-09-29T22:15:00Z")
+    _archive(db)
+    assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at="2026-09-30T00:00:00Z") == b
+    assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at="2026-09-29T22:00:00Z") == a
+
+
+def test_latest_confirmation_invalid_metadata_requires_new_canonical_recovery_not_older_a(tmp_path, monkeypatch):
+    db, registry, official_body, claims, clock = _setup(tmp_path, monkeypatch)
+    body_a = official_body.read_bytes()
+    a = _archive(db)
+    clock[0] = datetime(2026, 9, 29, 23, tzinfo=UTC)
+    _update_official(registry, official_body, claims, body_a.replace(b'<td class="td1_normal_class">32</td>', b'<td class="td1_normal_class">33</td>', 1), "2026-09-29T22:30:00Z")
+    _archive(db)
+    clock[0] = datetime(2026, 9, 30, tzinfo=UTC)
+    _update_official(registry, official_body, claims, body_a, "2026-09-29T23:30:00Z")
+    confirmed = _archive(db)
+    assert confirmed["revision"] == ground.MANIFEST_KIND
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE raw_forecast_artifacts SET artifact_metadata_json='{}' WHERE artifact_id=?", (confirmed["artifact_id"],))
+        broken = conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?", (confirmed["artifact_id"],)).fetchone()
+    assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at="2026-09-30T00:00:00Z") is None
+    clock[0] = datetime(2026, 9, 30, 1, tzinfo=UTC)
+    restored = _archive(db)
+    assert restored["manifest_role"] == "canonical_metadata_recovery"
+    assert restored["captured_at"] == confirmed["captured_at"]
+    assert restored["recovery_of"]["artifact_id"] == confirmed["artifact_id"]
+    assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at="2026-09-30T00:59:59Z") is None
+    assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at="2026-09-30T01:00:00Z") == restored
+    assert ground.read_frozen_station_ground_evidence(a, decision_at="2026-09-29T22:00:00Z") == a
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?", (confirmed["artifact_id"],)).fetchone() == broken
