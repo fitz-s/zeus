@@ -9083,40 +9083,6 @@ def test_redecision_screen_progresses_while_entry_reactor_is_active(monkeypatch)
     assert calls == ["screen"]
 
 
-def test_redecision_screen_yields_to_monitor_handoff_not_canonical_debt(
-    monkeypatch,
-) -> None:
-    """Existing venue rests keep management time while BUY cadence is scoped."""
-
-    import src.events.reactor as reactor_module
-    import src.main as main_module
-
-    captured: dict[str, object] = {}
-    monkeypatch.setattr(main_module, "_consume_live_control_commands", lambda: None)
-    monkeypatch.setattr(
-        main_module,
-        "_defer_for_held_position_monitor",
-        lambda _name: False,
-    )
-    monkeypatch.setattr(
-        reactor_module,
-        "run_edli_continuous_redecision_screen_cycle",
-        lambda **kwargs: captured.update(kwargs),
-    )
-    main_module._held_position_monitor_canonical_debt.set()
-    main_module._held_position_monitor_handoff_pending.clear()
-    try:
-        main_module._edli_continuous_redecision_screen_cycle()
-        preempt = captured["monitor_preempt_requested"]
-        assert callable(preempt)
-        assert preempt() is False
-        main_module._held_position_monitor_handoff_pending.set()
-        assert preempt() is True
-    finally:
-        main_module._held_position_monitor_canonical_debt.clear()
-        main_module._held_position_monitor_handoff_pending.clear()
-
-
 @pytest.mark.parametrize(
     ("reactor_active", "redecision_active", "monitor_active"),
     [
@@ -9172,106 +9138,6 @@ def test_chain_mirror_runs_when_money_path_db_work_is_idle(monkeypatch) -> None:
     main_module._chain_mirror_reconcile_cycle()
 
     assert calls == ["mirror"]
-
-
-def test_exit_monitor_claims_priority_and_waits_for_reactor_handoff(monkeypatch) -> None:
-    import src.execution.exit_lifecycle as exit_module
-    import src.main as main_module
-
-    calls: list[object] = []
-
-    class ReactorGate:
-        def acquire(self, *, timeout: float) -> bool:
-            calls.append(
-                (
-                    "wait",
-                    timeout,
-                    main_module._held_position_monitor_active.is_set(),
-                    main_module._held_position_monitor_handoff_pending.is_set(),
-                )
-            )
-            return True
-
-        def release(self) -> None:
-            calls.append("release")
-
-    def _run(**kwargs) -> bool:
-        calls.append(
-            (
-                "run",
-                kwargs["monitor_claimed"],
-                kwargs["target_families"],
-                main_module._held_position_monitor_handoff_pending.is_set(),
-            )
-        )
-        kwargs["mark_held_position_monitor_complete"]()
-        assert main_module._held_position_monitor_claim.acquire(blocking=False)
-        main_module._held_position_monitor_claim.release()
-        return True
-
-    main_module._held_position_monitor_active.clear()
-    main_module._day0_urgent_wake_pending.clear()
-    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
-    monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", _run)
-
-    assert main_module._exit_monitor_cycle() is True
-
-    assert calls == [
-        ("wait", pytest.approx(29.0, abs=0.01), True, True),
-        "release",
-        ("run", True, None, False),
-    ]
-    assert not main_module._held_position_monitor_active.is_set()
-
-
-def test_exit_monitor_handoff_preserves_bootstrap_and_primary_q_budget(
-    monkeypatch,
-) -> None:
-    import src.engine.cycle_runtime as cycle_runtime
-    import src.execution.exit_lifecycle as exit_module
-    import src.main as main_module
-    from src.riskguard.risk_level import RiskLevel
-
-    clock = [0.0]
-    observed: dict[str, float] = {}
-
-    class ReactorGate:
-        def acquire(self, *, timeout: float) -> bool:
-            observed["timeout"] = timeout
-            clock[0] += timeout
-            return True
-
-        def release(self) -> None:
-            return None
-
-    def run(**kwargs) -> bool:
-        observed["handoff_elapsed"] = kwargs[
-            "monitor_handoff_elapsed_seconds"
-        ]
-        observed["remaining"] = kwargs["monitor_deadline_monotonic"] - clock[0]
-        kwargs["mark_held_position_monitor_complete"]()
-        return True
-
-    main_module._held_position_monitor_active.clear()
-    monkeypatch.setattr(main_module.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(
-        cycle_runtime,
-        "_held_position_monitor_budget_seconds",
-        lambda: 12.0,
-    )
-    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
-    monkeypatch.setattr(
-        "src.riskguard.riskguard.get_current_level",
-        lambda: RiskLevel.GREEN,
-    )
-    monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", run)
-
-    assert main_module._exit_monitor_cycle() is True
-    assert observed["timeout"] == pytest.approx(2.0)
-    assert observed["handoff_elapsed"] == pytest.approx(2.0)
-    assert observed["remaining"] == pytest.approx(
-        exit_module.held_monitor_pre_artifact_reserve_seconds()
-    )
 
 
 def test_reactor_bootstrap_releases_after_canonical_monitor_coverage(
@@ -9766,7 +9632,6 @@ def test_periodic_exit_monitor_yields_before_claim_to_urgent_day0_held_monitor(
         main_module._periodic_exit_monitor_urgent_yielded.clear()
 
     assert main_module._held_position_monitor_active.is_set() is False
-    assert main_module._held_position_monitor_handoff_pending.is_set() is False
     assert main_module._held_position_monitor_bootstrap_complete.is_set() is False
 
 
@@ -10119,9 +9984,7 @@ def test_targeted_exit_monitor_does_not_complete_full_book_bootstrap(
 
     assert main_module._held_position_monitor_active.is_set() is False
     assert main_module._held_position_monitor_bootstrap_complete.is_set() is False
-    assert handoff_timeouts == [
-        main_module._URGENT_EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
-    ]
+    assert handoff_timeouts == []
 
 
 def test_urgent_exit_monitor_takes_handoff_after_reactor_preemption(
@@ -10342,43 +10205,6 @@ def test_targeted_monitor_preempts_only_for_new_canonical_cadence_debt(
         main_module._held_position_monitor_active.clear()
 
     assert callbacks == [False, True]
-
-
-def test_periodic_exit_monitor_yields_when_day0_arrives_during_handoff(
-    monkeypatch,
-) -> None:
-    import src.execution.exit_lifecycle as exit_module
-    import src.main as main_module
-
-    calls: list[str] = []
-
-    class ReactorGate:
-        def acquire(self, *, timeout: float) -> bool:
-            main_module._day0_urgent_wake_pending.set()
-            main_module._day0_exit_monitor_attempts["wake-during-handoff"] = None
-            return True
-
-        def release(self) -> None:
-            calls.append("release")
-
-    main_module._held_position_monitor_active.clear()
-    main_module._day0_urgent_wake_pending.clear()
-    main_module._periodic_exit_monitor_urgent_yielded.clear()
-    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
-    monkeypatch.setattr(
-        exit_module,
-        "run_exit_monitor_cycle",
-        lambda **_kwargs: pytest.fail("periodic runtime must yield after handoff"),
-    )
-    try:
-        assert main_module._exit_monitor_cycle() is True
-    finally:
-        main_module._day0_urgent_wake_pending.clear()
-        main_module._day0_exit_monitor_attempts.clear()
-        main_module._periodic_exit_monitor_urgent_yielded.clear()
-
-    assert calls == ["release"]
-    assert main_module._held_position_monitor_active.is_set() is False
 
 
 def test_exit_monitor_incomplete_runtime_cycle_is_not_success(monkeypatch) -> None:
@@ -11176,82 +11002,6 @@ def test_targeted_exit_monitor_pushes_family_scope_into_portfolio_loader() -> No
     assert "defer_partial_orderbook_gaps=target_families is None" in source
 
 
-def test_exit_monitor_handoff_timeout_releases_priority_claim(monkeypatch) -> None:
-    import src.execution.exit_lifecycle as exit_module
-    import src.main as main_module
-
-    calls: list[str] = []
-    observed_timeouts: list[float] = []
-
-    class BusyReactorGate:
-        def acquire(self, *, timeout: float) -> bool:
-            observed_timeouts.append(timeout)
-            return False
-
-    main_module._held_position_monitor_active.clear()
-    monkeypatch.setattr(
-        main_module,
-        "_current_periodic_monitor_obligation_count",
-        lambda: None,
-    )
-    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", BusyReactorGate())
-    monkeypatch.setattr(
-        exit_module,
-        "run_exit_monitor_cycle",
-        lambda **kwargs: calls.append("run"),
-    )
-
-    assert main_module._exit_monitor_cycle() is False
-
-    assert calls == []
-    assert observed_timeouts == [pytest.approx(29.0, abs=0.01)]
-    assert main_module._periodic_held_position_monitor_fairness_debt.is_set()
-    assert not main_module._held_position_monitor_active.is_set()
-    assert not main_module._held_position_monitor_handoff_pending.is_set()
-    main_module._periodic_held_position_monitor_fairness_debt.clear()
-
-
-def test_recovery_full_book_handoff_returns_before_next_recovery_tick(
-    monkeypatch,
-) -> None:
-    import src.execution.exit_lifecycle as exit_module
-    import src.main as main_module
-
-    observed_timeouts: list[float] = []
-
-    class BusyReactorGate:
-        def acquire(self, *, timeout: float) -> bool:
-            observed_timeouts.append(timeout)
-            return False
-
-    main_module._held_position_monitor_active.clear()
-    main_module._periodic_held_position_monitor_fairness_debt.clear()
-    monkeypatch.setattr(
-        main_module,
-        "_current_periodic_monitor_obligation_count",
-        lambda: 1,
-    )
-    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", BusyReactorGate())
-    monkeypatch.setattr(
-        exit_module,
-        "run_exit_monitor_cycle",
-        lambda **_kwargs: pytest.fail("busy reactor must not admit recovery writer"),
-    )
-    try:
-        assert main_module._exit_monitor_cycle(recovery_full_book=True) is False
-        assert observed_timeouts == [
-            main_module._URGENT_EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
-        ]
-        assert observed_timeouts[0] < 30.0
-        assert main_module._periodic_held_position_monitor_fairness_debt.is_set()
-        assert not main_module._held_position_monitor_active.is_set()
-        assert not main_module._held_position_monitor_handoff_pending.is_set()
-        assert main_module._held_position_monitor_claim.acquire(blocking=False)
-        main_module._held_position_monitor_claim.release()
-    finally:
-        main_module._periodic_held_position_monitor_fairness_debt.clear()
-
-
 def test_recovery_full_book_owns_urgent_pressure_until_canonical_coverage(
     monkeypatch,
 ) -> None:
@@ -11284,7 +11034,6 @@ def test_recovery_full_book_owns_urgent_pressure_until_canonical_coverage(
         return True
 
     main_module._held_position_monitor_active.clear()
-    main_module._periodic_held_position_monitor_fairness_debt.clear()
     monkeypatch.setattr(main_module, "_held_position_monitor_claim", Claim())
     monkeypatch.setattr(
         main_module,
@@ -11316,16 +11065,6 @@ def test_recovery_full_book_owns_urgent_pressure_until_canonical_coverage(
         "_periodic_exit_monitor_should_yield",
         lambda _pending: True,
     )
-    monkeypatch.setattr(
-        main_module,
-        "_reserve_periodic_held_monitor_successor",
-        lambda: 1,
-    )
-    monkeypatch.setattr(
-        main_module,
-        "_consume_periodic_held_monitor_successor",
-        lambda _generation: None,
-    )
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", IdleReactorGate())
     monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", run_recovery)
@@ -11354,8 +11093,7 @@ def test_targeted_recovery_owns_exact_overdue_scope_under_urgent_pressure(
 
     class IdleReactorGate:
         def acquire(self, *, timeout: float) -> bool:
-            assert timeout == main_module._URGENT_EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
-            return True
+            pytest.fail("the held-position monitor never waits on the reactor")
 
         def release(self) -> None:
             return None
@@ -11421,77 +11159,7 @@ def test_targeted_recovery_owns_exact_overdue_scope_under_urgent_pressure(
         assert bounded_claims == [True]
     finally:
         main_module._held_position_monitor_active.clear()
-        main_module._held_position_monitor_handoff_pending.clear()
-        main_module._periodic_held_position_monitor_handoff_pending.clear()
         main_module._held_position_monitor_canonical_debt.clear()
-
-
-def test_periodic_full_book_timeout_fairness_debt_yields_reactor_until_coverage(
-    monkeypatch,
-) -> None:
-    import src.execution.exit_lifecycle as exit_module
-    import src.main as main_module
-
-    class BusyReactorGate:
-        def acquire(self, *, timeout: float) -> bool:
-            return False
-
-    class IdleReactorGate:
-        def acquire(self, *, timeout: float) -> bool:
-            return True
-
-        def release(self) -> None:
-            pass
-
-    main_module._held_position_monitor_active.clear()
-    main_module._held_position_monitor_handoff_pending.clear()
-    main_module._periodic_held_position_monitor_handoff_pending.clear()
-    main_module._periodic_held_position_monitor_fairness_debt.clear()
-    main_module._held_position_monitor_bootstrap_complete.set()
-    main_module._day0_urgent_wake_pending.clear()
-    main_module._day0_held_monitor_preempt_requested.clear()
-    main_module._periodic_exit_monitor_urgent_yielded.clear()
-    monkeypatch.setattr(
-        main_module,
-        "_current_periodic_monitor_obligation_count",
-        lambda: 1,
-    )
-    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", BusyReactorGate())
-    monkeypatch.setattr(
-        exit_module,
-        "run_exit_monitor_cycle",
-        lambda **_kwargs: pytest.fail("timed-out monitor must not run coverage"),
-    )
-    try:
-        assert main_module._exit_monitor_cycle() is False
-        assert main_module._periodic_held_position_monitor_fairness_debt.is_set()
-        assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
-
-        monkeypatch.setattr(main_module, "_edli_reactor_active_lock", IdleReactorGate())
-        monkeypatch.setattr(
-            exit_module,
-            "run_exit_monitor_cycle",
-            lambda **kwargs: kwargs["mark_held_position_monitor_complete"]() or True,
-        )
-        assert main_module._exit_monitor_cycle(
-            target_families=frozenset({("Paris", "2026-07-30", "high")}),
-            urgent_day0=True,
-        ) is True
-        assert main_module._periodic_held_position_monitor_fairness_debt.is_set()
-
-        assert main_module._exit_monitor_cycle() is True
-        assert not main_module._periodic_held_position_monitor_fairness_debt.is_set()
-        assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
-    finally:
-        main_module._held_position_monitor_active.clear()
-        main_module._held_position_monitor_handoff_pending.clear()
-        main_module._periodic_held_position_monitor_handoff_pending.clear()
-        main_module._periodic_held_position_monitor_fairness_debt.clear()
-        main_module._held_position_monitor_canonical_debt.clear()
-        main_module._held_position_monitor_bootstrap_complete.clear()
-        main_module._day0_urgent_wake_pending.clear()
-        main_module._day0_held_monitor_preempt_requested.clear()
-        main_module._periodic_exit_monitor_urgent_yielded.clear()
 
 
 def test_zero_obligation_periodic_monitor_clears_debt_without_reactor_handoff(
@@ -11508,7 +11176,6 @@ def test_zero_obligation_periodic_monitor_clears_debt_without_reactor_handoff(
         main_module._held_position_monitor_bootstrap_complete.is_set()
     )
     main_module._held_position_monitor_active.clear()
-    main_module._periodic_held_position_monitor_fairness_debt.set()
     main_module._day0_held_monitor_preempt_requested.set()
     monkeypatch.setattr(
         main_module,
@@ -11528,57 +11195,11 @@ def test_zero_obligation_periodic_monitor_clears_debt_without_reactor_handoff(
 
     try:
         assert main_module._exit_monitor_cycle.__wrapped__() is True
-        assert not main_module._periodic_held_position_monitor_fairness_debt.is_set()
         assert not main_module._held_position_monitor_active.is_set()
-        assert not main_module._held_position_monitor_handoff_pending.is_set()
         assert not main_module._day0_held_monitor_preempt_requested.is_set()
         assert main_module._held_position_monitor_claim.acquire(blocking=False)
         main_module._held_position_monitor_claim.release()
     finally:
-        main_module._periodic_held_position_monitor_fairness_debt.clear()
-        if not was_bootstrap_complete:
-            main_module._held_position_monitor_bootstrap_complete.clear()
-
-
-def test_periodic_monitor_timeout_rechecks_exposure_before_arming_debt(
-    monkeypatch,
-) -> None:
-    import src.execution.exit_lifecycle as exit_module
-    import src.main as main_module
-
-    class BusyReactorGate:
-        def acquire(self, *, timeout: float) -> bool:
-            return False
-
-    obligation_counts = iter((1, 0))
-    was_bootstrap_complete = (
-        main_module._held_position_monitor_bootstrap_complete.is_set()
-    )
-    main_module._held_position_monitor_active.clear()
-    main_module._periodic_held_position_monitor_fairness_debt.set()
-    monkeypatch.setattr(
-        main_module,
-        "_current_periodic_monitor_obligation_count",
-        lambda: next(obligation_counts),
-    )
-    monkeypatch.setattr(
-        main_module,
-        "_edli_reactor_active_lock",
-        BusyReactorGate(),
-    )
-    monkeypatch.setattr(
-        exit_module,
-        "run_exit_monitor_cycle",
-        lambda **_kwargs: pytest.fail("timed-out monitor must not run coverage"),
-    )
-
-    try:
-        assert main_module._exit_monitor_cycle.__wrapped__() is True
-        assert not main_module._periodic_held_position_monitor_fairness_debt.is_set()
-        with pytest.raises(StopIteration):
-            next(obligation_counts)
-    finally:
-        main_module._periodic_held_position_monitor_fairness_debt.clear()
         if not was_bootstrap_complete:
             main_module._held_position_monitor_bootstrap_complete.clear()
 
@@ -11806,7 +11427,6 @@ def test_durable_monitor_recovery_worker_redrives_until_canonical_refresh(
     monkeypatch.setattr(main_module.time, "sleep", lambda _seconds: None)
     main_module._held_position_monitor_recovery_requested.clear()
     main_module._held_position_monitor_canonical_debt.set()
-    main_module._periodic_held_position_monitor_fairness_debt.set()
     try:
         main_module._held_position_monitor_recovery_worker_main()
         assert monitor_calls == [
@@ -11823,11 +11443,9 @@ def test_durable_monitor_recovery_worker_redrives_until_canonical_refresh(
                 "recovery_full_book": True,
             },
         ]
-        assert not main_module._periodic_held_position_monitor_fairness_debt.is_set()
         assert not main_module._held_position_monitor_canonical_debt.is_set()
     finally:
         main_module._held_position_monitor_recovery_requested.clear()
-        main_module._periodic_held_position_monitor_fairness_debt.clear()
         main_module._held_position_monitor_canonical_debt.clear()
 
 
@@ -11933,62 +11551,6 @@ def test_durable_monitor_recovery_detector_dispatches_after_evidence_failure(
         main_module._held_position_monitor_canonical_debt.clear()
 
 
-def test_durable_monitor_recovery_worker_redrives_real_busy_handoff(
-    monkeypatch,
-) -> None:
-    import src.execution.exit_lifecycle as exit_module
-    import src.main as main_module
-
-    class BusyReactorGate:
-        def acquire(self, *, timeout: float) -> bool:
-            assert timeout == main_module._URGENT_EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
-            return False
-
-    stale = {"stale_or_missing_position_count": 1, "future_monitor_event_count": 0}
-    fresh = {"stale_or_missing_position_count": 0, "future_monitor_event_count": 0}
-    evidence = iter((stale, fresh, fresh))
-    monkeypatch.setattr(
-        main_module,
-        "_held_position_monitor_recovery_evidence",
-        lambda: next(evidence),
-    )
-    monkeypatch.setattr(
-        main_module,
-        "_current_periodic_monitor_obligation_count",
-        lambda: 1,
-    )
-    monkeypatch.setattr(
-        main_module,
-        "_canonical_overdue_monitor_families",
-        lambda **_kwargs: None,
-    )
-    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", BusyReactorGate())
-    monkeypatch.setattr(
-        exit_module,
-        "run_exit_monitor_cycle",
-        lambda **_kwargs: pytest.fail("busy handoff must not admit monitor body"),
-    )
-    monkeypatch.setattr(main_module.time, "sleep", lambda _seconds: None)
-    main_module._held_position_monitor_recovery_requested.clear()
-    main_module._periodic_held_position_monitor_fairness_debt.clear()
-    main_module._held_position_monitor_canonical_debt.set()
-    try:
-        main_module._held_position_monitor_recovery_worker_main()
-        assert not main_module._held_position_monitor_active.is_set()
-        assert not main_module._held_position_monitor_handoff_pending.is_set()
-        assert main_module._held_position_monitor_claim.acquire(blocking=False)
-        main_module._held_position_monitor_claim.release()
-        assert not main_module._periodic_held_position_monitor_fairness_debt.is_set()
-        assert not main_module._held_position_monitor_canonical_debt.is_set()
-    finally:
-        main_module._held_position_monitor_active.clear()
-        main_module._held_position_monitor_handoff_pending.clear()
-        main_module._periodic_held_position_monitor_handoff_pending.clear()
-        main_module._held_position_monitor_recovery_requested.clear()
-        main_module._periodic_held_position_monitor_fairness_debt.clear()
-        main_module._held_position_monitor_canonical_debt.clear()
-
-
 def test_durable_monitor_recovery_dispatch_is_single_owner(monkeypatch) -> None:
     import src.main as main_module
 
@@ -12050,44 +11612,6 @@ def test_durable_monitor_recovery_worker_consumes_exit_race_dispatch(
     finally:
         main_module._held_position_monitor_recovery_requested.clear()
         main_module._held_position_monitor_canonical_debt.clear()
-
-
-def test_periodic_monitor_handoff_clears_fairness_debt_before_incomplete_scan(
-    monkeypatch,
-) -> None:
-    import src.execution.exit_lifecycle as exit_module
-    import src.main as main_module
-
-    class IdleReactorGate:
-        def acquire(self, *, timeout: float) -> bool:
-            return True
-
-        def release(self) -> None:
-            pass
-
-    was_bootstrap_complete = (
-        main_module._held_position_monitor_bootstrap_complete.is_set()
-    )
-    main_module._held_position_monitor_bootstrap_complete.set()
-    main_module._periodic_held_position_monitor_fairness_debt.set()
-    main_module._day0_urgent_wake_pending.clear()
-    main_module._day0_held_monitor_preempt_requested.clear()
-    main_module._periodic_exit_monitor_urgent_yielded.clear()
-    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", IdleReactorGate())
-    monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", lambda **_kwargs: False)
-
-    try:
-        with pytest.raises(RuntimeError, match="EXIT_MONITOR_CYCLE_INCOMPLETE"):
-            main_module._exit_monitor_cycle.__wrapped__()
-        assert not main_module._periodic_held_position_monitor_fairness_debt.is_set()
-        assert not main_module._defer_for_held_position_monitor("edli_event_reactor")
-    finally:
-        main_module._held_position_monitor_active.clear()
-        main_module._held_position_monitor_handoff_pending.clear()
-        main_module._periodic_held_position_monitor_handoff_pending.clear()
-        main_module._periodic_held_position_monitor_fairness_debt.clear()
-        if not was_bootstrap_complete:
-            main_module._held_position_monitor_bootstrap_complete.clear()
 
 
 def test_durable_monitor_recovery_has_an_independent_scheduler_executor() -> None:
@@ -12217,31 +11741,25 @@ def test_reactor_rechecks_monitor_priority_after_active_lock_claim() -> None:
     assert first_check < lock_claim < second_check
 
 
-def test_entry_reactor_monitor_defer_contract_is_effective(monkeypatch) -> None:
+def test_active_monitor_never_defers_entry_reactor_after_bootstrap(monkeypatch) -> None:
     import threading
 
     import src.main as main_module
 
     monitor_active = threading.Event()
     monitor_active.set()
-    handoff_pending = threading.Event()
     bootstrap_complete = threading.Event()
     bootstrap_complete.set()
     monkeypatch.setattr(main_module, "_held_position_monitor_active", monitor_active)
     monkeypatch.setattr(
         main_module,
-        "_held_position_monitor_handoff_pending",
-        handoff_pending,
-    )
-    monkeypatch.setattr(
-        main_module,
         "_held_position_monitor_bootstrap_complete",
         bootstrap_complete,
     )
+    monkeypatch.setattr(main_module, "_held_position_monitor_claim", threading.Lock())
+    assert main_module._held_position_monitor_claim.acquire(blocking=False)
 
     assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
-    handoff_pending.set()
-    assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
 
 
 def test_capital_recovery_handoff_defers_only_entry_reactor(monkeypatch) -> None:
@@ -12253,16 +11771,6 @@ def test_capital_recovery_handoff_defers_only_entry_reactor(monkeypatch) -> None
     bootstrap_complete.set()
     capital_handoff = threading.Event()
     capital_handoff.set()
-    monkeypatch.setattr(
-        main_module,
-        "_held_position_monitor_handoff_pending",
-        threading.Event(),
-    )
-    monkeypatch.setattr(
-        main_module,
-        "_periodic_held_position_monitor_fairness_debt",
-        threading.Event(),
-    )
     monkeypatch.setattr(
         main_module,
         "_held_position_monitor_bootstrap_complete",
@@ -12284,16 +11792,10 @@ def test_monitor_bootstrap_scopes_defer_to_entry_competitors(monkeypatch) -> Non
     import src.runtime.reactor_wake as wake_module
 
     bootstrap_complete = type(main_module._held_position_monitor_bootstrap_complete)()
-    handoff_pending = type(main_module._held_position_monitor_handoff_pending)()
     monkeypatch.setattr(
         main_module,
         "_held_position_monitor_bootstrap_complete",
         bootstrap_complete,
-    )
-    monkeypatch.setattr(
-        main_module,
-        "_held_position_monitor_handoff_pending",
-        handoff_pending,
     )
     monkeypatch.setattr(
         wake_module,
@@ -12341,16 +11843,10 @@ def test_monitor_bootstrap_keeps_exact_sell_reauction_live_but_blocks_discovery(
     import src.runtime.reactor_wake as wake_module
 
     bootstrap_complete = type(main_module._held_position_monitor_bootstrap_complete)()
-    handoff_pending = type(main_module._held_position_monitor_handoff_pending)()
     monkeypatch.setattr(
         main_module,
         "_held_position_monitor_bootstrap_complete",
         bootstrap_complete,
-    )
-    monkeypatch.setattr(
-        main_module,
-        "_held_position_monitor_handoff_pending",
-        handoff_pending,
     )
     monkeypatch.setattr(
         wake_module,
@@ -12372,9 +11868,6 @@ def test_monitor_bootstrap_keeps_exact_sell_reauction_live_but_blocks_discovery(
     assert main_module._defer_for_held_position_monitor("market_discovery") is True
     assert promote_calls == [True, True]
 
-    handoff_pending.set()
-    assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
-
 
 def test_monitor_bootstrap_allows_reduce_only_reactor_while_coverage_is_missing(
     monkeypatch,
@@ -12387,11 +11880,6 @@ def test_monitor_bootstrap_allows_reduce_only_reactor_while_coverage_is_missing(
         main_module,
         "_held_position_monitor_bootstrap_complete",
         bootstrap_complete,
-    )
-    monkeypatch.setattr(
-        main_module,
-        "_held_position_monitor_handoff_pending",
-        type(main_module._held_position_monitor_handoff_pending)(),
     )
     monkeypatch.setattr(
         wake_module,
@@ -12457,21 +11945,12 @@ def test_canonical_monitor_debt_runs_exact_held_sell_completion(
 
     canonical_debt = type(main_module._held_position_monitor_canonical_debt)()
     canonical_debt.set()
-    fairness_debt = type(
-        main_module._periodic_held_position_monitor_fairness_debt
-    )()
-    fairness_debt.set()
     bootstrap_complete = type(main_module._held_position_monitor_bootstrap_complete)()
     bootstrap_complete.set()
     monkeypatch.setattr(
         main_module,
         "_held_position_monitor_canonical_debt",
         canonical_debt,
-    )
-    monkeypatch.setattr(
-        main_module,
-        "_periodic_held_position_monitor_fairness_debt",
-        fairness_debt,
     )
     monkeypatch.setattr(
         main_module,
@@ -12483,15 +11962,9 @@ def test_canonical_monitor_debt_runs_exact_held_sell_completion(
         "_held_position_monitor_entry_block_reason",
         lambda: "held_position_monitor_cadence_overdue",
     )
-    monkeypatch.setattr(
-        main_module,
-        "_exact_held_sell_completion_pending",
-        lambda: True,
-    )
 
     assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
     assert canonical_debt.is_set() is True
-    assert fairness_debt.is_set() is True
 
 
 def test_reactor_poll_keeps_canonical_family_debt_ordinary_without_exact_debt(
@@ -12558,29 +12031,15 @@ def test_reactor_poll_keeps_canonical_family_debt_ordinary_without_exact_debt(
     ]
 
 
-@pytest.mark.parametrize("fairness_blocked", [False, True])
-def test_reactor_poll_prioritizes_exact_debt_with_or_without_fairness(
-    monkeypatch,
-    fairness_blocked,
-) -> None:
+def test_reactor_poll_prioritizes_exact_debt(monkeypatch) -> None:
     import src.main as main_module
     import src.runtime.reactor_wake as wake_module
 
-    fairness_debt = type(
-        main_module._periodic_held_position_monitor_fairness_debt
-    )()
-    if fairness_blocked:
-        fairness_debt.set()
     reads: list[dict] = []
     monkeypatch.setattr(
         main_module,
         "_defer_for_held_position_monitor",
         lambda _job: False,
-    )
-    monkeypatch.setattr(
-        main_module,
-        "_periodic_held_position_monitor_fairness_debt",
-        fairness_debt,
     )
     monkeypatch.setattr(
         wake_module,
@@ -12622,29 +12081,17 @@ def test_reactor_poll_prioritizes_exact_debt_with_or_without_fairness(
     ]
 
 
-@pytest.mark.parametrize("fairness_blocked", [False, True])
 def test_reactor_poll_does_not_run_ordinary_work_when_exact_debt_is_unreadable(
     monkeypatch,
-    fairness_blocked,
 ) -> None:
     import src.main as main_module
     import src.runtime.reactor_wake as wake_module
 
-    fairness_debt = type(
-        main_module._periodic_held_position_monitor_fairness_debt
-    )()
-    if fairness_blocked:
-        fairness_debt.set()
     reads: list[dict] = []
     monkeypatch.setattr(
         main_module,
         "_defer_for_held_position_monitor",
         lambda _job: False,
-    )
-    monkeypatch.setattr(
-        main_module,
-        "_periodic_held_position_monitor_fairness_debt",
-        fairness_debt,
     )
     monkeypatch.setattr(
         wake_module,
@@ -12725,11 +12172,6 @@ def test_exact_held_sell_wake_bypasses_monitor_defer_and_retries_after_lock_rele
     monkeypatch.setattr(
         main_module, "_paused_forecast_carrier_priority_allowed", lambda **_kwargs: False
     )
-    monkeypatch.setattr(
-        main_module,
-        "_periodic_held_position_monitor_fairness_debt",
-        type(main_module._periodic_held_position_monitor_fairness_debt)(),
-    )
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", gate)
     monkeypatch.setattr(
         main_module,
@@ -12792,16 +12234,7 @@ def test_held_day0_wake_bypasses_monitor_fairness_before_floor_crossing(
         "day0_extreme_event_committed",
         forecast_families=(family,),
     )
-    fairness_debt = type(
-        main_module._periodic_held_position_monitor_fairness_debt
-    )()
-    fairness_debt.set()
     reads: list[dict] = []
-    monkeypatch.setattr(
-        main_module,
-        "_periodic_held_position_monitor_fairness_debt",
-        fairness_debt,
-    )
     monkeypatch.setattr(
         wake_module,
         "exact_held_sell_completion_wake_ids",
@@ -12865,12 +12298,6 @@ def test_reactor_wrapper_preexisting_canonical_debt_scopes_buy_without_preemptio
 
     canonical_debt = type(main_module._held_position_monitor_canonical_debt)()
     canonical_debt.set()
-    fairness_debt = type(
-        main_module._periodic_held_position_monitor_fairness_debt
-    )()
-    handoff_pending = type(
-        main_module._periodic_held_position_monitor_handoff_pending
-    )()
     bootstrap_complete = type(main_module._held_position_monitor_bootstrap_complete)()
     bootstrap_complete.set()
     observed: dict[str, object] = {}
@@ -12879,16 +12306,6 @@ def test_reactor_wrapper_preexisting_canonical_debt_scopes_buy_without_preemptio
         main_module,
         "_held_position_monitor_canonical_debt",
         canonical_debt,
-    )
-    monkeypatch.setattr(
-        main_module,
-        "_periodic_held_position_monitor_fairness_debt",
-        fairness_debt,
-    )
-    monkeypatch.setattr(
-        main_module,
-        "_periodic_held_position_monitor_handoff_pending",
-        handoff_pending,
     )
     monkeypatch.setattr(
         main_module,
@@ -12920,11 +12337,10 @@ def test_reactor_wrapper_preexisting_canonical_debt_scopes_buy_without_preemptio
 
     def run_cycle(**kwargs) -> bool:
         observed.update(kwargs)
-        # Canonical debt is already an exact family BUY block.  With no actual
-        # handoff or fairness turn, it must not preempt unrelated fresh-family
-        # comparison or held SELL/HOLD/CASH.
-        assert kwargs["held_position_monitor_pending"]() is False
-        assert kwargs["held_position_monitor_debt_pending"]() is False
+        # Canonical debt is already an exact family BUY block. It never
+        # preempts unrelated fresh-family comparison or held SELL/HOLD/CASH.
+        assert "held_position_monitor_pending" not in kwargs
+        assert "held_position_monitor_debt_pending" not in kwargs
         return True
 
     monkeypatch.setattr(reactor_module, "run_edli_event_reactor_cycle", run_cycle)

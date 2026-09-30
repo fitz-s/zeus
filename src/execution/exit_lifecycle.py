@@ -14550,14 +14550,6 @@ def _held_monitor_preparation_cutoff(
     return outer_deadline - primary_reserve
 
 
-def held_monitor_pre_artifact_reserve_seconds() -> float:
-    """Minimum claim remainder needed for bootstrap plus one complete q read."""
-
-    from src.engine.monitor_refresh import HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
-
-    return 2.0 * float(HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS)
-
-
 def _load_held_monitor_bootstrap(
     *,
     deadline_monotonic: float,
@@ -14903,7 +14895,6 @@ def run_exit_monitor_cycle(
     mark_held_position_monitor_complete: Callable[[], None],
     monitor_claimed: bool = False,
     monitor_deadline_monotonic: float | None = None,
-    monitor_handoff_elapsed_seconds: float = 0.0,
     target_families: Collection[tuple[str, str, str]] | None = None,
     should_preempt_for_urgent_day0: Callable[[], bool] | None = None,
     failure_outcome_sink: Callable[[str], None] | None = None,
@@ -14918,14 +14909,11 @@ def run_exit_monitor_cycle(
     order submission.
 
     ``held_position_monitor_active``/``mark_held_position_monitor_complete``
-    are injected from src.main for non-reentrant run/complete signalling. Reactor
-    handoff priority is a separate dispatcher-owned event and ends before this
-    function performs network work. ``monitor_claimed`` means
-    the dispatcher already set the Event while waiting for an active reactor to
-    finish; direct callers retain the original local claim behavior. When the
+    are injected from src.main for non-reentrant run/complete signalling.
+    ``monitor_claimed`` means the dispatcher already owns the claim and set the
+    Event; direct callers retain the original local claim behavior. When the
     dispatcher owns the claim, ``monitor_deadline_monotonic`` carries the same
-    absolute claim-clock deadline through handoff, preparation, refresh, and
-    retry. Direct callers create that deadline immediately after their local
+    absolute claim-clock deadline through preparation, refresh, and retry. Direct callers create that deadline immediately after their local
     active claim.
     ``target_families`` limits event-triggered runs to the families changed by
     the committed observation while periodic runs retain the full portfolio.
@@ -15043,10 +15031,6 @@ def run_exit_monitor_cycle(
         "held_monitor_preparation_budget_seconds": max(
             0.0,
             preparation_deadline_monotonic - preparation_started_monotonic,
-        ),
-        "held_monitor_reactor_handoff_elapsed_seconds": max(
-            0.0,
-            float(monitor_handoff_elapsed_seconds),
         ),
     }
     full_book_open_position_count = 0

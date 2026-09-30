@@ -2239,24 +2239,16 @@ def test_market_discovery_does_not_defer_on_reactor_state_after_p2_lift():
 def test_held_position_monitor_only_pauses_lock_competing_decision_work():
     """Held-position monitoring is not a global live-money stop-the-world lock.
 
-    The entry reactor must yield after the monitor claims the shared handoff;
-    otherwise a cancellation/requeue storm can reacquire the reactor lock before
-    the full-book monitor. Independent recovery and substrate lanes continue.
+    During the bootstrap tranche the DB-heavy competitors (entry reactor,
+    discovery, health) wait for first coverage; after it, the monitor and the
+    entry reactor run concurrently. Independent recovery and substrate lanes
+    never wait.
     """
 
     was_active = main_module._held_position_monitor_active.is_set()
-    was_handoff_pending = main_module._held_position_monitor_handoff_pending.is_set()
     was_bootstrap_complete = main_module._held_position_monitor_bootstrap_complete.is_set()
-    if was_active:
-        main_module._held_position_monitor_active.clear()
-    if was_bootstrap_complete:
-        main_module._held_position_monitor_bootstrap_complete.clear()
-    if was_handoff_pending:
-        main_module._held_position_monitor_handoff_pending.clear()
-
     try:
         main_module._held_position_monitor_active.set()
-        main_module._held_position_monitor_handoff_pending.set()
         main_module._held_position_monitor_bootstrap_complete.set()
         live_decision_jobs = {
             "edli_command_recovery",
@@ -2264,27 +2256,18 @@ def test_held_position_monitor_only_pauses_lock_competing_decision_work():
             "edli_redecision_screen",
             "EDLI market-substrate warm",
             "EDLI market-channel substrate refresh",
+            "edli_event_reactor",
+            "market_discovery",
         }
         for job_name in live_decision_jobs:
             assert main_module._defer_for_held_position_monitor(job_name) is False
-
-        monitor_competing_jobs = {
-            "edli_event_reactor",
-            "market_discovery",
-            "live_health_composite",
-        }
-        for job_name in monitor_competing_jobs:
-            assert main_module._defer_for_held_position_monitor(job_name) is True
     finally:
         main_module._held_position_monitor_active.clear()
-        main_module._held_position_monitor_handoff_pending.clear()
         main_module._held_position_monitor_bootstrap_complete.clear()
         if was_active:
             main_module._held_position_monitor_active.set()
         if was_bootstrap_complete:
             main_module._held_position_monitor_bootstrap_complete.set()
-        if was_handoff_pending:
-            main_module._held_position_monitor_handoff_pending.set()
 
 
 def test_trading_daemon_does_not_host_new_listing_discovery():

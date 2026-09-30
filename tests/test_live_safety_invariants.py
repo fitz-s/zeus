@@ -24018,15 +24018,6 @@ def test_red_monitor_preparation_cutoff_keeps_force_exit_claim(monkeypatch):
     ) == pytest.approx(85.0)
 
 
-def test_monitor_pre_artifact_reserve_covers_bootstrap_and_one_q_read():
-    from src.engine.monitor_refresh import HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
-    from src.execution import exit_lifecycle
-
-    assert exit_lifecycle.held_monitor_pre_artifact_reserve_seconds() == pytest.approx(
-        2.0 * HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
-    )
-
-
 def test_exit_monitor_db_bootstrap_uses_preparation_cutoff(monkeypatch):
     from src.engine import cycle_runner
     from src.execution import exit_lifecycle
@@ -24107,14 +24098,6 @@ def test_periodic_monitor_deadline_releases_claim_for_successor(monkeypatch):
         def release(self):
             releases.append(clock[0])
 
-    class Reactor:
-        def acquire(self, *, timeout):
-            assert timeout > 0.0
-            return True
-
-        def release(self):
-            return None
-
     def run_at_boundary(**kwargs):
         deadline = kwargs["monitor_deadline_monotonic"]
         deadlines.append(deadline)
@@ -24130,19 +24113,12 @@ def test_periodic_monitor_deadline_releases_claim_for_successor(monkeypatch):
     monkeypatch.setattr(main.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(main, "_held_position_monitor_claim", Claim())
     monkeypatch.setattr(main, "_held_position_monitor_active", threading.Event())
-    monkeypatch.setattr(main, "_edli_reactor_active_lock", Reactor())
     monkeypatch.setattr(
         main,
         "_acquire_held_monitor_claim",
         lambda **_kwargs: (True, 0),
     )
     monkeypatch.setattr(main, "_current_periodic_monitor_obligation_count", lambda: 1)
-    monkeypatch.setattr(main, "_reserve_periodic_held_monitor_successor", lambda: 1)
-    monkeypatch.setattr(
-        main,
-        "_consume_periodic_held_monitor_successor",
-        lambda _g: None,
-    )
     monkeypatch.setattr(main, "_urgent_held_monitor_preemption_pending", lambda: False)
     monkeypatch.setattr(main, "_periodic_exit_monitor_should_yield", lambda _p: False)
     monkeypatch.setattr(main, "_urgent_held_monitor_owner_pending", lambda: False)

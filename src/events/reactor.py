@@ -7637,25 +7637,14 @@ def _process_pending_cancelled(
     producer_fast_path: bool,
     urgent_wake_pending: Callable[[], bool],
     urgent_day0_pending: Callable[[], bool] | None,
-    held_position_monitor_debt_pending: Callable[[], bool] | None = None,
     generic_completion_latch_cancelled: Callable[[], bool] | None = None,
     exact_held_completion: bool = False,
-    exact_executable_held_completion: bool = False,
-) -> Callable[[], bool] | None:
+) -> Callable[[], bool]:
     base_cancelled = (
         None
         if committed_day0_wake
         else (urgent_day0_pending if producer_fast_path else urgent_wake_pending)
     )
-    if (
-        held_position_monitor_debt_pending is None
-        and (
-            exact_held_completion
-            or committed_day0_wake
-        )
-    ):
-        return base_cancelled
-
     def cancelled() -> bool:
         if base_cancelled is not None and base_cancelled():
             return True
@@ -7666,54 +7655,21 @@ def _process_pending_cancelled(
                 return True
             if _EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set():
                 return True
-            # The caller passed this predicate only after its last-yield exact
-            # queue and monitor-debt recheck succeeded. Keep a late monitor
-            # debt out of this single bounded turn; deadline/unknown exact debt
-            # cancels above and leaves the durable generic wake pending.
+            # Deadline/unknown exact debt cancels above and leaves the durable
+            # generic wake pending.
             return False
         # SCOPE: only an ordinary replayable cycle; exact held completion and
         # committed Day0 hard-fact work are protected. DRAIN: the ordinary cut
         # exits at this safe checkpoint and the durable exact wake owns the next
         # poll. RESET: receipt/ack removes the exact debt, so later ordinary
         # cycles no longer observe this predicate.
-        if (
+        return (
             not exact_held_completion
             and not committed_day0_wake
             and _EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
-        ):
-            return True
-        if exact_executable_held_completion:
-            # SCOPE: one exact V4 SELL request with a claimed executable bid.
-            # DRAIN: this bounded global auction rebinds current q/book and
-            # emits its own receipt. RESET: a terminal receipt or a successor
-            # removes this turn; ordinary monitor debt remains pending.
-            return False
-        return (
-            held_position_monitor_debt_pending is not None
-            and _held_position_monitor_preemption_pending(
-                None,
-                held_position_monitor_debt_pending,
-            )
         )
 
     return cancelled
-
-
-def _held_position_monitor_preemption_pending(
-    monitor_pending: Callable[[], bool] | None,
-    monitor_debt_pending: Callable[[], bool] | None,
-) -> bool:
-    """Read scheduler monitor pressure without letting a failed hint veto work."""
-
-    for probe in (monitor_debt_pending, monitor_pending):
-        if probe is None:
-            continue
-        try:
-            if probe():
-                return True
-        except Exception:  # noqa: BLE001 - scheduler hint failure cannot veto trading.
-            continue
-    return False
 
 
 def _first_cancel_label(
@@ -8625,136 +8581,41 @@ def _held_sell_reauction_receipts_from_global_cut(
     return tuple(receipts)
 
 
-def _global_auction_monitor_cancellation_probe(
-    monitor_pending: Callable[[], bool] | None,
-    *,
-    monitor_debt_pending: Callable[[], bool] | None = None,
-    monitor_debt_grace_deadline_monotonic: float | None = None,
-    completion_due: bool = False,
-    exact_held_completion: bool = False,
-    exact_executable_held_completion: bool = False,
-) -> tuple[bool, Callable[[], bool]]:
-    """Reserve completion across monitor preemption until fresh truth clears debt."""
+def _exact_held_sell_preempts(*, exact_turn: bool) -> bool:
+    """Queued exact held-SELL debt ends every cut except its own exact turn."""
 
-    completion_due_at_start = (
-        completion_due or _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
-    )
-    if completion_due_at_start:
+    return not exact_turn and _EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
+
+
+def _reserve_global_auction_completion(completion_due: bool) -> bool:
+    """Whether this cut owes the one reserved global completion turn."""
+
+    due = completion_due or _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+    if due:
         _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
-    cancelled_this_cycle = False
-    if completion_due_at_start:
         logging.getLogger("zeus.events.reactor").info(
             "global auction economic-cut completion reserved"
         )
-    completion_starts_without_monitor_debt = False
-    if completion_due_at_start and not exact_held_completion:
-        try:
-            completion_starts_without_monitor_debt = (
-                monitor_debt_pending is None or not monitor_debt_pending()
-            )
-        except Exception:  # noqa: BLE001 - unknown debt cannot grant priority.
-            completion_starts_without_monitor_debt = False
-
-    def _cancelled() -> bool:
-        nonlocal cancelled_this_cycle
-
-        if cancelled_this_cycle:
-            return True
-        if (
-            not exact_executable_held_completion
-            and _EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
-        ):
-            cancelled_this_cycle = True
-            return True
-        if (
-            monitor_debt_grace_deadline_monotonic is not None
-            and time.monotonic() < monitor_debt_grace_deadline_monotonic
-        ):
-            # A strictly-qualified generic held completion received one bounded
-            # turn after the last monitor yield. The latch never masks exact
-            # completion debt above, and expiry returns control to the monitor.
-            return False
-        debt_pending = False
-        if monitor_debt_pending is not None:
-            try:
-                debt_pending = bool(monitor_debt_pending())
-            except Exception:  # noqa: BLE001 - scheduler hint failure cannot veto trading.
-                debt_pending = False
-        if completion_starts_without_monitor_debt and not debt_pending:
-            # SCOPE: this already-reserved generic economic cut, admitted only
-            # while durable monitor debt remains absent. DRAIN: one bounded
-            # current BUY/SELL/HOLD/CASH comparison completes while a merely
-            # claimed periodic successor waits. A handoff timeout upgrades that
-            # wait to durable debt and preempts this replayable cut at its next
-            # checkpoint. RESET: the monitor handoff clears debt; the retained
-            # completion token then owns the next current global cut.
-            return False
-        if exact_executable_held_completion:
-            # The exact request owns one bounded rebind turn.  Its historical
-            # witness never reaches the venue: the adapter still requires a
-            # current q/book and the global expected-capital comparison.
-            return False
-        if monitor_pending is None and not debt_pending:
-            return False
-        pending = debt_pending
-        if not pending and monitor_pending is not None:
-            try:
-                pending = bool(monitor_pending())
-            except Exception:  # noqa: BLE001 - scheduler hint failure cannot veto trading.
-                return False
-        if not pending:
-            return False
-        # SCOPE: cancel this in-flight global selection once so the claimed
-        # held monitor gets the reactor handoff. DRAIN: the next reactor cycle
-        # ignores ordinary monitor pressure, but durable timeout debt may keep
-        # the reserved cut pending until the monitor actually gets its turn.
-        # RESET: _settle_global_auction_monitor_fairness clears the debt only
-        # after a non-cancelled auction result; Day0 cancellation keeps it due.
-        completion_reserved = (
-            completion_due_at_start
-            or request_global_auction_completion(
-                reason="periodic_monitor_preemption",
-                position_id="",
-            )
-        )
-        if not completion_reserved:
-            logging.getLogger("zeus.events.reactor").warning(
-                "global auction kept current selection because monitor completion "
-                "wake was not durably accepted"
-            )
-            return False
-        cancelled_this_cycle = True
-        logging.getLogger("zeus.events.reactor").info(
-            "global auction yielded once to periodic held monitor; completion debt armed"
-        )
-        return True
-
-    return completion_due_at_start, _cancelled
+    return due
 
 
 def _try_latch_generic_held_completion(
     *,
     qualified: bool,
     durable_exact_completion_pending: Callable[[], bool] | None,
-    monitor_debt_pending: Callable[[], bool] | None,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> float | None:
-    """Return one bounded generic-completion deadline after the final yield.
+    """Return one bounded generic-completion deadline.
 
     The caller supplies the already-strict aggregate qualification. An
-    unreadable/new exact completion or monitor debt never receives this
-    exception. The returned deadline is absolute and is not renewed by later
-    construction stages.
+    unreadable/new exact completion never receives this exception. The
+    returned deadline is absolute and is not renewed by later stages.
     """
 
-    if (
-        not qualified
-        or durable_exact_completion_pending is None
-        or monitor_debt_pending is None
-    ):
+    if not qualified or durable_exact_completion_pending is None:
         return None
     try:
-        if durable_exact_completion_pending() or monitor_debt_pending():
+        if durable_exact_completion_pending():
             return None
     except Exception:  # noqa: BLE001 - unknown debt cannot receive priority.
         return None
@@ -9154,8 +9015,6 @@ def run_edli_event_reactor_cycle(
     allow_paused_forecast_snapshot_completion: bool = False,
     urgent_day0_pending: Callable[[], bool] | None = None,
     capital_recovery_pending: Callable[[], bool] | None = None,
-    held_position_monitor_pending: Callable[[], bool] | None = None,
-    held_position_monitor_debt_pending: Callable[[], bool] | None = None,
     live_entry_block_reason: str | None = None,
     live_entry_family_block_reasons: Mapping[str, str] | None = None,
 ) -> bool:
@@ -9181,16 +9040,10 @@ def run_edli_event_reactor_cycle(
     ``capital_recovery_pending`` is an independent handoff for unresolved venue
     effects. A preexisting Day0 marker never exempts this cancellation signal.
 
-    ``held_position_monitor_pending`` is the typed periodic-monitor handoff
-    signal. It may cancel one in-flight auction; that cancellation reserves the
-    next global auction against further periodic-monitor cancellation until it
-    completes, so neither lane can starve the other. Urgent forecast and Day0
-    monitors do not consume this fairness token. Newly committed Day0 facts
-    retain their independent urgent cancellation path inside the live adapter.
-
-    ``held_position_monitor_debt_pending`` remains set after a handoff timeout.
-    Unlike the transient handoff signal, it also cancels an already-reserved
-    completion auction so an in-flight selection cannot outlive monitor debt.
+    The held-position monitor never cancels this cycle: it needs no reactor
+    state, and SQLite writes are serialized by the write coordinator. Only a
+    fact ``cut_invalidating_wakes`` names, exact held-SELL debt, capital
+    recovery, or a deadline ends a cut.
 
     ``allow_paused_forecast_snapshot_completion`` is qualified once by
     ``src.main`` from durable global entries-pause state. It applies only to
@@ -9359,88 +9212,9 @@ def run_edli_event_reactor_cycle(
     paused_forecast_held_auction = False
     exact_final_actuation_window = False
 
-    def _yield_for_held_position_monitor(stage: str) -> bool:
-        unresolved_monitor_handoff = _held_position_monitor_preemption_pending(
-            None,
-            held_position_monitor_debt_pending,
-        )
-        monitor_pressure = unresolved_monitor_handoff or (
-            _held_position_monitor_preemption_pending(
-                held_position_monitor_pending,
-                None,
-            )
-        )
-        if (
-            (
-                paused_forecast_held_auction
-                or committed_day0_wake
-                or (
-                    (held_sell_completion_cycle and not exact_executable_held_completion)
-                    or _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
-                )
-            )
-            and not unresolved_monitor_handoff
-        ):
-            # SCOPE: only the already-reserved fairness completion cut. DRAIN:
-            # one terminal global cut runs while its upstream held-capital
-            # monitor truth remains current. Unresolved monitor debt overrides
-            # an exact/completion reservation for one handoff: otherwise the
-            # reactor holds the lock while the monitor waits for that same lock.
-            # RESET: fresh canonical monitor evidence clears the debt and the
-            # durable completion token/request still owns the next auction.
-            return False
-        if exact_final_actuation_window:
-            # SCOPE: only the final bounded reduce-only process_pending call.
-            # All discovery and snapshot construction above remain preemptible.
-            return False
-        if not monitor_pressure:
-            return False
-        # SCOPE: only this replayable global-auction cycle. DRAIN: the monitor
-        # receives this handoff, while the durable completion wake and in-process
-        # token force the next cycle past this early-yield boundary. RESET: one
-        # non-cancelled terminal global cut clears the token through
-        # _settle_global_auction_monitor_fairness().
-        completion_reserved = request_global_auction_completion(
-            reason="periodic_monitor_preemption",
-            position_id="",
-        )
-        if not completion_reserved:
-            _log.warning(
-                "EDLI reactor retained global auction before %s because monitor "
-                "completion wake was not durably accepted",
-                stage,
-            )
-            return False
-        _log.info(
-            "EDLI reactor yielded once before %s for held-position monitor "
-            "pressure; completion debt armed",
-            stage,
-        )
-        return True
-
     def _ordinary_stage_cancelled() -> bool:
-        return (
-            _urgent_wake_pending()
-            or (
-                not exact_final_actuation_window
-                and _EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
-            )
-            or _held_position_monitor_preemption_pending(
-                (
-                    None
-                    if (
-                        held_sell_completion_cycle
-                        or paused_forecast_held_auction
-                        or committed_day0_wake
-                    )
-                    else held_position_monitor_pending
-                ),
-                (
-                    None
-                    if exact_final_actuation_window
-                    else held_position_monitor_debt_pending
-                ),
-            )
+        return _urgent_wake_pending() or _exact_held_sell_preempts(
+            exact_turn=exact_final_actuation_window
         )
 
     completion_recovery_cycle = bool(
@@ -9451,8 +9225,6 @@ def run_edli_event_reactor_cycle(
     paused_forecast_carrier = (
         allow_paused_forecast_snapshot_completion and forecast_posterior_wake
     )
-    if _yield_for_held_position_monitor("paused-entry/runtime setup"):
-        return False
     if (
         get_current_level() != RiskLevel.GREEN
         and not completion_recovery_cycle
@@ -9519,9 +9291,6 @@ def run_edli_event_reactor_cycle(
             active_lock.release()
             return False
         if _defer_for_held_position_monitor("edli_event_reactor"):
-            active_lock.release()
-            return False
-        if _yield_for_held_position_monitor("runtime_db_setup"):
             active_lock.release()
             return False
     except BaseException:
@@ -9604,8 +9373,6 @@ def run_edli_event_reactor_cycle(
         store = EventStore(conn)
         targeted_event_ids = set(producer_wake_event_ids)
         catchup_day0_event_ids: tuple[str, ...] = ()
-        if _yield_for_held_position_monitor("day0_ledger_sync"):
-            return False
         if not producer_fast_path:
             try:
                 from src.config import runtime_cities as _runtime_cities
@@ -9627,8 +9394,6 @@ def run_edli_event_reactor_cycle(
                     _day0_sync_exc,
                 )
         _log_stage("day0_ledger_sync")
-        if _yield_for_held_position_monitor("day0_admission_and_prune"):
-            return False
         _day0_family_admission: _Day0LiveFamilyAdmission | None = None
         if not producer_fast_path:
             try:
@@ -9700,8 +9465,6 @@ def run_edli_event_reactor_cycle(
                 "before processing fresh fact"
             )
         _log_stage("pending_prune")
-        if _yield_for_held_position_monitor("forecast_snapshot_build"):
-            return False
         if not producer_fast_path and _urgent_wake_pending():
             _log.info(
                 "EDLI reactor maintenance preempted after prune by urgent producer wake"
@@ -9814,8 +9577,6 @@ def run_edli_event_reactor_cycle(
                 "EDLI reactor maintenance preempted after forecast discovery "
                 "by urgent producer wake"
             )
-            return False
-        if _yield_for_held_position_monitor("forecast_snapshot_emit"):
             return False
         # EDLI live contention fix (2026-05-31): the FSR/Day0/redecision
         # EMIT block writes opportunity_events to the WAL zeus-world.db shared
@@ -9976,14 +9737,11 @@ def run_edli_event_reactor_cycle(
                 "EDLI reactor maintenance preempted after emit by urgent producer wake"
             )
             return False
-        if _yield_for_held_position_monitor("reactor_construct"):
-            return False
         generic_completion_deadline_monotonic = _try_latch_generic_held_completion(
             qualified=family_scoped_held_completion,
             durable_exact_completion_pending=(
                 _durable_exact_held_sell_completion_pending
             ),
-            monitor_debt_pending=held_position_monitor_debt_pending,
         )
 
         def _generic_completion_latch_cancelled() -> bool:
@@ -10005,28 +9763,6 @@ def run_edli_event_reactor_cycle(
             construct_cut_seconds = DEFAULT_REACTOR_CONSTRUCT_WORK_CUT_SECONDS
         if not math.isfinite(construct_cut_seconds) or construct_cut_seconds <= 0.0:
             construct_cut_seconds = DEFAULT_REACTOR_CONSTRUCT_WORK_CUT_SECONDS
-        protected_completion_cut = (
-            held_sell_completion_cycle
-            or paused_forecast_held_auction
-            or committed_day0_wake
-        )
-
-        _, _construct_monitor_cancelled = (
-            _global_auction_monitor_cancellation_probe(
-                (
-                    None
-                    if protected_completion_cut
-                    else held_position_monitor_pending
-                ),
-                monitor_debt_pending=held_position_monitor_debt_pending,
-                completion_due=False,
-                exact_held_completion=held_sell_completion_cycle,
-                exact_executable_held_completion=exact_final_actuation_window,
-                monitor_debt_grace_deadline_monotonic=(
-                    generic_completion_deadline_monotonic
-                ),
-            )
-        )
         construct_context = WorkContext(
             deadline_monotonic=min(
                 time.monotonic() + construct_cut_seconds,
@@ -10036,13 +9772,11 @@ def run_edli_event_reactor_cycle(
             else time.monotonic() + construct_cut_seconds,
             cancel_requested=lambda: _first_cancel_label(
                 ("urgent_wake", _urgent_wake_pending),
-                ("monitor_handoff", _construct_monitor_cancelled),
                 ("generic_completion_latch", _generic_completion_latch_cancelled),
                 (
                     "exact_held_sell_pending",
-                    lambda: (
-                        not exact_final_actuation_window
-                        and _EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
+                    lambda: _exact_held_sell_preempts(
+                        exact_turn=exact_final_actuation_window
                     ),
                 ),
             ),
@@ -10247,23 +9981,12 @@ def run_edli_event_reactor_cycle(
                 held_sell_completion_cut_requests
             )
         )
-        (
-            _monitor_completion_due_at_start,
-            _monitor_selection_cancelled,
-        ) = _global_auction_monitor_cancellation_probe(
-            held_position_monitor_pending,
-            monitor_debt_pending=held_position_monitor_debt_pending,
-            completion_due=(
-                completion_wake
-                or durable_exact_held_completion
-                or paused_forecast_held_auction
-            ),
-            exact_held_completion=active_held_sell_completion_cycle,
-            exact_executable_held_completion=exact_executable_held_completion,
-            monitor_debt_grace_deadline_monotonic=(
-                generic_completion_deadline_monotonic
-            ),
+        _monitor_completion_due_at_start = _reserve_global_auction_completion(
+            completion_wake
+            or durable_exact_held_completion
+            or paused_forecast_held_auction
         )
+
         _construct_checkpoint("before_completion_mode")
         _completion_risk_level = get_current_level()
         _monitor_completion_mode = _construct_sql(
@@ -10349,7 +10072,12 @@ def run_edli_event_reactor_cycle(
             producer_wake_ids=producer_wake_ids,
             producer_wake_published_at=producer_wake_published_at,
             selection_cancelled=lambda: _first_cancel_label(
-                ("monitor_handoff", _monitor_selection_cancelled),
+                (
+                    "exact_held_sell_pending",
+                    lambda: _exact_held_sell_preempts(
+                        exact_turn=exact_executable_held_completion
+                    ),
+                ),
                 ("generic_completion_latch", _generic_completion_latch_cancelled),
             ),
             selection_completion_fairness_reserved=(
@@ -10482,14 +10210,12 @@ def run_edli_event_reactor_cycle(
                         if capital_recovery_pending is not None
                         else urgent_day0_pending
                     ),
-                    held_position_monitor_debt_pending=held_position_monitor_debt_pending,
                     generic_completion_latch_cancelled=(
                         _generic_completion_latch_cancelled
                         if generic_completion_deadline_monotonic is not None
                         else None
                     ),
                     exact_held_completion=active_held_sell_completion_cycle,
-                    exact_executable_held_completion=exact_final_actuation_window,
                 ),
             )
         finally:

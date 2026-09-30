@@ -22738,12 +22738,12 @@ def test_global_scope_reports_a_held_family_without_probability_carrier(
     assert missing == [("Held", "2026-07-08", "high")]
 
 
-def test_reserved_completion_auction_yields_to_late_durable_monitor_debt(
+def test_scope_scan_yields_to_late_exact_held_sell_debt(
     monkeypatch,
 ):
     from src.events import reactor
 
-    monitor_debt = threading.Event()
+    exact_debt = reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING
     available = _global_scope_event(city="Alpha", source_run_id="run-alpha")
 
     class SlowTrigger:
@@ -22751,7 +22751,7 @@ def test_reserved_completion_auction_yields_to_late_durable_monitor_debt(
             pass
 
         def build_committed_snapshot_events(self, **kwargs):
-            monitor_debt.set()
+            exact_debt.set()
             kwargs["forecasts_conn"].execute(
                 """
                 WITH RECURSIVE counter(value) AS (
@@ -22786,14 +22786,13 @@ def test_reserved_completion_auction_yields_to_late_durable_monitor_debt(
         "request_global_auction_completion",
         lambda **_kwargs: pytest.fail("reserved completion debt must not duplicate"),
     )
-    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
-    due_at_start, cancellation_probe = (
-        reactor._global_auction_monitor_cancellation_probe(
-            lambda: False,
-            monitor_debt_pending=monitor_debt.is_set,
-            completion_due=True,
+    exact_debt.clear()
+
+    def cancellation_probe():
+        return reactor._exact_held_sell_preempts(exact_turn=False) and (
+            "exact_held_sell_pending"
         )
-    )
+
     started = time.monotonic()
     try:
         with pytest.raises(
@@ -22809,10 +22808,10 @@ def test_reserved_completion_auction_yields_to_late_durable_monitor_debt(
                 cancelled=cancellation_probe,
             )
     finally:
-        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+        was_set = exact_debt.is_set()
+        exact_debt.clear()
 
-    assert due_at_start is True
-    assert monitor_debt.is_set()
+    assert was_set
     assert time.monotonic() - started < 1.0
     calls_before_probe = prior_handler_calls
     forecasts_conn.execute(

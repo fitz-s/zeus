@@ -49,7 +49,6 @@ from src.events.reactor import (
     _POST_SUBMIT_WORLD_WRITE_LOCK_RETRY,
     _build_day0_posterior_redecision_events,
     _edli_emit_day0_extreme_events,
-    _held_position_monitor_preemption_pending,
     _is_posterior_staleness_reason,
     _process_pending_cancelled,
     _qkernel_regret_economics,
@@ -957,16 +956,13 @@ def test_generic_held_completion_latch_is_bounded_and_fails_closed():
     from src.events import reactor
 
     exact_pending = [False]
-    monitor_debt = [False]
     clock = [100.0]
     deadline = reactor._try_latch_generic_held_completion(
         qualified=True,
         durable_exact_completion_pending=lambda: exact_pending[0],
-        monitor_debt_pending=lambda: monitor_debt[0],
         monotonic=lambda: clock[0],
     )
     assert deadline == 130.0
-    monitor_debt[0] = True
     assert not reactor._generic_held_completion_latch_cancelled(
         deadline_monotonic=deadline,
         durable_exact_completion_pending=lambda: exact_pending[0],
@@ -980,8 +976,7 @@ def test_generic_held_completion_latch_is_bounded_and_fails_closed():
     )
     assert reactor._try_latch_generic_held_completion(
         qualified=True,
-        durable_exact_completion_pending=lambda: False,
-        monitor_debt_pending=lambda: True,
+        durable_exact_completion_pending=lambda: True,
         monotonic=lambda: clock[0],
     ) is None
     assert reactor._try_latch_generic_held_completion(
@@ -989,7 +984,6 @@ def test_generic_held_completion_latch_is_bounded_and_fails_closed():
         durable_exact_completion_pending=lambda: (
             (_ for _ in ()).throw(OSError())
         ),
-        monitor_debt_pending=lambda: False,
         monotonic=lambda: clock[0],
     ) is None
     clock[0] = 130.0
@@ -998,29 +992,6 @@ def test_generic_held_completion_latch_is_bounded_and_fails_closed():
         durable_exact_completion_pending=lambda: False,
         monotonic=lambda: clock[0],
     )
-
-
-def test_generic_held_completion_latch_applies_to_selection_until_deadline(
-    monkeypatch,
-):
-    from src.events import reactor
-
-    clock = [100.0]
-    monkeypatch.setattr(reactor.time, "monotonic", lambda: clock[0])
-    monitor_debt = [True]
-    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
-    try:
-        _, cancelled = reactor._global_auction_monitor_cancellation_probe(
-            None,
-            monitor_debt_pending=lambda: monitor_debt[0],
-            completion_due=True,
-            monitor_debt_grace_deadline_monotonic=130.0,
-        )
-        assert cancelled() is False
-        clock[0] = 130.0
-        assert cancelled() is True
-    finally:
-        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
 
 def _generic_completion_invalidates(wakes, *, valuation_family_keys=None):
@@ -2068,12 +2039,9 @@ def test_main_monitor_cadence_debt_blocks_buy_without_preempting_ordinary_reacto
     assert captured["live_entry_block_reason"] == (
         "held_position_monitor_cadence_overdue"
     )
-    monitor_pending = captured["held_position_monitor_pending"]
-    assert callable(monitor_pending)
-    assert monitor_pending() is False
-    monitor_debt_pending = captured["held_position_monitor_debt_pending"]
-    assert callable(monitor_debt_pending)
-    assert monitor_debt_pending() is False
+    # The reactor receives no monitor-preemption callback at all.
+    assert "held_position_monitor_pending" not in captured
+    assert "held_position_monitor_debt_pending" not in captured
 
 
 def test_main_monitor_bootstrap_blocks_buy_but_keeps_reactor_live(monkeypatch):
@@ -2114,9 +2082,7 @@ def test_main_monitor_bootstrap_blocks_buy_but_keeps_reactor_live(monkeypatch):
     assert captured["live_entry_block_reason"] == (
         "held_position_monitor_bootstrap_incomplete"
     )
-    monitor_pending = captured["held_position_monitor_pending"]
-    assert callable(monitor_pending)
-    assert monitor_pending() is False
+    assert "held_position_monitor_pending" not in captured
 
 
 @pytest.mark.parametrize(
@@ -3034,7 +3000,6 @@ def test_paused_exact_canonical_held_sell_request_reaches_reduce_only_cycle(monk
             active_lock=lock,
             producer_wake_reason="held_sell_global_auction_completion_requested",
             producer_held_sell_reauction_requests=(request,),
-            held_position_monitor_debt_pending=lambda: True,
         )
     assert lock.locked() is False
 
@@ -6096,7 +6061,6 @@ def test_generic_scope_read_failure_preserves_fill_lane(tmp_path, monkeypatch):
         lambda **kwargs: selected.append(kwargs["producer_wake_reason"]) or True,
     )
     monkeypatch.setattr(main, "_position_fill_wake_held_families", lambda _ids: frozenset())
-    main._periodic_held_position_monitor_fairness_debt.clear()
     main._edli_initialize_reactor_wake_cursor()
     try:
         assert main._edli_reactor_wake_poll_once() is True
@@ -7682,218 +7646,66 @@ def test_global_batch_stops_claiming_when_cycle_is_cancelled():
     ) == 2
 
 
-def test_process_pending_cancellation_includes_monitor_debt_for_protected_completion():
+def test_process_pending_cancellation_names_only_facts_and_exact_debt():
     def any_urgent():
         return False
 
     def day0_urgent():
         return True
 
-    assert _process_pending_cancelled(
+    # A committed Day0 cut is cancelled only by queued exact held-SELL debt.
+    day0_cut = _process_pending_cancelled(
         committed_day0_wake=True,
         producer_fast_path=True,
         urgent_wake_pending=any_urgent,
         urgent_day0_pending=day0_urgent,
-    ) is None
+    )
+    assert day0_cut() is False
     fast_path_cancelled = _process_pending_cancelled(
         committed_day0_wake=False,
         producer_fast_path=True,
         urgent_wake_pending=any_urgent,
         urgent_day0_pending=day0_urgent,
     )
-    assert fast_path_cancelled is not None
     assert fast_path_cancelled() is True
-    ordinary_wake_cancelled = _process_pending_cancelled(
-        committed_day0_wake=False,
-        producer_fast_path=False,
-        urgent_wake_pending=any_urgent,
-        urgent_day0_pending=day0_urgent,
-    )
-    assert ordinary_wake_cancelled is not None
-    assert ordinary_wake_cancelled() is False
-
-    debt_pending = [False]
-    cancelled = _process_pending_cancelled(
-        committed_day0_wake=False,
-        producer_fast_path=False,
-        urgent_wake_pending=any_urgent,
-        urgent_day0_pending=day0_urgent,
-        held_position_monitor_debt_pending=lambda: debt_pending[0],
-    )
-    assert cancelled is not None
-    assert cancelled() is False
-    debt_pending[0] = True
-    assert cancelled() is True
-    latched_cancelled = _process_pending_cancelled(
-        committed_day0_wake=False,
-        producer_fast_path=True,
-        urgent_wake_pending=any_urgent,
-        urgent_day0_pending=lambda: False,
-        held_position_monitor_debt_pending=lambda: True,
-        generic_completion_latch_cancelled=lambda: False,
-    )
-    assert latched_cancelled is not None
-    assert latched_cancelled() is False
-    latched_expired = _process_pending_cancelled(
-        committed_day0_wake=False,
-        producer_fast_path=True,
-        urgent_wake_pending=any_urgent,
-        urgent_day0_pending=lambda: False,
-        held_position_monitor_debt_pending=lambda: True,
-        generic_completion_latch_cancelled=lambda: True,
-    )
-    assert latched_expired is not None
-    assert latched_expired() is True
-    exact_cancelled = _process_pending_cancelled(
-        committed_day0_wake=False,
-        producer_fast_path=False,
-        urgent_wake_pending=any_urgent,
-        urgent_day0_pending=day0_urgent,
-        held_position_monitor_debt_pending=lambda: True,
-        exact_held_completion=True,
-    )
-    assert exact_cancelled is not None
-    assert exact_cancelled() is True
-    executable_exact_cancelled = _process_pending_cancelled(
-        committed_day0_wake=False,
-        producer_fast_path=False,
-        urgent_wake_pending=any_urgent,
-        urgent_day0_pending=day0_urgent,
-        held_position_monitor_debt_pending=lambda: True,
-        exact_held_completion=True,
-        exact_executable_held_completion=True,
-    )
-    assert executable_exact_cancelled is not None
-    assert executable_exact_cancelled() is False
     ordinary_cancelled = _process_pending_cancelled(
         committed_day0_wake=False,
         producer_fast_path=False,
         urgent_wake_pending=any_urgent,
         urgent_day0_pending=day0_urgent,
-        exact_held_completion=False,
     )
-    assert ordinary_cancelled is not None
     assert ordinary_cancelled() is False
-    _EXACT_EXECUTABLE_HELD_SELL_PENDING.set()
-    try:
-        assert ordinary_cancelled() is True
-    finally:
-        _EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
-    protected_exact = _process_pending_cancelled(
+    latched = _process_pending_cancelled(
+        committed_day0_wake=False,
+        producer_fast_path=True,
+        urgent_wake_pending=any_urgent,
+        urgent_day0_pending=lambda: False,
+        generic_completion_latch_cancelled=lambda: False,
+    )
+    assert latched() is False
+    latched_expired = _process_pending_cancelled(
+        committed_day0_wake=False,
+        producer_fast_path=True,
+        urgent_wake_pending=any_urgent,
+        urgent_day0_pending=lambda: False,
+        generic_completion_latch_cancelled=lambda: True,
+    )
+    assert latched_expired() is True
+    exact_turn = _process_pending_cancelled(
         committed_day0_wake=False,
         producer_fast_path=False,
         urgent_wake_pending=any_urgent,
         urgent_day0_pending=day0_urgent,
         exact_held_completion=True,
     )
-    assert protected_exact is any_urgent
-    assert protected_exact() is False
-    protected_day0 = _process_pending_cancelled(
-        committed_day0_wake=True,
-        producer_fast_path=True,
-        urgent_wake_pending=any_urgent,
-        urgent_day0_pending=day0_urgent,
-        exact_held_completion=False,
-    )
-    assert protected_day0 is None
-    assert _held_position_monitor_preemption_pending(
-        lambda: False,
-        lambda: True,
-    ) is True
-    day0_cancelled = _process_pending_cancelled(
-        committed_day0_wake=True,
-        producer_fast_path=True,
-        urgent_wake_pending=any_urgent,
-        urgent_day0_pending=day0_urgent,
-        held_position_monitor_debt_pending=lambda: True,
-    )
-    assert day0_cancelled is not None
-    assert day0_cancelled() is True
-
-
-def test_monitor_debt_preempts_global_batch_and_leaves_queue_retryable():
-    conn, store = _store()
-    events = _multiwinner_events("monitor-debt", 3)
-    for event in events:
-        store.insert_or_ignore(event)
-    debt_pending = [False]
-
-    def _batch(claimed, decision_time, *, claim_unpaged_winner=None):
-        outcome = _sequential_winner_batch(
-            claimed,
-            decision_time,
-            claim_unpaged_winner=claim_unpaged_winner,
-        )
-        debt_pending[0] = True
-        return outcome
-
-    reactor = _multiwinner_reactor(store, _batch)
-    cancelled = _process_pending_cancelled(
-        committed_day0_wake=False,
-        producer_fast_path=False,
-        urgent_wake_pending=lambda: False,
-        urgent_day0_pending=None,
-        held_position_monitor_debt_pending=lambda: debt_pending[0],
-    )
-    reactor.process_pending(
-        decision_time=_DT_VENUE_OPEN,
-        limit=None,
-        cancelled=cancelled,
-    )
-
-    statuses = {
-        event.event_id: _processing_status(conn, event.event_id) for event in events
-    }
-    assert sorted(statuses.values()) == ["pending", "pending", "processing"]
-
-
-def test_monitor_debt_yields_before_runtime_setup_and_releases_reactor_lock(
-    monkeypatch,
-):
-    import src.events.reactor as reactor_module
-    import src.main as main
-    from src.riskguard import riskguard
-    from src.riskguard.risk_level import RiskLevel
-    import src.state.db as db
-
-    monkeypatch.setattr(main, "_settings_section", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
-    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
-    monkeypatch.setattr(
-        reactor_module,
-        "_durable_exact_held_sell_completion_pending",
-        lambda: False,
-    )
-    monkeypatch.setattr(
-        db,
-        "get_world_connection",
-        lambda: pytest.fail("monitor debt must yield before runtime DB setup"),
-    )
-    reservations: list[tuple[str, str]] = []
-
-    def reserve_completion(**kwargs):
-        reservations.append((kwargs["reason"], kwargs["position_id"]))
-        reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
-        return True
-
-    monkeypatch.setattr(
-        reactor_module,
-        "request_global_auction_completion",
-        reserve_completion,
-    )
-
-    lock = threading.Lock()
-    reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    _EXACT_EXECUTABLE_HELD_SELL_PENDING.set()
     try:
-        assert reactor_module.run_edli_event_reactor_cycle(
-            active_lock=lock,
-            held_position_monitor_debt_pending=lambda: True,
-        ) is False
-        assert reservations == [("periodic_monitor_preemption", "")]
-        assert reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
-        assert not lock.locked()
+        assert ordinary_cancelled() is True
+        assert latched() is True
+        assert exact_turn() is False
+        assert day0_cut() is False
     finally:
-        reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+        _EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
 
 
 def test_unreadable_exact_completion_debt_aborts_ordinary_reactor_admission(
@@ -7967,68 +7779,6 @@ def test_unreadable_exact_completion_debt_preserves_committed_producer_cycle(
     assert not lock.locked()
 
 
-@pytest.mark.parametrize(
-    ("completion_due", "exact_held_completion"),
-    ((True, False), (False, True)),
-)
-def test_reserved_or_exact_completion_yields_for_unresolved_monitor_debt(
-    monkeypatch,
-    completion_due,
-    exact_held_completion,
-):
-    import src.events.reactor as reactor_module
-    import src.main as main
-    import src.state.db as db
-    from src.riskguard import riskguard
-    from src.riskguard.risk_level import RiskLevel
-
-    monkeypatch.setattr(main, "_settings_section", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
-    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
-    monkeypatch.setattr(
-        reactor_module,
-        "_durable_exact_held_sell_completion_pending",
-        lambda: exact_held_completion,
-    )
-    monkeypatch.setattr(
-        reactor_module,
-        "_durable_exact_held_sell_completion_requests",
-        lambda **_kwargs: (),
-    )
-    monkeypatch.setattr(
-        db,
-        "get_world_connection",
-        lambda: pytest.fail("monitor debt must yield before runtime DB setup"),
-    )
-    reservations: list[tuple[str, str]] = []
-
-    def reserve_completion(**kwargs):
-        reservations.append((kwargs["reason"], kwargs["position_id"]))
-        reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
-        return True
-
-    monkeypatch.setattr(
-        reactor_module,
-        "request_global_auction_completion",
-        reserve_completion,
-    )
-
-    reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
-    if completion_due:
-        reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
-    lock = threading.Lock()
-    try:
-        assert reactor_module.run_edli_event_reactor_cycle(
-            active_lock=lock,
-            held_position_monitor_debt_pending=lambda: True,
-        ) is False
-        assert reservations == [("periodic_monitor_preemption", "")]
-        assert reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
-        assert not lock.locked()
-    finally:
-        reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
-
-
 def test_generic_completion_cannot_reacquire_before_monitor_successor(
     monkeypatch,
 ):
@@ -8070,77 +7820,9 @@ def test_generic_completion_cannot_reacquire_before_monitor_successor(
         reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
 
-def test_exact_executable_completion_yields_monitor_debt_before_broad_setup(
-    monkeypatch,
-):
-    import src.events.reactor as reactor_module
-    import src.main as main
-    import src.state.db as db
-    from src.riskguard import riskguard
-    from src.riskguard.risk_level import RiskLevel
-    from src.runtime.reactor_wake import make_held_sell_reauction_request
-
-    request = make_held_sell_reauction_request(
-        position_id="buenos-aires-exact-completion",
-        family=("Buenos Aires", "2026-08-23", "low"),
-        probability_content_identity="q-buenos-aires-exact-completion",
-        held_token_id="buenos-aires-exact-token",
-        held_best_bid=0.18,
-        bid_observed_at="2026-08-23T12:00:00+00:00",
-        probability_observed_at="2026-08-23T12:00:00+00:00",
-        completion_deadline_at="2026-08-23T12:00:30+00:00",
-        schema_version=4,
-        book_state="EXECUTABLE",
-    )
-    monkeypatch.setattr(main, "_settings_section", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
-    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
-    monkeypatch.setattr(
-        reactor_module,
-        "_durable_exact_held_sell_completion_pending",
-        lambda: True,
-    )
-    monkeypatch.setattr(
-        reactor_module,
-        "_durable_exact_held_sell_completion_requests",
-        lambda **_kwargs: (request,),
-    )
-    monkeypatch.setattr(
-        "src.runtime.reactor_wake.v4_held_sell_reauction_request_is_queued",
-        lambda _request: True,
-    )
-    monkeypatch.setattr(
-        reactor_module,
-        "_has_exact_executable_held_sell_completion",
-        lambda _requests: True,
-    )
-    monkeypatch.setattr(
-        reactor_module,
-        "_paused_entry_wake_should_park",
-        lambda **_kwargs: False,
-    )
-    monkeypatch.setattr(
-        db,
-        "get_world_connection",
-        lambda: pytest.fail("exact SELL must not protect broad reactor setup"),
-    )
-    reservations: list[str] = []
-    monkeypatch.setattr(
-        reactor_module,
-        "request_global_auction_completion",
-        lambda **kwargs: reservations.append(kwargs["reason"]) or True,
-    )
-
-    lock = threading.Lock()
-    assert reactor_module.run_edli_event_reactor_cycle(
-        active_lock=lock,
-        held_position_monitor_debt_pending=lambda: True,
-    ) is False
-    assert reservations == ["periodic_monitor_preemption"]
-    assert not lock.locked()
-
-
-@pytest.mark.parametrize("preemption", (False, True), ids=("deadline", "monitor"))
+@pytest.mark.parametrize(
+    "preemption", (False, True), ids=("deadline", "capital_recovery")
+)
 def test_reactor_construct_slow_sql_is_bounded_and_releases_resources(
     monkeypatch,
     tmp_path,
@@ -8168,7 +7850,7 @@ def test_reactor_construct_slow_sql_is_bounded_and_releases_resources(
     opened: list[sqlite3.Connection] = []
     trade_connection_kwargs: list[dict[str, object]] = []
     query_entered = threading.Event()
-    monitor_pressure = threading.Event()
+    capital_pressure = threading.Event()
 
     def world_connection():
         conn = sqlite3.connect(world_path)
@@ -8264,18 +7946,18 @@ def test_reactor_construct_slow_sql_is_bounded_and_releases_resources(
 
     armer = None
     if preemption:
-        def arm_monitor():
+        def arm_capital_recovery():
             assert query_entered.wait(2.0)
-            monitor_pressure.set()
+            capital_pressure.set()
 
-        armer = threading.Thread(target=arm_monitor)
+        armer = threading.Thread(target=arm_capital_recovery)
         armer.start()
 
     lock = threading.Lock()
     started = time.monotonic()
     assert reactor_module.run_edli_event_reactor_cycle(
         active_lock=lock,
-        held_position_monitor_debt_pending=monitor_pressure.is_set,
+        capital_recovery_pending=capital_pressure.is_set,
     ) is False
     elapsed = time.monotonic() - started
     if armer is not None:
@@ -8292,45 +7974,10 @@ def test_reactor_construct_slow_sql_is_bounded_and_releases_resources(
     assert len(bounded_trade_calls) == 1
     assert 1 <= int(bounded_trade_calls[0]["busy_timeout_ms"]) <= 1000
     assert float(bounded_trade_calls[0]["deadline_monotonic"]) > started
-    if preemption:
-        due_at_start, unrelated_family_probe = (
-            reactor_module._global_auction_monitor_cancellation_probe(
-                lambda: False
-            )
-        )
-        assert due_at_start is True
-        assert unrelated_family_probe() is False
     reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
     for conn in opened:
         with pytest.raises(sqlite3.ProgrammingError, match="closed"):
             conn.execute("SELECT 1")
-
-
-def test_reactor_construct_normal_live_observed_cut_remains_buy_capable():
-    from src.engine.global_auction_universe import WorkContext
-    from src.events import reactor
-
-    clock = [0.0]
-    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
-    try:
-        due_at_start, monitor_cancelled = (
-            reactor._global_auction_monitor_cancellation_probe(
-                lambda: False,
-                monitor_debt_pending=lambda: False,
-            )
-        )
-        context = WorkContext(
-            deadline_monotonic=reactor.DEFAULT_REACTOR_CONSTRUCT_WORK_CUT_SECONDS,
-            cancel_requested=monitor_cancelled,
-            monotonic=lambda: clock[0],
-        )
-
-        assert due_at_start is False
-        clock[0] = 28.408
-        assert context.checkpoint("reactor_construct:normal_buy") > 16.0
-        assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set() is False
-    finally:
-        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
 
 def test_producer_fast_path_skips_metar_ledger_recovery_sync():
@@ -8344,154 +7991,6 @@ def test_producer_fast_path_skips_metar_ledger_recovery_sync():
     ]
 
     assert "sync_from_ledger" in recovery_sync
-
-
-def test_main_reactor_injects_day0_and_monitor_preemption_signals(
-    monkeypatch,
-):
-    import src.events.reactor as reactor_module
-    import src.main as main
-    from src.runtime import reactor_wake
-
-    captured = {}
-    urgent_identity = ["wake-owned", "day0_extreme_event_committed"]
-
-    def fake_run(**kwargs):
-        captured.update(kwargs)
-        return True
-
-    monkeypatch.setattr(main, "_start_edli_reactor_wake_listener", lambda: None)
-    monkeypatch.setattr(reactor_module, "run_edli_event_reactor_cycle", fake_run)
-    monkeypatch.setattr(
-        reactor_wake,
-        "reactor_urgent_wake_identity",
-        lambda: tuple(urgent_identity),
-    )
-    # This scheduler seam test owns handoff predicates, not live held-position
-    # DB authority. Keep canonical debt isolated so a missing test DB cannot
-    # manufacture a held-monitor preemption signal.
-    monkeypatch.setattr(main, "_held_position_monitor_entry_block_reason", lambda: None)
-    monkeypatch.setattr(main, "_held_position_monitor_debt_pending", lambda: False)
-    main._capital_recovery_handoff_pending.clear()
-    main._day0_urgent_wake_pending.clear()
-    main._day0_exit_monitor_attempts.clear()
-    try:
-        assert main._edli_event_reactor_cycle(
-            producer_wake_reason="market_price_advanced",
-            producer_wake_ids=("wake-owned",),
-            producer_wake_published_at="2026-07-19T12:00:00+00:00",
-            producer_wake_event_ids=("price-event",),
-        ) is True
-        assert captured["producer_wake_ids"] == ("wake-owned",)
-        assert captured["producer_wake_published_at"] == (
-            "2026-07-19T12:00:00+00:00"
-        )
-        assert captured["urgent_day0_pending"]() is False
-        assert captured["capital_recovery_pending"]() is False
-        main._capital_recovery_handoff_pending.set()
-        assert captured["capital_recovery_pending"]() is True
-        assert captured["urgent_day0_pending"]() is False
-        main._capital_recovery_handoff_pending.clear()
-        assert captured["held_position_monitor_pending"]() is False
-        assert captured["held_position_monitor_debt_pending"]() is False
-        main._held_position_monitor_handoff_pending.set()
-        assert captured["held_position_monitor_pending"]() is True
-        assert captured["held_position_monitor_debt_pending"]() is False
-        main._periodic_held_position_monitor_successor_pending.set()
-        assert captured["held_position_monitor_pending"]() is True
-        main._periodic_held_position_monitor_fairness_debt.set()
-        assert captured["held_position_monitor_debt_pending"]() is True
-        main._periodic_held_position_monitor_successor_pending.clear()
-        main._periodic_held_position_monitor_fairness_debt.clear()
-        main._held_position_monitor_handoff_pending.clear()
-        main._day0_urgent_wake_pending.set()
-        assert captured["urgent_day0_pending"]() is True
-        main._day0_exit_monitor_attempts["wake-owned"] = None
-        assert captured["urgent_day0_pending"]() is False
-        urgent_identity[0] = "wake-new"
-        assert captured["urgent_day0_pending"]() is True
-    finally:
-        main._periodic_held_position_monitor_successor_pending.clear()
-        main._periodic_held_position_monitor_fairness_debt.clear()
-        main._held_position_monitor_handoff_pending.clear()
-        main._held_position_monitor_canonical_debt.clear()
-        main._day0_urgent_wake_pending.clear()
-        main._day0_exit_monitor_attempts.clear()
-
-
-def test_main_monitor_callbacks_preserve_reserved_completion_until_real_debt(
-    monkeypatch,
-):
-    import src.events.reactor as reactor_module
-    import src.main as main
-
-    captured: dict[str, object] = {}
-    completion_requests: list[dict[str, object]] = []
-    monkeypatch.setattr(main, "_start_edli_reactor_wake_listener", lambda: None)
-    monkeypatch.setattr(
-        main, "_edli_live_entry_readiness_block", lambda _cfg: (None, {})
-    )
-    monkeypatch.setattr(main, "_held_position_monitor_entry_block_reason", lambda: None)
-    monkeypatch.setattr(
-        reactor_module,
-        "run_edli_event_reactor_cycle",
-        lambda **kwargs: captured.update(kwargs) or True,
-    )
-    monkeypatch.setattr(
-        reactor_module,
-        "request_global_auction_completion",
-        lambda **kwargs: completion_requests.append(kwargs) or True,
-    )
-
-    main._held_position_monitor_handoff_pending.clear()
-    main._periodic_held_position_monitor_successor_pending.clear()
-    main._periodic_held_position_monitor_fairness_debt.clear()
-    reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
-    reactor_module._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
-    try:
-        assert main._edli_event_reactor_cycle() is True
-        monitor_pending = captured["held_position_monitor_pending"]
-        monitor_debt_pending = captured["held_position_monitor_debt_pending"]
-        assert callable(monitor_pending)
-        assert callable(monitor_debt_pending)
-
-        main._held_position_monitor_handoff_pending.set()
-        _, normal_cut_cancelled = reactor_module._global_auction_monitor_cancellation_probe(
-            monitor_pending,
-            monitor_debt_pending=monitor_debt_pending,
-        )
-        assert normal_cut_cancelled() is True
-        assert [request["reason"] for request in completion_requests] == [
-            "periodic_monitor_preemption"
-        ]
-
-        _, reserved_cut_cancelled = (
-            reactor_module._global_auction_monitor_cancellation_probe(
-                monitor_pending,
-                monitor_debt_pending=monitor_debt_pending,
-                completion_due=True,
-            )
-        )
-        assert reserved_cut_cancelled() is False
-
-        main._periodic_held_position_monitor_fairness_debt.set()
-        assert reserved_cut_cancelled() is True
-
-        main._periodic_held_position_monitor_fairness_debt.clear()
-        _, fresh_cut_cancelled = (
-            reactor_module._global_auction_monitor_cancellation_probe(
-                monitor_pending,
-                monitor_debt_pending=monitor_debt_pending,
-                completion_due=True,
-            )
-        )
-        assert fresh_cut_cancelled() is False
-    finally:
-        main._held_position_monitor_handoff_pending.clear()
-        main._periodic_held_position_monitor_successor_pending.clear()
-        main._periodic_held_position_monitor_fairness_debt.clear()
-        reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
-        reactor_module._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
 
 
 def _stub_selected_day0_wake_poll(monkeypatch, main, reactor_wake, wake):
@@ -8654,194 +8153,17 @@ def test_day0_completed_ownership_marker_clears_on_listener_restart():
         main._day0_exit_monitor_attempts.clear()
 
 
-def test_monitor_debt_repreempts_reserved_cut_until_monitor_handoff_clears(monkeypatch):
-    from types import SimpleNamespace
-
+def test_exact_held_sell_debt_preempts_every_cut_but_its_own_turn():
     from src.events import reactor
-    from src.runtime import reactor_wake
 
-    pending = [True]
-    monkeypatch.setattr(reactor_wake, "reactor_wakes_since", lambda _at: ())
-    monkeypatch.setattr(
-        reactor_wake,
-        "publish_reactor_wake",
-        lambda **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        reactor,
-        "request_global_auction_completion",
-        lambda **_kwargs: reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set() or True,
-    )
-    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
     reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
     try:
-        due_at_start, first_probe = (
-            reactor._global_auction_monitor_cancellation_probe(
-                lambda: pending[0]
-            )
-        )
-        assert due_at_start is False
-        assert first_probe() is True
-        assert first_probe() is True
-        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
-
-        due_at_start, completion_probe = (
-            reactor._global_auction_monitor_cancellation_probe(
-                lambda: pending[0],
-                monitor_debt_pending=lambda: pending[0],
-            )
-        )
-        assert due_at_start is True
-        assert completion_probe() is True
-        pending[0] = False
-        assert completion_probe() is True
-        due_after_handoff, post_handoff_probe = (
-            reactor._global_auction_monitor_cancellation_probe(
-                lambda: pending[0],
-                monitor_debt_pending=lambda: pending[0],
-            )
-        )
-        assert due_after_handoff is True
-        assert post_handoff_probe() is False
-        reactor._settle_global_auction_monitor_fairness(
-            completion_due_at_start=due_after_handoff,
-            result=SimpleNamespace(
-                processed=1,
-                proof_accepted=1,
-                rejected=0,
-                retried=0,
-                global_auction_completed_non_cancelled=1,
-                rejection_reasons=[],
-            ),
-        )
-        assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set() is False
+        assert reactor._exact_held_sell_preempts(exact_turn=False) is False
+        reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.set()
+        assert reactor._exact_held_sell_preempts(exact_turn=False) is True
+        assert reactor._exact_held_sell_preempts(exact_turn=True) is False
     finally:
-        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
         reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
-
-
-def test_late_durable_monitor_debt_preempts_reserved_completion():
-    """A reserved cut yields once its waiting monitor misses the handoff."""
-    from src.events import reactor
-
-    monitor_claimed = [False]
-    monitor_debt = [False]
-    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
-    reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
-    try:
-        _, generic_cancelled = reactor._global_auction_monitor_cancellation_probe(
-            lambda: monitor_claimed[0],
-            monitor_debt_pending=lambda: monitor_debt[0],
-            completion_due=True,
-        )
-        assert generic_cancelled() is False
-        monitor_claimed[0] = True
-        assert generic_cancelled() is False
-        monitor_debt[0] = True
-        assert generic_cancelled() is True
-        assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
-
-        _, exact_cancelled = reactor._global_auction_monitor_cancellation_probe(
-            lambda: True,
-            completion_due=True,
-            exact_held_completion=True,
-            exact_executable_held_completion=True,
-        )
-        assert exact_cancelled() is False
-        _, no_monitor_cancelled = reactor._global_auction_monitor_cancellation_probe(
-            None,
-            completion_due=True,
-        )
-        assert no_monitor_cancelled() is False
-    finally:
-        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
-        reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
-
-
-def test_monitor_does_not_preempt_when_completion_wake_is_not_durable(
-    monkeypatch,
-):
-    from src.events import reactor
-
-    monkeypatch.setattr(
-        reactor,
-        "request_global_auction_completion",
-        lambda **_kwargs: False,
-    )
-    due_at_start, cancellation_probe = (
-        reactor._global_auction_monitor_cancellation_probe(lambda: True)
-    )
-
-    assert due_at_start is False
-    assert cancellation_probe() is False
-    assert cancellation_probe() is False
-
-
-def test_monitor_fairness_debt_cancels_but_preserves_reserved_completion(
-    monkeypatch,
-):
-    from src.events import reactor
-
-    monkeypatch.setattr(
-        reactor,
-        "request_global_auction_completion",
-        lambda **_kwargs: pytest.fail("reserved completion debt must not duplicate"),
-    )
-    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
-    try:
-        due_at_start, cancellation_probe = (
-            reactor._global_auction_monitor_cancellation_probe(
-                lambda: True,
-                monitor_debt_pending=lambda: True,
-                completion_due=True,
-            )
-        )
-        assert due_at_start is True
-        assert cancellation_probe() is True
-        assert cancellation_probe() is True
-        assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
-    finally:
-        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
-
-
-def test_exact_executable_held_sell_completion_keeps_its_global_turn(monkeypatch):
-    from src.events import reactor
-    from src.runtime.reactor_wake import make_held_sell_reauction_request
-
-    request = make_held_sell_reauction_request(
-        position_id="exact-completion-position",
-        family=("Cape Town", "2026-08-23", "high"),
-        probability_content_identity="q-exact-completion",
-        held_token_id="exact-completion-token",
-        held_best_bid=0.21,
-        bid_observed_at="2026-08-23T12:00:00+00:00",
-        probability_observed_at="2026-08-23T12:00:00+00:00",
-        completion_deadline_at="2026-08-23T12:00:30+00:00",
-        schema_version=4,
-        book_state="EXECUTABLE",
-    )
-
-    monkeypatch.setattr(
-        reactor,
-        "request_global_auction_completion",
-        lambda **_kwargs: pytest.fail("exact executable turn must not re-arm monitor debt"),
-    )
-    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
-    try:
-        due_at_start, cancellation_probe = (
-            reactor._global_auction_monitor_cancellation_probe(
-                lambda: True,
-                monitor_debt_pending=lambda: True,
-                completion_due=True,
-                exact_held_completion=True,
-                exact_executable_held_completion=True,
-            )
-        )
-        assert due_at_start is True
-        assert cancellation_probe() is False
-        assert cancellation_probe() is False
-    finally:
-        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
 
 def test_active_lock_reads_exact_debt_before_skipping(monkeypatch):
@@ -8973,10 +8295,10 @@ def test_global_selection_cancels_when_exact_publisher_arrives_after_probe_creat
     now = datetime.now(timezone.utc)
     reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
     try:
-        _, ordinary_cancelled = reactor._global_auction_monitor_cancellation_probe(
-            lambda: False,
-            exact_executable_held_completion=False,
-        )
+        def ordinary_cancelled():
+            return reactor._exact_held_sell_preempts(exact_turn=False)
+
+        assert ordinary_cancelled() is False
         assert reactor.request_global_auction_completion(
             reason="test_probe_arrival",
             position_id="probe-arrival-position",
@@ -8992,13 +8314,7 @@ def test_global_selection_cancels_when_exact_publisher_arrives_after_probe_creat
             wake_path=tmp_path / "probe-arrival-wake.json",
         )
         assert ordinary_cancelled() is True
-
-        _, exact_cancelled = reactor._global_auction_monitor_cancellation_probe(
-            lambda: True,
-            monitor_debt_pending=lambda: True,
-            exact_executable_held_completion=True,
-        )
-        assert exact_cancelled() is False
+        assert reactor._exact_held_sell_preempts(exact_turn=True) is False
     finally:
         reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
 
@@ -9221,11 +8537,8 @@ def test_exact_publish_preempts_ordinary_and_preserves_exact_turn(tmp_path):
             producer_fast_path=False,
             urgent_wake_pending=lambda: False,
             urgent_day0_pending=None,
-            held_position_monitor_debt_pending=lambda: True,
             exact_held_completion=True,
-            exact_executable_held_completion=True,
         )
-        assert exact_cancelled is not None
         assert exact_cancelled() is False
     finally:
         _EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
@@ -9251,51 +8564,6 @@ def test_exact_publish_preempts_ordinary_and_preserves_exact_turn(tmp_path):
             },
         )
         assert not _EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
-
-
-def test_monitor_fairness_debt_reserves_completion_before_cancelling(
-    monkeypatch,
-):
-    from src.events import reactor
-
-    reservations: list[str] = []
-    monkeypatch.setattr(
-        reactor,
-        "request_global_auction_completion",
-        lambda **kwargs: reservations.append(kwargs["reason"]) or True,
-    )
-    due_at_start, cancellation_probe = (
-        reactor._global_auction_monitor_cancellation_probe(
-            lambda: False,
-            monitor_debt_pending=lambda: True,
-        )
-    )
-
-    assert due_at_start is False
-    assert cancellation_probe() is True
-    assert cancellation_probe() is True
-    assert reservations == ["periodic_monitor_preemption"]
-
-
-def test_monitor_fairness_debt_probe_failure_cannot_veto_auction(monkeypatch):
-    from src.events import reactor
-
-    monkeypatch.setattr(
-        reactor,
-        "request_global_auction_completion",
-        lambda **_kwargs: pytest.fail("failed scheduler hint must not reserve debt"),
-    )
-    due_at_start, cancellation_probe = (
-        reactor._global_auction_monitor_cancellation_probe(
-            lambda: False,
-            monitor_debt_pending=lambda: (_ for _ in ()).throw(
-                RuntimeError("debt hint unavailable")
-            ),
-        )
-    )
-
-    assert due_at_start is False
-    assert cancellation_probe() is False
 
 
 def test_held_sell_completion_request_persists_position_q_and_bid_witness(tmp_path):
@@ -11724,14 +10992,7 @@ def test_completion_wake_recovers_debt_after_process_restart():
 
     reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
     try:
-        due_at_start, cancellation_probe = (
-            reactor._global_auction_monitor_cancellation_probe(
-                None,
-                completion_due=True,
-            )
-        )
-        assert due_at_start is True
-        assert cancellation_probe() is False
+        assert reactor._reserve_global_auction_completion(True) is True
         assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set() is True
         assert (
             reactor._settle_global_auction_monitor_fairness(
@@ -11847,107 +11108,6 @@ def test_exact_v4_receipt_persist_failure_cannot_clear_completion_token(
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
 
-def test_monitor_handoff_defers_reactor_admission_only():
-    import src.main as main
-
-    was_pending = main._held_position_monitor_handoff_pending.is_set()
-    was_bootstrap_complete = main._held_position_monitor_bootstrap_complete.is_set()
-    try:
-        main._held_position_monitor_handoff_pending.set()
-        main._held_position_monitor_bootstrap_complete.set()
-        assert main._defer_for_held_position_monitor("edli_event_reactor") is True
-    finally:
-        main._held_position_monitor_handoff_pending.clear()
-        main._held_position_monitor_bootstrap_complete.clear()
-        if was_pending:
-            main._held_position_monitor_handoff_pending.set()
-        if was_bootstrap_complete:
-            main._held_position_monitor_bootstrap_complete.set()
-
-
-def test_periodic_monitor_successor_blocks_reacquire_until_core_turn(monkeypatch):
-    import src.main as main
-    from src.execution import exit_lifecycle
-    from src.riskguard import riskguard
-    from src.riskguard.risk_level import RiskLevel
-
-    observed = []
-
-    class ReactorGate:
-        def acquire(self, *, timeout):
-            observed.append(
-                (
-                    "handoff",
-                    timeout,
-                    main._periodic_held_position_monitor_successor_pending.is_set(),
-                    main._defer_for_held_position_monitor("edli_event_reactor"),
-                )
-            )
-            return True
-
-        def release(self):
-            observed.append(("release",))
-
-    def run_core(**_kwargs):
-        observed.append(
-            ("core", main._periodic_held_position_monitor_successor_pending.is_set())
-        )
-        return True
-
-    monkeypatch.setattr(main, "_edli_reactor_active_lock", ReactorGate())
-    monkeypatch.setattr(main, "_current_periodic_monitor_obligation_count", lambda: 1)
-    monkeypatch.setattr(main, "_day0_exit_monitor_priority_pending", lambda: False)
-    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
-    monkeypatch.setattr(exit_lifecycle, "run_exit_monitor_cycle", run_core)
-    main._held_position_monitor_handoff_pending.clear()
-    main._periodic_held_position_monitor_handoff_pending.clear()
-    main._periodic_held_position_monitor_successor_pending.clear()
-    try:
-        assert main._exit_monitor_cycle() is True
-        assert observed[0][0] == "handoff"
-        assert observed[0][2] is True
-        assert observed[0][3] is True
-        assert main._defer_for_held_position_monitor("edli_event_reactor") is False
-        assert ("core", False) in observed
-        assert not main._periodic_held_position_monitor_successor_pending.is_set()
-    finally:
-        main._held_position_monitor_handoff_pending.clear()
-        main._periodic_held_position_monitor_handoff_pending.clear()
-        main._periodic_held_position_monitor_successor_pending.clear()
-        if main._held_position_monitor_claim.locked():
-            main._held_position_monitor_claim.release()
-
-
-def test_monitor_handoff_timeout_keeps_successor_reservation(monkeypatch):
-    import src.main as main
-    from src.riskguard import riskguard
-    from src.riskguard.risk_level import RiskLevel
-
-    class BusyReactor:
-        def acquire(self, *, timeout):
-            assert timeout > 0
-            return False
-
-    monkeypatch.setattr(main, "_edli_reactor_active_lock", BusyReactor())
-    monkeypatch.setattr(main, "_current_periodic_monitor_obligation_count", lambda: 1)
-    monkeypatch.setattr(main, "_day0_exit_monitor_priority_pending", lambda: False)
-    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
-    main._periodic_held_position_monitor_successor_pending.clear()
-    main._periodic_held_position_monitor_fairness_debt.clear()
-    try:
-        assert main._exit_monitor_cycle() is False
-        assert main._periodic_held_position_monitor_successor_pending.is_set()
-        assert main._periodic_held_position_monitor_fairness_debt.is_set()
-        assert main._defer_for_held_position_monitor("edli_event_reactor") is True
-    finally:
-        main._periodic_held_position_monitor_successor_pending.clear()
-        main._periodic_held_position_monitor_fairness_debt.clear()
-        main._held_position_monitor_handoff_pending.clear()
-        main._periodic_held_position_monitor_handoff_pending.clear()
-        if main._held_position_monitor_claim.locked():
-            main._held_position_monitor_claim.release()
-
-
 def test_monitor_incomplete_keeps_canonical_debt_without_false_coverage(monkeypatch):
     import src.main as main
     from src.execution import exit_lifecycle
@@ -11959,16 +11119,11 @@ def test_monitor_incomplete_keeps_canonical_debt_without_false_coverage(monkeypa
     monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(exit_lifecycle, "run_exit_monitor_cycle", lambda **_kwargs: False)
     main._held_position_monitor_canonical_debt.set()
-    main._periodic_held_position_monitor_successor_pending.clear()
     try:
         assert main._exit_monitor_cycle() is None
         assert main._held_position_monitor_canonical_debt.is_set()
-        assert not main._periodic_held_position_monitor_successor_pending.is_set()
     finally:
         main._held_position_monitor_canonical_debt.clear()
-        main._periodic_held_position_monitor_successor_pending.clear()
-        main._held_position_monitor_handoff_pending.clear()
-        main._periodic_held_position_monitor_handoff_pending.clear()
         if main._held_position_monitor_claim.locked():
             main._held_position_monitor_claim.release()
 
@@ -12041,14 +11196,9 @@ def test_full_book_monitor_success_clears_cadence_debt_before_generic_listener(
     )
     previous_last_wake_id = main._edli_last_reactor_wake_id
     main._held_position_monitor_canonical_debt.set()
-    main._periodic_held_position_monitor_fairness_debt.set()
-    main._held_position_monitor_handoff_pending.clear()
-    main._periodic_held_position_monitor_handoff_pending.clear()
-    main._periodic_held_position_monitor_successor_pending.clear()
     try:
         assert main._exit_monitor_cycle() is True
         assert not main._held_position_monitor_canonical_debt.is_set()
-        assert not main._periodic_held_position_monitor_fairness_debt.is_set()
 
         # The ordinary listener can now admit the existing strict generic
         # completion through its unchanged reactor path.
@@ -12060,69 +11210,8 @@ def test_full_book_monitor_success_clears_cadence_debt_before_generic_listener(
     finally:
         main._edli_last_reactor_wake_id = previous_last_wake_id
         main._held_position_monitor_canonical_debt.clear()
-        main._periodic_held_position_monitor_fairness_debt.clear()
-        main._held_position_monitor_handoff_pending.clear()
-        main._periodic_held_position_monitor_handoff_pending.clear()
-        main._periodic_held_position_monitor_successor_pending.clear()
         if main._held_position_monitor_claim.locked():
             main._held_position_monitor_claim.release()
-
-
-@pytest.mark.parametrize(
-    "pending_event_name",
-    (
-        "_held_position_monitor_handoff_pending",
-        "_periodic_held_position_monitor_successor_pending",
-    ),
-)
-def test_active_monitor_handoff_observes_but_cannot_claim_generic_completion(
-    monkeypatch, pending_event_name
-):
-    import src.main as main
-    from src.runtime import reactor_wake
-
-    generic = reactor_wake.ReactorWake(
-        "strict-generic-during-monitor-handoff",
-        "2026-09-21T04:31:00+00:00",
-        "held_position_monitor",
-        reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
-        forecast_families=(("Chicago", "2026-09-21", "high"),),
-    )
-    read_calls: list[dict[str, object]] = []
-    monkeypatch.setattr(
-        reactor_wake,
-        "exact_held_sell_completion_wake_ids",
-        lambda **_kwargs: frozenset(),
-    )
-    monkeypatch.setattr(
-        reactor_wake,
-        "read_reactor_wake",
-        lambda **kwargs: read_calls.append(kwargs) or generic,
-    )
-    monkeypatch.setattr(
-        reactor_wake,
-        "coalescible_reactor_wakes",
-        lambda _wake: pytest.fail("active monitor handoff must not select generic work"),
-    )
-    monkeypatch.setattr(
-        main,
-        "_edli_event_reactor_cycle",
-        lambda **_kwargs: pytest.fail("active monitor handoff must not claim generic work"),
-    )
-    main._held_position_monitor_canonical_debt.clear()
-    main._periodic_held_position_monitor_fairness_debt.clear()
-    main._held_position_monitor_handoff_pending.clear()
-    main._periodic_held_position_monitor_successor_pending.clear()
-    getattr(main, pending_event_name).set()
-    try:
-        assert main._edli_reactor_wake_poll_once() is False
-        # This is only the existing Day0-priority probe. A generic top wake
-        # must not be selected, coalesced, acknowledged, or executed while a
-        # monitor handoff is active.
-        assert read_calls == [{"fail_on_error": True}]
-    finally:
-        main._held_position_monitor_handoff_pending.clear()
-        main._periodic_held_position_monitor_successor_pending.clear()
 
 
 @pytest.mark.parametrize(
@@ -12168,18 +11257,11 @@ def test_full_book_monitor_success_retains_cadence_debt_when_recovery_is_not_cur
         )
 
     main._held_position_monitor_canonical_debt.set()
-    main._held_position_monitor_handoff_pending.clear()
-    main._periodic_held_position_monitor_handoff_pending.clear()
-    main._periodic_held_position_monitor_successor_pending.clear()
     try:
         assert main._exit_monitor_cycle() is True
         assert main._held_position_monitor_canonical_debt.is_set()
     finally:
         main._held_position_monitor_canonical_debt.clear()
-        main._periodic_held_position_monitor_fairness_debt.clear()
-        main._held_position_monitor_handoff_pending.clear()
-        main._periodic_held_position_monitor_handoff_pending.clear()
-        main._periodic_held_position_monitor_successor_pending.clear()
         if main._held_position_monitor_claim.locked():
             main._held_position_monitor_claim.release()
 
@@ -12212,7 +11294,6 @@ def test_targeted_monitor_success_cannot_clear_canonical_cadence_debt(monkeypatc
     )
 
     main._held_position_monitor_canonical_debt.set()
-    main._held_position_monitor_handoff_pending.clear()
     try:
         assert main._exit_monitor_cycle(
             target_families=frozenset({("Chicago", "2026-09-21", "high")}),
@@ -12220,46 +11301,8 @@ def test_targeted_monitor_success_cannot_clear_canonical_cadence_debt(monkeypatc
         assert main._held_position_monitor_canonical_debt.is_set()
     finally:
         main._held_position_monitor_canonical_debt.clear()
-        main._held_position_monitor_handoff_pending.clear()
         if main._held_position_monitor_claim.locked():
             main._held_position_monitor_claim.release()
-
-
-@pytest.mark.parametrize(
-    ("monitor_kwargs", "periodic_pending"),
-    (
-        ({}, True),
-        ({"urgent_forecast": True}, False),
-        ({"urgent_day0": True}, False),
-    ),
-)
-def test_only_periodic_monitor_arms_global_auction_fairness(
-    monkeypatch, monitor_kwargs, periodic_pending
-):
-    import src.main as main
-
-    observed = []
-
-    class ReactorGate:
-        def acquire(self, *, timeout):
-            observed.append(
-                (
-                    timeout,
-                    main._held_position_monitor_handoff_pending.is_set(),
-                    main._periodic_held_position_monitor_handoff_pending.is_set(),
-                )
-            )
-            return False
-
-    monkeypatch.setattr(main, "_edli_reactor_active_lock", ReactorGate())
-    monkeypatch.setattr(main, "_day0_exit_monitor_priority_pending", lambda: False)
-    main._held_position_monitor_handoff_pending.clear()
-    main._periodic_held_position_monitor_handoff_pending.clear()
-
-    assert main._exit_monitor_cycle(**monitor_kwargs) is False
-    assert observed[0][1:] == (True, periodic_pending)
-    assert main._held_position_monitor_handoff_pending.is_set() is False
-    assert main._periodic_held_position_monitor_handoff_pending.is_set() is False
 
 
 @pytest.mark.parametrize(

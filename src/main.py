@@ -94,12 +94,6 @@ logger = logging.getLogger("zeus")
 _cycle_lock = threading.Lock()
 _held_position_monitor_active = threading.Event()
 _held_position_monitor_claim = threading.Lock()
-_held_position_monitor_handoff_pending = threading.Event()
-_periodic_held_position_monitor_handoff_pending = threading.Event()
-_periodic_held_position_monitor_fairness_debt = threading.Event()
-_periodic_held_position_monitor_successor_pending = threading.Event()
-_periodic_held_position_monitor_successor_lock = threading.Lock()
-_periodic_held_position_monitor_successor_generation = 0
 _held_position_monitor_canonical_debt = threading.Event()
 _held_position_monitor_recovery_requested = threading.Event()
 _held_position_monitor_recovery_worker_lock = threading.Lock()
@@ -721,21 +715,16 @@ def _exact_held_sell_completion_pending() -> bool:
 
 
 def _defer_for_held_position_monitor(job_name: str) -> bool:
-    """Give initial held monitoring first access to DB I/O and reactor work.
+    """Give initial held monitoring first access to DB I/O.
 
     Database-heavy background jobs wait for the first bounded coverage tranche.
-    Reactor competitors also yield during later handoffs; after the handoff both
-    live lanes may make progress concurrently.
+    After it, the monitor and the global auction run concurrently: the monitor
+    needs no reactor state, and a cut is cancelled only by the facts
+    ``cut_invalidating_wakes`` names, never by the monitor's schedule.
     """
 
     if job_name not in _HELD_POSITION_MONITOR_BOOTSTRAP_DEFER_JOBS:
         return False
-
-    exact_held_sell_pending = bool(
-        job_name == "edli_event_reactor"
-        and _periodic_held_position_monitor_fairness_debt.is_set()
-        and _exact_held_sell_completion_pending()
-    )
 
     if (
         job_name == "edli_event_reactor"
@@ -751,57 +740,14 @@ def _defer_for_held_position_monitor(job_name: str) -> bool:
             # monitor recovery cadence refreshes the overdue families while
             # the reactor compares the remaining executable set. RESET: a
             # canonical clean read clears this event; every new cut rebuilds
-            # the family scope. Transient fairness/handoff debt below remains
-            # the only admission-level monitor preemption.
-            if exact_held_sell_pending:
-                logger.info(
-                    "edli_event_reactor retaining exact held-SELL completion "
-                    "while canonical monitor debt remains (%s)",
-                    monitor_block_reason,
-                )
-            else:
-                logger.warning(
-                    "edli_event_reactor retaining scoped auction while canonical "
-                    "held-position monitor debt remains (%s)",
-                    monitor_block_reason,
-                )
+            # the family scope.
+            logger.warning(
+                "edli_event_reactor retaining scoped auction while canonical "
+                "held-position monitor debt remains (%s)",
+                monitor_block_reason,
+            )
         else:
             _held_position_monitor_canonical_debt.clear()
-
-    # SCOPE: a timed-out periodic full-book monitor blocks only EDLI reactor
-    # admission. DRAIN: the next periodic full-book monitor that successfully
-    # acquires the reactor handoff clears the debt before scanning positions.
-    # RESET: process restart, or that successful handoff; incomplete per-position
-    # evidence stays fail-closed for that position but cannot freeze unrelated
-    # entry families after the concurrency debt has already been paid.
-    if (
-        job_name == "edli_event_reactor"
-        and _periodic_held_position_monitor_fairness_debt.is_set()
-        and not exact_held_sell_pending
-    ):
-        logger.warning(
-            "edli_event_reactor deferred: periodic full-book monitor fairness debt"
-        )
-        return True
-
-    # SCOPE: all monitor kinds may defer reactor admission before it owns the
-    # active lock. Periodic fairness debt and canonical cadence debt may cancel
-    # an in-flight replayable auction at its next safe point. DRAIN: the claimed
-    # monitor gets the handoff or its bounded wait expires. RESET:
-    # _exit_monitor_cycle's finally block clears the handoff events, while full
-    # canonical coverage clears cadence debt.
-    if (
-        job_name in _HELD_POSITION_MONITOR_DEFER_JOBS
-        and (
-            _held_position_monitor_handoff_pending.is_set()
-            or (
-                job_name == "edli_event_reactor"
-                and _periodic_held_position_monitor_successor_pending.is_set()
-            )
-        )
-    ):
-        logger.info("%s deferred: held-position monitor reactor handoff pending", job_name)
-        return True
 
     # SCOPE: only admission of a new EDLI reactor auction, and only while an
     # exact capital-blocking cancel recovery tick is active. Held monitoring,
@@ -822,8 +768,7 @@ def _defer_for_held_position_monitor(job_name: str) -> bool:
     ):
         if job_name == "edli_event_reactor":
             # SCOPE: BUY authority only until current-process held coverage is
-            # proven. The wrapper supplies a bootstrap entry block, while an
-            # actual monitor handoff above still preempts reactor admission.
+            # proven. The wrapper supplies a bootstrap entry block.
             # DRAIN: the first canonical post-boot monitor coverage completes
             # bootstrap. RESET: process restart clears the completion event.
             logger.info(
@@ -863,10 +808,7 @@ def _defer_background_io_for_held_position_monitor(
     freshness) keep the original unconditional yield.
     """
 
-    if not (
-        _held_position_monitor_active.is_set()
-        or _held_position_monitor_handoff_pending.is_set()
-    ):
+    if not _held_position_monitor_active.is_set():
         return False
     if db_path is not None:
         wal_bytes = _wal_allocated_bytes(db_path)
@@ -2420,8 +2362,6 @@ _venue_heartbeat_thread = None
 _venue_order_truth_prewarm_lock = threading.Lock()
 _venue_order_truth_prewarm_thread = None
 _edli_reactor_active_lock = threading.Lock()
-_EXIT_MONITOR_REACTOR_HANDOFF_SECONDS = 30.0
-_URGENT_EXIT_MONITOR_REACTOR_HANDOFF_SECONDS = 1.0
 _venue_background_maintenance_lock = threading.Lock()
 _last_venue_background_maintenance_attempt_at = None
 VENUE_BACKGROUND_MAINTENANCE_SECONDS = 30.0
@@ -5011,25 +4951,6 @@ def _edli_event_reactor_cycle(
         # instead of running lower-value discovery ahead of exact cancel debt.
         urgent_day0_pending=_unowned_day0_urgent_wake_pending,
         capital_recovery_pending=_capital_recovery_handoff_pending.is_set,
-        held_position_monitor_pending=(
-            lambda: (
-                _periodic_held_position_monitor_successor_pending.is_set()
-                or _held_position_monitor_handoff_pending.is_set()
-            )
-        ),
-        held_position_monitor_debt_pending=(
-            # SCOPE: only actual periodic full-book fairness debt may stop an
-            # ordinary global cut. The ordinary handoff event remains a pending
-            # signal; treating it as global debt defeats reserved completion
-            # while the monitor is still within its bounded handoff window.
-            # DRAIN: a successful periodic monitor handoff or an empty canonical
-            # exposure set clears the fairness debt. RESET: the process-local
-            # fairness event starts clear and is re-armed only by a timed-out
-            # periodic handoff; canonical family debt remains separately scoped.
-            lambda: (
-                _periodic_held_position_monitor_fairness_debt.is_set()
-            )
-        ),
     )
     # Recovery is deliberately after the reactor invocation: this cycle keeps
     # its already-selected pause, while the next cycle reads fresh control state.
@@ -5064,7 +4985,6 @@ def _edli_initialize_reactor_wake_cursor() -> None:
     _day0_urgent_wake_pending.clear()
     _day0_held_monitor_preempt_requested.clear()
     _forecast_held_monitor_preempt_requested.clear()
-    _periodic_held_position_monitor_successor_pending.clear()
     with _day0_exit_monitor_attempts_lock:
         completed_wake_ids = tuple(
             wake_id
@@ -5549,26 +5469,6 @@ def _urgent_held_monitor_owner_pending() -> bool:
 def _held_monitor_preempt_generation_now() -> int:
     with _held_monitor_preempt_generation_lock:
         return _held_monitor_preempt_generation
-
-
-def _reserve_periodic_held_monitor_successor() -> int:
-    """Reserve the next reactor-free turn for one claimed full-book monitor."""
-
-    global _periodic_held_position_monitor_successor_generation
-    with _periodic_held_position_monitor_successor_lock:
-        _periodic_held_position_monitor_successor_generation += 1
-        _periodic_held_position_monitor_successor_pending.set()
-        return _periodic_held_position_monitor_successor_generation
-
-
-def _consume_periodic_held_monitor_successor(generation: int | None) -> None:
-    """Consume only the reservation owned by the monitor entering its core turn."""
-
-    if generation is None:
-        return
-    with _periodic_held_position_monitor_successor_lock:
-        if generation == _periodic_held_position_monitor_successor_generation:
-            _periodic_held_position_monitor_successor_pending.clear()
 
 
 def _record_held_monitor_preempt_request() -> None:
@@ -6903,9 +6803,6 @@ def _edli_reactor_wake_poll_once() -> bool:
         )
         return _day0_wake_requires_exit_monitor(families)
 
-    reactor_blocked_by_monitor_fairness = (
-        _periodic_held_position_monitor_fairness_debt.is_set()
-    )
     try:
         exact_held_sell_wake_ids = frozenset(
             exact_held_sell_completion_wake_ids(fail_on_error=True)
@@ -6918,7 +6815,7 @@ def _edli_reactor_wake_poll_once() -> bool:
         return False
     if not exact_held_sell_wake_ids:
         monitor_deferred = _defer_for_held_position_monitor("edli_event_reactor")
-        if (monitor_deferred or reactor_blocked_by_monitor_fairness) and not (
+        if monitor_deferred and not (
             _unowned_day0_monitor_wake_pending()
         ):
             return False
@@ -9124,11 +9021,6 @@ def _edli_continuous_redecision_screen_cycle() -> None:
 
     run_edli_continuous_redecision_screen_cycle(
         screen_lock=_edli_redecision_screen_lock,
-        # This callback executes from SQLite's progress handler.  It must stay
-        # O(1). Canonical cadence debt scopes BUY admission; only an active
-        # monitor handoff owns I/O strongly enough to preempt management of an
-        # already-live maker rest.
-        monitor_preempt_requested=_held_position_monitor_handoff_pending.is_set,
     )
 
 
@@ -10248,17 +10140,10 @@ def _exit_monitor_cycle(
     extraction, 2026-07-08) as ``run_exit_monitor_cycle``. See that function's
     docstring for the held-position monitoring / exit-submit lane it runs.
 
-    The active Event and completion callback keep this monitor non-reentrant.
-    Cross-job coordination uses the separate handoff Event only while the
-    monitor acquires and releases the reactor boundary; network work does not
-    hold that gate. The dispatcher owns both signals.
+    The claim, active Event and completion callback keep this monitor
+    non-reentrant. It never waits on the EDLI reactor.
     """
-    from src.execution.exit_lifecycle import (
-        held_monitor_pre_artifact_reserve_seconds,
-        run_exit_monitor_cycle,
-    )
-    from src.riskguard.risk_level import RiskLevel
-    from src.riskguard.riskguard import get_current_level
+    from src.execution.exit_lifecycle import run_exit_monitor_cycle
 
     urgent_fact = urgent_day0 or urgent_forecast
     recovery_claim = bool(recovery_full_book)
@@ -10314,7 +10199,6 @@ def _exit_monitor_cycle(
             # monitor. DRAIN: the canonical zero-set removes the writer
             # obligation immediately. RESET: a later positive exposure is
             # re-read by the next periodic pass.
-            _periodic_held_position_monitor_fairness_debt.clear()
             _day0_held_monitor_preempt_requested.clear()
             _forecast_held_monitor_preempt_requested.clear()
             _held_position_monitor_bootstrap_complete.set()
@@ -10355,9 +10239,8 @@ def _exit_monitor_cycle(
         return False
 
     # The deadline belongs to the single-writer monitor claim, not merely to
-    # the later network phase. Reactor handoff and all pre-monitor preparation
-    # consume the same finite budget so a stalled handoff cannot shift the
-    # probability/exit work beyond its advertised cadence.
+    # the later network phase. All pre-monitor preparation consumes the same
+    # finite budget so it cannot shift probability/exit work past its cadence.
     # Every path owns the same process-wide claim that the 30-second scheduler
     # needs.  A targeted wake with no debt at admission can itself create debt
     # by holding the claim for the old 75-second budget, skipping two periodic
@@ -10381,121 +10264,42 @@ def _exit_monitor_cycle(
         _forecast_held_monitor_preempt_requested.clear()
 
     monitor_claim_released = False
-    successor_entered_core = False
-    successor_generation = None
 
     def _release_monitor_claim() -> None:
         nonlocal monitor_claim_released
         if monitor_claim_released:
             return
         monitor_claim_released = True
-        if successor_entered_core:
-            _consume_periodic_held_monitor_successor(successor_generation)
         if not urgent_fact:
             _day0_held_monitor_preempt_requested.clear()
-            _periodic_held_position_monitor_handoff_pending.clear()
-        _held_position_monitor_handoff_pending.clear()
         _held_position_monitor_active.clear()
         _held_position_monitor_claim.release()
 
-    if periodic_full_book:
-        obligation_count = _current_periodic_monitor_obligation_count()
-        if obligation_count == 0:
-            # SCOPE: fairness debt exists only for current positive exposure
-            # owned by the held-position monitor. DRAIN: a canonical zero-set
-            # proves there is no monitor writer obligation, so no reactor
-            # handoff is required. RESET: any later positive exposure is
-            # re-read on the next periodic pass and regains normal handoff law.
-            _periodic_held_position_monitor_fairness_debt.clear()
-            _forecast_held_monitor_preempt_requested.clear()
-            _held_position_monitor_bootstrap_complete.set()
-            _release_monitor_claim()
-            logger.info(
-                "periodic exit_monitor completed without reactor handoff: "
-                "canonical monitored exposure is empty"
-            )
-            return True
+    if periodic_full_book and _current_periodic_monitor_obligation_count() == 0:
+        # SCOPE: current positive exposure owned by the held-position monitor.
+        # DRAIN: a canonical zero-set proves there is nothing to monitor.
+        # RESET: any later positive exposure is re-read on the next pass.
+        _forecast_held_monitor_preempt_requested.clear()
+        _held_position_monitor_bootstrap_complete.set()
+        _release_monitor_claim()
+        logger.info(
+            "periodic exit_monitor completed without a scan: "
+            "canonical monitored exposure is empty"
+        )
+        return True
 
-        # SCOPE: this claimed full-book monitor generation only. DRAIN: an
-        # in-flight replayable global cut stops at its next safe checkpoint;
-        # no later generic tranche may claim the reactor before this monitor
-        # enters its core run. RESET: consume immediately before
-        # ``run_exit_monitor_cycle``; an incomplete monitor keeps canonical
-        # debt, so its next claim obtains a fresh generation.
-        successor_generation = _reserve_periodic_held_monitor_successor()
-
-    # Claim exit priority before waiting. New reactor ticks defer only through
-    # the handoff; monitor network work does not stop unrelated decisions.
-    _held_position_monitor_handoff_pending.set()
-    if not urgent_fact:
-        _periodic_held_position_monitor_handoff_pending.set()
+    # The monitor owns its single-writer claim and runs now. It needs nothing
+    # from an in-flight global auction: SQLite writes are serialized by the
+    # write coordinator, and a cut is cancelled only by the facts
+    # ``cut_invalidating_wakes`` names, never by this schedule.
     _held_position_monitor_active.set()
     try:
-        # Recovery repeats every 30s; a full normal handoff wait would occupy
-        # its entire slot and make max_instances=1 skip the next repair tick.
-        configured_handoff_timeout = (
-            _URGENT_EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
-            if urgent_fact or recovery_claim
-            else _EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
-        )
-        risk_level_at_claim = get_current_level()
-        handoff_reserve_seconds = (
-            0.0
-            if risk_level_at_claim is RiskLevel.RED
-            else held_monitor_pre_artifact_reserve_seconds()
-        )
-        handoff_timeout = min(
-            configured_handoff_timeout,
-            max(
-                0.0,
-                monitor_deadline_monotonic
-                - time.monotonic()
-                - handoff_reserve_seconds,
-            ),
-        )
-        handoff_started_monotonic = time.monotonic()
-        reactor_idle = _edli_reactor_active_lock.acquire(timeout=handoff_timeout)
-        handoff_elapsed_seconds = max(
-            0.0,
-            time.monotonic() - handoff_started_monotonic,
-        )
-        if not reactor_idle:
-            if periodic_full_book:
-                current_obligation_count = (
-                    _current_periodic_monitor_obligation_count()
-                )
-                if current_obligation_count == 0:
-                    # The reservation belongs to this generation and its
-                    # canonical obligation is now terminally empty.  This is
-                    # the only pre-core path allowed to consume it.
-                    _consume_periodic_held_monitor_successor(successor_generation)
-                    _periodic_held_position_monitor_fairness_debt.clear()
-                    _held_position_monitor_bootstrap_complete.set()
-                    logger.info(
-                        "periodic exit_monitor completed after handoff timeout: "
-                        "canonical monitored exposure became empty"
-                    )
-                    return True
-                _periodic_held_position_monitor_fairness_debt.set()
-            logger.warning(
-                "exit_monitor deferred: active EDLI reactor did not finish within %.1fs",
-                handoff_timeout,
-            )
-            return False
-        _edli_reactor_active_lock.release()
-        if periodic_full_book:
-            # Fairness debt buys the monitor one reactor-free handoff, not a
-            # globally exclusive full-book scan. Once the handoff succeeds the
-            # concurrency obligation is satisfied even if a later position is
-            # missing fresh belief authority and the scan returns incomplete.
-            _periodic_held_position_monitor_fairness_debt.clear()
-        _held_position_monitor_handoff_pending.clear()
         if urgent_forecast and not urgent_price and (
             _day0_exit_monitor_priority_pending()
             or _day0_held_monitor_preempt_requested.is_set()
         ):
             logger.info(
-                "exit_monitor yielded after reactor handoff to urgent Day0 held-family monitor"
+                "exit_monitor yielded to urgent Day0 held-family monitor"
             )
             return False
         if (
@@ -10506,8 +10310,7 @@ def _exit_monitor_cycle(
             )
         ):
             logger.info(
-                "periodic exit_monitor yielded after reactor handoff to urgent "
-                "held-family monitor"
+                "periodic exit_monitor yielded to urgent held-family monitor"
             )
             return True
         should_preempt_for_urgent_day0 = None
@@ -10561,8 +10364,6 @@ def _exit_monitor_cycle(
                     _periodic_preemption_requested_since_claim()
                 )
             )
-        successor_entered_core = True
-        _consume_periodic_held_monitor_successor(successor_generation)
         failure_outcome: list[str] = []
         monitor_succeeded = run_exit_monitor_cycle(
             held_position_monitor_active=_held_position_monitor_active,
@@ -10573,7 +10374,6 @@ def _exit_monitor_cycle(
             mark_held_position_monitor_complete=_release_monitor_claim,
             monitor_claimed=True,
             monitor_deadline_monotonic=monitor_deadline_monotonic,
-            monitor_handoff_elapsed_seconds=handoff_elapsed_seconds,
             target_families=target_families,
             should_preempt_for_urgent_day0=should_preempt_for_urgent_day0,
             failure_outcome_sink=failure_outcome.append,
@@ -10689,7 +10489,6 @@ def _held_position_monitor_recovery_worker_main() -> None:
                     if _held_position_monitor_recovery_requested.is_set():
                         _held_position_monitor_recovery_requested.clear()
                         continue
-                    _periodic_held_position_monitor_fairness_debt.clear()
                     _held_position_monitor_canonical_debt.clear()
                     if _held_position_monitor_recovery_worker is current_worker:
                         _held_position_monitor_recovery_worker = None
@@ -10727,7 +10526,7 @@ def _held_position_monitor_recovery_worker_main() -> None:
                     exc_info=True,
                 )
 
-            # Do not return the debt to APScheduler.  A failed handoff, stale
+            # Do not return the debt to APScheduler.  A failed attempt, stale
             # probability, missing executable book, or canonical write race is
             # re-read and retried by this same single owner until DB evidence
             # proves the obligation drained.

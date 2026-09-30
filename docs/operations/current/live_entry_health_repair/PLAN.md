@@ -87,6 +87,35 @@ Restore truthful live entry admission after the global auction reached a real wi
 - Re-sample loaded SHA/PID, open positions, q identity, posterior/FSR identity, reactor completion cadence, and venue command/event counts.
 - Actual order proof requires separate `venue_commands`, submit event, venue ACK/order ID, fill/trade fact, and capital change lines. A candidate or health-clear signal is not an order.
 
+## Slice B90 -- The held monitor and the global cut never cancel each other
+
+- Live evidence (09-30 03:34-04:05Z, live `4f9caa572`): 60 cuts, 36 INCOMPLETE;
+  11 carry `cancel_source=monitor_handoff` (scope_scan 5, book_epoch_fence 3,
+  parallel_book_prefetch 2, prepare_family 1). Scope-scan cancels all land at
+  29.2-29.5s (one monitor handoff wait); an unpreempted scope_scan finishes in
+  2-8s. 20 `exit_monitor deferred: active EDLI reactor did not finish` lines
+  (15 at the 18-19s budget) show the monitor itself also stalled on the cut.
+- Root cause: `_exit_monitor_cycle` acquired the reactor lock only to release it
+  immediately, then ran its whole cycle concurrently with the next cut. The
+  handoff bought nothing (SQLite writes are serialized by the write
+  coordinator, not this lock) yet cancelled a replayable 10-45s cut, and a
+  timed-out handoff armed fairness debt that blocked the next reactor turn.
+- Invariant: a monitor handoff is not a fact change. A cut ends only on a fact
+  `cut_invalidating_wakes` names, exact held-SELL debt, capital recovery, or
+  its deadline. The monitor claims its own single-writer lane and never waits
+  on the reactor.
+- Change: delete the reactor handoff wait, the handoff/successor/fairness
+  events, and every monitor leaf in the reactor's cut-cancel probes; exact
+  held-SELL debt keeps its own `exact_held_sell_pending` label. Bootstrap
+  admission and canonical cadence BUY scoping are unchanged.
+- Files: `src/main.py`, `src/events/reactor.py`, `src/execution/exit_lifecycle.py`,
+  tests encoding the removed law, `tests/engine/test_monitor_cut_independence.py`,
+  `architecture/test_topology.yaml`, this plan.
+- Acceptance: monitor runs within cadence while a cut holds the reactor lock;
+  a claiming monitor raises no cut-cancel signal; structural antibody pins the
+  cut-cancel label set; failure-set diff vs origin/live adds no failure.
+- Rollback: revert the slice commit.
+
 ## Slice B88 -- Owned urgent-monitor handoff
 
 - Live evidence: a forecast-targeted monitor lost the single monitor claim and
