@@ -19,9 +19,15 @@ Two defects compounded on live:
 from __future__ import annotations
 
 import ast
+import json
+import os
 import time
+from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
 
 _ROOT = Path(__file__).resolve().parents[2]
 _DALLAS = "edli_family_021210275a8f78ba61213662"  # Dallas|2026-07-11|high
@@ -44,8 +50,9 @@ def _write_queue(reactor_wake, path: Path, count: int) -> None:
         )
 
 
+@pytest.mark.parametrize("legacy_pointer", (False, True))
 def test_exact_debt_probe_at_live_checkpoint_count_walks_the_queue_once(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, legacy_pointer
 ):
     """A live-shape scan probes exact debt at every checkpoint without re-walking.
 
@@ -59,6 +66,8 @@ def test_exact_debt_probe_at_live_checkpoint_count_walks_the_queue_once(
 
     path = tmp_path / "wake.json"
     _write_queue(reactor_wake, path, 2_000)
+    if legacy_pointer:
+        reactor_wake._atomic_write_wake(path, _legacy_wake(reactor_wake))
     walks = [0]
     walk = reactor_wake._queued_wakes
 
@@ -103,6 +112,195 @@ def test_cached_exact_debt_ids_see_a_newly_published_exact_wake(tmp_path):
     assert reactor_wake.exact_held_sell_completion_wake_ids(
         path=path, fail_on_error=True
     ) == frozenset({wake.wake_id})
+
+
+def _legacy_wake(reactor_wake, *, wake_id="legacy-known", exact=False):
+    request = reactor_wake.make_held_sell_reauction_request(
+        position_id="pos-1",
+        family=("Dallas", "2026-09-30", "high"),
+        probability_content_identity="q-1",
+        held_token_id="tok-1",
+        held_best_bid=0.4,
+        bid_observed_at="2026-09-30T08:00:00+00:00",
+    )
+    return reactor_wake.ReactorWake(
+        wake_id=wake_id,
+        published_at="2026-09-30T08:00:00+00:00",
+        source="private-strict-cache-antibody",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        forecast_families=(("Dallas", "2026-09-30", "high"),),
+        held_sell_reauction_requests=(request,) if exact else (),
+    )
+
+
+@contextmanager
+def _deny_private_path_access(path, mechanism):
+    """Change only a newly created private fixture's real OS permissions."""
+    import pwd
+    import stat
+    import subprocess
+    import sys
+
+    original_mode = stat.S_IMODE(path.stat().st_mode)
+    acl = mechanism.startswith("acl_")
+    if acl:
+        if sys.platform != "darwin":
+            pytest.skip("macOS ACL list/search/read test requires a macOS filesystem")
+        user = pwd.getpwuid(os.getuid()).pw_name
+        permission = mechanism.removeprefix("acl_")
+        subprocess.run(
+            ["chmod", "+a", f"user:{user} deny {permission}", str(path)],
+            check=True, capture_output=True, timeout=3,
+        )
+    else:
+        removed = 0o444 if mechanism == "no_read" else 0o111
+        path.chmod(original_mode & ~removed)
+    try:
+        yield
+    finally:
+        if acl:
+            subprocess.run(
+                ["chmod", "-N", str(path)],
+                check=True, capture_output=True, timeout=3,
+            )
+        path.chmod(original_mode)
+
+
+def _clear_private_queue_cache(reactor_wake, path):
+    queue_dir = reactor_wake._wake_queue_dir(path)
+    with reactor_wake._WAKE_QUEUE_CACHE_LOCK:
+        reactor_wake._EXACT_HELD_SELL_WAKE_IDS.pop(queue_dir, None)
+        reactor_wake._WAKE_QUEUE_CACHE.pop(queue_dir, None)
+        reactor_wake._WAKE_QUEUE_REVISIONS.pop(queue_dir, None)
+
+
+@pytest.mark.parametrize("mechanism", ("no_read", "acl_read"))
+@pytest.mark.parametrize("warm", (False, True))
+def test_strict_cached_legacy_read_error_is_real_and_resets(tmp_path, mechanism, warm):
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    _write_queue(reactor_wake, path, 1)
+    reactor_wake._atomic_write_wake(path, _legacy_wake(reactor_wake))
+    probe = lambda: reactor_wake.exact_held_sell_completion_wake_ids(
+        path=path, fail_on_error=True
+    )
+    assert probe() == frozenset()
+    revision = reactor_wake._wake_queue_revision(
+        reactor_wake._wake_queue_dir(path), path=path, fail_on_error=True
+    )
+    with _deny_private_path_access(path, mechanism):
+        assert reactor_wake._wake_queue_revision(
+            reactor_wake._wake_queue_dir(path), path=path, fail_on_error=True
+        ) == revision
+        if not warm:
+            _clear_private_queue_cache(reactor_wake, path)
+        with pytest.raises(PermissionError):
+            probe()
+    assert probe() == frozenset()
+
+
+@pytest.mark.parametrize("mechanism", ("no_read", "no_search", "acl_list", "acl_search"))
+@pytest.mark.parametrize("warm", (False, True))
+def test_strict_cached_directory_needs_real_list_and_search_access(tmp_path, mechanism, warm):
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    _write_queue(reactor_wake, path, 1)
+    probe = lambda: reactor_wake.exact_held_sell_completion_wake_ids(
+        path=path, fail_on_error=True
+    )
+    assert probe() == frozenset()
+    with _deny_private_path_access(reactor_wake._wake_queue_dir(path), mechanism):
+        if not warm:
+            _clear_private_queue_cache(reactor_wake, path)
+        with pytest.raises(PermissionError):
+            probe()
+    assert probe() == frozenset()
+
+
+def test_cached_exact_ids_use_current_legacy_even_with_the_same_revision(tmp_path):
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    _write_queue(reactor_wake, path, 1)
+    first = _legacy_wake(reactor_wake, wake_id="legacy-first", exact=True)
+    reactor_wake._atomic_write_wake(path, first)
+    probe = lambda: reactor_wake.exact_held_sell_completion_wake_ids(
+        path=path, fail_on_error=True
+    )
+    assert probe() == frozenset({first.wake_id})
+    original = path.stat()
+    revision = reactor_wake._wake_queue_revision(
+        reactor_wake._wake_queue_dir(path), path=path, fail_on_error=True
+    )
+    payload = json.loads(path.read_text())
+    payload["wake_id"] = "legacy-later"
+    path.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns))
+    assert reactor_wake._wake_queue_revision(
+        reactor_wake._wake_queue_dir(path), path=path, fail_on_error=True
+    ) == revision
+    assert probe() == frozenset({"legacy-later"})
+
+
+def test_cached_exact_ids_legacy_replace_delete_corruption_and_restore(tmp_path):
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    _write_queue(reactor_wake, path, 1)
+    first = _legacy_wake(reactor_wake, exact=True)
+    reactor_wake._atomic_write_wake(path, first)
+    probe = lambda: reactor_wake.exact_held_sell_completion_wake_ids(
+        path=path, fail_on_error=True
+    )
+    assert probe() == frozenset({first.wake_id})
+    later = replace(first, wake_id="legacy-next")
+    reactor_wake._atomic_write_wake(path, later)
+    assert probe() == frozenset({later.wake_id})
+    original = path.stat()
+    path.write_text("{" + " " * (original.st_size - 1))
+    os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns))
+    with pytest.raises(ValueError, match="REACTOR_WAKE_INVALID"):
+        probe()
+    path.unlink()
+    assert probe() == frozenset()  # known absence is not unreadable truth
+    reactor_wake._atomic_write_wake(path, later)
+    assert probe() == frozenset({later.wake_id})
+
+
+def test_warm_legacy_read_failure_cancels_actual_selection_and_final(tmp_path, monkeypatch):
+    import src.engine.event_reactor_adapter as era
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    _write_queue(reactor_wake, path, 1)
+    reactor_wake._atomic_write_wake(path, _legacy_wake(reactor_wake))
+    probe = reactor_wake.exact_held_sell_completion_wake_ids
+    monkeypatch.setattr(
+        reactor_wake, "exact_held_sell_completion_wake_ids",
+        lambda **kwargs: probe(path=path, **kwargs),
+    )
+    captured = _run_generic_completion_batch(monkeypatch, era)
+    for name in ("selection_cancelled", "final_actuation_cancelled"):
+        assert captured[name]() is False
+    with _deny_private_path_access(path, "no_read"):
+        for name in ("selection_cancelled", "final_actuation_cancelled"):
+            assert captured[name]() == "exact_held_sell_queue_unreadable"
+    for name in ("selection_cancelled", "final_actuation_cancelled"):
+        assert captured[name]() is False
+
+
+def test_lenient_invalid_queue_read_never_seeds_a_strict_exact_cache(tmp_path):
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    _write_queue(reactor_wake, path, 1)
+    queue_dir = reactor_wake._wake_queue_dir(path)
+    (queue_dir / "invalid.json").write_text("{")
+    assert reactor_wake.exact_held_sell_completion_wake_ids(path=path) == frozenset()
+    with pytest.raises(ValueError, match="REACTOR_WAKE_INVALID"):
+        reactor_wake.exact_held_sell_completion_wake_ids(path=path, fail_on_error=True)
 
 
 def test_a_request_marker_or_elapsed_time_never_cancels_a_generic_completion(
