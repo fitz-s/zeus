@@ -98,6 +98,79 @@ def test_explicit_international_homr_binding_normal_archive_first_cut_and_change
 @pytest.mark.parametrize("metric", ("high", "low"))
 def test_international_homr_normal_metadata_seed_and_public_ground_scope(tmp_path, monkeypatch, _hko_source_surface, city_name, metric):
     """Real retained ground/normal producers; controlled forecast and51 ENS, not field GRIB."""
+    _international_homr_normal_metadata_seed_and_public_ground_scope(tmp_path, monkeypatch, city_name, metric)
+
+
+@pytest.mark.parametrize("city_name", (
+    "Auckland", "Busan", "Chengdu", "Chongqing", "Guangzhou", "Istanbul",
+    "Jakarta", "Jinan", "Lagos", "Mexico City", "Munich", "Sao Paulo",
+    "Seoul", "Shenzhen", "Wellington", "Zhengzhou",
+))
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_explicit_international_homr_normal_metadata_seed_public_and_changed_facts(tmp_path, monkeypatch, _international_homr_physical_surfaces, city_name, metric):
+    """New retained metadata at its own clock; controlled forecast/ENS, not field GRIB."""
+    _international_homr_normal_metadata_seed_and_public_ground_scope(tmp_path, monkeypatch, city_name, metric, explicit_new=True)
+
+
+@pytest.fixture
+def _international_homr_physical_surfaces(tmp_path, monkeypatch, request, _hko_source_surface):
+    """Controlled whole-OM terrain, not field geography or a mocked authority.
+
+    The old HK fixture's32m plain must not be used as evidence of a2km station.
+    Every decoder/capture/guard runs normally on explicit same-height toy inputs.
+    """
+    import threading
+    import numpy as np
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from omfiles import OmFileWriter
+    import src.config as config
+    from src.data import openmeteo_model_surface as surface
+    from src.data import openmeteo_ecmwf_ifs9_bucket_transport as transport
+
+    city_name=request.node.callspec.params["city_name"]
+    claim=json.loads((config.PROJECT_ROOT/"config/station_precise_coords.json").read_text())[city_name]["station_ground_proof"]
+    facts=config.station_ground_facts_from_bytes(source_kind=config.HOMR_INTERNATIONAL_GROUND_SOURCE_KIND,
+        station_id=claim["station_id"],raw_body=(config.PROJECT_ROOT/claim["artifact_ref"]).read_bytes())
+    assert facts is not None
+    height=float(np.float32(facts["elevation_m"]))
+    writer=OmFileWriter(str(_hko_source_surface))
+    root=writer.write_array(np.full((1,transport.O1280_TOTAL_POINTS),height,dtype=np.float32),chunks=(1,4096),name="HSURF")
+    writer.close(root)
+    transport._hsurf_reader.cache_clear()
+    bodies={}
+    for model in ("icon_global","ukmo_global_deterministic_10km"):
+        profile=surface._profile(model)
+        path=tmp_path/f"international-{profile['domain']}.om"
+        writer=OmFileWriter(str(path))
+        root=writer.write_array(np.full((profile["ny"],profile["nx"]),height,dtype=np.float32),chunks=(20,20),name="HSURF")
+        writer.close(root)
+        bodies[profile["domain"]]=path.read_bytes()
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body=bodies.get(self.path.lstrip("/"))
+            if body is None:
+                self.send_error(404);return
+            self.send_response(200)
+            self.send_header("Content-Length",str(len(body)))
+            self.send_header("ETag",'"'+hashlib.sha256(body).hexdigest()+'"')
+            self.send_header("Last-Modified","Tue, 29 Sep 2026 22:00:00 GMT")
+            self.end_headers();self.wfile.write(body)
+        def log_message(self,*_args):
+            pass
+    server=ThreadingHTTPServer(("127.0.0.1",0),Handler)
+    thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    monkeypatch.setattr(surface,"_asset_url",lambda domain:f"http://127.0.0.1:{server.server_port}/{domain}")
+    monkeypatch.setattr(surface,"_cache_root",lambda:tmp_path/"international-static")
+    try:
+        for model in ("icon_global","ukmo_global_deterministic_10km"):
+            captured=surface.ensure_model_surface(model)
+            assert captured.status=="READY",captured.reason
+        yield height
+    finally:
+        server.shutdown();server.server_close();thread.join(timeout=2)
+
+
+def _international_homr_normal_metadata_seed_and_public_ground_scope(tmp_path, monkeypatch, city_name, metric, *, explicit_new=False):
     from dataclasses import asdict, replace
     from datetime import date, timedelta
     from zoneinfo import ZoneInfo
@@ -120,11 +193,28 @@ def test_international_homr_normal_metadata_seed_and_public_ground_scope(tmp_pat
     from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _selected_test_cell
 
     configured_claim=json.loads((config.PROJECT_ROOT/"config/station_precise_coords.json").read_text())[city_name]["station_ground_proof"]
-    registry, official, claims = _official_international_homr_registry(tmp_path, monkeypatch, city_name)
+    if explicit_new:
+        claims=json.loads((config.PROJECT_ROOT/"config/station_precise_coords.json").read_text())
+        official=tmp_path/Path(configured_claim["artifact_ref"]).name
+        official.write_bytes((config.PROJECT_ROOT/configured_claim["artifact_ref"]).read_bytes())
+        registry=tmp_path/"station_precise_coords.json"
+        registry.write_text(json.dumps(claims))
+        (tmp_path/"cities.json").write_bytes((config.PROJECT_ROOT/"config/cities.json").read_bytes())
+        monkeypatch.setattr(config,"CONFIG_DIR",tmp_path)
+    else:
+        registry, official, claims = _official_international_homr_registry(tmp_path, monkeypatch, city_name)
     assert claims[city_name]["station_ground_proof"]==configured_claim
     city = config.runtime_cities_by_name()[city_name]
+    if explicit_new:
+        import numpy as np
+        terrain=float(np.float32(configured_claim["elevation_m"]))
+    else:
+        terrain=32.
     target, cycle = date(2026, 10, 1), datetime(2026, 9, 30, 12, tzinfo=UTC)
     capture, recorded, cut = (cycle+timedelta(minutes=m) for m in (55,61,65))
+    if explicit_new:
+        capture,recorded,cut=(cycle+timedelta(hours=8,minutes=m) for m in (5,10,30))
+        target=cut.astimezone(ZoneInfo(city.timezone)).date()+timedelta(days=1)
     db = tmp_path/"homr-normal-public.db"
     conn = _low_revision_authority_conn(db, include_legacy_provider_fixtures=False,
         city_name=city_name, include_retired_incumbent=False, target_date=target, source_cycle=cycle)
@@ -141,7 +231,7 @@ def test_international_homr_normal_metadata_seed_and_public_ground_scope(tmp_pat
             fields = {key:value for key,value in values.items() if key in columns}
             conn.execute(f"UPDATE {table} SET "+",".join(f"{key}=?" for key in fields),tuple(fields.values()))
     conn.commit()
-    moment = [cycle+timedelta(hours=1)]
+    moment = [datetime(2026,9,30,15,10,tzinfo=UTC) if explicit_new else cycle+timedelta(hours=1)]
     class Clock(datetime):
         @classmethod
         def now(cls, tz=None):
@@ -149,7 +239,7 @@ def test_international_homr_normal_metadata_seed_and_public_ground_scope(tmp_pat
     monkeypatch.setattr(ground,"datetime",Clock)
     evidence = _archive(db,city_name)
     assert evidence["recorded_at"] == moment[0].isoformat()
-    assert evidence["captured_at"] == "2026-09-30T12:52:01+00:00"
+    assert datetime.fromisoformat(evidence["captured_at"]) == datetime.fromisoformat(configured_claim["checked_at"])
     assert ground.read_current_station_ground_evidence(db,city=city_name,decision_at=moment[0]-timedelta(microseconds=1)) is None
     class DownloadClock(datetime):
         @classmethod
@@ -163,7 +253,7 @@ def test_international_homr_normal_metadata_seed_and_public_ground_scope(tmp_pat
         else native_sqlite.execute("SELECT strftime(?,?)",(fmt,value)).fetchone()[0])
     offset = int(datetime.combine(target,datetime.min.time(),ZoneInfo(city.timezone)).utcoffset().total_seconds())
     def payload(lat,lon,value):
-        return {"latitude":lat,"longitude":lon,"elevation":32.,"timezone":city.timezone,
+        return {"latitude":lat,"longitude":(lon+180)%360-180,"elevation":terrain,"timezone":city.timezone,
             "utc_offset_seconds":offset,"hourly_units":{"temperature_2m":"°C"},
             "hourly":{"time":[f"{target.isoformat()}T{h:02d}:00" for h in range(24)],"temperature_2m":[value]*24}}
     def fetch(url,params,**kwargs):
@@ -177,7 +267,7 @@ def test_international_homr_normal_metadata_seed_and_public_ground_scope(tmp_pat
         targets=[dl.BayesPrecisionFusionDownloadTarget(city=city_name,metric=metric,target_date=target.isoformat(),
             lead_days=1,latitude=city.lat,longitude=city.lon,timezone_name=city.timezone)],
         models=("icon_global","ukmo_global_deterministic_10km"),include_previous_runs=False,prune_after=False)
-    cell=source_cell_geometry_proof(latitude=city.lat,longitude=city.lon,target_elevation_m=32.)
+    cell=source_cell_geometry_proof(latitude=city.lat,longitude=city.lon,target_elevation_m=terrain)
     anchor=payload(cell["selected_grid_lat"],cell["selected_grid_lon"],18.5)
     anchor["_zeus_current_target_scope"]={"city":city_name,"target_date":target.isoformat(),"metric":metric}
     raw=(json.dumps(anchor,sort_keys=True)+"\n").encode()
