@@ -74,7 +74,10 @@ current scope, book, wealth, probability, RiskGuard, and venue receipt evidence 
   explicitly myopic. Mean economics live only in
   `expected_*` certificates and may never be written into `robust_*` or LCB/UCB
   fields. After each action-law admission, rank
-  every fixed proposal by one posterior-mean expected Δlog-wealth rate. Settlement-locked BUY
+  every fixed proposal by posterior-mean expected terminal Δlog-wealth on the
+  current cash-constrained feasible set. Time is diagnostic, not an inferred
+  reinvestment benefit or a multiplier on a static cash dual. A terminal maker
+  attempt cannot exclude a fresh, independently valid proposal. Settlement-locked BUY
   and a maker-contingent no-fill branch derive their horizon from the immutable family city and
   target local date plus the configured settlement timezone, bound into the current
   scope/universe witness identity. An immediate FAK SELL instead uses its certificate-bound
@@ -118,7 +121,7 @@ current scope, book, wealth, probability, RiskGuard, and venue receipt evidence 
   feasibility bounds keep `W_end(a) > 0` strictly. A global reduce-only SELL is
   the sole typed exception: exact zero atoms use the `epsilon -> 0` extended-log
   limit, with raw ruin-probability reduction as the first lexicographic key and
-  finite expected log growth per capital-hour only after exact equality. Never
+  finite expected terminal log gain only after exact equality. Never
   round, tolerance-collapse, or time-normalize the ruin key. Negative or
   non-finite terminal wealth always fails closed; maker zero-atom SELL requires
   a current partial-fill distribution and otherwise remains unavailable.

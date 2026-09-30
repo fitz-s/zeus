@@ -1578,7 +1578,9 @@ def test_capital_proof_locates_nearest_rejected_executable_buy_frontier():
         witness_identity=joint_probability_witness_identity(**witness_fields),
     )
 
-    def evaluation(candidate_id: str, expected_du: float) -> Evaluation:
+    def evaluation(
+        candidate_id: str, expected_du: float, lock_hours: float
+    ) -> Evaluation:
         return Evaluation(
             candidate_id=candidate_id,
             family_key="family-buy",
@@ -1601,7 +1603,7 @@ def test_capital_proof_locates_nearest_rejected_executable_buy_frontier():
                 "probe_limit_price": "0.30",
                 "probe_expected_fill_price_before_fee": "0.30",
                 "probe_expected_delta_log_wealth": expected_du,
-                "probe_expected_log_growth_per_hour": expected_du / 24.0,
+                "probe_expected_log_growth_per_hour": expected_du / lock_hours,
                 "probe_expected_ev_usd": -0.1,
                 "probe_expected_capital_efficiency": expected_du / 3.1,
             },
@@ -1612,8 +1614,10 @@ def test_capital_proof_locates_nearest_rejected_executable_buy_frontier():
             candidate=None,
             expected_growth=None,
             candidate_evaluations=(
-                evaluation("farther", -0.004),
-                evaluation("nearest", -0.002),
+                # The farther row's long lock gives it the better per-hour
+                # rate; the frontier follows terminal gain regardless.
+                evaluation("farther", -0.004, 400.0),
+                evaluation("nearest", -0.002, 24.0),
             ),
             shares=Decimal("0"),
             cost_usd=Decimal("0"),
@@ -1766,20 +1770,22 @@ def test_compact_buy_rejection_group_requires_complete_economic_frontier():
             },
         }
 
+    # Terminal gain, not its per-hour rate, orders the frontier: the long-lock
+    # row has the worse rate (-0.002/h) but the nearer terminal gain (-0.02).
     complete = global_batch_runtime._compact_buy_rejection_group(
         action="BUY",
         side="YES",
         reason="NON_POSITIVE_ROBUST_OBJECTIVE",
         rows=(
-            row("worse", -0.002, -0.02),
-            row("nearest-cash", -0.001, -0.03),
+            row("nearest-terminal", -0.002, -0.02),
+            row("nearest-rate", -0.001, -0.03),
         ),
-        buy_candidate_positions={"worse": 0, "nearest-cash": 1},
+        buy_candidate_positions={"nearest-terminal": 0, "nearest-rate": 1},
     )
 
     assert complete["frontier_complete"] is True
     assert complete["economics_candidate_count"] == 2
-    assert complete["frontier"]["candidate_index"] == 1
+    assert complete["frontier"]["candidate_index"] == 0
     assert complete["candidate_indexes"] == [0, 1]
 
     incomplete = global_batch_runtime._compact_buy_rejection_group(
@@ -1812,8 +1818,8 @@ def test_compact_buy_rejection_group_ranks_posterior_mean_frontier():
             },
         }
         for candidate_id, growth, delta in (
-            ("worse", -0.002, -0.02),
-            ("nearest-cash", -0.001, -0.03),
+            ("nearest-terminal", -0.002, -0.02),
+            ("nearest-rate", -0.001, -0.03),
         )
     )
 
@@ -1822,12 +1828,17 @@ def test_compact_buy_rejection_group_ranks_posterior_mean_frontier():
         side="YES",
         reason="NON_POSITIVE_EXPECTED_OBJECTIVE",
         rows=rows,
-        buy_candidate_positions={"worse": 0, "nearest-cash": 1},
+        buy_candidate_positions={"nearest-terminal": 0, "nearest-rate": 1},
     )
 
     assert compact["frontier_complete"] is True
-    assert compact["frontier"]["candidate_index"] == 1
-    assert "_frontier_growth" not in compact["frontier"]["economics"]
+    assert compact["frontier"]["candidate_index"] == 0
+    assert compact["frontier"]["economics"][
+        "probe_expected_log_growth_per_hour"
+    ] == -0.002
+    assert not any(
+        str(key).startswith("_frontier_") for key in compact["frontier"]["economics"]
+    )
 
 
 def test_candidate_semantic_key_distinguishes_maker_and_taker_proposals():
@@ -4523,21 +4534,13 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy(seed_s
     authority = witnessed_epoch.execution_authority(maker, checked_at_utc=at)
     assert authority is not None
     assert authority.maker_witness_identity == maker_witness.witness_identity
-def test_global_escalated_buy_rejects_only_repeated_maker_proposal():
-    armed = frozenset({"token"})
 
-    assert global_batch_runtime._global_maker_rest_escalation_rejection(
-        SimpleNamespace(action="BUY", execution_mode="MAKER_REST", token_id="token"),
-        armed_buy_token_ids=armed,
-    ) == "GLOBAL_MAKER_REST_ALREADY_ESCALATED"
-    assert global_batch_runtime._global_maker_rest_escalation_rejection(
-        SimpleNamespace(action="BUY", execution_mode="TAKER_LIMIT", token_id="token"),
-        armed_buy_token_ids=armed,
-    ) is None
-    assert global_batch_runtime._global_maker_rest_escalation_rejection(
-        SimpleNamespace(action="SELL", execution_mode="MAKER_REST", token_id="token"),
-        armed_buy_token_ids=armed,
-    ) is None
+
+def test_global_current_candidate_admission_has_no_terminal_attempt_blackout():
+    source = inspect.getsource(global_batch_runtime.process_current_global_batch)
+    assert "_global_maker_rest_escalation_rejection" not in source
+    assert "maker_rest_escalation_armed_token_ids" not in source
+    assert "candidate_policy_rejection_resolver(candidate)" in source
 
 
 def test_global_actuation_does_not_blanket_block_existing_family_exposure():

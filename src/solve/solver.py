@@ -8952,14 +8952,15 @@ def select_global_single_order(
         )
 
     # Each action first passes its own admission/sizing law. Rank all fixed
-    # proposals on the same posterior-mean expected-growth axis. Never round a
-    # comparator component: even a sub-femtoscale positive ruin reduction is
-    # lexicographically prior to every finite log-growth difference.
+    # proposals by terminal expected gain on the current cash-constrained set.
+    # A cash constraint does not license multiplying its dual by settlement time.
+    # Duration remains diagnostic; no future reinvestment or exit is fabricated.
+    # Never round a comparator component: even a sub-femtoscale positive ruin
+    # reduction is lexicographically prior to every finite log-growth difference.
     winner = min(
         positive_scored,
         key=lambda score: (
             -float(score.expected_growth.ruin_probability_reduction),
-            -float(score.expected_growth.expected_log_growth_per_hour),
             -float(score.expected_growth.expected_delta_log_wealth),
             -float(score.expected_growth.expected_capital_efficiency),
             score.cost_usd,

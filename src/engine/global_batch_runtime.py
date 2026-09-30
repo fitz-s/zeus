@@ -1719,30 +1719,6 @@ def _global_candidate_execution_mode(candidate: object) -> str:
     return str(getattr(candidate, "execution_mode", default) or default).upper()
 
 
-def _global_maker_rest_escalation_rejection(
-    candidate: object,
-    *,
-    armed_buy_token_ids: frozenset[str],
-) -> str | None:
-    """Remove only a repeated BUY maker rest after its real window elapsed.
-
-    SCOPE: this native BUY token's MAKER_REST proposal only. DRAIN: its current
-    TAKER_LIMIT sibling and CASH remain in the same global comparison. RESET:
-    the shared 24-hour escalation evidence expires, admitting a genuinely new
-    maker window.
-    """
-
-    if (
-        str(getattr(candidate, "action", "BUY") or "BUY").strip().upper()
-        == "BUY"
-        and _global_candidate_execution_mode(candidate) == "MAKER_REST"
-        and str(getattr(candidate, "token_id", "") or "").strip()
-        in armed_buy_token_ids
-    ):
-        return "GLOBAL_MAKER_REST_ALREADY_ESCALATED"
-    return None
-
-
 # Reasons for a cut that a probe cancelled, superseded or deferred. Each such
 # reject logs one attributed line and writes cancel_source/cancel_stage.
 _CANCELLED_CUT_REASONS = frozenset(
@@ -3742,7 +3718,6 @@ def _compact_buy_rejection_group(
         if not all(math.isfinite(value) for value in numeric[:3]):
             continue
         normalized = dict(economics)
-        normalized["_frontier_growth"] = numeric[0]
         normalized["_frontier_delta"] = numeric[1]
         normalized["_frontier_efficiency"] = numeric[2]
         economic_rows.append((row, normalized))
@@ -3753,9 +3728,8 @@ def _compact_buy_rejection_group(
         row, economics = min(
             economic_rows,
             key=lambda item: (
-                -round(float(item[1]["_frontier_growth"]), 15),
-                -round(float(item[1]["_frontier_delta"]), 15),
-                -round(float(item[1]["_frontier_efficiency"]), 15),
+                -float(item[1]["_frontier_delta"]),
+                -float(item[1]["_frontier_efficiency"]),
                 Decimal(str(item[1]["probe_cost_usd"])),
                 str(item[0].get("candidate_id") or ""),
             ),
@@ -8141,7 +8115,6 @@ def _capital_proof_counterfactual_receipt(
         rejected_buy_frontiers.append(
             (
                 (
-                    -growth_rate,
                     -expected_du,
                     -capital_efficiency,
                     probe_cost,
@@ -9915,10 +9888,6 @@ def process_current_global_batch(
             selection_at = current_time()
             prepared_for_selection = attempt_prepared
             if attempt_book_epoch is not None and selection_state is not None:
-                from src.execution.staleness_cancel import (
-                    maker_rest_escalation_armed_token_ids,
-                )
-
                 required_tokens_by_family: dict[str, set[str]] = {}
                 for state in tuple(
                     getattr(attempt_book_epoch, "asset_states", ()) or ()
@@ -9984,17 +9953,6 @@ def process_current_global_batch(
                         issued_at_utc=selection_at,
                     )
                 )
-                armed_buy_maker_token_ids = (
-                    maker_rest_escalation_armed_token_ids(
-                        trade_conn,
-                        token_ids=(
-                            asset.token_id for asset in attempt_book_epoch.assets
-                        ),
-                        decision_time=selection_at,
-                    )
-                )
-            else:
-                armed_buy_maker_token_ids = frozenset()
             excluded_candidates = dict(preflight_excluded_by_candidate or {})
             if attempt_book_epoch is not None and excluded_candidates:
                 known_candidate_keys = {
@@ -10036,12 +9994,6 @@ def process_current_global_batch(
                 # fresh buy_candidates_enabled authority.
                 if not buy_candidates_enabled and action == "BUY":
                     return "GLOBAL_BUY_CANDIDATES_DISABLED"
-                escalation_rejection = _global_maker_rest_escalation_rejection(
-                    candidate,
-                    armed_buy_token_ids=armed_buy_maker_token_ids,
-                )
-                if escalation_rejection is not None:
-                    return escalation_rejection
                 key = (
                     action,
                     str(getattr(candidate, "family_key", "") or ""),
@@ -10069,12 +10021,6 @@ def process_current_global_batch(
                     str(getattr(candidate, "token_id", "") or ""),
                     _global_candidate_execution_mode(candidate),
                 )
-                escalation_rejection = _global_maker_rest_escalation_rejection(
-                    candidate,
-                    armed_buy_token_ids=armed_buy_maker_token_ids,
-                )
-                if escalation_rejection is not None:
-                    return escalation_rejection
                 reason = excluded_candidates.get(key)
                 if reason is not None:
                     return f"GLOBAL_PREFLIGHT_CANDIDATE_INELIGIBLE:{reason}"

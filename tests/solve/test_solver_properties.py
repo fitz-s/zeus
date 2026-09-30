@@ -1,6 +1,6 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-09-22
-# Lifecycle: created=2026-07-03; last_reviewed=2026-09-22; last_reused=2026-09-22
+# Last reused/audited: 2026-09-30
+# Lifecycle: created=2026-07-03; last_reviewed=2026-09-30; last_reused=2026-09-30
 # Authority basis: current global auction, executable Kelly, and wealth contracts
 """Current global-auction solver properties over executable portfolio wealth."""
 
@@ -2368,7 +2368,7 @@ def test_global_single_order_sell_uses_incremental_growth_not_loss_majority():
     assert decision.robust_ev_usd > 0
 
 
-def test_global_single_order_ranks_immediate_sell_on_execution_horizon():
+def test_global_single_order_quote_horizon_does_not_create_sell_value():
     sell = _global_sell_candidate(
         candidate_id="sell-runner-up",
         family="sell-runner-family",
@@ -2397,8 +2397,8 @@ def test_global_single_order_ranks_immediate_sell_on_execution_horizon():
         },
     )
 
-    assert decision.candidate is sell
-    assert decision.capital_action_mode == "IMMEDIATE_TAKER_SELL"
+    assert decision.candidate is buy
+    assert decision.capital_action_mode == "SETTLEMENT_LOCKED_BUY"
     evaluations = {
         evaluation.candidate_id: evaluation
         for evaluation in decision.candidate_evaluations
@@ -2614,18 +2614,22 @@ def test_false_edge_sample_rate_does_not_remove_buy_before_global_ranking():
         cap="100",
     )
 
-    assert decision.candidate is sell
+    assert decision.candidate is buy
     assert buy.candidate_id not in decision.rejection_reasons
     evaluations = {
         evaluation.candidate_id: evaluation
         for evaluation in decision.candidate_evaluations
     }
-    assert evaluations[buy.candidate_id].status == "SCORED"
+    assert evaluations[buy.candidate_id].status == "SELECTED"
     assert evaluations[buy.candidate_id].expected_growth is not None
     assert evaluations[buy.candidate_id].expected_growth.probability_basis == (
         "POSTERIOR_PREDICTIVE_MEAN"
     )
-    assert evaluations[sell.candidate_id].status == "SELECTED"
+    assert evaluations[sell.candidate_id].status == "SCORED"
+    assert (
+        evaluations[buy.candidate_id].expected_growth.expected_delta_log_wealth
+        > evaluations[sell.candidate_id].expected_growth.expected_delta_log_wealth
+    )
 
 
 def test_global_single_order_zero_buy_capacity_preserves_sell_and_cash():
@@ -6843,7 +6847,7 @@ def test_global_single_order_does_not_couple_unmodelled_portfolio_upside_to_win(
     assert unrelated_upside.robust_delta_log_wealth == cash_only.robust_delta_log_wealth
 
 
-def test_global_single_order_maximizes_authority_bound_log_growth_rate():
+def test_global_single_order_maximizes_terminal_gain_on_current_cash_set():
     slow = _global_candidate(
         candidate_id="higher-growth", family="a", side="YES", q=0.74
     )
@@ -6856,8 +6860,8 @@ def test_global_single_order_maximizes_authority_bound_log_growth_rate():
         resolution_hours_by_family={"a": 48.0, "b": 12.0},
     )
 
-    assert decision.candidate.candidate_id == "lower-growth"
-    assert decision.capital_lock_hours == 12.0
+    assert decision.candidate.candidate_id == "higher-growth"
+    assert decision.capital_lock_hours == 48.0
     assert decision.robust_log_growth_per_hour is None
     assert decision.expected_growth is not None
     assert decision.expected_growth.expected_log_growth_per_hour > 0
@@ -9542,3 +9546,95 @@ def test_same_token_repost_law_is_one_predicate_for_selector_submit_and_cleanup(
     assert calls
     assert decision.candidate is None
     assert decision.rejection_reasons[only.candidate_id] == "entry_cooldown:spy_refusal"
+
+
+# Created: 2026-09-30; authority: early-value design, pinned 514cdc7d9.
+def _early_value_policy(which, *, blocked=None, enabled=True, excluded=None):
+    """Execute the exact nested current-policy function, without runtime I/O."""
+    import ast
+    from pathlib import Path
+    module = ast.parse((Path(S.__file__).parents[1] / "engine/global_batch_runtime.py").read_text())
+    scope = next(n for n in ast.walk(module) if isinstance(n, ast.FunctionDef) and n.name == "select_once")
+    policy = next(n for n in scope.body if isinstance(n, ast.FunctionDef) and n.name == which)
+    helper_names = {"_global_candidate_execution_mode", "_global_maker_rest_escalation_rejection"}
+    nodes = [n for n in module.body if isinstance(n, ast.FunctionDef) and n.name in helper_names]
+    nodes.append(policy)
+    env = {
+        "buy_candidates_enabled": enabled,
+        "armed_buy_maker_token_ids": frozenset({"token"}),
+        "excluded_candidates": excluded or {},
+        "candidate_policy_rejection_resolver": lambda _c: blocked,
+        "proof_candidate_policy_rejection_resolver": lambda _c: blocked,
+    }
+    exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])),
+                 "pinned-current-policy", "exec"), env)
+    return env[which]
+
+
+@pytest.mark.parametrize("which", ["candidate_policy", "proof_candidate_policy"])
+@pytest.mark.parametrize("metric", ["high", "low"])
+@pytest.mark.parametrize("side", ["YES", "NO"])
+def test_early_value_terminal_attempt_is_not_current_admission(which, metric, side):
+    candidate = SimpleNamespace(action="BUY", execution_mode="MAKER_REST", token_id="token",
+                                family_key=f"family-{metric}", bin_id="bin", side=side)
+    assert _early_value_policy(which)(candidate) is None
+
+
+@pytest.mark.parametrize("which", ["candidate_policy", "proof_candidate_policy"])
+@pytest.mark.parametrize("mode", ["MAKER_REST", "TAKER_LIMIT"])
+def test_early_value_actual_current_rejection_still_controls(which, mode):
+    candidate = SimpleNamespace(action="BUY", execution_mode=mode, token_id="token",
+                                family_key="family-low", bin_id="bin", side="NO")
+    assert _early_value_policy(which, blocked="CURRENT_PROBABILITY_AUTHORITY_BLOCKED")(candidate) == "CURRENT_PROBABILITY_AUTHORITY_BLOCKED"
+    key = ("BUY", "family-low", "bin", "NO", "token", mode)
+    assert _early_value_policy(which, excluded={key: "QUOTE_EXPIRED"})(candidate) == "GLOBAL_PREFLIGHT_CANDIDATE_INELIGIBLE:QUOTE_EXPIRED"
+
+
+def test_early_value_entry_pause_and_sell_separation():
+    buy = SimpleNamespace(action="BUY", execution_mode="MAKER_REST", token_id="token",
+                          family_key="f-high", bin_id="bin", side="YES")
+    sell = SimpleNamespace(action="SELL", execution_mode="MAKER_REST", token_id="token",
+                          family_key="f-high", bin_id="bin", side="YES")
+    policy = _early_value_policy("candidate_policy", enabled=False)
+    assert policy(buy) == "GLOBAL_BUY_CANDIDATES_DISABLED"
+    assert policy(sell) is None
+
+
+@pytest.mark.parametrize("side", ["YES", "NO"])
+@pytest.mark.parametrize("cash", ["5", "100"])
+def test_early_value_terminal_dominance_with_scarce_or_slack_cash(side, cash):
+    early = _global_candidate(candidate_id="early", family="early-high", side=side, q=0.74)
+    late = _global_candidate(candidate_id="late", family="late-high", side=side, q=0.60)
+    decision = _global_select((late, early), cash=cash, floor="100", ceiling="100", cap="100",
+                             fractional_kelly_multiplier="0.125",
+                             resolution_hours_by_family={early.family_key: 48, late.family_key: 8})
+    rows = {r.candidate_id: r for r in decision.candidate_evaluations}
+    eg = rows[early.candidate_id].expected_growth
+    lg = rows[late.candidate_id].expected_growth
+    assert eg.expected_delta_log_wealth > lg.expected_delta_log_wealth > 0
+    assert eg.expected_log_growth_per_hour < lg.expected_log_growth_per_hour
+    assert decision.candidate is early
+    assert decision.max_spend_usd <= Decimal(cash)
+    if cash == "5":
+        assert decision.max_spend_usd == Decimal("5")
+
+
+@pytest.mark.parametrize("side", ["YES", "NO"])
+def test_early_value_settlement_relabel_changes_no_payoff(side):
+    a = _global_candidate(candidate_id="a", family="a-low", side=side, q=0.70)
+    z = _global_candidate(candidate_id="z", family="z-low", side=side, q=0.70)
+    first = _global_select((z, a), cash="5", resolution_hours_by_family={"a-low": 55, "z-low": 6})
+    second = _global_select((z, a), cash="5", resolution_hours_by_family={"a-low": 6, "z-low": 55})
+    assert first.candidate is second.candidate is a
+    assert first.cost_usd == second.cost_usd
+
+
+def test_early_value_quote_expiry_is_not_a_return_multiplier():
+    a = _global_sell_candidate(candidate_id="a", family="a", side="YES", held_q=0.20,
+                              bids=(("0.60", "10"),), quote_ttl_seconds=2,
+                              probability_functional="POSTERIOR_PREDICTIVE_MEAN")
+    z = _global_sell_candidate(candidate_id="z", family="z", side="YES", held_q=0.20,
+                              bids=(("0.60", "10"),), quote_ttl_seconds=1,
+                              probability_functional="POSTERIOR_PREDICTIVE_MEAN")
+    assert _global_select((z, a)).candidate is a
+
