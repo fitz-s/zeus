@@ -2548,7 +2548,8 @@ def test_missing_day0_hourly_carrier_is_a_blocked_input(
 
 def _shanghai_current_owner_request(tmp_path, monkeypatch, *, metric="high",
     target_date=date(2026,10,2),source_cycle_time=datetime(2026,10,1,tzinfo=UTC),
-    computed_at=None,first_compute_at=None,expires_at=None,observed_extreme=None):
+    computed_at=None,first_compute_at=None,expires_at=None,observed_extreme=None,
+    observed_sample_count=12):
     """Normal owned ground/anchor/provider proof with controlled ENS/math inputs.
 
     The actual HOMR body was captured Sep30. Move the entire external forecast
@@ -2611,7 +2612,7 @@ def _shanghai_current_owner_request(tmp_path, monkeypatch, *, metric="high",
             day0_observed_extreme_c=value if active else None,
             day0_observed_extreme_source="noaa_wrh_zspd" if active else None,
             day0_observed_extreme_observation_time=(cut-timedelta(minutes=5)).isoformat() if active else None,
-            day0_observed_extreme_sample_count=12 if active else None,
+            day0_observed_extreme_sample_count=observed_sample_count if active else None,
             day0_observed_extreme_unit="C" if active else None)
         return _install_hko_live_fusion(monkeypatch,conn=conn,request=request,selected_cells=cells,
                                         snapshot_id=9001 if metric=="high" else 9002)
@@ -2654,14 +2655,16 @@ def _append_shanghai_owner_prints(conn,request):
     from src.state.schema.observation_prints_schema import ensure_table
     ensure_table(conn)
     observed = datetime.fromisoformat(request.day0_observed_extreme_observation_time)
-    instants = [observed-timedelta(minutes=11-index) for index in range(12)]
-    values = [25.+index*.05 for index in range(11)]+[request.day0_observed_extreme_c]
+    count = request.day0_observed_extreme_sample_count
+    assert isinstance(count,int) and count > 0
+    instants = [observed-timedelta(minutes=count-1-index) for index in range(count)]
+    values = [25.+index*.05 for index in range(count-1)]+[request.day0_observed_extreme_c]
     body = {"STATION":[{"STID":"ZSPD","OBSERVATIONS":{
         "date_time":[at.astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%dT%H:%M:%S%z") for at in instants],
-        "air_temp_set_1":values,"sea_level_pressure_set_1":[1010]*12,
+        "air_temp_set_1":values,"sea_level_pressure_set_1":[1010]*count,
         "metar_set_1":[f"ZSPD {at:%d%H%M}Z 26/20 T02600200" for at in instants]}}]}
     rows = rows_from_payload(body,station="ZSPD")
-    assert len(rows)==request.day0_observed_extreme_sample_count==12
+    assert len(rows)==request.day0_observed_extreme_sample_count
     _append_noaa_wrh_prints(conn,city_name=request.city,station="ZSPD",unit="C",rows=rows,
         target_date_local=request.target_date,view="all",fetch_utc=request.computed_at-timedelta(minutes=1))
     conn.commit()
@@ -5650,86 +5653,98 @@ def test_wu_and_raw_noaa_fast_are_provisional_until_wrh_authority() -> None:
     assert materializer_mod._day0_absorbing_observed_extreme_c(settlement_page) == 31.0
 
 
-def test_materializer_day0_allows_elapsed_om9_hours_covered_by_observed_extreme(
+def _assert_remaining_suffix_cannot_supply_full_day_prior(conn, monkeypatch, request, *, first_hour, captured):
+    """Actual scalar/parser and vector-store roles, not a complete q license."""
+    from src.config import runtime_cities_by_name
+    from src.data import day0_hourly_vectors as hourly
+    from src.data.openmeteo_ecmwf_ifs9_anchor import extract_openmeteo_ecmwf_ifs9_localday_anchor
+
+    payload = json.loads(request.openmeteo_raw_payload_bytes)
+    full = extract_openmeteo_ecmwf_ifs9_localday_anchor(payload,city_timezone=request.city_timezone,
+        target_local_date=request.target_date,source_cycle_time=request.source_cycle_time,require_full_localday=True)
+    assert full == request.openmeteo_anchor
+    suffix = {**payload,"hourly":{
+        "time":payload["hourly"]["time"][first_hour:],
+        "temperature_2m":payload["hourly"]["temperature_2m"][first_hour:]}}
+    # The ordinary producer's final anchor stage passes require_full_localday.
+    # Observation maturity cannot turn these missing samples into a full mu.
+    with pytest.raises(ValueError,match="partial local-day coverage: missing, duplicate or unordered hourly slots"):
+        extract_openmeteo_ecmwf_ifs9_localday_anchor(suffix,city_timezone=request.city_timezone,
+            target_local_date=request.target_date,source_cycle_time=request.source_cycle_time,require_full_localday=True)
+    city = runtime_cities_by_name()[request.city]
+    endpoint = "https://single-runs-api.open-meteo.com/v1/forecast"
+    params = {"latitude":city.lat,"longitude":city.lon,"timezone":city.timezone,
+              "hourly":"temperature_2m","models":"ecmwf_ifs","run":request.source_cycle_time.isoformat()}
+    identity = hourly.build_request_hash(endpoint=endpoint,params=params,models=["ecmwf_ifs"],
+        captured_at=captured.isoformat(),payload=suffix)
+    metadata = hourly._day0_provider_run_meta(model="ecmwf_ifs",model_api_id="ecmwf_ifs",
+        run=request.source_cycle_time,available_at=request.source_cycle_time+timedelta(hours=8),
+        modified_at=request.source_cycle_time+timedelta(hours=8),authority="run_pinned_single_runs",
+        endpoint_mode="single_runs",request_params={**params,"endpoint":endpoint},request_hash=identity,
+        fetch_started_at=captured,fetch_finished_at=captured)
+    vectors = hourly.parse_openmeteo_hourly_payload(suffix,city=city,models=["ecmwf_ifs"],
+        captured_at=captured.isoformat(),source_run_meta_json=json.dumps(metadata))
+    assert len(vectors)==1 and len(vectors[0].times)==24-first_hour
+    assert hourly.persist_day0_hourly_vectors(vectors,target_date=str(request.target_date),conn=conn,
+        request_hash=identity,endpoint=endpoint,now=request.computed_at)==1
+    selected = hourly.read_freshest_day0_hourly_vectors(city=request.city,target_date=str(request.target_date),
+        conn=conn,now=request.computed_at,expected_models=["ecmwf_ifs"],require_expected=True)
+    assert len(selected)==1 and selected[0].times==vectors[0].times
+    assert selected[0].source_run_meta_json==vectors[0].source_run_meta_json
+    # Even a self-consistent new owned artifact/metadata must fail the
+    # materializer's independent source replay, not only a hand-picked flag.
+    from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _selected_test_cell
+    partial = extract_openmeteo_ecmwf_ifs9_localday_anchor(suffix,city_timezone=request.city_timezone,
+        target_local_date=request.target_date,source_cycle_time=request.source_cycle_time)
+    before=tuple(tuple(row) for row in conn.execute("SELECT * FROM forecast_posteriors ORDER BY posterior_id"))
+    candidate = _install_hko_live_fusion(monkeypatch,conn=conn,request=replace(request,
+        openmeteo_anchor=partial,openmeteo_raw_payload_bytes=json.dumps(suffix,sort_keys=True).encode()),
+        selected_cells={model:_selected_test_cell(model,city.lat,city.lon)
+                        for model in ("icon_global","ukmo_global_deterministic_10km")})
+    assert candidate.openmeteo_precision_guard.passable_for_live_materialization
+    refused=materialize_replacement_forecast_live(conn,candidate)
+    assert refused.ok is False and refused.reason_codes==("OM9_SOURCE_RESPONSE_INVALID",)
+    assert tuple(tuple(row) for row in conn.execute("SELECT * FROM forecast_posteriors ORDER BY posterior_id"))==before
+    return suffix
+
+
+@pytest.mark.usefixtures("_hko_source_surface")
+def test_materializer_day0_requires_full_prior_even_with_elapsed_observed_extreme(
+    tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    conn = _conn()
-    _install_live_fusion(monkeypatch)
-    request = _request(
-        computed_at=_dt(18),
-        expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
-        day0_observed_extreme_c=26.0,
-        day0_observed_extreme_source="same_station_fast_tail",
-        day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
-        day0_observed_extreme_sample_count=2,
-    )
-    partial_raw = json.loads(request.openmeteo_raw_payload_bytes)
-    partial_raw["hourly"]["time"] = partial_raw["hourly"]["time"][2:]
-    partial_raw["hourly"]["temperature_2m"] = partial_raw["hourly"]["temperature_2m"][2:]
-    partial_bytes = (json.dumps(partial_raw, sort_keys=True, indent=2) + "\n").encode()
-    partial_metadata = replace(
-        request.openmeteo_precision_guard.metadata,
-        source_geometry_proof={
-            **request.openmeteo_precision_guard.metadata.source_geometry_proof,
-            "raw_payload_sha256": hashlib.sha256(partial_bytes).hexdigest(),
-        },
-    )
-    partial_request = replace(
-        request,
-        openmeteo_anchor=_anchor_with_local_hours(hours=range(2, 24)),
-        openmeteo_raw_payload_bytes=partial_bytes,
-        openmeteo_precision_guard=evaluate_openmeteo_ecmwf_ifs9_precision_guard(
-            partial_metadata, raw_payload_bytes=partial_bytes,
-        ),
-    )
-
-    result = materialize_replacement_forecast_live(conn, partial_request)
-
+    """Replace the retired observation-fills-prefix contract, not its source gate."""
+    conn,request = _shanghai_noaa_future_request(tmp_path,monkeypatch,
+        absorbing_extreme=26.,current_temp_c=26.)
+    assert request.day0_observed_extreme_source=="aviationweather_metar"
+    assert materializer_mod._day0_absorbing_observed_extreme_c(request) is None
+    assert request.source_cycle_time <= request.openmeteo_anchor.contributing_valid_times_utc[0]
+    result = materialize_replacement_forecast_live(conn,request)
     assert result.ok is True
     assert "REPLACEMENT_MATERIALIZATION_OM9_LOCALDAY_HOURLY_COVERAGE_INCOMPLETE" not in result.reason_codes
+    rows = tuple(tuple(row) for row in conn.execute("SELECT * FROM forecast_posteriors ORDER BY posterior_id"))
+    _assert_remaining_suffix_cannot_supply_full_day_prior(conn,monkeypatch,request,first_hour=2,
+        captured=request.computed_at-timedelta(minutes=1))
+    assert tuple(tuple(row) for row in conn.execute("SELECT * FROM forecast_posteriors ORDER BY posterior_id"))==rows
 
 
-def test_materializer_day0_allows_post_localday_observation_to_cover_elapsed_hours(
+@pytest.mark.usefixtures("_hko_source_surface")
+def test_materializer_post_localday_preserves_yesterdays_full_prior_not_suffix(
+    tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    conn = _conn()
-    _install_live_fusion(monkeypatch)
-    request = _request(
-        source_cycle_time=datetime(2026, 6, 7, 6, tzinfo=UTC),
-        computed_at=datetime(2026, 6, 7, 17, tzinfo=UTC),
-        expires_at=datetime(2026, 6, 8, 0, tzinfo=UTC),
-        day0_observed_extreme_c=32.0,
-        day0_observed_extreme_source="noaa_wrh_zspd",
-        day0_observed_extreme_observation_time=datetime(2026, 6, 7, 15, 0, tzinfo=UTC).isoformat(),
-        day0_observed_extreme_sample_count=24,
-    )
-    partial_anchor = replace(
-        _anchor_with_local_hours(hours=range(14, 24)),
-        source_cycle_time=datetime(2026, 6, 7, 6, tzinfo=UTC),
-        high_c=18.5,
-    )
-    partial_raw = json.loads(request.openmeteo_raw_payload_bytes)
-    partial_raw["hourly"]["time"] = partial_raw["hourly"]["time"][14:]
-    partial_raw["hourly"]["temperature_2m"] = partial_raw["hourly"]["temperature_2m"][14:]
-    partial_bytes = (json.dumps(partial_raw, sort_keys=True, indent=2) + "\n").encode()
-    partial_metadata = replace(
-        request.openmeteo_precision_guard.metadata,
-        source_geometry_proof={
-            **request.openmeteo_precision_guard.metadata.source_geometry_proof,
-            "raw_payload_sha256": hashlib.sha256(partial_bytes).hexdigest(),
-        },
-    )
-    partial_request = replace(
-        request,
-        openmeteo_anchor=partial_anchor,
-        openmeteo_raw_payload_bytes=partial_bytes,
-        openmeteo_precision_guard=evaluate_openmeteo_ecmwf_ifs9_precision_guard(
-            partial_metadata, raw_payload_bytes=partial_bytes,
-        ),
-    )
-
-    result = materialize_replacement_forecast_live(conn, partial_request)
-
+    """Yesterday's qualified observation still updates q; suffix is no full prior."""
+    cycle=datetime(2026,10,1,12,tzinfo=UTC)
+    conn,initial = _shanghai_current_owner_request(tmp_path,monkeypatch,source_cycle_time=cycle,
+        computed_at=datetime(2026,10,2,15,5,tzinfo=UTC),observed_extreme=32.,observed_sample_count=24)
+    assert materialize_replacement_forecast_live(conn,initial).ok is True
+    entities=tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_forecast_artifacts ORDER BY artifact_id"))
+    request=_refresh_shanghai_owner_request(conn,monkeypatch,
+        replace(initial,computed_at=datetime(2026,10,2,17,tzinfo=UTC)))
+    assert materializer_mod._target_local_day_is_open(request) is False
+    assert request.target_date==date(2026,10,2)
+    assert request.source_cycle_time <= request.openmeteo_anchor.contributing_valid_times_utc[0]
+    result = materialize_replacement_forecast_live(conn,request)
     assert result.ok is True
     row = conn.execute(
         "SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
@@ -5739,6 +5754,10 @@ def test_materializer_day0_allows_post_localday_observation_to_cover_elapsed_hou
     assert provenance["day0_conditioning"]["observed_extreme_c"] == 32.0
     assert provenance["day0_conditioning"]["sample_count"] == 24
     assert "REPLACEMENT_MATERIALIZATION_OM9_LOCALDAY_HOURLY_COVERAGE_INCOMPLETE" not in result.reason_codes
+    _assert_remaining_suffix_cannot_supply_full_day_prior(conn,monkeypatch,request,first_hour=14,
+        captured=initial.computed_at-timedelta(minutes=1))
+    assert all(tuple(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?",(row[0],)).fetchone())==row
+               for row in entities)
 
 
 def test_materializer_day0_blocks_om9_missing_future_hours_after_observed_extreme() -> None:
