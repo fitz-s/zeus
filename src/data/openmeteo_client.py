@@ -481,6 +481,8 @@ def fetch(
     store: OpenMeteoResponseStore | None = None,
     capture_entity_body: Callable[[bytes, float], None] | None = None,
     capture_network_response: Callable[[bytes, float, Mapping[str, str]], None] | None = None,
+    require_network_capture: bool = False,
+    network_capture_reason: str | None = None,
 ) -> dict:
     """GET an Open-Meteo endpoint with retries, 429 handling, and quota tracking.
 
@@ -499,7 +501,17 @@ def fetch(
     store at zero quota cost until its provider run state changes, and a caller whose
     identical twin is in flight in another process waits for that answer instead of
     paying again.
+
+    The normal producer may need an actual 200 entity to discharge typed,
+    same-issued physical-proof debt. This exception does not bypass quota,
+    ownership leases, retries or terminal provider refusals; cache/304 is not
+    a new network capture.
     """
+    if require_network_capture and (
+        network_capture_reason not in {"ENTITY_BODY_MISSING", "HTTP_CAPTURE_RECEIPT_MISSING", "MODEL_SURFACE_EPOCH_AFTER_BODY"}
+        or capture_entity_body is None or capture_network_response is None
+    ):
+        raise ValueError("actual network capture requires typed physical-proof debt and both capture callbacks")
     tracker = quota or quota_tracker
     answers = store or response_store
     request_id = request_identity(
@@ -526,7 +538,7 @@ def fetch(
             answers, req, request_id, tracker=tracker, client=client, timeout=timeout
         )
         held = answers.lookup(request_id, req)
-        if held is not None and (held[0] >= 400 or capture_held(held[1])):
+        if held is not None and (held[0] >= 400 or (not require_network_capture and capture_held(held[1]))):
             answers.note_served(job, quota_cost)
             return _serve(held, url, params, conditional_status_codes)
     twin_deadline = time.monotonic() + min(IN_FLIGHT_WAIT_SECONDS, float(timeout))
@@ -550,7 +562,7 @@ def fetch(
                 break
             # Another caller is paying for this exact answer; wait for it instead.
             held = _await_twin(answers, tracker, request_id, req, twin_deadline)
-            if held is not None and (held[0] >= 400 or capture_held(held[1])):
+            if held is not None and (held[0] >= 400 or (not require_network_capture and capture_held(held[1]))):
                 answers.note_served(job, quota_cost)
                 return _serve(held, url, params, conditional_status_codes)
             if time.monotonic() >= twin_deadline or tracker.request_in_flight(request_id):
@@ -621,6 +633,9 @@ def fetch(
                     )
                 raise error
 
+            if require_network_capture and resp.status_code != 200:
+                raise httpx.HTTPStatusError("physical-proof debt requires a real 200 entity response",
+                    request=resp.request, response=resp)
             # httpx.content is the decoded HTTP entity body, not compressed wire bytes.
             # Capture before parsing; neither JSON canonicalization nor a cache replay
             # may manufacture new bytes or renew the original possession clock.

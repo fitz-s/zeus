@@ -614,6 +614,29 @@ def test_only_real_http_response_emits_capture_event_not_cache_replay(world):
     assert captures[0] == captures[1]
 
 
+@pytest.mark.parametrize("reason", ("ENTITY_BODY_MISSING", "HTTP_CAPTURE_RECEIPT_MISSING", "MODEL_SURFACE_EPOCH_AFTER_BODY"))
+def test_typed_physical_proof_debt_obtains_real_200_under_original_request_and_quota(world, reason):
+    proc = world.process()
+    captures, events = [], []
+    original = world.fetch(proc, capture_entity_body=lambda *args: captures.append(args),
+        capture_network_response=lambda *args: events.append(args))
+    world.now["t"] += 20
+    refreshed = world.fetch(world.process(), capture_entity_body=lambda *args: captures.append(args),
+        capture_network_response=lambda *args: events.append(args), require_network_capture=True, network_capture_reason=reason)
+    assert world.provider.data_calls == 2 and proc[0].calls_today() == 2
+    assert refreshed != original and len(events) == 2
+    assert events[0][1] < events[1][1] == world.now["t"]
+    replay = world.fetch(world.process(), capture_entity_body=lambda *args: captures.append(args),
+        capture_network_response=lambda *args: events.append(args))
+    assert replay == refreshed and len(events) == 2 and world.provider.data_calls == 2
+
+
+def test_unknown_or_unwitnessed_force_capture_is_not_a_generic_refresh_entry(world):
+    with pytest.raises(ValueError, match="typed physical-proof debt"):
+        world.fetch(world.process(), require_network_capture=True, network_capture_reason="ground_missing")
+    assert world.provider.data_calls == 0
+
+
 def test_legacy_parsed_cache_requires_ordinary_metered_entity_capture(world):
     proc = world.process()
     payload = world.fetch(proc)
