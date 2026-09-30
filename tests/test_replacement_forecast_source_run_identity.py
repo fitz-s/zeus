@@ -141,6 +141,60 @@ def test_owned_legacy_manifest_same_city_inputs_preserve_actual_source_identity(
     assert (source, coverage, owned.read_bytes()) == before
 
 
+@pytest.mark.parametrize("fault", ("missing", "tampered", "symlink"))
+def test_owned_coordinate_manifest_cannot_be_replaced_by_a_cached_path(tmp_path, monkeypatch, fault):
+    import src.config as config
+    from src.data.ecmwf_open_data import _write_runtime_coordinate_manifest
+    from src.data.replacement_forecast_source_run_identity import native_coordinate_manifest_compatibility
+    current = {"coordinate_basis": "runtime_settlement_station", "cities": [{
+        "city": "Hong Kong", "lat": 22.3022, "lon": 114.1742, "timezone": "Asia/Hong_Kong", "unit": "C",
+        "station_geometry": {"station_id": "HKO_HQ", "lat": 22.3022, "lon": 114.1742, "validity_reason": None}}]}
+    original = copy.deepcopy(current)
+    original["cities"][0]["station_geometry"].update(elevation_m=32.0, station_surface="land")
+    raw = json.dumps(original, sort_keys=True, separators=(",", ":"))
+    owned = _write_runtime_coordinate_manifest(tmp_path, manifest_json=raw)
+    version = coordinate_bound_data_version(ECMWF_OPENDATA_HIGH_DATA_VERSION, sha256(raw.encode()).hexdigest())
+    monkeypatch.setenv("ZEUS_51_SOURCE_ROOT", str(tmp_path))
+    monkeypatch.setattr(config, "runtime_coordinate_manifest_json", lambda: json.dumps(current))
+    cache = {}
+    assert native_coordinate_manifest_compatibility("Hong Kong", "high", version, manifest_cache=cache) is not None
+    if fault == "tampered":
+        owned.write_text(raw + " ")
+    else:
+        owned.unlink()
+        if fault == "symlink":
+            other = tmp_path / "foreign-manifest.json"
+            other.write_text(raw)
+            owned.symlink_to(other)
+    assert native_coordinate_manifest_compatibility("Hong Kong", "high", version, manifest_cache=cache) is None
+
+
+def test_coordinate_compatibility_is_local_to_the_unchanged_city(tmp_path, monkeypatch):
+    import src.config as config
+    from src.data.ecmwf_open_data import _write_runtime_coordinate_manifest
+    from src.data.replacement_forecast_source_run_identity import native_coordinate_manifest_compatibility
+    hong_kong = {"city": "Hong Kong", "lat": 22.3022, "lon": 114.1742, "timezone": "Asia/Hong_Kong", "unit": "C",
+        "station_geometry": {"station_id": "HKO_HQ", "lat": 22.3022, "lon": 114.1742, "validity_reason": None}}
+    paris = {"city": "Paris", "lat": 48.9694, "lon": 2.4414, "timezone": "Europe/Paris", "unit": "C",
+        "station_geometry": {"station_id": "LFPB", "lat": 48.9694, "lon": 2.4414, "validity_reason": None}}
+    current = {"coordinate_basis": "runtime_settlement_station", "cities": [hong_kong, paris]}
+    original = copy.deepcopy(current)
+    for row in original["cities"]:
+        row["station_geometry"].update(elevation_m=None, station_surface="land")
+    raw = json.dumps(original, sort_keys=True, separators=(",", ":"))
+    _write_runtime_coordinate_manifest(tmp_path, manifest_json=raw)
+    version = coordinate_bound_data_version(ECMWF_OPENDATA_HIGH_DATA_VERSION, sha256(raw.encode()).hexdigest())
+    monkeypatch.setenv("ZEUS_51_SOURCE_ROOT", str(tmp_path))
+    monkeypatch.setattr(config, "runtime_coordinate_manifest_json", lambda: json.dumps(current))
+    before = native_coordinate_manifest_compatibility("Hong Kong", "high", version)
+    current["cities"][1]["lat"] += .001
+    after = native_coordinate_manifest_compatibility("Hong Kong", "high", version)
+    assert before is not None and after is not None
+    assert before["city_inputs_sha256"] == after["city_inputs_sha256"]
+    assert before["current_manifest_sha256"] != after["current_manifest_sha256"]
+    assert native_coordinate_manifest_compatibility("Paris", "high", version) is None
+
+
 @pytest.mark.parametrize("axis", ("lat", "lon", "timezone", "unit", "station_id", "station_lat", "extra", "surface", "height"))
 def test_owned_coordinate_compatibility_rejects_changed_scope_and_unknown_fields(tmp_path, monkeypatch, axis):
     import src.config as config
@@ -244,6 +298,8 @@ def test_native_old_manifest_normal_certificate_rebuilds_without_relabeling_sour
             normal._kord_public_bundles(fixture, monkeypatch, at=fixture.cut)
         immutable = {table: tuple(tuple(row) for row in fixture.conn.execute(f"SELECT * FROM {table} ORDER BY rowid"))
             for table in ("source_run", "source_run_coverage", "ensemble_snapshots", "raw_model_forecasts", "raw_forecast_artifacts")}
+        owned_hashes = {row["artifact_path"]:sha256(Path(row["artifact_path"]).read_bytes()).hexdigest()
+            for row in fixture.conn.execute("SELECT artifact_path FROM raw_forecast_artifacts")}
         old_row = dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
             (fixture.result.posterior_id,)).fetchone())
         old_shape = json.loads(old_row["provenance_json"])["bayes_precision_fusion"]["current_evidence_shape"]
@@ -268,6 +324,9 @@ def test_native_old_manifest_normal_certificate_rebuilds_without_relabeling_sour
         manifest.verify_artifact()
         write_manifest(manifest, manifest_path)
         profile[0] = current_text
+        from src.data.replacement_forecast_source_run_identity import native_coordinate_certificate_reason
+        assert native_coordinate_certificate_reason(fixture.conn,shape=old_shape,city=city.name,
+            target_date=fixture.request.target_date,metric="low") == "REPLACEMENT_CURRENT_COORDINATE_COMPATIBILITY_MISSING_OR_INVALID"
         seed = {"city":city.name,"target_date":str(fixture.request.target_date),"temperature_metric":"low",
             "baseline_source_run_id":fixture.request.baseline_source_run_id,
             "openmeteo_source_run_id":fixture.request.openmeteo_source_run_id,"computed_at":fixture.cut.isoformat()}
@@ -295,6 +354,49 @@ def test_native_old_manifest_normal_certificate_rebuilds_without_relabeling_sour
         assert Path(queued_payload["openmeteo_manifest_json"]).is_absolute()
         request = build_materialize_request_dataclass(queued_payload, base_dir=request_dir)
         assert request.baseline_data_version == original_version
+        fingerprint_inputs = []
+        real_sha256 = queue.hashlib.sha256
+        def traced_hash(raw=b"", *args, **kwargs):
+            try:
+                identity = json.loads(raw)
+                if isinstance(identity, dict) and "native_coordinate_inputs" in identity.get("raw", {}):
+                    fingerprint_inputs.append(identity)
+            except (ValueError, TypeError, UnicodeError):
+                pass
+            return real_sha256(raw, *args, **kwargs)
+        with monkeypatch.context() as trace:
+            trace.setattr(queue.hashlib, "sha256", traced_hash)
+            fingerprint = queue._blocked_attempt_fingerprint(input_json=queued[0],
+                forecast_db=fixture.db, payload=queued_payload)
+        assert fingerprint is not None and len(fingerprint_inputs) == 1
+        dependency = fingerprint_inputs[0]["raw"]["native_coordinate_inputs"]
+        assert dependency["data_version"] == original_version and dependency["city_inputs_sha256"]
+        legacy_namespace = copy.deepcopy(fingerprint_inputs[0])
+        del legacy_namespace["raw"]["native_coordinate_inputs"]
+        old_fingerprint = real_sha256(json.dumps(legacy_namespace, sort_keys=True,
+            separators=(",", ":"), default=str).encode()).hexdigest()
+        marker_dir = transport / "blocked_attempts"
+        marker_path = queue._blocked_attempt_marker_path(marker_dir, queued_payload)
+        queue._write_blocked_attempt_marker(marker_path=marker_path, payload=queued_payload,
+            fingerprint=old_fingerprint)
+        assert not queue._blocked_attempt_state(marker_dir=marker_dir,input_json=queued[0],
+            payload=queued_payload,forecast_db=fixture.db)[2]
+        queue._write_blocked_attempt_marker(marker_path=marker_path,payload=queued_payload,
+            fingerprint=fingerprint)
+        assert queue._blocked_attempt_state(marker_dir=marker_dir,input_json=queued[0],
+            payload=queued_payload,forecast_db=fixture.db)[2]
+        # Only the active city's inputs belong in this request's proof/FP.
+        unrelated = copy.deepcopy(current)
+        unrelated["cities"].append({"city":"Paris","lat":48.9694,"lon":2.4414,
+            "timezone":"Europe/Paris","unit":"C","station_geometry":{
+                "station_id":"LFPB","lat":48.9694,"lon":2.4414,"validity_reason":None}})
+        profile[0] = json.dumps(unrelated,sort_keys=True,separators=(",", ":"))
+        assert queue._blocked_attempt_fingerprint(input_json=queued[0],forecast_db=fixture.db,
+            payload=queued_payload) == fingerprint
+        profile[0] = current_text
+        # Preserve the legacy marker so the real claim/actor exercises DRAIN.
+        queue._write_blocked_attempt_marker(marker_path=marker_path,payload=queued_payload,
+            fingerprint=old_fingerprint)
         calls = []
         def actor(command):
             path = Path(command[command.index("--input-json")+1])
@@ -327,9 +429,87 @@ def test_native_old_manifest_normal_certificate_rebuilds_without_relabeling_sour
         repeat = discover_replacement_forecast_materialization_seeds(forecast_db=fixture.db,
             raw_manifest_dir=transport,seed_dir=transport/"repeat-seeds",computed_at=new_cut,limit=1)
         assert repeat.discovered_count == 0 and repeat.failed_count == 0, repeat
+        profile[0] = json.dumps(unrelated,sort_keys=True,separators=(",", ":"))
+        assert len(normal._kord_public_bundles(fixture,monkeypatch,at=new_cut)) == 2
+        assert queue._seed_already_covered(forecast_db=fixture.db,forecast_conn=fixture.conn,seed=seed)
+        assert build_replacement_forecast_current_target_plan(fixture.db,now_utc=new_cut).covered_count == 1
+        profile[0] = current_text
+        changed = copy.deepcopy(current)
+        changed["cities"][0]["lat"] += .001
+        profile[0] = json.dumps(changed,sort_keys=True,separators=(",", ":"))
+        assert not queue._seed_already_covered(forecast_db=fixture.db,forecast_conn=fixture.conn,seed=seed)
+        assert build_replacement_forecast_current_target_plan(fixture.db,now_utc=new_cut).target_count == 0
+        assert queue._blocked_attempt_fingerprint(input_json=queued[0],forecast_db=fixture.db,
+            payload=queued_payload) != fingerprint
+        assert native_coordinate_certificate_reason(fixture.conn,shape=fresh,city=city.name,
+            target_date=request.target_date,metric="low") == "REPLACEMENT_CURRENT_COORDINATE_COMPATIBILITY_MISSING_OR_INVALID"
+        with pytest.raises(AssertionError,match="REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"):
+            normal._kord_public_bundles(fixture,monkeypatch,at=new_cut)
+        profile[0] = current_text
+        # A normal new certificate must not turn a partial/bad native binding
+        # into coverage. Each private single fault is restored, with actual
+        # canonical source rows intact in the final immutability comparison.
+        pristine = json.loads(latest["provenance_json"])
+        original_snapshot_provenance = fixture.conn.execute("SELECT provenance_json FROM ensemble_snapshots WHERE snapshot_id=?",
+            (fresh["snapshot_id"],)).fetchone()[0]
+        original_manifest_hash = fixture.conn.execute("SELECT manifest_hash FROM source_run WHERE source_run_id=?",
+            (request.baseline_source_run_id,)).fetchone()[0]
+        for fault in ("missing_proof","original_hash","semantic_hash","missing_snapshot","sea_cell","source_manifest"):
+            fixture.conn.execute("PRAGMA query_only=OFF")
+            try:
+                damaged = copy.deepcopy(pristine)
+                damaged_shape = damaged["bayes_precision_fusion"]["current_evidence_shape"]
+                if fault == "missing_proof":
+                    del damaged_shape["native_coordinate_compatibility"]
+                elif fault in ("original_hash","semantic_hash"):
+                    field = "original_grid_surface_evidence_identity_hash" if fault=="original_hash" else "city_inputs_sha256"
+                    damaged_shape["native_coordinate_compatibility"][field] = "0"*64
+                elif fault == "missing_snapshot":
+                    damaged_shape["snapshot_id"] = 999999
+                elif fault == "sea_cell":
+                    snapshot = dict(fixture.conn.execute("SELECT * FROM ensemble_snapshots WHERE snapshot_id=?",
+                        (fresh["snapshot_id"],)).fetchone())
+                    native_body = json.loads(snapshot["provenance_json"])
+                    native_body["grid_surface_evidence"]["selected_land_fraction"] = 0.0
+                    fixture.conn.execute("UPDATE ensemble_snapshots SET provenance_json=? WHERE snapshot_id=?",
+                        (json.dumps(native_body),fresh["snapshot_id"]))
+                else:
+                    fixture.conn.execute("UPDATE source_run SET manifest_hash=? WHERE source_run_id=?",
+                        ("0"*64,request.baseline_source_run_id))
+                fixture.conn.execute("UPDATE forecast_posteriors SET provenance_json=? WHERE posterior_id=?",
+                    (json.dumps(damaged),new.posterior_id))
+                fixture.conn.commit()  # Independent readonly replay sees the private single fault.
+                assert native_coordinate_certificate_reason(fixture.conn,shape=damaged_shape,city=city.name,
+                    target_date=request.target_date,metric="low") is not None, fault
+                assert not queue._seed_already_covered(forecast_db=fixture.db,forecast_conn=fixture.conn,seed=seed), fault
+                with pytest.raises(AssertionError,match="BLOCKED"):
+                    normal._kord_public_bundles(fixture,monkeypatch,at=new_cut)
+            finally:
+                fixture.conn.execute("PRAGMA query_only=OFF")
+                fixture.conn.execute("UPDATE forecast_posteriors SET provenance_json=? WHERE posterior_id=?",
+                    (latest["provenance_json"],new.posterior_id))
+                fixture.conn.execute("UPDATE ensemble_snapshots SET provenance_json=? WHERE snapshot_id=?",
+                    (original_snapshot_provenance,fresh["snapshot_id"]))
+                fixture.conn.execute("UPDATE source_run SET manifest_hash=? WHERE source_run_id=?",
+                    (original_manifest_hash,request.baseline_source_run_id))
+                fixture.conn.commit()
+        assert len(normal._kord_public_bundles(fixture,monkeypatch,at=new_cut)) == 2
+        anchor_body_path = Path(original_anchor["artifact_path"])
+        original_body_bytes = anchor_body_path.read_bytes()
+        try:
+            anchor_body_path.write_bytes(original_body_bytes+b" ")
+            assert not queue._seed_already_covered(forecast_db=fixture.db,forecast_conn=fixture.conn,seed=seed)
+            with pytest.raises(AssertionError,match="BLOCKED"):
+                normal._kord_public_bundles(fixture,monkeypatch,at=new_cut)
+        finally:
+            anchor_body_path.write_bytes(original_body_bytes)
+        assert len(normal._kord_public_bundles(fixture,monkeypatch,at=new_cut)) == 2
+        expired_seed = {**seed,"computed_at":(request.source_cycle_time+timedelta(hours=31)).isoformat()}
+        assert not queue._seed_already_covered(forecast_db=fixture.db,forecast_conn=fixture.conn,seed=expired_seed)
         assert dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?", (old_row["posterior_id"],)).fetchone()) == old_row
         assert {table: tuple(tuple(row) for row in fixture.conn.execute(f"SELECT * FROM {table} ORDER BY rowid"))
             for table in immutable} == immutable
+        assert {path:sha256(Path(path).read_bytes()).hexdigest() for path in owned_hashes} == owned_hashes
     finally:
         if fixture is not None:
             fixture.conn.close()
