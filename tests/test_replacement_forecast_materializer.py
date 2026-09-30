@@ -4406,6 +4406,7 @@ def test_legacy_wu_fast_posterior_without_current_carrier_cannot_replay() -> Non
 
 
 def test_day0_current_path_revision_separates_old_q_cohort() -> None:
+    """Mechanism stamps preserve old attribution, never relabel it as current."""
     from src.events.day0_authority import (
         DAY0_PROBABILITY_SEMANTICS_REVISION,
         bind_day0_probability_semantics,
@@ -4415,15 +4416,26 @@ def test_day0_current_path_revision_separates_old_q_cohort() -> None:
     stamped = bind_day0_probability_semantics("current-path-cert")
     assert day0_probability_semantics_revision(stamped) == DAY0_PROBABILITY_SEMANTICS_REVISION
     assert DAY0_PROBABILITY_SEMANTICS_REVISION in {
+        "day0_settlement_channel_revision_model_v29_smooth_center_bias_observation_clock_v1",
+        "day0_resolver_terminal_composition_v28_smooth_center_bias_observation_clock_v1",
+    }
+    assert bind_day0_probability_semantics(stamped) == stamped
+    for old_revision in (
+        "day0_settlement_channel_revision_model_v28_hko_observation_clock_v1",
+        "day0_resolver_terminal_composition_v27_hko_observation_clock_v1",
         "day0_settlement_channel_revision_model_v28_smooth_center_bias_v1",
         "day0_resolver_terminal_composition_v27_smooth_center_bias_v1",
-    }
-    assert stamped not in {
-        "day0-semrev:day0_settlement_channel_revision_model_v27_diurnal_mixture_v1:current-path-cert",
-        "day0-semrev:day0_resolver_terminal_composition_v26_diurnal_mixture_v1:current-path-cert",
-        "day0-semrev:day0_settlement_channel_revision_model_v26_land_grid_v3:current-path-cert",
-        "day0-semrev:day0_resolver_terminal_composition_v25_land_grid_v3:current-path-cert",
-    }
+        "day0_settlement_channel_revision_model_v26_land_grid_v3",
+        "day0_resolver_terminal_composition_v25_land_grid_v3",
+        "day0_settlement_channel_revision_model_v27_diurnal_mixture_v1",
+        "day0_resolver_terminal_composition_v26_diurnal_mixture_v1",
+    ):
+        old_stamp = f"day0-semrev:{old_revision}:current-path-cert"
+        assert old_stamp != stamped
+        assert day0_probability_semantics_revision(old_stamp) == old_revision
+        # An already-stamped historical mechanism stays historical. A new
+        # certificate requires actual recomputation, not another bind call.
+        assert bind_day0_probability_semantics(old_stamp) == old_stamp
 
 
 @pytest.mark.parametrize("source", ("aviationweather_metar", "wu_api+same_station_fast_tail"))
