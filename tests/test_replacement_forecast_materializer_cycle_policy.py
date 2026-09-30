@@ -86,27 +86,36 @@ def _surface_identity(*, decision_at=None) -> dict:
     }
 
 
-def _licensed_current_context(monkeypatch):
-    """Controlled math/ENS; normal same-DB body/native/ground/anchor evidence."""
+@pytest.fixture
+def _licensed_current_context(tmp_path, monkeypatch):
+    """Actual native collector/public world; only external forecast bytes controlled."""
+    from tests.test_replacement_forecast_bundle_reader import _shanghai_reader_current_certificate
     from src.data.station_ground_evidence import forecast_db_from_connection
-    conn = _hko_canonical_conn()
-    request = _install_hko_live_fusion(monkeypatch, conn=conn,
-        request=_hko_request(source_cycle_time=_hko_dt(6), computed_at=_hko_dt(12), expires_at=_hko_dt(14)))
-    result = materialize_replacement_forecast_live(conn, request)
-    assert result.ok, result.reason_codes
-    conn.commit()
-    provenance = json.loads(conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_id=?",
-        (result.posterior_id,)).fetchone()[0])
-    scope = dict(materialized_at=request.computed_at, city=request.city,
-        target_date=request.target_date.isoformat(), metric=request.temperature_metric,
-        anchor_id=result.anchor_id, forecast_db=forecast_db_from_connection(conn))
-    assert current_evidence_shape_has_entry_authority(provenance, **scope)
-    assert current_evidence_shape_has_held_authority(provenance, **scope)
-    return conn, request, provenance, scope
+    normal = _shanghai_reader_current_certificate.__wrapped__(tmp_path.resolve(), monkeypatch)
+    context = next(normal)
+    try:
+        provenance = json.loads(context.row["provenance_json"])
+        scope = dict(materialized_at=context.request.computed_at, city=context.request.city,
+            target_date=context.request.target_date.isoformat(), metric=context.request.temperature_metric,
+            anchor_id=context.row["openmeteo_anchor_id"], forecast_db=forecast_db_from_connection(context.conn))
+        assert current_evidence_shape_has_entry_authority(provenance, **scope)
+        assert current_evidence_shape_has_held_authority(provenance, **scope)
+        yield context.conn, context.request, provenance, scope
+    finally:
+        next(normal, None)
 
 
-def test_entry_held_and_sql_coverage_require_same_land_grid_identity(monkeypatch) -> None:
-    physical, request, baseline, scope = _licensed_current_context(monkeypatch)
+def test_entry_held_and_sql_coverage_require_same_land_grid_identity(_licensed_current_context) -> None:
+    physical, request, baseline, scope = _licensed_current_context
+    absent = json.loads(json.dumps(baseline))
+    absent["bayes_precision_fusion"]["current_evidence_shape"]["snapshot_id"] = 9001
+    assert physical.execute("SELECT 1 FROM ensemble_snapshots WHERE snapshot_id=9001").fetchone() is None
+    assert current_evidence_shape_has_entry_authority(absent, **scope) is False
+    assert current_evidence_shape_has_held_authority(absent, **scope) is False
+    # The actual collector and normal materializer, not an absence fallback,
+    # supplied the present native snapshot used by the healthy control.
+    assert current_evidence_shape_has_entry_authority(baseline, **scope) is True
+    assert current_evidence_shape_has_held_authority(baseline, **scope) is True
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE posterior (q_lcb_json TEXT, q_ucb_json TEXT, provenance_json TEXT)")
     coverage = tradeable_grade_coverage_sql(
@@ -128,21 +137,22 @@ def test_entry_held_and_sql_coverage_require_same_land_grid_identity(monkeypatch
         conn.execute("INSERT INTO posterior VALUES ('{}', '{}', ?)", (json.dumps(provenance),))
         assert bool(conn.execute(f"SELECT count(*) FROM posterior WHERE 1=1 {coverage}").fetchone()[0]) is expected
     conn.close()
-    physical.close()
 
 
-def test_selected_land_cell_changes_current_shape_hash_without_changing_math(monkeypatch) -> None:
+def test_selected_land_cell_changes_current_shape_hash_without_changing_math(_licensed_current_context) -> None:
     from src.data import replacement_forecast_materializer as materializer
     from src.data.replacement_current_value_serving import read_current_instrument_values
-    conn, request, baseline, scope = _licensed_current_context(monkeypatch)
+    conn, request, baseline, scope = _licensed_current_context
     served = read_current_instrument_values(conn, city=request.city, metric=request.temperature_metric,
         target_date=request.target_date.isoformat(), source_cycle_time_iso=request.source_cycle_time.isoformat(),
         decision_time_iso=request.computed_at.isoformat())
-    actual = materializer._replacement_bayes_precision_fusion_override()
+    actual = materializer._replacement_bayes_precision_fusion_override(request,
+        metric=request.temperature_metric, anchor_value_corrected_c=request.openmeteo_anchor.high_c, conn=conn)
+    assert actual is not None
     # The values are the already-licensed body's controlled physical inputs;
     # the original purpose is math invariance under geometry identity, not .6/.4.
     inputs = {
-        "snapshot_id": 17,
+        "snapshot_id": baseline["bayes_precision_fusion"]["current_evidence_shape"]["snapshot_id"],
         "source_cycle_time": request.source_cycle_time.isoformat(),
         "source_available_at": actual.current_evidence_shape["source_available_at"],
         "members_c": actual.current_evidence_members_c,
@@ -171,7 +181,6 @@ def test_selected_land_cell_changes_current_shape_hash_without_changing_math(mon
         provenance = json.loads(json.dumps(baseline))
         provenance["bayes_precision_fusion"]["current_evidence_shape"] = candidate.as_payload()
         assert current_evidence_shape_has_entry_authority(provenance, **scope) is expected
-    conn.close()
 
 
 @pytest.mark.parametrize(
@@ -211,8 +220,8 @@ def test_shape_cycle_timestamp_accepts_canonical_aware_iso(cycle_text: str) -> N
     assert current_evidence_shape_source_cycle_time(provenance) is not None
 
 
-def test_current_evidence_semantics_is_probability_identity_and_coverage(monkeypatch) -> None:
-    physical, request, current, scope = _licensed_current_context(monkeypatch)
+def test_current_evidence_semantics_is_probability_identity_and_coverage(_licensed_current_context) -> None:
+    physical, request, current, scope = _licensed_current_context
     current["bayes_precision_fusion"]["current_evidence_shape"]["stale_shape_reused"] = False
     stale = {
         "bayes_precision_fusion": {
@@ -271,7 +280,7 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage(monkeyp
 
     clause = tradeable_grade_coverage_sql(
         posterior_columns={"q_lcb_json", "q_ucb_json", "provenance_json"},
-        decision_time=_hko_dt(12),
+        decision_time=request.computed_at,
         alias="p.",
     )
     assert "current_evidence_shape.semantics_revision" in clause
@@ -322,14 +331,14 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage(monkeyp
     ] = REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT
     stale_at_bound["bayes_precision_fusion"]["current_evidence_shape"][
         "source_cycle_time"
-    ] = "2026-09-29T06:00:00+00:00"
+    ] = (request.computed_at-timedelta(hours=REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT)).isoformat()
     stale_over_bound = json.loads(json.dumps(stale_reused))
     stale_over_bound["bayes_precision_fusion"]["current_evidence_shape"][
         "shape_lag_hours"
     ] = REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT + 0.001
     stale_over_bound["bayes_precision_fusion"]["current_evidence_shape"][
         "source_cycle_time"
-    ] = "2026-09-29T05:59:56+00:00"
+    ] = (request.computed_at-timedelta(hours=REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT, seconds=4)).isoformat()
     negative_lag = json.loads(json.dumps(current))
     negative_lag["bayes_precision_fusion"]["current_evidence_shape"][
         "shape_lag_hours"
@@ -345,11 +354,11 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage(monkeyp
     future_cycle = json.loads(json.dumps(current))
     future_cycle["bayes_precision_fusion"]["current_evidence_shape"][
         "source_cycle_time"
-    ] = "2026-09-30T12:00:01+00:00"
+    ] = (request.computed_at+timedelta(seconds=1)).isoformat()
     old_cycle = json.loads(json.dumps(current))
     old_cycle["bayes_precision_fusion"]["current_evidence_shape"][
         "source_cycle_time"
-    ] = "2026-09-29T05:59:59+00:00"
+    ] = (request.computed_at-timedelta(hours=REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT, seconds=1)).isoformat()
     malformed_shapes = []
     for field, value in (
         ("shape_lag_hours", False),
@@ -411,7 +420,6 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage(monkeyp
     )
     assert "AND 0 = 1" in missing_provenance_clause
     conn.close()
-    physical.close()
 
 
 @dataclass(frozen=True)
@@ -688,9 +696,9 @@ def test_day0_carrier_coverage_requires_complete_current_v2_pair() -> None:
         assert bool(count) is expected, carrier
 
 
-def test_live_unshifted_policy_python_and_sql_coverage_share_strict_types(monkeypatch) -> None:
+def test_live_unshifted_policy_python_and_sql_coverage_share_strict_types(_licensed_current_context) -> None:
     """Same lawful body/geometry; only the carrier construction claim changes."""
-    physical, request, baseline, scope = _licensed_current_context(monkeypatch)
+    physical, request, baseline, scope = _licensed_current_context
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE posterior (q_lcb_json TEXT, q_ucb_json TEXT, provenance_json TEXT)")
     coverage = tradeable_grade_coverage_sql(
@@ -719,16 +727,15 @@ def test_live_unshifted_policy_python_and_sql_coverage_share_strict_types(monkey
         conn.execute("INSERT INTO posterior VALUES ('{}', '{}', ?)", (json.dumps(provenance),))
         assert bool(conn.execute(f"SELECT count(*) FROM posterior WHERE 1=1 {coverage}").fetchone()[0]) is expected
     conn.close()
-    physical.close()
 
 
-def test_same_raw_live_policy_transition_retries_without_mtime_churn(tmp_path, monkeypatch) -> None:
+def test_same_raw_live_policy_transition_retries_without_mtime_churn(tmp_path, monkeypatch, _licensed_current_context) -> None:
     """Real canonical inputs stay immutable; policy alone clears old suppression."""
     from pathlib import Path
     from src.events import day0_authority
     from src.data import replacement_forecast_live_materialization_queue as queue
 
-    physical, request, _, scope = _licensed_current_context(monkeypatch)
+    physical, request, _, scope = _licensed_current_context
     original = physical.execute("SELECT * FROM raw_model_forecasts").fetchall()
     payload = dict(city=request.city, target_date=request.target_date.isoformat(),
                    temperature_metric=request.temperature_metric,
@@ -755,7 +762,6 @@ def test_same_raw_live_policy_transition_retries_without_mtime_churn(tmp_path, m
     assert before != after == fingerprint()
     assert payload == before_payload
     assert physical.execute("SELECT * FROM raw_model_forecasts").fetchall() == original
-    physical.close()
 
 
 @pytest.mark.parametrize("unit", ("C", "F"))
@@ -921,7 +927,7 @@ def test_day0_v3_coverage_rejects_malformed_provider_and_infinite_value() -> Non
 
 
 @pytest.mark.parametrize("legacy_shape_only", (None, "day0_remaining_shared_carrier_v1", "day0_remaining_shared_carrier_v2"))
-def test_day0_v1_coverage_drains_seed_and_v2_coverage_stops_reenqueue(tmp_path, monkeypatch, legacy_shape_only) -> None:
+def test_day0_v1_coverage_drains_seed_and_v2_coverage_stops_reenqueue(tmp_path, monkeypatch, legacy_shape_only, _licensed_current_context) -> None:
     """Legacy-label debt drains through real builder/queue/current certificate.
 
     The historical name is retained for case identity. This is not a normal
@@ -930,142 +936,129 @@ def test_day0_v1_coverage_drains_seed_and_v2_coverage_stops_reenqueue(tmp_path, 
     Forecast/ENS are controlled inputs, not live official GRIB captures.
     """
     from dataclasses import asdict, replace
-    from src.data import replacement_forecast_materializer as materializer
     from src.data.replacement_forecast_materialization_request_builder import build_materialize_request_dataclass
-    from src.data.station_ground_evidence import forecast_db_from_connection
-    from src.contracts.replacement_pipeline_files import DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS
     from src.state.db import init_schema_trade_only
     import src.data.replacement_forecast_live_materialization_queue as queue
 
-    conn = _hko_canonical_conn()
-    request = _install_hko_live_fusion(monkeypatch, conn=conn,
-        request=_hko_request(source_cycle_time=_hko_dt(12), computed_at=_hko_dt(20), expires_at=_hko_dt(22),
-            day0_observation_state=DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS))
-    db_path = forecast_db_from_connection(conn)
-    assert db_path is not None
-    clock = [request.computed_at]
-    builtin = sqlite3.connect(":memory:")
-    def sqlite_clock(fmt, value):
-        return builtin.execute("SELECT strftime(?,?)",
-            (fmt, clock[0].isoformat() if value == "now" else value)).fetchone()[0]
-    # TEST_ONLY_CONTROLLED_CANONICAL_INSERT_CLOCK and replay clock. Normal
-    # private INSERTs/readiness expiry use the explicit fixture analysis cut.
-    conn.create_function("strftime", 2, sqlite_clock)
-    real_open = queue._queue_read_only_connection
-    def open_at_fixture_cut(path, *args, **kwargs):
-        opened = real_open(path, *args, **kwargs)
-        if str(path) == str(db_path):
-            opened.create_function("strftime", 2, sqlite_clock)
-        return opened
-    monkeypatch.setattr(queue, "_queue_read_only_connection", open_at_fixture_cut)
-    payload_path = conn.execute("SELECT artifact_path FROM raw_forecast_artifacts WHERE artifact_id=?",
-        (request.anchor_artifact_id,)).fetchone()[0]
-    metadata_path = tmp_path / "normal-precision.json"
-    metadata_path.write_text(json.dumps(asdict(request.openmeteo_precision_guard.metadata)))
-    seed = dict(city=request.city, city_id=request.city_id, city_timezone=request.city_timezone,
-        target_date=request.target_date.isoformat(), temperature_metric=request.temperature_metric,
-        computed_at=request.computed_at.isoformat(), source_cycle_time=request.source_cycle_time.isoformat(),
-        expires_at=request.expires_at.isoformat(), baseline_source_run_id=request.baseline_source_run_id,
-        baseline_data_version=request.baseline_data_version,
-        baseline_source_available_at=request.baseline_source_available_at.isoformat(),
-        openmeteo_source_run_id=request.openmeteo_source_run_id,
-        openmeteo_source_available_at=request.openmeteo_source_available_at.isoformat(),
-        openmeteo_anchor_artifact_id=request.anchor_artifact_id,
-        openmeteo_payload_json=payload_path, precision_metadata_json=str(metadata_path),
-        bins=[asdict(item) for item in request.bins], day0_observation_state=request.day0_observation_state)
-    # Commit the independently read anchor FK before the private positive control.
-    materializer._insert_anchor(conn, request, metric=request.temperature_metric)
-    conn.commit()
-    conn.execute("SAVEPOINT current_control")
-    positive = materialize_replacement_forecast_live(conn, request)
-    assert positive.ok, positive.reason_codes
-    assert queue._seed_already_covered(forecast_db=db_path, seed=seed, forecast_conn=conn)
-    healthy_row = dict(conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
-        (positive.posterior_id,)).fetchone())
-    healthy_readiness = dict(conn.execute("SELECT * FROM readiness_state WHERE readiness_id=?",
-        (positive.readiness_id,)).fetchone())
-    conn.execute("PRAGMA query_only=OFF")
-    conn.execute("ROLLBACK TO current_control")
-    conn.execute("RELEASE current_control")
-    # TEST_ONLY_SYNTHETIC_EXTERNAL_CONDITION: recreate the historical diagnostic
-    # input in this private schema. No READY enum mock and no relabeling repair:
-    # its readiness fields came from the normal positive writer above.
-    provenance = json.loads(healthy_row["provenance_json"])
-    if legacy_shape_only is None:
-        provenance.update(day0_remaining_carrier_content_identity="content-v1",
-            day0_remaining_carrier_operator="extreme_observed_then_noisy_future_v1")
-    else:
-        provenance["q_shape"] = legacy_shape_only
-    healthy_row["provenance_json"] = json.dumps(provenance)
-    def insert_record(table, row):
-        # Let canonical generated identity columns reproduce their own values.
-        writable = {field[1] for field in conn.execute(f"PRAGMA table_info({table})")}
-        row = {key:value for key,value in row.items() if key in writable}
-        conn.execute(f"INSERT INTO {table} (" + ",".join(row) + ") VALUES (" +
-            ",".join("?" for _ in row) + ")", tuple(row.values()))
-    insert_record("forecast_posteriors", healthy_row)
-    insert_record("readiness_state", healthy_readiness)
-    conn.commit()
-    old_id = positive.posterior_id
-    old_tuple = tuple(conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?", (old_id,)).fetchone())
-    raw_inputs = [tuple(row) for row in conn.execute("""SELECT raw_model_forecast_id,model,source_cycle_time,
-        source_available_at,captured_at,recorded_at,raw_sha256 FROM raw_model_forecasts ORDER BY raw_model_forecast_id""")]
-    assert not queue._seed_already_covered(forecast_db=db_path, seed=seed)
-    # A new actual analysis cut produces a new certificate; the old diagnostic
-    # tuple stays immutable rather than being restamped to the current law.
-    request = _install_hko_live_fusion(monkeypatch, conn=conn,
-        request=replace(request, computed_at=request.computed_at+timedelta(minutes=1)))
-    clock[0] = request.computed_at
-    conn.create_function("strftime", 2, sqlite_clock)
-    seed["computed_at"] = request.computed_at.isoformat()
-    metadata_path.write_text(json.dumps(asdict(request.openmeteo_precision_guard.metadata)))
-    trade_conn = sqlite3.connect(tmp_path / "trade.db")
-    init_schema_trade_only(trade_conn)
-    trade_conn.commit()
-    seed_dir, processed_dir, failed_dir, request_dir = (tmp_path / name for name in ("seeds", "processed", "failed", "requests"))
-    seed_dir.mkdir()
-    seed_path = seed_dir / "Hong Kong.2026-10-01.high.station-input-revision.1.json"
-    seed_path.write_text(json.dumps(seed))
-    real_builder = queue.build_replacement_forecast_materialization_request
-    calls = []
-    def normal_builder(*args, **kwargs):
-        calls.append(1)
-        return real_builder(*args, **kwargs)
-    monkeypatch.setattr(queue, "build_replacement_forecast_materialization_request", normal_builder)
-    def drain():
-        return queue._prepare_seed_requests_with_connection(seed_dir=seed_dir,
-            seed_processed_dir=processed_dir, seed_failed_dir=failed_dir, request_dir=request_dir,
-            forecast_db=db_path, forecast_conn=None, trade_conn=trade_conn, limit=1,
-            fast_own_clock_station_revision=True)
-    processed, failed, reasons = drain()
-    assert processed and not failed, (processed, failed, reasons)
-    request_path = request_dir / seed_path.name
-    assert request_path.is_file()
-    assert len(calls) == 1
-    built = build_materialize_request_dataclass(json.loads(request_path.read_text()), base_dir=request_dir)
-    result = materialize_replacement_forecast_live(conn, built)
-    assert result.ok, result.reason_codes
-    conn.commit()
-    assert result.posterior_id != old_id
-    current = json.loads(conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_id=?",
-        (result.posterior_id,)).fetchone()[0])
-    scope = dict(materialized_at=built.computed_at, city=built.city, target_date=built.target_date.isoformat(),
-        metric=built.temperature_metric, anchor_id=result.anchor_id, forecast_db=db_path)
-    assert current_evidence_shape_has_entry_authority(current, **scope)
-    assert current_evidence_shape_has_held_authority(current, **scope)
-    assert [tuple(row) for row in conn.execute("""SELECT raw_model_forecast_id,model,source_cycle_time,
-        source_available_at,captured_at,recorded_at,raw_sha256 FROM raw_model_forecasts ORDER BY raw_model_forecast_id""")] == raw_inputs
-    assert tuple(conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?", (old_id,)).fetchone()) == old_tuple
-    assert queue._seed_already_covered(forecast_db=db_path, seed=seed)
-    seed_path_v2 = seed_dir / "Hong Kong.2026-10-01.high.station-input-revision.2.json"
-    seed_path_v2.write_text(json.dumps(seed))
-    processed_v2, failed_v2, reasons_v2 = drain()
-    assert processed_v2 and not failed_v2, (processed_v2, failed_v2, reasons_v2)
-    assert not (request_dir / seed_path_v2.name).exists()
-    assert len(calls) == 1  # Real builder was not called for current coverage.
-    conn.close()
-    trade_conn.close()
-    builtin.close()
+    conn, request, _, scope = _licensed_current_context
+    db_path = scope["forecast_db"]
+    original_row = dict(conn.execute("SELECT * FROM forecast_posteriors WHERE city=? AND target_date=? "
+        "AND temperature_metric=? ORDER BY posterior_id DESC LIMIT 1",
+        (request.city, str(request.target_date), request.temperature_metric)).fetchone())
+    trade_conn = builtin = None
+    try:
+        clock = [request.computed_at]
+        builtin = sqlite3.connect(":memory:")
+        def sqlite_clock(fmt, value):
+            return builtin.execute("SELECT strftime(?,?)",
+                (fmt, clock[0].isoformat() if value == "now" else value)).fetchone()[0]
+        # TEST_ONLY_CONTROLLED_CANONICAL_INSERT_CLOCK and replay clock. Normal
+        # private INSERTs/readiness expiry use the explicit fixture analysis cut.
+        conn.create_function("strftime", 2, sqlite_clock)
+        real_open = queue._queue_read_only_connection
+        def open_at_fixture_cut(path, *args, **kwargs):
+            opened = real_open(path, *args, **kwargs)
+            if str(path) == str(db_path):
+                opened.create_function("strftime", 2, sqlite_clock)
+            return opened
+        monkeypatch.setattr(queue, "_queue_read_only_connection", open_at_fixture_cut)
+        payload_path = conn.execute("SELECT artifact_path FROM raw_forecast_artifacts WHERE artifact_id=?",
+            (request.anchor_artifact_id,)).fetchone()[0]
+        metadata_path = tmp_path / "normal-precision.json"
+        metadata_path.write_text(json.dumps(asdict(request.openmeteo_precision_guard.metadata)))
+        seed = dict(city=request.city, city_id=request.city_id, city_timezone=request.city_timezone,
+            target_date=request.target_date.isoformat(), temperature_metric=request.temperature_metric,
+            computed_at=request.computed_at.isoformat(), source_cycle_time=request.source_cycle_time.isoformat(),
+            expires_at=request.expires_at.isoformat(), baseline_source_run_id=request.baseline_source_run_id,
+            baseline_data_version=request.baseline_data_version,
+            baseline_source_available_at=request.baseline_source_available_at.isoformat(),
+            openmeteo_source_run_id=request.openmeteo_source_run_id,
+            openmeteo_source_available_at=request.openmeteo_source_available_at.isoformat(),
+            openmeteo_anchor_artifact_id=request.anchor_artifact_id,
+            openmeteo_payload_json=payload_path, precision_metadata_json=str(metadata_path),
+            bins=[asdict(item) for item in request.bins], day0_observation_state=request.day0_observation_state)
+        # This control came from actual collector/materializer/public writers.
+        assert queue._seed_already_covered(forecast_db=db_path, seed=seed, forecast_conn=conn)
+        healthy_row = dict(original_row)
+        # TEST_ONLY historical selector-metadata attack. It does not replace native
+        # bytes, source_run, clocks or READY. Normal repair must append a successor.
+        provenance = json.loads(healthy_row["provenance_json"])
+        if legacy_shape_only is None:
+            provenance.update(day0_remaining_carrier_content_identity="content-v1",
+                day0_remaining_carrier_operator="extreme_observed_then_noisy_future_v1")
+        else:
+            provenance["q_shape"] = legacy_shape_only
+        old_id = healthy_row["posterior_id"]
+        conn.execute("PRAGMA query_only=OFF")
+        conn.execute("UPDATE forecast_posteriors SET provenance_json=? WHERE posterior_id=?",
+            (json.dumps(provenance), old_id))
+        conn.commit()
+        old_tuple = tuple(conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?", (old_id,)).fetchone())
+        raw_inputs = [tuple(row) for row in conn.execute("""SELECT raw_model_forecast_id,model,source_cycle_time,
+            source_available_at,captured_at,recorded_at,raw_sha256 FROM raw_model_forecasts ORDER BY raw_model_forecast_id""")]
+        assert not queue._seed_already_covered(forecast_db=db_path, seed=seed)
+        # A new actual analysis cut produces a new certificate; the old diagnostic
+        # tuple stays immutable rather than being restamped to the current law.
+        request = replace(request, computed_at=request.computed_at+timedelta(minutes=1))
+        clock[0] = request.computed_at
+        conn.create_function("strftime", 2, sqlite_clock)
+        seed["computed_at"] = request.computed_at.isoformat()
+        metadata_path.write_text(json.dumps(asdict(request.openmeteo_precision_guard.metadata)))
+        trade_conn = sqlite3.connect(tmp_path / "trade.db")
+        init_schema_trade_only(trade_conn)
+        trade_conn.commit()
+        seed_dir, processed_dir, failed_dir, request_dir = (tmp_path / name for name in ("seeds", "processed", "failed", "requests"))
+        seed_dir.mkdir()
+        seed_path = seed_dir / f"{request.city}.{request.target_date}.{request.temperature_metric}.station-input-revision.1.json"
+        seed_path.write_text(json.dumps(seed))
+        real_builder = queue.build_replacement_forecast_materialization_request
+        calls = []
+        def normal_builder(*args, **kwargs):
+            calls.append(1)
+            return real_builder(*args, **kwargs)
+        monkeypatch.setattr(queue, "build_replacement_forecast_materialization_request", normal_builder)
+        def drain():
+            return queue._prepare_seed_requests_with_connection(seed_dir=seed_dir,
+                seed_processed_dir=processed_dir, seed_failed_dir=failed_dir, request_dir=request_dir,
+                forecast_db=db_path, forecast_conn=None, trade_conn=trade_conn, limit=1,
+                fast_own_clock_station_revision=True)
+        processed, failed, reasons = drain()
+        assert processed and not failed, (processed, failed, reasons)
+        request_path = request_dir / seed_path.name
+        assert request_path.is_file()
+        assert len(calls) == 1
+        built = build_materialize_request_dataclass(json.loads(request_path.read_text()), base_dir=request_dir)
+        result = materialize_replacement_forecast_live(conn, built)
+        assert result.ok, result.reason_codes
+        conn.commit()
+        assert result.posterior_id != old_id
+        current = json.loads(conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_id=?",
+            (result.posterior_id,)).fetchone()[0])
+        scope = dict(materialized_at=built.computed_at, city=built.city, target_date=built.target_date.isoformat(),
+            metric=built.temperature_metric, anchor_id=result.anchor_id, forecast_db=db_path)
+        assert current_evidence_shape_has_entry_authority(current, **scope)
+        assert current_evidence_shape_has_held_authority(current, **scope)
+        assert [tuple(row) for row in conn.execute("""SELECT raw_model_forecast_id,model,source_cycle_time,
+            source_available_at,captured_at,recorded_at,raw_sha256 FROM raw_model_forecasts ORDER BY raw_model_forecast_id""")] == raw_inputs
+        assert tuple(conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?", (old_id,)).fetchone()) == old_tuple
+        assert queue._seed_already_covered(forecast_db=db_path, seed=seed)
+        seed_path_v2 = seed_dir / f"{request.city}.{request.target_date}.{request.temperature_metric}.station-input-revision.2.json"
+        seed_path_v2.write_text(json.dumps(seed))
+        processed_v2, failed_v2, reasons_v2 = drain()
+        assert processed_v2 and not failed_v2, (processed_v2, failed_v2, reasons_v2)
+        assert not (request_dir / seed_path_v2.name).exists()
+        assert len(calls) == 1  # Real builder was not called for current coverage.
+    finally:
+        conn.execute("PRAGMA query_only=OFF")
+        conn.execute("UPDATE forecast_posteriors SET provenance_json=? WHERE posterior_id=?",
+            (original_row["provenance_json"], original_row["posterior_id"]))
+        conn.commit()
+        assert dict(conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+            (original_row["posterior_id"],)).fetchone()) == original_row
+        if trade_conn is not None:
+            trade_conn.close()
+        if builtin is not None:
+            builtin.close()
 
 
 def test_prewrite_blocks_when_cycle_older_than_bound() -> None:
