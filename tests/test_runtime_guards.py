@@ -4072,6 +4072,121 @@ def test_entry_order_cleanup_terminal_no_fill_repost_cooldown_expires(
     assert state == ("CANCELLED" if expected_cancelled else "ACKED")
 
 
+def test_entry_order_cleanup_never_pulls_a_resting_order_over_a_rejected_predecessor(
+    monkeypatch,
+    tmp_path,
+):
+    """The submit law keeps requiring a reprice after a request-400 rejection,
+    but that predecessor never rested: a resting order the venue accepted at
+    the same price is not a repeat of it and must not be pulled."""
+
+    conn = get_connection(tmp_path / "rejected-predecessor-resting.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-entry",
+        selected_outcome_token_id="tok-entry",
+        yes_token_id="tok-entry",
+        no_token_id="no-entry",
+        condition_id="m-entry",
+        top_bid="0.570",
+        top_ask="0.580",
+        min_tick_size="0.001",
+    )
+    _seed_pending_entry_command(
+        conn,
+        command_id="cmd-old",
+        position_id="pos-old",
+        venue_order_id="",
+        command_state="REJECTED",
+        order_status="rejected",
+        order_price=0.57,
+    )
+    now = datetime.now(timezone.utc)
+    prior_iso = (now - timedelta(hours=1)).isoformat()
+    conn.execute(
+        "UPDATE venue_commands SET venue_order_id = NULL, updated_at = ?, created_at = ? "
+        "WHERE command_id = 'cmd-old'",
+        (prior_iso, prior_iso),
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_command_events (
+            event_id, command_id, sequence_no, event_type, occurred_at,
+            payload_json, state_after
+        ) VALUES ('evt-old-400', 'cmd-old', 9, 'SUBMIT_REJECTED', ?, ?, 'REJECTED')
+        """,
+        (
+            prior_iso,
+            json.dumps(
+                {
+                    "reason": "venue_rejected_invalid_amount_400",
+                    "proof_class": "deterministic_venue_invalid_amount_400",
+                    "venue_order_created": False,
+                }
+            ),
+        ),
+    )
+    _seed_pending_entry_command(
+        conn,
+        command_id="cmd-entry",
+        position_id="pos-entry",
+        venue_order_id="order-entry",
+        command_state="ACKED",
+        order_status="live",
+        order_price=0.57,
+    )
+    recent_iso = now.isoformat()
+    conn.execute(
+        "UPDATE venue_commands SET updated_at = ?, created_at = ? WHERE command_id = 'cmd-entry'",
+        (recent_iso, recent_iso),
+    )
+    conn.execute(
+        "UPDATE position_current SET updated_at = ? WHERE position_id IN ('pos-old', 'pos-entry')",
+        (recent_iso,),
+    )
+    conn.commit()
+    from src.execution.executor import _entry_same_token_cooldown_component
+
+    law = _entry_same_token_cooldown_component(
+        conn, token_id="tok-entry", candidate_position_id="pos-entry", limit_price=0.57
+    )
+    assert law["reason"] == "same_token_terminal_no_fill_requires_reprice"
+    cancelled: list[str] = []
+
+    class DummyClob:
+        def cancel_order(self, order_id):
+            cancelled.append(order_id)
+            return {"status": "CANCELLED", "id": order_id}
+
+    monkeypatch.setattr(
+        "src.execution.exit_safety.gate_for_intent",
+        lambda intent: types.SimpleNamespace(
+            allow_cancel=True,
+            block_reason=None,
+            state=types.SimpleNamespace(value="READY"),
+        ),
+    )
+    try:
+        detail = cycle_runtime._same_token_terminal_no_fill_reprice_block_detail(
+            conn,
+            token_id="tok-entry",
+            candidate_position_id="pos-entry",
+            candidate_price=Decimal("0.57"),
+        )
+        cycle_runtime.cleanup_stale_entry_orders(
+            DummyClob(),
+            deps=types.SimpleNamespace(logger=logging.getLogger("test_rejected_predecessor")),
+            conn=conn,
+        )
+    finally:
+        conn.close()
+
+    assert detail is None
+    assert "order-entry" not in cancelled
+
+
 def test_stale_entry_order_cleanup_skips_when_fresh_book_no_longer_improves(monkeypatch, tmp_path):
     conn = get_connection(tmp_path / "stale-entry-book-reverted.db")
     init_schema(conn)

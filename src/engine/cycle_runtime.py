@@ -2561,16 +2561,18 @@ def _same_token_terminal_no_fill_reprice_block_detail(
         now=now,
     )
     existing_price = _decimal_or_none(verdict.get("existing_price"))
-    reason = verdict.get("reason")
-    # A resting order the venue accepted outlives any post-cooldown request
-    # verdict on its predecessor; only the cooldown window pulls it.
-    within_cooldown = reason == "same_token_terminal_no_fill_cooling_down" or (
-        reason == "same_token_terminal_no_fill_requires_reprice"
-        and int(verdict.get("age_seconds") or 0) <= int(verdict.get("cooldown_seconds") or 0)
-    )
+    # Only a predecessor the venue actually rested and then ended with no fill
+    # says this resting limit repeats a failed order; a rejected submit never
+    # rested, so it cannot pull an order the venue accepted.
     if (
         verdict.get("allowed")
-        or not within_cooldown
+        or verdict.get("reason")
+        not in {
+            "same_token_terminal_no_fill_cooling_down",
+            "same_token_terminal_no_fill_requires_reprice",
+        }
+        or str(verdict.get("existing_command_state") or "").upper()
+        not in {"CANCELLED", "EXPIRED"}
         or existing_price is None
         or not entry_price_repeats(existing_price, Decimal(str(candidate_price)))
     ):
