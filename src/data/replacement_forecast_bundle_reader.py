@@ -1066,6 +1066,7 @@ def _live_grade_provenance(
     *,
     authority_purpose: ReplacementForecastAuthorityPurpose,
     parsed_provenance: Mapping[str, Any] | None = None,
+    forecast_db: object | None = None,
 ) -> Mapping[str, Any] | None:
     """Return provenance only when it authorizes the named capital action."""
     if str(row_map.get("runtime_layer") or "") != LIVE_RUNTIME_LAYER:
@@ -1136,6 +1137,7 @@ def _live_grade_provenance(
             city=row_map.get("city"), target_date=row_map.get("target_date"),
             metric=row_map.get("temperature_metric"),
             anchor_id=row_map.get("openmeteo_anchor_id"),
+            forecast_db=forecast_db,
         )
         if authority_purpose is ReplacementForecastAuthorityPurpose.ENTRY
         else current_evidence_shape_has_held_authority(
@@ -1143,6 +1145,7 @@ def _live_grade_provenance(
             city=row_map.get("city"), target_date=row_map.get("target_date"),
             metric=row_map.get("temperature_metric"),
             anchor_id=row_map.get("openmeteo_anchor_id"),
+            forecast_db=forecast_db,
         )
     )
     if not shape_authorized:
@@ -1516,10 +1519,14 @@ def read_replacement_forecast_bundle(
     carrier_reason = _day0_carrier_identity_reason(raw_provenance)
     if carrier_reason is not None:
         return ReplacementForecastBundleReadResult("BLOCKED", carrier_reason)
+    from src.data.station_ground_evidence import forecast_db_from_connection
+
+    forecast_db = forecast_db_from_connection(conn)
     provenance = _live_grade_provenance(
         row_map,
         authority_purpose=authority_purpose,
         parsed_provenance=raw_provenance,
+        forecast_db=forecast_db,
     )
     if provenance is None:
         return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE")
@@ -1534,6 +1541,7 @@ def read_replacement_forecast_bundle(
         and _live_grade_provenance(
             latest_row_map,
             authority_purpose=authority_purpose,
+            forecast_db=forecast_db,
         )
         is None
     )
