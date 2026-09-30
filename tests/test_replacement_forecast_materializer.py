@@ -2653,6 +2653,25 @@ def _shanghai_current_owner_request(tmp_path, monkeypatch, *, metric="high",
     return conn,request
 
 
+def _refresh_shanghai_owner_request(conn, monkeypatch, request):
+    """Rebind the new analysis cut without renewing ordinary source entities."""
+    from src.config import runtime_cities_by_name
+    from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _selected_test_cell
+
+    city = runtime_cities_by_name()[request.city]
+    cells = {model:_selected_test_cell(model,city.lat,city.lon)
+             for model in ("icon_global","ukmo_global_deterministic_10km")}
+    entities = tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_forecast_artifacts ORDER BY artifact_id"))
+    raw = tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id"))
+    refreshed = _install_hko_live_fusion(monkeypatch,conn=conn,request=request,selected_cells=cells,
+        snapshot_id=9001 if request.temperature_metric=="high" else 9002)
+    assert tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_forecast_artifacts ORDER BY artifact_id")) == entities
+    assert tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id")) == raw
+    if refreshed.day0_observed_extreme_c is not None:
+        _append_shanghai_owner_prints(conn,refreshed)
+    return refreshed
+
+
 def _append_shanghai_owner_prints(conn,request):
     """Controlled WRH body through its ordinary native-product print writer."""
     from src.data.noaa_wrh_timeseries import rows_from_payload
@@ -4239,18 +4258,12 @@ def test_materializer_blocks_when_day0_frontier_ledger_read_fails() -> None:
     )
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_materializer_blocks_malformed_day0_frontier_ledger(
+    tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    conn = _conn()
-    _install_live_fusion(monkeypatch)
-    first = _request(
-        computed_at=_dt(18),
-        expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
-        day0_observed_extreme_c=31.0,
-        day0_observed_extreme_source="noaa_wrh_zspd",
-        day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
-    )
+    conn, first = _shanghai_current_owner_request(tmp_path,monkeypatch,observed_extreme=31.)
     written = materialize_replacement_forecast_live(conn, first)
     assert written.ok is True
     conn.execute(
@@ -4260,13 +4273,12 @@ def test_materializer_blocks_malformed_day0_frontier_ledger(
 
     result = materialize_replacement_forecast_live(
         conn,
-        replace(
+        _refresh_shanghai_owner_request(conn,monkeypatch,replace(
             first,
-            computed_at=_dt(18, 10),
+            computed_at=first.computed_at+timedelta(minutes=10),
             day0_observed_extreme_c=30.0,
-            day0_observed_extreme_source="wu_icao_history",
-            day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
-        ),
+            day0_observed_extreme_observation_time=(first.computed_at+timedelta(minutes=5)).isoformat(),
+        )),
     )
 
     assert result.ok is False
@@ -4283,26 +4295,18 @@ def test_materializer_blocks_malformed_day0_frontier_ledger(
         ("low", _current_baseline_data_version("low"), 19.0, 18.0),
     ],
 )
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_materializer_ignores_typed_legacy_provisional_frontier_ledger(
+    tmp_path,
     monkeypatch: pytest.MonkeyPatch,
     metric: str,
     baseline_data_version: str,
     legacy_extreme: float,
     current_extreme: float,
 ) -> None:
-    conn = _conn()
-    _install_live_fusion(monkeypatch)
-    legacy = replace(
-        _request(
-            computed_at=_dt(18),
-            expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
-            day0_observed_extreme_c=legacy_extreme,
-            day0_observed_extreme_source="noaa_wrh_zspd",
-            day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
-        ),
-        temperature_metric=metric,
-        baseline_data_version=baseline_data_version,
-    )
+    conn, legacy = _shanghai_current_owner_request(tmp_path,monkeypatch,
+        metric=metric,observed_extreme=legacy_extreme)
+    assert legacy.baseline_data_version == baseline_data_version
     written = materialize_replacement_forecast_live(conn, legacy)
     assert written.ok is True
     provenance = json.loads(
@@ -4319,13 +4323,13 @@ def test_materializer_ignores_typed_legacy_provisional_frontier_ledger(
         (json.dumps(provenance), written.posterior_id),
     )
 
-    current = replace(
+    current = _refresh_shanghai_owner_request(conn,monkeypatch,replace(
         legacy,
-        computed_at=_dt(18, 10),
+        computed_at=legacy.computed_at+timedelta(minutes=10),
         day0_observed_extreme_c=current_extreme,
         day0_observed_extreme_source="noaa_wrh_zspd",
-        day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
-    )
+        day0_observed_extreme_observation_time=(legacy.computed_at+timedelta(minutes=5)).isoformat(),
+    ))
     result = materialize_replacement_forecast_live(conn, current)
 
     assert result.ok is True
@@ -4353,25 +4357,17 @@ def test_materializer_ignores_typed_legacy_provisional_frontier_ledger(
         ("low", _current_baseline_data_version("low"), "future"),
     ],
 )
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_materializer_blocks_malformed_typed_provisional_frontier_ledger(
+    tmp_path,
     monkeypatch: pytest.MonkeyPatch,
     metric: str,
     baseline_data_version: str,
     malformation: str,
 ) -> None:
-    conn = _conn()
-    _install_live_fusion(monkeypatch)
-    first = replace(
-        _request(
-            computed_at=_dt(18),
-            expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
-            day0_observed_extreme_c=31.0 if metric == "high" else 19.0,
-            day0_observed_extreme_source="noaa_wrh_zspd",
-            day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
-        ),
-        temperature_metric=metric,
-        baseline_data_version=baseline_data_version,
-    )
+    conn, first = _shanghai_current_owner_request(tmp_path,monkeypatch,metric=metric,
+        observed_extreme=31. if metric=="high" else 19.)
+    assert first.baseline_data_version == baseline_data_version
     written = materialize_replacement_forecast_live(conn, first)
     assert written.ok is True
     provenance = json.loads(
@@ -4387,7 +4383,7 @@ def test_materializer_blocks_malformed_typed_provisional_frontier_ledger(
     elif malformation == "nonfinite":
         conditioning["observed_extreme_c"] = "nan"
     else:
-        conditioning["observation_time"] = _dt(18, 5).isoformat()
+        conditioning["observation_time"] = (first.computed_at+timedelta(minutes=5)).isoformat()
     conn.execute(
         "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
         (json.dumps(provenance), written.posterior_id),
@@ -4395,11 +4391,11 @@ def test_materializer_blocks_malformed_typed_provisional_frontier_ledger(
 
     result = materialize_replacement_forecast_live(
         conn,
-        replace(
+        _refresh_shanghai_owner_request(conn,monkeypatch,replace(
             first,
-            computed_at=_dt(18, 10),
-            day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
-        ),
+            computed_at=first.computed_at+timedelta(minutes=10),
+            day0_observed_extreme_observation_time=(first.computed_at+timedelta(minutes=5)).isoformat(),
+        )),
     )
 
     assert result.ok is False
@@ -4415,24 +4411,16 @@ def test_materializer_blocks_malformed_typed_provisional_frontier_ledger(
         ("low", _current_baseline_data_version("low")),
     ],
 )
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_materializer_blocks_unknown_frontier_finality(
+    tmp_path,
     monkeypatch: pytest.MonkeyPatch,
     metric: str,
     baseline_data_version: str,
 ) -> None:
-    conn = _conn()
-    _install_live_fusion(monkeypatch)
-    first = replace(
-        _request(
-            computed_at=_dt(18),
-            expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
-            day0_observed_extreme_c=31.0 if metric == "high" else 19.0,
-            day0_observed_extreme_source="noaa_wrh_zspd",
-            day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
-        ),
-        temperature_metric=metric,
-        baseline_data_version=baseline_data_version,
-    )
+    conn, first = _shanghai_current_owner_request(tmp_path,monkeypatch,metric=metric,
+        observed_extreme=31. if metric=="high" else 19.)
+    assert first.baseline_data_version == baseline_data_version
     written = materialize_replacement_forecast_live(conn, first)
     assert written.ok is True
     provenance = json.loads(
@@ -4449,12 +4437,12 @@ def test_materializer_blocks_unknown_frontier_finality(
 
     result = materialize_replacement_forecast_live(
         conn,
-        replace(
+        _refresh_shanghai_owner_request(conn,monkeypatch,replace(
             first,
-            computed_at=_dt(18, 10),
+            computed_at=first.computed_at+timedelta(minutes=10),
             day0_observed_extreme_c=32.0,
-            day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
-        ),
+            day0_observed_extreme_observation_time=(first.computed_at+timedelta(minutes=5)).isoformat(),
+        )),
     )
 
     assert result.ok is False
@@ -4478,25 +4466,17 @@ def test_materializer_blocks_unknown_frontier_finality(
         ("low", _current_baseline_data_version("low"), 1),
     ],
 )
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_materializer_blocks_unknown_declared_frontier_finality(
+    tmp_path,
     monkeypatch: pytest.MonkeyPatch,
     metric: str,
     baseline_data_version: str,
     declared_finality: object,
 ) -> None:
-    conn = _conn()
-    _install_live_fusion(monkeypatch)
-    first = replace(
-        _request(
-            computed_at=_dt(18),
-            expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
-            day0_observed_extreme_c=31.0 if metric == "high" else 19.0,
-            day0_observed_extreme_source="noaa_wrh_zspd",
-            day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
-        ),
-        temperature_metric=metric,
-        baseline_data_version=baseline_data_version,
-    )
+    conn, first = _shanghai_current_owner_request(tmp_path,monkeypatch,metric=metric,
+        observed_extreme=31. if metric=="high" else 19.)
+    assert first.baseline_data_version == baseline_data_version
     written = materialize_replacement_forecast_live(conn, first)
     assert written.ok is True
     provenance = json.loads(
@@ -4513,11 +4493,11 @@ def test_materializer_blocks_unknown_declared_frontier_finality(
 
     result = materialize_replacement_forecast_live(
         conn,
-        replace(
+        _refresh_shanghai_owner_request(conn,monkeypatch,replace(
             first,
-            computed_at=_dt(18, 10),
-            day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
-        ),
+            computed_at=first.computed_at+timedelta(minutes=10),
+            day0_observed_extreme_observation_time=(first.computed_at+timedelta(minutes=5)).isoformat(),
+        )),
     )
 
     assert result.ok is False
@@ -4526,18 +4506,12 @@ def test_materializer_blocks_unknown_declared_frontier_finality(
     )
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_materializer_blocks_ledger_observation_after_its_own_compute_time(
+    tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    conn = _conn()
-    _install_live_fusion(monkeypatch)
-    first = _request(
-        computed_at=_dt(18),
-        expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
-        day0_observed_extreme_c=31.0,
-        day0_observed_extreme_source="noaa_wrh_zspd",
-        day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
-    )
+    conn, first = _shanghai_current_owner_request(tmp_path,monkeypatch,observed_extreme=31.)
     written = materialize_replacement_forecast_live(conn, first)
     assert written.ok is True
     provenance = json.loads(
@@ -4546,7 +4520,7 @@ def test_materializer_blocks_ledger_observation_after_its_own_compute_time(
             (written.posterior_id,),
         ).fetchone()["provenance_json"]
     )
-    provenance["day0_conditioning"]["observation_time"] = _dt(18, 5).isoformat()
+    provenance["day0_conditioning"]["observation_time"] = (first.computed_at+timedelta(minutes=5)).isoformat()
     conn.execute(
         "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
         (json.dumps(provenance), written.posterior_id),
@@ -4554,13 +4528,12 @@ def test_materializer_blocks_ledger_observation_after_its_own_compute_time(
 
     result = materialize_replacement_forecast_live(
         conn,
-        replace(
+        _refresh_shanghai_owner_request(conn,monkeypatch,replace(
             first,
-            computed_at=_dt(18, 10),
+            computed_at=first.computed_at+timedelta(minutes=10),
             day0_observed_extreme_c=30.0,
-            day0_observed_extreme_source="wu_icao_history",
-            day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
-        ),
+            day0_observed_extreme_observation_time=(first.computed_at+timedelta(minutes=5)).isoformat(),
+        )),
     )
 
     assert result.ok is False
@@ -4569,12 +4542,15 @@ def test_materializer_blocks_ledger_observation_after_its_own_compute_time(
     )
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_materializer_ignores_malformed_pre_day0_frontier_ledger(
+    tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    conn = _conn()
-    _install_live_fusion(monkeypatch)
-    pre_day0 = materialize_replacement_forecast_live(conn, _request())
+    cycle = datetime(2026,10,1,tzinfo=UTC)
+    conn, request = _shanghai_current_owner_request(tmp_path,monkeypatch,
+        computed_at=cycle+timedelta(hours=4))
+    pre_day0 = materialize_replacement_forecast_live(conn, request)
     assert pre_day0.ok is True
     conn.execute(
         "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
@@ -4583,13 +4559,14 @@ def test_materializer_ignores_malformed_pre_day0_frontier_ledger(
 
     day0 = materialize_replacement_forecast_live(
         conn,
-        _request(
-            computed_at=_dt(18),
-            expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+        _refresh_shanghai_owner_request(conn,monkeypatch,replace(request,
+            computed_at=cycle+timedelta(hours=18),
+            expires_at=cycle+timedelta(hours=26),
             day0_observed_extreme_c=31.0,
             day0_observed_extreme_source="noaa_wrh_zspd",
-            day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
-        ),
+            day0_observed_extreme_observation_time=(cycle+timedelta(hours=17,minutes=55)).isoformat(),
+            day0_observed_extreme_sample_count=12,day0_observed_extreme_unit="C",
+        )),
     )
 
     assert day0.ok is True
@@ -7986,27 +7963,29 @@ def test_day0_final_writer_uses_frozen_frontier_without_likelihood_recompute(
     )
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_day0_ledger_frontier_allows_65_rows_and_retries_on_append(
+    tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Append-only Day0 history has no row-count ratchet; a real append stales prepare."""
-    conn = _conn()
-    _install_live_fusion(monkeypatch)
-    request = _request(
-        computed_at=_dt(18, 10),
-        expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
-        day0_observed_extreme_c=30.0,
-        day0_observed_extreme_source="wu_icao_history",
-        day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
-    )
+    cycle = datetime(2026,10,1,tzinfo=UTC)
+    conn, request = _shanghai_current_owner_request(tmp_path,monkeypatch,
+        computed_at=cycle+timedelta(hours=18,minutes=10),observed_extreme=30.)
+    # The synthetic history protects the bounded ledger frontier, not WU's
+    # pre-transition channel license. Keep this current same-station product.
+    conn.execute("SAVEPOINT normal_control")
+    assert materialize_replacement_forecast_live(conn,request).ok is True
+    conn.execute("ROLLBACK TO normal_control")
+    conn.execute("RELEASE normal_control")
     conditioning = json.dumps(
         {
             "day0_conditioning": {
                 "active": True,
                 "metric": "high",
                 "observed_extreme_c": 30.0,
-                "source": "wu_icao_history",
-                "observation_time": _dt(16).isoformat(),
+                "source": "noaa_wrh_zspd",
+                "observation_time": (cycle+timedelta(hours=16)).isoformat(),
             }
         }
     )
@@ -8020,7 +7999,7 @@ def test_day0_ledger_frontier_allows_65_rows_and_retries_on_append(
             "high",
             request.source_cycle_time.isoformat(),
             request.openmeteo_source_available_at.isoformat(),
-            _dt(17, index % 60).isoformat(),
+            (cycle+timedelta(hours=17,minutes=index % 60)).isoformat(),
             "{}",
             "history",
             conditioning,
@@ -8045,7 +8024,9 @@ def test_day0_ledger_frontier_allows_65_rows_and_retries_on_append(
     conn.commit()
     assert first.ok is True
 
-    stale = _prepare_for_final_write(conn, replace(request, computed_at=_dt(18, 20)))
+    current = _refresh_shanghai_owner_request(conn,monkeypatch,
+        replace(request,computed_at=cycle+timedelta(hours=18,minutes=20)))
+    stale = _prepare_for_final_write(conn, current)
     conn.execute(
         """
         INSERT INTO forecast_posteriors (
@@ -8061,7 +8042,7 @@ def test_day0_ledger_frontier_allows_65_rows_and_retries_on_append(
             request.target_date.isoformat(),
             request.source_cycle_time.isoformat(),
             request.openmeteo_source_available_at.isoformat(),
-            _dt(18, 15).isoformat(),
+            (cycle+timedelta(hours=18,minutes=15)).isoformat(),
             conditioning,
         ),
     )
@@ -8071,7 +8052,7 @@ def test_day0_ledger_frontier_allows_65_rows_and_retries_on_append(
         materializer_mod.write_prepared_replacement_forecast_live(conn, stale)
     conn.rollback()
     refreshed = _prepare_for_final_write(
-        conn, replace(request, computed_at=_dt(18, 20))
+        conn, current
     )
     latest_id = conn.execute(
         "SELECT MAX(posterior_id) FROM forecast_posteriors"
