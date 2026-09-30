@@ -3189,7 +3189,7 @@ def build_replacement_forecast_current_target_plan(
                     or openmeteo_resolved_cycle
                     or baseline_source_cycle_time,
                     raw_model_forecasts_available="raw_model_forecasts" in tables,
-                    decision_time=decision_time,
+                    decision_time=evaluation_now_utc,
                 )
             input_lag_reason = None
             if posterior_count > 0 and readiness_count > 0:

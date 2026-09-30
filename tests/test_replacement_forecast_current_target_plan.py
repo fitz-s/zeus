@@ -2322,7 +2322,7 @@ def test_day0_running_low_advances_when_fresher_source_saw_less() -> None:
     conn.close()
 
 
-def _create_db(path) -> None:
+def _create_db(path, *, include_raw_provider: bool = True) -> None:
     conn = sqlite3.connect(path)
     try:
         conn.execute(
@@ -2588,13 +2588,31 @@ def _create_db(path) -> None:
                     hashlib.sha256(city_body).hexdigest(),len(city_body),
                 ),
             )
-            if city in {"London", "Paris"}:
+            if include_raw_provider and city in {"London", "Paris"}:
                 from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _persist_exact_provider_body
                 _persist_exact_provider_body(conn, Path(path).parent, city=city,metric="high",target_date="2026-06-09",
                     model="gfs_global",value=21.0,cycle="2026-06-07T06:00:00+00:00",captured="2026-06-07T08:00:00+00:00")
         conn.commit()
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize("now", ("2026-06-07T10:00:00+00:00", "2026-06-07T10:00:00.123456+00:00"))
+def test_normal_target_plan_passes_actual_evaluation_cut_to_current_source_reader(tmp_path, monkeypatch, now):
+    db = tmp_path / "forecast.db"
+    _create_db(db, include_raw_provider=False)
+    actual_count = current_target_plan._fusion_current_value_count
+    seen = []
+    def observed_count(*args, **kwargs):
+        seen.append(kwargs["decision_time"])
+        return actual_count(*args, **kwargs)
+    monkeypatch.setattr(current_target_plan, "_fusion_current_value_count", observed_count)
+    decision = datetime.fromisoformat(now)
+    plan = build_replacement_forecast_current_target_plan(db, now_utc=decision)
+    assert seen and all(stamp == decision for stamp in seen)
+    present = [row for row in plan.rows if row.city in ("Paris", "London")]
+    assert len(present) == 2
+    assert all(row.fusion_current_value_count == 0 and not row.can_seed for row in present)
 
 
 def test_current_target_plan_classifies_covered_seedable_and_missing_manifest_targets(
