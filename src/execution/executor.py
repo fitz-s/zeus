@@ -683,13 +683,15 @@ def _entry_geoblock_no_fill_proof(
     message = str(payload.get("detail") or payload.get("exception_message") or "")
     if not _is_polymarket_geoblock_403_message(message):
         return False
-    if _entry_has_positive_trade_fact(conn, command_id=command_id):
-        return False
-    if _table_exists(conn, "venue_order_facts") and conn.execute(
-        "SELECT 1 FROM venue_order_facts WHERE command_id = ? LIMIT 1",
-        (command_id,),
-    ).fetchone():
-        return False
+    # The proof means the venue never touched this command: any order or trade
+    # fact row, whatever its size or state (zero-size RETRYING/FAILED included),
+    # is venue contact and fails it closed.
+    for table in ("venue_order_facts", "venue_trade_facts"):
+        if _table_exists(conn, table) and conn.execute(
+            f"SELECT 1 FROM {table} WHERE command_id = ? LIMIT 1",
+            (command_id,),
+        ).fetchone():
+            return False
     final_id = str(payload.get("final_submission_envelope_id") or "").strip()
     if final_id and _table_exists(conn, "venue_submission_envelopes"):
         row = conn.execute(

@@ -1545,8 +1545,22 @@ _GEOBLOCK_DETAIL = (
 )
 
 
-def _insert_geoblock_rejection(conn, *, final_order_id=None, order_fact=False):
+def _insert_geoblock_rejection(
+    conn, *, final_order_id=None, order_fact=False, zero_size_trade_fact=None
+):
     """Live shape of command 6f37c222b7a24d8a (2026-09-29 17:03Z)."""
+
+    if zero_size_trade_fact is not None:
+        # append_trade_fact admits RETRYING/FAILED rows with no fill economics
+        # (venue_command_repo.append_trade_fact): venue contact without size.
+        conn.execute(
+            """INSERT INTO venue_trade_facts
+               (trade_id, venue_order_id, command_id, state, filled_size,
+                observed_at, local_sequence)
+               VALUES ('trade-geoblock', '0x7108', 'cmd-geoblock', ?, '0',
+                       '2026-09-29T17:03:08+00:00', 1)""",
+            (zero_size_trade_fact,),
+        )
 
     conn.execute(
         """INSERT INTO venue_commands
@@ -1619,7 +1633,13 @@ def test_geoblock_rejected_predecessor_does_not_block_same_price(mem_db, age_sec
 
 
 @pytest.mark.parametrize(
-    "kwargs", [{"final_order_id": "0xvenue-order"}, {"order_fact": True}]
+    "kwargs",
+    [
+        {"final_order_id": "0xvenue-order"},
+        {"order_fact": True},
+        {"zero_size_trade_fact": "FAILED"},
+        {"zero_size_trade_fact": "RETRYING"},
+    ],
 )
 def test_geoblock_proof_fails_closed_on_venue_order_evidence(mem_db, kwargs):
     _insert_geoblock_rejection(mem_db, **kwargs)
