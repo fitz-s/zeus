@@ -1,0 +1,158 @@
+{
+  "experiment_window": "2026-09-30T15:49:16Z/2026-09-30T16:00:33Z",
+  "failures": [
+    {
+      "channel": "awc",
+      "error_class": "ReadTimeout",
+      "at": "2026-09-30T15:49:33.398601+00:00"
+    },
+    {
+      "channel": "awc",
+      "error_class": "ReadTimeout",
+      "at": "2026-09-30T15:50:33.454178+00:00"
+    },
+    {
+      "channel": "knmi_listing",
+      "request_at": "2026-09-30T15:50:35.780911+00:00",
+      "receipt_at": "2026-09-30T15:50:36.131891+00:00",
+      "status": 429,
+      "sha256": "3c44003c4893e9b1503b06a1286cc2fdf18e6693e654b220f88bc3331ed9bbcf"
+    },
+    {
+      "channel": "knmi",
+      "error_class": "HTTPStatusError",
+      "at": "2026-09-30T15:50:36.132694+00:00"
+    },
+    {
+      "channel": "knmi_listing",
+      "request_at": "2026-09-30T15:51:23.439500+00:00",
+      "receipt_at": "2026-09-30T15:51:23.796543+00:00",
+      "status": 429,
+      "sha256": "3c44003c4893e9b1503b06a1286cc2fdf18e6693e654b220f88bc3331ed9bbcf"
+    },
+    {
+      "channel": "knmi",
+      "error_class": "HTTPStatusError",
+      "at": "2026-09-30T15:51:23.797084+00:00"
+    },
+    {
+      "channel": "knmi_listing",
+      "request_at": "2026-09-30T15:52:23.842143+00:00",
+      "receipt_at": "2026-09-30T15:52:24.217027+00:00",
+      "status": 429,
+      "sha256": "3c44003c4893e9b1503b06a1286cc2fdf18e6693e654b220f88bc3331ed9bbcf"
+    },
+    {
+      "channel": "knmi",
+      "error_class": "HTTPStatusError",
+      "at": "2026-09-30T15:52:24.217710+00:00"
+    },
+    {
+      "channel": "awc",
+      "error_class": "ReadTimeout",
+      "at": "2026-09-30T15:53:33.722271+00:00"
+    },
+    {
+      "channel": "knmi_listing",
+      "request_at": "2026-09-30T15:53:35.400727+00:00",
+      "receipt_at": "2026-09-30T15:53:35.777561+00:00",
+      "status": 429,
+      "sha256": "3c44003c4893e9b1503b06a1286cc2fdf18e6693e654b220f88bc3331ed9bbcf"
+    },
+    {
+      "channel": "knmi",
+      "error_class": "HTTPStatusError",
+      "at": "2026-09-30T15:53:35.778363+00:00"
+    },
+    {
+      "channel": "awc",
+      "error_class": "ReadTimeout",
+      "at": "2026-09-30T15:54:32.967835+00:00"
+    },
+    {
+      "channel": "knmi_listing",
+      "request_at": "2026-09-30T15:54:34.501219+00:00",
+      "receipt_at": "2026-09-30T15:54:34.870107+00:00",
+      "status": 429,
+      "sha256": "3c44003c4893e9b1503b06a1286cc2fdf18e6693e654b220f88bc3331ed9bbcf"
+    },
+    {
+      "channel": "knmi",
+      "error_class": "HTTPStatusError",
+      "at": "2026-09-30T15:54:34.870914+00:00"
+    },
+    {
+      "channel": "knmi_listing",
+      "request_at": "2026-09-30T15:55:31.398402+00:00",
+      "receipt_at": "2026-09-30T15:55:32.203352+00:00",
+      "status": 429,
+      "sha256": "3c44003c4893e9b1503b06a1286cc2fdf18e6693e654b220f88bc3331ed9bbcf"
+    },
+    {
+      "channel": "knmi",
+      "error_class": "HTTPStatusError",
+      "at": "2026-09-30T15:55:32.203931+00:00"
+    },
+    {
+      "channel": "knmi_listing",
+      "request_at": "2026-09-30T15:56:24.341542+00:00",
+      "receipt_at": "2026-09-30T15:56:24.710025+00:00",
+      "status": 429,
+      "sha256": "3c44003c4893e9b1503b06a1286cc2fdf18e6693e654b220f88bc3331ed9bbcf"
+    },
+    {
+      "channel": "knmi",
+      "error_class": "HTTPStatusError",
+      "at": "2026-09-30T15:56:24.710885+00:00"
+    },
+    {
+      "channel": "knmi_listing",
+      "request_at": "2026-09-30T15:57:22.754354+00:00",
+      "receipt_at": "2026-09-30T15:57:23.114306+00:00",
+      "status": 429,
+      "sha256": "3c44003c4893e9b1503b06a1286cc2fdf18e6693e654b220f88bc3331ed9bbcf"
+    },
+    {
+      "channel": "knmi",
+      "error_class": "HTTPStatusError",
+      "at": "2026-09-30T15:57:23.115206+00:00"
+    },
+    {
+      "channel": "knmi_listing",
+      "request_at": "2026-09-30T15:58:23.547150+00:00",
+      "receipt_at": "2026-09-30T15:58:23.894457+00:00",
+      "status": 429,
+      "sha256": "3c44003c4893e9b1503b06a1286cc2fdf18e6693e654b220f88bc3331ed9bbcf"
+    },
+    {
+      "channel": "knmi",
+      "error_class": "HTTPStatusError",
+      "at": "2026-09-30T15:58:23.894757+00:00"
+    },
+    {
+      "channel": "knmi_listing",
+      "request_at": "2026-09-30T15:59:22.988842+00:00",
+      "receipt_at": "2026-09-30T15:59:23.348265+00:00",
+      "status": 429,
+      "sha256": "3c44003c4893e9b1503b06a1286cc2fdf18e6693e654b220f88bc3331ed9bbcf"
+    },
+    {
+      "channel": "knmi",
+      "error_class": "HTTPStatusError",
+      "at": "2026-09-30T15:59:23.384866+00:00"
+    },
+    {
+      "channel": "knmi_listing",
+      "request_at": "2026-09-30T16:00:31.297697+00:00",
+      "receipt_at": "2026-09-30T16:00:31.672140+00:00",
+      "status": 429,
+      "sha256": "3c44003c4893e9b1503b06a1286cc2fdf18e6693e654b220f88bc3331ed9bbcf"
+    },
+    {
+      "channel": "knmi",
+      "error_class": "HTTPStatusError",
+      "at": "2026-09-30T16:00:31.672555+00:00"
+    }
+  ],
+  "interpretation": "KNMI HTTP429 is rate limiting of the shared anonymous credential, not proof of a station outage. AWC timeouts are transport failures, not missing observations. No further anonymous requests were made after this bounded experiment."
+}

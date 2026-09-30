@@ -1,0 +1,11 @@
+# Retain raw local audit material without accidentally publishing dependencies,
+# temporary signed-URL response bodies, repeated raw data, or test scratch.
+/python_deps/
+/baseline49ac/
+/*.xml
+/sample_sources_resume.py
+/recovered/*.json
+/recovered/sample_sources.py
+/resume_measurements/*.body
+/resume_measurements/*.json
+# Already tracked sanitized evidence remains tracked despite these patterns.
