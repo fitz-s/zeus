@@ -4935,6 +4935,52 @@ def test_real_capture_debt_accepts_identical_duplicate_target_without_extra_cost
     assert len(world.calls) == calls + 1 and world.tracker.calls_today() == quota + 1
 
 
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("failure", ("response_shape", "terminal_400"))
+def test_real_capture_debt_location_split_preserves_exact_receipt_scope(tmp_path, monkeypatch, metric, failure):
+    from src.data import bayes_precision_fusion_download as dl
+    from src.data.replacement_current_value_serving import physical_capture_debt_reason
+    world = _real_capture_world(tmp_path, monkeypatch, "locations", metric)
+    targets = world.targets[:2]
+    with sqlite3.connect(world.db) as conn:
+        raw_ids = tuple(conn.execute("SELECT raw_model_forecast_id FROM raw_model_forecasts WHERE city=?", (t.city,)).fetchone()[0] for t in targets)
+        before = conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall()
+        body_id = conn.execute("SELECT artifact_id FROM raw_model_forecasts WHERE raw_model_forecast_id=?", (raw_ids[0],)).fetchone()[0]
+        conn.execute("DELETE FROM raw_forecast_artifacts WHERE data_version='openmeteo_single_model_http_capture_receipt_v1'"
+            " AND json_extract(artifact_metadata_json,'$.physical_http_capture_receipt.body_artifact_id')=?", (body_id,))
+        conn.commit()
+        world.clock[0] = datetime(2026, 9, 29, 23, 30, tzinfo=UTC)
+        for raw_id in raw_ids:
+            assert physical_capture_debt_reason(conn, raw_model_forecast_id=raw_id,
+                decision_time_iso=world.clock[0].isoformat()) == "HTTP_CAPTURE_RECEIPT_MISSING"
+        receipt_count = conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts WHERE data_version='openmeteo_single_model_http_capture_receipt_v1'").fetchone()[0]
+    original_get = world.provider.get
+    def split_only(url, *, params=None, timeout=None):
+        if params and "," in str(params.get("latitude", "")):
+            world.calls.append(dict(params))
+            return httpx.Response(400 if failure == "terminal_400" else 200,
+                request=httpx.Request("GET", url), json={"error": True, "reason": "private location batch refusal"} if failure == "terminal_400" else [{}])
+        return original_get(url, params=params, timeout=timeout)
+    monkeypatch.setattr(world.provider, "get", split_only)
+    calls, quota = len(world.calls), world.tracker.calls_today()
+    report = dl.download_bayes_precision_fusion_extra_raw_inputs(**world.kwargs, targets=targets,
+        network_capture_reason="HTTP_CAPTURE_RECEIPT_MISSING", capture_debt_raw_ids=raw_ids)
+    if failure == "terminal_400":
+        assert report["physical_capture_recovered_raw_ids"] == () and report["committed_families"] == ()
+        assert len(world.calls) == calls + 1 and world.tracker.calls_today() == quota + 2
+    else:
+        assert report["physical_capture_recovered_raw_ids"] == tuple(sorted(raw_ids)), report
+        assert set(report["committed_families"]) == {(t.city, t.target_date, t.metric) for t in targets}
+        assert len(world.calls) == calls + 3 and world.tracker.calls_today() == quota + 4
+    assert report["written_row_count"] == 0
+    for request in world.calls[calls:]:
+        assert str(world.targets[-1].latitude) not in str(request["latitude"])
+        assert len(str(request["latitude"]).split(",")) == len(str(request["longitude"]).split(",")) == len(str(request["timezone"]).split(","))
+    with sqlite3.connect(world.db) as conn:
+        assert conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall() == before
+        assert conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts WHERE data_version='openmeteo_single_model_http_capture_receipt_v1'").fetchone()[0] == receipt_count + (0 if failure == "terminal_400" else 2)
+
+
 def test_real_fresh_changed_value_receipt_is_not_proof_recovery(tmp_path, monkeypatch):
     from src.data import bayes_precision_fusion_download as dl
     from src.data.replacement_current_value_serving import physical_capture_debt_reason
