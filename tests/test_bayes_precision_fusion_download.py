@@ -53,6 +53,7 @@ def _complete_hourly_local_day_payload(
     *,
     base: float = 0.0,
     missing_hour: int | None = None,
+    utc_offset_seconds: int = 0,
 ) -> dict[str, object]:
     """A full hourly local-day axis; an optional defect stays internal to that axis."""
     hours = list(range(24))
@@ -63,12 +64,84 @@ def _complete_hourly_local_day_payload(
     if missing_hour is not None:
         temperatures[hours.index(missing_hour)] = None
     return {
+        "utc_offset_seconds": utc_offset_seconds,
         "hourly": {
             "time": [f"{target_date.isoformat()}T{hour:02d}:00" for hour in hours],
             "temperature_2m": temperatures,
         },
         "hourly_units": {"temperature_2m": "C"},
     }
+
+
+def _actual_header_axis_payload(day, zone_name, *, offset_seconds, aware=False):
+    """Official single-run ISO encoding: one response offset over a UTC axis."""
+    from zoneinfo import ZoneInfo
+    zone = ZoneInfo(zone_name)
+    start = datetime.combine(day, datetime.min.time(), zone).astimezone(UTC)
+    end = datetime.combine(day + timedelta(days=1), datetime.min.time(), zone).astimezone(UTC)
+    # Run-pinned API hourly instants lie on the UTC hourly grid; half-hour
+    # zones therefore honestly contain local xx:30 samples, not invented xx:00.
+    first = start.replace(minute=0, second=0, microsecond=0)
+    if first < start:
+        first += timedelta(hours=1)
+    instants = []
+    at = first
+    while at < end:
+        instants.append(at)
+        at += timedelta(hours=1)
+    axis = [instants[0] - timedelta(hours=1), *instants, instants[-1] + timedelta(hours=1)]
+    def stamp(value):
+        return (value.isoformat() if aware else
+            (value.replace(tzinfo=None) + timedelta(seconds=offset_seconds)).isoformat(timespec="minutes"))
+    return {"timezone": zone_name, "utc_offset_seconds": offset_seconds,
+        "hourly_units": {"time": "iso8601", "temperature_2m": "°C"},
+        "hourly": {"time": [stamp(value) for value in axis],
+            "temperature_2m": [-1000.0, *[float(i) for i in range(len(instants))], 1000.0]}}, len(instants)
+
+
+@pytest.mark.parametrize("day,zone,offset,count", (
+    (date(2026, 3, 8), "America/New_York", -18000, 23),
+    (date(2026, 11, 1), "America/New_York", -14400, 25),
+    (date(2026, 6, 9), "Asia/Kolkata", 19800, 24),
+    (date(2026, 6, 9), "Asia/Kathmandu", 20700, 24),
+))
+@pytest.mark.parametrize("aware", (False, True))
+def test_full_day_scalar_replays_header_utc_axis_through_dst_and_fractional_zone(day, zone, offset, count, aware):
+    from src.data import bayes_precision_fusion_download as dl
+    payload, samples = _actual_header_axis_payload(day, zone, offset_seconds=offset, aware=aware)
+    assert samples == count
+    got = dl._parse_batched_single_runs_payload(payload, ["icon_global"], day, zone)
+    assert got["icon_global"] == (float(count - 1), 0.0)
+
+
+@pytest.mark.parametrize("damage", ("missing", "duplicate", "early", "late", "both_edges", "today_suffix"))
+def test_full_day_scalar_never_accepts_incomplete_or_duplicate_slots(damage):
+    from src.data import bayes_precision_fusion_download as dl
+    day = date(2026, 9, 4)
+    payload = _complete_hourly_local_day_payload(day)
+    times, values = payload["hourly"]["time"], payload["hourly"]["temperature_2m"]
+    if damage == "missing":
+        del times[11]
+        del values[11]
+    elif damage == "duplicate":
+        times.insert(11, times[11])
+        values.insert(11, values[11])
+    else:
+        first, stop = {"early": (1, 24), "late": (0, 23), "both_edges": (3, 21), "today_suffix": (6, 24)}[damage]
+        payload["hourly"] = {"time": times[first:stop], "temperature_2m": values[first:stop]}
+    got = dl._parse_batched_single_runs_payload(payload, ["icon_global"], day, "UTC",
+        decision_at=datetime(2026, 9, 4, 12, tzinfo=UTC))
+    assert "icon_global" not in got
+    assert "partial local-day coverage" in got[dl._BATCH_EXACT_RUN_UNMATERIALIZABLE_KEY]["icon_global"]
+
+
+def test_naive_hourly_axis_without_original_response_offset_is_unproven():
+    from src.data import bayes_precision_fusion_download as dl
+    payload = _complete_hourly_local_day_payload(date(2026, 9, 4))
+    payload.pop("utc_offset_seconds")
+    got = dl._parse_batched_single_runs_payload(payload, ["icon_global"], date(2026, 9, 4), "UTC")
+    assert "icon_global" not in got
+    assert "utc_offset_seconds" in got[dl._BATCH_EXACT_RUN_UNMATERIALIZABLE_KEY]["icon_global"]
 
 
 def _two_city_targets():
@@ -300,18 +373,7 @@ def test_source_clock_fetch_batches_multiple_locations_into_one_request(monkeypa
     captured: dict[str, object] = {}
 
     def _payload(base: float) -> dict[str, object]:
-        return {
-            "hourly": {
-                "time": [
-                    "2026-06-09T00:00",
-                    "2026-06-09T03:00",
-                    "2026-06-09T12:00",
-                    "2026-06-09T21:00",
-                ],
-                "temperature_2m": [base - 1.0, base, base + 2.0, base + 1.0],
-            },
-            "hourly_units": {"temperature_2m": "°C"},
-        }
+        return _complete_hourly_local_day_payload(date(2026, 6, 9), base=base, utc_offset_seconds=7200)
 
     def _fetch(_url, params, **kwargs):
         captured["params"] = params
@@ -344,21 +406,21 @@ def test_source_clock_fetch_batches_multiple_locations_into_one_request(monkeypa
 @pytest.mark.parametrize(
     ("target_date", "decision_at", "first_hour", "last_hour", "expected"),
     (
-        # Sao Paulo 19:30 local: the 06:00 prefix gap is already elapsed and
-        # the current run still covers the unresolved evening.
-        (date(2026, 8, 18), datetime(2026, 8, 18, 22, 30, tzinfo=UTC), 6, 23, True),
+        # A remaining-day vector is a different quantity. This full-day
+        # scalar cannot obtain authority from an elapsed-prefix-only suffix.
+        (date(2026, 8, 18), datetime(2026, 8, 18, 22, 30, tzinfo=UTC), 6, 23, False),
         # A clipped suffix can omit the unresolved peak and remains forbidden.
         (date(2026, 8, 18), datetime(2026, 8, 18, 22, 30, tzinfo=UTC), 6, 18, False),
         # A run that starts after the decision does not cover the current-to-end window.
         (date(2026, 8, 18), datetime(2026, 8, 18, 22, 30, tzinfo=UTC), 21, 23, False),
         # The nominal evening threshold is not enough when it is already behind the decision.
         (date(2026, 8, 18), datetime(2026, 8, 19, 1, 30, tzinfo=UTC), 6, 20, False),
-        # Missing-prefix relaxation is Day0-only; future days still need full coverage.
+        # Both Day0 and future full-day scalars need the whole sample axis.
         (date(2026, 8, 19), datetime(2026, 8, 18, 22, 30, tzinfo=UTC), 6, 23, False),
         (date(2026, 8, 19), datetime(2026, 8, 18, 22, 30, tzinfo=UTC), 0, 23, True),
     ),
 )
-def test_single_runs_partial_day_requires_elapsed_prefix_and_remaining_coverage(
+def test_single_runs_full_day_scalar_requires_whole_day_even_after_prefix_elapsed(
     target_date: date,
     decision_at: datetime,
     first_hour: int,
@@ -371,6 +433,7 @@ def test_single_runs_partial_day_requires_elapsed_prefix_and_remaining_coverage(
 
     hours = list(range(first_hour, last_hour + 1))
     payload = {
+        "utc_offset_seconds": -10800,
         "hourly": {
             "time": [f"{target_date.isoformat()}T{hour:02d}:00" for hour in hours],
             "temperature_2m": [float(hour) for hour in hours],
@@ -395,6 +458,7 @@ def test_single_runs_partial_future_day_receipts_exact_run_as_unmaterializable()
 
     target_date = date(2026, 9, 4)
     payload = {
+        "utc_offset_seconds": 10800,
         "hourly": {
             "time": [
                 f"{target_date.isoformat()}T{hour:02d}:00" for hour in range(6, 21)
@@ -438,6 +502,75 @@ def test_single_runs_rejects_internal_hourly_nonfinite_value() -> None:
     )
 
 
+@pytest.mark.parametrize("day,zone,offset", (
+    (date(2026, 3, 8), "America/New_York", -18000),
+    (date(2026, 11, 1), "America/New_York", -14400),
+    (date(2026, 6, 9), "Asia/Kolkata", 19800),
+    (date(2026, 6, 9), "Asia/Kathmandu", 20700),
+))
+@pytest.mark.parametrize("unit", ("°C", "°F"))
+def test_previous_runs_and_single_runs_share_original_axis_and_complete_sample_quantity(day, zone, offset, unit):
+    from src.data import bayes_precision_fusion_download as dl
+    payload, _ = _actual_header_axis_payload(day, zone, offset_seconds=offset)
+    payload["hourly_units"]["temperature_2m"] = unit
+    direct = dl._parse_batched_single_runs_payload(payload, ["icon_global"], day, zone)
+    previous = json.loads(json.dumps(payload))
+    previous["hourly"]["temperature_2m_previous_day1"] = previous["hourly"].pop("temperature_2m")
+    replay = dl._parse_batched_previous_runs_payload(previous, ["icon_global"], "temperature_2m_previous_day1",
+        target_local_date=day, timezone_name=zone)
+    assert replay["icon_global"] == direct["icon_global"]
+    del previous["hourly"]["time"][5]
+    del previous["hourly"]["temperature_2m_previous_day1"][5]
+    assert "icon_global" not in dl._parse_batched_previous_runs_payload(previous, ["icon_global"], "temperature_2m_previous_day1",
+        target_local_date=day, timezone_name=zone)
+
+
+@pytest.mark.parametrize("zone,offset,latitude,longitude", (
+    ("Asia/Singapore", 28800, 1.35019, 103.994003),
+    ("America/New_York", -14400, 40.0, -73.0),
+))
+def test_intrinsic_single_run_left_prefix_only_reuses_raw_payload_not_full_day_or_network_event(tmp_path, monkeypatch, zone, offset, latitude, longitude):
+    from zoneinfo import ZoneInfo
+    from src.data import bayes_precision_fusion_download as dl
+    from src.data import openmeteo_client as client
+    monkeypatch.setattr("src.config.state_path", lambda filename: tmp_path / filename)
+    for cache in (dl._SINGLE_RUNS_PAYLOAD_CACHE, dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEX,
+        dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEXED_KEYS, dl._SINGLE_RUNS_PAYLOAD_CACHE_RECORDED_AT):
+        cache.clear()
+    day = date(2026, 11, 1) if zone == "America/New_York" else date(2026, 9, 6)
+    run = datetime.combine(day, datetime.min.time(), ZoneInfo(zone)).astimezone(UTC) + timedelta(hours=8)
+    end = datetime.combine(day + timedelta(days=2), datetime.min.time(), ZoneInfo(zone)).astimezone(UTC)
+    axis = []
+    at = run
+    while at < end:
+        axis.append(at)
+        at += timedelta(hours=1)
+    payload = {"latitude": latitude, "longitude": longitude, "elevation": 10.0,
+        "timezone": zone, "utc_offset_seconds": offset, "hourly_units": {"temperature_2m": "°C"},
+        "hourly": {"time": [(at.replace(tzinfo=None) + timedelta(seconds=offset)).isoformat(timespec="minutes") for at in axis],
+            "temperature_2m": [24.0]*len(axis)}}
+    calls = []
+    captured = run + timedelta(minutes=15)
+    def fetch(_url, params, **kwargs):
+        calls.append(dict(params))
+        body = json.dumps(payload).encode()
+        kwargs["capture_entity_body"](body, captured.timestamp())
+        kwargs["capture_network_response"](body, captured.timestamp(), {"content-type": "application/json"})
+        return json.loads(body)
+    monkeypatch.setattr(client, "fetch", fetch)
+    first, = dl._fetch_single_runs_hourly_payloads_batched(models=["ecmwf_ifs"],
+        locations=[(latitude, longitude, zone, (day,))], run=run, forecast_hours=120)
+    assert len(calls) == 1
+    assert first[dl._BATCH_PHYSICAL_RESPONSE_KEY]["network_capture"]
+    assert "ecmwf_ifs" not in dl._parse_batched_single_runs_payload(first, ["ecmwf_ifs"], day, zone)
+    second, = dl._fetch_single_runs_hourly_payloads_batched(models=["ecmwf_ifs"],
+        locations=[(latitude, longitude, zone, (day + timedelta(days=1),))], run=run, forecast_hours=120)
+    assert len(calls) == 1
+    assert "network_capture" not in second[dl._BATCH_PHYSICAL_RESPONSE_KEY]
+    assert dl._parse_batched_single_runs_payload(second, ["ecmwf_ifs"], day + timedelta(days=1), zone)["ecmwf_ifs"] == (24.0, 24.0)
+    assert not dl._single_runs_payload_has_reusable_hourly_axis(
+        {**payload, "hourly": {"time": payload["hourly"]["time"][:-1], "temperature_2m": payload["hourly"]["temperature_2m"][:-1]}},
+        models=["ecmwf_ifs"], timezone_name=zone, target_local_dates=(day + timedelta(days=1),), run=run)
 def test_source_clock_fetch_isolates_location_response_failure(monkeypatch) -> None:
     import src.data.bayes_precision_fusion_download as dl
     import src.data.openmeteo_client as client
@@ -445,18 +578,7 @@ def test_source_clock_fetch_isolates_location_response_failure(monkeypatch) -> N
     calls: list[int] = []
 
     def _payload(base: float) -> dict[str, object]:
-        return {
-            "hourly": {
-                "time": [
-                    "2026-06-09T00:00",
-                    "2026-06-09T03:00",
-                    "2026-06-09T12:00",
-                    "2026-06-09T21:00",
-                ],
-                "temperature_2m": [base - 1.0, base, base + 2.0, base + 1.0],
-            },
-            "hourly_units": {"temperature_2m": "°C"},
-        }
+        return _complete_hourly_local_day_payload(date(2026, 6, 9), base=base)
 
     def _fetch(_url, params, **_kwargs):
         location_count = len(str(params["latitude"]).split(","))
@@ -650,25 +772,14 @@ def test_nbm_hourly_run_falls_back_to_atomic_meta_stamped_standard_api(
         metadata_reads.append(object())
         return (update,)
 
-    def _payload(base: float) -> dict[str, object]:
-        return {
-            "hourly": {
-                "time": [
-                    "2026-07-28T00:00",
-                    "2026-07-28T03:00",
-                    "2026-07-28T12:00",
-                    "2026-07-28T21:00",
-                ],
-                "temperature_2m": [base - 1.0, base, base + 2.0, base + 1.0],
-            },
-            "hourly_units": {"temperature_2m": "°C"},
-        }
+    def _payload(base: float, offset: int) -> dict[str, object]:
+        return _complete_hourly_local_day_payload(date(2026, 7, 28), base=base, utc_offset_seconds=offset)
 
     def _fetch(url, params, **_kwargs):
         fetches.append((url, params))
         if "single-runs" in url:
             raise RuntimeError("Client error '400 Bad Request'")
-        return [_payload(30.0), _payload(25.0)]
+        return [_payload(30.0, -18000), _payload(25.0, -14400)]
 
     monkeypatch.setattr(metadata, "fetch_model_updates", _metadata)
     monkeypatch.setattr(client, "fetch", _fetch)
@@ -719,12 +830,9 @@ def test_single_runs_quota_uses_atomic_meta_stamped_standard_api_for_same_model(
         fetches.append((url, params))
         if "single-runs" in url:
             raise RuntimeError("429 Too Many Requests")
-        return {
-            "hourly": {
-                "time": ["2026-08-19T00:00", "2026-08-19T12:00", "2026-08-19T21:00"],
-                "temperature_2m": [20.0, 31.0, 24.0],
-            }
-        }
+        return {"utc_offset_seconds": 10800, "hourly_units": {"temperature_2m": "°C"},
+            "hourly": {"time": [f"2026-08-19T{hour:02d}:00" for hour in range(24)],
+                "temperature_2m": [20.0 if hour == 0 else 31.0 if hour == 12 else 24.0 for hour in range(24)]}}
 
     monkeypatch.setattr(client, "fetch", _fetch)
     got = dl._default_live_fetch_locations_batched(
@@ -2033,8 +2141,11 @@ def test_bpf_batched_fetch_uses_injected_quota_tracker(monkeypatch) -> None:
 
         def json(self) -> dict:
             return {
+                "utc_offset_seconds": 7200,
+                "hourly_units": {"temperature_2m": "°C"},
                 "hourly": {
-                    "temperature_2m_previous_day1_icon_global": [18.0, 19.5, 17.25],
+                    "time": [f"2026-06-09T{hour:02d}:00" for hour in range(24)],
+                    "temperature_2m_previous_day1_icon_global": [19.5 if hour == 12 else 17.25 if hour == 23 else 18.0 for hour in range(24)],
                 }
             }
 
@@ -2082,9 +2193,12 @@ def test_default_previous_runs_requests_single_model_headers(monkeypatch) -> Non
 
         def json(self) -> dict:
             return {
+                "utc_offset_seconds": 7200,
+                "hourly_units": {"temperature_2m": "°C"},
                 "hourly": {
-                    "temperature_2m_previous_day1_icon_global": [18.0, 19.5, 17.25],
-                    "temperature_2m_previous_day1_ecmwf_ifs025": [20.0, 21.0, 19.0],
+                    "time": [f"2026-06-09T{hour:02d}:00" for hour in range(24)],
+                    "temperature_2m_previous_day1_icon_global": [19.5 if hour == 12 else 17.25 if hour == 23 else 18.0 for hour in range(24)],
+                    "temperature_2m_previous_day1_ecmwf_ifs025": [21.0 if hour == 12 else 19.0 if hour == 23 else 20.0 for hour in range(24)],
                 }
             }
 
@@ -2124,18 +2238,7 @@ def test_default_single_runs_batched_400_falls_back_per_model(monkeypatch) -> No
     requested_models: list[object] = []
 
     def _payload(value: float) -> dict:
-        return {
-            "hourly": {
-                "time": [
-                    "2026-06-09T00:00",
-                    "2026-06-09T03:00",
-                    "2026-06-09T12:00",
-                    "2026-06-09T21:00",
-                ],
-                "temperature_2m": [value - 1.0, value, value + 2.0, value + 1.0],
-            },
-            "hourly_units": {"temperature_2m": "°C"},
-        }
+        return _complete_hourly_local_day_payload(date(2026, 6, 9), base=value, utc_offset_seconds=7200)
 
     def _fake_fetch(_url, params, **_kwargs):
         requested_models.append(params["models"])
@@ -2548,12 +2651,11 @@ def _two_day_single_runs_payload() -> dict:
     return {
         "latitude": 1.35019, "longitude": 103.994003, "elevation": 10.0,
         "timezone": "Asia/Singapore",
+        "utc_offset_seconds": 28800,
         "hourly": {
-            "time": [
-                "2026-09-06T00:00", "2026-09-06T03:00", "2026-09-06T12:00", "2026-09-06T21:00",
-                "2026-09-07T00:00", "2026-09-07T03:00", "2026-09-07T12:00", "2026-09-07T21:00",
-            ],
-            "temperature_2m": [24.0, 23.0, 31.0, 26.0, 25.0, 24.0, 32.0, 27.0],
+            "time": [f"2026-09-{day:02d}T{hour:02d}:00" for day in (6, 7) for hour in range(24)],
+            "temperature_2m": [23.0 if hour == 3 else 31.0 if hour == 12 else 24.0 for hour in range(24)]
+                + [24.0 if hour == 3 else 32.0 if hour == 12 else 25.0 for hour in range(24)],
         },
         "hourly_units": {"temperature_2m": "°C"},
     }
@@ -4100,7 +4202,7 @@ def test_target_aware_reader_and_fast_path_write_real_old_cycle_after_complete_p
     def _fetch(_url, params, **_kwargs):
         seen.append(str(params["run"]))
         target = date(2026, 9, 23) if params["run"] == latest.strftime("%Y-%m-%dT%H:%M") else date(2026, 9, 25)
-        return _complete_hourly_local_day_payload(target, base=25.0)
+        return _complete_hourly_local_day_payload(target, base=25.0, utc_offset_seconds=7200)
 
     monkeypatch.setattr(client, "fetch", _fetch)
     db = _forecast_db(tmp_path)

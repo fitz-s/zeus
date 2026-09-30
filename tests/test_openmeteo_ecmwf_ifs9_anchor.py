@@ -49,7 +49,11 @@ def test_anchor_request_uses_single_runs_api_and_explicit_run() -> None:
     assert metadata["source_id"] == SOURCE_ID
     assert metadata["product_id"] == PRODUCT_ID
     assert metadata["role"] == "soft_spatial_anchor"
-    assert metadata["trade_authority_status"] == "BLOCKED"
+    assert metadata["measurement_policy"] == "hourly_temperature_2m_localday_anchor"
+    from src.data.replacement_forecast_cycle_policy import current_evidence_shape_has_entry_authority, current_evidence_shape_has_held_authority
+    # Raw request metadata is not a posterior/readiness/witness certificate.
+    for authority in (current_evidence_shape_has_entry_authority, current_evidence_shape_has_held_authority):
+        assert not authority(metadata, materialized_at="2026-06-06T08:00:00Z")
     assert metadata["training_allowed"] is False
     assert metadata["past_hours"] == 0
 
@@ -229,7 +233,7 @@ def test_anchor_artifact_manifest_preserves_run_pinned_request_and_metric_identi
     high_manifest.verify_artifact()
 
 
-def test_anchor_artifact_manifest_rejects_bad_metric_or_pre_available_capture(tmp_path) -> None:
+def test_anchor_artifact_manifest_rejects_bad_metric_and_future_issue_but_keeps_hint_telemetry(tmp_path) -> None:
     artifact = tmp_path / "openmeteo-ifs9.json"
     artifact.write_text('{"hourly":{"time":[],"temperature_2m":[]}}\n', encoding="utf-8")
     request = build_anchor_request(
@@ -248,10 +252,23 @@ def test_anchor_artifact_manifest_rejects_bad_metric_or_pre_available_capture(tm
             captured_at=datetime(2026, 6, 6, 8, tzinfo=timezone.utc),
         )
 
-    with pytest.raises(ValueError, match="captured_at cannot precede source_available_at"):
+    manifest = build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(
+        artifact, request=request, metric="high",
+        source_available_at=datetime(2026, 6, 6, 8, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 6, 6, 7, tzinfo=timezone.utc),
+    )
+    assert manifest.source_cycle_time == request.run
+    assert manifest.captured_at == datetime(2026, 6, 6, 7, tzinfo=timezone.utc)
+    assert manifest.source_available_at == manifest.captured_at
+    assert manifest.product_metadata["requested_source_available_at"] == "2026-06-06T08:00:00+00:00"
+    assert manifest.product_metadata["requested_source_available_at_role"] == "telemetry_not_authority"
+    assert manifest.product_metadata["source_available_at_authority"] == "captured_at_no_signed_openmeteo_generation_time"
+    future_issue = build_anchor_request(latitude=31.1979, longitude=121.3363,
+        run="2026-06-06T08:00:00Z", timezone_name="Asia/Shanghai")
+    with pytest.raises(ValueError):
         build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(
             artifact,
-            request=request,
+            request=future_issue,
             metric="high",
             source_available_at=datetime(2026, 6, 6, 8, tzinfo=timezone.utc),
             captured_at=datetime(2026, 6, 6, 7, tzinfo=timezone.utc),
@@ -260,6 +277,7 @@ def test_anchor_artifact_manifest_rejects_bad_metric_or_pre_available_capture(tm
 
 def test_anchor_response_extracts_localday_high_low_from_hourly_json() -> None:
     payload = {
+        "utc_offset_seconds": 28800,
         "hourly_units": {"temperature_2m": "°C"},
         "hourly": {
             "time": [
@@ -290,7 +308,11 @@ def test_anchor_response_extracts_localday_high_low_from_hourly_json() -> None:
     assert anchor.sample_count == 3
     assert [item.hour for item in anchor.contributing_local_times] == [0, 12, 23]
     assert anchor.contributing_valid_times_utc[0].hour == 16
-    assert anchor.trade_authority_status == "BLOCKED"
+    from dataclasses import asdict
+    from src.data.replacement_forecast_cycle_policy import current_evidence_shape_has_entry_authority, current_evidence_shape_has_held_authority
+    assert anchor.measurement_policy == "hourly_temperature_2m_localday_anchor"
+    for authority in (current_evidence_shape_has_entry_authority, current_evidence_shape_has_held_authority):
+        assert not authority(asdict(anchor), materialized_at="2026-06-06T08:00:00Z")
     assert anchor.training_allowed is False
 
 
@@ -325,14 +347,14 @@ def test_anchor_response_fails_closed_for_malformed_payload_or_coverage() -> Non
 
     with pytest.raises(ValueError, match="insufficient"):
         extract_openmeteo_ecmwf_ifs9_localday_anchor(
-            {"hourly": {"time": ["2026-06-05T00:00"], "temperature_2m": [20.0]}},
+            {"utc_offset_seconds": 0, "hourly": {"time": ["2026-06-05T00:00"], "temperature_2m": [20.0]}},
             city_timezone="UTC",
             target_local_date=date(2026, 6, 6),
         )
 
     with pytest.raises(ValueError, match="unit"):
         extract_openmeteo_ecmwf_ifs9_localday_anchor(
-            {"hourly_units": {"temperature_2m": "rankine"}, "hourly": {"time": ["2026-06-06T00:00"], "temperature_2m": [20.0]}},
+            {"utc_offset_seconds": 0, "hourly_units": {"temperature_2m": "rankine"}, "hourly": {"time": ["2026-06-06T00:00"], "temperature_2m": [20.0]}},
             city_timezone="UTC",
             target_local_date=date(2026, 6, 6),
         )

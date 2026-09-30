@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlencode
@@ -37,13 +37,9 @@ DEFAULT_FORECAST_HOURS = 120
 # that context makes Open-Meteo start at the pinned run, not the wall-clock hour.
 CURRENT_RUN_CONTEXT_HOURS = 24
 
-# Local-day coverage span guard (2026-06-17): the daily extreme is trustworthy ONLY if the
-# hourly samples SPAN the full settlement day, so the diurnal peak/trough is inside the window.
-# A horizon-clipped partial day — e.g. a 2km model whose ~48h horizon ends at 17:00 on a lead-2
-# target, or any model that returns only a morning slice — is OMITTED (the caller is fail-soft)
-# rather than yielding a WRONG clipped extreme (a morning-only "high"). Step-resolution-agnostic:
-# a 3-hourly model spanning 00:00..21:00 passes; a model clipped at 17:00 fails. require_full_localday
-# (the live forward parser) enforces it; the de-bias/anchor callers keep the legacy >=1 behaviour.
+# Legacy span thresholds remain exported for callers with a distinct partial
+# anchor role. They do not prove a complete hourly-sampled daily quantity:
+# require_full_localday checks the exact 23/24/25-slot UTC/local-calendar axis.
 LOCALDAY_SPAN_EARLY_HOUR = 3   # earliest contributing sample must be at/under 03:00 local
 LOCALDAY_SPAN_LATE_HOUR = 20   # latest contributing sample must be at/over 20:00 local
 UTC = timezone.utc
@@ -94,14 +90,49 @@ def _temperature_to_c(value: float, unit: str) -> float:
     raise ValueError("temperature_2m unit must be C, F, or K")
 
 
-def _parse_openmeteo_time(value: str, *, city_timezone: str) -> datetime:
+def _parse_openmeteo_time(value: str, *, city_timezone: str, utc_offset_seconds: object = None) -> datetime:
     if not value:
         raise ValueError("Open-Meteo hourly time values must be non-empty")
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     zone = ZoneInfo(city_timezone)
     if parsed.tzinfo is None or parsed.utcoffset() is None:
-        return parsed.replace(tzinfo=zone)
+        # JsonWriter uses one response-time offset over its actual UTC axis.
+        # Assigning the target date's ZoneInfo offset instead changes the source
+        # instants across DST. Missing original header is not inferable truth.
+        if (isinstance(utc_offset_seconds, bool) or not isinstance(utc_offset_seconds, (int, float))
+            or not math.isfinite(float(utc_offset_seconds)) or int(utc_offset_seconds) != utc_offset_seconds
+            or abs(float(utc_offset_seconds)) >= 86400):
+            raise ValueError("naive Open-Meteo time requires original integral utc_offset_seconds")
+        return (parsed - timedelta(seconds=int(utc_offset_seconds))).replace(tzinfo=UTC).astimezone(zone)
     return parsed.astimezone(zone)
+
+
+def _localday_hourly_slots(*, phase_utc: datetime, target_local_date: date, city_timezone: str) -> tuple[datetime, ...]:
+    """Exact hourly phase intersecting the real local-calendar day."""
+    zone = ZoneInfo(city_timezone)
+    start = datetime.combine(target_local_date, datetime.min.time(), zone).astimezone(UTC)
+    end = datetime.combine(target_local_date + timedelta(days=1), datetime.min.time(), zone).astimezone(UTC)
+    first = phase_utc.astimezone(UTC)
+    if first.second or first.microsecond:
+        raise ValueError("partial local-day coverage: non-hourly API phase")
+    expected_first = start.replace(minute=first.minute, second=0, microsecond=0)
+    if expected_first < start:
+        expected_first += timedelta(hours=1)
+    expected = []
+    at = expected_first
+    while at < end:
+        expected.append(at)
+        at += timedelta(hours=1)
+    return tuple(expected)
+
+
+def _assert_complete_localday_hourly_slots(times_utc: Sequence[datetime], *, target_local_date: date, city_timezone: str) -> None:
+    if not times_utc:
+        raise ValueError("partial local-day coverage: no hourly slots")
+    expected = _localday_hourly_slots(phase_utc=times_utc[0],
+        target_local_date=target_local_date, city_timezone=city_timezone)
+    if tuple(times_utc) != expected:
+        raise ValueError("partial local-day coverage: missing, duplicate or unordered hourly slots")
 
 
 @dataclass(frozen=True)
@@ -560,11 +591,11 @@ def extract_openmeteo_ecmwf_ifs9_localday_anchor(
 ) -> OpenMeteoIfs9LocalDayAnchor:
     """Extract deterministic local-day high/low from a run-pinned Open-Meteo response.
 
-    require_full_localday: when True, REJECT a target local day whose hourly samples do not
-    SPAN the full settlement day (earliest <= LOCALDAY_SPAN_EARLY_HOUR and latest >=
-    LOCALDAY_SPAN_LATE_HOUR). A horizon-clipped partial day (a fine model past its ~48h horizon
-    on a far lead) is then omitted by the fail-soft caller instead of producing a wrong clipped
-    extreme. Step-resolution-agnostic — depends on the time SPAN, not the sample count.
+    require_full_localday: every unique, ordered, finite hourly sample on the
+    actual UTC phase inside [local midnight, next local midnight) is required.
+    DST yields 23/25 slots; fractional-offset zones retain their actual phase.
+    This is an hourly-sampled proxy, not a native continuous daily extreme.
+    False serves only callers with an independently specified partial-anchor role.
     """
 
     if min_hourly_samples <= 0:
@@ -594,7 +625,8 @@ def extract_openmeteo_ecmwf_ifs9_localday_anchor(
     for raw_time, raw_temperature in zip(times, temperatures, strict=True):
         if not isinstance(raw_time, str):
             raise ValueError("hourly.time values must be strings")
-        local_time = _parse_openmeteo_time(raw_time, city_timezone=city_timezone)
+        local_time = _parse_openmeteo_time(raw_time, city_timezone=city_timezone,
+            utc_offset_seconds=payload.get("utc_offset_seconds"))
         if local_time.date() != target_local_date:
             continue
         if raw_temperature is None:
@@ -606,19 +638,16 @@ def extract_openmeteo_ecmwf_ifs9_localday_anchor(
             continue
         contributing_local_times.append(local_time)
         contributing_valid_times_utc.append(local_time.astimezone(UTC))
+        if isinstance(raw_temperature, bool):
+            raise ValueError("temperature_2m values must be numeric, not boolean")
         contributing_temperatures_c.append(_temperature_to_c(float(raw_temperature), temperature_unit))
 
     if len(contributing_temperatures_c) < min_hourly_samples:
         raise ValueError("insufficient Open-Meteo hourly samples inside target local day")
 
     if require_full_localday:
-        _hours = [t.hour for t in contributing_local_times]
-        if not (min(_hours) <= LOCALDAY_SPAN_EARLY_HOUR and max(_hours) >= LOCALDAY_SPAN_LATE_HOUR):
-            raise ValueError(
-                f"partial local-day coverage: hours span [{min(_hours):02d}..{max(_hours):02d}] "
-                f"does not cover the full settlement day (need earliest<={LOCALDAY_SPAN_EARLY_HOUR:02d}:00 "
-                f"and latest>={LOCALDAY_SPAN_LATE_HOUR:02d}:00) — horizon-clipped, excluded"
-            )
+        _assert_complete_localday_hourly_slots(contributing_valid_times_utc,
+            target_local_date=target_local_date, city_timezone=city_timezone)
 
     return OpenMeteoIfs9LocalDayAnchor(
         city_timezone=city_timezone,

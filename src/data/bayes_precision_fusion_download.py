@@ -989,6 +989,7 @@ def _target_hourly_internal_axis_gap_reason(
     *,
     target_local_date: date,
     timezone_name: str,
+    utc_offset_seconds: object = None,
 ) -> str | None:
     """Return a retryable internal target-day non-finite value defect, if one is present."""
     if not isinstance(times, Sequence) or isinstance(times, (str, bytes)):
@@ -1003,16 +1004,13 @@ def _target_hourly_internal_axis_gap_reason(
         for index, (raw_time, raw_value) in enumerate(zip(times, values, strict=True)):
             if not isinstance(raw_time, str) or not raw_time:
                 return "hourly time axis is malformed"
-            parsed = datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
-            local_time = (
-                parsed.astimezone(ZoneInfo(timezone_name))
-                if parsed.tzinfo is not None and parsed.utcoffset() is not None
-                else parsed
-            )
+            from src.data.openmeteo_ecmwf_ifs9_anchor import _parse_openmeteo_time
+            local_time = _parse_openmeteo_time(raw_time, city_timezone=timezone_name,
+                utc_offset_seconds=utc_offset_seconds)
             if local_time.date() == target_local_date:
                 target_rows.append((index, raw_value))
-    except (TypeError, ValueError):
-        return "hourly time axis is malformed"
+    except (TypeError, ValueError) as exc:
+        return f"hourly time axis is malformed: {exc}"
     if not target_rows:
         return None
 
@@ -1044,18 +1042,50 @@ def _single_runs_payload_has_reusable_hourly_axis(
     models: Sequence[str],
     timezone_name: str,
     target_local_dates: Sequence[date],
+    run: datetime | None = None,
 ) -> bool:
     """Whether this request's target-day slices are safe to replay from raw cache."""
-    # A finite prefix is not a complete target. Do not pin an incomplete
-    # response for 24h; let the same exact run become complete on a later fetch.
-    # The parser also preserves its existing elapsed-prefix Day0 acceptance.
+    # Only raw payload reuse permits the pinned run's intrinsic left prefix.
+    # It never grants that suffix a full-day scalar or a new capture receipt.
+    # Internal holes/right-tail loss remain retryable, not pinned for 24 hours.
     for target_local_date in target_local_dates:
         parsed = _parse_batched_single_runs_payload(
             payload, list(models), target_local_date, timezone_name,
         )
-        if any(model not in parsed for model in models):
-            return False
+        for model in models:
+            if model not in parsed and not _single_runs_intrinsic_left_prefix(
+                payload, model=model, run=run, target_local_date=target_local_date,
+                timezone_name=timezone_name,
+            ):
+                return False
     return True
+
+
+def _single_runs_intrinsic_left_prefix(payload, *, model, run, target_local_date, timezone_name):
+    if run is None or run.tzinfo is None:
+        return False
+    from src.data.openmeteo_ecmwf_ifs9_anchor import (
+        _parse_openmeteo_time, _localday_hourly_slots, extract_openmeteo_ecmwf_ifs9_localday_anchor,
+    )
+    try:
+        hourly = payload["hourly"]
+        if not isinstance(hourly, Mapping) or not isinstance(hourly.get("time"), (list, tuple)) or any(not isinstance(at, str) for at in hourly["time"]):
+            return False
+        series = hourly.get(f"temperature_2m_{OPENMETEO_MODEL_IDS.get(model, model)}", hourly.get("temperature_2m"))
+        axis = tuple(_parse_openmeteo_time(at, city_timezone=timezone_name,
+            utc_offset_seconds=payload.get("utc_offset_seconds")).astimezone(UTC) for at in hourly["time"])
+        run = run.astimezone(UTC)
+        if not axis or axis[0] != run or run.astimezone(ZoneInfo(timezone_name)).date() != target_local_date:
+            return False
+        subpayload = {**payload, "hourly": {**hourly, "temperature_2m": series}}
+        anchor = extract_openmeteo_ecmwf_ifs9_localday_anchor(subpayload,
+            city_timezone=timezone_name, target_local_date=target_local_date)
+        expected = _localday_hourly_slots(phase_utc=run,
+            target_local_date=target_local_date, city_timezone=timezone_name)
+        return bool(expected and expected[0] < run and
+            anchor.contributing_valid_times_utc == tuple(at for at in expected if at >= run))
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def _single_runs_payload_cache_persistence_enabled() -> bool:
@@ -1982,6 +2012,7 @@ def _default_live_fetch_batched(
             models=models,
             timezone_name=timezone_name,
             target_local_dates=(target_local_date,),
+            run=run,
         )):
             cached_payload = None
         if cached_payload is None:
@@ -2019,6 +2050,7 @@ def _default_live_fetch_batched(
                 models=models,
                 timezone_name=timezone_name,
                 target_local_dates=(target_local_date,),
+                run=run,
             ):
                 _store_single_runs_payload_cache(
                     cache_key,
@@ -2392,6 +2424,7 @@ def _lookup_single_runs_superset_payload(
             models=models,
             timezone_name=timezone_name,
             target_local_dates=target_local_dates,
+            run=datetime.fromisoformat(run_iso).replace(tzinfo=UTC),
         ):
             continue
         if cand_forecast_hours == forecast_hours:
@@ -2487,6 +2520,7 @@ def _fetch_single_runs_hourly_payloads_batched(
             models=models,
             timezone_name=timezone_name,
             target_local_dates=target_local_dates,
+            run=run,
         )):
             entry = None
         if entry is None:
@@ -2522,6 +2556,7 @@ def _fetch_single_runs_hourly_payloads_batched(
                 models=models,
                 timezone_name=timezone_name,
                 target_local_dates=target_local_dates,
+                run=run,
             ):
                 _store_single_runs_payload_cache(
                     cache_keys[index],
@@ -2614,8 +2649,6 @@ def _parse_batched_single_runs_payload(
     Uses extract_openmeteo_ecmwf_ifs9_localday_anchor for consistent local-day windowing.
     """
     from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: PLC0415
-        LOCALDAY_SPAN_EARLY_HOUR,
-        LOCALDAY_SPAN_LATE_HOUR,
         extract_openmeteo_ecmwf_ifs9_localday_anchor,
     )
 
@@ -2651,6 +2684,7 @@ def _parse_batched_single_runs_payload(
             series,
             target_local_date=target_local_date,
             timezone_name=timezone_name,
+            utc_offset_seconds=payload.get("utc_offset_seconds"),
         )
         if axis_gap is not None:
             unmaterializable[model] = f"ValueError:{axis_gap}"
@@ -2664,42 +2698,8 @@ def _parse_batched_single_runs_payload(
                 sub_payload,
                 city_timezone=timezone_name,
                 target_local_date=target_local_date,
-                require_full_localday=False,
+                require_full_localday=True,
             )
-            local_times = anchor.contributing_local_times
-            earliest = min(local_times)
-            latest = max(local_times)
-            covers_full_day = (
-                earliest.hour <= LOCALDAY_SPAN_EARLY_HOUR
-                and latest.hour >= LOCALDAY_SPAN_LATE_HOUR
-            )
-            if not covers_full_day:
-                decision_utc = (
-                    datetime.now(UTC)
-                    if decision_at is None
-                    else _utc_datetime(decision_at)
-                )
-                decision_local = decision_utc.astimezone(ZoneInfo(timezone_name))
-                ordered_times = sorted(local_times)
-                positive_steps = tuple(
-                    right - left
-                    for left, right in zip(ordered_times, ordered_times[1:], strict=False)
-                    if right > left
-                )
-                final_slot_end = latest + (
-                    min(positive_steps) if positive_steps else timedelta(hours=1)
-                )
-                covers_remaining_day0 = (
-                    decision_local.date() == target_local_date
-                    and earliest <= decision_local
-                    and final_slot_end > decision_local
-                    and latest.hour >= LOCALDAY_SPAN_LATE_HOUR
-                )
-                if not covers_remaining_day0:
-                    raise ValueError(
-                        "partial local-day coverage is not an elapsed-prefix-only "
-                        "Day0 slice with remaining-day coverage"
-                    )
             result[model] = (float(anchor.high_c), float(anchor.low_c))
         except Exception as exc:
             reason = f"{type(exc).__name__}:{str(exc)[:180]}"
@@ -2775,7 +2775,8 @@ def _default_previous_runs_fetch_batched(
         )
         payload = _bind_physical_response(payload, model=models[0], url=PREVIOUS_RUNS_URL,
             params=params, run=capture_run, captures=captures, network_captures=network_captures)
-        result = _parse_batched_previous_runs_payload(payload, models, hourly_var)
+        result = _parse_batched_previous_runs_payload(payload, models, hourly_var,
+            target_local_date=date.fromisoformat(target_date), timezone_name=timezone_name)
         if isinstance(payload, Mapping) and payload.get(_BATCH_PHYSICAL_RESPONSE_KEY):
             result[_BATCH_PHYSICAL_RESPONSE_KEY] = {models[0]: payload[_BATCH_PHYSICAL_RESPONSE_KEY]}
         return result
@@ -2788,12 +2789,13 @@ def _parse_batched_previous_runs_payload(
     payload: object,
     models: list[str],
     hourly_var: str,
-) -> dict[str, tuple[float | None, float | None]]:
+    *, target_local_date: date, timezone_name: str,
+) -> dict[str, object]:
     """Parse a batched previous-runs response into {model: (high_c, low_c)}.
 
     Open-Meteo returns <hourly_var>_<om_id> for each model, or bare <hourly_var>
-    when a single model is requested. Extracts both high (max) and low (min) from
-    the same series.
+    when a single model is requested. The same original-response UTC axis and
+    complete local-day sample contract as single_runs authorize both extrema.
     """
     if not isinstance(payload, dict):
         return {}
@@ -2801,7 +2803,7 @@ def _parse_batched_previous_runs_payload(
     if not isinstance(hourly, dict):
         return {}
 
-    result: dict[str, tuple[float | None, float | None]] = {}
+    result: dict[str, object] = {}
     for model in models:
         om_id = OPENMETEO_PREVIOUS_RUNS_MODEL_IDS.get(
             model, OPENMETEO_MODEL_IDS.get(model, model)
@@ -2810,10 +2812,14 @@ def _parse_batched_previous_runs_payload(
         series = hourly.get(keyed_var) or (hourly.get(hourly_var) if len(models) == 1 else None)
         if series is None:
             continue
-        nums = [float(v) for v in series if isinstance(v, (int, float))]
-        if not nums:
-            continue
-        result[model] = (max(nums), min(nums))
+        subpayload = {**payload, "hourly": {**hourly, "temperature_2m": series}}
+        # A previous_runs suffix is a variable name, not permission to weaken
+        # local-day coverage or silently skip a missing/nonfinite temperature.
+        parsed = _parse_batched_single_runs_payload(subpayload, [model], target_local_date, timezone_name)
+        if model in parsed:
+            result[model] = parsed[model]
+        if _BATCH_EXACT_RUN_UNMATERIALIZABLE_KEY in parsed:
+            result.setdefault(_BATCH_EXACT_RUN_UNMATERIALIZABLE_KEY, {}).update(parsed[_BATCH_EXACT_RUN_UNMATERIALIZABLE_KEY])
     return result
 
 
