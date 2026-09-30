@@ -287,12 +287,9 @@ def test_native_old_manifest_normal_certificate_rebuilds_without_relabeling_sour
                 '"source_run_id":request.openmeteo_source_run_id}')
             exec(compile(anchor_source, raw_inputs.__file__, "exec"), anchor_inputs)
             old_producer.setattr(raw_inputs, "_hko_request_with_owned_anchor", anchor_inputs["_hko_request_with_owned_anchor"])
-            source = inspect.getsource(normal._kord_normal_prior_fixture).replace(
-                "target, cycle = date(2026, 10, 1)", "target, cycle = date(2026, 10, 2)").replace(
-                "day0_observation_state=DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS", "day0_observation_state=None")
-            inputs = dict(vars(normal))
-            exec(compile(source, normal.__file__, "exec"), inputs)
-            fixture = inputs["_kord_normal_prior_fixture"](tmp_path, monkeypatch)
+            fixture = normal._kord_normal_prior_fixture(
+                tmp_path, monkeypatch, target_date=date(2026, 10, 2),
+            )
             assert fixture.request.target_date == date(2026, 10, 2)
             assert fixture.request.source_cycle_time == datetime(2026, 10, 1, tzinfo=fixture.cut.tzinfo)
             normal._kord_public_bundles(fixture, monkeypatch, at=fixture.cut)
