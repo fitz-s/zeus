@@ -16,7 +16,9 @@ Nothing is recomputed from the fixture's own values.
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import sqlite3
+import sys
 import time
 from decimal import Decimal
 from types import SimpleNamespace
@@ -95,6 +97,76 @@ def _witness(*, yes_q=YES_Q, at=AT, family=FAMILY) -> JointOutcomeProbabilityWit
         max_age=_dt.timedelta(minutes=3),
         witness_identity=joint_probability_witness_identity(**fields),
     )
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("operator", ("v2", "v3", "resolver"))
+def test_held_sell_point_kernel_trace_replays_active_mixture_without_samples(metric, operator):
+    from src.calibration.day0_diurnal_residual import Day0DiurnalMixture
+    from src.calibration.day0_resolver_terminal_residual import Day0ResolverTerminalInput
+    from src.contracts.settlement_semantics import SettlementSemantics
+    from src.data import day0_hourly_vectors as hourly
+
+    # Controlled arithmetic stress, not a claim of native source authority.
+    rng = np.random.default_rng(20260929)
+    semantics = SettlementSemantics("hko_daily", "C", 1.0, "oracle_truncate", "12:00:00Z")
+    future = rng.uniform(28, 36, 51).tolist()
+    final = rng.uniform(29, 37, 51).tolist() if operator != "v2" else []
+    weights = rng.uniform(.1, 1, 51); weights /= weights.sum()
+    scenarios = [(float(b), float(w)) for b, w in zip(rng.uniform(29, 33, 51), weights)]
+    bounds = [(None, 19.)] + [(float(x), float(x)) for x in range(20, 40)] + [(40., None)]
+    terminal = Day0ResolverTerminalInput(
+        artifact_hash="a"*64, fit_cutoff_utc="2026-09-29T00:00:00+00:00",
+        cell=(metric, "h12_18", "hko", "gap0", "HKO"),
+        levels=tuple((f"L{i}|{metric}|hko|HKO", 1000, 7, 4.123456789+i) for i in range(4)),
+        g_levels=((3, 2, 1, 1),)*4,
+    )
+    selected_operator = {
+        "v2": hourly.DAY0_REMAINING_CARRIER_OPERATOR_V2,
+        "v3": hourly.DAY0_REMAINING_CARRIER_OPERATOR_V3,
+        "resolver": hourly.DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER,
+    }[operator]
+    if operator == "resolver": scenarios = [(31.173456789012345, 1.)]
+    params = dict(
+        future_extremes_c=future, final_extreme_centers_c=final,
+        boundary_scenarios=scenarios, metric=metric,
+        path_error_sigma_c=1.2345678901234567, instrument_sigma_c=.24567890123456789,
+        bin_bounds_c=bounds, n_point=8192, n_samples=2, identity_inputs={"unit": "C"},
+        settlement_semantics=semantics, operator=selected_operator,
+        remaining_center_bias_native=.012345678901234567,
+        resolver_terminal=terminal if operator == "resolver" else None,
+    )
+    carrier = hourly.build_day0_remaining_probability_carrier(**params)
+    immutable = {**params,**{key:tuple(tuple(item) if isinstance(item,(tuple,list)) else item for item in params[key])
+                            for key in ("future_extremes_c","final_extreme_centers_c","boundary_scenarios","bin_bounds_c")}}
+    tuple_carrier = hourly.build_day0_remaining_probability_carrier(**immutable)
+    assert tuple_carrier["content_identity"] == carrier["content_identity"]
+    np.testing.assert_array_equal(tuple_carrier["q"],carrier["q"])
+    np.testing.assert_array_equal(tuple_carrier["samples"],carrier["samples"])
+    dead = tuple(i < 3 if metric == "high" else i >= len(bounds)-3 for i in range(len(bounds)))
+    pi = np.asarray([0. if d else rng.uniform(.1, 1.) for d in dead]); pi /= pi.sum()
+    mixture = Day0DiurnalMixture(.4312345678901234, tuple(pi), dead, -1, 32.34567890123456,
+                                "2026-09-29", "controlled-active-"+"b"*64)
+    final_q = mixture.apply(carrier["q"])
+    kernel = {key: value for key, value in params.items()
+              if key not in {"n_point", "n_samples", "identity_inputs", "settlement_semantics", "resolver_terminal"}}
+    kernel.update(settlement=dict(resolution_source="hko_daily", measurement_unit="C", precision=1.,
+                                  rounding_rule="oracle_truncate", finalization_time="12:00:00Z"),
+                  resolver_terminal=terminal.to_payload() if operator == "resolver" else None,
+                  carrier_to_witness=list(range(len(bounds))), base_yes_q=carrier["q"])
+    trace = dict(schema="held_sell_point_kernel_trace_v1", status="READY", lane="HELD_MONITOR",
+                 decision_at_utc="2026-09-30T06:20:00+00:00", loaded_revision="a"*40,
+                 family="Hong Kong|2026-09-30|"+metric, kernel=kernel, diurnal=mixture.to_payload(),
+                 final_yes_q=final_q, producer_witness_identity="b"*64,
+                 probability_content_identity="c"*64, source_truth_identity="d"*64,
+                 posterior_identity_hash="e"*64, q_version="day0-v28",
+                 bindings=[[str(i), f"cond-{i}", f"yes-{i}", f"no-{i}"] for i in range(len(bounds))])
+    frozen = corpus.freeze_held_sell_point_trace(trace)
+    future[0] = -999.  # Async consumers must not close over a mutable array.
+    np.testing.assert_array_equal(corpus.replay_held_sell_point_trace(frozen), final_q)
+    np.testing.assert_array_equal(1-np.asarray(corpus.replay_held_sell_point_trace(frozen)), 1-np.asarray(final_q))
+    assert len(frozen) <= 16*1024
+    assert len(corpus.encode_payload(frozen)) <= 8*1024
 
 
 def _curve(token: str, side: str, ask: str) -> ExecutableCostCurve:
@@ -229,7 +301,7 @@ def _trade_db(tmp_path, name="trade.db") -> sqlite3.Connection:
     return conn
 
 
-def _store(conn, decision, *, epoch="epoch-1", witness=None, book=None, at=AT, flush=True):
+def _store(conn, decision, *, epoch="epoch-1", witness=None, book=None, at=AT, flush=True, point_traces=()):
     """Receipt write (committed) followed by the batch's post-commit flush."""
 
     witness = witness or _witness()
@@ -257,6 +329,7 @@ def _store(conn, decision, *, epoch="epoch-1", witness=None, book=None, at=AT, f
         probability_witnesses={FAMILY: witness},
         book_epoch=book,
         buy_candidates_enabled=True,
+        held_point_traces=point_traces,
     )
     conn.commit()
     if flush:
@@ -304,6 +377,172 @@ def _built(witness, decision, *, epoch="epoch-x", reason="R", at=AT, book=None):
         book_epoch=book or _book_epoch(), family_context_by_key={},
         fractional_kelly_multiplier=Decimal("0.25"), buy_candidates_enabled=True,
     )
+
+
+def _controlled_point_trace():
+    """Typed math/corpus seam fixture, not a native source authority claim."""
+    from src.contracts.settlement_semantics import SettlementSemantics
+    from src.data.day0_hourly_vectors import (
+        build_day0_remaining_probability_carrier, DAY0_REMAINING_CARRIER_OPERATOR_V2,
+    )
+    semantics = SettlementSemantics("hko_daily","C",1.,"oracle_truncate","12:00:00Z")
+    params = dict(future_extremes_c=(19.5,20.5,21.5),final_extreme_centers_c=(),
+        boundary_scenarios=((18.2,1.),),metric="high",path_error_sigma_c=.31,
+        instrument_sigma_c=.22,bin_bounds_c=tuple((lo,hi) for _,lo,hi in BINS),
+        remaining_center_bias_native=0.,operator=DAY0_REMAINING_CARRIER_OPERATOR_V2)
+    carrier = build_day0_remaining_probability_carrier(**params,n_point=100,n_samples=1,
+        identity_inputs={"unit":"C"},settlement_semantics=semantics)
+    witness = _witness(yes_q=carrier["q"])
+    bindings = [[b.bin_id,b.condition_id,b.yes_token_id,b.no_token_id] for b in witness.bindings]
+    trace = dict(schema="held_sell_point_kernel_trace_v1",status="READY",lane="ENTRY",
+        role="SELECTED_GLOBAL",selected_lane="ENTRY",family=witness.family_key,
+        producer_witness_identity=witness.witness_identity,consumer_witness_identity=witness.witness_identity,
+        probability_content_identity=witness.probability_content_identity,q_version=witness.q_version,
+        source_truth_identity=witness.source_truth_identity,posterior_identity_hash=witness.posterior_identity_hash,
+        bindings=bindings,consumer_bindings=bindings,final_yes_q=witness.yes_point_q.tolist(),
+        consumer_yes_q=witness.yes_point_q.tolist(),diurnal=None,
+        kernel={**params,"base_yes_q":carrier["q"],"carrier_to_witness":[0,1,2],
+                "settlement":dict(resolution_source="hko_daily",measurement_unit="C",precision=1.,
+                    rounding_rule="oracle_truncate",finalization_time="12:00:00Z")})
+    return witness,corpus.freeze_held_sell_point_trace(trace)
+
+
+def test_held_point_trace_sidecar_preserves_receipt_q_books_legs_and_old_v1(tmp_path):
+    witness,trace = _controlled_point_trace()
+    decision = _no_winner_decision(witness)
+    baseline = _trade_db(tmp_path,"baseline.db")
+    observed = _trade_db(tmp_path,"observed.db")
+    _store(baseline,decision,witness=witness)
+    _store(observed,decision,witness=witness,point_traces=(trace,),flush=False)
+    pending,_ = corpus.pending_cuts(gbr._decision_log_connection_key(observed))
+    assert pending[0]._diagnostic_charge == sys.getsizeof((trace,))+sys.getsizeof(trace)
+    assert corpus.point_trace_pending_charge() == pending[0]._diagnostic_charge
+    _flush(observed)
+    assert corpus.point_trace_pending_charge() == 0
+    base_state = _snapshot(baseline)
+    traced_state = _snapshot(observed)
+    retained = traced_state.pop("held_sell_point_traces")
+    assert traced_state == base_state
+    np.testing.assert_array_equal(corpus.replay_held_sell_point_trace(
+        corpus.freeze_held_sell_point_trace(retained[0])),witness.yes_point_q)
+    assert _only(baseline,"tier0_family_snapshot")["payload_encoding"] == corpus.SNAPSHOT_ENCODING
+    assert _only(observed,"tier0_family_snapshot")["payload_encoding"] == corpus.SNAPSHOT_POINT_TRACE_ENCODING
+    for table in ("decision_log","tier0_auction_cut"):
+        def immutable_rows(conn):
+            return [{key:row[key] for key in row.keys() if key not in {"timestamp","created_at"}}
+                    for row in conn.execute(f"SELECT * FROM {table}")]
+        assert immutable_rows(baseline) == immutable_rows(observed)
+    with pytest.raises(ValueError,match="HELD_POINT_TRACE_UNAVAILABLE"):
+        corpus.replay_held_sell_point_trace(corpus._point_trace_unavailable("LEGACY_V1_NO_TRACE"))
+
+
+@pytest.mark.parametrize("fault",("binding","codec","canonical","unavailable","overflow"))
+def test_held_point_trace_fault_drops_only_optional_diagnostic(tmp_path,monkeypatch,fault):
+    witness,trace = _controlled_point_trace()
+    decision = _no_winner_decision(witness)
+    base = _built(witness,decision)
+    if fault == "binding":
+        bad = json.loads(trace); bad["consumer_bindings"][0][2] = "different-token"
+        trace = corpus.freeze_held_sell_point_trace(bad)
+    elif fault == "unavailable":
+        trace = corpus._point_trace_unavailable("UNSUPPORTED_POINT_KERNEL_V1",json.loads(trace))
+    pending = corpus.PendingCut(lambda:(base,()),1,point_traces=(trace,))
+    corpus.queue_cut("db-one",pending)
+    if fault == "codec":
+        monkeypatch.setattr(corpus,"encode_payload",lambda _: (_ for _ in ()).throw(RuntimeError("codec")))
+        monkeypatch.setattr(corpus._LOG,"warning",lambda *_: (_ for _ in ()).throw(RuntimeError("logger")))
+    elif fault == "canonical":
+        monkeypatch.setattr(corpus,"_canonical",lambda _: (_ for _ in ()).throw(RuntimeError("json")))
+        assert json.loads(corpus.freeze_held_sell_point_trace(json.loads(trace)))["status"] == "UNAVAILABLE"
+    elif fault == "overflow":
+        monkeypatch.setattr(corpus,"_POINT_TRACE_QUEUE_LIMIT",1)
+        corpus.queue_cut("db-two",corpus.PendingCut(lambda:(base,()),2,point_traces=(trace,)))
+        assert corpus.pending_cuts("db-two")[0][0]._diagnostic_charge == 0
+    rows,_ = pending.rows()
+    assert rows.cut_row == base.cut_row
+    assert rows.q_raw_by_candidate == base.q_raw_by_candidate
+    if fault not in {"unavailable","overflow"}:
+        assert rows.families == base.families
+    assert pending._point_traces == ()
+    assert pending._diagnostic_charge <= sys.getsizeof((trace,))+sys.getsizeof(trace)
+    corpus.release_cuts("db-one",(pending,),0)
+    corpus.release_cuts("db-one",(pending,),0)
+    assert corpus.point_trace_pending_charge() == 0
+
+
+def test_held_point_trace_queue_counts_real_forms_across_databases_and_releases_cancel(monkeypatch):
+    witness,trace = _controlled_point_trace()
+    base = _built(witness,_no_winner_decision(witness))
+    first = corpus.PendingCut(lambda:(base,()),1,point_traces=(trace,))
+    charge = first._diagnostic_charge
+    monkeypatch.setattr(corpus,"_POINT_TRACE_QUEUE_LIMIT",charge)
+    corpus.queue_cut("first",first)
+    second = corpus.PendingCut(lambda:(base,()),2,point_traces=(trace,))
+    corpus.queue_cut("second",second)
+    assert second._diagnostic_charge == 0
+    assert corpus.point_trace_pending_charge() == charge
+    rows,_ = first.rows()
+    assert first._point_traces == ()
+    expected = sum(max(0,sys.getsizeof(new.snapshot[5])-sys.getsizeof(old.snapshot[5]))
+                   for new,old in zip(rows.families,base.families))
+    assert corpus.point_trace_pending_charge() == expected
+    corpus.release_cuts("first",(first,),0)
+    assert corpus.point_trace_pending_charge() == 0
+    def cancelled(): raise KeyboardInterrupt("cancelled builder")
+    cancelled_cut = corpus.PendingCut(cancelled,3,point_traces=(trace,))
+    corpus.queue_cut("cancel",cancelled_cut)
+    assert cancelled_cut._diagnostic_charge > 0
+    with pytest.raises(KeyboardInterrupt): cancelled_cut.rows()
+    assert cancelled_cut._point_traces == () and cancelled_cut._diagnostic_charge == 0
+    assert corpus.point_trace_pending_charge() == 0
+    corpus._PENDING.clear()  # Process restart loses only pending diagnostics/cuts.
+    assert corpus.point_trace_pending_charge() == 0
+
+
+@pytest.mark.parametrize("fault",("v1","nonfinite","oversized","projection","base","mixture"))
+def test_held_point_trace_replay_refuses_uncaptured_or_unavailable_kernel(fault):
+    from src.data.day0_hourly_vectors import DAY0_REMAINING_CARRIER_OPERATOR_V1
+    _,raw = _controlled_point_trace()
+    trace = json.loads(raw)
+    if fault == "v1": trace["kernel"]["operator"] = DAY0_REMAINING_CARRIER_OPERATOR_V1
+    elif fault == "nonfinite": trace["kernel"]["future_extremes_c"][0] = float("nan")
+    elif fault == "oversized": trace["kernel"]["future_extremes_c"] = [31.123456789]*2000
+    elif fault == "projection": trace["kernel"]["carrier_to_witness"] = [0,0,2]
+    elif fault == "base": trace["kernel"]["base_yes_q"][0] += .01
+    elif fault == "mixture": trace["final_yes_q"][0] += .01
+    frozen = corpus.freeze_held_sell_point_trace(trace)
+    assert len(frozen) <= 16*1024 and len(corpus.encode_payload(frozen)) <= 8*1024
+    if fault in {"v1","nonfinite","oversized"}:
+        assert json.loads(frozen)["status"] == "UNAVAILABLE"
+    with pytest.raises(ValueError,match="HELD_POINT_TRACE_"):
+        corpus.replay_held_sell_point_trace(frozen)
+
+
+def test_held_point_trace_transaction_cap_and_queue_overflow_do_not_expand_existing_limits(monkeypatch):
+    witness,trace = _controlled_point_trace()
+    base = _built(witness,_no_winner_decision(witness))
+    pending = corpus.PendingCut(lambda:(base,()),1,point_traces=(trace,))
+    observed,_ = pending.rows()
+    family = observed.families[0]
+    size = len(family.snapshot[5])
+    monkeypatch.setattr(corpus,"_POINT_TRACE_TRANSACTION_LIMIT",size+1)
+    # Stress the pure chunker with three legal encoded bodies; no source or
+    # authority claim is inferred from these repeated fixture rows.
+    wide = corpus.CutCorpus(observed.cut_row,(family,)*3,observed.q_raw_by_candidate)
+    chunks = []
+    monkeypatch.setattr(corpus,"_write_family_content",lambda _conn,rows: chunks.append(rows))
+    monkeypatch.setattr(corpus,"write_cut",lambda *_args,**_kwargs: None)
+    for unit in corpus.cut_write_units(object(),wide,decision_log_id=1,max_new_rows=32): unit()
+    assert [len(chunk) for chunk in chunks] == [1,1,1]
+    assert all(sum(len(row.snapshot[5]) for row in chunk)<=size+1 for chunk in chunks)
+    assert all(len(chunk)<=32 for chunk in chunks)
+    monkeypatch.setattr(corpus,"_QUEUE_LIMIT",1)
+    first = corpus.PendingCut(lambda:(base,()),2,point_traces=(trace,))
+    second = corpus.PendingCut(lambda:(base,()),3,point_traces=(trace,))
+    corpus.queue_cut("overflow",first); corpus.queue_cut("overflow",second)
+    assert first._diagnostic_charge == 0 and first._point_traces == ()
+    assert corpus.pending_cuts("overflow") == ((second,),1)
+    assert corpus.point_trace_pending_charge() == second._diagnostic_charge
 
 
 def test_no_winner_cut_persists_cut_row_and_every_leg_with_raw_q(tmp_path):

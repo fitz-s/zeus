@@ -41224,6 +41224,34 @@ def test_global_batch_uses_one_probability_and_book_fence_cut(monkeypatch):
     assert result.receipts[event.event_id].submitted is True
 
 
+@pytest.mark.parametrize("fault",("scope","selection","malformed","logger"))
+def test_held_point_trace_optional_runtime_fault_preserves_original_actuation(monkeypatch,fault):
+    from src.engine import tier0_auction_corpus as corpus
+    actual = global_batch_runtime.process_current_global_batch
+    scopes = []
+    def run(events,**kwargs):
+        def scope(keys):
+            scopes.append(keys)
+            if fault in {"scope","logger"}: raise RuntimeError("optional scope observer")
+        kwargs["held_point_trace_scope_observer"] = scope
+        if fault == "malformed":
+            original = kwargs["selection_telemetry_observer"]
+            def malformed(*args):
+                try: original(*args)
+                except RuntimeError: pass  # Retain original callback call-count assertion.
+                return ({"not_frozen":True},)
+            kwargs["selection_telemetry_observer"] = malformed
+        return actual(events,**kwargs)
+    if fault == "logger":
+        monkeypatch.setattr(corpus._LOG,"warning",lambda *_: (_ for _ in ()).throw(RuntimeError("handler")))
+    monkeypatch.setattr(global_batch_runtime,"process_current_global_batch",run)
+    # Existing fence/selected actuation assertions remain exact: one book,
+    # one preflight and one original actuation/token. No authority gate mocked
+    # by this additional diagnostic fault injection.
+    test_global_batch_uses_one_probability_and_book_fence_cut(monkeypatch)
+    assert scopes == [frozenset()]
+
+
 def test_global_batch_rebinds_sell_authority_to_book_probability_witness():
     from src.engine import qkernel_spine_bridge as bridge
 
@@ -48674,6 +48702,123 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric):
     conn.commit()
     return SimpleNamespace(conn=conn,db=db,city=city,request=request,result=result,cut=cut,bins=bins,
                            anchor_request=anchor_request,artifact_path=artifact_path,manifest_dir=manifest_dir)
+
+
+@pytest.mark.parametrize("metric",("high","low"))
+def test_held_point_trace_observes_normal_hko_consumer_without_changing_witness(tmp_path,monkeypatch,metric):
+    from src.engine import tier0_auction_corpus as corpus
+    from src.events.triggers.day0_extreme_updated import (
+        build_day0_extreme_updated_event, observation_instant_row_to_day0_observation,
+    )
+    from src.contracts.settlement_semantics import SettlementSemantics
+
+    fixture = _hko_clock_normal_materializer_fixture(tmp_path,monkeypatch,metric)
+    try:
+        observation = observation_instant_row_to_day0_observation(dict(fixture.conn.execute(
+            "SELECT * FROM observation_instants ORDER BY utc_timestamp DESC LIMIT 1"
+        ).fetchone()),metric=metric)
+        event = build_day0_extreme_updated_event(observation=observation,
+            settlement_semantics=SettlementSemantics.for_city(fixture.city),
+            decision_time=fixture.cut,received_at=fixture.cut.isoformat())
+        def consume(use,enabled):
+            with era._held_point_trace_capture(enabled) as capture:
+                prepared = era._prepare_current_global_probability_family(event,
+                    forecast_conn=fixture.conn,topology_conn=fixture.conn,observation_conn=fixture.conn,
+                    decision_time=fixture.cut,max_age=_dt.timedelta(seconds=30),
+                    allow_unobserved_day0_replacement=False,allow_provisional_day0_replacement=True,
+                    probability_use=use,raw_input_hwm_conn=fixture.conn)
+            return prepared,era._freeze_prepared_held_point_trace(capture,prepared,
+                lane=use.value,at=fixture.cut)
+        for use in (era._CurrentProbabilityUse.ENTRY,era._CurrentProbabilityUse.HELD_MONITOR):
+            baseline,_ = consume(use,False)
+            observed,frozen = consume(use,True)
+            assert observed.probability_witness.witness_identity == baseline.probability_witness.witness_identity
+            assert observed.probability_witness.probability_content_identity == baseline.probability_witness.probability_content_identity
+            assert observed.probability_witness.source_truth_identity == baseline.probability_witness.source_truth_identity
+            np.testing.assert_array_equal(observed.probability_witness.yes_point_q,baseline.probability_witness.yes_point_q)
+            np.testing.assert_array_equal(corpus.replay_held_sell_point_trace(frozen),baseline.probability_witness.yes_point_q)
+            trace = json.loads(frozen)
+            assert trace["producer_witness_identity"] == baseline.probability_witness.witness_identity
+            assert trace["lane"] == use.value
+            assert trace["decision_at_utc"] == fixture.cut.isoformat()
+    finally:
+        fixture.conn.close()
+
+
+@pytest.mark.parametrize("metric",("high","low"))
+@pytest.mark.parametrize("fault",("none","freeze","overflow","off"))
+def test_held_point_trace_normal_adapter_preserves_selected_entry_and_exact_token_binding(tmp_path,monkeypatch,metric,fault):
+    from src.engine import tier0_auction_corpus as corpus
+    from src.engine.global_auction_universe import _rebind_probability_witness_tokens
+    from src.events.triggers.day0_extreme_updated import (
+        build_day0_extreme_updated_event,observation_instant_row_to_day0_observation,
+    )
+    from src.contracts.settlement_semantics import SettlementSemantics
+    fixture = _hko_clock_normal_materializer_fixture(tmp_path,monkeypatch,metric)
+    trade = sqlite3.connect(":memory:")
+    callbacks = []
+    # Isolate callback composition, not source/readiness/probability authority.
+    # This node does not claim the world auction, wealth or venue submit E2E.
+    monkeypatch.setattr(global_batch_runtime,"process_current_global_batch",
+        lambda events,**kwargs: callbacks.append(kwargs) or SimpleNamespace(events=tuple(events)))
+    monkeypatch.setattr(era,"_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE",None)
+    monkeypatch.setattr(era,"_GLOBAL_PROBABILITY_FAMILY_CACHE",{})
+    monkeypatch.setattr(era,"_GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE",{})
+    try:
+        observation = observation_instant_row_to_day0_observation(dict(fixture.conn.execute(
+            "SELECT * FROM observation_instants ORDER BY utc_timestamp DESC LIMIT 1"
+        ).fetchone()),metric=metric)
+        event = build_day0_extreme_updated_event(observation=observation,
+            settlement_semantics=SettlementSemantics.for_city(fixture.city),
+            decision_time=fixture.cut,received_at=fixture.cut.isoformat())
+        adapter = era.event_bound_live_adapter_from_trade_conn(trade,
+            get_current_level=lambda:era.RiskLevel.GREEN,forecast_conn=fixture.conn,
+            topology_conn=fixture.conn,calibration_conn=fixture.conn)
+        adapter.process_global_batch((event,),fixture.cut)
+        hooks = callbacks[-1]
+        family = era.weather_family_id(city="Hong Kong",target_date="2026-09-30",metric=metric)
+        baseline = era._prepare_current_global_probability_family(event,forecast_conn=fixture.conn,
+            topology_conn=fixture.conn,observation_conn=fixture.conn,decision_time=fixture.cut,
+            max_age=FRESHNESS_WINDOW_DEFAULT,allow_partial_deterministic=True,
+            allow_provisional_day0_replacement=True)
+        if fault == "freeze":
+            monkeypatch.setattr(corpus,"freeze_held_sell_point_trace",
+                lambda _: (_ for _ in ()).throw(RuntimeError("optional encoder")))
+        elif fault == "overflow": monkeypatch.setattr(corpus,"_POINT_TRACE_QUEUE_LIMIT",1)
+        hooks["held_point_trace_scope_observer"](frozenset() if fault=="off" else frozenset({family}))
+        entry_receipt = hooks["prepare_event"](event,fixture.cut)
+        held_at = fixture.cut+_dt.timedelta(seconds=1)
+        held_receipt = hooks["prepare_held_event"](event,held_at)
+        assert entry_receipt.prepared_global_family is not None,entry_receipt.reason
+        assert held_receipt.prepared_global_family is not None,held_receipt.reason
+        entry = entry_receipt.prepared_global_family.probability_witness
+        held = held_receipt.prepared_global_family.probability_witness
+        assert entry.witness_identity == baseline.probability_witness.witness_identity
+        assert entry.q_version == baseline.probability_witness.q_version
+        assert entry_receipt.prepared_global_family.decision_id == baseline.decision_id
+        assert entry.probability_content_identity == baseline.probability_witness.probability_content_identity
+        assert entry.source_truth_identity == baseline.probability_witness.source_truth_identity
+        np.testing.assert_array_equal(entry.yes_point_q,baseline.probability_witness.yes_point_q)
+        tokens = {binding.condition_id:(binding.yes_token_id,f"no-complete-{i}")
+                  for i,binding in enumerate(entry.bindings)}
+        selected = _rebind_probability_witness_tokens(entry,token_map_by_condition=tokens,
+            required_token_ids=frozenset(token for pair in tokens.values() for token in pair))
+        frozen = hooks["selection_telemetry_observer"]({family:selected},None,{},SimpleNamespace(),held_at)
+        traces = [json.loads(raw) for raw in frozen]
+        assert {trace["lane"] for trace in traces} == ({"ENTRY","HELD_MONITOR"} if fault=="none" else set())
+        for trace,raw in zip(traces,frozen):
+            witness = entry if trace["lane"]=="ENTRY" else held
+            assert trace["producer_witness_identity"] == witness.witness_identity
+            assert trace["consumer_witness_identity"] == selected.witness_identity
+            assert trace["consumer_bindings"] == [[b.bin_id,b.condition_id,b.yes_token_id,b.no_token_id]
+                                                   for b in selected.bindings]
+            assert trace["selected_lane"] == "ENTRY"
+            assert trace["role"] == ("SELECTED_GLOBAL" if trace["lane"]=="ENTRY" else "NONSELECTED_LANE")
+            np.testing.assert_array_equal(corpus.replay_held_sell_point_trace(raw),witness.yes_point_q)
+        # A second observation cannot retain or re-label the old cut's buffers.
+        assert hooks["selection_telemetry_observer"]({family:selected},None,{},SimpleNamespace(),held_at) == ()
+    finally:
+        trade.close(); fixture.conn.close()
 
 
 @pytest.mark.parametrize("metric",("high","low"))

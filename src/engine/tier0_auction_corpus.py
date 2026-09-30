@@ -34,8 +34,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import sqlite3
+import sys
 import threading
 import uuid
 from dataclasses import dataclass
@@ -52,6 +54,7 @@ from src.solve.solver import (
 from src.state.schema.tier0_auction_corpus_schema import (
     CUT_ENCODING,
     SNAPSHOT_ENCODING,
+    SNAPSHOT_POINT_TRACE_ENCODING,
     TOPOLOGY_ENCODING,
 )
 
@@ -60,6 +63,11 @@ _ZSTD_LEVEL = 3
 # flushes fail (e.g. a full disk).
 _QUEUE_LIMIT = 512
 _FLUSH_LIMIT = 16
+_POINT_TRACE_CANONICAL_LIMIT = 16 * 1024
+_POINT_TRACE_COMPRESSED_LIMIT = 8 * 1024
+_POINT_TRACE_QUEUE_LIMIT = 8 * 1024 * 1024
+_POINT_TRACE_TRANSACTION_LIMIT = 256 * 1024
+_LOG = logging.getLogger(__name__)
 
 
 class Tier0CorpusIdentityConflict(RuntimeError):
@@ -82,6 +90,149 @@ def decode_payload(blob: bytes) -> object:
     """Inverse of ``encode_payload`` for every ``*_ENCODING`` in the schema."""
 
     return json.loads(zstandard.ZstdDecompressor().decompress(blob))
+
+
+def _point_trace_unavailable(reason: str, trace: Mapping[str, object] | None = None) -> bytes:
+    # Preserve only the consumed witness's diagnostic binding, never a partial
+    # kernel that could be mistaken for replayable point authority.
+    fields = {"lane", "decision_at_utc", "family", "final_yes_q", "bindings",
+              "producer_witness_identity", "probability_content_identity", "q_version",
+              "source_truth_identity", "posterior_identity_hash", "consumer_witness_identity",
+              "consumer_bindings", "consumer_yes_q", "consumer_captured_at_utc",
+              "selected_lane", "role"}
+    value = {key: value for key, value in (trace or {}).items() if key in fields}
+    value.update(schema="held_sell_point_kernel_trace_v1",status="UNAVAILABLE",reason=reason)
+    try:
+        raw = _canonical(value)
+        if (len(raw) <= _POINT_TRACE_CANONICAL_LIMIT
+                and len(encode_payload(raw)) <= _POINT_TRACE_COMPRESSED_LIMIT):
+            return raw
+    except Exception:  # noqa: BLE001 -- unavailable evidence is also optional
+        pass
+    # Literal fallback also survives a broken optional JSON encoder.
+    return (b'{"reason":"POINT_TRACE_UNAVAILABLE_ENCODING_FAILED",'
+            b'"schema":"held_sell_point_kernel_trace_v1","status":"UNAVAILABLE"}')
+
+
+def _point_trace_warning(message: str, *args: object) -> None:
+    try:
+        _LOG.warning(message, *args)
+    except Exception:  # noqa: BLE001 -- a logging handler cannot cost the base cut
+        pass
+
+
+def freeze_held_sell_point_trace(trace: Mapping[str, object]) -> bytes:
+    """Freeze optional point diagnostics, never an action/probability authority.
+
+    Only these low-dimensional fields may enter the corpus. The queue retains
+    the canonical bytes alone, not the caller's dictionaries or arrays. A bad
+    diagnostic is locally unavailable; it cannot fail the probability cut.
+    This ordinary diagnostic follows existing label/30-day retention. Queue
+    overflow or restart can lose it; it is not protected TotalLoss evidence.
+    """
+    fields = {
+        "schema", "status", "lane", "decision_at_utc", "probability_clock_utc",
+        "loaded_revision", "loaded_revision_status", "family", "kernel", "diurnal",
+        "diurnal_status", "final_yes_q", "producer_witness_identity", "q_version",
+        "probability_content_identity", "source_truth_identity", "posterior_identity_hash",
+        "bindings", "input_identities", "carrier_content_identity",
+        "consumer_witness_identity", "consumer_bindings", "consumer_yes_q",
+        "consumer_captured_at_utc", "selected_lane",
+        "role", "reason",
+    }
+    try:
+        if set(trace).difference(fields) or trace.get("schema") != "held_sell_point_kernel_trace_v1":
+            return _point_trace_unavailable("TRACE_FIELDS_INVALID")
+        if trace.get("status") == "UNAVAILABLE":
+            return _point_trace_unavailable(str(trace.get("reason") or "POINT_TRACE_UNAVAILABLE"),trace)
+        kernel = trace.get("kernel")
+        if not isinstance(kernel, Mapping):
+            return _point_trace_unavailable("POINT_KERNEL_MISSING",trace)
+        if set(kernel).difference({
+            "future_extremes_c", "final_extreme_centers_c", "boundary_scenarios", "metric",
+            "path_error_sigma_c", "instrument_sigma_c", "bin_bounds_c", "remaining_center_bias_native",
+            "operator", "settlement", "resolver_terminal", "carrier_to_witness", "n_point",
+            "n_samples", "base_yes_q", "support_mask",
+        }):
+            return _point_trace_unavailable("POINT_KERNEL_FIELDS_INVALID",trace)
+        from src.data.day0_hourly_vectors import (
+            DAY0_REMAINING_CARRIER_OPERATOR_V1, DAY0_REMAINING_CARRIER_OPERATOR_V2,
+            DAY0_REMAINING_CARRIER_OPERATOR_V3, DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER,
+        )
+        operator = kernel.get("operator")
+        if operator == DAY0_REMAINING_CARRIER_OPERATOR_V1:
+            return _point_trace_unavailable("UNSUPPORTED_POINT_KERNEL_V1",trace)
+        if operator not in {DAY0_REMAINING_CARRIER_OPERATOR_V2,
+                            DAY0_REMAINING_CARRIER_OPERATOR_V3,
+                            DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER}:
+            return _point_trace_unavailable("UNSUPPORTED_POINT_KERNEL",trace)
+        raw = _canonical(dict(trace))
+        if len(raw) > _POINT_TRACE_CANONICAL_LIMIT:
+            return _point_trace_unavailable("TRACE_CANONICAL_SIZE_LIMIT",trace)
+        # The temporary compressed form is discarded; only one representation
+        # is retained by the pending queue.
+        if len(encode_payload(raw)) > _POINT_TRACE_COMPRESSED_LIMIT:
+            return _point_trace_unavailable("TRACE_COMPRESSED_SIZE_LIMIT",trace)
+        return raw
+    except Exception:  # noqa: BLE001 -- diagnostic failure cannot alter q
+        return _point_trace_unavailable("TRACE_FREEZE_FAILED")
+
+
+def replay_held_sell_point_trace(raw: bytes) -> tuple[float, ...]:
+    """Replay the frozen scalar point kernel, not native paths or sample draws.
+
+    V2/V3 point integration is independent of the confidence RNG. One throwaway
+    confidence row is required by the existing builder API but is never used.
+    V1 and any uncaptured composition remain explicitly unsupported.
+    """
+    import numpy as np
+    from src.calibration.day0_diurnal_residual import Day0DiurnalMixture
+    from src.calibration.day0_resolver_terminal_residual import Day0ResolverTerminalInput
+    from src.contracts.settlement_semantics import SettlementSemantics
+    from src.data.day0_hourly_vectors import build_day0_remaining_probability_carrier
+
+    if not isinstance(raw, bytes) or len(raw) > _POINT_TRACE_CANONICAL_LIMIT:
+        raise ValueError("HELD_POINT_TRACE_SIZE_INVALID")
+    trace = json.loads(raw)
+    if trace.get("status") != "READY":
+        raise ValueError("HELD_POINT_TRACE_UNAVAILABLE:"+str(trace.get("reason") or "unknown"))
+    kernel = trace["kernel"]
+    parameters = {
+        key: kernel[key] for key in (
+            "future_extremes_c", "final_extreme_centers_c", "boundary_scenarios",
+            "metric", "path_error_sigma_c", "instrument_sigma_c", "bin_bounds_c",
+            "operator", "remaining_center_bias_native",
+        )
+    }
+    if str(parameters["operator"]).endswith("noisy_future_v1"):
+        raise ValueError("HELD_POINT_TRACE_UNSUPPORTED_V1")
+    semantics = SettlementSemantics(**kernel["settlement"])
+    parameters.update(
+        n_point=1, n_samples=1, identity_inputs={"unit": semantics.measurement_unit},
+        settlement_semantics=semantics,
+        resolver_terminal=(Day0ResolverTerminalInput.from_payload(kernel["resolver_terminal"])
+                           if kernel.get("resolver_terminal") is not None else None),
+    )
+    carrier = build_day0_remaining_probability_carrier(**parameters)
+    projection = tuple(kernel.get("carrier_to_witness") or range(len(carrier["q"])))
+    if sorted(projection) != list(range(len(carrier["q"]))):
+        raise ValueError("HELD_POINT_TRACE_PROJECTION_INVALID")
+    base = [float(carrier["q"][i]) for i in projection]
+    mask = kernel.get("support_mask")
+    if mask is not None:
+        if len(mask) != len(base) or any(type(value) is not bool for value in mask):
+            raise ValueError("HELD_POINT_TRACE_MASK_INVALID")
+        masked = np.asarray(base, dtype=float)*np.asarray(mask, dtype=bool)
+        total = float(masked.sum())
+        if total <= 0.: raise ValueError("HELD_POINT_TRACE_MASK_EMPTY")
+        base = (masked/total).tolist()
+    if not np.array_equal(base, kernel["base_yes_q"]):
+        raise ValueError("HELD_POINT_TRACE_UNCAPTURED_COMPOSITION")
+    mixture = trace.get("diurnal")
+    final = Day0DiurnalMixture.from_payload(mixture).apply(base) if mixture is not None else base
+    if not np.array_equal(final, trace["final_yes_q"]):
+        raise ValueError("HELD_POINT_TRACE_FINAL_Q_MISMATCH")
+    return tuple(float(value) for value in final)
 
 
 def _id128(*parts: bytes) -> bytes:
@@ -510,6 +661,56 @@ def build_unreceipted_cut(
 CandidateRows = tuple[tuple[object, ...], ...]
 
 
+def _attach_held_point_traces(
+    corpus: CutCorpus, traces: tuple[bytes, ...], reservation: int,
+) -> tuple[CutCorpus, int]:
+    """Attach optional evidence to corpus identities only; base cut is immutable."""
+    by_witness: dict[str, list[Mapping[str, object]]] = {}
+    for raw in traces:
+        try:
+            trace = json.loads(raw)
+            if trace.get("status") not in {"READY", "UNAVAILABLE"}:
+                _point_trace_warning("held point trace unavailable: %s", trace.get("reason"))
+                continue
+            consumer = str(trace.get("consumer_witness_identity") or "")
+            if not consumer:
+                raise ValueError("CONSUMER_WITNESS_MISSING")
+            by_witness.setdefault(consumer, []).append(trace)
+        except Exception as exc:  # noqa: BLE001 -- one diagnostic cannot hide peers
+            _point_trace_warning("held point trace dropped: malformed:%s", type(exc).__name__)
+    families = []
+    charge = 0
+    for family in corpus.families:
+        selected = by_witness.get(family.witness_identity.hex())
+        if not selected:
+            families.append(family)
+            continue
+        try:
+            topology = decode_payload(family.topology[8])
+            base = decode_payload(family.snapshot[5])
+            valid = [trace for trace in selected
+                     if trace.get("consumer_bindings") == topology["bindings"]
+                     and trace.get("consumer_yes_q") == base["raw_yes_q"]
+                     and trace.get("family") == topology["family_key"]]
+            if not valid:
+                raise ValueError("CONSUMER_BINDING_MISMATCH")
+            raw = _canonical({**base, "held_sell_point_traces": valid})
+            encoded = encode_payload(raw)
+            extra = max(0, sys.getsizeof(encoded)-sys.getsizeof(family.snapshot[5]))
+            if charge+extra > reservation or len(encoded) > _POINT_TRACE_TRANSACTION_LIMIT:
+                raise ValueError("ENCODED_DIAGNOSTIC_BUDGET")
+            state_id = _id128(b"tier0_family_state_v2_point_trace", family.topology_id, raw)
+            snapshot = (state_id, *family.snapshot[1:4], SNAPSHOT_POINT_TRACE_ENCODING,
+                        encoded, family.snapshot[6])
+            families.append(FamilyRows(family.topology_id, family.topology, state_id,
+                                       snapshot, family.witness_identity))
+            charge += extra
+        except Exception as exc:  # noqa: BLE001 -- preserve q/book/legs/full base cut
+            _point_trace_warning("held point trace dropped: %s:%s", type(exc).__name__, exc)
+            families.append(family)
+    return CutCorpus(corpus.cut_row, tuple(families), corpus.q_raw_by_candidate), charge
+
+
 class PendingCut:
     """One queued cut. Its rows are built lazily, once, off the receipt path.
 
@@ -518,30 +719,80 @@ class PendingCut:
     it, so a queued cut holds compact bytes, not witness matrices.
     """
 
-    __slots__ = ("_build", "_rows", "decision_log_id", "actuation")
+    __slots__ = ("_build", "_rows", "decision_log_id", "actuation",
+                 "_point_traces", "_diagnostic_charge")
 
     def __init__(
         self,
         build: Callable[[], tuple[CutCorpus, CandidateRows]],
         decision_log_id: int | None,
+        *, point_traces: Sequence[bytes] = (),
     ) -> None:
         self._build: Callable[[], tuple[CutCorpus, CandidateRows]] | None = build
         self._rows: tuple[CutCorpus, CandidateRows] | None = None
         self.decision_log_id = decision_log_id
         # (outcome, reason) of a SELECTED cut's winner, set before the flush.
         self.actuation: tuple[str, str | None] | None = None
+        retained: list[bytes] = []
+        total = 0
+        for raw in point_traces:
+            if not isinstance(raw, bytes) or len(raw) > _POINT_TRACE_CANONICAL_LIMIT:
+                _point_trace_warning("held point trace dropped: invalid frozen body")
+                continue
+            total += sys.getsizeof(raw)
+            if total > _POINT_TRACE_QUEUE_LIMIT:
+                _point_trace_warning("held point traces dropped: incoming batch budget")
+                retained.clear()
+                break
+            retained.append(raw)
+        self._point_traces = tuple(retained)
+        self._diagnostic_charge = (
+            sys.getsizeof(self._point_traces)+sum(sys.getsizeof(raw) for raw in self._point_traces)
+            if self._point_traces else 0
+        )
+
+    def drop_point_traces(self, reason: str) -> None:
+        count = len(self._point_traces)
+        self._point_traces = ()
+        self._diagnostic_charge = 0
+        if count:
+            _point_trace_warning("held point traces dropped: reason=%s count=%d", reason, count)
 
     def rows(self) -> tuple[CutCorpus, CandidateRows]:
         if self._rows is None:
             build, self._build = self._build, None
             assert build is not None
-            self._rows = build()
+            try:
+                corpus, candidates = build()
+                if self._point_traces:
+                    try:
+                        corpus, charge = _attach_held_point_traces(
+                            corpus, self._point_traces, self._diagnostic_charge,
+                        )
+                        self._diagnostic_charge = charge
+                    except Exception as exc:  # noqa: BLE001 -- retain the entire base cut
+                        self._diagnostic_charge = 0
+                        _point_trace_warning("held point trace attach failed: %s", type(exc).__name__)
+                self._rows = corpus, candidates
+            except BaseException:
+                self._diagnostic_charge = 0
+                raise
+            finally:
+                # Pending canonical bytes are replaced by the actual encoded
+                # snapshot increment, never retained alongside a second copy.
+                self._point_traces = ()
         return self._rows
 
 
 _PENDING_LOCK = threading.Lock()
 _PENDING: dict[str, list[PendingCut]] = {}
 _OVERFLOW: dict[str, int] = {}
+
+
+def point_trace_pending_charge() -> int:
+    """Actual optional bytes/container increment retained by all DB queues."""
+    with _PENDING_LOCK:
+        return sum(cut._diagnostic_charge for queue in _PENDING.values() for cut in queue)
 
 
 def queue_cut(db_key: str, cut: PendingCut) -> None:
@@ -557,8 +808,15 @@ def queue_cut(db_key: str, cut: PendingCut) -> None:
     with _PENDING_LOCK:
         queue = _PENDING.setdefault(db_key, [])
         if len(queue) >= _QUEUE_LIMIT:
-            del queue[0]
+            dropped = queue.pop(0)
+            dropped.drop_point_traces("CORPUS_QUEUE_OVERFLOW")
             _OVERFLOW[db_key] = _OVERFLOW.get(db_key, 0) + 1
+        # Charge the objects actually retained, not their compressed estimate.
+        # No day quota: a successful flush immediately restores capacity, and
+        # a budget miss drops only this optional diagnostic, never its cut.
+        if (sum(item._diagnostic_charge for pending in _PENDING.values() for item in pending)
+                +cut._diagnostic_charge > _POINT_TRACE_QUEUE_LIMIT):
+            cut.drop_point_traces("DIAGNOSTIC_QUEUE_BUDGET")
         queue.append(cut)
 
 
@@ -601,6 +859,9 @@ def release_cuts(db_key: str, written: Sequence[PendingCut], overflow: int) -> N
         queue = _PENDING.get(db_key)
         if queue is not None:
             queue[:] = [cut for cut in queue if id(cut) not in ids]
+        for cut in written:
+            cut._diagnostic_charge = 0
+            cut._point_traces = ()
         remaining = _OVERFLOW.get(db_key, 0) - overflow
         if remaining > 0:
             _OVERFLOW[db_key] = remaining
@@ -682,9 +943,22 @@ def cut_write_units(
 
     families = corpus.families
     units: list[Callable[[], None]] = []
-    for offset in range(0, len(families), max_new_rows):
-        chunk = families[offset : offset + max_new_rows]
-        units.append(lambda chunk=chunk: _write_family_content(conn, chunk))
+    chunk: list[FamilyRows] = []
+    diagnostic_bytes = 0
+    for family in families:
+        # Counting the entire V2 BLOB is conservative: it bounds the added
+        # diagnostic bytes without expanding the existing row/time limits.
+        extra = len(family.snapshot[5]) if family.snapshot[4] == SNAPSHOT_POINT_TRACE_ENCODING else 0
+        if chunk and (len(chunk) >= max_new_rows
+                      or diagnostic_bytes+extra > _POINT_TRACE_TRANSACTION_LIMIT):
+            frozen_chunk = tuple(chunk)
+            units.append(lambda chunk=frozen_chunk: _write_family_content(conn, chunk))
+            chunk, diagnostic_bytes = [], 0
+        chunk.append(family)
+        diagnostic_bytes += extra
+    if chunk:
+        frozen_chunk = tuple(chunk)
+        units.append(lambda chunk=frozen_chunk: _write_family_content(conn, chunk))
     units.append(
         lambda: write_cut(
             conn, corpus, decision_log_id=decision_log_id, actuation=actuation

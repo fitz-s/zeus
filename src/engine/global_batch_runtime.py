@@ -4314,6 +4314,7 @@ def _store_global_auction_receipt(
     probability_witnesses: Mapping[str, object] | None = None,
     book_epoch: object | None = None,
     buy_candidates_enabled: bool | None = None,
+    held_point_traces: tuple[bytes, ...] = (),
 ) -> int | None:
     """Persist one complete auction comparison before any venue side effect.
 
@@ -5015,7 +5016,10 @@ def _store_global_auction_receipt(
             )
 
         try:
-            corpus.queue_cut(connection_key, corpus.PendingCut(build, row_id))
+            corpus.queue_cut(
+                connection_key,
+                corpus.PendingCut(build, row_id, point_traces=held_point_traces),
+            )
         except Exception as exc:  # noqa: BLE001 - evidence never costs the receipt
             _LOG.error(
                 "tier0 learning corpus cut not queued: %s: %s",
@@ -8308,9 +8312,10 @@ def process_current_global_batch(
     restrict_to_family_keys: frozenset[str] | None = None,
     selection_telemetry_observer: Callable[
         [Mapping[str, object], CurrentGlobalBookEpoch | None, Mapping[str, object], object, datetime],
-        None,
+        tuple[bytes, ...] | None,
     ]
     | None = None,
+    held_point_trace_scope_observer: Callable[[frozenset[str]], None] | None = None,
     _probability_supersession_reauction_count: int = 0,
 ) -> GlobalBatchSubmitResult:
     """Select once from every family holding a current q certificate."""
@@ -9396,6 +9401,17 @@ def process_current_global_batch(
         held_obligation_family_keys = {
             obligation.family_key for obligation in holding_obligations
         }
+        # Optional diagnostic scope is the actual consumed holding set, not
+        # the full BUY universe. Failure cannot invalidate authority or q.
+        if held_point_trace_scope_observer is not None:
+            try:
+                held_point_trace_scope_observer(
+                    frozenset(held_obligation_family_keys)
+                )
+            except Exception as exc:  # noqa: BLE001 -- diagnostic only
+                from src.engine.tier0_auction_corpus import _point_trace_warning
+
+                _point_trace_warning("held point trace scope dropped: %s", type(exc).__name__)
         missing_required_obligation_keys = required_held_family_keys.difference(
             held_obligation_family_keys
         )
@@ -10148,20 +10164,35 @@ def process_current_global_batch(
                     raise RuntimeError(
                         "GLOBAL_CAPITAL_PROOF_COUNTERFACTUAL_VENUE_SIDE_EFFECT"
                     )
+            held_point_traces: tuple[bytes, ...] = ()
             if selection_telemetry_observer is not None:
                 try:
-                    selection_telemetry_observer(
+                    observed_traces = selection_telemetry_observer(
                         attempt_probabilities,
                         attempt_book_epoch,
                         prepared_for_selection,
                         selected,
                         selection_at,
                     )
-                except Exception:  # noqa: BLE001 -- telemetry cannot alter selection
-                    _LOG.warning(
-                        "global selection telemetry projection failed",
-                        exc_info=True,
+                    if observed_traces is not None:
+                        from src.engine import tier0_auction_corpus as corpus
+
+                        if (not isinstance(observed_traces, tuple)
+                                or any(not isinstance(raw, bytes)
+                                       or len(raw) > corpus._POINT_TRACE_CANONICAL_LIMIT
+                                       for raw in observed_traces)
+                                or sum(len(raw) for raw in observed_traces)
+                                > corpus._POINT_TRACE_QUEUE_LIMIT):
+                            raise ValueError("OPTIONAL_POINT_TRACE_ENCODING_INVALID")
+                        held_point_traces = observed_traces
+                except Exception as exc:  # noqa: BLE001 -- telemetry cannot alter selection
+                    from src.engine.tier0_auction_corpus import _point_trace_warning
+
+                    _point_trace_warning(
+                        "global selection telemetry dropped: %s", type(exc).__name__,
                     )
+                finally:
+                    observed_traces = None
             # An unevaluated result (every whole-scope abort before candidate
             # materialization, plus the cancelled-mid-solve case constructed
             # directly above rather than through ``_no_trade``) must never
@@ -10467,6 +10498,7 @@ def process_current_global_batch(
                 probability_witnesses=attempt_probabilities,
                 book_epoch=attempt_book_epoch,
                 buy_candidates_enabled=buy_candidates_enabled,
+                held_point_traces=held_point_traces,
                     persist_artifact=_global_auction_artifact_persister(
                         trade_conn,
                         work_context=work_context,
@@ -10490,6 +10522,9 @@ def process_current_global_batch(
             except _GlobalArtifactCommitRevoked as exc:
                 return reject(exc.reason)
             finally:
+                # The post-commit queue is now the sole canonical owner. A
+                # later flush must not retain this local beside its V2 BLOB.
+                held_point_traces = ()
                 _receipt_stages_end()
             last_selection_receipt_row_id = receipt_row_id
             cut_receipt_written = True
@@ -11192,6 +11227,8 @@ def process_current_global_batch(
                         final_actuation_cancelled=final_actuation_cancelled,
                         dependency_scope_observer=dependency_scope_observer,
                         cut_scope_observer=cut_scope_observer,
+                        held_point_trace_scope_observer=held_point_trace_scope_observer,
+                        selection_telemetry_observer=selection_telemetry_observer,
                         work_context=work_context,
                         required_held_family_keys=required_held_family_keys,
                         restrict_to_family_keys=restrict_to_family_keys,

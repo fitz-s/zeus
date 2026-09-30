@@ -39,6 +39,7 @@ import sqlite3
 
 CUT_ENCODING = "zstd3+canonical-json-tier0-cut-v1"
 SNAPSHOT_ENCODING = "zstd3+canonical-json-tier0-family-snapshot-v1"
+SNAPSHOT_POINT_TRACE_ENCODING = "zstd3+canonical-json-tier0-family-snapshot-v2-point-trace"
 TOPOLOGY_ENCODING = "zstd3+canonical-json-tier0-family-topology-v1"
 LABEL_ENCODING = "zstd3+canonical-json-tier0-family-label-v1"
 

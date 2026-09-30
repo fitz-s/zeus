@@ -161,6 +161,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import sys
 import math
 import re
 import os
@@ -169,6 +170,8 @@ import threading
 import time as _time
 import zlib
 from copy import deepcopy
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace as dataclass_replace
 from datetime import date, datetime, time, timedelta, timezone
 from enum import StrEnum
@@ -179,6 +182,146 @@ from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Callable, Protocol, TypeVar, get_args
 
 import numpy as np
+
+
+_HELD_POINT_TRACE_CAPTURE: ContextVar[dict[str, bytes] | None] = ContextVar(
+    "held_sell_point_trace_capture", default=None,
+)
+
+
+@contextmanager
+def _held_point_trace_capture(enabled: bool):
+    capture = {} if enabled else None
+    token = _HELD_POINT_TRACE_CAPTURE.set(capture)
+    try:
+        yield capture
+    finally:
+        _HELD_POINT_TRACE_CAPTURE.reset(token)
+
+
+def _capture_held_point_kernel(inputs, carrier, *, projection=None) -> None:
+    capture = _HELD_POINT_TRACE_CAPTURE.get()
+    if capture is None:
+        return
+    try:
+        semantics = inputs["settlement_semantics"]
+        kernel = {key: inputs[key] for key in (
+            "future_extremes_c", "final_extreme_centers_c", "boundary_scenarios",
+            "metric", "path_error_sigma_c", "instrument_sigma_c", "bin_bounds_c",
+            "remaining_center_bias_native",
+        )}
+        terminal = inputs.get("resolver_terminal")
+        kernel.update(
+            operator=carrier["operator"],
+            settlement={key: getattr(semantics, key) for key in (
+                "resolution_source", "measurement_unit", "precision", "rounding_rule",
+                "finalization_time",
+            )},
+            resolver_terminal=terminal.to_payload() if terminal is not None else None,
+            carrier_to_witness=list(projection) if projection is not None else list(range(len(carrier["q"]))),
+            n_point=inputs["n_point"], n_samples=inputs["n_samples"],
+        )
+        raw = json.dumps(kernel, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+        if len(raw) > 16*1024:
+            capture["unavailable"] = b"POINT_KERNEL_SIZE_LIMIT"
+            return
+        capture["kernel"] = raw
+        capture["carrier_content_identity"] = str(carrier["content_identity"]).encode()
+        identity = inputs.get("identity_inputs") or {}
+        capture["input_identities"] = json.dumps(
+            {key: identity[key] for key in (
+                "city", "unit", "station_id", "preliminary_survival_identity", "current_path_state",
+            ) if key in identity},
+            sort_keys=True, separators=(",", ":"), allow_nan=False,
+        ).encode()
+    except Exception:  # noqa: BLE001 -- diagnostic cannot alter a consumed carrier
+        capture["unavailable"] = b"POINT_KERNEL_CAPTURE_FAILED"
+
+
+def _capture_held_point_base(vector, mixture, *, payload=None) -> None:
+    capture = _HELD_POINT_TRACE_CAPTURE.get()
+    if capture is None:
+        return
+    try:
+        capture["base_yes_q"] = json.dumps(
+            np.asarray(vector, dtype=float).tolist(), allow_nan=False, separators=(",", ":"),
+        ).encode()
+        capture["diurnal"] = json.dumps(
+            mixture.to_payload() if mixture is not None else None,
+            sort_keys=True, allow_nan=False, separators=(",", ":"),
+        ).encode()
+        if isinstance(payload, Mapping):
+            clocks = {key: payload[key] for key in (
+                "observation_time", "observation_available_at", "raw_payload_sha256",
+                "_edli_day0_current_temperature_native", "_edli_day0_current_temperature_source",
+                "_edli_day0_current_temperature_observed_at_utc", "posterior_id",
+                "_edli_day0_remaining_provider_source_cycle_time_utc",
+            ) if key in payload and not isinstance(payload[key], (Mapping, list, tuple))}
+            binding = payload.get("_edli_global_day0_binding")
+            if isinstance(binding, Mapping):
+                clocks.update({key: binding[key] for key in (
+                    "posterior_id", "probability_base_identity", "configured_station_id",
+                    "observation_time", "observation_available_at", "settlement_source",
+                ) if key in binding and not isinstance(binding[key], (Mapping, list, tuple))})
+            capture["source_clocks"] = json.dumps(
+                clocks, sort_keys=True, separators=(",", ":"), allow_nan=False,
+            ).encode()
+    except Exception:  # noqa: BLE001 -- observation only
+        capture["unavailable"] = b"POINT_MIXTURE_CAPTURE_FAILED"
+
+
+def _freeze_prepared_held_point_trace(capture, prepared, *, lane: str, at: datetime) -> bytes | None:
+    if capture is None or prepared is None:
+        return None
+    from src.engine import tier0_auction_corpus as corpus
+    try:
+        witness = prepared.probability_witness
+        binding = {
+            "lane": lane, "family": str(witness.family_key),
+            "decision_at_utc": at.astimezone(UTC).isoformat(),
+            "final_yes_q": witness.yes_point_q.tolist(),
+            "producer_witness_identity": str(witness.witness_identity),
+            "probability_content_identity": str(witness.probability_content_identity),
+            "source_truth_identity": str(witness.source_truth_identity),
+            "posterior_identity_hash": str(witness.posterior_identity_hash),
+            "q_version": str(witness.q_version),
+            "bindings": [[b.bin_id,b.condition_id,b.yes_token_id,b.no_token_id] for b in witness.bindings],
+        }
+        if "kernel" not in capture or "unavailable" in capture:
+            return corpus._point_trace_unavailable(
+                capture.get("unavailable", b"POINT_KERNEL_NOT_CAPTURED").decode(),binding,
+            )
+        kernel = json.loads(capture["kernel"])
+        kernel["base_yes_q"] = json.loads(capture.get("base_yes_q", b"[]"))
+        if "support_mask" in capture:
+            kernel["support_mask"] = json.loads(capture["support_mask"])
+        boot = next((getattr(sys.modules.get(name), "_BOOT_STATE", None)
+                     for name in ("__main__", "src.main")
+                     if isinstance(getattr(sys.modules.get(name), "_BOOT_STATE", None), Mapping)), {})
+        revision = str(boot.get("sha") or "")
+        if len(revision) != 40 or any(c not in "0123456789abcdef" for c in revision):
+            revision = None
+        return corpus.freeze_held_sell_point_trace({
+            **binding,
+            "schema": "held_sell_point_kernel_trace_v1", "status": "READY", "lane": lane,
+            "family": str(witness.family_key), "decision_at_utc": at.astimezone(UTC).isoformat(),
+            "probability_clock_utc": _day0_probability_clock(at).isoformat(),
+            "loaded_revision": revision,
+            "loaded_revision_status": "BOOT_IDENTITY" if revision else "UNAVAILABLE_NOT_BOOT_CONTEXT",
+            "kernel": kernel, "diurnal": json.loads(capture.get("diurnal", b"null")),
+            "final_yes_q": witness.yes_point_q.tolist(),
+            "producer_witness_identity": str(witness.witness_identity),
+            "probability_content_identity": str(witness.probability_content_identity),
+            "source_truth_identity": str(witness.source_truth_identity),
+            "posterior_identity_hash": str(witness.posterior_identity_hash),
+            "q_version": str(witness.q_version),
+            "carrier_content_identity": capture["carrier_content_identity"].decode(),
+            "bindings": [[b.bin_id, b.condition_id, b.yes_token_id, b.no_token_id] for b in witness.bindings],
+            "input_identities": {**json.loads(capture.get("input_identities", b"{}")),
+                                 **json.loads(capture.get("source_clocks", b"{}"))},
+        })
+    except Exception:  # noqa: BLE001 -- never a probability/action failure
+        return corpus._point_trace_unavailable("PREPARED_POINT_TRACE_FREEZE_FAILED")
 
 
 _GLOBAL_BOOK_PROJECTION_HINT_BUDGET_SECONDS = 0.25
@@ -9263,6 +9406,110 @@ def event_bound_live_adapter_from_trade_conn(
             str, dict[str, tuple[object, object, str | None, object]]
         ] = {}
         emitted_global_selection_telemetry: set[tuple[str, str]] = set()
+        held_point_trace_scope: frozenset[str] = frozenset()
+        held_point_trace_lanes: dict[str, dict[str, tuple[bytes, object]]] = {}
+
+        def _held_trace_retained_charge():
+            return sys.getsizeof(held_point_trace_lanes)+sum(
+                sys.getsizeof(key)+sys.getsizeof(lanes)+sum(
+                    sys.getsizeof(lane)+sys.getsizeof(item)+sys.getsizeof(item[0])
+                    for lane,item in lanes.items()
+                ) for key,lanes in held_point_trace_lanes.items()
+            ) if held_point_trace_lanes else 0
+
+        def _observe_held_point_trace_scope(families):
+            nonlocal held_point_trace_scope
+            # Runtime supplies its already-consumed holding obligations. This
+            # observer is diagnostic-only: no reads, probability or action law.
+            held_point_trace_lanes.clear()
+            held_point_trace_scope = frozenset(str(value) for value in families)
+
+        def _record_held_point_trace(family_key, lane, raw, prepared):
+            from src.engine import tier0_auction_corpus as corpus
+
+            try:
+                if raw is None or prepared is None:
+                    return
+                held_point_trace_lanes.setdefault(family_key, {})[lane] = (
+                    raw, prepared.probability_witness,
+                )
+                if (_held_trace_retained_charge()+corpus.point_trace_pending_charge()
+                        > corpus._POINT_TRACE_QUEUE_LIMIT):
+                    del held_point_trace_lanes[family_key][lane]
+                    if not held_point_trace_lanes[family_key]:
+                        del held_point_trace_lanes[family_key]
+                    corpus._point_trace_warning("held point trace dropped: collector budget")
+            except Exception as exc:  # noqa: BLE001 -- collector is not authority
+                held_point_trace_lanes.get(family_key,{}).pop(lane,None)
+                corpus._point_trace_warning("held point trace collector failed: %s",type(exc).__name__)
+
+        def _held_point_traces_for_cut(probabilities, selection_at):
+            from src.engine import tier0_auction_corpus as corpus
+            from src.engine.global_auction_universe import _rebind_probability_witness_tokens
+
+            frozen = []
+            for family_key, consumer in probabilities.items():
+                lanes = held_point_trace_lanes.get(family_key) or {}
+                selected_lane = None
+                for lane, (_raw, original) in lanes.items():
+                    try:
+                        if original.witness_identity == consumer.witness_identity:
+                            selected_lane = lane
+                            break
+                        tokens = {b.condition_id: (b.yes_token_id, b.no_token_id) for b in consumer.bindings}
+                        rebound = _rebind_probability_witness_tokens(
+                            original, token_map_by_condition=tokens,
+                            required_token_ids=frozenset(t for pair in tokens.values() for t in pair if t),
+                        )
+                        if rebound.witness_identity == consumer.witness_identity:
+                            selected_lane = lane
+                            break
+                    except (AttributeError, TypeError, ValueError):
+                        continue
+                if lanes and selected_lane is None:
+                    corpus._point_trace_warning("held point trace unavailable: selected witness has no captured lane")
+                for lane, (raw, original) in tuple(lanes.items()):
+                    try:
+                        trace = json.loads(raw)
+                        if trace.get("status") == "UNAVAILABLE":
+                            corpus._point_trace_warning("held point trace unavailable: %s", trace.get("reason"))
+                        elif trace.get("status") != "READY":
+                            raise ValueError("POINT_TRACE_STATUS_INVALID")
+                        bindings = [[b.bin_id, b.condition_id, b.yes_token_id, b.no_token_id]
+                                    for b in consumer.bindings]
+                        if ([row[:2] for row in trace["bindings"]] != [row[:2] for row in bindings]
+                                or trace["probability_content_identity"] != str(original.probability_content_identity)
+                                or trace["source_truth_identity"] != str(original.source_truth_identity)
+                                or trace["posterior_identity_hash"] != str(original.posterior_identity_hash)
+                                or trace["q_version"] != str(original.q_version)
+                                or trace["final_yes_q"] != original.yes_point_q.tolist()):
+                            raise ValueError("PRODUCER_TRACE_BINDING_MISMATCH")
+                        role = "SELECTED_GLOBAL" if lane == selected_lane else "NONSELECTED_LANE"
+                        # Never substitute a held kernel for an ENTRY-selected
+                        # witness. The auxiliary lane retains its own inputs/q.
+                        if role == "SELECTED_GLOBAL" and trace["final_yes_q"] != consumer.yes_point_q.tolist():
+                            raise ValueError("SELECTED_TRACE_POINT_MISMATCH")
+                        trace.update(
+                            role=role, selected_lane=selected_lane,
+                            consumer_witness_identity=str(consumer.witness_identity),
+                            consumer_bindings=bindings, consumer_yes_q=consumer.yes_point_q.tolist(),
+                            consumer_captured_at_utc=selection_at.astimezone(UTC).isoformat(),
+                        )
+                        encoded = corpus.freeze_held_sell_point_trace(trace)
+                        # Replace the producer's canonical bytes with the
+                        # consumer-bound bytes, never retain both batches.
+                        del lanes[lane]
+                        retained = sys.getsizeof(frozen)+sum(sys.getsizeof(raw) for raw in frozen)
+                        if (_held_trace_retained_charge()+retained+sys.getsizeof(encoded)
+                                +corpus.point_trace_pending_charge()>corpus._POINT_TRACE_QUEUE_LIMIT):
+                            corpus._point_trace_warning("held point trace dropped: selection budget")
+                        else:
+                            frozen.append(encoded)
+                    except Exception as exc:  # noqa: BLE001 -- diagnostic only
+                        corpus._point_trace_warning("held point trace dropped at selection: %s", type(exc).__name__)
+                held_point_trace_lanes.pop(family_key,None)
+            held_point_trace_lanes.clear()
+            return tuple(frozen)
 
         def _record_global_selection_context(
             event: OpportunityEvent,
@@ -9346,7 +9593,7 @@ def event_bound_live_adapter_from_trade_conn(
             prepared_by_event,
             selected,
             selection_at,
-        ) -> None:
+        ) -> tuple[bytes, ...]:
             from src.events.family_book_manifest import (
                 project_global_selection_observation_envelope,
             )
@@ -9395,6 +9642,7 @@ def event_bound_live_adapter_from_trade_conn(
                         "global selection observation capture failed",
                         exc_info=True,
                     )
+            return _held_point_traces_for_cut(_probabilities, selection_at)
 
         def _prepare_current_scope_event(event, at):
             payload = _payload(event)
@@ -9479,6 +9727,10 @@ def event_bound_live_adapter_from_trade_conn(
                         _record_global_selection_context(
                             event, *cached_context, cached
                         )
+                    if family_key in held_point_trace_scope:
+                        _record_held_point_trace(family_key, "ENTRY", _freeze_prepared_held_point_trace(
+                            {"unavailable": b"CACHED_POINT_KERNEL_NOT_RETAINED"},cached,lane="ENTRY",at=at,
+                        ), cached)
                     return _prepared_global_event_receipt(event, cached)
                 cached_ineligible = (
                     _probe_global_probability_family_ineligible_cache(
@@ -9494,13 +9746,14 @@ def event_bound_live_adapter_from_trade_conn(
                     return cached_ineligible
                 probability_cache_stats["miss"] += 1
             cache_metadata: dict[str, str] = {}
-            receipt = _prepare_global_event(
-                event,
-                at,
-                cache_metadata_out=cache_metadata,
-                telemetry_context_sink=_telemetry_context_sink(event),
-            )
+            with _held_point_trace_capture(family_key in held_point_trace_scope) as capture:
+                receipt = _prepare_global_event(
+                    event, at, cache_metadata_out=cache_metadata,
+                    telemetry_context_sink=_telemetry_context_sink(event),
+                )
             prepared = receipt.prepared_global_family
+            point_trace = _freeze_prepared_held_point_trace(capture, prepared, lane="ENTRY", at=at)
+            _record_held_point_trace(family_key, "ENTRY", point_trace, prepared)
             if prepared is not None:
                 _store_global_probability_family_cache(
                     probability_cache_namespace,
@@ -9608,22 +9861,24 @@ def event_bound_live_adapter_from_trade_conn(
                             _record_global_selection_context(
                                 event, *cached_context, cached
                             )
+                        if family_key in held_point_trace_scope:
+                            _record_held_point_trace(family_key, "HELD_MONITOR", _freeze_prepared_held_point_trace(
+                                {"unavailable": b"CACHED_POINT_KERNEL_NOT_RETAINED"},cached,lane="HELD_MONITOR",at=at,
+                            ), cached)
                         return _prepared_global_event_receipt(event, cached)
                     probability_cache_stats["miss"] += 1
             try:
-                prepared = _prepare_current_global_probability_family(
-                    held_event,
-                    forecast_conn=forecast_conn,
-                    topology_conn=topology_conn,
-                    observation_conn=calibration_conn,
-                    decision_time=at,
-                    max_age=FRESHNESS_WINDOW_DEFAULT,
-                    allow_unobserved_day0_replacement=held_unobserved_prefix,
-                    allow_provisional_day0_replacement=not held_is_forecast_lane,
-                    probability_use=_CurrentProbabilityUse.HELD_MONITOR,
-                    cache_metadata_out=cache_metadata,
-                    telemetry_context_sink=_telemetry_context_sink(event),
-                )
+                with _held_point_trace_capture(family_key in held_point_trace_scope) as capture:
+                    prepared = _prepare_current_global_probability_family(
+                        held_event, forecast_conn=forecast_conn, topology_conn=topology_conn,
+                        observation_conn=calibration_conn, decision_time=at,
+                        max_age=FRESHNESS_WINDOW_DEFAULT,
+                        allow_unobserved_day0_replacement=held_unobserved_prefix,
+                        allow_provisional_day0_replacement=not held_is_forecast_lane,
+                        probability_use=_CurrentProbabilityUse.HELD_MONITOR,
+                        cache_metadata_out=cache_metadata,
+                        telemetry_context_sink=_telemetry_context_sink(event),
+                    )
             except Exception as exc:  # noqa: BLE001 - held authority remains fail closed
                 failure_type = family_fault_tag(exc) or type(exc).__name__
                 # T-day0inelig.md §6 D1: mirrors the ENTRY-lane prepare
@@ -9650,6 +9905,8 @@ def event_bound_live_adapter_from_trade_conn(
                         else None
                     ),
                 )
+            point_trace = _freeze_prepared_held_point_trace(capture, prepared, lane="HELD_MONITOR", at=at)
+            _record_held_point_trace(family_key, "HELD_MONITOR", point_trace, prepared)
             if is_forecast_lane or held_is_day0:
                 _store_global_probability_family_cache(
                     probability_cache_namespace,
@@ -12185,6 +12442,7 @@ def event_bound_live_adapter_from_trade_conn(
                 selection_telemetry_observer=(
                     _capture_global_selection_observations
                 ),
+                held_point_trace_scope_observer=_observe_held_point_trace_scope,
                 # Ordinary proof-only entry evaluation remains global. An exact
                 # held-SELL completion instead owns only the requested actions:
                 # portfolio wealth still carries every holding, while unrelated
@@ -45727,6 +45985,7 @@ def _market_analysis_from_event_snapshot(
                 unit=unit,
                 probability_time=day0_probability_time,
             )
+            _capture_held_point_base(p_cal, _day0_mixture, payload=payload)
             if _day0_mixture is not None:
                 _day0_unmixed_q = tuple(float(value) for value in p_cal)
                 p_raw = np.asarray(_day0_mixture.apply(p_raw), dtype=float)
@@ -46970,16 +47229,16 @@ def _day0_remaining_p_raw_vector(
                 payload.get("_edli_day0_resolver_terminal_input")
             )
             boundary_scenarios = ((float(probability_boundary), 1.0),)
-        carrier = build_day0_remaining_probability_carrier(
-            future_extremes_c=future_native,
+        carrier_inputs = dict(
+            future_extremes_c=tuple(future_native),
             final_extreme_centers_c=tuple(
                 value * native_scale + native_offset for value in final_c
             ),
-            boundary_scenarios=boundary_scenarios,
+            boundary_scenarios=tuple(tuple(pair) for pair in boundary_scenarios),
             metric=metric,
             path_error_sigma_c=path_sigma_c * native_scale,
             instrument_sigma_c=instrument_sigma_native,
-            bin_bounds_c=native_bounds,
+            bin_bounds_c=tuple(tuple(pair) for pair in native_bounds),
             n_point=n_mc,
             n_samples=500,
             identity_inputs=identity_inputs,
@@ -46990,6 +47249,10 @@ def _day0_remaining_p_raw_vector(
             operator=str(payload["_edli_day0_probability_operator"]),
             remaining_center_bias_native=remaining_bias_c * native_scale,
             resolver_terminal=resolver_terminal,
+        )
+        carrier = build_day0_remaining_probability_carrier(**carrier_inputs)
+        _capture_held_point_kernel(
+            carrier_inputs, carrier, projection=np.argsort(carrier_to_event).tolist(),
         )
         expected_identity = str(payload["_edli_day0_remaining_content_identity"]).strip()
         if expected_identity != str(carrier["content_identity"]):
@@ -47456,6 +47719,15 @@ def _apply_day0_mask_to_probability_vector(*, payload: dict[str, object], family
     mask = _day0_absorbing_mask(payload=payload, family=family)
     masked = arr * mask
     total = float(masked.sum())
+    capture = _HELD_POINT_TRACE_CAPTURE.get()
+    if capture is not None:
+        try:
+            capture["support_mask"] = json.dumps(
+                (np.asarray(mask, dtype=bool) if total > 0. else np.ones(len(arr), dtype=bool)).tolist(),
+                separators=(",", ":"),
+            ).encode()
+        except Exception:  # noqa: BLE001 -- diagnostic only
+            capture["unavailable"] = b"POINT_MASK_CAPTURE_FAILED"
     if total <= 0.0:
         return arr
     return masked / total
@@ -48595,17 +48867,17 @@ def _rebuild_decision_time_day0_carrier(
             members_native=(*values_native, *final_values_native),
             settlement_semantics=semantics,
         )
-    carrier = build_day0_remaining_probability_carrier(
-        future_extremes_c=values_native,
-        final_extreme_centers_c=final_values_native,
-        boundary_scenarios=boundary_scenarios,
+    carrier_inputs = dict(
+        future_extremes_c=tuple(values_native),
+        final_extreme_centers_c=tuple(final_values_native),
+        boundary_scenarios=tuple(tuple(pair) for pair in boundary_scenarios),
         metric=str(family.metric).strip().lower(),
         # The builder's historical "_c" argument is applied directly to the
         # native-unit values/bounds. Keep the persisted witness canonical in C,
         # then apply the same native scale used by the consumer.
         path_error_sigma_c=path_error_sigma_c * native_scale,
         instrument_sigma_c=float(sigma_instrument_for_city(city).to(carrier_unit).value),
-        bin_bounds_c=bounds,
+        bin_bounds_c=tuple(tuple(pair) for pair in bounds),
         n_point=ensemble_n_mc(),
         n_samples=500,
         identity_inputs=identity_inputs,
@@ -48620,6 +48892,8 @@ def _rebuild_decision_time_day0_carrier(
         remaining_center_bias_native=remaining_bias.shift_c * native_scale,
         resolver_terminal=resolver_terminal,
     )
+    carrier = build_day0_remaining_probability_carrier(**carrier_inputs)
+    _capture_held_point_kernel(carrier_inputs, carrier)
     if resolver_terminal is not None:
         payload["_edli_day0_resolver_terminal_input"] = carrier[
             "resolver_terminal_input"
