@@ -1797,6 +1797,115 @@ def test_priority_probe_window_start_is_the_consumer_current_print(monkeypatch) 
     }
 
 
+@pytest.mark.parametrize("fact_metric", ("high", "low"))
+@pytest.mark.parametrize(("city", "unit"), (
+    (SimpleNamespace(name="Chicago", timezone="America/Chicago", lat=41.98, lon=-87.9), "F"),
+    (SimpleNamespace(name="Paris", timezone="Europe/Paris", lat=48.97, lon=2.43), "C"),
+))
+def test_priority_probe_window_is_the_current_print_for_every_unit_and_metric(
+    monkeypatch, city, unit, fact_metric,
+) -> None:
+    """The current-print boundary is unit- and metric-independent.
+
+    Only the metric whose authorized fact exists is present, so a LOW-only (or
+    HIGH-only) family still schedules from the latest print, never the extreme.
+    """
+    import src.config as config_module
+    import src.data.replacement_forecast_current_target_plan as target_plan
+    import src.events.reactor as reactor
+    import src.state.db as db_module
+
+    city = SimpleNamespace(**vars(city), settlement_unit=unit)
+    now = datetime(2026, 9, 30, 11, 13, 0, tzinfo=UTC)
+    target_date = now.astimezone(ZoneInfo(city.timezone)).date().isoformat()
+    extreme_print = now - timedelta(hours=5, minutes=22)
+    latest_print = now - timedelta(minutes=22)
+
+    class _Conn:
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(config_module, "runtime_cities_by_name", lambda: {city.name: city})
+    monkeypatch.setattr(db_module, "get_world_connection_read_only", lambda **_kw: _Conn())
+    monkeypatch.setattr(db_module, "get_forecasts_connection_read_only", lambda **_kw: _Conn())
+    monkeypatch.setattr(
+        target_plan,
+        "_latest_authorized_day0_fact",
+        lambda *_args, temperature_metric, **_kwargs: (
+            {"observation_time": extreme_print.isoformat()}
+            if temperature_metric == fact_metric else None
+        ),
+    )
+    monkeypatch.setattr(
+        day0,
+        "read_day0_current_temperature_state",
+        lambda **_kwargs: SimpleNamespace(observed_at=latest_print),
+    )
+    monkeypatch.setattr(day0, "day0_hourly_models_for_city", lambda _city: ["ecmwf_ifs"])
+    monkeypatch.setattr(
+        day0, "day0_source_clock_ensemble_target_dates", lambda **_kwargs: ()
+    )
+    monkeypatch.setattr(day0, "read_freshest_day0_hourly_vectors", lambda **_kwargs: [])
+
+    probe = reactor._edli_day0_hourly_refresh_due_families(cities=[city], decision_time=now)
+
+    assert dict(((c, td), ws) for c, td, ws in probe.window_starts) == {
+        (city.name, target_date): latest_print
+    }
+    assert probe.refresh_due_families == frozenset(
+        {(city.name, target_date, fact_metric)}
+    )
+
+
+def test_priority_probe_names_a_failed_current_print_read(monkeypatch, caplog) -> None:
+    """A failed boundary read keeps the fact time, and says so by family."""
+    import logging
+
+    import src.config as config_module
+    import src.data.replacement_forecast_current_target_plan as target_plan
+    import src.events.reactor as reactor
+    import src.state.db as db_module
+
+    city = SimpleNamespace(name="Chicago", timezone="America/Chicago", lat=41.98, lon=-87.9)
+    now = datetime(2026, 9, 30, 9, 13, 0, tzinfo=UTC)
+    fact_time = datetime(2026, 9, 30, 5, 51, 0, tzinfo=UTC)
+
+    class _Conn:
+        def close(self) -> None:
+            return None
+
+    def broken(**_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(config_module, "runtime_cities_by_name", lambda: {city.name: city})
+    monkeypatch.setattr(db_module, "get_world_connection_read_only", lambda **_kw: _Conn())
+    monkeypatch.setattr(db_module, "get_forecasts_connection_read_only", lambda **_kw: _Conn())
+    monkeypatch.setattr(
+        target_plan,
+        "_latest_authorized_day0_fact",
+        lambda *_args, **_kwargs: {"observation_time": fact_time.isoformat()},
+    )
+    monkeypatch.setattr(day0, "read_day0_current_temperature_state", broken)
+    monkeypatch.setattr(day0, "day0_hourly_models_for_city", lambda _city: ["ecmwf_ifs"])
+    monkeypatch.setattr(
+        day0, "day0_source_clock_ensemble_target_dates", lambda **_kwargs: ()
+    )
+    monkeypatch.setattr(day0, "read_freshest_day0_hourly_vectors", lambda **_kwargs: [])
+
+    with caplog.at_level(logging.WARNING, logger="zeus.events.reactor"):
+        probe = reactor._edli_day0_hourly_refresh_due_families(
+            cities=[city], decision_time=now
+        )
+
+    assert [ws for _c, _td, ws in probe.window_starts] == [fact_time]
+    lines = [
+        r.getMessage() for r in caplog.records
+        if "DAY0_HOURLY_PROBE_CURRENT_PRINT_UNAVAILABLE" in r.getMessage()
+    ]
+    assert len(lines) == 1
+    assert "city=Chicago" in lines[0] and "OperationalError" in lines[0]
+
+
 def test_ambiguous_low_missing_ens_is_priority_debt_until_strict_current_bundle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

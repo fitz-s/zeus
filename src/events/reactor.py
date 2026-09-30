@@ -6269,8 +6269,16 @@ def _edli_day0_hourly_refresh_due_families(
                     target_date=target_date,
                     decision_time=now,
                 )
-            except Exception:  # noqa: BLE001 -- boundary hint; the fact time remains
+            except Exception as exc:  # noqa: BLE001 -- boundary hint; the fact time remains
                 current_state = None
+                logging.getLogger("zeus.events.reactor").warning(
+                    "DAY0_HOURLY_PROBE_CURRENT_PRINT_UNAVAILABLE city=%s target=%s "
+                    "exc=%s: %s; scheduling from the authorized fact time",
+                    city_name,
+                    target_date,
+                    type(exc).__name__,
+                    exc,
+                )
             for metric in ("high", "low"):
                 if deadline_expired():
                     raise TimeoutError(
