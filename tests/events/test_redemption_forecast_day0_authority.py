@@ -150,7 +150,7 @@ def test_current_mixture_policy_is_explicit_and_ordinary_telemetry_is_not_a_carr
 
 
 @pytest.mark.parametrize("cache_kind", ("prepared_entry", "prepared_held", "prepared_exit", "ineligible"))
-@pytest.mark.parametrize("revision_kind", ("fast_route", "mixture_policy"))
+@pytest.mark.parametrize("revision_kind", ("fast_route", "mixture_policy", "current_width_route"))
 def test_fast_consumer_route_invalidates_both_process_caches_and_reuses_new_namespace(
     monkeypatch, cache_kind, revision_kind,
 ):
@@ -181,12 +181,20 @@ def test_fast_consumer_route_invalidates_both_process_caches_and_reuses_new_name
             old_namespace = hashlib.sha256(
                 repr((cut.date().isoformat(), (databases,))).encode("utf-8")
             ).hexdigest()
-        else:
+        elif revision_kind == "mixture_policy":
             from src.events import day0_authority as authority
 
             with monkeypatch.context() as old_policy:
                 old_policy.setattr(authority, "DAY0_PROBABILITY_MIXTURE_POLICY", "fitted_diurnal_live_v1")
                 old_namespace = era._global_probability_family_cache_namespace((conn,), decision_time=cut)
+        else:
+            from src.events.day0_authority import DAY0_PROBABILITY_MIXTURE_POLICY
+
+            # Exact pre-width-route namespace, not a fictional old value for
+            # the new field. Existing process entries must miss after reload.
+            old_namespace = hashlib.sha256(repr((cut.date().isoformat(), (databases,),
+                era._DAY0_FAST_CARRIER_CONSUMER_ROUTE_REVISION,
+                DAY0_PROBABILITY_MIXTURE_POLICY)).encode("utf-8")).hexdigest()
         current_namespace = era._global_probability_family_cache_namespace(
             (conn,), decision_time=cut,
         )

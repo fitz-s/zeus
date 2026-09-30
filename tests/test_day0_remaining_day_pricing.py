@@ -15638,3 +15638,156 @@ def test_unmixed_live_missing_fusion_stays_typed_unavailable(tmp_path, monkeypat
             fixture.conn.close()
             fixture.builtin.close()
         next(native, None)
+
+
+def test_ordinary_wrh_amber_current_kernel_ignores_age_fit(tmp_path, monkeypatch):
+    """Lawful aged source; a fitted artifact cannot change a live q regime."""
+    import hashlib
+    import inspect
+    from dataclasses import replace
+    from tests.integration import test_w3_solve_seam_g3 as normal
+    from tests.test_replacement_forecast_materializer import _hko_request_with_owned_anchor
+    from src.forecast import posterior_age_inflation as age
+    from src.data import replacement_forecast_materializer as materializer, replacement_forecast_bundle_reader as reader
+    from src.events.triggers.day0_extreme_updated import Day0ExtremeUpdatedTrigger
+    from src.events.event_writer import EventWriter
+    from src.events.opportunity_event import OpportunityEvent
+    from src.contracts.settlement_semantics import SettlementSemantics
+    from src.engine import event_reactor_adapter as era
+
+    # Reuse the actual writer fixture, changing only controlled input time/bins
+    # and native WRH/AWC observations. No production code or authority is patched.
+    prior_source = inspect.getsource(normal._kord_normal_prior_fixture).replace(
+        "hours=8, minutes=15", "hours=20, minutes=15").replace(
+        '(("56F or below", None, 56), ("57-58F", 57, 58), ("59F or above", 59, None))',
+        '(("64F or below", None, 64), ("65-66F", 65, 66), ("67F or above", 67, None))')
+    observation_source = inspect.getsource(normal._kord_causal_fast_inputs).replace(
+        "hours=8,minutes=20", "hours=20,minutes=20").replace("57.2", "66.2").replace(
+        "14/14 A3005 RMK AO2 T01440139", "19/18 A3005 RMK AO2 T01900180").replace(
+        '"temp":14.4', '"temp":19.0').replace('"temp":13.9', '"temp":19.0').replace(
+        "14/14 A3005 RMK AO2 T01390139", "19/19 A3005 RMK AO2 T01900190")
+    observation_source = observation_source[:observation_source.index(
+        "    qualified = fast.latest_fast_station_conditioning")] + '''
+    latest_report = f"KORD {observed:%d%H%M}Z 00000KT 10SM CLR 19/18 A3005 RMK AO2 T01900180"
+    latest_body = {"STATION":[{"STID":"KORD","OBSERVATIONS":{
+        "date_time":[observed.astimezone(ZoneInfo(city.timezone)).strftime("%Y-%m-%dT%H:%M:%S%z")],
+        "air_temp_set_1":[66.2],"sea_level_pressure_set_1":[1013.0],"metar_set_1":[latest_report]}}]}
+    latest = wrh._parse_rows(latest_body,"KORD")
+    assert len(latest) == 1
+    _append_noaa_wrh_prints(conn,city_name=city.name,station="KORD",unit="F",rows=latest,
+        target_date_local=fixture.request.target_date,view=city.settlement_page_view,fetch_utc=current_fetch)
+    conn.commit()
+    return cut
+'''
+    inputs = dict(vars(normal))
+    exec(compile(prior_source + "\n" + observation_source, normal.__file__, "exec"), inputs)
+    native = normal._noaa_native_sources.__wrapped__(tmp_path, monkeypatch)
+    next(native)
+    fixture = None
+    try:
+        fixture = inputs["_kord_normal_prior_fixture"](tmp_path, monkeypatch)
+        normal._kord_public_bundles(fixture, monkeypatch, at=fixture.cut)
+        cut = inputs["_kord_causal_fast_inputs"](fixture, monkeypatch)
+        fixture.sql_clock[0] = cut
+        class ClockType(type):
+            def __instancecheck__(cls, value): return isinstance(value, datetime)
+        class Clock(datetime, metaclass=ClockType):
+            @classmethod
+            def now(cls, tz=None): return cut.astimezone(tz or UTC)
+        from src.events import opportunity_event as event_module
+        monkeypatch.setattr(event_module, "datetime", Clock)
+        monkeypatch.setattr(reader, "datetime", Clock)
+        trigger = Day0ExtremeUpdatedTrigger(EventWriter(fixture.conn),
+            scan_families=((fixture.city.name, str(fixture.request.target_date), "low"),))
+        assert trigger.scan_settlement_print_rows(observation_conn=fixture.conn,
+            settlement_semantics=SettlementSemantics.for_city(fixture.city),decision_time=cut,received_at=cut.isoformat())
+        row = dict(fixture.conn.execute("SELECT * FROM opportunity_events WHERE event_type='DAY0_EXTREME_UPDATED' "
+            "AND json_extract(payload_json,'$.metric')='low' ORDER BY rowid DESC LIMIT 1").fetchone())
+        event = OpportunityEvent(**{field:row[field] for field in OpportunityEvent.__dataclass_fields__})
+        payload = json.loads(event.payload_json)
+        assert payload["settlement_source"] == "noaa_wrh_kord" and payload["raw_value"] == 66.2
+        assert era._held_day0_has_canonical_observation(fixture.conn,event=event,decision_time=cut)
+        request = replace(fixture.request,computed_at=cut,day0_observation_state=None,
+            day0_observed_extreme_c=19.0,day0_observed_extreme_source=payload["settlement_source"],
+            day0_observed_extreme_observation_time=payload["observation_time"],day0_observed_extreme_unit="F")
+        request = _hko_request_with_owned_anchor(fixture.conn, request)
+        result = materializer.materialize_replacement_forecast_live(fixture.conn, request)
+        assert result.ok, result.reason_codes
+        fixture.conn.commit()
+        fixture.request, fixture.result = request, result
+        public = normal._kord_public_bundles(fixture, monkeypatch, at=cut)
+        original = tuple(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+            (result.posterior_id,)).fetchone())
+        # A real, hash-sealed controlled offline artifact; loader itself is not
+        # mocked. The current live route must not read or consume its variance.
+        fit_root = tmp_path / "age-fit"
+        fit_root.mkdir()
+        fitted = json.dumps({"band_hours":6,"metrics":{"low":{"v_by_age_band":{"18":0.25}}}}).encode()
+        (fit_root / "controlled.json").write_bytes(fitted)
+        (fit_root / "ACTIVE.json").write_text(json.dumps({"artifact":"controlled.json",
+            "sha256":hashlib.sha256(fitted).hexdigest()}))
+        states = []
+        direction_widths = []
+        live_fit_calls = []
+        offline_v_for = age.v_for
+        def record_fit_read(*args, **kwargs):
+            live_fit_calls.append((args, kwargs))
+            return offline_v_for(*args, **kwargs)
+        topology = era._event_family_market_topology_rows(fixture.conn, payload)
+        source_family = SimpleNamespace(city=fixture.city.name,target_date=str(request.target_date),metric="low",
+            candidates=tuple(era._topology_candidate_from_market_event(item,None,payload) for item in topology))
+        for artifact_root in (tmp_path / "no-age-fit", fit_root):
+            age._load_active_artifact.cache_clear()
+            monkeypatch.setattr(age, "_artifact_dir", lambda root=artifact_root: root)
+            assert offline_v_for("low", 20.0) == (0.25 if artifact_root == fit_root else 0.0)
+            monkeypatch.setattr(age, "v_for", record_fit_read)
+            witnesses = []
+            for purpose in (era._CurrentProbabilityUse.ENTRY, era._CurrentProbabilityUse.HELD_MONITOR,
+                            era._CurrentProbabilityUse.REDUCE_ONLY_EXIT):
+                out = {}
+                family = era._prepare_current_global_probability_family(event,forecast_conn=fixture.conn,
+                    topology_conn=fixture.conn,observation_conn=fixture.conn,decision_time=cut,
+                    max_age=timedelta(seconds=30),allow_unobserved_day0_replacement=False,
+                    allow_provisional_day0_replacement=True,probability_use=purpose,
+                    raw_input_hwm_conn=fixture.conn,day0_payload_out=out)
+                witnesses.append(family.probability_witness)
+            states.append(witnesses)
+            direction_proof = era._replacement_authority_probability_and_fdr_proof(event=event,
+                payload=dict(payload),family=source_family,conn=fixture.conn,native_costs={},decision_time=cut)
+            direction_widths.append(direction_proof[-1]["forecast_predictive_sigma_c"])
+        for plain, fitted in zip(*states, strict=True):
+            np.testing.assert_array_equal(plain.yes_point_q, fitted.yes_point_q)
+            np.testing.assert_array_equal(plain.yes_q_samples, fitted.yes_q_samples)
+            assert plain.witness_identity == fitted.witness_identity
+        expected_width = next(iter(public.values())).provenance_json["bayes_precision_fusion"]["predictive_sigma_c"]
+        assert direction_widths == [expected_width, expected_width]
+        witness = states[-1][-1]
+        binding = witness.bindings[1]
+        curve = normal.ExecutableSellCurve(token_id=binding.yes_token_id,side="YES",
+            snapshot_id="amber-sell-book",book_hash="amber-sell-hash",
+            levels=(normal.BookLevel(price=normal.Decimal(".50"),size=normal.Decimal("1")),),
+            fee_model=normal.FeeModel(fee_rate=normal.Decimal("0")),min_tick=normal.Decimal(".01"),
+            min_order_size=normal.Decimal("1"),quote_ttl=timedelta(seconds=30))
+        candidate = normal.GlobalSingleOrderSellCandidate(candidate_id="amber-stat-sell",
+            family_key=witness.family_key,bin_id=binding.bin_id,condition_id=binding.condition_id,
+            side="YES",token_id=binding.yes_token_id,position_id="amber-held",held_shares=normal.Decimal("1"),
+            probability_witness_identity=witness.witness_identity,book_snapshot_id=curve.snapshot_id,
+            book_captured_at_utc=cut,execution_curve_identity=normal.executable_curve_identity(curve),
+            ledger_snapshot_id="amber-held-ledger",executable_sell_curve=curve,
+            resolution_identity=witness.resolution_identity,neg_risk=False,
+            **normal._explicit_sell_maker_terms(curve,capacity=normal.Decimal("1")))
+        rebound, _ = era._current_global_actuation_prepared_family(event,
+            global_actuation=SimpleNamespace(probability_witness=witness,
+                decision=SimpleNamespace(candidate=candidate)),forecast_conn=fixture.conn,
+            topology_conn=fixture.conn,observation_conn=fixture.conn,decision_time=cut)
+        assert rebound.probability_witness is witness
+        assert live_fit_calls == []
+        assert tuple(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+            (result.posterior_id,)).fetchone()) == original
+        assert normal._kord_public_bundles(fixture, monkeypatch, at=cut).keys() == public.keys()
+    finally:
+        age._load_active_artifact.cache_clear()
+        if fixture is not None:
+            fixture.conn.close()
+            fixture.builtin.close()
+        next(native, None)

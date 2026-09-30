@@ -1,6 +1,6 @@
 # Created: 2026-06-21
-# Last reused or audited: 2026-09-04
-# Lifecycle: created=2026-06-21; last_reviewed=2026-09-04; last_reused=2026-09-04
+# Last reused or audited: 2026-09-30
+# Lifecycle: created=2026-06-21; last_reviewed=2026-09-30; last_reused=2026-09-30
 # Authority basis: docs/evidence/live_order_pathology/2026-06-21_forward_chain_diagnosis.md
 #   "CHOSEN FIX (consult-validated, two layers)" — LAYER 2 monitor read-through.
 """ANTIBODY: stale held belief must recover without blocking portfolio monitoring.
@@ -2300,7 +2300,7 @@ def test_day0_pinned_current_local_day_requires_hwm_station_witness(
     )
     monkeypatch.setattr(era, "_day0_global_candidate_payoff_q_lcb_caps", lambda **_: ())
     monkeypatch.setattr(era, "_day0_payoff_truth_rows", lambda **_: ())
-    monkeypatch.setattr(era, "_amber_inflated_predictive_sigma_c", lambda *_a, **_k: 1.0)
+    monkeypatch.setattr(era, "_replacement_predictive_sigma_c", lambda *_a, **_k: 1.0)
     monkeypatch.setattr(qkernel, "build_forecast_case", lambda *_a, **_k: object())
     monkeypatch.setattr(
         qkernel,
@@ -2814,7 +2814,7 @@ def test_raw_metar_entry_requires_statistical_confirmation_not_exact_payoff(
         era, "_day0_replacement_conditioning", lambda *_a, **_k: {}
     )
     monkeypatch.setattr(
-        era, "_amber_inflated_predictive_sigma_c", lambda *_a, **_k: 1.0
+        era, "_replacement_predictive_sigma_c", lambda *_a, **_k: 1.0
     )
 
     def fake_global_day0_execution_payload(*_args, **_kwargs):

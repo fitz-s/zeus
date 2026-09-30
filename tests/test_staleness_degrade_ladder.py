@@ -1,18 +1,21 @@
 # Created: 2026-07-17
-# Last reused/audited: 2026-07-17
+# Last reused/audited: 2026-09-30
+# Lifecycle: created=2026-07-17; last_reviewed=2026-09-30; last_reused=2026-09-30
+# Purpose: Preserve age eligibility boundaries without live fitted width.
+# Reuse: Check the current-width consumer and independent expiry gates.
 # Authority basis: docs/authority/replacement_final_form_2026_06_09.md §4a (staleness
 #   degrade ladder). Boundaries DERIVED in docs/evidence/upstream_physical_2026_07_17/
 #   staleness_ladder_derivation.md — these tests pin the band edges, the fail-open
-#   contract, and the AMBER sigma-inflation admission seam.
-"""Staleness DEGRADE LADDER: classification, fitted inflation loader, admission wiring.
+#   contract. Upper probability law keeps fitted inflation offline only.
+"""Staleness DEGRADE LADDER: classification, offline fit, current-width consumption.
 
 (1) classify_posterior_staleness: GREEN/AMBER/RED/EXPIRED band edges (18h/24h/30h);
     newer-cycle-detected forces RED; unparseable/None cycle => UNKNOWN (caller keeps its
     binary law); the EXPIRED horizon is the SAME policy constant the fail-closed gate uses.
 (2) posterior_age_inflation.v_for: fail-open zeros (artifact absent / sha mismatch /
     unknown metric / bad age); age->band mapping + monotone clamp.
-(3) _amber_inflated_predictive_sigma_c: AMBER widens sigma by sqrt(sigma²+v); GREEN/RED/
-    EXPIRED and a missing artifact leave the base sigma byte-identical (fail-open no-op).
+(3) Live consumption preserves current predictive sigma at every age; eligibility
+    still belongs to the unchanged ladder and source-expiry gates.
 """
 from __future__ import annotations
 
@@ -178,7 +181,7 @@ def test_v_for_band_mapping_and_clamp(tmp_path, monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# (3) AMBER sigma-inflation admission seam
+# (3) Current predictive width; fitted age variance remains offline
 # ---------------------------------------------------------------------------
 
 def _bundle(sigma_c: float, age_hours: float):
@@ -189,52 +192,27 @@ def _bundle(sigma_c: float, age_hours: float):
     )
 
 
-def test_amber_inflates_sigma_by_fitted_value(tmp_path, monkeypatch) -> None:
-    import math
-
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_live_current_sigma_ignores_fitted_age_variance(tmp_path, monkeypatch, metric) -> None:
     import src.engine.event_reactor_adapter as era
 
-    _write_artifact(tmp_path, {"high": {"v_by_age_band": {"18": 0.36}, "n_by_age_band": {"18": 900}}})
+    _write_artifact(tmp_path, {metric: {"v_by_age_band": {"18": 0.36}, "n_by_age_band": {"18": 900}}})
     monkeypatch.setenv(pai.ENV_POSTERIOR_AGE_INFLATION_DIR, str(tmp_path))
     pai._load_active_artifact.cache_clear()
-    family = SimpleNamespace(metric="high", city="Shanghai", target_date="2026-07-18")
-
-    # AMBER (age 20h): sigma widened to sqrt(sigma² + v).
-    amber = era._amber_inflated_predictive_sigma_c(
-        _bundle(0.84, 20.0), family=family, decision_time=DECISION
-    )
-    assert amber == pytest.approx(math.sqrt(0.84 * 0.84 + 0.36))
-    assert amber > 0.84
-
-    # GREEN (age 10h): base sigma untouched.
-    green = era._amber_inflated_predictive_sigma_c(
-        _bundle(0.84, 10.0), family=family, decision_time=DECISION
-    )
-    assert green == pytest.approx(0.84)
-
-    # RED (age 26h): the AMBER inflation does not apply here (RED is entry-isolated at the
-    # bundle read); base sigma returned unchanged if this seam is ever reached.
-    red = era._amber_inflated_predictive_sigma_c(
-        _bundle(0.84, 26.0), family=family, decision_time=DECISION
-    )
-    assert red == pytest.approx(0.84)
+    assert pai.v_for(metric, 20.0) == 0.36  # Offline loader still works.
+    for age in (10.0, 18.0, 20.0, 24.0, 26.0, 30.0):
+        assert era._replacement_predictive_sigma_c(_bundle(0.84, age)) == 0.84
 
 
-def test_amber_sigma_fails_open_without_artifact(tmp_path, monkeypatch) -> None:
+def test_live_current_sigma_missing_proof_is_not_supplied_by_age_fit(tmp_path, monkeypatch) -> None:
     import src.engine.event_reactor_adapter as era
 
     monkeypatch.setenv(pai.ENV_POSTERIOR_AGE_INFLATION_DIR, str(tmp_path))  # empty
     pai._load_active_artifact.cache_clear()
-    family = SimpleNamespace(metric="high")
-    # AMBER band but no artifact => v=0.0 => base sigma byte-identical (fail-open).
-    assert era._amber_inflated_predictive_sigma_c(
-        _bundle(0.84, 20.0), family=family, decision_time=DECISION
-    ) == pytest.approx(0.84)
+    assert era._replacement_predictive_sigma_c(_bundle(0.84, 20.0)) == 0.84
     # Missing sigma provenance => None (degrade to the conservative 1-step threshold).
-    assert era._amber_inflated_predictive_sigma_c(
-        SimpleNamespace(provenance_json={}, source_cycle_time=_cyc(20).isoformat()),
-        family=family, decision_time=DECISION,
-    ) is None
+    assert era._replacement_predictive_sigma_c(
+        SimpleNamespace(provenance_json={}, source_cycle_time=_cyc(20).isoformat())) is None
 
 
 def test_monitor_exit_lane_does_not_import_the_ladder() -> None:
