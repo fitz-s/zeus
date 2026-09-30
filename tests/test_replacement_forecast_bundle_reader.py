@@ -1410,6 +1410,190 @@ def _generic_reader_current_row(tmp_path,monkeypatch,request):
         next(source,None)
 
 
+def _reader_shanghai_native_high(conn, request, root, monkeypatch):
+    """Controlled extracted native windows -> ordinary collector/authority writer.
+
+    Only download and GRIB extraction are skipped. No snapshot, coverage,
+    readiness result or current-shape reader is replaced.
+    """
+    from src.config import runtime_cities_by_name, runtime_coordinate_manifest_json
+    from src.data import ecmwf_open_data as native
+    from tests.test_opendata_writes_v2_table import _make_opendata_high_payload
+    from tests.test_replacement_forecast_materializer import _fixture_ens_surface_provenance
+    from src.state.db import init_schema_forecasts
+    from zoneinfo import ZoneInfo
+    city = runtime_cities_by_name()[request.city]
+    init_schema_forecasts(conn)
+    cycle = request.source_cycle_time
+    captured = cycle+timedelta(hours=8,minutes=5)
+    assert captured <= request.computed_at
+    start = datetime.combine(request.target_date,datetime.min.time(),tzinfo=ZoneInfo(city.timezone))
+    end = (start+timedelta(days=1)).astimezone(UTC)
+    start = start.astimezone(UTC)
+    selected = (round(city.lat*4)/4,round(city.lon*4)/4)
+    body = _make_opendata_high_payload(request.target_date.isoformat(),cycle.isoformat(),
+        local_day_start_iso=start.isoformat(),local_day_end_iso=end.isoformat(),
+        nearest_grid_lat=selected[0],nearest_grid_lon=selected[1])
+    grid = json.loads(_fixture_ens_surface_provenance(city_name=city.name,
+        cycle=cycle.isoformat(),selected_coords=selected,decision_at=captured))["grid_surface_evidence"]
+    grid["mask_source_fetched_at"] = captured.isoformat()
+    manifest_sha = hashlib.sha256(runtime_coordinate_manifest_json().encode()).hexdigest()
+    body.update(city=city.name,lat=city.lat,lon=city.lon,timezone=city.timezone,unit=city.settlement_unit,
+        generated_at=captured.isoformat(),manifest_sha256=manifest_sha,manifest_hash=manifest_sha,
+        grid_surface_evidence=grid)
+    body["selected_step_ranges"] = body["selected_step_ranges_inner"]
+    for index,member in enumerate(body["members"]):
+        value = 25.+(index-25)*.02
+        member.update(value_native_unit=value,inner_max_native_unit=value,
+            boundary_max_native_unit=value-.2 if member["boundary_step_ranges"] else None)
+        for window in member["native_windows"]:
+            interval = f"{window['start_step_hours']}-{window['end_step_hours']}"
+            window["value_native_unit"] = value if interval in member["inner_step_ranges"] else value-.2
+    source_root = root/"native-ens"
+    directory = source_root/"raw"/"coordinate_manifests"/manifest_sha/"open_ens_mx2t6_localday_max"/"shanghai"/cycle.strftime("%Y%m%d")
+    directory.mkdir(parents=True)
+    path = directory/f"open_ens_mx2t6_localday_max_target_{request.target_date}_lead_1.json"
+    path.write_text(json.dumps(body),encoding="utf-8")
+    builtin = sqlite3.connect(":memory:")
+    conn.create_function("strftime",2,lambda fmt,value: captured.isoformat(timespec="milliseconds")
+        if (fmt,value)==("%Y-%m-%dT%H:%M:%f+00:00","now") else builtin.execute("SELECT strftime(?,?)",(fmt,value)).fetchone()[0])
+    class ClockType(type):
+        def __instancecheck__(cls,value): return isinstance(value,datetime)
+    class NativeClock(datetime,metaclass=ClockType):
+        @classmethod
+        def now(cls,tz=None): return captured.astimezone(tz or UTC)
+    with monkeypatch.context() as ingress:
+        ingress.setattr(native,"datetime",NativeClock)
+        ingress.setattr(native._ingest_grib_module,"_now_utc_iso",lambda:captured.isoformat())
+        decision,release = native._select_cycle_for_track(track="mx2t6_high",now_utc=captured)
+        assert decision is native.FetchDecision.FETCH_ALLOWED
+        assert release["selected_cycle_time"] == cycle and release["horizon_profile"] == "full"
+        collected = native.collect_open_ens_cycle(track="mx2t6_high",skip_download=True,skip_extract=True,
+            grid_surface_source_evidence=grid,conn=conn,now_utc=captured,
+            _paths=native._resolve_opendata_paths(source_root=source_root,environ={}))
+    assert collected["status"]=="ok" and collected["snapshots_inserted"]==1,collected
+    assert collected["coverage_written"]==1 and collected["producer_readiness_written"]==1,collected
+    snapshot = dict(conn.execute("SELECT * FROM ensemble_snapshots WHERE source_run_id=?",
+        (collected["source_run_id"],)).fetchone())
+    assert snapshot["city"]==city.name and snapshot["temperature_metric"]=="high"
+    assert snapshot["target_date"]==request.target_date.isoformat()
+    assert snapshot["source_available_at"]==captured.isoformat()
+    assert snapshot["source_transport"]=="ensemble_snapshots_db_reader"
+    assert json.loads(snapshot["provenance_json"])["high_local_day_max_boundary_certificate"]["status"]=="EXACT"
+    from src.data.executable_forecast_reader import read_executable_forecast
+    city_id = city.name.upper().replace(" ","_")
+    public = read_executable_forecast(conn,city_id=city_id,city_name=city.name,
+        city_timezone=city.timezone,target_local_date=request.target_date,temperature_metric="high",
+        source_id="ecmwf_open_data",source_transport=snapshot["source_transport"],
+        data_version=snapshot["dataset_id"],track=collected["forecast_track"],strategy_key="entry_forecast",
+        market_family="controlled-shanghai-high",condition_id="controlled-shanghai-high",
+        decision_time=request.computed_at,require_entry_readiness=False)
+    assert public.ok,public.reason_code
+    assert public.bundle.snapshot.snapshot_id==snapshot["snapshot_id"]
+    from dataclasses import replace
+    return replace(request,city_id=city_id,baseline_source_run_id=collected["source_run_id"],
+        baseline_data_version=snapshot["dataset_id"],baseline_source_available_at=captured),snapshot,builtin
+
+
+@pytest.fixture
+def _shanghai_reader_current_certificate(tmp_path, monkeypatch):
+    """Normal Shanghai physical ownership; controlled forecast/ENS inputs.
+
+    The complete relative fixture window follows retained HOMR possession,
+    never lends September ground evidence to the former June test clock.
+    """
+    from tests.test_replacement_forecast_materializer import (
+        _hko_native_surfaces, _hko_source_surface, _shanghai_current_owner_request,
+    )
+    from src.data import replacement_forecast_materializer as materializer
+    from src.data.replacement_forecast_readiness import latest_replacement_readiness
+    from src.data.station_ground_evidence import forecast_db_from_connection
+    root = tmp_path.resolve()
+    native = _hko_native_surfaces.__wrapped__(root,monkeypatch)
+    next(native)
+    try:
+        source = _hko_source_surface.__wrapped__(root,monkeypatch,None)
+        next(source)
+        try:
+            cut = datetime(2026,10,1,8,15,tzinfo=UTC)
+            actual_override = materializer._replacement_bayes_precision_fusion_override
+            conn,request = _shanghai_current_owner_request(root,monkeypatch,
+                computed_at=cut,first_compute_at=cut-timedelta(minutes=10))
+            builtin = None
+            try:
+                request,snapshot,builtin = _reader_shanghai_native_high(conn,request,root,monkeypatch)
+                monkeypatch.setattr(materializer,"_replacement_bayes_precision_fusion_override",actual_override)
+                # The normal source path now derives its current shape from
+                # the actually ingested ID, not A25's controlled 9001 seam.
+                conn.create_function("strftime",2,lambda fmt,value: cut.isoformat(timespec="milliseconds")
+                    if (fmt,value)==("%Y-%m-%dT%H:%M:%f+00:00","now") else builtin.execute("SELECT strftime(?,?)",(fmt,value)).fetchone()[0])
+                result = materializer.materialize_replacement_forecast_live(conn,request)
+                assert result.ok,result.reason_codes
+                conn.commit()
+                row = dict(conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+                    (result.posterior_id,)).fetchone())
+                assert json.loads(row["dependency_source_run_ids_json"])["current_ensemble_snapshot"] == snapshot["snapshot_id"]
+                assert json.loads(row["provenance_json"])["bayes_precision_fusion"]["current_evidence_shape"]["snapshot_id"] == snapshot["snapshot_id"]
+                readiness = latest_replacement_readiness(conn,city=row["city"],target_date=row["target_date"],
+                    temperature_metric=row["temperature_metric"],decision_time=cut)
+                assert readiness is not None
+                baseline = _BaselineBundle(_Evidence(request.baseline_source_run_id))
+                namespace = forecast_db_from_connection(conn)
+                assert namespace.is_relative_to(root)
+                class ClockType(type):
+                    def __instancecheck__(cls,value): return isinstance(value,datetime)
+                class ReaderClock(datetime,metaclass=ClockType):
+                    @classmethod
+                    def now(cls,tz=None): return cut.astimezone(tz) if tz else cut.replace(tzinfo=None)
+                monkeypatch.setattr(reader,"datetime",ReaderClock)
+                kwargs = dict(baseline_bundle=baseline,readiness=readiness,city=row["city"],
+                    target_date=row["target_date"],temperature_metric=row["temperature_metric"],
+                    decision_time=cut,current_bin_topology_hash=row["bin_topology_hash"],
+                    enforce_raw_input_hwm=True,raw_input_hwm_conn=conn)
+                for purpose in ReplacementForecastAuthorityPurpose:
+                    healthy = read_replacement_forecast_bundle(conn,**kwargs,authority_purpose=purpose)
+                    assert healthy.ok,healthy.reason_code
+                    assert healthy.bundle.posterior_id == row["posterior_id"]
+                yield SimpleNamespace(conn=conn,row=row,request=request,readiness=readiness,kwargs=kwargs)
+                assert dict(conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+                    (row["posterior_id"],)).fetchone()) == row
+            finally:
+                conn.close()
+                if builtin is not None: builtin.close()
+        finally:
+            next(source,None)
+    finally:
+        next(native,None)
+
+
+def _reader_with_posterior_fault(normal, **fields):
+    """Negative-only exact row SELECT; licensed storage and all other reads stay real."""
+    class FaultCursor:
+        def __init__(self,cursor): self.cursor = cursor
+        def fetchone(self):
+            row = self.cursor.fetchone()
+            if row is not None and "posterior_id" in row.keys() and row["posterior_id"]==normal.row["posterior_id"]:
+                return {**dict(row),**fields}
+            return row
+        def __getattr__(self,name): return getattr(self.cursor,name)
+    class FaultRead:
+        def execute(self,sql,parameters=()):
+            cursor = normal.conn.execute(sql,parameters)
+            return FaultCursor(cursor) if "FROM forecast_posteriors" in sql else cursor
+    return FaultRead()
+
+
+@pytest.mark.parametrize("purpose",tuple(ReplacementForecastAuthorityPurpose))
+def test_reader_normal_native_high_requires_its_actual_snapshot(purpose,_shanghai_reader_current_certificate):
+    normal = _shanghai_reader_current_certificate
+    assert read_replacement_forecast_bundle(normal.conn,**normal.kwargs,authority_purpose=purpose).ok
+    dependencies = json.loads(normal.row["dependency_source_run_ids_json"])
+    dependencies["current_ensemble_snapshot"] += 1000
+    fault = _reader_with_posterior_fault(normal,dependency_source_run_ids_json=json.dumps(dependencies))
+    blocked = read_replacement_forecast_bundle(fault,**normal.kwargs,authority_purpose=purpose)
+    assert not blocked.ok and blocked.reason_code=="REPLACEMENT_CURRENT_COORDINATE_SNAPSHOT_MISSING"
+
+
 @pytest.mark.parametrize("_generic_reader_current_row",[False],indirect=True)
 @pytest.mark.parametrize("purpose",tuple(ReplacementForecastAuthorityPurpose))
 def test_live_reader_accepts_normal_hourly_v2_without_a_station_final_center(
@@ -2481,34 +2665,24 @@ def test_replacement_bundle_reader_requires_baseline_executable_bundle() -> None
     assert result.reason_code == "REPLACEMENT_BASELINE_EXECUTABLE_FORECAST_REQUIRED"
 
 
-def test_replacement_bundle_reader_returns_posterior_when_b0_and_readiness_match() -> None:
-    conn = _conn()
-    posterior_id = _insert_posterior(conn)
-
-    result = read_replacement_forecast_bundle(
-        conn,
-        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
-        readiness=_readiness(posterior_id=posterior_id),
-        city="Shanghai",
-        target_date="2026-06-07",
-        temperature_metric="high",
-        decision_time=_dt(4),
-        current_bin_topology_hash="topology-hash",
-    )
+def test_replacement_bundle_reader_returns_posterior_when_b0_and_readiness_match(
+    _shanghai_reader_current_certificate,
+) -> None:
+    normal = _shanghai_reader_current_certificate
+    row = normal.row
+    result = read_replacement_forecast_bundle(normal.conn,**normal.kwargs)
 
     assert result.ok is True
     assert result.reason_code == "REPLACEMENT_POSTERIOR_READY"
     assert result.bundle is not None
-    assert result.bundle.posterior_id == posterior_id
-    assert result.bundle.baseline_source_run_id == "b0-run"
-    assert result.bundle.q == pytest.approx({"cold": 0.2, "warm": 0.8})
-    assert result.bundle.q_lcb == pytest.approx({"cold": 0.1, "warm": 0.7})
+    assert result.bundle.posterior_id == row["posterior_id"]
+    assert result.bundle.baseline_source_run_id == normal.request.baseline_source_run_id
+    assert result.bundle.q == json.loads(row["q_json"])
+    assert result.bundle.q_lcb == json.loads(row["q_lcb_json"])
     assert result.bundle.runtime_layer == LIVE_RUNTIME_LAYER
-    assert result.bundle.posterior_identity_hash == (
-        f"identity-{_dt(3, 5).isoformat()}-{_dt(3).isoformat()}"
-    )
-    assert result.bundle.dependency_hash == "dependency-hash"
-    assert result.bundle.posterior_config_hash == "config-hash"
+    assert result.bundle.posterior_identity_hash == row["posterior_identity_hash"]
+    assert result.bundle.dependency_hash == row["dependency_hash"]
+    assert result.bundle.posterior_config_hash == row["posterior_config_hash"]
 
 
 def test_replacement_bundle_reader_binds_to_readiness_posterior_not_latest_scope_row() -> None:
@@ -2600,26 +2774,14 @@ def test_replacement_bundle_reader_blocks_unready_readiness_or_mismatched_ids() 
     assert posterior_mismatch.reason_code == "REPLACEMENT_POSTERIOR_READINESS_MISMATCH"
 
 
-def test_replacement_bundle_reader_blocks_dependency_source_run_drift() -> None:
-    conn = _conn()
-    openmeteo_drift_id = _insert_posterior(
-        conn,
-        dependency_source_run_ids={
-            "baseline_b0": "b0-run",
-            "openmeteo_ifs9_anchor": "wrong-om9-run",
-        },
-    )
-
-    openmeteo_drift = read_replacement_forecast_bundle(
-        conn,
-        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
-        readiness=_readiness(posterior_id=openmeteo_drift_id),
-        city="Shanghai",
-        target_date=date(2026, 6, 7),
-        temperature_metric="high",
-        decision_time=_dt(4),
-        current_bin_topology_hash="topology-hash",
-    )
+def test_replacement_bundle_reader_blocks_dependency_source_run_drift(
+    _shanghai_reader_current_certificate,
+) -> None:
+    normal = _shanghai_reader_current_certificate
+    dependencies = json.loads(normal.row["dependency_source_run_ids_json"])
+    dependencies["openmeteo_ifs9_anchor"] = "wrong-om9-run"
+    fault = _reader_with_posterior_fault(normal,dependency_source_run_ids_json=json.dumps(dependencies))
+    openmeteo_drift = read_replacement_forecast_bundle(fault,**normal.kwargs)
 
     assert openmeteo_drift.reason_code == "REPLACEMENT_DEPENDENCY_SOURCE_RUN_MISMATCH"
 
