@@ -477,3 +477,78 @@ def test_latest_confirmation_invalid_metadata_requires_new_canonical_recovery_no
     assert ground.read_frozen_station_ground_evidence(a, decision_at="2026-09-29T22:00:00Z") == a
     with sqlite3.connect(db) as conn:
         assert conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?", (confirmed["artifact_id"],)).fetchone() == broken
+
+
+@pytest.mark.parametrize("bad_capture", ("bad-old-clock", "2026-09-30T12:00:00Z"))
+def test_new_actual_source_capture_drains_old_invalid_capture_without_authorising_invalid_latest(tmp_path, monkeypatch, bad_capture):
+    db, registry, official_body, claims, clock = _setup(tmp_path, monkeypatch)
+    body_a = official_body.read_bytes()
+    a = _archive(db)
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE raw_forecast_artifacts SET captured_at=? WHERE artifact_id=?", (bad_capture, a["artifact_id"]))
+        broken = conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?", (a["artifact_id"],)).fetchone()
+    assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at="2026-09-29T22:00:00Z") is None
+    clock[0] = datetime(2026, 9, 29, 23, tzinfo=UTC)
+    body_b = body_a.replace(b'<td class="td1_normal_class">32</td>', b'<td class="td1_normal_class">33</td>', 1)
+    _update_official(registry, official_body, claims, body_b, "2026-09-29T22:30:00Z")
+    b = _archive(db)
+    assert ground.read_frozen_station_ground_evidence(b, decision_at="2026-09-29T23:00:00Z") == b
+    assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at="2026-09-29T23:00:00Z") == b
+    assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at="2026-09-29T22:59:59Z") is None
+    # A latest bad source clock cannot be hidden by old B. A truly future
+    # canonical row cannot revoke B at the preceding independent cutoff.
+    clock[0] = datetime(2026, 9, 30, tzinfo=UTC)
+    body_c = body_b.replace(b'<td class="td1_normal_class">33</td>', b'<td class="td1_normal_class">34</td>', 1)
+    _update_official(registry, official_body, claims, body_c, "2026-09-29T23:30:00Z")
+    c = _archive(db)
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE raw_forecast_artifacts SET captured_at='broken-latest-clock' WHERE artifact_id=?", (c["artifact_id"],))
+        assert conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?", (a["artifact_id"],)).fetchone() == broken
+    assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at="2026-09-29T23:59:59Z") == b
+    assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at="2026-09-30T00:00:00Z") is None
+    clock[0] = datetime(2026, 9, 30, 1, tzinfo=UTC)
+    _update_official(registry, official_body, claims, body_c + b"<!-- actual later official response -->", "2026-09-30T00:30:00Z")
+    d = _archive(db)
+    assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at="2026-09-30T01:00:00Z") == d
+
+
+@pytest.mark.parametrize("bad_capture", ("broken-source-clock", "2026-10-01T00:00:00Z"))
+def test_real_recapture_a_confirms_after_invalid_b_clock_without_claiming_a_clock_for_b(tmp_path, monkeypatch, bad_capture):
+    db, registry, official_body, claims, clock = _setup(tmp_path, monkeypatch)
+    body_a = official_body.read_bytes()
+    a = _archive(db)
+    clock[0] = datetime(2026, 9, 29, 23, tzinfo=UTC)
+    _update_official(registry, official_body, claims, body_a.replace(b'<td class="td1_normal_class">32</td>', b'<td class="td1_normal_class">33</td>', 1), "2026-09-29T22:30:00Z")
+    b = _archive(db)
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE raw_forecast_artifacts SET captured_at=? WHERE artifact_id=?", (bad_capture, b["artifact_id"]))
+        broken = conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?", (b["artifact_id"],)).fetchone()
+    clock[0] = datetime(2026, 9, 30, tzinfo=UTC)
+    _update_official(registry, official_body, claims, body_a, a["captured_at"])
+    old_poll = ground.archive_station_ground_evidence(db, ["Hong Kong"])
+    assert not old_poll["archived"]
+    assert "Hong Kong" in old_poll["degraded"]
+    assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at="2026-09-30T00:00:00Z") is None
+    _update_official(registry, official_body, claims, body_a, "2026-09-29T23:30:00Z")
+    confirmed = _archive(db)
+    assert confirmed["manifest_role"] == "source_capture_confirmation"
+    assert confirmed["previous_source_capture_invalid"] is True
+    assert confirmed["previous_source_evidence"]["captured_at"] == bad_capture
+    assert "recovery_of" not in confirmed
+    assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at="2026-09-29T23:59:59Z") is None
+    assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at="2026-09-30T00:00:00Z") == confirmed
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?", (b["artifact_id"],)).fetchone() == broken
+
+
+@pytest.mark.parametrize("source_capture", ("2026-09-29T21:50:00Z", "2026-09-29T22:00:00Z"))
+def test_late_old_or_equal_capture_cannot_wash_invalid_event_bound(tmp_path, monkeypatch, source_capture):
+    db, registry, official_body, claims, clock = _setup(tmp_path, monkeypatch)
+    body = official_body.read_bytes()
+    a = _archive(db)
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE raw_forecast_artifacts SET captured_at='broken-source-clock' WHERE artifact_id=?", (a["artifact_id"],))
+    clock[0] = datetime(2026, 9, 29, 23, tzinfo=UTC)
+    _update_official(registry, official_body, claims, body + b"<!-- delayed old response -->", source_capture)
+    _archive(db)
+    assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at="2026-09-29T23:00:00Z") is None

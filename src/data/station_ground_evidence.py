@@ -122,6 +122,17 @@ def _read_body_dependency(dependency: Mapping[str, object], *, conn: sqlite3.Con
     return body
 
 
+def _capture_selection_bound(captured_at, recorded):
+    """Invalid capture uses possession only as a conservative blocking bound."""
+    try:
+        captured = _stamp(captured_at)
+        if captured <= recorded:
+            return captured, False
+    except (TypeError, ValueError):
+        pass
+    return recorded, True  # never an actual source clock or physical witness
+
+
 def _latest_candidate(conn, station_id, decision, deadline):
     rows = conn.execute("SELECT artifact_id,artifact_metadata_json,captured_at,recorded_at FROM raw_forecast_artifacts WHERE source_id=? AND data_version IN (?,?)", (f"station_ground::{station_id}", KIND, MANIFEST_KIND))
     latest = None
@@ -131,20 +142,22 @@ def _latest_candidate(conn, station_id, decision, deadline):
             recorded = _stamp(recorded_at)
             if recorded > decision:
                 continue
-            captured = _stamp(captured_at)
-            if captured > recorded:
-                raise ValueError("ground source capture is after canonical possession")
+            captured_bound, invalid_capture = _capture_selection_bound(captured_at, recorded)
             # Actual source event precedes canonical write order. A delayed
             # old response cannot roll back a newer source snapshot. Metadata
             # is deliberately not parsed until this candidate is selected.
-            candidate = (captured, recorded, int(artifact_id), metadata)
-            if latest is None or candidate[:3] > latest[:3]:
+            candidate = (captured_bound, recorded, int(artifact_id), metadata, invalid_capture)
+            # At the invalid event's upper bound, equality is insufficient to
+            # prove a genuinely later source event. Its explicit invalid flag
+            # therefore wins the tie, irrespective of a later write order.
+            rank = (candidate[0], candidate[4], candidate[1], candidate[2])
+            if latest is None or rank > (latest[0], latest[4], latest[1], latest[2]):
                 latest = candidate
     return latest
 
 
 def _candidate_evidence(candidate, now, deadline):
-    if candidate is None:
+    if candidate is None or candidate[4]:
         return None
     try:
         evidence = json.loads(str(candidate[3]))["station_ground_evidence"]
@@ -181,10 +194,12 @@ def _archive_manifest(conn, prepared, old_id, deadline, *, role, prior):
         "forecast_db": str(Path(conn.execute("PRAGMA database_list").fetchone()[2]).resolve()),
         "input_bodies": {"ground": dependency}, "manifest_role": role,
         "previous_source_evidence": previous}
+    if prior is not None and prior[4]:
+        payload["previous_source_capture_invalid"] = True
     if role == "canonical_metadata_recovery":
         payload["recovery_of"] = {"artifact_id": previous["artifact_id"],
             "invalid_metadata_sha256": previous["original_metadata_sha256"]}
-    elif role != "source_capture_confirmation" or captured <= _stamp(previous["captured_at"]):
+    elif role != "source_capture_confirmation" or captured <= _capture_selection_bound(previous["captured_at"], _stamp(previous["recorded_at"]))[0]:
         raise ValueError("ground confirmation requires a genuinely newer source capture")
     manifest = _encoded(payload)
     manifest_sha = hashlib.sha256(manifest).hexdigest()
@@ -237,7 +252,7 @@ def _archive_entity(conn, prepared, forecast_db, deadline):
         if captured < latest[0] or (latest_evidence is not None and captured == latest[0]):
             return evidence  # old config/source response cannot wash a newer transition
         return _archive_manifest(conn, prepared, old[0], deadline,
-            role="source_capture_confirmation" if latest_evidence is not None else "canonical_metadata_recovery", prior=latest)
+            role="source_capture_confirmation" if latest_evidence is not None or (latest[4] and captured > latest[0]) else "canonical_metadata_recovery", prior=latest)
     recorded, original = datetime.now(UTC).isoformat(), captured.isoformat()
     cursor = conn.execute("""INSERT INTO raw_forecast_artifacts
         (source_id,product_id,data_version,source_cycle_time,source_available_at,captured_at,
@@ -458,16 +473,19 @@ def _read_manifest_evidence(evidence, *, decision_at, deadline_monotonic=None):
                 return None
         else:
             previous = evidence["previous_source_evidence"]
+            previous_recorded = _stamp(previous["recorded_at"])
+            previous_bound, previous_invalid = _capture_selection_bound(previous["captured_at"], previous_recorded)
             if (_body_dependency(conn, previous["artifact_id"]) != previous
                 or previous["source_id"] != evidence["source_id"]
                 or previous["product_id"] != evidence["product_id"]
                 or previous["data_version"] not in {KIND, MANIFEST_KIND}
-                or not _stamp(previous["captured_at"]) <= _stamp(previous["recorded_at"]) <= _stamp(evidence["recorded_at"])
-                or _stamp(previous["captured_at"]) > capture
+                or previous_recorded > _stamp(evidence["recorded_at"])
+                or previous_bound > capture
+                or evidence.get("previous_source_capture_invalid", False) is not previous_invalid
                 or capture != _stamp(evidence["source_audit"]["checked_at"])):
                 return None
             if role == "source_capture_confirmation":
-                if "recovery_of" in evidence or capture <= _stamp(previous["captured_at"]):
+                if "recovery_of" in evidence or capture <= previous_bound:
                     return None
             elif role == "canonical_metadata_recovery":
                 if evidence["recovery_of"] != {"artifact_id": previous["artifact_id"], "invalid_metadata_sha256": previous["original_metadata_sha256"]}:
