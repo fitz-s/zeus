@@ -2676,51 +2676,71 @@ def test_replacement_bundle_reader_returns_posterior_when_b0_and_readiness_match
     assert result.bundle.posterior_config_hash == row["posterior_config_hash"]
 
 
-def test_replacement_bundle_reader_binds_to_readiness_posterior_not_latest_scope_row() -> None:
-    conn = _conn()
-    certified_posterior_id = _insert_posterior(conn, computed_at=_dt(3, 5))
-    newer_posterior_id = _insert_posterior(conn, computed_at=_dt(3, 20))
-    conn.execute(
-        """
-        UPDATE forecast_posteriors
-           SET posterior_identity_hash = ?, dependency_hash = ?, posterior_config_hash = ?
-         WHERE posterior_id = ?
-        """,
-        (
-            "certified-identity",
-            "certified-dependency",
-            "certified-config",
-            certified_posterior_id,
-        ),
-    )
-    conn.execute(
-        """
-        UPDATE forecast_posteriors
-           SET posterior_identity_hash = ?, dependency_hash = ?, posterior_config_hash = ?
-         WHERE posterior_id = ?
-        """,
-        ("latest-identity", "latest-dependency", "latest-config", newer_posterior_id),
-    )
-
-    result = read_replacement_forecast_bundle(
-        conn,
-        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
-        readiness=_readiness(posterior_id=certified_posterior_id),
-        city="Shanghai",
-        target_date="2026-06-07",
-        temperature_metric="high",
-        decision_time=_dt(4),
-        current_bin_topology_hash="topology-hash",
-    )
+def test_replacement_bundle_reader_binds_to_readiness_posterior_not_latest_scope_row(
+    monkeypatch, _shanghai_reader_current_certificate,
+) -> None:
+    from dataclasses import replace
+    from src.data import replacement_forecast_materializer as materializer
+    from src.data.replacement_forecast_readiness import latest_replacement_readiness
+    from tests.test_replacement_forecast_materializer import _hko_request_with_owned_anchor
+    normal = _shanghai_reader_current_certificate
+    conn = normal.conn
+    cut = normal.request.computed_at+timedelta(minutes=10)
+    original_raw = tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id"))
+    original_artifacts = tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_forecast_artifacts ORDER BY artifact_id"))
+    builtin = sqlite3.connect(":memory:")
+    def bind_insert_clock():
+        conn.create_function("strftime",2,lambda fmt,value: cut.isoformat(timespec="milliseconds")
+            if (fmt,value)==("%Y-%m-%dT%H:%M:%f+00:00","now") else builtin.execute("SELECT strftime(?,?)",(fmt,value)).fetchone()[0])
+    try:
+        # Normal redecision at a new computation cut, using the very same
+        # already-possessed source inputs. The producer owns both identities;
+        # equal point q must not erase which certificate was selected.
+        request = _hko_request_with_owned_anchor(conn,replace(normal.request,computed_at=cut))
+        bind_insert_clock()
+        written = materializer.materialize_replacement_forecast_live(conn,request)
+        assert written.ok,written.reason_codes
+        conn.commit()
+        newer = dict(conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",(written.posterior_id,)).fetchone())
+        assert newer["posterior_id"] != normal.row["posterior_id"]
+        assert datetime.fromisoformat(newer["computed_at"]) == datetime.fromisoformat(newer["recorded_at"]) == cut
+        assert newer["posterior_identity_hash"] != normal.row["posterior_identity_hash"]
+        for key in ("source_cycle_time","source_available_at","expires_at"):
+            assert newer[key] == normal.row[key]
+        readiness = latest_replacement_readiness(conn,city=normal.row["city"],target_date=normal.row["target_date"],
+            temperature_metric=request.temperature_metric,decision_time=cut)
+        assert readiness is not None
+        class ClockType(type):
+            def __instancecheck__(cls,value): return isinstance(value,datetime)
+        class ReadClock(datetime,metaclass=ClockType):
+            @classmethod
+            def now(cls,tz=None): return cut.astimezone(tz) if tz else cut.replace(tzinfo=None)
+        monkeypatch.setattr(reader,"datetime",ReadClock)
+        current = read_replacement_forecast_bundle(conn,**{**normal.kwargs,
+            "readiness":readiness,"decision_time":cut})
+        assert current.ok,current.reason_code
+        assert current.bundle.posterior_id == newer["posterior_id"]
+        # This case's original default-no-HWM contract binds to the exact
+        # caller-supplied certificate, never to the latest scope projection.
+        result = read_replacement_forecast_bundle(conn,**{**normal.kwargs,
+            "decision_time":cut,"enforce_raw_input_hwm":False})
+        strict = read_replacement_forecast_bundle(conn,**{**normal.kwargs,"decision_time":cut})
+        assert strict.ok,strict.reason_code
+        assert strict.bundle.posterior_id == normal.row["posterior_id"]
+        assert tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id"))[:len(original_raw)] == original_raw
+        assert tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_forecast_artifacts ORDER BY artifact_id"))[:len(original_artifacts)] == original_artifacts
+    finally:
+        builtin.close()
 
     assert result.ok is True
     assert result.reason_code == "REPLACEMENT_POSTERIOR_READY"
     assert result.bundle is not None
-    assert result.bundle.posterior_id == certified_posterior_id
-    assert result.bundle.posterior_id != newer_posterior_id
-    assert result.bundle.posterior_identity_hash == "certified-identity"
-    assert result.bundle.dependency_hash == "certified-dependency"
-    assert result.bundle.posterior_config_hash == "certified-config"
+    assert result.bundle.posterior_id == normal.row["posterior_id"]
+    assert result.bundle.posterior_id != newer["posterior_id"]
+    assert result.bundle.posterior_identity_hash == normal.row["posterior_identity_hash"]
+    assert result.bundle.dependency_hash == normal.row["dependency_hash"]
+    assert result.bundle.posterior_config_hash == normal.row["posterior_config_hash"]
+    assert result.bundle.q == json.loads(normal.row["q_json"])
 
 
 def test_replacement_bundle_reader_blocks_unready_readiness_or_mismatched_ids(
