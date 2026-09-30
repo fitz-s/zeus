@@ -100,7 +100,7 @@ def _hko_dt(hour: int, minute: int = 0) -> datetime:
 
 
 @pytest.fixture
-def _hko_source_surface(tmp_path, monkeypatch):
+def _hko_source_surface(tmp_path, monkeypatch, _hko_native_surfaces):
     """Actual O1280 OM decoding of controlled static input, not guard authority."""
     from functools import partial
     import numpy as np
@@ -116,6 +116,9 @@ def _hko_source_surface(tmp_path, monkeypatch):
     # routes the real constructor to one temporary, whole-byte OM artifact.
     monkeypatch.setattr(transport, "source_cell_geometry_proof",
                         partial(_REAL_SOURCE_CELL_GEOMETRY_PROOF, local_cache=str(path)))
+    monkeypatch.setattr(transport, "HSURF_LOCAL_CACHE", str(path))
+    monkeypatch.setattr(transport, "_o1280_snapshot_root", lambda: tmp_path / "owned-o1280")
+    monkeypatch.setattr(transport, "_o1280_snapshot_now", lambda: _hko_dt(0)-timedelta(hours=1))
     yield path
     transport._hsurf_reader.cache_clear()
 
@@ -158,7 +161,7 @@ def _hko_native_surfaces(tmp_path, monkeypatch):
     thread.start()
     monkeypatch.setattr(surface, "_asset_url", lambda domain: f"http://127.0.0.1:{server.server_port}/{domain}")
     monkeypatch.setattr(surface, "_cache_root", lambda: tmp_path / "native-static")
-    monkeypatch.setattr(surface, "_now", lambda: _hko_dt(12,1))
+    monkeypatch.setattr(surface, "_now", lambda: _hko_dt(0)-timedelta(hours=1))
     try:
         for model in ("icon_global", "ukmo_global_deterministic_10km"):
             capture = surface.ensure_model_surface(model)
@@ -171,14 +174,14 @@ def _hko_native_surfaces(tmp_path, monkeypatch):
 
 
 def _hko_raw_openmeteo_bytes() -> bytes:
-    from src.config import runtime_cities_by_name, runtime_station_geometry_for_city
+    from src.config import runtime_cities_by_name
     from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
-    station = runtime_station_geometry_for_city(runtime_cities_by_name()["Hong Kong"])
-    cell = source_cell_geometry_proof(latitude=station["lat"], longitude=station["lon"],
+    city = runtime_cities_by_name()["Hong Kong"]
+    cell = source_cell_geometry_proof(latitude=city.lat, longitude=city.lon,
                                      target_elevation_m=32.0)
     return json.dumps({
         "latitude": cell["selected_grid_lat"], "longitude": cell["selected_grid_lon"],
-        "elevation": 32.0, "timezone": "Asia/Hong_Kong",
+        "elevation": 32.0, "timezone": "Asia/Hong_Kong", "utc_offset_seconds": 28800,
         "hourly": {"time": [f"2026-10-01T{hour:02d}:00" for hour in range(24)],
                    "temperature_2m": [27.0 if hour == 12 else 18.5 for hour in range(24)]},
         "hourly_units": {"temperature_2m": "°C"},
@@ -186,35 +189,13 @@ def _hko_raw_openmeteo_bytes() -> bytes:
     }, sort_keys=True).encode()
 
 
-def _hko_precision_guard():
-    from src.config import runtime_cities_by_name, runtime_station_geometry_for_city
-    from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
-    from src.data.openmeteo_ecmwf_ifs9_precision_guard import _haversine_km
-    city = runtime_cities_by_name()["Hong Kong"]
-    station = runtime_station_geometry_for_city(city)
-    assert station["ground_status"] == "VERIFIED"
-    raw = _hko_raw_openmeteo_bytes()
-    cell = source_cell_geometry_proof(latitude=station["lat"], longitude=station["lon"],
-                                     target_elevation_m=32.0)
-    proof = {**cell, "raw_payload_sha256": hashlib.sha256(raw).hexdigest(),
-             "station_registry_sha256": station["registry_sha256"],
-             "station_ground_proof": {"revision": "station_ground_roles_v1", "status": "VERIFIED",
-                 "reason": None, "facts": station["ground_facts"], "audit": station["ground_audit"]}}
-    metadata = OpenMeteoIfs9PrecisionMetadata(
-        city="Hong Kong", station_id=station["station_id"], city_lat=city.lat, city_lon=city.lon,
-        station_lat=station["lat"], station_lon=station["lon"], requested_lat=station["lat"],
-        requested_lon=station["lon"], requested_coordinate_precision_decimals=4,
-        nearest_grid_lat=cell["selected_grid_lat"], nearest_grid_lon=cell["selected_grid_lon"],
-        nearest_grid_distance_km=_haversine_km(station["lat"], station["lon"], cell["selected_grid_lat"], cell["selected_grid_lon"]),
-        native_grid="openmeteo_ecmwf_ifs_9km", delivery_grid_resolution="9km",
-        interpolation_method="openmeteo_api_point_interpolation", endpoint_mode="hourly_zeus_aggregated",
-        local_day_start_utc=_hko_dt(16), local_day_end_utc=_hko_dt(16)+timedelta(days=1),
-        timezone_name="Asia/Hong_Kong", target_local_date=date(2026, 10, 1), temperature_unit="C",
-        anchor_sigma_c=3.0, grid_elevation_m=cell["raw_grid_elevation_m"],
-        station_elevation_m=station["ground_elevation_m"], land_sea_mask="land", city_class="standard",
-        station_mapping_policy="settlement_station", source_geometry_proof=proof,
-    )
-    guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(metadata, raw_payload_bytes=raw)
+def _hko_precision_guard(*, decision_at=None, raw_payload_bytes=None):
+    from scripts.download_replacement_forecast_current_targets import _precision_metadata
+    raw = raw_payload_bytes or _hko_raw_openmeteo_bytes()
+    metadata = OpenMeteoIfs9PrecisionMetadata(**_precision_metadata(
+        "Hong Kong", "2026-10-01", anchor_sigma_c=3.0, raw_payload_bytes=raw))
+    guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
+        metadata, raw_payload_bytes=raw, decision_at=decision_at or _hko_dt(4))
     assert guard.passable_for_live_materialization, guard.reason_codes
     return guard
 
@@ -229,7 +210,7 @@ def _hko_request(**kwargs):
     anchor_available = kwargs.pop("openmeteo_source_available_at", cycle+timedelta(hours=3))
     guard = kwargs.pop("openmeteo_precision_guard", _DEFAULT_PRECISION_GUARD)
     if guard is _DEFAULT_PRECISION_GUARD:
-        guard = _hko_precision_guard()
+        guard = _hko_precision_guard(decision_at=cut)
     anchor = extract_openmeteo_ecmwf_ifs9_localday_anchor(json.loads(raw), city_timezone="Asia/Hong_Kong",
         target_local_date=date(2026, 10, 1), source_cycle_time=cycle)
     return replace(_request(**kwargs, openmeteo_precision_guard=guard),
@@ -9178,7 +9159,7 @@ def test_seed_cycle_boundary_allows_only_proven_retired_low_migration(
     assert queue._seed_source_cycle_boundary(forecast_db=db, seed=seed) == ('current_posterior','2026-09-22T18:00:00+00:00')
 
 
-def _low_revision_authority_conn(db_path: Path | None = None) -> sqlite3.Connection:
+def _low_revision_authority_conn(db_path: Path | None = None, *, include_legacy_provider_fixtures: bool = True) -> sqlite3.Connection:
     """A forecast-class DB with genuine run, target coverage and ENS schema."""
     from src.contracts.ensemble_snapshot_provenance import (
         ECMWF_OPENDATA_LOW_DATA_VERSION_UNCERTIFIED,
@@ -9265,7 +9246,8 @@ def _low_revision_authority_conn(db_path: Path | None = None) -> sqlite3.Connect
                 "UPDATE ensemble_snapshots SET provenance_json=? WHERE snapshot_id=?",
                 (_fixture_ens_surface_provenance(city_name="Hong Kong", cycle=cycle.isoformat()), snapshot_id),
             )
-    for raw_id, model in enumerate(("ecmwf_ifs9", "gfs", "icon", "gem", "jma"), 101):
+    legacy_models = ("ecmwf_ifs9", "gfs", "icon", "gem", "jma") if include_legacy_provider_fixtures else ()
+    for raw_id, model in enumerate(legacy_models, 101):
         conn.execute(
             """INSERT INTO raw_model_forecasts (
                 raw_model_forecast_id, model, city, target_date, metric,
@@ -9307,7 +9289,8 @@ def _low_revision_authority_conn(db_path: Path | None = None) -> sqlite3.Connect
         source_run_id=f"posterior:{incumbent_id}", strategy_key=STRATEGY_KEY,
         expires_at=_hko_dt(22),
     )
-    _qualify_raw_fixture_rows(conn)
+    if include_legacy_provider_fixtures:
+        _qualify_raw_fixture_rows(conn)
     conn.commit()
     return conn
 
@@ -9327,17 +9310,37 @@ def _low_revision_request() -> ReplacementForecastMaterializeRequest:
     )
 
 
-@pytest.mark.usefixtures("_hko_source_surface")
-@pytest.mark.usefixtures("_hko_native_surfaces")
-def test_normal_current_writer_rebuilds_v6_posterior_after_literal_v5_refusal(tmp_path, monkeypatch):
+def _normal_hko_writer_proof_relationship(tmp_path, monkeypatch, *, include_raw_ifs):
     """Real entity bytes/ordinary writer + qualified ENS read, not authority mocks."""
     from src.config import runtime_cities_by_name
     from src.data import bayes_precision_fusion_download as dl
+    from src.data import station_ground_evidence as ground
+    from tests.test_config import _official_hko_registry
     from src.data.replacement_forecast_cycle_policy import (
         current_evidence_shape_has_entry_authority, current_evidence_shape_has_held_authority,
     )
+    registry, official_body, ground_claims = _official_hko_registry(tmp_path, monkeypatch)
+    original_ground_body = official_body.read_bytes()
+    monkeypatch.setattr(ground, "_store_root", lambda: tmp_path / "station-ground")
+    ground_clock = [_hko_dt(19, 59)]
+    class GroundClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return ground_clock[0].astimezone(tz or UTC)
+    monkeypatch.setattr(ground, "datetime", GroundClock)
     db = tmp_path / "forecast.db"
-    conn = _low_revision_authority_conn(db)
+    # This relationship acquires every provider through the normal writer
+    # below; legacy convenience rows remain available to their own tests.
+    conn = _low_revision_authority_conn(db, include_legacy_provider_fixtures=False)
+    # TEST_ONLY_CONTROLLED_CANONICAL_INSERT_CLOCK: evaluate the normal SQLite
+    # DEFAULT at INSERT, never UPDATE a licensed row or pre-seal its own clock.
+    sql_clock = [_hko_dt(12, 11)]
+    sql_builtins = sqlite3.connect(":memory:")
+    def canonical_insert_clock(fmt, value):
+        if (fmt, value) == ("%Y-%m-%dT%H:%M:%f+00:00", "now"):
+            return sql_clock[0].isoformat(timespec="milliseconds")
+        return sql_builtins.execute("SELECT strftime(?,?)", (fmt, value)).fetchone()[0]
+    conn.create_function("strftime", 2, canonical_insert_clock)
     city = runtime_cities_by_name()["Hong Kong"]
     class Clock(datetime):
         @classmethod
@@ -9352,7 +9355,8 @@ def test_normal_current_writer_rebuilds_v6_posterior_after_literal_v5_refusal(tm
             else (22.25,114.125) if params["models"] == "icon_global" else (22.3125,114.1875))
         payload = {"latitude": selected_lat,
             "longitude": selected_lon, "elevation": 32.0,
-            "timezone": city.timezone, "hourly_units": {"temperature_2m": "°C"},
+            "timezone": city.timezone, "utc_offset_seconds": 28800,
+            "hourly_units": {"temperature_2m": "°C"},
             "hourly": {"time": [f"2026-10-01T{hour:02d}:00" for hour in range(24)],
                        "temperature_2m": [value]*24}}
         body = (json.dumps(payload, indent=2)+"\n").encode()
@@ -9366,10 +9370,44 @@ def test_normal_current_writer_rebuilds_v6_posterior_after_literal_v5_refusal(tm
         targets=[dl.BayesPrecisionFusionDownloadTarget(
             city="Hong Kong", metric="low", target_date="2026-10-01", lead_days=1,
             latitude=city.lat, longitude=city.lon, timezone_name=city.timezone)],
-        models=("ecmwf_ifs", "icon_global", "ukmo_global_deterministic_10km"),
+        models=(("ecmwf_ifs", "icon_global", "ukmo_global_deterministic_10km") if include_raw_ifs
+                else ("icon_global", "ukmo_global_deterministic_10km")),
         include_previous_runs=False, prune_after=False,
     )
     request = _low_revision_request()
+    from src.data.openmeteo_ecmwf_ifs9_anchor import (
+        OpenMeteoEcmwfIfs9AnchorRequest, build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest,
+    )
+    from src.data.raw_forecast_artifact_manifest import write_manifest_to_db
+    anchor_payload = json.loads(request.openmeteo_raw_payload_bytes)
+    anchor_payload["_zeus_current_target_scope"]["metric"] = "low"
+    anchor_bytes = (json.dumps(anchor_payload, indent=2, sort_keys=True)+"\n").encode()
+    anchor_path = tmp_path / "normal-low-anchor.json"
+    anchor_path.write_bytes(anchor_bytes)
+    anchor_manifest = build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(anchor_path,
+        request=OpenMeteoEcmwfIfs9AnchorRequest(city.lat, city.lon, request.source_cycle_time, city.timezone),
+        metric="low", source_available_at=_hko_dt(12, 5), captured_at=_hko_dt(12, 10),
+        product_metadata={"city":city.name, "target_date":request.target_date.isoformat()})
+    anchor_id = write_manifest_to_db(conn, anchor_manifest)
+    anchor_row = dict(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?", (anchor_id,)).fetchone())
+    assert datetime.fromisoformat(anchor_row["captured_at"]) <= datetime.fromisoformat(anchor_row["recorded_at"]) <= request.computed_at
+    assert anchor_row["recorded_at"] == sql_clock[0].isoformat(timespec="milliseconds")
+    assert write_manifest_to_db(conn, anchor_manifest) == anchor_id
+    assert dict(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?", (anchor_id,)).fetchone()) == anchor_row
+    request = replace(request, anchor_artifact_id=anchor_id, openmeteo_raw_payload_bytes=anchor_bytes,
+        openmeteo_precision_guard=_hko_precision_guard(decision_at=request.computed_at, raw_payload_bytes=anchor_bytes))
+    sql_clock[0] = request.computed_at
+    conn.commit()  # Publish the normal anchor entity before archive's transaction.
+    archived = ground.archive_station_ground_evidence(db, ["Hong Kong"])
+    ground_a = archived["archived"]["Hong Kong"]
+    assert ground_a["captured_at"] == "2026-09-29T21:23:56+00:00"
+    assert ground_a["recorded_at"] == _hko_dt(19, 59).isoformat()
+    old_cut = replace(request, computed_at=_hko_dt(19, 58))
+    assert ground.read_current_station_ground_evidence(
+        db, city="Hong Kong", decision_at=old_cut.computed_at) is None
+    refused_before_possession = materialize_replacement_forecast_live(conn, old_cut)
+    assert refused_before_possession.reason_codes == ("OM9_STATION_GROUND_ENTITY_NOT_POSSESSED",)
+    assert conn.execute("SELECT count(*) FROM forecast_posteriors").fetchone()[0] == 1
     real_shape_reader = materializer_mod._read_current_evidence_shape
     with monkeypatch.context() as obsolete:
         def old_shape(*args, **kwargs):
@@ -9382,14 +9420,167 @@ def test_normal_current_writer_rebuilds_v6_posterior_after_literal_v5_refusal(tm
         assert conn.execute("SELECT count(*) FROM forecast_posteriors").fetchone()[0] == 1
     rebuilt = materialize_replacement_forecast_live(conn, request)
     assert rebuilt.ok, rebuilt.reason_codes
+    conn.commit()  # Public authority opens the committed canonical anchor FK.
     row = conn.execute("SELECT q_json, provenance_json FROM forecast_posteriors WHERE posterior_id=?",
                        (rebuilt.posterior_id,)).fetchone()
     provenance = json.loads(row["provenance_json"])
     shape = provenance["bayes_precision_fusion"]["current_evidence_shape"]
     assert shape["semantics_revision"] == "ensemble_center_scenarios_v6"
     assert shape["member_count"] == 51
-    assert current_evidence_shape_has_entry_authority(provenance, materialized_at=request.computed_at)
-    assert current_evidence_shape_has_held_authority(provenance, materialized_at=request.computed_at)
+    frozen_ground = shape["provider_geometry_audit"]["anchor_station_ground"]
+    assert frozen_ground == ground_a
+    authority_scope = dict(materialized_at=request.computed_at, city=request.city,
+        target_date=request.target_date.isoformat(), metric=request.temperature_metric,
+        anchor_id=rebuilt.anchor_id, forecast_db=ground.forecast_db_from_connection(conn))
+    assert current_evidence_shape_has_entry_authority(provenance, **authority_scope)
+    assert current_evidence_shape_has_held_authority(provenance, **authority_scope)
+    # USED IFS9 must replay its own request/body/static bytes, not just a
+    # self-consistent hash of an unproven two-field geometry claim.
+    used_models = provenance["bayes_precision_fusion"]["used_models"]
+    assert "ecmwf_ifs" in used_models  # Anchor center is also a used instrument.
+    anchor_audit = shape["provider_geometry_audit"]
+    assert anchor_audit["anchor_ifs9_role"] == ("raw_ifs9_and_anchor" if include_raw_ifs else "anchor_only")
+    assert anchor_audit["anchor_raw_artifact"]["artifact_id"] == anchor_id
+    assert anchor_audit["anchor_raw_artifact"]["sha256"] == hashlib.sha256(anchor_bytes).hexdigest()
+    assert anchor_audit["anchor_precision_metadata"]["source_geometry_proof"]["static_asset_audit"]
+    if not include_raw_ifs:
+        assert "ecmwf_ifs" not in shape["provider_geometry_evidence"]["providers"]
+        assert "ecmwf_ifs" not in provenance["bayes_precision_fusion"]["current_value_serving"]
+    ifs_physical = (provenance["bayes_precision_fusion"]["current_value_serving"]["ecmwf_ifs"]["physical_response"]
+                    if include_raw_ifs else None)
+    ifs_proof = ifs_physical["source_cell_geometry_proof"] if ifs_physical else anchor_audit["anchor_precision_metadata"]["source_geometry_proof"]
+    assert ifs_proof["static_asset_audit"]
+    if ifs_physical:
+        assert ifs_physical["frozen_entity_body"]
+        assert ifs_physical["frozen_product_identity"]
+    damaged_provenances = []
+    for damage in (("two_fields", "missing_used_provider") if include_raw_ifs else ("missing_anchor_artifact", "wrong_anchor_cell")):
+        damaged_provenance = json.loads(json.dumps(provenance))
+        damaged_fusion = damaged_provenance["bayes_precision_fusion"]
+        damaged_shape = damaged_fusion["current_evidence_shape"]
+        damaged_geometry = damaged_shape["provider_geometry_evidence"]
+        if damage == "missing_anchor_artifact":
+            del damaged_shape["provider_geometry_audit"]["anchor_raw_artifact"]
+        elif damage == "wrong_anchor_cell":
+            damaged_shape["provider_geometry_audit"]["anchor_precision_metadata"]["source_geometry_proof"]["selected_flat_index"] += 1
+        elif damage == "two_fields":
+            damaged_claim = {"revision": ifs_proof["revision"], "cell_is_sea": False}
+            damaged_fusion["current_value_serving"]["ecmwf_ifs"]["physical_response"]["source_cell_geometry_proof"] = damaged_claim
+            damaged_geometry["providers"]["ecmwf_ifs"]["source_cell_geometry_proof"] = dict(damaged_claim)
+        else:
+            # Keep USED and its served instrument unchanged: an anchor proof
+            # must not substitute for the missing used-provider instrument.
+            del damaged_geometry["providers"]["ecmwf_ifs"]
+        damaged_shape["provider_geometry_identity_hash"] = hashlib.sha256(
+            json.dumps(damaged_geometry, sort_keys=True, separators=(",", ":"), default=str).encode()
+        ).hexdigest()
+        assert not current_evidence_shape_has_entry_authority(damaged_provenance, **authority_scope), damage
+        assert not current_evidence_shape_has_held_authority(damaged_provenance, **authority_scope), damage
+        damaged_provenances.append(damaged_provenance)
+    if not include_raw_ifs:
+        from scripts.download_replacement_forecast_current_targets import _precision_metadata
+        from src.data.replacement_current_value_serving import _ARTIFACT_IDENTITY_JSON_SQL
+        from src.data.replacement_forecast_cycle_policy import _anchor_ifs9_response_has_authority
+        foreign_manifests = []
+        # Independently normal-produced, internally coherent foreign evidence:
+        # neither a false tuple nor a hash-only mutation is the rejection cause.
+        for foreign in ("target", "metric", "body"):
+            foreign_date = request.target_date + (timedelta(days=1) if foreign == "target" else timedelta())
+            foreign_metric = "high" if foreign == "metric" else request.temperature_metric
+            foreign_payload = json.loads(anchor_bytes)
+            foreign_payload["hourly"]["time"] = [f"{foreign_date.isoformat()}T{hour:02d}:00" for hour in range(24)]
+            foreign_payload["_zeus_current_target_scope"].update(target_date=foreign_date.isoformat(), metric=foreign_metric)
+            if foreign == "body":
+                foreign_payload["hourly"]["temperature_2m"][0] -= 1.0
+            foreign_bytes = (json.dumps(foreign_payload, indent=2, sort_keys=True)+"\n").encode()
+            foreign_path = tmp_path / f"normal-foreign-{foreign}-anchor.json"
+            foreign_path.write_bytes(foreign_bytes)
+            foreign_precision = _precision_metadata(city.name, foreign_date.isoformat(),
+                anchor_sigma_c=3.0, raw_payload_bytes=foreign_bytes)
+            foreign_manifest = build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(foreign_path,
+                request=OpenMeteoEcmwfIfs9AnchorRequest(city.lat, city.lon, request.source_cycle_time, city.timezone),
+                metric=foreign_metric, source_available_at=_hko_dt(12, 5), captured_at=_hko_dt(12, 10),
+                product_metadata={"city": city.name, "target_date": foreign_date.isoformat()})
+            foreign_id = write_manifest_to_db(conn, foreign_manifest)
+            if foreign != "body":
+                foreign_manifests.append(foreign_manifest)
+            conn.commit()
+            foreign_artifact = {**json.loads(conn.execute(
+                f"SELECT {_ARTIFACT_IDENTITY_JSON_SQL} FROM raw_forecast_artifacts a WHERE artifact_id=?",
+                (foreign_id,)).fetchone()[0]), "forecast_db": str(db)}
+            assert foreign_id != anchor_id
+            damaged_provenance = json.loads(json.dumps(provenance))
+            damaged_shape = damaged_provenance["bayes_precision_fusion"]["current_evidence_shape"]
+            damaged_audit = damaged_shape["provider_geometry_audit"]
+            damaged_audit.update(anchor_precision_metadata=foreign_precision, anchor_raw_artifact=foreign_artifact)
+            damaged_provenance["openmeteo_anchor_artifact_id"] = foreign_id
+            # The foreign pair has its own legitimate producer scope, but is
+            # not the artifact selected by this posterior's canonical anchor FK.
+            assert _anchor_ifs9_response_has_authority(damaged_shape["provider_geometry_evidence"],
+                damaged_audit, materialized_at=request.computed_at, city=city.name,
+                target_date=foreign_date.isoformat(), metric=foreign_metric,
+                expected_anchor_artifact_id=foreign_id, request_anchor_artifact_id=foreign_id,
+                forecast_db=ground.forecast_db_from_connection(conn)), foreign
+            assert not current_evidence_shape_has_entry_authority(damaged_provenance, **authority_scope), foreign
+            assert not current_evidence_shape_has_held_authority(damaged_provenance, **authority_scope), foreign
+            damaged_provenances.append(damaged_provenance)
+        # A second actual tmp DB gets naturally identical local IDs through
+        # the same ordinary writer sequence. Its self-consistent own body is
+        # not a substitute for the public consumer's A database namespace.
+        other_db = tmp_path / "independent-forecast.db"
+        other_conn = _low_revision_authority_conn(other_db, include_legacy_provider_fixtures=False)
+        other_conn.create_function("strftime", 2, canonical_insert_clock)
+        dl.download_bayes_precision_fusion_extra_raw_inputs(
+            forecast_db=other_db, cycle=request.source_cycle_time,
+            targets=[dl.BayesPrecisionFusionDownloadTarget(city=city.name, metric="low",
+                target_date=request.target_date.isoformat(), lead_days=1, latitude=city.lat,
+                longitude=city.lon, timezone_name=city.timezone)],
+            models=("icon_global", "ukmo_global_deterministic_10km"),
+            include_previous_runs=False, prune_after=False)
+        # The provider cache replay is not a fresh HTTP receipt. These two
+        # genuine other-target/metric products precede B's own LOW entity; no
+        # explicit PK assignment, UPDATE or transfer of a licensed ID occurs.
+        for other_product in foreign_manifests:
+            write_manifest_to_db(other_conn, other_product)
+        other_payload = json.loads(anchor_bytes)
+        other_payload["hourly"]["temperature_2m"][0] -= 1.0
+        other_bytes = (json.dumps(other_payload, indent=2, sort_keys=True)+"\n").encode()
+        other_path = tmp_path / "independent-normal-low-anchor.json"
+        other_path.write_bytes(other_bytes)
+        other_manifest = build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(other_path,
+            request=OpenMeteoEcmwfIfs9AnchorRequest(city.lat, city.lon, request.source_cycle_time, city.timezone),
+            metric="low", source_available_at=_hko_dt(12, 5), captured_at=_hko_dt(12, 10),
+            product_metadata={"city": city.name, "target_date": request.target_date.isoformat()})
+        other_id = write_manifest_to_db(other_conn, other_manifest)
+        other_guard = _hko_precision_guard(decision_at=request.computed_at, raw_payload_bytes=other_bytes)
+        from src.data.openmeteo_ecmwf_ifs9_anchor import extract_openmeteo_ecmwf_ifs9_localday_anchor
+        other_request = replace(request, anchor_artifact_id=other_id, openmeteo_raw_payload_bytes=other_bytes,
+            openmeteo_precision_guard=other_guard, openmeteo_anchor=extract_openmeteo_ecmwf_ifs9_localday_anchor(
+                other_payload, city_timezone=city.timezone, target_local_date=request.target_date,
+                source_cycle_time=request.source_cycle_time, require_full_localday=True))
+        other_anchor_id = materializer_mod._insert_anchor(other_conn, other_request, metric="low")
+        other_conn.commit()
+        other_ground = ground.archive_station_ground_evidence(other_db, [city.name])["archived"][city.name]
+        other_artifact = {**json.loads(other_conn.execute(
+            f"SELECT {_ARTIFACT_IDENTITY_JSON_SQL} FROM raw_forecast_artifacts a WHERE artifact_id=?",
+            (other_id,)).fetchone()[0]), "forecast_db": str(other_db)}
+        assert (other_id, other_anchor_id) == (anchor_id, rebuilt.anchor_id)
+        assert other_artifact["sha256"] != anchor_audit["anchor_raw_artifact"]["sha256"]
+        namespace_provenance = json.loads(json.dumps(provenance))
+        namespace_audit = namespace_provenance["bayes_precision_fusion"]["current_evidence_shape"]["provider_geometry_audit"]
+        namespace_audit.update(anchor_raw_artifact=other_artifact, anchor_station_ground=other_ground,
+            anchor_precision_metadata=_precision_metadata(
+            city.name, request.target_date.isoformat(), anchor_sigma_c=3.0, raw_payload_bytes=other_bytes))
+        # The foreign artifact is legal in B, before the actual A consumer
+        # rejects the pointer despite matching local FK/family/geometry.
+        assert _anchor_ifs9_response_has_authority(shape["provider_geometry_evidence"], namespace_audit,
+            materialized_at=request.computed_at, city=city.name, target_date=request.target_date.isoformat(),
+            metric="low", expected_anchor_artifact_id=other_id, anchor_id=other_anchor_id,
+            forecast_db=ground.forecast_db_from_connection(other_conn))
+        assert not current_evidence_shape_has_entry_authority(namespace_provenance, **authority_scope)
+        assert not current_evidence_shape_has_held_authority(namespace_provenance, **authority_scope)
+        damaged_provenances.append(namespace_provenance)
+        other_conn.close()
     q = json.loads(row["q_json"])
     mu = provenance["bayes_precision_fusion"]["anchor_value_c"]
     sigma = shape["predictive_sigma_c"]
@@ -9408,6 +9599,24 @@ def test_normal_current_writer_rebuilds_v6_posterior_after_literal_v5_refusal(tm
         captured = conn.execute("SELECT * FROM raw_model_forecasts WHERE raw_model_forecast_id=?",
                                 (serving[model]["raw_model_forecast_id"],)).fetchone()
         assert captured["model"] == model and captured["raw_sha256"]
+    # An unrelated official-page edit is a new possession, not new geometry.
+    # Replaying the A certificate must read its sealed A body, never latest B.
+    conn.commit()  # Complete the materializer transaction before producer archive.
+    body_b = official_body.read_bytes() + b"<!-- unrelated retained page edit -->"
+    official_body.write_bytes(body_b)
+    ground_claims["Hong Kong"]["station_ground_proof"].update(
+        body_sha256=hashlib.sha256(body_b).hexdigest(),
+        checked_at=_hko_dt(20).isoformat(),
+    )
+    registry.write_text(json.dumps(ground_claims))
+    ground_clock[0] = _hko_dt(20) + timedelta(seconds=30)
+    ground_b = ground.archive_station_ground_evidence(db, ["Hong Kong"])["archived"]["Hong Kong"]
+    assert ground_b["body_sha256"] != ground_a["body_sha256"]
+    assert ground_b["artifact_id"] != ground_a["artifact_id"]
+    assert ground_b["facts_identity"] == ground_a["facts_identity"]
+    assert ground.read_frozen_station_ground_evidence(ground_a, decision_at=request.computed_at) == ground_a
+    assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at=request.computed_at) == ground_a
+    assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at=_hko_dt(20, 1)) == ground_b
     from src.data.replacement_forecast_readiness import ReplacementForecastReadinessDecision
     from src.data import replacement_forecast_bundle_reader as bundle_reader
     from src.data.replacement_forecast_bundle_reader import (
@@ -9441,6 +9650,44 @@ def test_normal_current_writer_rebuilds_v6_posterior_after_literal_v5_refusal(tm
         assert served.ok, (purpose, served.reason_code)
         assert served.bundle.posterior_id == rebuilt.posterior_id
         assert dict(served.bundle.q) == pytest.approx(q, abs=1e-12)
+        if not include_raw_ifs:
+            # Real owned evidence is required even with an unchanged/re-signed
+            # geometry claim; restoring the same bytes re-enables replay.
+            for owned_path in (anchor_path, Path(ifs_proof["static_asset_audit"]["asset_path"])):
+                original_bytes = owned_path.read_bytes()
+                owned_path.unlink()
+                try:
+                    assert not current_evidence_shape_has_entry_authority(provenance, **authority_scope)
+                    assert not current_evidence_shape_has_held_authority(provenance, **authority_scope)
+                    missing_body = read_replacement_forecast_bundle(
+                        conn, baseline_bundle=_BaselineBundle(_Evidence("new12")), readiness=readiness,
+                        city=request.city, target_date=request.target_date, temperature_metric=request.temperature_metric,
+                        decision_time=_hko_dt(20, 1).isoformat(),
+                        current_bin_topology_hash=posterior["bin_topology_hash"], enforce_raw_input_hwm=True,
+                        authority_purpose=purpose)
+                    assert not missing_body.ok
+                    assert missing_body.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
+                finally:
+                    owned_path.write_bytes(original_bytes)
+                assert current_evidence_shape_has_entry_authority(provenance, **authority_scope)
+                assert current_evidence_shape_has_held_authority(provenance, **authority_scope)
+        # Positive-first persisted certificate tampering: re-signing the
+        # geometry map cannot turn the legacy two-field claim into authority.
+        for damaged_provenance in damaged_provenances:
+            conn.execute("UPDATE forecast_posteriors SET provenance_json=? WHERE posterior_id=?",
+                (json.dumps(damaged_provenance), rebuilt.posterior_id))
+            try:
+                damaged_read = read_replacement_forecast_bundle(
+                    conn, baseline_bundle=_BaselineBundle(_Evidence("new12")), readiness=readiness,
+                    city="Hong Kong", target_date=request.target_date, temperature_metric="low",
+                    decision_time=_hko_dt(20, 1).isoformat(),
+                    current_bin_topology_hash=posterior["bin_topology_hash"], enforce_raw_input_hwm=True,
+                    authority_purpose=purpose)
+                assert not damaged_read.ok
+                assert damaged_read.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
+            finally:
+                conn.execute("UPDATE forecast_posteriors SET provenance_json=? WHERE posterior_id=?",
+                    (row["provenance_json"], rebuilt.posterior_id))
         from src.engine import event_reactor_adapter as era, monitor_refresh
         from src.solve.solver import JointOutcomeProbabilityWitness, OutcomeTokenBinding, joint_probability_witness_identity
         # Reorder conditions relative to stored bin order to disprove a positional
@@ -9486,7 +9733,213 @@ def test_normal_current_writer_rebuilds_v6_posterior_after_literal_v5_refusal(tm
                 means.append(sell_mean)
             assert sum(points) == pytest.approx(1.0)
             assert sum(means) == pytest.approx(1.0)
+    current_request = replace(request, computed_at=_hko_dt(20, 1))
+    current = materialize_replacement_forecast_live(conn, current_request)
+    assert current.ok, current.reason_codes
+    conn.commit()  # Publish the new independent canonical anchor before public replay.
+    current_row = conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+                               (current.posterior_id,)).fetchone()
+    current_provenance = json.loads(current_row["provenance_json"])
+    current_shape = current_provenance["bayes_precision_fusion"]["current_evidence_shape"]
+    assert current_shape["provider_geometry_audit"]["anchor_station_ground"] == ground_b
+    assert current_shape["provider_geometry_identity_hash"] == shape["provider_geometry_identity_hash"]
+    assert json.loads(current_row["q_json"]) == pytest.approx(q, abs=1e-12)
+    current_cert = conn.execute("SELECT * FROM readiness_state WHERE readiness_id=?",
+                                (current.readiness_id,)).fetchone()
+    current_readiness = ReplacementForecastReadinessDecision(
+        readiness_id=current_cert["readiness_id"], status=current_cert["status"],
+        reason_codes=tuple(json.loads(current_cert["reason_codes_json"])),
+        dependency_json=json.loads(current_cert["dependency_json"]),
+        provenance_json=json.loads(current_cert["provenance_json"]),
+        expires_at=datetime.fromisoformat(current_cert["expires_at"]),
+    )
+    for purpose in ReplacementForecastAuthorityPurpose:
+        current_served = read_replacement_forecast_bundle(
+            conn, baseline_bundle=_BaselineBundle(_Evidence("new12")), readiness=current_readiness,
+            city="Hong Kong", target_date=request.target_date, temperature_metric="low",
+            decision_time=current_request.computed_at.isoformat(),
+            current_bin_topology_hash=current_row["bin_topology_hash"], enforce_raw_input_hwm=True,
+            authority_purpose=purpose,
+        )
+        assert current_served.ok, (purpose, current_served.reason_code)
+        assert current_served.bundle.posterior_id == current.posterior_id
+        assert dict(current_served.bundle.q) == pytest.approx(q, abs=1e-12)
+    # TEST_ONLY_SYNTHETIC_EXTERNAL_CONDITION: change the retained official
+    # product's ground value, then acquire its original A bytes again. This
+    # exercises normal possession/RESET, not an actual station-height change.
+    conn.commit()
+    original_ground_row = tuple(conn.execute(
+        "SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?",
+        (ground_a["artifact_id"],)).fetchone())
+    changed_ground_body = original_ground_body.replace(
+        b'<td class="td1_normal_class">32</td>',
+        b'<td class="td1_normal_class">33</td>', 1)
+    assert changed_ground_body != original_ground_body
+    official_body.write_bytes(changed_ground_body)
+    ground_claims["Hong Kong"]["station_ground_proof"].update(
+        elevation_m=33.0, body_sha256=hashlib.sha256(changed_ground_body).hexdigest(),
+        checked_at=_hko_dt(20, 2).isoformat())
+    registry.write_text(json.dumps(ground_claims))
+    ground_clock[0] = _hko_dt(20, 2) + timedelta(seconds=30)
+    changed_ground = ground.archive_station_ground_evidence(
+        db, ["Hong Kong"])["archived"]["Hong Kong"]
+    assert changed_ground["facts"]["elevation_m"] == 33.0
+    assert changed_ground["facts_identity"] != ground_a["facts_identity"]
+    # The real runtime registry/page are now C33, not A32. A frozen
+    # certificate still replays its own canonical knowledge at the old cut.
+    assert current_evidence_shape_has_entry_authority(provenance, **authority_scope)
+    assert current_evidence_shape_has_held_authority(provenance, **authority_scope)
+    for purpose in ReplacementForecastAuthorityPurpose:
+        historical = read_replacement_forecast_bundle(
+            conn, baseline_bundle=_BaselineBundle(_Evidence("new12")), readiness=readiness,
+            city=request.city, target_date=request.target_date, temperature_metric=request.temperature_metric,
+            decision_time=request.computed_at.isoformat(),
+            current_bin_topology_hash=posterior["bin_topology_hash"], enforce_raw_input_hwm=True,
+            authority_purpose=purpose)
+        assert historical.ok, (purpose, historical.reason_code)
+        assert historical.bundle.posterior_id == rebuilt.posterior_id
+        assert dict(historical.bundle.q) == pytest.approx(q, abs=1e-12)
+    changed_request = replace(request, computed_at=_hko_dt(20, 3))
+    new_scope = {**authority_scope, "materialized_at": changed_request.computed_at}
+    assert not current_evidence_shape_has_entry_authority(provenance, **new_scope)
+    assert not current_evidence_shape_has_held_authority(provenance, **new_scope)
+    # The unchanged A request is not licensed by B; this is an explicit
+    # degradation, not a synthetic B forecast/probability certificate.
+    changed = materialize_replacement_forecast_live(conn, changed_request)
+    assert not changed.ok
+    assert changed.reason_codes == ("OM9_STATION_GROUND_ENTITY_NOT_POSSESSED",)
+    for purpose in ReplacementForecastAuthorityPurpose:
+        stale_ground = read_replacement_forecast_bundle(
+            conn, baseline_bundle=_BaselineBundle(_Evidence("new12")), readiness=current_readiness,
+            city=request.city, target_date=request.target_date, temperature_metric=request.temperature_metric,
+            decision_time=changed_request.computed_at.isoformat(),
+            current_bin_topology_hash=current_row["bin_topology_hash"], enforce_raw_input_hwm=True,
+            authority_purpose=purpose)
+        assert not stale_ground.ok
+        assert "basis=station_ground_current_facts_changed" in stale_ground.reason_code
+    # Normal metadata captures C33 from the actual current official body;
+    # neither old A geometry nor its probability is pasted onto the new cut.
+    rebound_request = replace(changed_request, openmeteo_precision_guard=_hko_precision_guard(
+        decision_at=changed_request.computed_at, raw_payload_bytes=anchor_bytes))
+    rebound = materialize_replacement_forecast_live(conn, rebound_request)
+    assert rebound.ok, rebound.reason_codes
+    conn.commit()
+    rebound_row = conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?", (rebound.posterior_id,)).fetchone()
+    rebound_provenance = json.loads(rebound_row["provenance_json"])
+    rebound_shape = rebound_provenance["bayes_precision_fusion"]["current_evidence_shape"]
+    assert rebound_shape["provider_geometry_audit"]["anchor_station_ground"] == changed_ground
+    assert rebound_shape["provider_geometry_identity_hash"] != shape["provider_geometry_identity_hash"]
+    rebound_mu = rebound_provenance["bayes_precision_fusion"]["anchor_value_c"]
+    rebound_sigma = rebound_shape["predictive_sigma_c"]
+    rebound_cdf = lambda x: .5*(1+math.erf((x-rebound_mu)/(rebound_sigma*math.sqrt(2))))
+    rebound_q = json.loads(rebound_row["q_json"])
+    assert rebound_q == pytest.approx({"cool": rebound_cdf(20.5), "warm": rebound_cdf(30.5)-rebound_cdf(20.5),
+                                      "hot": 1-rebound_cdf(30.5)}, abs=1e-12)
+    rebound_cert = conn.execute("SELECT * FROM readiness_state WHERE readiness_id=?", (rebound.readiness_id,)).fetchone()
+    rebound_readiness = ReplacementForecastReadinessDecision(
+        readiness_id=rebound_cert["readiness_id"], status=rebound_cert["status"],
+        reason_codes=tuple(json.loads(rebound_cert["reason_codes_json"])),
+        dependency_json=json.loads(rebound_cert["dependency_json"]),
+        provenance_json=json.loads(rebound_cert["provenance_json"]),
+        expires_at=datetime.fromisoformat(rebound_cert["expires_at"]))
+    for purpose in ReplacementForecastAuthorityPurpose:
+        rebound_served = read_replacement_forecast_bundle(
+            conn, baseline_bundle=_BaselineBundle(_Evidence("new12")), readiness=rebound_readiness,
+            city=request.city, target_date=request.target_date, temperature_metric=request.temperature_metric,
+            decision_time=rebound_request.computed_at.isoformat(),
+            current_bin_topology_hash=rebound_row["bin_topology_hash"], enforce_raw_input_hwm=True,
+            authority_purpose=purpose)
+        assert rebound_served.ok, (purpose, rebound_served.reason_code)
+        assert dict(rebound_served.bundle.q) == pytest.approx(rebound_q, abs=1e-12)
+    conn.commit()
+    official_body.write_bytes(original_ground_body)
+    ground_claims["Hong Kong"]["station_ground_proof"].update(
+        elevation_m=32.0, body_sha256=hashlib.sha256(original_ground_body).hexdigest(),
+        checked_at=_hko_dt(20, 4).isoformat())
+    registry.write_text(json.dumps(ground_claims))
+    ground_clock[0] = _hko_dt(20, 4) + timedelta(seconds=30)
+    confirmed_a = ground.archive_station_ground_evidence(
+        db, ["Hong Kong"])["archived"]["Hong Kong"]
+    assert confirmed_a["manifest_role"] == "source_capture_confirmation"
+    assert confirmed_a["input_bodies"]["ground"]["artifact_id"] == ground_a["artifact_id"]
+    assert confirmed_a["input_bodies"]["ground"]["captured_at"] == ground_a["captured_at"]
+    assert confirmed_a["captured_at"] == _hko_dt(20, 4).isoformat()
+    assert confirmed_a["recorded_at"] == ground_clock[0].isoformat()
+    assert confirmed_a["facts_identity"] == ground_a["facts_identity"]
+    assert tuple(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?",
+        (ground_a["artifact_id"],)).fetchone()) == original_ground_row
+    assert ground.read_current_station_ground_evidence(
+        db, city="Hong Kong", decision_at=changed_request.computed_at) == changed_ground
+    assert ground.read_current_station_ground_evidence(
+        db, city="Hong Kong", decision_at=request.computed_at) == ground_a
+    reset_request = replace(request, computed_at=_hko_dt(20, 5))
+    reset = materialize_replacement_forecast_live(conn, reset_request)
+    assert reset.ok, reset.reason_codes
+    conn.commit()  # RESET certificates are public only after canonical commit.
+    reset_row = conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+                            (reset.posterior_id,)).fetchone()
+    reset_provenance = json.loads(reset_row["provenance_json"])
+    reset_shape = reset_provenance["bayes_precision_fusion"]["current_evidence_shape"]
+    assert reset_shape["provider_geometry_audit"]["anchor_station_ground"] == confirmed_a
+    assert reset_shape["provider_geometry_identity_hash"] == shape["provider_geometry_identity_hash"]
+    assert reset_row["dependency_hash"] != posterior["dependency_hash"]
+    assert json.loads(reset_row["q_json"]) == pytest.approx(q, abs=1e-12)
+    reset_cert = conn.execute("SELECT * FROM readiness_state WHERE readiness_id=?",
+                             (reset.readiness_id,)).fetchone()
+    reset_readiness = ReplacementForecastReadinessDecision(
+        readiness_id=reset_cert["readiness_id"], status=reset_cert["status"],
+        reason_codes=tuple(json.loads(reset_cert["reason_codes_json"])),
+        dependency_json=json.loads(reset_cert["dependency_json"]),
+        provenance_json=json.loads(reset_cert["provenance_json"]),
+        expires_at=datetime.fromisoformat(reset_cert["expires_at"]))
+    for purpose in ReplacementForecastAuthorityPurpose:
+        reset_served = read_replacement_forecast_bundle(
+            conn, baseline_bundle=_BaselineBundle(_Evidence("new12")), readiness=reset_readiness,
+            city="Hong Kong", target_date=request.target_date, temperature_metric="low",
+            decision_time=reset_request.computed_at.isoformat(),
+            current_bin_topology_hash=reset_row["bin_topology_hash"], enforce_raw_input_hwm=True,
+            authority_purpose=purpose)
+        assert reset_served.ok, (purpose, reset_served.reason_code)
+        assert reset_served.bundle.posterior_id == reset.posterior_id
+        assert dict(reset_served.bundle.q) == pytest.approx(q, abs=1e-12)
+        reset_samples, reset_point, reset_basis = era._replacement_global_probability_components(
+            reset_served.bundle, candidates=candidates, bindings=bindings)
+        assert reset_point == pytest.approx(point, abs=1e-12)
+        reset_identity = {**identity, "q_version": reset_served.bundle.posterior_identity_hash,
+            "posterior_identity_hash": reset_served.bundle.posterior_identity_hash,
+            "source_truth_identity": reset_served.bundle.dependency_hash,
+            "authority_certificate_hash": hashlib.sha256(reset_cert["provenance_json"].encode()).hexdigest(),
+            "band_basis": reset_basis, "yes_point_q": reset_point,
+            "yes_q_samples": reset_samples, "captured_at_utc": reset_request.computed_at}
+        reset_witness = JointOutcomeProbabilityWitness(**reset_identity, max_age=timedelta(minutes=5),
+            witness_identity=joint_probability_witness_identity(**reset_identity))
+        for index, binding in enumerate(bindings):
+            for direction, side in (("buy_yes", "YES"), ("buy_no", "NO")):
+                held = SimpleNamespace(condition_id=binding.condition_id, direction=direction,
+                    token_id=binding.yes_token_id, no_token_id=binding.no_token_id)
+                expected_point = q[binding.bin_id] if side == "YES" else 1-q[binding.bin_id]
+                assert monitor_refresh._current_global_held_point_probability(
+                    held, reset_witness) == pytest.approx(expected_point, abs=1e-12)
+                expected_samples = reset_samples[:, index] if side == "YES" else 1-reset_samples[:, index]
+                assert monitor_refresh._current_global_held_samples(held, reset_witness,
+                    current_token_pair=(binding.yes_token_id, binding.no_token_id)) == pytest.approx(expected_samples)
+                assert era._global_sell_held_probability(SimpleNamespace(bin_id=binding.bin_id, side=side),
+                    reset_witness) == pytest.approx(float(expected_samples.mean()))
+    conn.commit()
+    ground_clock[0] = _hko_dt(20, 6)
+    assert ground.archive_station_ground_evidence(db, ["Hong Kong"])["archived"]["Hong Kong"] == confirmed_a
     conn.close()
+    sql_builtins.close()
+
+
+@pytest.mark.usefixtures("_hko_source_surface")
+def test_normal_current_writer_rebuilds_v6_posterior_after_literal_v5_refusal(tmp_path, monkeypatch):
+    _normal_hko_writer_proof_relationship(tmp_path, monkeypatch, include_raw_ifs=True)
+
+
+@pytest.mark.usefixtures("_hko_source_surface")
+def test_normal_anchor_only_writer_rebuilds_v6_and_public_entry_held_own_proof(tmp_path, monkeypatch):
+    _normal_hko_writer_proof_relationship(tmp_path, monkeypatch, include_raw_ifs=False)
 
 
 def _built_low_revision_request(tmp_path: Path) -> ReplacementForecastMaterializeRequest:
