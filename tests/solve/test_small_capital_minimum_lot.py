@@ -14,6 +14,7 @@ still binds the lot.
 from __future__ import annotations
 
 import inspect
+from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -222,6 +223,56 @@ def test_lot_is_refused_when_its_fill_leaves_the_price_band():
     assert decision.no_trade_reason == "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT"
 
 
+@pytest.mark.parametrize("cap,admitted", [("1.20", False), ("1.30", True)])
+def test_lot_worst_limit_spend_must_fit_the_allocator_cap(cap, admitted):
+    # Taker $1 lot is 4.10 shares (4 @ 0.20 + 0.10 @ 0.30; notional at the
+    # 0.30 limit). Its cost 0.83 fits a $1.20 cap; its worst-limit spend
+    # 4.10 * 0.30 = 1.23 does not.
+    candidate = _global_candidate(
+        candidate_id=f"spend-bound-{cap}",
+        family=f"spend-bound-{cap}",
+        side="YES",
+        q=0.38,
+        levels=(("0.20", "4"), ("0.30", "1000")),
+    )
+    decision = _global_score(
+        candidate, floor="32", ceiling="32", cash="15", cap=cap, multiplier="0.125"
+    )
+
+    if admitted:
+        assert decision.buy_sizing_mode == "SMALL_CAPITAL_MINIMUM_LOT"
+        assert decision.shares == Decimal("4.10")
+        assert decision.max_spend_usd == Decimal("1.2300")
+    else:
+        assert decision.candidate is None
+
+
+@pytest.mark.parametrize("cash,admitted", [("1.01", False), ("1.03", True)])
+def test_grid_rounded_lot_must_fit_cash_capacity(cash, admitted):
+    # At 0.051 the $1 minimum is 19.61 shares but the venue amount grid makes
+    # the smallest legal lot 20.00. $1.01 buys 19.8 shares: past the raw
+    # minimum (so not DEPTH_INFEASIBLE) yet short of the legal lot.
+    candidate = _global_candidate(
+        candidate_id=f"grid-lot-{cash}",
+        family=f"grid-lot-{cash}",
+        side="YES",
+        q=0.9,
+        levels=(("0.051", "1000"),),
+    )
+    assert S._single_order_legal_minimum_lot(candidate) == Decimal("20.00")
+    decision = _global_score(
+        candidate, floor="5", ceiling="5", cash=cash, cap=cash, multiplier="0.125"
+    )
+
+    if admitted:
+        assert decision.buy_sizing_mode == "SMALL_CAPITAL_MINIMUM_LOT"
+        assert decision.shares == Decimal("20.00")
+        assert decision.max_spend_usd <= Decimal(cash)
+    else:
+        assert decision.candidate is None
+        assert decision.no_trade_reason == "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT"
+
+
 def test_lot_is_refused_when_cash_cannot_pay_it():
     _taker, maker = _maker_leg(cid="cash-bound")
     decision = _score_mean(maker, q=0.38, cash="1.49")
@@ -381,6 +432,58 @@ def test_joint_planner_refuses_a_lot_outside_the_price_band():
     plan = _plan(candidate, witness, wealth="2", cash="2")
 
     assert plan.targets == ()
+
+
+def test_joint_leg_below_the_band_floor_never_reaches_the_planner():
+    # The lower band edge is enforced before sizing: a taker whose best ask is
+    # below 0.05 is ineligible, so no joint lot can be minted from it.
+    candidate, witness = _joint_family(q=0.38, family="joint-band-floor")
+    curve = _global_curve(
+        side="YES",
+        token=candidate.token_id,
+        levels=(("0.04", "10"), ("0.30", "1000")),
+        min_order="5",
+    )
+    candidate = replace(
+        candidate,
+        executable_cost_curve=curve,
+        book_snapshot_id=curve.snapshot_id,
+        execution_curve_identity=S.executable_curve_identity(curve),
+    )
+    assert candidate.eligibility_reason == "LIVE_UNIT_PRICE_OUT_OF_BOUNDS"
+    decision = _global_select(
+        (candidate,),
+        probability_witnesses={witness.family_key: witness},
+        floor="32",
+        ceiling="32",
+        cash="15.24",
+        cap="15.24",
+        fractional_kelly_multiplier="0.125",
+        family_portfolio_endowment_resolver=lambda _family: _joint_endowment(witness),
+    )
+    assert decision.candidate is None
+
+
+def test_joint_planner_lot_respects_each_candidates_own_cap():
+    candidate, witness = _joint_family(q=0.26, family="joint-own-cap")
+    endowment = _joint_endowment(witness)
+    admitted = S.plan_family_joint_buy_targets(
+        (candidate,),
+        probability_witness=witness,
+        endowment=endowment,
+        capital_limit_by_candidate={candidate.candidate_id: Decimal("1.00")},
+        fractional_kelly_multiplier=KAPPA,
+    )
+    refused = S.plan_family_joint_buy_targets(
+        (candidate,),
+        probability_witness=witness,
+        endowment=endowment,
+        capital_limit_by_candidate={candidate.candidate_id: Decimal("0.99")},
+        fractional_kelly_multiplier=KAPPA,
+    )
+
+    assert [t.shares for t in admitted.targets] == [Decimal("5.00")]
+    assert refused.targets == ()
 
 
 def test_joint_planner_uses_normal_sizing_with_large_capital():

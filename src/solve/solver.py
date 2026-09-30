@@ -5584,25 +5584,17 @@ def plan_family_joint_buy_targets(
         if raw_min is None or legal_min is None:
             continue
         if legal is None or legal < legal_min:
-            # The same law as the single-order sizer; the lot keeps the
-            # candidate's cash/allocator cap and the live price band, and the
-            # joint log-wealth and fractional-budget checks below still bind.
-            try:
-                lot_limit, lot_fill, _lot_spend = _single_order_execution_boundary(
-                    candidate, legal_min,
-                )
-            except ValueError:
-                continue
-            if not (
-                legal_min <= candidate_caps[index]
-                and _live_unit_price_in_band(lot_limit)
-                and _live_unit_price_in_band(lot_fill)
-                and small_capital_minimum_lot_admits(
-                    current_token_shares=held,
-                    full_kelly_target_shares=full_target,
-                    fractional_kelly_target_shares=fractional_target,
-                    minimum_lot_shares=legal_min,
-                )
+            # The same law as the single-order sizer. ``full_target`` is
+            # already capped by this candidate's cash/allocator capacity, so
+            # ``held + lot <= full_target`` keeps the lot inside it. The joint
+            # log-wealth and fractional-budget checks below still bind, and
+            # each target is rescored by the single-order sizer (price band,
+            # EV, fill prefix) before it can be selected.
+            if not small_capital_minimum_lot_admits(
+                current_token_shares=held,
+                full_kelly_target_shares=full_target,
+                fractional_kelly_target_shares=fractional_target,
+                minimum_lot_shares=legal_min,
             ):
                 continue
             legal = legal_min
@@ -6018,7 +6010,6 @@ def _single_order_small_capital_lot(
     *,
     lot_shares: Decimal,
     max_shares: Decimal,
-    spend_limit: Decimal,
     held_shares: Decimal,
     multiplier: Decimal,
     q_samples: np.ndarray,
@@ -6030,9 +6021,12 @@ def _single_order_small_capital_lot(
     """Admit one minimum lot under ``small_capital_minimum_lot_admits`` or None.
 
     Only the fractional-target-below-lot rejection is relaxed. The lot keeps
-    every other admission law of the fractional sizer: depth, allocator/cash
-    capacity, the live price band, positive log-wealth, EV and efficiency, and
-    the rounding-safe fill-prefix proof.
+    every other admission law of the fractional sizer: the caller has already
+    proved this exact lot's log-wealth and EV positive (``minimum_order_positive``),
+    ``_single_order_execution_boundary`` refuses any fill outside the live price
+    band, ``max_shares`` bounds the lot's worst-limit spend by cash and the
+    allocator cap, and here the lot must pass the rounding-safe fill-prefix proof. The selector then applies
+    ``_positive_common_expected_growth`` to it like any other proposal.
     """
 
     if lot_shares > max_shares:
@@ -6075,14 +6069,8 @@ def _single_order_small_capital_lot(
             fractional_kelly_target_shares=fractional_target,
             minimum_lot_shares=lot_shares,
         )
-        and robust_du > 0.0
-        and robust_ev > _ROBUST_EV_EPS_USD
-        and efficiency > 0.0
         and prefix_du > 0.0
         and prefix_ev > _ROBUST_EV_EPS_USD
-        and _live_unit_price_in_band(limit_price)
-        and _live_unit_price_in_band(expected_fill_price)
-        and max_spend <= spend_limit
     ):
         return None
     return GlobalSingleOrderDecision(
@@ -6483,7 +6471,6 @@ def _score_global_single_order(
             candidate,
             lot_shares=legal_min_shares,
             max_shares=actual_max_shares,
-            spend_limit=spend_limit,
             held_shares=held_shares,
             multiplier=multiplier,
             q_samples=q_samples,
