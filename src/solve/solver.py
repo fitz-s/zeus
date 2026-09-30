@@ -237,7 +237,6 @@ GlobalEligibilityReason = Literal[
     "ROBUST_MAJORITY_LOSS",
     "FRACTIONAL_KELLY_TARGET_REACHED",
     "LIVE_UNIT_PRICE_OUT_OF_BOUNDS",
-    "CURRENT_PRECLIFF_LIQUIDATION_CAPACITY_MISSING",
     "CURRENT_TOKEN_EXITABILITY_AUTHORITY_MISSING",
     "MAKER_REST_EXITABILITY_SEED_REQUIRED",
     "NON_POSITIVE_ROBUST_OBJECTIVE",
@@ -353,18 +352,36 @@ def passive_buy_proposal_curve(
     curve: ExecutableCostCurve,
     *,
     native_bid_levels: Sequence[BidBookLevel | BookLevel],
+    cash_usd: Decimal,
 ) -> ExecutableCostCurve | None:
     """Price one post-only BUY one tick above the current best bid."""
 
     bids = tuple(native_bid_levels)
     if not bids:
         return None
-    best_bid = max(Decimal(level.price) for level in bids)
+    limit = max(Decimal(level.price) for level in bids) + Decimal(curve.min_tick)
     return passive_buy_proposal_at_limit(
         curve,
         native_bid_levels=bids,
-        limit=best_bid + Decimal(curve.min_tick),
+        limit=limit,
+        capacity=maker_buy_capacity(cash_usd, limit),
     )
+
+
+def maker_buy_capacity(cash_usd: Decimal, limit: Decimal) -> Decimal:
+    """Shares ``cash_usd`` funds at ``limit``: the most one resting BUY carries.
+
+    The size is ours, not the book's. Kelly and the capital limit size the
+    order inside it; resale depth never bounds a BUY held to settlement.
+    """
+
+    cash = Decimal(cash_usd)
+    price = Decimal(limit)
+    if not (cash.is_finite() and price.is_finite()) or cash <= 0 or price <= 0:
+        return Decimal("0")
+    return (cash / price / _SIZE_QUANTUM).to_integral_value(
+        rounding=ROUND_FLOOR
+    ) * _SIZE_QUANTUM
 
 
 def passive_buy_proposal_at_limit(
@@ -372,22 +389,23 @@ def passive_buy_proposal_at_limit(
     *,
     native_bid_levels: Sequence[BidBookLevel | BookLevel],
     limit: Decimal,
+    capacity: Decimal,
 ) -> ExecutableCostCurve | None:
-    """Rest one post-only BUY at ``limit`` iff the current book admits it.
+    """Rest one post-only BUY of ``capacity`` shares at ``limit``.
 
-    ``resting_limit_violation`` is the single book law; capacity is the same
-    book's current pre-cliff liquidation capacity.
+    ``resting_limit_violation`` is the single book law; a proposal below the
+    venue lot is not a proposal.
     """
 
     bids = tuple(native_bid_levels)
     best_bid = max((Decimal(level.price) for level in bids), default=None)
     best_ask = Decimal(curve.levels[0].price) if curve.levels else None
-    proposal_capacity = current_precliff_liquidation_capacity(bids)
+    shares = Decimal(capacity)
     if (
         resting_limit_violation("BUY", limit, best_bid=best_bid, best_ask=best_ask)
         is not None
-        or not proposal_capacity.is_finite()
-        or proposal_capacity < Decimal(curve.min_order_size)
+        or not shares.is_finite()
+        or shares < Decimal(curve.min_order_size)
     ):
         return None
     return ExecutableCostCurve(
@@ -395,41 +413,13 @@ def passive_buy_proposal_at_limit(
         side=curve.side,
         snapshot_id=curve.snapshot_id,
         book_hash=curve.book_hash,
-        # A maker fill is adverse-selection evidence.  Never rest more shares
-        # than the same captured book can currently liquidate above the venue
-        # floor.  A floor bid is executable now but provides no downward-tick
-        # redecision slack.  This witness does not claim that bids persist.
-        levels=(BookLevel(price=Decimal(limit), size=proposal_capacity),),
+        levels=(BookLevel(price=Decimal(limit), size=shares),),
         # See passive_sell_proposal_curve: current maker authority uses the
         # exact submitted limit, without an assumed fee or rebate.
         fee_model=FeeModel(fee_rate=Decimal("0")),
         min_tick=curve.min_tick,
         min_order_size=curve.min_order_size,
         quote_ttl=curve.quote_ttl,
-    )
-
-
-def current_precliff_liquidation_capacity(
-    native_bid_levels: Sequence[BidBookLevel | BookLevel],
-) -> Decimal:
-    """Return shares executable before the live SELL floor is reached.
-
-    A bid exactly at the floor is legal execution authority for an already-held
-    SELL, but it is not pre-cliff capacity for admitting new risk: there is no
-    lower legal tick on which the next re-decision could preserve capital.
-    """
-
-    return sum(
-        (
-            Decimal(level.size)
-            for level in native_bid_levels
-            if Decimal(level.price).is_finite()
-            and Decimal(level.price) > LIVE_ORDER_MIN_UNIT_PRICE
-            and Decimal(level.price) <= LIVE_ORDER_MAX_UNIT_PRICE
-            and Decimal(level.size).is_finite()
-            and Decimal(level.size) > 0
-        ),
-        Decimal("0"),
     )
 
 
@@ -2254,8 +2244,13 @@ def global_candidates_from_native(
     maker_fill_witness: CurrentMakerFillWitness | None = None,
     asset_epoch_identity: str | None = None,
     current_token_shares: Decimal | None = None,
+    maker_cash_usd: Decimal | None = None,
 ) -> tuple[GlobalSingleOrderCandidate, ...]:
-    """Materialize current taker and, when fully witnessed, maker siblings."""
+    """Materialize current taker and, when fully witnessed, maker siblings.
+
+    A maker carries the size ``maker_cash_usd`` funds at its limit: the same
+    proposal the witness binder priced, never bounded by bid depth.
+    """
 
     if getattr(native, "no_trade_reason", None) is not None:
         raise ValueError("native no-trade candidate is not globally executable")
@@ -2324,8 +2319,10 @@ def global_candidates_from_native(
         **common,
     )
     if include_maker:
+        if maker_cash_usd is None:
+            raise ValueError("maker proposal size requires current cash authority")
         maker_curve = passive_buy_proposal_curve(
-            curve, native_bid_levels=native_bid_levels
+            curve, native_bid_levels=bids, cash_usd=maker_cash_usd
         )
         if maker_curve is None or maker_fill_witness is None or not asset_epoch_identity:
             return (taker,)
@@ -6161,7 +6158,6 @@ def _score_global_single_order(
     fractional_kelly_multiplier: Decimal = Decimal("1"),
     payoff_q_lcb: float | None = None,
     current_token_shares: Decimal = Decimal("0"),
-    settlement_locked_exact_payoff: bool = False,
 ) -> GlobalSingleOrderDecision:
     """Rank real fixed orders within a capacity-independent Kelly risk target.
 
@@ -6178,8 +6174,6 @@ def _score_global_single_order(
         raise ValueError("fractional Kelly multiplier must be finite and in (0, 1]")
     if not held_shares.is_finite() or held_shares < 0:
         raise ValueError("current token shares must be finite and non-negative")
-    if type(settlement_locked_exact_payoff) is not bool:
-        raise ValueError("exact-payoff settlement-lock authority must be bool")
     affordability_limit = min(
         Decimal(spendable_cash_usd),
         Decimal(wealth_floor_usd) * (Decimal("1") - Decimal(str(_WEALTH_MARGIN))),
@@ -6189,34 +6183,9 @@ def _score_global_single_order(
         candidate.economic_cost_curve,
         spend_limit_usd=spend_limit,
     )
+    # A BUY is held to settlement: current resale depth neither admits nor
+    # sizes it. Ask depth, cash, the venue lot and Kelly bound it below.
     raw_min_shares = _single_order_min_buy_shares(candidate)
-    liquidation_capacity = current_precliff_liquidation_capacity(
-        candidate.native_bid_levels
-    )
-    liquidation_cap_shares = (
-        liquidation_capacity / _SIZE_QUANTUM
-    ).to_integral_value(rounding=ROUND_FLOOR) * _SIZE_QUANTUM
-    requires_liquidation_capacity = not settlement_locked_exact_payoff
-    if requires_liquidation_capacity and (
-        raw_min_shares is None or liquidation_cap_shares < raw_min_shares
-    ):
-        # SCOPE: this statistical BUY and its current native bid curve only.
-        # DRAIN: the next auction rebuilds the candidate from a fresh book.
-        # RESET: a current in-band bid prefix large enough for one legal lot
-        # returns the candidate to the expected-log-growth solve.
-        reason = "PRECLIFF_LIQUIDATION_CAPACITY_BELOW_MINIMUM_LOT"
-        return GlobalSingleOrderDecision(
-            candidate=None,
-            shares=Decimal("0"),
-            cost_usd=Decimal("0"),
-            robust_delta_log_wealth=0.0,
-            robust_ev_usd=0.0,
-            capital_efficiency=0.0,
-            no_trade_reason=reason,
-            rejection_reasons={candidate.candidate_id: reason},
-        )
-    if requires_liquidation_capacity:
-        capacity_max_shares = min(capacity_max_shares, liquidation_cap_shares)
     if raw_min_shares is None or capacity_max_shares < raw_min_shares:
         return GlobalSingleOrderDecision(
             candidate=None,
@@ -6629,7 +6598,6 @@ def _score_global_single_order_buy_expected(
     capital_limit_usd: Decimal,
     fractional_kelly_multiplier: Decimal,
     current_token_shares: Decimal,
-    settlement_locked_exact_payoff: bool = False,
 ) -> GlobalSingleOrderDecision:
     """Size one BUY on posterior-mean expected log wealth.
 
@@ -6658,7 +6626,6 @@ def _score_global_single_order_buy_expected(
         fractional_kelly_multiplier=fractional_kelly_multiplier,
         payoff_q_lcb=mean_q,
         current_token_shares=current_token_shares,
-        settlement_locked_exact_payoff=settlement_locked_exact_payoff,
     )
     reason_map = {
         "NON_POSITIVE_ROBUST_OBJECTIVE": "NON_POSITIVE_EXPECTED_OBJECTIVE",
@@ -7838,7 +7805,6 @@ def select_global_single_order(
         str, GlobalSellPointCounterfactual
     ] = {}
     buy_capital_limits: dict[str, Decimal] = {}
-    joint_buy_cost_limits: dict[str, Decimal] = {}
     buy_endowments: dict[str, CandidatePortfolioEndowment] = {}
     buy_corrections: dict[str, PayoffQCorrection | SourceIdentityBaseline | None] = {}
     joint_buy_candidates_by_family: dict[
@@ -8387,16 +8353,6 @@ def select_global_single_order(
             rejections[candidate.candidate_id] = "CAPITAL_CONSTRAINT_UNAVAILABLE"
             continue
         probability_witness = probability_witnesses[candidate.family_key]
-        exact_yes_payoff = family_exact_yes_payoff(
-            probability_witness,
-            bin_id=candidate.bin_id,
-        )
-        settlement_locked_exact_payoff = (
-            candidate.settlement_locked_exact_payoff
-            and exact_yes_payoff is not None
-            and (exact_yes_payoff if candidate.side == "YES" else 1 - exact_yes_payoff)
-            == 1
-        )
         candidate_capital_limit = capital_limit_usd
         if candidate_capital_limit_resolver is not None:
             try:
@@ -8411,51 +8367,7 @@ def select_global_single_order(
         if candidate_capital_limit <= 0:
             rejections[candidate.candidate_id] = "CAPITAL_CAPACITY_EXHAUSTED"
             continue
-        joint_cost_limit = candidate_capital_limit
-        if not settlement_locked_exact_payoff:
-            liquidation_capacity = current_precliff_liquidation_capacity(
-                candidate.native_bid_levels
-            )
-            executable_ask_depth = sum(
-                (
-                    Decimal(level.size)
-                    for level in candidate.economic_cost_curve.levels
-                    if Decimal(level.size).is_finite() and Decimal(level.size) > 0
-                ),
-                Decimal("0"),
-            )
-            liquidation_cap_shares = (
-                min(liquidation_capacity, executable_ask_depth) / _SIZE_QUANTUM
-            ).to_integral_value(rounding=ROUND_FLOOR) * _SIZE_QUANTUM
-            liquidation_min_shares = _single_order_min_buy_shares(candidate)
-            if (
-                liquidation_min_shares is None
-                or liquidation_cap_shares < liquidation_min_shares
-            ):
-                rejections[candidate.candidate_id] = (
-                    "PRECLIFF_LIQUIDATION_CAPACITY_BELOW_MINIMUM_LOT"
-                )
-                continue
-            if liquidation_capacity < executable_ask_depth:
-                try:
-                    joint_cost_limit = min(
-                        candidate_capital_limit,
-                        _single_order_cost(
-                            candidate.economic_cost_curve,
-                            liquidation_cap_shares,
-                            execution_mode=candidate.execution_mode,
-                        ),
-                    )
-                except ValueError:
-                    rejections[candidate.candidate_id] = (
-                        "PRECLIFF_LIQUIDATION_CAPACITY_BELOW_MINIMUM_LOT"
-                    )
-                    continue
         buy_capital_limits[candidate.candidate_id] = candidate_capital_limit
-        # The joint planner walks VWAP cost; the fixed-order solver reserves
-        # every share at its limit and separately caps liquidation shares.
-        # Passing a depth cost as cash to the latter would shrink size twice.
-        joint_buy_cost_limits[candidate.candidate_id] = joint_cost_limit
         candidate_endowment = CandidatePortfolioEndowment(
             loss_wealth_floor_usd=utility_liquid_cash,
             win_wealth_floor_usd=utility_liquid_cash,
@@ -8533,9 +8445,6 @@ def select_global_single_order(
             capital_limit_usd=candidate_capital_limit,
             fractional_kelly_multiplier=multiplier,
             current_token_shares=candidate_endowment.current_token_shares,
-            settlement_locked_exact_payoff=(
-                settlement_locked_exact_payoff and payoff_probability_mean == 1.0
-            ),
         )
         if correction is not None and score.candidate is not None:
             score = replace(score, payoff_q_correction=correction)
@@ -8733,7 +8642,6 @@ def select_global_single_order(
                         ),
                         fractional_kelly_multiplier=multiplier,
                         current_token_shares=endowment.current_token_shares,
-                        settlement_locked_exact_payoff=(candidate_id in exact_winner_ids),
                     )
                     rejections.pop(candidate_id, None)
                     rejected_buy_economics_by_id.pop(candidate_id, None)
@@ -8764,7 +8672,7 @@ def select_global_single_order(
                     positive_family_candidates,
                     probability_witness=witness,
                     endowment=family_endowment,
-                    capital_limit_by_candidate=joint_buy_cost_limits,
+                    capital_limit_by_candidate=buy_capital_limits,
                     fractional_kelly_multiplier=multiplier,
                     cache=family_joint_plan_cache,
                 )
@@ -8844,7 +8752,6 @@ def select_global_single_order(
                     capital_limit_usd=target_cost,
                     fractional_kelly_multiplier=multiplier,
                     current_token_shares=target.current_token_shares,
-                    settlement_locked_exact_payoff=False,
                 )
                 if fixed.candidate is None:
                     rejections[candidate_id] = (

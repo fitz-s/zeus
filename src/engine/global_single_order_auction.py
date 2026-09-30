@@ -1115,6 +1115,7 @@ def select_prepared_global_auction(
                         maker_fill_witness=maker_witness,
                         asset_epoch_identity=book_epoch.witness_identity,
                         current_token_shares=current_token_shares,
+                        maker_cash_usd=wealth_witness.spendable_cash_usd,
                         neg_risk=asset.neg_risk,
                     )
                 )

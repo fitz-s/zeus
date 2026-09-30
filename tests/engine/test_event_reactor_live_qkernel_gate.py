@@ -1,5 +1,5 @@
 # Created: 2026-06-30
-# Last reused/audited: 2026-09-16
+# Last reused/audited: 2026-09-30
 # Authority basis: live-money qkernel submit authority and canonical selection-fact persistence.
 
 from __future__ import annotations
@@ -2912,7 +2912,7 @@ def test_global_maker_band_uses_passive_limit_not_opposite_ask(side, ask):
     )
     bids = (BookLevel(price=Decimal("0.94"), size=Decimal("100")),)
     proposal = passive_buy_proposal_curve(
-        taker.executable_cost_curve, native_bid_levels=bids,
+        taker.executable_cost_curve, native_bid_levels=bids, cash_usd=Decimal("12"),
     )
     assert proposal is not None
     witness = _current_maker_witness(
@@ -3201,7 +3201,9 @@ def test_global_receipt_stamps_selected_family_probability_revision():
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_taker_candidate_requires_measurable_bid_not_tight_spread(side):
+def test_global_taker_candidate_is_admitted_without_any_resale_bid(side):
+    """A BUY is held to settlement: no bid, a floor bid or a NaN bid all admit."""
+
     def candidate(bids):
         return SimpleNamespace(
             action="BUY",
@@ -3222,15 +3224,15 @@ def test_global_taker_candidate_requires_measurable_bid_not_tight_spread(side):
     ) is None
     assert era._global_current_entry_feasibility_rejection_reason(
         candidate(())
-    ) == "GLOBAL_ENTRY_FEASIBILITY_BID_INVALID"
+    ) is None
     assert era._global_current_entry_feasibility_rejection_reason(
         candidate(("NaN",))
-    ) == "GLOBAL_ENTRY_FEASIBILITY_BID_INVALID"
+    ) is None
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
 @pytest.mark.parametrize("exact_lock", (False, True, 1, "true", None))
-def test_exact_settlement_entry_only_skips_resale_quote(side, exact_lock, monkeypatch):
+def test_entry_feasibility_never_requires_a_resale_quote(side, exact_lock, monkeypatch):
     candidate = SimpleNamespace(
         action="BUY", side=side, execution_mode="TAKER_LIMIT",
         settlement_locked_exact_payoff=exact_lock,
@@ -3239,10 +3241,8 @@ def test_exact_settlement_entry_only_skips_resale_quote(side, exact_lock, monkey
         ),
         native_bid_levels=(),
     )
-    reason = era._global_current_entry_feasibility_rejection_reason(candidate)
-    assert reason == (None if exact_lock is True else "GLOBAL_ENTRY_FEASIBILITY_BID_INVALID")
-    if exact_lock is not True:
-        return
+    # Statistical and exact settlement-held BUYs alike: no bid is not a reason.
+    assert era._global_current_entry_feasibility_rejection_reason(candidate) is None
     monkeypatch.setattr(
         era, "_entry_strategy_policy_blocks_live_submit",
         lambda *_args, **_kwargs: "STRATEGY_POLICY_GATED:test",

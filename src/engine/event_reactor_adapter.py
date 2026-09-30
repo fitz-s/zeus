@@ -939,7 +939,6 @@ def _is_global_jit_authority_failure(reason: object) -> bool:
         "GLOBAL_BUY_JIT_BID_LEVEL_INVALID",
         "GLOBAL_BUY_JIT_ASK_LEVEL_INVALID",
         "GLOBAL_BUY_JIT_MARKET_METADATA_CONFLICT",
-        "GLOBAL_BUY_JIT_PRECLIFF_LIQUIDATION_CAPACITY_INFEASIBLE",
         "GLOBAL_SELL_JIT_CLOCK_INVALID",
         "GLOBAL_SELL_JIT_NEG_RISK_AUTHORITY_MISSING",
         "GLOBAL_SELL_JIT_TOKEN_MISMATCH",
@@ -6857,9 +6856,8 @@ def _global_current_entry_feasibility_rejection_reason(
     floor is not part of that strategy's feasible set. Taker and passive-rest
     proposals are distinct auction assets: the former carries exact executable
     ask/depth/fee economics, while the latter carries its own non-crossing price
-    and fill/no-fill economics. Statistical takers require a measurable bid
-    for liquidation capacity; proved settlement winners do not. Relative
-    spread is not an eligibility wall: the
+    and fill/no-fill economics. Every BUY is held to settlement, so neither
+    mode requires a resale bid. Relative spread is not an eligibility wall: the
     solver already compares the exact executable ask, fees, q, FDR, Kelly, and
     expected log growth. SELL compares against HOLD and does not consume BUY
     authority.
@@ -6891,20 +6889,11 @@ def _global_current_entry_feasibility_rejection_reason(
         else best_ask
     )
     if execution_mode == "TAKER_LIMIT":
+        # A BUY is held to settlement; a resale bid is not part of its law.
         try:
             assert_live_order_unit_price(best_ask)
         except (TypeError, ValueError) as exc:
             return f"GLOBAL_ENTRY_LIVE_UNIT_PRICE_INVALID:{exc}"
-        # The selector independently re-proves this exact winning payoff.
-        # Its settlement-held objective does not depend on a resale bid.
-        if getattr(candidate, "settlement_locked_exact_payoff", False) is not True:
-            bid_levels = tuple(getattr(candidate, "native_bid_levels", ()) or ())
-            try:
-                best_bid = max(Decimal(level.price) for level in bid_levels)
-            except (ArithmeticError, AttributeError, TypeError, ValueError):
-                return "GLOBAL_ENTRY_FEASIBILITY_BID_INVALID"
-            if not best_bid.is_finite() or not Decimal("0") < best_bid < Decimal("1"):
-                return "GLOBAL_ENTRY_FEASIBILITY_BID_INVALID"
     elif execution_mode == "MAKER_REST":
         try:
             assert_live_order_unit_price(proposal_price)
@@ -13753,7 +13742,6 @@ def _global_buy_candidate_from_raw_book(
     from src.solve.solver import (
         CurrentMakerFillWitness,
         current_maker_fill_witness_identity,
-        current_precliff_liquidation_capacity,
         executable_curve_identity,
         maker_fill_candidate_binding_identity,
         passive_buy_proposal_at_limit,
@@ -13765,13 +13753,6 @@ def _global_buy_candidate_from_raw_book(
         getattr(candidate, "execution_mode", "") or ""
     ).strip().upper()
     if selected_execution_mode == "MAKER_REST":
-        liquidation_capacity = current_precliff_liquidation_capacity(bid_levels)
-        if liquidation_capacity < Decimal(curve.min_order_size):
-            raise ValueError(
-                "GLOBAL_BUY_JIT_PRECLIFF_LIQUIDATION_CAPACITY_INFEASIBLE:"
-                f"token_id={token_id}:"
-                f"precliff_bid_shares={liquidation_capacity}"
-            )
         selected_witness = getattr(candidate, "maker_fill_witness", None)
         selected_proposal = getattr(candidate, "proposal_cost_curve", None)
         asset_epoch_identity = str(
@@ -13828,13 +13809,14 @@ def _global_buy_candidate_from_raw_book(
             selected_witness.assert_current_at(
                 validated_at_utc if validated_at_utc is not None else datetime.now(UTC)
             )
-            # The selected limit stays authority while the current book still
-            # admits it (resting_limit_violation); a flickering top bid below it
-            # changes neither the limit, its cashflow, nor its ask distance.
+            # The selected limit and size stay authority while the current book
+            # still admits the limit (resting_limit_violation); a flickering top
+            # bid changes neither the limit, its cashflow, nor its ask distance.
             proposal = passive_buy_proposal_at_limit(
                 curve,
                 native_bid_levels=bid_levels,
                 limit=selected_witness.limit_price,
+                capacity=selected_proposal.levels[0].size,
             )
             if proposal is None:
                 raise ValueError("current_limit_or_cashflow_changed")
@@ -15907,16 +15889,6 @@ def _global_curve_supersession_from_receipt(
 
     reason = str(receipt.reason or "")
     market_prefix = "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
-    if reason.startswith(
-        market_prefix + "GLOBAL_BUY_JIT_PRECLIFF_LIQUIDATION_CAPACITY_INFEASIBLE:"
-    ):
-        # The JIT book proves this exact BUY is not executable under the
-        # pre-cliff capital-release law.  It does not invalidate another
-        # token's frozen q/book/wealth comparison.  SCOPE: the selected BUY
-        # candidate only.  DRAIN: exclude it and preflight the next-best
-        # action in this cut.  RESET: the next cut rebuilds this token from a
-        # fresh native book and may admit it when exit capacity returns.
-        return "CANDIDATE_BLOCKED", None, reason
     if reason.startswith(market_prefix):
         return "MARKET_AUTHORITY_SUPERSEDED", None, reason
     prefix = "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:curve_economics:"
@@ -16845,112 +16817,10 @@ def _global_preflight_entry_jit_receipt(
         limit = Decimal(str(getattr(decision, "limit_price", "0") or "0"))
         if shares <= 0:
             raise ValueError("GLOBAL_BUY_JIT_SELECTED_SIZE_INVALID")
-        from src.solve.solver import (
-            family_exact_yes_payoff,
-            ExpectedBuyTerminalWealthCertificate,
-            current_precliff_liquidation_capacity,
-        )
-
+        # A BUY is held to settlement: current resale depth does not bound it.
         execution_mode = str(
             getattr(candidate, "execution_mode", "") or ""
         ).upper()
-        settlement_locked_exact_payoff = (
-            getattr(candidate, "settlement_locked_exact_payoff", False) is True
-            and getattr(
-                current_candidate,
-                "settlement_locked_exact_payoff",
-                False,
-            )
-            is True
-        )
-        expected_terminal = getattr(decision, "expected_terminal_wealth", None)
-        witness = getattr(global_actuation, "probability_witness", None)
-        exact_yes_payoff = family_exact_yes_payoff(
-            witness, bin_id=str(getattr(candidate, "bin_id", "") or ""),
-        )
-        binding = None
-        if exact_yes_payoff is not None:
-            binding = next(
-                (
-                    item
-                    for item in witness.bindings
-                    if item.bin_id == str(getattr(candidate, "bin_id", "") or "")
-                ),
-                None,
-            )
-        side = str(getattr(candidate, "side", "") or "").upper()
-        expected_token = (
-            binding.yes_token_id
-            if binding is not None and side == "YES"
-            else binding.no_token_id
-            if binding is not None and side == "NO"
-            else None
-        )
-        exact_held_payoff = (
-            exact_yes_payoff == 1
-            if side == "YES"
-            else exact_yes_payoff == 0
-            if side == "NO"
-            else False
-        )
-        witness_fresh = (
-            exact_yes_payoff is not None
-            and witness.captured_at_utc <= mode_checked_at
-            and mode_checked_at <= witness.captured_at_utc + witness.max_age
-        )
-        typed_exact_payoff_binding = (
-            exact_yes_payoff is not None
-            and binding is not None
-            and witness_fresh
-            and witness.family_key == str(getattr(candidate, "family_key", "") or "")
-            and witness.resolution_identity
-            == str(getattr(candidate, "resolution_identity", "") or "")
-            and witness.witness_identity
-            == str(getattr(candidate, "probability_witness_identity", "") or "")
-            and binding.condition_id
-            == str(getattr(candidate, "condition_id", "") or "")
-            and expected_token == str(getattr(candidate, "token_id", "") or "")
-            and str(getattr(current_candidate, "family_key", "") or "")
-            == witness.family_key
-            and str(getattr(current_candidate, "bin_id", "") or "")
-            == binding.bin_id
-            and str(getattr(current_candidate, "condition_id", "") or "")
-            == binding.condition_id
-            and str(getattr(current_candidate, "resolution_identity", "") or "")
-            == witness.resolution_identity
-            and str(getattr(current_candidate, "token_id", "") or "")
-            == expected_token
-            and str(getattr(current_candidate, "side", "") or "").upper() == side
-            and str(
-                getattr(current_candidate, "probability_witness_identity", "") or ""
-            )
-            == witness.witness_identity
-            and exact_held_payoff
-        )
-        exact_payoff_decision = (
-            str(getattr(decision, "capital_action_mode", "") or "")
-            == "SETTLEMENT_LOCKED_BUY"
-            and isinstance(expected_terminal, ExpectedBuyTerminalWealthCertificate)
-            and expected_terminal.win_probability_mean == 1.0
-            and expected_terminal.loss_probability_mean == 0.0
-        )
-        liquidation_capacity = current_precliff_liquidation_capacity(
-            current_candidate.native_bid_levels
-        )
-        if (
-            not (
-                execution_mode == "TAKER_LIMIT"
-                and settlement_locked_exact_payoff
-                and typed_exact_payoff_binding
-                and exact_payoff_decision
-            )
-            and liquidation_capacity + Decimal("1e-9") < shares
-        ):
-            raise ValueError(
-                "GLOBAL_BUY_JIT_PRECLIFF_LIQUIDATION_CAPACITY_INFEASIBLE:"
-                f"token_id={candidate.token_id}:required_shares={shares}:"
-                f"precliff_bid_shares={liquidation_capacity}"
-            )
         if execution_mode == "TAKER_LIMIT":
             executable_shares = sum(
                 (

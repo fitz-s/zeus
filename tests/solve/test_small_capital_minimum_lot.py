@@ -28,6 +28,7 @@ from tests.solve.test_solver_properties import (
     BookLevel,
     _DECISION_AT,
     _GLOBAL_PROBABILITY_WITNESSES,
+    _MAKER_TEST_CASH,
     _current_maker_witness,
     _global_candidate,
     _global_curve,
@@ -71,7 +72,7 @@ def _maker_leg(*, q=0.38, min_order="5", cid="live-maker"):
         book_captured_at_utc=seed.book_captured_at_utc,
         neg_risk=False,
         native_bid_levels=bids,
-        include_maker=True,
+        include_maker=True, maker_cash_usd=_MAKER_TEST_CASH,
         asset_epoch_identity=f"{cid}-epoch",
         current_token_shares=Decimal("0"),
     )

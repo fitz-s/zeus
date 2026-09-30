@@ -2228,6 +2228,8 @@ def _bind_current_maker_fill_witnesses(
     ledger_snapshot_id = str(getattr(wealth_witness, "ledger_snapshot_id", "") or "")
     if not ledger_snapshot_id:
         return dict(prepared_by_event), book_epoch
+    # A maker rest's size is what current spendable cash funds at its limit.
+    maker_cash = Decimal(str(wealth_witness.spendable_cash_usd))
     event_by_family = {
         str(getattr(getattr(prepared, "probability_witness", None), "family_key", "") or ""):
         str(event_id)
@@ -2345,6 +2347,7 @@ def _bind_current_maker_fill_witnesses(
             proposal = passive_buy_proposal_curve(
                 asset.curve,
                 native_bid_levels=asset.bid_levels,
+                cash_usd=maker_cash,
             )
             if proposal is not None:
                 # No executable ask means no counterparty exists at any price, which is a

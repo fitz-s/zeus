@@ -103,30 +103,45 @@ def _bids(price: str) -> tuple[BidBookLevel, ...]:
 
 def test_proposal_at_limit_keeps_limit_after_bid_retreat():
     proposal = passive_buy_proposal_at_limit(
-        _curve("0.30"), native_bid_levels=_bids("0.24"), limit=Decimal("0.27")
+        _curve("0.30"),
+        native_bid_levels=_bids("0.24"),
+        limit=Decimal("0.27"),
+        capacity=Decimal("44.44"),
     )
     assert proposal is not None
     assert proposal.levels[0].price == Decimal("0.27")
-    assert proposal.levels[0].size == Decimal("50")
+    # The size is the caller's, never the bid depth (50).
+    assert proposal.levels[0].size == Decimal("44.44")
 
 
 @pytest.mark.parametrize(("bid", "ask"), (("0.27", "0.30"), ("0.28", "0.30"), ("0.24", "0.27")))
 def test_proposal_at_limit_rejects_outside_spread(bid, ask):
     assert (
         passive_buy_proposal_at_limit(
-            _curve(ask), native_bid_levels=_bids(bid), limit=Decimal("0.27")
+            _curve(ask),
+            native_bid_levels=_bids(bid),
+            limit=Decimal("0.27"),
+            capacity=Decimal("10"),
         )
         is None
     )
 
 
 def test_bid_plus_tick_proposal_is_the_same_law_at_its_own_limit():
-    proposal = passive_buy_proposal_curve(_curve("0.30"), native_bid_levels=_bids("0.26"))
+    cash = Decimal("12")
+    proposal = passive_buy_proposal_curve(
+        _curve("0.30"), native_bid_levels=_bids("0.26"), cash_usd=cash
+    )
     assert proposal is not None and proposal.levels[0].price == Decimal("0.27")
+    assert proposal.levels[0].size == Decimal("44.44")  # floor(12 / 0.27)
     # One-tick spread: bid+tick would cross.
-    assert passive_buy_proposal_curve(_curve("0.27"), native_bid_levels=_bids("0.26")) is None
+    assert passive_buy_proposal_curve(
+        _curve("0.27"), native_bid_levels=_bids("0.26"), cash_usd=cash
+    ) is None
     # Above the band.
-    assert passive_buy_proposal_curve(_curve("0.97"), native_bid_levels=_bids("0.95")) is None
+    assert passive_buy_proposal_curve(
+        _curve("0.97"), native_bid_levels=_bids("0.95"), cash_usd=cash
+    ) is None
 
 
 def _witness(bid, ask):

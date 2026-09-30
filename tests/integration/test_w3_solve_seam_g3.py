@@ -163,6 +163,8 @@ from src.types.market import Bin
 from tests.support import qkernel_family_fixtures as R
 
 _BRIDGE_PATH = bridge.__file__
+# Spendable cash a maker BUY's size is bounded by (the live wallet scale).
+MAKER_TEST_CASH = Decimal("12")
 
 
 def _test_wealth_witness(
@@ -4279,7 +4281,9 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy(seed_s
         global_batch_runtime._bind_current_maker_fill_witnesses(
             {"event": prepared},
             book_epoch=epoch,
-            wealth_witness=SimpleNamespace(ledger_snapshot_id="ledger"),
+            wealth_witness=SimpleNamespace(
+                ledger_snapshot_id="ledger", spendable_cash_usd=MAKER_TEST_CASH
+            ),
             samples={"BUY": sample},
             issued_at_utc=at,
         )
@@ -4303,7 +4307,7 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy(seed_s
         ledger_snapshot_id="ledger",
         book_captured_at_utc=at,
         native_bid_levels=asset.bid_levels,
-        include_maker=True,
+        include_maker=True, maker_cash_usd=MAKER_TEST_CASH,
         maker_fill_witness=maker_witness,
         asset_epoch_identity=epoch.witness_identity,
         current_token_shares=Decimal("0"),
@@ -4341,7 +4345,7 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy(seed_s
         ledger_snapshot_id="ledger",
         book_captured_at_utc=at,
         native_bid_levels=asset.bid_levels,
-        include_maker=True,
+        include_maker=True, maker_cash_usd=MAKER_TEST_CASH,
         maker_fill_witness=maker_witness,
         asset_epoch_identity=epoch.witness_identity,
         current_token_shares=Decimal("0"),
@@ -4369,7 +4373,7 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy(seed_s
             ledger_snapshot_id="ledger",
             book_captured_at_utc=at,
             native_bid_levels=asset.bid_levels,
-            include_maker=True,
+            include_maker=True, maker_cash_usd=MAKER_TEST_CASH,
             maker_fill_witness=maker_witness,
             asset_epoch_identity=epoch.witness_identity,
             current_token_shares=held,
@@ -4428,7 +4432,7 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy(seed_s
         ledger_snapshot_id="ledger",
         book_captured_at_utc=at,
         native_bid_levels=asset.bid_levels,
-        include_maker=True,
+        include_maker=True, maker_cash_usd=MAKER_TEST_CASH,
         maker_fill_witness=maker_witness,
         asset_epoch_identity=epoch.witness_identity,
         current_token_shares=Decimal("0"),
@@ -4455,7 +4459,7 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy(seed_s
         ledger_snapshot_id="ledger",
         book_captured_at_utc=at,
         native_bid_levels=asset.bid_levels,
-        include_maker=True,
+        include_maker=True, maker_cash_usd=MAKER_TEST_CASH,
         maker_fill_witness=maker_witness,
         asset_epoch_identity=epoch.witness_identity,
         current_token_shares=Decimal("0"),
@@ -4469,7 +4473,7 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy(seed_s
         ledger_snapshot_id="ledger",
         book_captured_at_utc=at,
         native_bid_levels=asset.bid_levels,
-        include_maker=True,
+        include_maker=True, maker_cash_usd=MAKER_TEST_CASH,
         maker_fill_witness=maker_witness,
         asset_epoch_identity=epoch.witness_identity,
         neg_risk=False,
@@ -4489,7 +4493,7 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy(seed_s
         ledger_snapshot_id="ledger",
         book_captured_at_utc=at,
         native_bid_levels=asset.bid_levels,
-        include_maker=True,
+        include_maker=True, maker_cash_usd=MAKER_TEST_CASH,
         maker_fill_witness=maker_witness,
         asset_epoch_identity=epoch.witness_identity,
         current_token_shares=seed_shares,
@@ -4524,7 +4528,7 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy(seed_s
         _, dust_maker = global_candidates_from_native(
             native, probability_witness=probability, ledger_snapshot_id="ledger",
             book_captured_at_utc=at, native_bid_levels=asset.bid_levels,
-            include_maker=True, maker_fill_witness=maker_witness,
+            include_maker=True, maker_cash_usd=MAKER_TEST_CASH, maker_fill_witness=maker_witness,
             asset_epoch_identity=epoch.witness_identity,
             current_token_shares=dust_seed, neg_risk=False,
         )
@@ -21519,18 +21523,19 @@ def test_global_preflight_jit_worse_curve_replaces_and_reauctions(monkeypatch):
 @pytest.mark.parametrize(
     ("execution_mode", "bid_price", "bid_size", "expected_accepted"),
     (
-        ("TAKER_LIMIT", "0.04", "100", False),
+        # A statistical BUY is held to settlement: a floor bid, an in-band bid,
+        # a thin bid (six shares under a 20-share order) or no bid at all is
+        # no reason to force a new decision.
+        ("TAKER_LIMIT", "0.04", "100", True),
+        ("TAKER_LIMIT", "0.05", "100", True),
         ("TAKER_LIMIT", "0.06", "100", True),
-        # The inclusive venue band permits .05 SELL, but new-risk BUY needs
-        # strictly greater pre-cliff liquidation capacity on its own law.
-        ("TAKER_LIMIT", "0.05", "100", False),
-        # Selection admitted 20 shares on an earlier book; submit JIT sees
-        # only six legal unwind shares and must force a new decision.
-        ("TAKER_LIMIT", "0.05", "6", False),
+        ("TAKER_LIMIT", "0.05", "6", True),
+        ("TAKER_LIMIT", None, None, True),
+        # A maker still needs its own current fill witness, bid or no bid.
         ("MAKER_REST", "0.04", "100", False),
     ),
 )
-def test_global_preflight_jit_requires_exit_depth_for_statistical_settlement_hold(
+def test_global_preflight_jit_holds_statistical_buy_to_settlement_without_exit_depth(
     monkeypatch,
     execution_mode,
     side,
@@ -21589,7 +21594,9 @@ def test_global_preflight_jit_requires_exit_depth_for_statistical_settlement_hol
         resolution_identity="resolution-a",
         neg_risk=False,
         native_bid_levels=(
-            BookLevel(price=Decimal(bid_price), size=Decimal(bid_size)),
+            ()
+            if bid_price is None
+            else (BookLevel(price=Decimal(bid_price), size=Decimal(bid_size)),)
         ),
         **maker_terms,
     )
@@ -21650,28 +21657,34 @@ def test_global_preflight_jit_requires_exit_depth_for_statistical_settlement_hol
         book_quote_provider=lambda token_id: {
             "asset_id": token_id,
             "hash": "jit-book-a",
-            "bids": [{"price": bid_price, "size": bid_size}],
+            "bids": (
+                [] if bid_price is None else [{"price": bid_price, "size": bid_size}]
+            ),
             "asks": [{"price": "0.07", "size": "100"}],
         },
     )
 
     assert checked.proof_accepted is expected_accepted
+    assert "PRECLIFF" not in str(checked.reason or "")
     if expected_accepted:
         assert isinstance(checked.global_jit_candidate, era._GlobalJitHandoff)
     else:
-        assert checked.reason.startswith(
-            "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
-            "GLOBAL_BUY_JIT_PRECLIFF_LIQUIDATION_CAPACITY_INFEASIBLE:"
+        assert checked.reason.endswith(
+            "GLOBAL_BUY_JIT_MAKER_WITNESS_SUPERSEDED:"
+            "ValueError:selected_witness_missing_or_unbound"
         )
 
 
 @pytest.mark.parametrize("win_q", (1.0, 0.9))
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_preflight_jit_rejects_untyped_exact_payoff_bypass(
+def test_global_preflight_jit_untyped_exact_payoff_flag_grants_nothing(
     monkeypatch,
     side,
     win_q,
 ):
+    """The exit-depth bypass is gone with the exit-depth law: an untyped exact
+    lock claim reaches the same JIT outcome as the plain statistical BUY."""
+
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
     at = _dt.datetime(2026, 8, 10, 20, 5, tzinfo=_dt.timezone.utc)
     selected_curve = ExecutableCostCurve(
@@ -21734,28 +21747,34 @@ def test_global_preflight_jit_rejects_untyped_exact_payoff_bypass(
         min_order_size="5",
     )
 
-    accepted = era._global_preflight_entry_jit_receipt(
-        event,
-        receipt,
-        global_actuation=actuation,
-        book_quote_provider=lambda token_id: {
-            "asset_id": token_id,
-            "hash": "jit-book-a",
-            "bids": [{"price": "0.04", "size": "100"}],
-            "asks": [{"price": "0.80", "size": "100"}],
-        },
-    )
+    def preflight(selected):
+        return era._global_preflight_entry_jit_receipt(
+            event,
+            receipt,
+            global_actuation=SimpleNamespace(
+                winner_event_id=event.event_id,
+                decision=SimpleNamespace(
+                    **{**vars(actuation.decision), "candidate": selected}
+                ),
+            ),
+            book_quote_provider=lambda token_id: {
+                "asset_id": token_id,
+                "hash": "jit-book-a",
+                "bids": [{"price": "0.04", "size": "100"}],
+                "asks": [{"price": "0.80", "size": "100"}],
+            },
+        )
 
-    assert accepted.proof_accepted is False
-    assert accepted.reason.startswith(
-        "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
-        "GLOBAL_BUY_JIT_PRECLIFF_LIQUIDATION_CAPACITY_INFEASIBLE:"
-    )
+    claimed = preflight(candidate)
+    plain = preflight(replace(candidate, settlement_locked_exact_payoff=False))
+
+    assert claimed.proof_accepted is plain.proof_accepted is True
+    assert claimed.reason == plain.reason
 
 
 @pytest.mark.parametrize(("side", "exact_yes_payoff"), (("YES", 1), ("NO", 0)))
-@pytest.mark.parametrize(("witness_age_seconds", "expected_accepted"), ((0, True), (31, False)))
-def test_global_preflight_jit_requires_typed_fresh_exact_payoff_bypass(
+@pytest.mark.parametrize(("witness_age_seconds", "expected_accepted"), ((0, True), (31, True)))
+def test_global_preflight_jit_exact_payoff_needs_no_exit_depth_bypass(
     monkeypatch,
     side,
     exact_yes_payoff,
@@ -21883,22 +21902,23 @@ def test_global_preflight_jit_requires_typed_fresh_exact_payoff_bypass(
         checked_at_utc=at + _dt.timedelta(seconds=witness_age_seconds),
     )
 
+    # Fresh or stale, the exact witness bypassed only the retired exit-depth
+    # law; the settlement hold needs no bypass on a 0.04 floor bid.
     assert accepted.proof_accepted is expected_accepted
-    if expected_accepted:
-        assert isinstance(accepted.global_jit_candidate, era._GlobalJitHandoff)
-    else:
-        assert accepted.reason.startswith(
-            "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
-            "GLOBAL_BUY_JIT_PRECLIFF_LIQUIDATION_CAPACITY_INFEASIBLE:"
-        )
+    assert isinstance(accepted.global_jit_candidate, era._GlobalJitHandoff)
 
 
 @pytest.mark.parametrize(("side", "exact_yes_payoff"), (("YES", 1), ("NO", 0)))
-def test_global_preflight_jit_rejects_rebound_resolution_forgery(
+def test_global_preflight_jit_rebound_resolution_forgery_buys_no_bypass(
     monkeypatch,
     side,
     exact_yes_payoff,
 ):
+    """A forged rebound resolution once bought an exit-depth bypass. With the
+    law retired it buys nothing: the handoff is admitted exactly as the
+    statistical hold, and the production caller still drops any handoff whose
+    identity (resolution included) differs from the selected candidate."""
+
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
     at = _dt.datetime(2026, 8, 10, 20, 5, tzinfo=_dt.timezone.utc)
     binding = OutcomeTokenBinding(
@@ -22045,11 +22065,13 @@ def test_global_preflight_jit_rejects_rebound_resolution_forgery(
         checked_at_utc=at,
     )
 
-    assert rejected.proof_accepted is False
-    assert rejected.reason.startswith(
-        "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
-        "GLOBAL_BUY_JIT_PRECLIFF_LIQUIDATION_CAPACITY_INFEASIBLE:"
-    )
+    assert rejected.proof_accepted is True
+    assert "PRECLIFF" not in str(rejected.reason or "")
+    import inspect as _inspect
+
+    caller = _inspect.getsource(era)
+    guard = caller.index("identity_matches = selected_candidate is not None")
+    assert '"resolution_identity"' in caller[guard - 600 : guard]
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
@@ -39198,13 +39220,6 @@ def test_global_batch_falls_through_family_local_preflight_block(
             "SELL",
         ),
         (
-            "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
-            "GLOBAL_BUY_JIT_PRECLIFF_LIQUIDATION_CAPACITY_INFEASIBLE:"
-            "token_id=token-a:required_shares=34.4:precliff_bid_shares=0",
-            "BUY",
-            "SELL",
-        ),
-        (
             "risk_allocator_pre_submit_blocked: unknown_side_effect_same_market",
             "BUY",
             "SELL",
@@ -44421,7 +44436,7 @@ def _current_maker_buy_candidate(*, side: str = "YES") -> GlobalSingleOrderCandi
     bids = (BookLevel(price=Decimal("0.40"), size=Decimal("100")),)
     proposal = passive_buy_proposal_curve(
         base.executable_cost_curve,
-        native_bid_levels=bids,
+        native_bid_levels=bids, cash_usd=MAKER_TEST_CASH,
     )
     assert proposal is not None
     asset_epoch_identity = "asset-epoch-maker-buy"

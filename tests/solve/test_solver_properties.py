@@ -42,6 +42,9 @@ from src.solve import solver as S
 ALPHA = 0.05
 DOM_TOL = 1e-9
 _DECISION_AT = datetime(2026, 7, 10, 6, 0, tzinfo=UTC)
+# A maker BUY's size is what the selecting wallet's spendable cash funds at its
+# limit; the default fixture wallet (_global_witness) holds $100.
+_MAKER_TEST_CASH = Decimal("100")
 def _global_curve(*, side, token, levels, fee="0", min_order="0.01"):
     return ExecutableCostCurve(
         token_id=token,
@@ -415,7 +418,7 @@ def _native_maker_candidates(*, side, current_token_shares):
         native_bid_levels=(
             BookLevel(price=Decimal("0.39"), size=Decimal("100")),
         ),
-        include_maker=True,
+        include_maker=True, maker_cash_usd=_MAKER_TEST_CASH,
         maker_fill_witness=placeholder,
         asset_epoch_identity=asset_epoch,
         current_token_shares=current_token_shares,
@@ -437,7 +440,7 @@ def _native_maker_candidates(*, side, current_token_shares):
         native_bid_levels=(
             BookLevel(price=Decimal("0.39"), size=Decimal("100")),
         ),
-        include_maker=True,
+        include_maker=True, maker_cash_usd=_MAKER_TEST_CASH,
         maker_fill_witness=witness,
         asset_epoch_identity=asset_epoch,
         current_token_shares=current_token_shares,
@@ -2969,7 +2972,7 @@ def test_global_buy_generation_omits_untyped_maker_sibling():
         ledger_snapshot_id=seed.ledger_snapshot_id,
         book_captured_at_utc=seed.book_captured_at_utc,
         neg_risk=False,
-        include_maker=True,
+        include_maker=True, maker_cash_usd=_MAKER_TEST_CASH,
     )
 
     assert len(proposals) == 1
@@ -3127,8 +3130,8 @@ def test_native_maker_builder_rejects_high_raw_q_when_calibrated_mean_is_negativ
     )
 
 
-@pytest.mark.parametrize("bid_price", ("0.01", "0.04", "0.05"))
-def test_statistical_taker_buy_requires_precliff_liquidation_capacity(bid_price):
+@pytest.mark.parametrize("bid_price", (None, "0.01", "0.04", "0.05"))
+def test_statistical_taker_buy_is_held_to_settlement_without_a_resale_bid(bid_price):
     candidate = _global_candidate(
         candidate_id="taker-born-unexitable",
         family="taker-born-unexitable-family",
@@ -3140,23 +3143,24 @@ def test_statistical_taker_buy_requires_precliff_liquidation_capacity(bid_price)
     candidate = replace(
         candidate,
         native_bid_levels=(
-            BookLevel(price=Decimal(bid_price), size=Decimal("100")),
+            ()
+            if bid_price is None
+            else (BookLevel(price=Decimal(bid_price), size=Decimal("100")),)
         ),
     )
 
     decision = _global_select((candidate,), cap="5")
 
-    assert decision.candidate is None
-    assert decision.no_trade_reason == "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER"
-    assert decision.rejection_reasons[candidate.candidate_id] == (
-        "PRECLIFF_LIQUIDATION_CAPACITY_BELOW_MINIMUM_LOT"
-    )
+    # No bid, or only a floor bid, neither admits nor sizes a settlement hold.
+    assert decision.candidate is candidate
+    assert decision.capital_action_mode == "SETTLEMENT_LOCKED_BUY"
+    assert decision.rejection_reasons == {}
 
 
-def test_global_buy_precliff_cap_uses_the_smaller_bid_or_ask_depth():
+def test_global_buy_size_is_bounded_by_ask_depth_not_bid_depth():
     candidate = _global_candidate(
-        candidate_id="precliff-ask-depth-cap",
-        family="precliff-ask-depth-cap-family",
+        candidate_id="ask-depth-cap",
+        family="ask-depth-cap-family",
         side="YES",
         q=0.80,
         levels=(("0.35", "100"),),
@@ -3176,10 +3180,10 @@ def test_global_buy_precliff_cap_uses_the_smaller_bid_or_ask_depth():
     assert decision.cost_usd <= Decimal("35")
 
 
-def test_global_buy_precliff_cap_does_not_exceed_bid_when_ask_is_deeper():
+def test_global_buy_size_ignores_bid_depth_when_ask_is_deeper():
     candidate = _global_candidate(
-        candidate_id="precliff-bid-depth-cap",
-        family="precliff-bid-depth-cap-family",
+        candidate_id="bid-depth-ignored",
+        family="bid-depth-ignored-family",
         side="YES",
         q=0.80,
         levels=(("0.35", "1000000"),),
@@ -3194,15 +3198,16 @@ def test_global_buy_precliff_cap_does_not_exceed_bid_when_ask_is_deeper():
 
     decision = _global_select((candidate,), cap="60")
 
+    # Kelly and the $60 cap size the hold; the 60-share bid does not.
     assert decision.candidate is candidate
-    assert decision.shares <= Decimal("60")
-    assert decision.cost_usd <= Decimal("21")
+    assert decision.shares > Decimal("60")
+    assert decision.cost_usd <= Decimal("60")
 
 
-def test_global_buy_precliff_cap_is_symmetric_when_bid_and_ask_depth_match():
+def test_global_buy_size_is_ask_bounded_when_bid_and_ask_depth_match():
     candidate = _global_candidate(
-        candidate_id="precliff-equal-depth-cap",
-        family="precliff-equal-depth-cap-family",
+        candidate_id="equal-depth-cap",
+        family="equal-depth-cap-family",
         side="YES",
         q=0.80,
         levels=(("0.35", "60"),),
@@ -3226,12 +3231,12 @@ def test_global_buy_precliff_cap_is_symmetric_when_bid_and_ask_depth_match():
     ("ask_size", "expected_candidate"),
     (("10.009", True), ("4.999", True), ("2.859", False)),
 )
-def test_global_buy_precliff_cap_rounds_ask_depth_down_before_minimum_lot(
+def test_global_buy_ask_depth_rounds_down_before_minimum_lot(
     ask_size, expected_candidate
 ):
     candidate = _global_candidate(
-        candidate_id=f"precliff-fractional-depth-{ask_size}",
-        family=f"precliff-fractional-depth-family-{ask_size}",
+        candidate_id=f"fractional-ask-depth-{ask_size}",
+        family=f"fractional-ask-depth-family-{ask_size}",
         side="YES",
         q=0.80,
         levels=(("0.35", ask_size),),
@@ -3250,16 +3255,17 @@ def test_global_buy_precliff_cap_rounds_ask_depth_down_before_minimum_lot(
         assert decision.candidate is candidate
         assert decision.shares <= Decimal("10.00")
     else:
+        # Ask depth below one lot is a depth fact, not a resale-bid law.
         assert decision.candidate is None
         assert decision.rejection_reasons[candidate.candidate_id] == (
-            "PRECLIFF_LIQUIDATION_CAPACITY_BELOW_MINIMUM_LOT"
+            "DEPTH_INFEASIBLE"
         )
 
 
-def test_global_buy_precliff_cap_prices_the_full_fee_aware_ask_ladder():
+def test_global_buy_size_prices_the_full_fee_aware_ask_ladder():
     candidate = _global_candidate(
-        candidate_id="precliff-fee-aware-depth",
-        family="precliff-fee-aware-depth-family",
+        candidate_id="fee-aware-ask-depth",
+        family="fee-aware-ask-depth-family",
         side="YES",
         q=0.80,
         levels=(("0.35", "3"), ("0.36", "7")),
@@ -3280,7 +3286,7 @@ def test_global_buy_precliff_cap_prices_the_full_fee_aware_ask_ladder():
     assert decision.cost_usd <= Decimal("3.90")
 
 
-def test_jinan_statistical_buy_with_floor_bid_has_no_executable_unwind():
+def test_jinan_statistical_buy_with_floor_bid_is_held_to_settlement():
     candidate = _global_candidate(
         candidate_id="jinan-2026-08-27-floor-bid",
         family="Jinan|2026-08-27|high",
@@ -3298,13 +3304,14 @@ def test_jinan_statistical_buy_with_floor_bid_has_no_executable_unwind():
 
     decision = _global_select((candidate,), cap="5")
 
-    assert decision.candidate is None
-    assert decision.rejection_reasons[candidate.candidate_id] == (
-        "PRECLIFF_LIQUIDATION_CAPACITY_BELOW_MINIMUM_LOT"
-    )
+    # q 0.1242 against a 0.076 ask is the thin early market this law exists
+    # for: a floor bid is no reason to refuse or shrink the settlement hold.
+    assert decision.candidate is candidate
+    assert decision.capital_action_mode == "SETTLEMENT_LOCKED_BUY"
+    assert candidate.candidate_id not in decision.rejection_reasons
 
 
-def test_global_taker_buy_size_is_capped_by_current_liquidation_capacity():
+def test_global_taker_buy_size_is_not_capped_by_current_liquidation_capacity():
     candidate = _global_candidate(
         candidate_id="taker-repairable-prefix",
         family="taker-repairable-prefix-family",
@@ -3324,10 +3331,12 @@ def test_global_taker_buy_size_is_capped_by_current_liquidation_capacity():
     decision = _global_select((candidate,), cap="5")
 
     assert decision.candidate is candidate
-    assert decision.shares == Decimal("25")
+    # 55 in-band bid shares (25 above the floor) no longer cap the order.
+    assert decision.shares > Decimal("25")
+    assert decision.cost_usd <= Decimal("5")
 
 
-def test_statistical_taker_buy_retains_liquidation_capped_legal_size():
+def test_statistical_taker_buy_size_is_not_capped_by_a_thin_bid():
     candidate = _global_candidate(
         candidate_id="liquidation-capped-buy",
         family="liquidation-capped-buy-family",
@@ -3346,7 +3355,7 @@ def test_statistical_taker_buy_retains_liquidation_capped_legal_size():
     decision = _global_select((candidate,), cap="20")
 
     assert decision.candidate is candidate
-    assert decision.shares == Decimal("6")
+    assert decision.shares > Decimal("6")
     assert decision.expected_growth is not None
     assert decision.expected_growth.expected_ev_usd > 0.0
 
@@ -3472,21 +3481,6 @@ def test_exact_payoff_taker_can_lock_to_settlement_without_exit_depth(
     assert decision.expected_terminal_wealth.win_probability_mean == 1.0
 
 
-def test_current_precliff_capacity_excludes_floor_without_down_tick_slack():
-    levels = (
-        BookLevel(price=Decimal("0.05"), size=Decimal("100")),
-        BookLevel(price=Decimal("0.0501"), size=Decimal("2")),
-        BookLevel(price=Decimal("0.95"), size=Decimal("3")),
-        BookLevel(price=Decimal("0.96"), size=Decimal("7")),
-        SimpleNamespace(price=Decimal("0.50"), size=Decimal("-11")),
-        SimpleNamespace(price=Decimal("0.50"), size=Decimal("NaN")),
-        SimpleNamespace(price=Decimal("0.50"), size=Decimal("Infinity")),
-        SimpleNamespace(price=Decimal("NaN"), size=Decimal("100")),
-    )
-
-    assert S.current_precliff_liquidation_capacity(levels) == Decimal("5")
-
-
 def test_current_maker_buy_witness_can_win_on_exact_partial_distribution():
     taker = _global_candidate(
         candidate_id="maker-current-taker",
@@ -3498,6 +3492,7 @@ def test_current_maker_buy_witness_can_win_on_exact_partial_distribution():
     maker_curve = S.passive_buy_proposal_curve(
         taker.executable_cost_curve,
         native_bid_levels=(BookLevel(price=Decimal("0.40"), size=Decimal("100")),),
+        cash_usd=_MAKER_TEST_CASH,
     )
     assert maker_curve is not None
     asset_epoch = "asset-epoch-current"
@@ -3566,7 +3561,7 @@ def test_current_maker_buy_witness_can_win_on_exact_partial_distribution():
     )
 
 
-def test_passive_buy_caps_rest_to_current_precliff_liquidation_depth():
+def test_passive_buy_size_is_cash_bounded_not_bid_depth():
     taker = _global_candidate(
         candidate_id="maker-liquidation-cap-taker",
         family="maker-liquidation-cap-family",
@@ -3582,15 +3577,17 @@ def test_passive_buy_caps_rest_to_current_precliff_liquidation_depth():
             BookLevel(price=Decimal("0.39"), size=Decimal("4")),
             BookLevel(price=Decimal("0.04"), size=Decimal("100")),
         ),
+        cash_usd=_MAKER_TEST_CASH,
     )
 
     assert maker_curve is not None
+    # 7 in-band bid shares no longer cap the rest; $100 at 0.401 does.
     assert maker_curve.levels == (
-        BookLevel(price=Decimal("0.401"), size=Decimal("7")),
+        BookLevel(price=Decimal("0.401"), size=Decimal("249.37")),
     )
 
 
-def test_passive_buy_uses_bid_capacity_when_taker_best_ask_is_subminimum():
+def test_passive_buy_uses_cash_capacity_when_taker_best_ask_is_subminimum():
     taker = _global_candidate(
         candidate_id="maker-ask-dust-taker",
         family="maker-ask-dust-family",
@@ -3603,11 +3600,12 @@ def test_passive_buy_uses_bid_capacity_when_taker_best_ask_is_subminimum():
     maker_curve = S.passive_buy_proposal_curve(
         taker.executable_cost_curve,
         native_bid_levels=(BookLevel(price=Decimal("0.40"), size=Decimal("10")),),
+        cash_usd=_MAKER_TEST_CASH,
     )
 
     assert maker_curve is not None
     assert maker_curve.levels == (
-        BookLevel(price=Decimal("0.401"), size=Decimal("10")),
+        BookLevel(price=Decimal("0.401"), size=Decimal("249.37")),
     )
 
 
@@ -3674,7 +3672,7 @@ def test_exact_global_buy_keeps_maker_when_taker_ask_depth_is_subminimum(
         book_captured_at_utc=seed.book_captured_at_utc,
         neg_risk=False,
         native_bid_levels=bid_levels,
-        include_maker=True,
+        include_maker=True, maker_cash_usd=_MAKER_TEST_CASH,
         maker_fill_witness=placeholder,
         asset_epoch_identity=asset_epoch,
         current_token_shares=held_shares,
@@ -3683,7 +3681,7 @@ def test_exact_global_buy_keeps_maker_when_taker_ask_depth_is_subminimum(
     assert provisional_maker.execution_mode == "MAKER_REST"
     assert provisional_maker.eligibility_reason is None
     assert provisional_maker.proposal_cost_curve.levels == (
-        BookLevel(price=Decimal("0.401"), size=Decimal("10")),
+        BookLevel(price=Decimal("0.401"), size=Decimal("249.37")),
     )
 
     maker_witness = _current_maker_witness(
@@ -3703,7 +3701,7 @@ def test_exact_global_buy_keeps_maker_when_taker_ask_depth_is_subminimum(
         book_captured_at_utc=seed.book_captured_at_utc,
         neg_risk=False,
         native_bid_levels=bid_levels,
-        include_maker=True,
+        include_maker=True, maker_cash_usd=_MAKER_TEST_CASH,
         maker_fill_witness=maker_witness,
         asset_epoch_identity=asset_epoch,
         current_token_shares=held_shares,
@@ -3728,7 +3726,7 @@ def test_exact_global_buy_keeps_maker_when_taker_ask_depth_is_subminimum(
     assert decision.rejection_reasons[taker.candidate_id] == "DEPTH_INFEASIBLE"
 
 
-def test_passive_buy_rejects_sub_minimum_legal_liquidation_depth():
+def test_passive_buy_rests_on_thin_bid_depth_and_refuses_sub_lot_cash():
     taker = _global_candidate(
         candidate_id="maker-liquidation-dust-taker",
         family="maker-liquidation-dust-family",
@@ -3743,9 +3741,18 @@ def test_passive_buy_rejects_sub_minimum_legal_liquidation_depth():
             BookLevel(price=Decimal("0.40"), size=Decimal("0.5")),
             BookLevel(price=Decimal("0.04"), size=Decimal("100")),
         ),
+        cash_usd=_MAKER_TEST_CASH,
     )
 
-    assert maker_curve is None
+    # 0.5 bid shares are no reason to refuse the rest.
+    assert maker_curve is not None
+    assert maker_curve.levels[0].size == Decimal("249.37")
+    # Cash for less than one venue lot (1 share at 0.401) is no proposal.
+    assert S.passive_buy_proposal_curve(
+        taker.executable_cost_curve,
+        native_bid_levels=(BookLevel(price=Decimal("0.40"), size=Decimal("100")),),
+        cash_usd=Decimal("0.40"),
+    ) is None
 
 
 def test_current_maker_witness_asset_epoch_drift_excludes_only_maker_sibling():
@@ -3755,6 +3762,7 @@ def test_current_maker_witness_asset_epoch_drift_excludes_only_maker_sibling():
     maker_curve = S.passive_buy_proposal_curve(
         taker.executable_cost_curve,
         native_bid_levels=(BookLevel(price=Decimal("0.30"), size=Decimal("100")),),
+        cash_usd=_MAKER_TEST_CASH,
     )
     assert maker_curve is not None
     provisional = replace(
@@ -3797,6 +3805,7 @@ def test_current_maker_witness_rejects_reminted_non_limit_cashflow_only():
     maker_curve = S.passive_buy_proposal_curve(
         taker.executable_cost_curve,
         native_bid_levels=(BookLevel(price=Decimal("0.40"), size=Decimal("100")),),
+        cash_usd=_MAKER_TEST_CASH,
     )
     assert maker_curve is not None
     provisional = replace(
@@ -3845,6 +3854,7 @@ def test_current_maker_witness_temporal_order_and_decision_window_fail_closed():
     proposal = S.passive_buy_proposal_curve(
         taker.executable_cost_curve,
         native_bid_levels=(BookLevel(price=Decimal("0.30"), size=Decimal("100")),),
+        cash_usd=_MAKER_TEST_CASH,
     )
     assert proposal is not None
     provisional = replace(
@@ -4683,15 +4693,6 @@ def test_global_single_order_sell_high_bid_is_not_execution_authority():
 
     assert proposal is None
     assert mode == "TAKER_LIMIT"
-
-
-def test_precliff_liquidation_capacity_excludes_above_band_bids():
-    assert S.current_precliff_liquidation_capacity(
-        (
-            BookLevel(price=Decimal("0.999"), size=Decimal("20")),
-            BookLevel(price=Decimal("0.95"), size=Decimal("7")),
-        )
-    ) == Decimal("7")
 
 
 def test_exact_one_sell_bid_is_not_execution_authority():
@@ -7238,8 +7239,8 @@ def _correction_for(candidate, *, raw_q, corrected_q, p0=None):
     )
 
 
-def _with_precliff_depth(candidate, *, size="1000"):
-    """Give a test candidate legal downward-tick liquidation depth."""
+def _with_native_bid(candidate, *, size="1000"):
+    """Give a test candidate one in-band native bid level (provenance only)."""
 
     return replace(
         candidate,
@@ -7573,7 +7574,7 @@ def test_family_calibration_uses_one_corrected_standalone_target(
     expected_shares,
     side,
 ):
-    candidate = _with_precliff_depth(
+    candidate = _with_native_bid(
         _global_candidate(
             candidate_id=f"family-calibrated-{side}-{raw_q}",
             family=f"family-calibrated-{side}-{raw_q}",
@@ -7639,7 +7640,7 @@ def test_family_calibration_uses_one_corrected_standalone_target(
 
 
 def test_calibration_changes_global_capital_winner_after_family_resolve():
-    corrected_candidate = _with_precliff_depth(
+    corrected_candidate = _with_native_bid(
         _global_candidate(
             candidate_id="calibrated-winner-a",
             family="calibrated-winner-a-family",
@@ -7648,7 +7649,7 @@ def test_calibration_changes_global_capital_winner_after_family_resolve():
             levels=(("0.40", "1000"),),
         )
     )
-    independent_candidate = _with_precliff_depth(
+    independent_candidate = _with_native_bid(
         _global_candidate(
             candidate_id="independent-winner-b",
             family="independent-winner-b-family",
@@ -7703,7 +7704,7 @@ def test_calibration_changes_global_capital_winner_after_family_resolve():
 
 
 def test_family_joint_sizes_from_point_q_not_sample_mean():
-    candidate = _with_precliff_depth(
+    candidate = _with_native_bid(
         _global_candidate(
             candidate_id="point-q-family",
             family="point-q-family",
@@ -7744,7 +7745,7 @@ def test_family_joint_sizes_from_point_q_not_sample_mean():
 
 
 def test_calibrated_family_budget_uses_remaining_cash_without_double_kelly():
-    candidate = _with_precliff_depth(
+    candidate = _with_native_bid(
         _global_candidate(
             candidate_id="calibrated-remaining-budget",
             family="calibrated-remaining-budget",
@@ -7792,7 +7793,7 @@ def test_calibrated_family_budget_uses_remaining_cash_without_double_kelly():
 
 @pytest.mark.parametrize("committed", ("25", "24.60"))
 def test_calibrated_family_budget_zero_or_below_minimum_rejects(committed):
-    candidate = _with_precliff_depth(
+    candidate = _with_native_bid(
         _global_candidate(
             candidate_id=f"calibrated-budget-reject-{committed}",
             family=f"calibrated-budget-reject-{committed}",
@@ -7823,7 +7824,7 @@ def test_calibrated_family_budget_zero_or_below_minimum_rejects(committed):
 
 
 def test_calibrated_family_preserves_existing_same_token_holding():
-    candidate = _with_precliff_depth(
+    candidate = _with_native_bid(
         _global_candidate(
             candidate_id="calibrated-held-token",
             family="calibrated-held-token",
@@ -7958,7 +7959,7 @@ def test_mixed_family_calibration_keeps_each_taker_standalone_and_one_winner():
 
 
 def test_calibrated_family_rejects_mismatched_endowment_authority():
-    candidate = _with_precliff_depth(
+    candidate = _with_native_bid(
         _global_candidate(
             candidate_id="calibrated-bad-endowment",
             family="calibrated-bad-endowment",
@@ -8202,12 +8203,12 @@ def test_sell_correction_rejects_invalid_result_without_raw_fallback():
 
 
 def test_calibrated_family_keeps_maker_and_taker_as_distinct_fixed_proposals():
-    taker = _with_precliff_depth(_global_candidate(
+    taker = _with_native_bid(_global_candidate(
         candidate_id="calibrated-mode-taker", family="calibrated-mode-family",
         side="YES", q=0.80, levels=(("0.40", "1000"),),
     ))
     proposal = S.passive_buy_proposal_curve(
-        taker.executable_cost_curve, native_bid_levels=taker.native_bid_levels,
+        taker.executable_cost_curve, native_bid_levels=taker.native_bid_levels, cash_usd=_MAKER_TEST_CASH,
     )
     assert proposal is not None
     provisional = replace(
@@ -8607,8 +8608,8 @@ def test_fee_inclusive_near_breakeven_rejects_both_sides(side):
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
-@pytest.mark.parametrize("bid_size, expected_shares", (("1.99", None), ("4", "4"), ("5", "5"), ("10", "10"), ("30", "15")))
-def test_fractional_kelly_target_does_not_haircut_exit_capacity(side, bid_size, expected_shares):
+@pytest.mark.parametrize("bid_size", ("0", "1.99", "4", "5", "10", "30"))
+def test_fractional_kelly_target_sizes_the_hold_whatever_the_bid_depth(side, bid_size):
     candidate = _global_candidate(
         candidate_id="fractional-exit-capacity",
         family="fractional-exit-capacity-family",
@@ -8618,26 +8619,23 @@ def test_fractional_kelly_target_does_not_haircut_exit_capacity(side, bid_size, 
         min_order="5",
     )
     candidate = replace(candidate, native_bid_levels=(
-        BookLevel(price=Decimal("0.49"), size=Decimal(bid_size)),
+        ()
+        if bid_size == "0"
+        else (BookLevel(price=Decimal("0.49"), size=Decimal(bid_size)),)
     ))
     decision = _global_select((candidate,), cap="100", fractional_kelly_multiplier="0.125")
-    if expected_shares is None:
-        assert decision.candidate is None
-        assert decision.rejection_reasons[candidate.candidate_id] == "PRECLIFF_LIQUIDATION_CAPACITY_BELOW_MINIMUM_LOT"
-        return
     # Binary Kelly: W*(q-p)/(p*(1-p)) = 120 shares; the risk target is 15.
-    # Executable shares must independently fit the current exit book.
+    # The hold is sized by that target; the resale bid depth is not an input.
     assert decision.candidate is candidate
     assert decision.full_kelly_target_shares == pytest.approx(Decimal("120"))
     assert decision.fractional_kelly_target_shares == pytest.approx(Decimal("15"))
-    assert abs(decision.shares - Decimal(expected_shares)) <= Decimal("0.02")
-    assert decision.shares <= Decimal(bid_size)
+    assert abs(decision.shares - Decimal("15")) <= Decimal("0.02")
     assert decision.expected_growth.expected_delta_log_wealth > 0
     assert decision.expected_growth.expected_ev_usd > 0
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_fractional_exit_capacity_redecision_consumes_calibrated_final_target(side):
+def test_calibrated_final_target_is_reached_in_one_hold_without_exit_depth(side):
     candidate = _global_candidate(
         candidate_id="calibrated-exit-capacity",
         family="calibrated-exit-capacity-family", side=side,
@@ -8648,7 +8646,8 @@ def test_fractional_exit_capacity_redecision_consumes_calibrated_final_target(si
     ))
     correction = _correction_for(candidate, raw_q=0.95, corrected_q=0.80, p0=0.50)
     held, cash = Decimal("0"), Decimal("100")
-    for expected_shares in (Decimal("10"), Decimal("5"), Decimal("0")):
+    # A 10-share bid used to split the target into 10 + 5; now it is one order.
+    for expected_shares in (Decimal("15"), Decimal("0")):
         endowment = S.CandidatePortfolioEndowment(
             loss_wealth_floor_usd=cash, win_wealth_floor_usd=cash + held,
             current_token_shares=held, ledger_snapshot_id="ledger-current",
@@ -8666,7 +8665,6 @@ def test_fractional_exit_capacity_redecision_consumes_calibrated_final_target(si
                 Decimal("15")
             )
             assert held + decision.shares <= decision.fractional_kelly_target_shares
-            assert decision.shares <= Decimal("10")
             assert decision.expected_growth.expected_ev_usd > 0
             held += decision.shares
             cash -= decision.cost_usd
@@ -8776,7 +8774,7 @@ def test_maker_reference_keeps_existing_fee_contract_without_taker_bound():
         side="YES", q=0.80, levels=(("0.50", "100"),), fee="0.10",
     )
     proposal = S.passive_buy_proposal_curve(
-        taker.executable_cost_curve, native_bid_levels=taker.native_bid_levels
+        taker.executable_cost_curve, native_bid_levels=taker.native_bid_levels, cash_usd=_MAKER_TEST_CASH,
     )
     assert proposal is not None
     maker = replace(
@@ -8884,13 +8882,13 @@ def test_joint_single_family_keeps_thin_ask_cap_under_reference_kelly():
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
 @pytest.mark.parametrize("budget_kind", ("cash", "allocator", "family"))
-def test_global_buy_keeps_liquidation_shares_separate_from_cash(side, budget_kind):
+def test_global_buy_budget_bounds_size_without_liquidation_shares(side, budget_kind):
     candidate = _global_candidate(
         candidate_id=f"liquidation-budget-{side}", family=f"liquidation-{side}",
         side=side, q=0.95, fee="0.05",
         levels=(("0.20", "5"), ("0.80", "20")),
     )
-    candidate = _with_precliff_depth(candidate, size="10")
+    candidate = _with_native_bid(candidate, size="10")
     correction = _correction_for(candidate, raw_q=0.95, corrected_q=0.90, p0=0.20)
     budget = Decimal("5.08" if budget_kind == "allocator" else
                      "8" if budget_kind == "family" else "200")
@@ -8909,14 +8907,12 @@ def test_global_buy_keeps_liquidation_shares_separate_from_cash(side, budget_kin
         payoff_q_correction_resolver=lambda *_: correction, **kwargs,
     )
 
-    # Independent exhaustive economics over every .01 amount: the 10-share
-    # liquidation limit is a quantity, while collateral uses the deepest ask.
+    # Independent exhaustive economics over every .01 amount: the 10-share bid
+    # is not a quantity bound; collateral uses the deepest ask.
     feasible = []
     q, wealth = Decimal("0.90"), Decimal("200")
     for units in range(1, 2501):
         shares = Decimal(units) / 100
-        if shares > 10:
-            continue
         limit = Decimal("0.20") if shares <= 5 else Decimal("0.80")
         cost = (min(shares, Decimal("5")) * Decimal("0.208")
                 + max(shares - 5, Decimal("0")) * Decimal("0.808"))
@@ -8951,17 +8947,16 @@ def test_global_buy_keeps_liquidation_shares_separate_from_cash(side, budget_kin
     assert decision.expected_growth.expected_delta_log_wealth == pytest.approx(oracle[0])
     assert decision.expected_growth.expected_ev_usd == pytest.approx(float(oracle[3]))
     assert decision.max_spend_usd == oracle[4] <= budget
-    assert decision.shares <= 10
     assert decision.payoff_q_correction is correction
     if budget_kind == "cash":
-        assert decision.shares == Decimal("10")
-        assert decision.expected_growth.expected_ev_usd == pytest.approx(3.92)
+        # Past the old 10-share bid bound, into the 0.80 ask level.
+        assert decision.shares > Decimal("10")
     elif budget_kind == "allocator":
         assert decision.shares == Decimal("6.25")
 
 
-def test_raw_joint_liquidation_cost_bound_is_preserved(monkeypatch):
-    candidate = _with_precliff_depth(_global_candidate(
+def test_joint_planner_capital_limit_is_not_a_liquidation_cost(monkeypatch):
+    candidate = _with_native_bid(_global_candidate(
         candidate_id="joint-depth-bound", family="joint-depth-bound", side="YES",
         q=0.9, fee="0.05", levels=(("0.20", "5"), ("0.80", "20")),
     ), size="10")
@@ -8977,12 +8972,15 @@ def test_raw_joint_liquidation_cost_bound_is_preserved(monkeypatch):
         (candidate,), cap="100", fractional_kelly_multiplier="0.125",
         family_portfolio_endowment_resolver=lambda _: _family_endowment(candidate),
     )
-    assert seen == [Decimal("5.08")]
+    # The capital cap reaches the planner unshrunk by the 10-share bid.
+    assert seen == [Decimal("100")]
 
 
 @pytest.mark.parametrize("better_side", ("YES", "NO"))
 def test_global_ranking_compares_full_feasible_sizes_on_both_sides(better_side):
-    better = _with_precliff_depth(_global_candidate(
+    """Both sides rank at their full Kelly/cash/ask-feasible sizes."""
+
+    better = _with_native_bid(_global_candidate(
         candidate_id="better-depth", family="better-depth", side=better_side,
         q=0.95, fee="0.05", levels=(("0.20", "5"), ("0.80", "20")),
     ), size="10")
@@ -9001,9 +8999,13 @@ def test_global_ranking_compares_full_feasible_sizes_on_both_sides(better_side):
         payoff_q_correction_resolver=lambda c, *_: corrections[c.candidate_id],
     )
     assert decision.candidate is better
-    assert decision.shares == Decimal("10")
+    # The 10-share bid no longer caps it: 5 @ 0.208 + 8.95 @ 0.808 all-in.
+    assert decision.shares == Decimal("13.95")
+    assert decision.cost_usd == Decimal("8.27160")
+    cost = float(decision.cost_usd)
     assert decision.expected_growth.expected_delta_log_wealth == pytest.approx(
-        0.90 * math.log(204.92 / 200) + 0.10 * math.log(194.92 / 200)
+        0.90 * math.log((200 + 13.95 - cost) / 200)
+        + 0.10 * math.log((200 - cost) / 200)
     )
     assert decision.expected_growth.expected_delta_log_wealth > (
         0.79 * math.log(205.88 / 200) + 0.21 * math.log(195.88 / 200)
@@ -9118,7 +9120,7 @@ def _source_identity_for(candidate, raw_q, p0):
 @pytest.mark.parametrize("side", ("YES", "NO"))
 @pytest.mark.parametrize("family_joint", (False, True))
 def test_source_identity_preserves_source_sizing_and_joint_family_law(side, family_joint):
-    candidate = _with_precliff_depth(_global_candidate(
+    candidate = _with_native_bid(_global_candidate(
         candidate_id=f"source-{side}", family=f"source-{side}", side=side,
         q=0.8, levels=(("0.4", "1000"),),
     ))
@@ -9182,6 +9184,7 @@ def _live_residue_maker_pair(prefix):
     maker_curve = S.passive_buy_proposal_curve(
         taker.executable_cost_curve,
         native_bid_levels=(BookLevel(price=Decimal("0.40"), size=Decimal("100")),),
+        cash_usd=_MAKER_TEST_CASH,
     )
     assert maker_curve is not None
     asset_epoch = f"{prefix}-asset-epoch"
