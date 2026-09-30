@@ -170,7 +170,7 @@ def geometry_proof_authenticity_reason(
         city = cities_by_name.get(metadata.city)
         if city is None:
             return "OM9_STATION_SOURCE_UNAVAILABLE"
-        station = runtime_station_geometry_for_city(city)
+        station = runtime_station_geometry_for_city(city, effective_at=_to_utc(decision_at, field_name="decision_at"))
         if station["validity_reason"] is not None:
             return "OM9_STATION_SOURCE_INVALID"
         ground_facts = station.get("ground_facts")

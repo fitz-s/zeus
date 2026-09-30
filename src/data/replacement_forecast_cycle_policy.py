@@ -200,7 +200,8 @@ def current_evidence_shape_semantics_mismatch(provenance: object) -> bool:
     return str(shape.get("semantics_revision") or "") != expected
 
 
-def _anchor_station_ground_has_authority(geometry: Mapping[str, object], audit: object, materialized_at: object = None) -> bool:
+def _anchor_station_ground_has_authority(geometry: Mapping[str, object], audit: object, materialized_at: object = None,
+        *, target_scope: object = None, certificate_city: object = None, certificate_target_date: object = None) -> bool:
     """Replay this certificate's own canonical official ground entity."""
     try:
         from src.config import runtime_cities_by_name, runtime_station_geometry_for_city
@@ -235,6 +236,25 @@ def _anchor_station_ground_has_authority(geometry: Mapping[str, object], audit: 
             frozen["forecast_db"], city=str(anchor["city"]), decision_at=materialized_at,
         )
         if current is None or current["facts"] != frozen["facts"]:
+            return False
+        from src.config import OSCAR_WMD_SOURCE_KIND
+        if isinstance(target_scope,Mapping):
+            from src.data.replacement_current_value_serving import station_ground_target_coverage_for_city
+            if certificate_city != anchor["city"] or not certificate_target_date:
+                return False
+            coverage = station_ground_target_coverage_for_city(current,city=str(certificate_city),
+                target_date=certificate_target_date,decision_at=materialized_at)
+            if (target_scope["city"] != certificate_city
+                or str(target_scope["target_local_date"]) != str(certificate_target_date)
+                or target_scope["timezone_name"] != city.timezone
+                or datetime.fromisoformat(str(target_scope["local_day_start_utc"]).replace("Z","+00:00")) != datetime.fromisoformat(coverage["target_start_utc"])
+                or datetime.fromisoformat(str(target_scope["local_day_end_utc"]).replace("Z","+00:00")) != datetime.fromisoformat(coverage["target_end_utc"])
+                or coverage["status"] != "VERIFIED"):
+                return False
+            claimed = audit.get("anchor_station_ground_target_coverage")
+            if (frozen["source_kind"] == OSCAR_WMD_SOURCE_KIND or claimed is not None) and claimed != coverage:
+                return False
+        elif frozen["source_kind"] == OSCAR_WMD_SOURCE_KIND:
             return False
         station = runtime_station_geometry_for_city(city)
         return (
@@ -424,7 +444,13 @@ def _current_evidence_shape_has_probability_authority(
             return False
     except (KeyError, TypeError, ValueError, OSError):
         return False
-    if not _anchor_station_ground_has_authority(geometry, shape.get("provider_geometry_audit"), materialized_at):
+    try:
+        payload = json.loads(provenance) if isinstance(provenance, str) else provenance
+        precision = payload["openmeteo_precision_guard"]["metadata"]
+    except (KeyError, TypeError, ValueError):
+        return False
+    if not _anchor_station_ground_has_authority(geometry, shape.get("provider_geometry_audit"), materialized_at,
+        target_scope=precision,certificate_city=city,certificate_target_date=target_date):
         return False
     try:
         payload = json.loads(provenance) if isinstance(provenance,str) else provenance

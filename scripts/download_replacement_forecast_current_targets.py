@@ -479,6 +479,7 @@ def _local_day_window(city_timezone: str, target_date: str) -> tuple[datetime, d
 def _precision_metadata(
     city: str, target_date: str, *, anchor_sigma_c: float,
     raw_payload_bytes: bytes,
+    analysis_at: datetime | None = None,
 ) -> dict[str, object]:
     from src.data.openmeteo_ecmwf_ifs9_bucket_transport import (
         same_grid_cell, capture_source_cell_geometry_proof,
@@ -500,7 +501,10 @@ def _precision_metadata(
     ):
         raise ValueError("OM9 raw response target scope differs from precision metadata")
     start, end = _local_day_window(city_config.timezone, target_date)
-    station = runtime_station_geometry_for_city(city_config)
+    analysis_at = datetime.now(tz=UTC) if analysis_at is None else analysis_at
+    if analysis_at.tzinfo is None or analysis_at.utcoffset() is None:
+        raise ValueError("OM9 analysis cut must be timezone-aware")
+    station = runtime_station_geometry_for_city(city_config,effective_at=analysis_at)
     if station["validity_reason"] is not None:
         raise ValueError(f"OM9 precise station source: {station['validity_reason']}")
     station_id = str(station["station_id"])

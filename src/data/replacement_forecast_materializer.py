@@ -3339,6 +3339,7 @@ def _bind_provider_geometry_identity(
     *, anchor_metadata: object | None = None, decision_at: datetime | str | None = None,
     station_ground_evidence: Mapping[str, object] | None = None,
     anchor_raw_artifact: Mapping[str, object] | None = None,
+    station_ground_target_coverage: Mapping[str, object] | None = None,
 ) -> _CurrentEvidenceShape:
     """Stable actual provider geometry, independent of capture IDs/clocks/batch shape."""
     from dataclasses import replace
@@ -3369,6 +3370,8 @@ def _bind_provider_geometry_identity(
                 # canonical possession. Its whole-page identity stays an audit
                 # dependency, never a newest-page/stable-geometry constraint.
                 audit["anchor_station_ground"] = station_ground_evidence
+                if station_ground_target_coverage is not None:
+                    audit["anchor_station_ground_target_coverage"] = dict(station_ground_target_coverage)
                 anchor["source_geometry_proof"]["station_ground_proof"] = {
                     key: ground[key] for key in ("revision", "status", "reason", "facts") if key in ground
                 }
@@ -4089,7 +4092,9 @@ def _fusion_current_evidence_shape_has_live_authority(
         {"bayes_precision_fusion": {"current_evidence_shape": shape,
             "current_value_serving": getattr(fusion, "current_value_serving", None),
             "used_models": getattr(fusion, "used_models", None)},
-            "openmeteo_anchor_artifact_id":request.anchor_artifact_id}, materialized_at=request.computed_at,
+            "openmeteo_anchor_artifact_id":request.anchor_artifact_id,
+            "openmeteo_precision_guard":None if request.openmeteo_precision_guard is None else asdict(request.openmeteo_precision_guard)},
+        materialized_at=request.computed_at,
         city=request.city,target_date=_date_text(request.target_date),metric=request.temperature_metric,
         request_anchor_artifact_id=request.anchor_artifact_id,
         forecast_db=forecast_db_from_connection(conn),
@@ -4357,6 +4362,19 @@ def _replacement_bayes_precision_fusion_override(
         target_date = _date_text(request.target_date)
         target_local_date = date.fromisoformat(target_date)
         computed_at = _to_utc(request.computed_at, field_name="computed_at")
+        from src.data.station_ground_evidence import forecast_db_from_connection, read_current_station_ground_evidence
+        from src.data.replacement_current_value_serving import station_ground_target_coverage_for_city
+        ground_db = None if conn is None else forecast_db_from_connection(conn)
+        ground_entity = None if ground_db is None else read_current_station_ground_evidence(
+            ground_db, city=request.city, decision_at=computed_at)
+        ground_target_coverage = station_ground_target_coverage_for_city(ground_entity,
+            city=request.city,target_date=target_date,decision_at=computed_at)
+        if ground_target_coverage["status"] != "VERIFIED":
+            import logging
+            logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
+                "current provider precision DATA_DEGRADED for %s %s %s: %s",
+                request.city,target_date,metric,ground_target_coverage["reason"])
+            return None
         # BLOCKER 6: lead in the CITY-LOCAL date (tz_name), NOT the UTC date. Cross-timezone the
         # UTC date is off-by-one -> wrong lead bucket / regional eligibility / sigma.
         lead_days = _bayes_precision_fusion_city_local_lead_days(
@@ -5198,13 +5216,6 @@ def _replacement_bayes_precision_fusion_override(
                 pass
             return None
 
-        from src.data.station_ground_evidence import (
-            forecast_db_from_connection, read_current_station_ground_evidence,
-        )
-        ground_db = None if conn is None else forecast_db_from_connection(conn)
-        ground_entity = None if ground_db is None else read_current_station_ground_evidence(
-            ground_db, city=request.city, decision_at=computed_at,
-        )
         anchor_raw_artifact = None
         if conn is not None and request.anchor_artifact_id is not None:
             from src.data.replacement_current_value_serving import _ARTIFACT_IDENTITY_JSON_SQL
@@ -5222,6 +5233,7 @@ def _replacement_bayes_precision_fusion_override(
             decision_at=computed_at,
             station_ground_evidence=ground_entity,
             anchor_raw_artifact=anchor_raw_artifact,
+            station_ground_target_coverage=ground_target_coverage,
         )
         if _source_clock_payload is not None:
             _source_clock_payload["current_evidence_shape"] = _source_clock_current_shape.as_payload()
@@ -8029,6 +8041,9 @@ def _compute_posterior_payload(
                     "artifact_id", "body_sha256", "manifest_sha256", "facts_identity",
                 )
             }
+        ground_coverage = ground_audit.get("anchor_station_ground_target_coverage") if isinstance(ground_audit,Mapping) else None
+        if isinstance(ground_coverage,Mapping):
+            dependency_payload["station_ground_target_applicability"] = ground_coverage.get("applicability_identity")
     dependency_hash = _json_hash(dependency_payload)
     posterior_config = {
         "posterior_method": "openmeteo_ecmwf_ifs9_bayes_fusion",

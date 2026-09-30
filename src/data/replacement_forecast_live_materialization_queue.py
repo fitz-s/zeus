@@ -3054,6 +3054,9 @@ def _blocked_attempt_fingerprint(
                 db_path, city=scope[0], decision_at=computed_at,
             )
             ground_facts_frontier = None if ground_entity is None else ground_entity["facts_identity"]
+            from src.data.replacement_current_value_serving import station_ground_target_coverage_for_city
+            ground_target_frontier = station_ground_target_coverage_for_city(ground_entity,city=scope[0],
+                target_date=scope[1],decision_at=computed_at)["applicability_identity"]
             from src.data.replacement_input_hwm import (  # noqa: PLC0415
                 _latest_eligible_ensemble_input_mark,
             )
@@ -3150,6 +3153,7 @@ def _blocked_attempt_fingerprint(
                 "source_clock_frontier": source_clock_frontier,
                 "physical_proof_frontier": physical_proof_frontier,
                 "station_ground_facts_frontier": ground_facts_frontier,
+                "station_ground_target_applicability": ground_target_frontier,
                 "eligible_ensemble_input_mark": eligible_ensemble_input_mark,
                 "day0_hourly_frontier": day0_hourly_frontier,
             },

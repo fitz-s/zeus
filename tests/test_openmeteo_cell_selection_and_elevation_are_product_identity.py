@@ -190,7 +190,8 @@ def _download_time(monkeypatch, module, when):
     monkeypatch.setattr(module, "datetime", Clock)
 
 
-def _persist_exact_provider_body(conn, tmp_path, *, city, metric, target_date, model, cycle, captured, value, expected_written=1, network=False):
+def _persist_exact_provider_body(conn, tmp_path, *, city, metric, target_date, model, cycle, captured, value, expected_written=1, network=False,
+        payload_dates=None):
     """Real entity parser/artifact/raw writer fixture, with causal original clocks."""
     from src.config import runtime_cities_by_name
     from src.data import bayes_precision_fusion_download as dl
@@ -210,8 +211,9 @@ def _persist_exact_provider_body(conn, tmp_path, *, city, metric, target_date, m
     offset = int(day.replace(tzinfo=ZoneInfo(target.timezone_name)).utcoffset().total_seconds())
     payload = {"latitude":target.latitude, "longitude":target.longitude, "elevation":45,
         "timezone":target.timezone_name, "utc_offset_seconds":offset, "hourly_units":{"temperature_2m":"°C"},
-        "hourly":{"time":[(day+timedelta(hours=i)).isoformat(timespec="minutes") for i in range(24)],
-                  "temperature_2m":[value]*24}}
+        "hourly":{"time":[(datetime.fromisoformat(body_day)+timedelta(hours=i)).isoformat(timespec="minutes")
+            for body_day in (payload_dates or (target_date,)) for i in range(24)],
+                  "temperature_2m":[value]*(24*len(payload_dates or (target_date,)))}}
     body = (json.dumps(payload, indent=2)+"\n").encode()
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr("src.config.state_path", lambda filename: Path(tmp_path)/"state"/filename)
@@ -292,10 +294,10 @@ def _normal_ifs9_owned_product(tmp_path, monkeypatch, metric, *, legacy=False):
     return conn, served, persist, data, write, clock
 
 
-def _normal_anchor_only_ifs9(tmp_path, monkeypatch, metric):
+def _normal_anchor_only_ifs9(tmp_path, monkeypatch, metric, *, city_name="Hong Kong"):
     """The current-target producer owns this anchor's actual body and frozen O1280."""
     from dataclasses import dataclass
-    from tests.test_station_ground_evidence import _setup, _archive
+    from tests.test_station_ground_evidence import _setup, _wmd_setup, _archive
     from tests.test_openmeteo_ecmwf_ifs9_bucket_transport import _actual_o1280_static_fixture
     import src.config as config
     import scripts.download_replacement_forecast_current_targets as producer
@@ -307,21 +309,22 @@ def _normal_anchor_only_ifs9(tmp_path, monkeypatch, metric):
     from src.data.openmeteo_ecmwf_ifs9_anchor import extract_openmeteo_ecmwf_ifs9_localday_anchor
     from src.data.openmeteo_ecmwf_ifs9_precision_guard import evaluate_openmeteo_ecmwf_ifs9_precision_guard
 
-    db, _, _, _, _ = _setup(tmp_path, monkeypatch)
-    entity = _archive(db)
+    db, *_ = (_wmd_setup if city_name == "Paris" else _setup)(tmp_path, monkeypatch)
+    entity = _archive(db, city_name)
     transport, path, _, _, clock, _ = _actual_o1280_static_fixture(tmp_path, monkeypatch)
     # Fixture producer clock precedes actual SQLite INSERT; no old cut is
     # restamped, and the canonical tuple's independent recorded clock is read.
     clock[0] = datetime.now(UTC) - timedelta(minutes=1)
     monkeypatch.setattr(transport, "HSURF_LOCAL_CACHE", str(path))
     monkeypatch.setattr(config, "state_path", lambda filename: tmp_path / "state" / filename)
-    city = config.runtime_cities_by_name()["Hong Kong"]
+    city = config.runtime_cities_by_name()[city_name]
     points, _, center = transport.om_get_surrounding_gridpoints(city.lat, city.lon)
     selected = transport.om_get_coordinates(points[center])
     run = clock[0].replace(hour=clock[0].hour//6*6, minute=0, second=0, microsecond=0)
     target = clock[0].astimezone(__import__("zoneinfo").ZoneInfo(city.timezone)).date() + timedelta(days=1)
-    payload = {"latitude":selected.grid_latitude,"longitude":selected.grid_longitude_east,"elevation":32.,
-        "timezone":city.timezone,"utc_offset_seconds":28800,"hourly_units":{"temperature_2m":"°C"},
+    payload = {"latitude":selected.grid_latitude,"longitude":selected.grid_longitude_east,"elevation":float(entity["facts"]["elevation_m"]),
+        "timezone":city.timezone,"utc_offset_seconds":int(clock[0].astimezone(__import__("zoneinfo").ZoneInfo(city.timezone)).utcoffset().total_seconds()),
+        "hourly_units":{"temperature_2m":"°C"},
         "hourly":{"time":[datetime.combine(target,datetime.min.time()).replace(hour=i).isoformat(timespec="minutes") for i in range(24)],
             "temperature_2m":[20.]*24}}
     raw = (json.dumps(payload,indent=2)+"\n").encode()
@@ -344,8 +347,10 @@ def _normal_anchor_only_ifs9(tmp_path, monkeypatch, metric):
         provider_geometry_evidence: object=None
         provider_geometry_identity_hash: object=None
         provider_geometry_audit: object=None
+    from src.data.replacement_current_value_serving import station_ground_target_coverage_for_city
+    coverage = station_ground_target_coverage_for_city(entity,city=city.name,target_date=target,decision_at=cut) if city_name=="Paris" else None
     bound=_bind_provider_geometry_identity(Shape(),{},anchor_metadata=metadata,decision_at=cut,
-        station_ground_evidence=entity,anchor_raw_artifact=artifact)
+        station_ground_evidence=entity,anchor_raw_artifact=artifact,station_ground_target_coverage=coverage)
     anchor_id=_insert_anchor(conn,ReplacementForecastMaterializeRequest(city=city.name,city_id=city.name,
         city_timezone=city.timezone,target_date=target,temperature_metric=metric,
         baseline_source_run_id="unit-anchor-only-not-q-authority",baseline_data_version="unit-only",
@@ -493,7 +498,7 @@ def test_anchor_frozen_ground_replays_own_cut_after_actual_later_page_and_statio
     assert not _anchor_ifs9_response_has_authority(geometry, audit, materialized_at=clock[0].isoformat(), **scope)
 
     metadata_c = OpenMeteoIfs9PrecisionMetadata(**producer._precision_metadata(
-        scope["city"], scope["target_date"], anchor_sigma_c=3., raw_payload_bytes=body_path.read_bytes(),
+        scope["city"], scope["target_date"], anchor_sigma_c=3., raw_payload_bytes=body_path.read_bytes(),analysis_at=clock[0],
     ))
     bound_c = _bind_provider_geometry_identity(a, {}, anchor_metadata=metadata_c, decision_at=clock[0],
         station_ground_evidence=c, anchor_raw_artifact=audit["anchor_raw_artifact"])
@@ -586,6 +591,115 @@ def test_anchor_natural_ids_are_bound_to_the_actual_reader_database_namespace(tm
     alias.symlink_to(scope_a["forecast_db"])
     assert _anchor_ifs9_response_has_authority(a.provider_geometry_evidence,
         a.provider_geometry_audit,materialized_at=cut.isoformat(),**{**scope_a,"forecast_db":alias})
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_normal_wmd_future_disclosure_changes_only_target_applicability_hwm_and_network_debt(tmp_path, monkeypatch, metric):
+    """Actual ground/raw producers; HWM component evidence is not a q certificate."""
+    from src.data import station_ground_evidence as ground
+    from src.data.replacement_current_value_serving import (
+        physical_capture_debt_reason, read_current_instrument_values, station_ground_target_coverage_for_city,
+    )
+    from src.data.replacement_forecast_live_materialization_queue import _blocked_attempt_fingerprint
+    from src.data.replacement_input_hwm import _exact_current_value_serving_lag
+    from tests.test_station_ground_evidence import _wmd_setup, _archive, _wmd_known_periods
+
+    db, registry, primary, _, claims, clock = _wmd_setup(tmp_path, monkeypatch)
+    a = _archive(db, "Paris")
+    cut_a = datetime(2026,9,30,1,19,tzinfo=UTC)
+    run = "2026-09-29T18:00:00+00:00"
+    days = ("2026-09-30", "2026-10-01")
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    models = ("icon_global", "ukmo_global_deterministic_10km")
+    for day in days:
+        for model in models:
+            _persist_exact_provider_body(conn,tmp_path,city="Paris",metric=metric,target_date=day,model=model,
+                cycle=run,captured="2026-09-30T01:16:00+00:00",value=20.,network=True,payload_dates=days)
+    conn.commit()
+    provenances, fingerprints = {}, {}
+
+    def fingerprint(day, cut):
+        return _blocked_attempt_fingerprint(input_json=tmp_path/"seed.json",forecast_db=db,
+            payload={"forecast_db":str(db),"city":"Paris","target_date":day,"temperature_metric":metric,
+                "source_cycle_time":run,"computed_at":cut.isoformat()})
+
+    def lag(day, decision):
+        return _exact_current_value_serving_lag(conn,city="Paris",target_date=day,metric=metric,
+            decision_time=decision,posterior_computed_at=cut_a,provenance=provenances[day])
+
+    for day in days:
+        served = read_current_instrument_values(conn,city="Paris",metric=metric,target_date=day,
+            source_cycle_time_iso=run,decision_time_iso=cut_a.isoformat())
+        assert set(served) == set(models)
+        provenances[day] = {"bayes_precision_fusion":{"used_models":list(models),
+            "current_value_serving":{model:value.as_provenance() for model,value in served.items()},
+            "current_evidence_shape":{"provider_geometry_evidence":{"component_only":True},
+                "provider_geometry_audit":{"anchor_station_ground":a}}}}
+        assert lag(day,cut_a)[1] is None
+        fingerprints[day] = fingerprint(day,cut_a)
+        assert fingerprints[day] is not None
+    originals = conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall()
+    _wmd_known_periods(primary,registry,claims,[("2026-10-01",100)],captured="2026-09-30T01:20:00Z")
+    clock[0] = datetime(2026,9,30,1,30,tzinfo=UTC)
+    b = _archive(db,"Paris")
+    assert b["facts_identity"] == a["facts_identity"]
+    cut_b = datetime(2026,9,30,1,31,tzinfo=UTC)
+    assert station_ground_target_coverage_for_city(b,city="Paris",target_date=days[1],decision_at=cut_b)["status"] == "DATA_DEGRADED"
+    assert lag(days[1],cut_b)[1] == "basis=station_ground_target_applicability_changed"
+    assert lag(days[0],cut_b)[1] is None
+    assert lag(days[1],cut_a)[1] is None
+    assert fingerprint(days[1],cut_b) != fingerprints[days[1]]
+    assert fingerprint(days[0],cut_b) == fingerprints[days[0]]
+    assert fingerprint(days[1],cut_a) == fingerprints[days[1]]
+    # Only missing HTTP proof can be repaired by HTTP. A known target conflict
+    # must not use that same reason to keep forcing requests for this day.
+    conn.execute("DELETE FROM raw_forecast_artifacts WHERE data_version='openmeteo_single_model_http_capture_receipt_v1'")
+    conn.commit()
+    raw_ids = {row["target_date"]:row["raw_model_forecast_id"] for row in originals if row["model"]=="icon_global"}
+    assert physical_capture_debt_reason(conn,raw_model_forecast_id=raw_ids[days[0]],decision_time_iso=cut_b.isoformat()) == "HTTP_CAPTURE_RECEIPT_MISSING"
+    assert physical_capture_debt_reason(conn,raw_model_forecast_id=raw_ids[days[1]],decision_time_iso=cut_b.isoformat()) is None
+    assert physical_capture_debt_reason(conn,raw_model_forecast_id=raw_ids[days[1]],decision_time_iso=cut_a.isoformat()) == "HTTP_CAPTURE_RECEIPT_MISSING"
+    assert conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall() == originals
+    conn.close()
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_wmd_public_ground_window_uses_independent_family_and_decision_visible_knowledge(tmp_path, monkeypatch, metric):
+    from copy import deepcopy
+    import src.config as config
+    from src.data import station_ground_evidence as ground
+    from src.data.replacement_forecast_cycle_policy import _anchor_station_ground_has_authority
+    from tests.test_station_ground_evidence import _archive, _wmd_known_periods
+    a, _, cut_a, scope = _normal_anchor_only_ifs9(tmp_path,monkeypatch,metric,city_name="Paris")
+    audit, geometry = a.provider_geometry_audit, a.provider_geometry_evidence
+    metadata = audit["anchor_precision_metadata"]
+    independent = {"certificate_city":scope["city"], "certificate_target_date":scope["target_date"]}
+    assert _anchor_station_ground_has_authority(geometry,audit,cut_a.isoformat(),target_scope=metadata,**independent)
+    for field, wrong in (("target_local_date","2030-01-01"), ("city","Hong Kong"),
+        ("timezone_name","UTC"), ("local_day_start_utc",(cut_a-timedelta(days=1)).isoformat()),
+        ("local_day_end_utc",(cut_a+timedelta(days=1)).isoformat())):
+        assert not _anchor_station_ground_has_authority(geometry,audit,cut_a.isoformat(),
+            target_scope={**metadata,field:wrong},**independent)
+    assert not _anchor_station_ground_has_authority(geometry,audit,cut_a.isoformat(),target_scope=metadata)
+    registry = config.CONFIG_DIR/"station_precise_coords.json"
+    primary = config.CONFIG_DIR/"wmo_wmd_lfpb_station.xml"
+    claims = json.loads(registry.read_text())
+    _wmd_known_periods(primary,registry,claims,[(scope["target_date"],100)],captured=(cut_a+timedelta(minutes=1)).isoformat())
+    cut_b = cut_a+timedelta(minutes=3)
+    class Clock(datetime):
+        @classmethod
+        def now(cls,tz=None):
+            return (cut_a+timedelta(minutes=2)).astimezone(tz or UTC)
+    monkeypatch.setattr(ground,"datetime",Clock)
+    b = _archive(scope["forecast_db"],"Paris")
+    assert b["facts_identity"] == audit["anchor_station_ground"]["facts_identity"]
+    assert _anchor_station_ground_has_authority(geometry,audit,cut_a.isoformat(),target_scope=metadata,**independent)
+    # At a genuinely later materialization cut, an older same-facts XML cannot
+    # hide newly possessed target restrictions disclosed by the newer entity.
+    later = deepcopy(audit)
+    later["decision_at"] = cut_b.isoformat()
+    assert not _anchor_station_ground_has_authority(geometry,later,cut_b.isoformat(),target_scope=metadata,**independent)
 
 
 @pytest.mark.parametrize("metric", ("high", "low"))

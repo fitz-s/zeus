@@ -1513,6 +1513,14 @@ def _exact_current_value_serving_lag(
             return True, "basis=station_ground_canonical_evidence_unavailable", None
         if frozen["facts_identity"] != current_ground["facts_identity"]:
             return True, "basis=station_ground_current_facts_changed", None
+        from src.data.replacement_current_value_serving import station_ground_target_coverage_for_city
+        prior_coverage = station_ground_target_coverage_for_city(frozen,city=city,target_date=target_date,
+            decision_at=posterior_computed_at)
+        current_coverage = station_ground_target_coverage_for_city(current_ground,city=city,target_date=target_date,
+            decision_at=decision_time)
+        if (current_coverage["status"] != "VERIFIED"
+            or prior_coverage["applicability_identity"] != current_coverage["applicability_identity"]):
+            return True,"basis=station_ground_target_applicability_changed",None
         # Whole-page/manifest/possession changes with the exact same station
         # facts never invalidate a certificate or force a new probability shape.
 

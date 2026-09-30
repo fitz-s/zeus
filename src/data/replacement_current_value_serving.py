@@ -848,6 +848,22 @@ def _physical_response_has_authority(row: Mapping[str, object], *, _require_surf
         return False
 
 
+def station_ground_target_coverage_for_city(evidence: object, *, city: str, target_date: object,
+        decision_at: object) -> dict[str, object]:
+    """Derive the physical window from the settlement city's real local calendar."""
+    from datetime import date
+    from src.config import runtime_cities_by_name
+    from src.data.forecast_target_contract import compute_target_local_day_window_utc
+    from src.data.station_ground_evidence import station_ground_target_coverage
+    city_object = runtime_cities_by_name().get(city)
+    if city_object is None:
+        raise ValueError("station ground target city unavailable")
+    window = compute_target_local_day_window_utc(city_timezone=str(city_object.timezone),
+        target_local_date=date.fromisoformat(str(target_date)))
+    return station_ground_target_coverage(evidence,decision_at=decision_at,
+        target_start_utc=window.start_utc,target_end_utc=window.end_utc)
+
+
 def physical_capture_debt_reason(
     conn: sqlite3.Connection, *, raw_model_forecast_id: int,
     decision_time_iso: str, deadline_monotonic: float | None = None,
@@ -922,7 +938,10 @@ def physical_capture_debt_reason(
         if not raw_product_matches_live_source(view, city, lead_days=int(raw["lead_days"])):
             return None
         db_path = next((str(row[2]) for row in conn.execute("PRAGMA database_list") if row[1] == "main"), "")
-        if not db_path or read_current_station_ground_evidence(Path(db_path), city=str(raw["city"]), decision_at=decision) is None:
+        ground_entity = None if not db_path else read_current_station_ground_evidence(
+            Path(db_path), city=str(raw["city"]), decision_at=decision)
+        if ground_entity is None or station_ground_target_coverage_for_city(ground_entity,
+            city=str(raw["city"]),target_date=raw["target_date"],decision_at=decision)["status"] != "VERIFIED":
             return None
         row = json.loads(_read_product_identity_at_cutoff(conn, item[0], deadline_monotonic=deadline_monotonic))
         artifact = row.get("physical_artifact")
