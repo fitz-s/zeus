@@ -373,9 +373,12 @@ def _anchor_with_local_hours(*, hours: range | tuple[int, ...]) -> OpenMeteoIfs9
 
 
 def _fixture_raw_openmeteo_bytes() -> bytes:
+    """Controlled local-axis payload; the offset does not renew any source clock."""
+    from zoneinfo import ZoneInfo
+
     response = {
         "latitude": 31.14, "longitude": 121.80, "elevation": 8.0,
-        "timezone": "Asia/Shanghai",
+        "timezone": "Asia/Shanghai", "utc_offset_seconds": 28800,
         "hourly": {
             "time": [f"2026-06-07T{hour:02d}:00" for hour in range(24)],
             "temperature_2m": [27.0 if hour == 12 else 18.5 for hour in range(24)],
@@ -383,6 +386,12 @@ def _fixture_raw_openmeteo_bytes() -> bytes:
         "hourly_units": {"temperature_2m": "°C"},
         "_zeus_current_target_scope": {"city": "Shanghai", "target_date": "2026-06-07", "metric": "high"},
     }
+    local_axis = tuple(datetime.fromisoformat(at).replace(tzinfo=ZoneInfo(response["timezone"]))
+                       for at in response["hourly"]["time"])
+    assert all(at.utcoffset() == timedelta(seconds=response["utc_offset_seconds"]) for at in local_axis)
+    assert local_axis[0].astimezone(UTC) == _dt(16)
+    assert (local_axis[0] + timedelta(days=1)).astimezone(UTC) == datetime(2026, 6, 7, 16, tzinfo=UTC)
+    assert tuple(at.astimezone(UTC) for at in local_axis) == _anchor().contributing_valid_times_utc
     return (json.dumps(response, indent=2, sort_keys=True) + "\n").encode()
 
 
