@@ -619,19 +619,25 @@ def test_consumed_regional_clock_newer_than_anchor_cycle_is_covered(tmp_path, mo
             hourly={"time": [f"{target.target_date}T{hour:02d}:00" for hour in range(24)],
                 "temperature_2m": [19.0]*24})
         body = json.dumps(payload, sort_keys=True).encode()
-        bound = dl._bind_physical_response(payload, model="gfs_hrrr", url=SINGLE_RUNS_FORECAST_URL,
-            params=params, run=run, captures=[(body, capture.timestamp())],
-            network_captures=[(body, capture.timestamp(), {"content-type": "application/json"})])
-        row = dict(model="gfs_hrrr", city=target.city, metric=target.metric, target_date=target.target_date,
-            source_cycle_time=run.isoformat(), source_available_at=capture.isoformat(),
-            captured_at=capture.isoformat(), lead_days=1, forecast_value_c=19.0, endpoint="single_runs",
-            _physical_response=bound[dl._BATCH_PHYSICAL_RESPONSE_KEY],
-            **dl._bayes_precision_fusion_product_identity("gfs_hrrr", "single_runs", target))
-        assert dl._persist_rows(fixture.conn, [row]) == 1
+        from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _download_time
+        with monkeypatch.context() as acquisition:
+            # Both acquisition and canonical INSERT use this actual private
+            # event time; no post-publication clock field is rewritten.
+            _download_time(acquisition, dl, capture)
+            bound = dl._bind_physical_response(payload, model="gfs_hrrr", url=SINGLE_RUNS_FORECAST_URL,
+                params=params, run=run, captures=[(body, capture.timestamp())],
+                network_captures=[(body, capture.timestamp(), {"content-type": "application/json"})])
+            row = dict(model="gfs_hrrr", city=target.city, metric=target.metric, target_date=target.target_date,
+                source_cycle_time=run.isoformat(), source_available_at=capture.isoformat(),
+                captured_at=capture.isoformat(), lead_days=1, forecast_value_c=19.0, endpoint="single_runs",
+                _physical_response=bound[dl._BATCH_PHYSICAL_RESPONSE_KEY],
+                **dl._bayes_precision_fusion_product_identity("gfs_hrrr", "single_runs", target))
+            assert dl._persist_rows(fixture.conn, [row]) == 1
         fixture.conn.commit()
         served = read_current_instrument_values(fixture.conn, city=target.city, metric="low",
             target_date=target.target_date, source_cycle_time_iso=fixture.request.source_cycle_time.isoformat(),
             decision_time_iso=cut.isoformat())
+        assert "gfs_hrrr" in served, sorted(served)
         assert served["gfs_hrrr"].served_cycle == run.isoformat()
         fixture.sql_clock[0] = cut
         fixture.request = replace(fixture.request, computed_at=cut)
