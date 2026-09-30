@@ -729,6 +729,7 @@ def _precision_guard_payload(guard: OpenMeteoIfs9PrecisionGuardResult) -> dict[s
 
 def _precision_guard_block_reason(
     request: ReplacementForecastMaterializeRequest,
+    conn: sqlite3.Connection | None = None,
 ) -> tuple[str, ...]:
     guard = request.openmeteo_precision_guard
     if guard is None:
@@ -741,6 +742,15 @@ def _precision_guard_block_reason(
         possessed = _to_utc(ground["audit"]["checked_at"], field_name="station_ground_checked_at")
         if possessed > _to_utc(request.computed_at, field_name="computed_at"):
             return ("OM9_STATION_GROUND_PROOF_AFTER_DECISION",)
+        from src.data.station_ground_evidence import (
+            forecast_db_from_connection, read_current_station_ground_evidence,
+        )
+        ground_db = None if conn is None else forecast_db_from_connection(conn)
+        ground_entity = None if ground_db is None else read_current_station_ground_evidence(
+            ground_db, city=request.city, decision_at=request.computed_at,
+        )
+        if ground_entity is None or ground_entity["facts"] != ground["facts"]:
+            return ("OM9_STATION_GROUND_ENTITY_NOT_POSSESSED",)
         raw = json.loads(raw_bytes)
         if not isinstance(raw, Mapping):
             raise ValueError("Open-Meteo response must be an object")
@@ -3326,6 +3336,7 @@ class _CurrentEvidenceShape:
 def _bind_provider_geometry_identity(
     shape: _CurrentEvidenceShape, served: Mapping[str, object],
     *, anchor_metadata: object | None = None, decision_at: datetime | str | None = None,
+    station_ground_evidence: Mapping[str, object] | None = None,
 ) -> _CurrentEvidenceShape:
     """Stable actual provider geometry, independent of capture IDs/clocks/batch shape."""
     from dataclasses import replace
@@ -3363,7 +3374,10 @@ def _bind_provider_geometry_identity(
                 if key != "station_registry_sha256" and not any(clock in key for clock in ("fetched", "captured", "payload_sha", "manifest_sha", "recorded", "cycle", "available"))}
             ground = anchor["source_geometry_proof"].get("station_ground_proof")
             if isinstance(ground, Mapping):
-                audit["anchor_station_ground"] = ground.get("audit")
+                # Frozen official entity has its own original source capture and
+                # canonical possession. Its whole-page identity stays an audit
+                # dependency, never a newest-page/stable-geometry constraint.
+                audit["anchor_station_ground"] = station_ground_evidence
                 anchor["source_geometry_proof"]["station_ground_proof"] = {
                     key: ground[key] for key in ("revision", "status", "reason", "facts") if key in ground
                 }
@@ -5188,12 +5202,20 @@ def _replacement_bayes_precision_fusion_override(
                 pass
             return None
 
+        from src.data.station_ground_evidence import (
+            forecast_db_from_connection, read_current_station_ground_evidence,
+        )
+        ground_db = None if conn is None else forecast_db_from_connection(conn)
+        ground_entity = None if ground_db is None else read_current_station_ground_evidence(
+            ground_db, city=request.city, decision_at=computed_at,
+        )
         _source_clock_current_shape = _bind_provider_geometry_identity(
             _source_clock_current_shape,
             {model: value for model, value in served_current.items()
              if model in (_source_clock_used_models or _weights)},
             anchor_metadata=getattr(request.openmeteo_precision_guard, "metadata", None),
             decision_at=computed_at,
+            station_ground_evidence=ground_entity,
         )
         if _source_clock_payload is not None:
             _source_clock_payload["current_evidence_shape"] = _source_clock_current_shape.as_payload()
@@ -7993,6 +8015,14 @@ def _compute_posterior_payload(
             model: physical_source_proof_dependency(serving.get("physical_response"))
             for model, serving in (bayes_precision_fusion_override.current_value_serving or {}).items()
         }
+        ground_audit = bayes_precision_fusion_override.current_evidence_shape.get("provider_geometry_audit")
+        ground_entity = ground_audit.get("anchor_station_ground") if isinstance(ground_audit, Mapping) else None
+        if isinstance(ground_entity, Mapping):
+            dependency_payload["station_ground_entity"] = {
+                key: ground_entity.get(key) for key in (
+                    "artifact_id", "body_sha256", "manifest_sha256", "facts_identity",
+                )
+            }
     dependency_hash = _json_hash(dependency_payload)
     posterior_config = {
         "posterior_method": "openmeteo_ecmwf_ifs9_bayes_fusion",
@@ -9054,7 +9084,7 @@ def _validated_replacement_forecast_request(
             anchor_id=None,
             readiness_id=None,
         )
-    precision_block_reasons = _precision_guard_block_reason(request)
+    precision_block_reasons = _precision_guard_block_reason(request, conn)
     if precision_block_reasons:
         return ReplacementForecastMaterializeResult(
             status="BLOCKED",

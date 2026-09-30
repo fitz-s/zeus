@@ -419,11 +419,12 @@ def test_physical_manifest_redacts_request_credentials(tmp_path, monkeypatch):
 def test_station_ground_facts_identity_excludes_audit_but_cutoff_requires_possession(tmp_path, monkeypatch, city):
     from dataclasses import dataclass
     import src.config as config
-    from tests.test_config import _official_hko_registry, _official_kord_registry
+    from tests.test_station_ground_evidence import _setup, _archive
     from src.data.replacement_forecast_materializer import _bind_provider_geometry_identity
     from src.data.replacement_forecast_cycle_policy import _anchor_station_ground_has_authority
 
-    (_official_hko_registry if city == "Hong Kong" else _official_kord_registry)(tmp_path, monkeypatch)
+    db, _, _, _, _ = _setup(tmp_path, monkeypatch, city)
+    entity = _archive(db, city)
     station = config.runtime_station_geometry_for_city(config.runtime_cities_by_name()[city])
     assert station["ground_status"] == "VERIFIED"
     @dataclass(frozen=True)
@@ -445,24 +446,28 @@ def test_station_ground_facts_identity_excludes_audit_but_cutoff_requires_posses
             "facts": station["ground_facts"], "audit": station["ground_audit"]}}
     metadata = Metadata(city, str(station["station_id"]), float(station["lat"]), float(station["lon"]),
         float(station["ground_elevation_m"]), proof)
-    bound = _bind_provider_geometry_identity(Shape(), {}, anchor_metadata=metadata, decision_at="2026-09-29T22:00:00+00:00")
+    bound = _bind_provider_geometry_identity(Shape(), {}, anchor_metadata=metadata, decision_at="2026-09-29T22:00:00+00:00", station_ground_evidence=entity)
     assert _anchor_station_ground_has_authority(bound.provider_geometry_evidence, bound.provider_geometry_audit, "2026-09-29T22:00:00Z")
     assert not _anchor_station_ground_has_authority(bound.provider_geometry_evidence, bound.provider_geometry_audit)
     assert not _anchor_station_ground_has_authority(bound.provider_geometry_evidence, bound.provider_geometry_audit, "2026-09-29T04:00:00Z")
-    old = _bind_provider_geometry_identity(Shape(), {}, anchor_metadata=metadata, decision_at="2026-09-29T04:00:00Z")
+    old = _bind_provider_geometry_identity(Shape(), {}, anchor_metadata=metadata, decision_at="2026-09-29T04:00:00Z", station_ground_evidence=entity)
     assert not _anchor_station_ground_has_authority(old.provider_geometry_evidence, old.provider_geometry_audit, "2026-09-29T04:00:00Z")
     changed_audit = json.loads(json.dumps(proof))
     changed_audit["station_registry_sha256"] = "b" * 64
     changed_audit["station_ground_proof"]["audit"]["body_sha256"] = "c" * 64
     changed_audit["station_ground_proof"]["audit"]["checked_at"] = "2026-09-29T21:30:00Z"
     other = _bind_provider_geometry_identity(Shape(), {}, anchor_metadata=replace(metadata, source_geometry_proof=changed_audit),
-        decision_at="2026-09-29T22:00:00Z")
+        decision_at="2026-09-29T22:00:00Z", station_ground_evidence=entity)
     assert other.provider_geometry_identity_hash == bound.provider_geometry_identity_hash
-    assert not _anchor_station_ground_has_authority(other.provider_geometry_evidence, other.provider_geometry_audit, "2026-09-29T22:00:00Z")
+    # Audit labels are not authority. The normal canonical entity above owns
+    # real original bytes, source capture and independent DB possession.
+    assert _anchor_station_ground_has_authority(other.provider_geometry_evidence, other.provider_geometry_audit, "2026-09-29T22:00:00Z")
     assert other.shape_hash == bound.shape_hash
+    missing = _bind_provider_geometry_identity(Shape(), {}, anchor_metadata=metadata, decision_at="2026-09-29T22:00:00Z")
+    assert not _anchor_station_ground_has_authority(missing.provider_geometry_evidence, missing.provider_geometry_audit, "2026-09-29T22:00:00Z")
     changed_audit["station_ground_proof"]["facts"]["elevation_m"] = 33.0
     changed = _bind_provider_geometry_identity(Shape(), {}, anchor_metadata=replace(metadata, source_geometry_proof=changed_audit),
-        decision_at="2026-09-29T22:00:00Z")
+        decision_at="2026-09-29T22:00:00Z", station_ground_evidence=entity)
     assert changed.shape_hash != bound.shape_hash
     assert not _anchor_station_ground_has_authority(changed.provider_geometry_evidence, changed.provider_geometry_audit, "2026-09-29T22:00:00Z")
 

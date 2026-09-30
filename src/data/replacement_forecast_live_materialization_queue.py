@@ -3046,6 +3046,11 @@ def _blocked_attempt_fingerprint(
                 for model, value in sorted(served.items())
                 if configured_models is None or model in configured_models
             }
+            from src.data.station_ground_evidence import read_current_station_ground_evidence
+            ground_entity = read_current_station_ground_evidence(
+                db_path, city=scope[0], decision_at=computed_at,
+            )
+            ground_facts_frontier = None if ground_entity is None else ground_entity["facts_identity"]
             from src.data.replacement_input_hwm import (  # noqa: PLC0415
                 _latest_eligible_ensemble_input_mark,
             )
@@ -3141,6 +3146,7 @@ def _blocked_attempt_fingerprint(
                 "missing_configured_sources": missing_sources,
                 "source_clock_frontier": source_clock_frontier,
                 "physical_proof_frontier": physical_proof_frontier,
+                "station_ground_facts_frontier": ground_facts_frontier,
                 "eligible_ensemble_input_mark": eligible_ensemble_input_mark,
                 "day0_hourly_frontier": day0_hourly_frontier,
             },

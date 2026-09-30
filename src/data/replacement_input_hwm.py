@@ -1494,6 +1494,28 @@ def _exact_current_value_serving_lag(
     if not isinstance(serving, Mapping) or not used_models:
         return True, "basis=current_value_serving_provenance_unverifiable", None
 
+    shape = fusion.get("current_evidence_shape")
+    if isinstance(shape, Mapping) and isinstance(shape.get("provider_geometry_evidence"), Mapping):
+        from src.data.station_ground_evidence import (
+            forecast_db_from_connection, read_current_station_ground_evidence,
+            read_frozen_station_ground_evidence,
+        )
+        db_path = forecast_db_from_connection(conn)
+        ground_audit = shape.get("provider_geometry_audit")
+        frozen = None if posterior_computed_at is None else read_frozen_station_ground_evidence(
+            ground_audit.get("anchor_station_ground") if isinstance(ground_audit, Mapping) else None,
+            decision_at=posterior_computed_at,
+        )
+        current_ground = None if db_path is None else read_current_station_ground_evidence(
+            db_path, city=city, decision_at=decision_time,
+        )
+        if frozen is None or current_ground is None:
+            return True, "basis=station_ground_canonical_evidence_unavailable", None
+        if frozen["facts_identity"] != current_ground["facts_identity"]:
+            return True, "basis=station_ground_current_facts_changed", None
+        # Whole-page/manifest/possession changes with the exact same station
+        # facts never invalidate a certificate or force a new probability shape.
+
     consumed: dict[str, tuple[int, datetime, datetime | None]] = {}
     for model in used_models:
         item = serving.get(model)

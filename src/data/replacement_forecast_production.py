@@ -4965,6 +4965,19 @@ def _run_replacement_forecast_live_materialization_queue_once(
     from src.data.replacement_forecast_live_materialization_queue import (
         process_replacement_forecast_live_materialization_queue,
     )
+    from src.config import runtime_cities_by_name
+    from src.data.station_ground_evidence import archive_station_ground_evidence
+
+    # SCOPE: only approved official station entities; no forecast/source clocks
+    # are renewed. DRAIN: normal producer polls archive them before fresh seed
+    # computation. RESET: new decision-visible ground facts can authorize a new
+    # certificate; unrelated page bytes alone do not rotate existing q.
+    try:
+        archive_station_ground_evidence(
+            Path(cfg["forecast_db"]), tuple(runtime_cities_by_name()),
+        )
+    except (OSError, ValueError, KeyError, sqlite3.Error, TimeoutError):
+        logger.warning("station ground canonical archival unavailable; exact-family materializer stays degraded", exc_info=True)
 
     revision_before = _forecast_posterior_revision(cfg)
     batch_limit = int(cfg["limit"] if limit is None else limit)

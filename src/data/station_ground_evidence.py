@@ -223,12 +223,19 @@ def read_frozen_station_ground_evidence(evidence: object, *, decision_at: object
         _check(deadline)
         conn = _connect_read_only(Path(str(evidence["forecast_db"])), deadline_monotonic=deadline)
         try:
-            row = conn.execute("SELECT source_id,product_id,data_version,sha256,captured_at,source_available_at,recorded_at,artifact_metadata_json FROM raw_forecast_artifacts WHERE artifact_id=?", (evidence["artifact_id"],)).fetchone()
+            row = conn.execute("""SELECT source_id,product_id,data_version,sha256,captured_at,
+                source_available_at,recorded_at,artifact_metadata_json,source_cycle_time,
+                artifact_path,byte_size,request_url,request_params_json,training_allowed
+                FROM raw_forecast_artifacts WHERE artifact_id=?""", (evidence["artifact_id"],)).fetchone()
         finally:
             conn.close()
         if row is None or tuple(row[:7]) != (evidence["source_id"],evidence["product_id"],KIND,evidence["body_sha256"],evidence["captured_at"],evidence["source_available_at"],evidence["recorded_at"]):
             return None
         if json.loads(str(row[7])) != {"station_ground_evidence":dict(evidence)}:
+            return None
+        if tuple(row[8:12]) != (evidence["source_cycle_time"], evidence["body_path"], evidence["byte_size"], evidence["source_url"]):
+            return None
+        if json.loads(str(row[12])) != {"source_kind": evidence["source_kind"], "station_id": evidence["station_id"]} or row[13] != 0:
             return None
         return dict(evidence)
     except (KeyError, TypeError, ValueError, OSError, sqlite3.Error, TimeoutError):

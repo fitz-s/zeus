@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -123,7 +124,7 @@ def test_normal_archive_restores_exact_missing_or_damaged_owned_file_without_new
         assert conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts").fetchone()[0] == 1
 
 
-@pytest.mark.parametrize("mutation", ("artifact_id", "foreign_station", "capture", "facts", "body_symlink", "manifest_symlink", "db_metadata"))
+@pytest.mark.parametrize("mutation", ("artifact_id", "foreign_station", "capture", "facts", "body_symlink", "manifest_symlink", "db_metadata", "db_cycle", "db_path", "db_url", "db_available"))
 def test_frozen_ground_entity_rejects_unbound_or_tampered_identity(tmp_path, monkeypatch, mutation):
     db, _, _, _, _ = _setup(tmp_path, monkeypatch)
     proof = _archive(db)
@@ -139,6 +140,11 @@ def test_frozen_ground_entity_rejects_unbound_or_tampered_identity(tmp_path, mon
     elif mutation == "db_metadata":
         with sqlite3.connect(db) as conn:
             conn.execute("UPDATE raw_forecast_artifacts SET artifact_metadata_json='{}'")
+    elif mutation.startswith("db_"):
+        field = {"db_cycle": "source_cycle_time", "db_path": "artifact_path",
+                 "db_url": "request_url", "db_available": "source_available_at"}[mutation]
+        with sqlite3.connect(db) as conn:
+            conn.execute(f"UPDATE raw_forecast_artifacts SET {field}='unbound identity'")
     else:
         path = Path(proof["body_path" if mutation == "body_symlink" else "manifest_path"])
         other = tmp_path / "foreign-copy"
@@ -186,3 +192,113 @@ def test_connection_identity_is_actual_db_not_memory_or_claimed_path(tmp_path, m
         assert ground.forecast_db_from_connection(conn) == db.resolve()
     with sqlite3.connect(":memory:") as conn:
         assert ground.forecast_db_from_connection(conn) is None
+
+
+def _bound_entity(entity, decision_at):
+    from src.data.replacement_forecast_materializer import _bind_provider_geometry_identity
+    import src.config as config
+    station = config.runtime_station_geometry_for_city(config.runtime_cities_by_name()["Hong Kong"])
+
+    @dataclass(frozen=True)
+    class Shape:
+        shape_hash: str = "current-source-shape"
+        provider_geometry_evidence: object = None
+        provider_geometry_identity_hash: object = None
+        provider_geometry_audit: object = None
+
+    @dataclass(frozen=True)
+    class Metadata:
+        city: str = "Hong Kong"
+        station_id: str = "HKO_HQ"
+        station_lat: float = station["lat"]
+        station_lon: float = station["lon"]
+        station_elevation_m: float = entity["facts"]["elevation_m"]
+        source_geometry_proof: object = None
+
+    metadata = Metadata(source_geometry_proof={
+        "revision": "openmeteo_ifs9_o1280_source_cell_v1",
+        "station_ground_proof": {"revision": "station_ground_roles_v1", "status": "VERIFIED",
+            "reason": None, "facts": entity["facts"], "audit": entity["source_audit"]},
+    })
+    return _bind_provider_geometry_identity(Shape(), {}, anchor_metadata=metadata,
+        decision_at=decision_at, station_ground_evidence=entity)
+
+
+def test_public_ground_gate_replays_own_a_and_not_latest_page_sha_b(tmp_path, monkeypatch):
+    from src.data.replacement_forecast_cycle_policy import _anchor_station_ground_has_authority as authority
+    db, registry, official_body, claims, clock = _setup(tmp_path, monkeypatch)
+    a = _archive(db)
+    bound_a = _bound_entity(a, "2026-09-29T22:00:00Z")
+    assert authority(bound_a.provider_geometry_evidence, bound_a.provider_geometry_audit, "2026-09-29T22:00:00Z")
+    assert not authority(bound_a.provider_geometry_evidence, bound_a.provider_geometry_audit, "2026-09-29T04:00:00Z")
+    clock[0] = datetime(2026, 9, 29, 23, tzinfo=UTC)
+    body_b = official_body.read_bytes() + b"<!-- unrelated official page edit -->"
+    _update_official(registry, official_body, claims, body_b, "2026-09-29T22:30:00Z")
+    b = _archive(db)
+    bound_b = _bound_entity(b, "2026-09-29T23:00:00Z")
+    assert bound_b.shape_hash == bound_a.shape_hash
+    assert authority(bound_a.provider_geometry_evidence, bound_a.provider_geometry_audit, "2026-09-29T22:00:00Z")
+    # A can also support a genuinely new decision when its own bytes/facts are
+    # still true. Updating the audit decision cannot bypass canonical possession.
+    new_a = _bound_entity(a, "2026-09-29T23:00:00Z")
+    assert authority(new_a.provider_geometry_evidence, new_a.provider_geometry_audit, "2026-09-29T23:00:00Z")
+    clock[0] = datetime(2026, 9, 30, 1, tzinfo=UTC)
+    body_c = body_b.replace(b'<td class="td1_normal_class">32</td>', b'<td class="td1_normal_class">33</td>', 1)
+    _update_official(registry, official_body, claims, body_c, "2026-09-30T00:30:00Z")
+    c = _archive(db)
+    current_a = _bound_entity(a, "2026-09-30T01:00:00Z")
+    assert not authority(current_a.provider_geometry_evidence, current_a.provider_geometry_audit, "2026-09-30T01:00:00Z")
+    bound_c = _bound_entity(c, "2026-09-30T01:00:00Z")
+    assert bound_c.shape_hash != bound_a.shape_hash
+    assert authority(bound_c.provider_geometry_evidence, bound_c.provider_geometry_audit, "2026-09-30T01:00:00Z")
+    assert authority(bound_a.provider_geometry_evidence, bound_a.provider_geometry_audit, "2026-09-29T22:00:00Z")
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_ground_facts_only_normal_blocked_fingerprint_reset_not_whole_page_or_future(tmp_path, monkeypatch, metric):
+    from src.data.replacement_forecast_live_materialization_queue import _blocked_attempt_fingerprint
+    db, registry, official_body, claims, clock = _setup(tmp_path, monkeypatch)
+    payload = {"forecast_db": str(db), "city": "Hong Kong", "target_date": "2026-09-30",
+        "temperature_metric": metric, "source_cycle_time": "2026-09-29T18:00:00Z"}
+    def fingerprint(cut):
+        return _blocked_attempt_fingerprint(input_json=tmp_path / "seed.json", forecast_db=db,
+            payload={**payload, "computed_at": cut})
+    old = fingerprint("2026-09-29T21:59:59Z")
+    assert old is not None
+    a = _archive(db)
+    assert fingerprint("2026-09-29T21:59:59Z") == old
+    ready_a = fingerprint("2026-09-29T22:00:00Z")
+    assert ready_a is not None and ready_a != old
+    clock[0] = datetime(2026, 9, 29, 23, tzinfo=UTC)
+    body_b = official_body.read_bytes() + b"<!-- unrelated official page edit -->"
+    _update_official(registry, official_body, claims, body_b, "2026-09-29T22:30:00Z")
+    b = _archive(db)
+    assert b["artifact_id"] != a["artifact_id"]
+    assert fingerprint("2026-09-29T23:00:00Z") == ready_a
+    clock[0] = datetime(2026, 9, 30, 1, tzinfo=UTC)
+    body_c = body_b.replace(b'<td class="td1_normal_class">32</td>', b'<td class="td1_normal_class">33</td>', 1)
+    _update_official(registry, official_body, claims, body_c, "2026-09-30T00:30:00Z")
+    _archive(db)
+    assert fingerprint("2026-09-29T23:00:00Z") == ready_a
+    assert fingerprint("2026-09-30T01:00:00Z") != ready_a
+
+
+def test_normal_producer_archives_before_queue_discovery_cutoff(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from src.data import replacement_forecast_production as producer
+    from src.data import replacement_forecast_live_materialization_queue as queue
+    db, _, _, _, _ = _setup(tmp_path, monkeypatch)
+    assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at="2026-09-29T22:00:00Z") is None
+    calls = []
+    def discover_after_archive(**kwargs):
+        assert kwargs["discover"] is True
+        entity = ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at="2026-09-29T22:00:00Z")
+        assert entity is not None
+        calls.append(entity["artifact_id"])
+        return SimpleNamespace(processed_count=0, seed_processed_count=0)
+    monkeypatch.setattr(queue, "process_replacement_forecast_live_materialization_queue", discover_after_archive)
+    cfg = {"forecast_db": db, "limit": 1, "seed_limit": 1, "seed_discovery_limit": 1,
+        **{key: tmp_path / key for key in ("request_dir", "processed_dir", "failed_dir", "seed_dir",
+            "seed_processed_dir", "seed_failed_dir", "raw_manifest_dir")}}
+    producer._run_replacement_forecast_live_materialization_queue_once(cfg)
+    assert len(calls) == 1
