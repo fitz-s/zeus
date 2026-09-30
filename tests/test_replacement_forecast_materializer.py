@@ -15,6 +15,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass, replace
@@ -66,6 +67,7 @@ from src.state.readiness_repo import write_readiness_state
 UTC = timezone.utc
 _DEFAULT_PRECISION_GUARD = object()
 REPO_ROOT = Path(__file__).resolve().parents[1]
+_HKO_FORECAST_DB_DIR: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -106,6 +108,17 @@ def _hko_source_surface(tmp_path, monkeypatch, _hko_native_surfaces):
     import numpy as np
     from omfiles import OmFileWriter
     import src.data.openmeteo_ecmwf_ifs9_bucket_transport as transport
+    from src.data import station_ground_evidence as ground
+
+    # Prior approved 13bc prerequisite: only this explicit physical fixture
+    # enables file-backed canonical possession, never the generic source cases.
+    monkeypatch.setattr(sys.modules[__name__], "_HKO_FORECAST_DB_DIR", tmp_path / "forecast-fixtures")
+    monkeypatch.setattr(ground, "_store_root", lambda: tmp_path / "station-ground")
+    class GroundClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return (_hko_dt(0)-timedelta(minutes=30)).astimezone(tz or UTC)
+    monkeypatch.setattr(ground, "datetime", GroundClock)
 
     path = tmp_path / "controlled-o1280-hsurf.om"
     writer = OmFileWriter(str(path))
@@ -228,10 +241,21 @@ def _current_baseline_data_version(metric: str = "high") -> str:
 
 
 def _conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
+    db = None
+    if _HKO_FORECAST_DB_DIR is not None:
+        _HKO_FORECAST_DB_DIR.mkdir(exist_ok=True)
+        fd,filename = tempfile.mkstemp(prefix="forecast-",suffix=".db",dir=_HKO_FORECAST_DB_DIR)
+        os.close(fd)
+        db = Path(filename)
+    conn = sqlite3.connect(db if db is not None else ":memory:")
     conn.row_factory = sqlite3.Row
     apply_canonical_schema(conn, forecast_tables=True)
     _create_readiness_state(conn)
+    if db is not None:
+        from src.data.station_ground_evidence import archive_station_ground_evidence
+        conn.commit()
+        archived = archive_station_ground_evidence(db,["Hong Kong"])
+        assert archived["status"] == "GROUND_SOURCE_ARCHIVED",archived
     return conn
 
 
@@ -850,8 +874,123 @@ def _install_live_fusion(
 def _install_hko_live_fusion(monkeypatch, **kwargs):
     """Lawful ground/geometry write seam; not a claim of normal provider capture."""
     request = kwargs.pop("request", None) or _hko_request(source_cycle_time=_hko_dt(6), computed_at=_hko_dt(10), expires_at=_hko_dt(12))
+    conn = kwargs.pop("conn",None)
     kwargs.setdefault("shape_cycle_time", request.source_cycle_time)
+    if conn is not None:
+        request = _hko_request_with_owned_anchor(conn,request)
     _install_live_fusion(monkeypatch, request=request, **kwargs)
+    if conn is None:
+        return request  # Legacy downstream seam, not current proof authority.
+    original = materializer_mod._replacement_bayes_precision_fusion_override()
+    members = original.current_evidence_members_c
+    within = sum((value-25.0)**2 for value in members)/len(members)
+    delta = math.sqrt(original.predictive_sigma_c**2-within)
+    values = {"icon_global":25.0-delta,"ukmo_global_deterministic_10km":25.0+delta}
+    served = _hko_current_provider_inputs(request,values,conn=conn)
+    shape = materializer_mod._current_evidence_shape_from_values(
+        snapshot_id=kwargs.get("snapshot_id",9001),source_cycle_time=kwargs["shape_cycle_time"].isoformat(),
+        source_available_at=(request.source_cycle_time+timedelta(hours=1)).isoformat(),members_c=members,
+        provider_values_c=values,provider_weights=dict.fromkeys(values,.5),center_c=25.0,
+        provider_cycles=dict.fromkeys(values,request.source_cycle_time.isoformat()),
+        carrier_cycle_time=request.source_cycle_time.isoformat(),
+        grid_surface_evidence_revision="ecmwf_ens_land_cell_selection_v1",grid_surface_evidence_identity_hash="a"*64)
+    if kwargs.get("shape_lag_hours"):
+        shape = replace(shape,shape_lag_hours=kwargs["shape_lag_hours"],
+            source_cycle_time=(request.source_cycle_time-timedelta(hours=kwargs["shape_lag_hours"])).isoformat())
+    from src.data import station_ground_evidence as ground
+    from src.data.replacement_current_value_serving import _ARTIFACT_IDENTITY_JSON_SQL, station_ground_target_coverage_for_city
+    db = ground.forecast_db_from_connection(conn)
+    evidence = ground.read_current_station_ground_evidence(db,city=request.city,decision_at=request.computed_at)
+    artifact = json.loads(conn.execute(f"SELECT {_ARTIFACT_IDENTITY_JSON_SQL} FROM raw_forecast_artifacts a WHERE artifact_id=?",
+                                      (request.anchor_artifact_id,)).fetchone()[0])
+    shape = materializer_mod._bind_provider_geometry_identity(shape,served,
+        anchor_metadata=request.openmeteo_precision_guard.metadata,decision_at=request.computed_at,
+        station_ground_evidence=evidence,anchor_raw_artifact={**artifact,"forecast_db":str(db)},
+        station_ground_target_coverage=station_ground_target_coverage_for_city(evidence,city=request.city,
+            target_date=request.target_date,decision_at=request.computed_at))
+    override = replace(original,used_models=tuple(values),current_value_serving={k:v.as_provenance() for k,v in served.items()},
+        current_evidence_shape=shape.as_payload(),raw_model_forecast_ids=tuple(v.raw_model_forecast_id for v in served.values()),
+        decorrelated_providers_expected=2,decorrelated_providers_served=2 if kwargs.get("complete",True) else 1)
+    monkeypatch.setattr(materializer_mod,"_replacement_bayes_precision_fusion_override",lambda *a,**k:override)
+    return request
+
+
+def _hko_request_with_owned_anchor(conn,request):
+    """Normal canonical anchor writer; no guessed ID or borrowed database."""
+    from src.config import runtime_cities_by_name
+    from src.data.station_ground_evidence import forecast_db_from_connection
+    from src.data.openmeteo_ecmwf_ifs9_anchor import (
+        OpenMeteoEcmwfIfs9AnchorRequest,build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest,
+    )
+    from src.data.raw_forecast_artifact_manifest import write_manifest_to_db
+    city = runtime_cities_by_name()[request.city]
+    assert city.name == "Hong Kong"
+    payload = json.loads(request.openmeteo_raw_payload_bytes)
+    payload["_zeus_current_target_scope"]["metric"] = request.temperature_metric
+    raw = (json.dumps(payload,sort_keys=True)+"\n").encode()
+    db = forecast_db_from_connection(conn)
+    assert db is not None
+    path = Path(db).parent / f"anchor-{request.temperature_metric}-{hashlib.sha256(raw).hexdigest()}.json"
+    path.write_bytes(raw)
+    manifest = build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(path,
+        request=OpenMeteoEcmwfIfs9AnchorRequest(city.lat,city.lon,request.source_cycle_time,city.timezone),
+        metric=request.temperature_metric,source_available_at=request.openmeteo_source_available_at,
+        captured_at=request.openmeteo_source_available_at,
+        product_metadata={"city":city.name,"target_date":request.target_date.isoformat()})
+    # TEST_ONLY_CONTROLLED_CANONICAL_INSERT_CLOCK: actual private INSERT;
+    # restore SQLite's own function afterward, never UPDATE sealed rows.
+    builtin = sqlite3.connect(":memory:")
+    def insert_clock(fmt,value):
+        if (fmt,value)==("%Y-%m-%dT%H:%M:%f+00:00","now"):
+            return request.computed_at.isoformat(timespec="milliseconds")
+        return builtin.execute("SELECT strftime(?,?)",(fmt,value)).fetchone()[0]
+    conn.create_function("strftime",2,insert_clock)
+    artifact_id = write_manifest_to_db(conn,manifest)
+    conn.create_function("strftime",2,lambda fmt,value:builtin.execute("SELECT strftime(?,?)",(fmt,value)).fetchone()[0])
+    conn.commit()  # The independent readonly authority reader sees committed possession.
+    # Keep the builtin alive for the private conn's callback lifetime.
+    return replace(request,anchor_artifact_id=artifact_id,openmeteo_raw_payload_bytes=raw,
+        openmeteo_precision_guard=_hko_precision_guard(decision_at=request.computed_at,raw_payload_bytes=raw))
+
+
+def _hko_current_provider_inputs(request,values,*,conn):
+    """Prior 2ab writer seam with current actual body/capture/native proof."""
+    from unittest.mock import patch
+    from src.config import runtime_cities_by_name
+    from src.data import bayes_precision_fusion_download as dl
+    from src.data.replacement_current_value_serving import read_current_instrument_values
+    captured = max(request.source_cycle_time+timedelta(hours=1),request.openmeteo_source_available_at)
+    class Clock(datetime):
+        @classmethod
+        def now(cls,tz=None):
+            return captured.astimezone(tz or UTC)
+    city = runtime_cities_by_name()[request.city]
+    target = dl.BayesPrecisionFusionDownloadTarget(city=city.name,metric=request.temperature_metric,
+        target_date=request.target_date.isoformat(),lead_days=1,latitude=city.lat,longitude=city.lon,timezone_name=city.timezone)
+    for model,value in values.items():
+        identity = dl._bayes_precision_fusion_product_identity(model,"single_runs",target)
+        params = json.loads(identity["request_params_json"])
+        params["run"] = request.source_cycle_time.strftime("%Y-%m-%dT%H:%M")
+        lat,lon = (22.25,114.125) if model=="icon_global" else (22.3125,114.1875)
+        payload = {"latitude":lat,"longitude":lon,"elevation":32.0,"timezone":city.timezone,"utc_offset_seconds":28800,
+            "hourly_units":{"temperature_2m":"°C"},"hourly":{"time":[f"{request.target_date}T{hour:02d}:00" for hour in range(24)],
+            "temperature_2m":[value]*24}}
+        body = (json.dumps(payload,sort_keys=True)+"\n").encode()
+        bound = dl._bind_physical_response(payload,model=model,url="https://single-runs-api.open-meteo.com/v1/forecast",
+            params=params,run=request.source_cycle_time,captures=[(body,captured.timestamp())],
+            network_captures=[(body,captured.timestamp(),{"content-type":"application/json"})])
+        row = {"model":model,"city":city.name,"target_date":str(request.target_date),"metric":request.temperature_metric,
+            "source_cycle_time":request.source_cycle_time.isoformat(),"source_available_at":captured.isoformat(),
+            "captured_at":captured.isoformat(),"lead_days":1,"forecast_value_c":value,"endpoint":"single_runs",
+            **identity,"_physical_response":bound[dl._BATCH_PHYSICAL_RESPONSE_KEY]}
+        with patch.object(dl,"datetime",Clock):
+            dl._persist_rows(conn,[row])
+    served = read_current_instrument_values(conn,city=city.name,metric=request.temperature_metric,
+        target_date=str(request.target_date),source_cycle_time_iso=request.source_cycle_time.isoformat(),
+        decision_time_iso=request.computed_at.isoformat())
+    assert set(values).issubset(served)
+    conn.commit()  # End ordinary writer setup before the consumer transaction begins.
+    return {model:served[model] for model in values}
 
 
 def _install_pinned_ready_fusion(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3136,9 +3275,9 @@ def test_materializer_keeps_readiness_separate_by_baseline_source_run(monkeypatc
         baseline_source_available_at=_hko_dt(2), computed_at=_hko_dt(4), expires_at=_hko_dt(6))
     second_request = _hko_request(baseline_source_run_id="ecmwf_open_data:mx2t6_high:2026-09-30T00Z:revised",
         baseline_source_available_at=_hko_dt(2,15), computed_at=_hko_dt(4,15), expires_at=_hko_dt(6,15))
-    _install_hko_live_fusion(monkeypatch, request=first_request)
+    first_request = _install_hko_live_fusion(monkeypatch, conn=conn, request=first_request)
     first = materialize_replacement_forecast_live(conn, first_request)
-    _install_hko_live_fusion(monkeypatch, request=second_request)
+    second_request = _install_hko_live_fusion(monkeypatch, conn=conn, request=second_request)
     second = materialize_replacement_forecast_live(conn, second_request)
 
     assert first.ok is True
@@ -3164,7 +3303,7 @@ def test_materializer_keeps_readiness_separate_by_baseline_source_run(monkeypatc
 def test_materializer_writes_certified_bootstrap_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
     conn = _conn()
     request = _hko_request()
-    _install_hko_live_fusion(monkeypatch, request=request)
+    request = _install_hko_live_fusion(monkeypatch, conn=conn, request=request)
 
     result = materialize_replacement_forecast_live(conn, request)
 
@@ -3188,7 +3327,10 @@ def test_materializer_does_not_publish_stale_ensemble_as_live_probability(
 ) -> None:
     conn = _conn()
     request = _hko_request()
-    _install_hko_live_fusion(monkeypatch, request=request, shape_lag_hours=6.0)
+    request = _install_hko_live_fusion(monkeypatch, conn=conn, request=request)
+    assert isinstance(materializer_mod.prepare_replacement_forecast_live(conn, request),
+                      materializer_mod.PreparedReplacementForecastMaterialization)
+    request = _install_hko_live_fusion(monkeypatch, conn=conn, request=request, shape_lag_hours=6.0)
 
     result = materialize_replacement_forecast_live(conn, request)
 
@@ -3204,7 +3346,7 @@ def test_prepared_materialization_keeps_compute_read_only(
 ) -> None:
     conn = _conn()
     request = _hko_request()
-    _install_hko_live_fusion(monkeypatch, request=request)
+    request = _install_hko_live_fusion(monkeypatch, conn=conn, request=request)
 
     conn.execute("BEGIN")
     prepared = materializer_mod.prepare_replacement_forecast_live(conn, request)

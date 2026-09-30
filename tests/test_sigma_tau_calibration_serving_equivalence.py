@@ -33,9 +33,10 @@ from tests.test_replacement_forecast_materializer import (
 pytestmark = pytest.mark.usefixtures("_hko_source_surface")
 
 
-def _install_current_evidence_fusion(monkeypatch: pytest.MonkeyPatch) -> None:
+def _install_current_evidence_fusion(monkeypatch: pytest.MonkeyPatch, conn, request=None):
     # Downstream write seam; real shape/geometry constructors, no authority mock.
-    _install_live_fusion(monkeypatch, shape_cycle_time=_dt(6))
+    return _install_live_fusion(monkeypatch,conn=conn,request=request or _request(**_REQUEST_KWARGS),
+                               shape_cycle_time=_dt(6))
 
 
 def _full_row(conn) -> dict:
@@ -105,7 +106,7 @@ _EXPECTED_APPLIED_K = 1.25 * 0.95
 def test_historical_path_ignores_sigma_tau_artifact(monkeypatch, tmp_path) -> None:
     """A diagnostic historical carrier stays artifact-inert and cannot become live."""
     monkeypatch.setattr(cfg, "runtime_state_path", lambda fn: tmp_path / fn)
-    _install_current_evidence_fusion(monkeypatch)
+    _install_current_evidence_fusion(monkeypatch, _conn())
     current = materializer_mod._replacement_bayes_precision_fusion_override(None)
     monkeypatch.setattr(materializer_mod, "_replacement_bayes_precision_fusion_override",
                         lambda *args, **kwargs: replace(current, current_evidence_shape=None))
@@ -127,9 +128,9 @@ def test_historical_path_ignores_sigma_tau_artifact(monkeypatch, tmp_path) -> No
 def test_current_evidence_path_no_artifact_is_neutral(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(cfg, "runtime_state_path", lambda fn: tmp_path / fn)  # no file written -> absent
     conn = _conn()
-    _install_current_evidence_fusion(monkeypatch)
+    request = _install_current_evidence_fusion(monkeypatch,conn)
 
-    result = materialize_replacement_forecast_live(conn, _request(**_REQUEST_KWARGS))
+    result = materialize_replacement_forecast_live(conn, request)
     assert result.ok is True
     full = _full_row(conn)
 
@@ -145,14 +146,14 @@ def test_current_evidence_path_no_artifact_keeps_stable_provenance_key_set(monke
     monkeypatch.setattr(cfg, "runtime_state_path", lambda fn: tmp_path / fn)
 
     conn_hist = _conn()
-    _install_current_evidence_fusion(monkeypatch)
-    result_hist = materialize_replacement_forecast_live(conn_hist, _request(**_REQUEST_KWARGS))
+    request_hist = _install_current_evidence_fusion(monkeypatch,conn_hist)
+    result_hist = materialize_replacement_forecast_live(conn_hist, request_hist)
     assert result_hist.ok is True
     prov_hist = _full_row(conn_hist)["provenance"]
 
     conn_current = _conn()
-    _install_current_evidence_fusion(monkeypatch)
-    result_current = materialize_replacement_forecast_live(conn_current, _request(**_REQUEST_KWARGS))
+    request_current = _install_current_evidence_fusion(monkeypatch,conn_current)
+    result_current = materialize_replacement_forecast_live(conn_current, request_current)
     assert result_current.ok is True
     prov_current = _full_row(conn_current)["provenance"]
 
@@ -166,17 +167,19 @@ def test_current_evidence_path_no_artifact_keeps_stable_provenance_key_set(monke
 
 def test_current_evidence_path_ignores_valid_fitted_artifact(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(cfg, "runtime_state_path", lambda fn: tmp_path / fn)
-    _install_current_evidence_fusion(monkeypatch)
     baseline_conn = _conn()
-    assert materialize_replacement_forecast_live(baseline_conn, _request(**_REQUEST_KWARGS)).ok
+    request = _install_current_evidence_fusion(monkeypatch,baseline_conn)
+    assert materialize_replacement_forecast_live(baseline_conn, request).ok
     baseline = _full_row(baseline_conn)
     artifact_bytes = json.dumps(_fitted_artifact_for_default_request()).encode("utf-8")
     (tmp_path / "sigma_tau_calibration.json").write_bytes(artifact_bytes)
     expected_hash = hashlib.sha256(artifact_bytes).hexdigest()
 
-    conn = _conn()
-    _install_current_evidence_fusion(monkeypatch)
-    result = materialize_replacement_forecast_live(conn, _request(**_REQUEST_KWARGS))
+    # Hold one actual DB/body/ground/anchor input fixed; change only the fitted
+    # artifact so full-row equality is not accidentally a cross-DB comparison.
+    conn = baseline_conn
+    _install_current_evidence_fusion(monkeypatch,conn,request)
+    result = materialize_replacement_forecast_live(conn, request)
     assert result.ok is True
     prov = _full_row(conn)["provenance"]
 
@@ -200,8 +203,8 @@ def test_current_evidence_path_rejects_artifact_missing_oos_gate(monkeypatch: py
     (tmp_path / "sigma_tau_calibration.json").write_bytes(artifact_bytes)
 
     conn = _conn()
-    _install_current_evidence_fusion(monkeypatch)
-    result = materialize_replacement_forecast_live(conn, _request(**_REQUEST_KWARGS))
+    request = _install_current_evidence_fusion(monkeypatch,conn)
+    result = materialize_replacement_forecast_live(conn, request)
     assert result.ok is True
     prov = _full_row(conn)["provenance"]
 
@@ -222,8 +225,8 @@ def test_current_evidence_path_rejects_wrong_tau_clock_declaration(monkeypatch: 
     (tmp_path / "sigma_tau_calibration.json").write_text(json.dumps(artifact))
 
     conn = _conn()
-    _install_current_evidence_fusion(monkeypatch)
-    result = materialize_replacement_forecast_live(conn, _request(**_REQUEST_KWARGS))
+    request = _install_current_evidence_fusion(monkeypatch,conn)
+    result = materialize_replacement_forecast_live(conn, request)
     assert result.ok is True
     prov = _full_row(conn)["provenance"]
 
@@ -240,7 +243,6 @@ def test_current_shape_integrates_declared_sigma_despite_hostile_fitted_width_an
     artifact["families"] = {unit: {metric: group}}
     (tmp_path / "sigma_tau_calibration.json").write_text(json.dumps(artifact))
     sigma = .593198
-    _install_live_fusion(monkeypatch, shape_cycle_time=_dt(6), predictive_sigma_c=sigma)
     _fixed_center_debias(monkeypatch, shift_c=1.0, metric=metric)
     monkeypatch.setattr(materializer_mod, "_replacement_settlement_sigma_floor_lookup",
                         lambda *args, **kwargs: pytest.fail("current shape read fitted floor"))
@@ -264,6 +266,8 @@ def test_current_shape_integrates_declared_sigma_despite_hostile_fitted_width_an
         return original(**kwargs)
     monkeypatch.setattr(materializer_mod, "_build_fused_q_bounds", observe_bounds)
     conn = _conn()
+    request = _install_live_fusion(monkeypatch,conn=conn,request=request,
+                                  shape_cycle_time=_dt(6),predictive_sigma_c=sigma)
     result = materialize_replacement_forecast_live(conn, request)
     assert result.ok, result.reason_codes
     full = _full_row(conn)
