@@ -1,0 +1,3770 @@
+[
+  {
+    "city": "Tokyo",
+    "station": "RJTT",
+    "channel": "jma_amedas",
+    "n_pairs": 151,
+    "n_exact": 151,
+    "mismatches": [],
+    "pairs": [
+      {
+        "time": "2026-09-27T17:30:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-27T18:00:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-27T18:30:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-27T19:00:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-27T19:30:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-27T20:00:00+00:00",
+        "candidate_contract": [
+          24
+        ],
+        "resolver_contract": [
+          24
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-27T20:30:00+00:00",
+        "candidate_contract": [
+          24
+        ],
+        "resolver_contract": [
+          24
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-27T21:00:00+00:00",
+        "candidate_contract": [
+          24
+        ],
+        "resolver_contract": [
+          24
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-27T21:30:00+00:00",
+        "candidate_contract": [
+          24
+        ],
+        "resolver_contract": [
+          24
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-27T22:00:00+00:00",
+        "candidate_contract": [
+          24
+        ],
+        "resolver_contract": [
+          24
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-27T22:30:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-27T23:00:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-27T23:30:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T00:00:00+00:00",
+        "candidate_contract": [
+          22
+        ],
+        "resolver_contract": [
+          22
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T00:30:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T01:00:00+00:00",
+        "candidate_contract": [
+          24
+        ],
+        "resolver_contract": [
+          24
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T01:30:00+00:00",
+        "candidate_contract": [
+          24
+        ],
+        "resolver_contract": [
+          24
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T02:00:00+00:00",
+        "candidate_contract": [
+          24
+        ],
+        "resolver_contract": [
+          24
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T02:30:00+00:00",
+        "candidate_contract": [
+          26
+        ],
+        "resolver_contract": [
+          26
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T03:00:00+00:00",
+        "candidate_contract": [
+          25
+        ],
+        "resolver_contract": [
+          25
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T03:30:00+00:00",
+        "candidate_contract": [
+          26
+        ],
+        "resolver_contract": [
+          26
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T04:00:00+00:00",
+        "candidate_contract": [
+          25
+        ],
+        "resolver_contract": [
+          25
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T04:30:00+00:00",
+        "candidate_contract": [
+          25
+        ],
+        "resolver_contract": [
+          25
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T05:00:00+00:00",
+        "candidate_contract": [
+          25
+        ],
+        "resolver_contract": [
+          25
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T05:30:00+00:00",
+        "candidate_contract": [
+          26
+        ],
+        "resolver_contract": [
+          26
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T06:00:00+00:00",
+        "candidate_contract": [
+          25
+        ],
+        "resolver_contract": [
+          25
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T06:30:00+00:00",
+        "candidate_contract": [
+          25
+        ],
+        "resolver_contract": [
+          25
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T07:00:00+00:00",
+        "candidate_contract": [
+          25
+        ],
+        "resolver_contract": [
+          25
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T07:30:00+00:00",
+        "candidate_contract": [
+          25
+        ],
+        "resolver_contract": [
+          25
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T08:00:00+00:00",
+        "candidate_contract": [
+          25
+        ],
+        "resolver_contract": [
+          25
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T08:30:00+00:00",
+        "candidate_contract": [
+          25
+        ],
+        "resolver_contract": [
+          25
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T09:00:00+00:00",
+        "candidate_contract": [
+          24
+        ],
+        "resolver_contract": [
+          24
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T09:30:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T10:00:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T10:30:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T11:00:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T11:30:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T12:00:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T12:30:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T13:00:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T13:30:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T14:00:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T14:30:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T15:00:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T15:30:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T16:00:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T16:30:00+00:00",
+        "candidate_contract": [
+          22
+        ],
+        "resolver_contract": [
+          22
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T17:00:00+00:00",
+        "candidate_contract": [
+          22
+        ],
+        "resolver_contract": [
+          22
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T17:30:00+00:00",
+        "candidate_contract": [
+          22
+        ],
+        "resolver_contract": [
+          22
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T18:00:00+00:00",
+        "candidate_contract": [
+          22
+        ],
+        "resolver_contract": [
+          22
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T18:30:00+00:00",
+        "candidate_contract": [
+          22
+        ],
+        "resolver_contract": [
+          22
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T19:00:00+00:00",
+        "candidate_contract": [
+          22
+        ],
+        "resolver_contract": [
+          22
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T19:30:00+00:00",
+        "candidate_contract": [
+          22
+        ],
+        "resolver_contract": [
+          22
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T20:00:00+00:00",
+        "candidate_contract": [
+          22
+        ],
+        "resolver_contract": [
+          22
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T20:30:00+00:00",
+        "candidate_contract": [
+          22
+        ],
+        "resolver_contract": [
+          22
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T21:00:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T21:30:00+00:00",
+        "candidate_contract": [
+          22
+        ],
+        "resolver_contract": [
+          22
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T22:00:00+00:00",
+        "candidate_contract": [
+          22
+        ],
+        "resolver_contract": [
+          22
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T22:30:00+00:00",
+        "candidate_contract": [
+          21
+        ],
+        "resolver_contract": [
+          21
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T23:00:00+00:00",
+        "candidate_contract": [
+          21
+        ],
+        "resolver_contract": [
+          21
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T23:30:00+00:00",
+        "candidate_contract": [
+          21
+        ],
+        "resolver_contract": [
+          21
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T00:00:00+00:00",
+        "candidate_contract": [
+          21
+        ],
+        "resolver_contract": [
+          21
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T00:30:00+00:00",
+        "candidate_contract": [
+          21
+        ],
+        "resolver_contract": [
+          21
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T01:00:00+00:00",
+        "candidate_contract": [
+          21
+        ],
+        "resolver_contract": [
+          21
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T01:30:00+00:00",
+        "candidate_contract": [
+          21
+        ],
+        "resolver_contract": [
+          21
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T02:00:00+00:00",
+        "candidate_contract": [
+          21
+        ],
+        "resolver_contract": [
+          21
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T02:30:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T03:00:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T03:30:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T04:00:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T04:30:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T05:00:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T05:30:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T06:00:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T06:30:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T07:00:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T07:30:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T08:00:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T08:30:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T09:00:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T09:30:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T10:00:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T10:30:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T11:00:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T11:30:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T12:00:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T12:30:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T13:00:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T13:30:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T14:00:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T14:30:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T15:00:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T15:30:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T16:00:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T16:30:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T17:00:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T17:30:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T18:00:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T18:30:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T19:00:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T19:30:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T20:00:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T20:30:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T21:00:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T21:30:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T22:00:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T22:30:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T23:00:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T23:30:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T00:00:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T00:30:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T01:00:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T01:30:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T02:00:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T02:30:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T03:00:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T03:30:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T04:00:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T04:30:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T05:00:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T05:30:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T06:00:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T06:30:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T07:00:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T07:30:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T08:00:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T08:30:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T09:00:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T09:30:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T10:00:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T10:30:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T11:00:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T11:30:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T12:00:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T12:30:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T13:00:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T13:30:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T14:00:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T14:30:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T15:00:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_origin_measurements.json",
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T15:30:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_origin_measurements.json",
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T16:00:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_origin_measurements.json",
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T16:30:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_origin_measurements.json",
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T17:00:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_origin_measurements.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T17:30:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_origin_measurements.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T18:00:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_origin_measurements.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T21:00:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T21:30:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T22:00:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T22:30:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T23:00:00+00:00",
+        "candidate_contract": [
+          21
+        ],
+        "resolver_contract": [
+          21
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      }
+    ],
+    "verdict": "RETAIN_EXISTING_ADMISSION"
+  },
+  {
+    "city": "Toronto",
+    "station": "CYYZ",
+    "channel": "eccc_swob",
+    "n_pairs": 57,
+    "n_exact": 57,
+    "mismatches": [],
+    "pairs": [
+      {
+        "time": "2026-09-27T18:00:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-27T19:00:00+00:00",
+        "candidate_contract": [
+          24
+        ],
+        "resolver_contract": [
+          24
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-27T20:00:00+00:00",
+        "candidate_contract": [
+          24
+        ],
+        "resolver_contract": [
+          24
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-27T21:00:00+00:00",
+        "candidate_contract": [
+          22
+        ],
+        "resolver_contract": [
+          22
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-27T22:00:00+00:00",
+        "candidate_contract": [
+          22
+        ],
+        "resolver_contract": [
+          22
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-27T23:00:00+00:00",
+        "candidate_contract": [
+          22
+        ],
+        "resolver_contract": [
+          22
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T00:00:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T01:00:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T02:00:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T02:26:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T03:00:00+00:00",
+        "candidate_contract": [
+          16
+        ],
+        "resolver_contract": [
+          16
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T04:00:00+00:00",
+        "candidate_contract": [
+          16
+        ],
+        "resolver_contract": [
+          16
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T05:00:00+00:00",
+        "candidate_contract": [
+          16
+        ],
+        "resolver_contract": [
+          16
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T06:00:00+00:00",
+        "candidate_contract": [
+          16
+        ],
+        "resolver_contract": [
+          16
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T07:00:00+00:00",
+        "candidate_contract": [
+          16
+        ],
+        "resolver_contract": [
+          16
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T08:00:00+00:00",
+        "candidate_contract": [
+          16
+        ],
+        "resolver_contract": [
+          16
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T09:00:00+00:00",
+        "candidate_contract": [
+          16
+        ],
+        "resolver_contract": [
+          16
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T10:00:00+00:00",
+        "candidate_contract": [
+          16
+        ],
+        "resolver_contract": [
+          16
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T11:00:00+00:00",
+        "candidate_contract": [
+          15
+        ],
+        "resolver_contract": [
+          15
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T12:00:00+00:00",
+        "candidate_contract": [
+          16
+        ],
+        "resolver_contract": [
+          16
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T13:00:00+00:00",
+        "candidate_contract": [
+          16
+        ],
+        "resolver_contract": [
+          16
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T14:00:00+00:00",
+        "candidate_contract": [
+          17
+        ],
+        "resolver_contract": [
+          17
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T15:00:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T16:00:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T17:00:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T18:00:00+00:00",
+        "candidate_contract": [
+          21
+        ],
+        "resolver_contract": [
+          21
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T19:00:00+00:00",
+        "candidate_contract": [
+          21
+        ],
+        "resolver_contract": [
+          21
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T20:00:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T21:00:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T22:00:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-28T23:00:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T00:00:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T01:00:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T02:00:00+00:00",
+        "candidate_contract": [
+          17
+        ],
+        "resolver_contract": [
+          17
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T03:00:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T04:00:00+00:00",
+        "candidate_contract": [
+          17
+        ],
+        "resolver_contract": [
+          17
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T05:00:00+00:00",
+        "candidate_contract": [
+          17
+        ],
+        "resolver_contract": [
+          17
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T06:00:00+00:00",
+        "candidate_contract": [
+          16
+        ],
+        "resolver_contract": [
+          16
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T06:12:00+00:00",
+        "candidate_contract": [
+          16
+        ],
+        "resolver_contract": [
+          16
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T07:00:00+00:00",
+        "candidate_contract": [
+          15
+        ],
+        "resolver_contract": [
+          15
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T07:09:00+00:00",
+        "candidate_contract": [
+          16
+        ],
+        "resolver_contract": [
+          16
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T07:31:00+00:00",
+        "candidate_contract": [
+          15
+        ],
+        "resolver_contract": [
+          15
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T08:00:00+00:00",
+        "candidate_contract": [
+          15
+        ],
+        "resolver_contract": [
+          15
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T09:00:00+00:00",
+        "candidate_contract": [
+          15
+        ],
+        "resolver_contract": [
+          15
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T10:00:00+00:00",
+        "candidate_contract": [
+          14
+        ],
+        "resolver_contract": [
+          14
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T11:00:00+00:00",
+        "candidate_contract": [
+          15
+        ],
+        "resolver_contract": [
+          15
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T12:00:00+00:00",
+        "candidate_contract": [
+          16
+        ],
+        "resolver_contract": [
+          16
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T13:00:00+00:00",
+        "candidate_contract": [
+          16
+        ],
+        "resolver_contract": [
+          16
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T14:00:00+00:00",
+        "candidate_contract": [
+          17
+        ],
+        "resolver_contract": [
+          17
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T15:00:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T16:00:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_window/comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T17:00:00+00:00",
+        "candidate_contract": [
+          22
+        ],
+        "resolver_contract": [
+          22
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_origin_measurements.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T18:00:00+00:00",
+        "candidate_contract": [
+          22
+        ],
+        "resolver_contract": [
+          22
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_origin_measurements.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T22:21:00+00:00",
+        "candidate_contract": [
+          22
+        ],
+        "resolver_contract": [
+          22
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T23:00:00+00:00",
+        "candidate_contract": [
+          21
+        ],
+        "resolver_contract": [
+          21
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T23:09:00+00:00",
+        "candidate_contract": [
+          21
+        ],
+        "resolver_contract": [
+          21
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T23:16:00+00:00",
+        "candidate_contract": [
+          21
+        ],
+        "resolver_contract": [
+          21
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      }
+    ],
+    "verdict": "RETAIN_EXISTING_ADMISSION"
+  },
+  {
+    "city": "Seoul",
+    "station": "RKSI",
+    "channel": "kma_amo_raw_metar",
+    "n_pairs": 50,
+    "n_exact": 50,
+    "mismatches": [],
+    "pairs": [
+      {
+        "time": "2026-09-29T23:00:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-29T23:30:00+00:00",
+        "candidate_contract": [
+          21
+        ],
+        "resolver_contract": [
+          21
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T00:00:00+00:00",
+        "candidate_contract": [
+          22
+        ],
+        "resolver_contract": [
+          22
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T00:30:00+00:00",
+        "candidate_contract": [
+          22
+        ],
+        "resolver_contract": [
+          22
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T01:00:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T01:30:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T02:00:00+00:00",
+        "candidate_contract": [
+          24
+        ],
+        "resolver_contract": [
+          24
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T02:30:00+00:00",
+        "candidate_contract": [
+          24
+        ],
+        "resolver_contract": [
+          24
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T03:00:00+00:00",
+        "candidate_contract": [
+          25
+        ],
+        "resolver_contract": [
+          25
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T03:30:00+00:00",
+        "candidate_contract": [
+          25
+        ],
+        "resolver_contract": [
+          25
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T04:00:00+00:00",
+        "candidate_contract": [
+          25
+        ],
+        "resolver_contract": [
+          25
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T04:30:00+00:00",
+        "candidate_contract": [
+          25
+        ],
+        "resolver_contract": [
+          25
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T05:00:00+00:00",
+        "candidate_contract": [
+          25
+        ],
+        "resolver_contract": [
+          25
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T05:30:00+00:00",
+        "candidate_contract": [
+          24
+        ],
+        "resolver_contract": [
+          24
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T06:00:00+00:00",
+        "candidate_contract": [
+          25
+        ],
+        "resolver_contract": [
+          25
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T06:30:00+00:00",
+        "candidate_contract": [
+          24
+        ],
+        "resolver_contract": [
+          24
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T07:00:00+00:00",
+        "candidate_contract": [
+          24
+        ],
+        "resolver_contract": [
+          24
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T07:30:00+00:00",
+        "candidate_contract": [
+          24
+        ],
+        "resolver_contract": [
+          24
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T08:00:00+00:00",
+        "candidate_contract": [
+          24
+        ],
+        "resolver_contract": [
+          24
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T08:30:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T09:00:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T09:30:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T10:00:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T10:30:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T11:00:00+00:00",
+        "candidate_contract": [
+          22
+        ],
+        "resolver_contract": [
+          22
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T11:30:00+00:00",
+        "candidate_contract": [
+          22
+        ],
+        "resolver_contract": [
+          22
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T12:00:00+00:00",
+        "candidate_contract": [
+          21
+        ],
+        "resolver_contract": [
+          21
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T12:30:00+00:00",
+        "candidate_contract": [
+          21
+        ],
+        "resolver_contract": [
+          21
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T13:00:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T13:30:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_origin_measurements.json",
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T14:00:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_origin_measurements.json",
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T14:30:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_origin_measurements.json",
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T15:00:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_origin_measurements.json",
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T15:30:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_origin_measurements.json",
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T16:00:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_origin_measurements.json",
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T16:30:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_origin_measurements.json",
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T17:00:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_origin_measurements.json",
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T17:30:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_origin_measurements.json",
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T18:00:00+00:00",
+        "candidate_contract": [
+          17
+        ],
+        "resolver_contract": [
+          17
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_origin_measurements.json",
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T18:30:00+00:00",
+        "candidate_contract": [
+          17
+        ],
+        "resolver_contract": [
+          17
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T19:00:00+00:00",
+        "candidate_contract": [
+          17
+        ],
+        "resolver_contract": [
+          17
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T19:30:00+00:00",
+        "candidate_contract": [
+          17
+        ],
+        "resolver_contract": [
+          17
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T20:00:00+00:00",
+        "candidate_contract": [
+          16
+        ],
+        "resolver_contract": [
+          16
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T20:30:00+00:00",
+        "candidate_contract": [
+          16
+        ],
+        "resolver_contract": [
+          16
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T21:00:00+00:00",
+        "candidate_contract": [
+          15
+        ],
+        "resolver_contract": [
+          15
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T21:30:00+00:00",
+        "candidate_contract": [
+          15
+        ],
+        "resolver_contract": [
+          15
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T22:00:00+00:00",
+        "candidate_contract": [
+          15
+        ],
+        "resolver_contract": [
+          15
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T22:30:00+00:00",
+        "candidate_contract": [
+          16
+        ],
+        "resolver_contract": [
+          16
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T23:00:00+00:00",
+        "candidate_contract": [
+          17
+        ],
+        "resolver_contract": [
+          17
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T23:30:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      }
+    ],
+    "verdict": "RETAIN_EXISTING_ADMISSION"
+  },
+  {
+    "city": "Busan",
+    "station": "RKPK",
+    "channel": "kma_amo_raw_metar",
+    "n_pairs": 27,
+    "n_exact": 27,
+    "mismatches": [],
+    "pairs": [
+      {
+        "time": "2026-09-29T23:00:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T00:00:00+00:00",
+        "candidate_contract": [
+          21
+        ],
+        "resolver_contract": [
+          21
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T01:00:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T02:00:00+00:00",
+        "candidate_contract": [
+          26
+        ],
+        "resolver_contract": [
+          26
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T03:00:00+00:00",
+        "candidate_contract": [
+          26
+        ],
+        "resolver_contract": [
+          26
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T04:00:00+00:00",
+        "candidate_contract": [
+          27
+        ],
+        "resolver_contract": [
+          27
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T05:00:00+00:00",
+        "candidate_contract": [
+          27
+        ],
+        "resolver_contract": [
+          27
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T05:01:00+00:00",
+        "candidate_contract": [
+          27
+        ],
+        "resolver_contract": [
+          27
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T06:00:00+00:00",
+        "candidate_contract": [
+          27
+        ],
+        "resolver_contract": [
+          27
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T07:00:00+00:00",
+        "candidate_contract": [
+          26
+        ],
+        "resolver_contract": [
+          26
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T08:00:00+00:00",
+        "candidate_contract": [
+          25
+        ],
+        "resolver_contract": [
+          25
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T09:00:00+00:00",
+        "candidate_contract": [
+          24
+        ],
+        "resolver_contract": [
+          24
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T09:18:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T10:00:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T11:00:00+00:00",
+        "candidate_contract": [
+          23
+        ],
+        "resolver_contract": [
+          23
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T12:00:00+00:00",
+        "candidate_contract": [
+          22
+        ],
+        "resolver_contract": [
+          22
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T13:00:00+00:00",
+        "candidate_contract": [
+          21
+        ],
+        "resolver_contract": [
+          21
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T14:00:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_origin_measurements.json",
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T15:00:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_origin_measurements.json",
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T16:00:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_origin_measurements.json",
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T17:00:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_origin_measurements.json",
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T18:00:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round3_origin_measurements.json",
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T19:00:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T20:00:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T21:00:00+00:00",
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T22:00:00+00:00",
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-09-30T23:00:00+00:00",
+        "candidate_contract": [
+          21
+        ],
+        "resolver_contract": [
+          21
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      }
+    ],
+    "verdict": "RETAIN_EXISTING_ADMISSION"
+  }
+]

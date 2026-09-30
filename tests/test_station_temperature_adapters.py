@@ -32,6 +32,7 @@ def _public_fixture(name):
 @pytest.mark.parametrize("provider,station,name", [
     ("mgm_metar", "LTAC", "mgm_public"),
     ("metaviatelecom_metar", "UUWW", "metaviatelecom"),
+    ("imd_olbs_metar", "VILK", "imd_olbs_public"),
 ])
 def test_public_native_metar_real_response_reaches_current_reader(monkeypatch,provider,station,name):
     from src.data.day0_hourly_vectors import read_day0_current_temperature_state
@@ -42,16 +43,18 @@ def test_public_native_metar_real_response_reaches_current_reader(monkeypatch,pr
     s=samples[-1]
     assert valid_station_print(route,s.raw_report,observed_at=s.observed_at,value=s.value_native)
     monkeypatch.setattr("src.data.physical_current_sources.physical_current_sources_for_city",lambda _:(route,))
-    city=SimpleNamespace(name="Ankara" if station=="LTAC" else "Moscow",timezone="UTC",
-        settlement_unit="C",settlement_source_type="noaa",wu_station=station)
+    from src.config import cities
+    from zoneinfo import ZoneInfo
+    city=next(c for c in cities if c.wu_station==station)
+    local_day=s.observed_at.astimezone(ZoneInfo(city.timezone)).date().isoformat()
     conn=sqlite3.connect(":memory:");ensure_table(conn)
     append_print(conn,city=city.name,station_id=station,source_channel=route.source_channel,
         publish_ts_utc=s.observed_at.isoformat(),value_native=s.value_native,unit="C",
         fetched_at_utc=receipt.isoformat(),raw_report=s.raw_report)
     assert read_day0_current_temperature_state(conn=conn,city=city,
-        target_date=s.observed_at.date().isoformat(),decision_time=receipt-timedelta(microseconds=1)) is None
+        target_date=local_day,decision_time=receipt-timedelta(microseconds=1)) is None
     state=read_day0_current_temperature_state(conn=conn,city=city,
-        target_date=s.observed_at.date().isoformat(),decision_time=receipt)
+        target_date=local_day,decision_time=receipt)
     assert state is not None and state.source==route.source_channel and state.value_native==s.value_native
     conn.close()
 
@@ -90,6 +93,25 @@ def test_mgm_future_or_nil_is_not_servable():
     assert parse_station_payload(_public_route(),_mgm_body([_mgm_row()]),received_at=stamp)==()
     assert parse_station_payload(_public_route(),_mgm_body([_mgm_row(raw="METAR LTAC 302220Z NIL")]),
         received_at=stamp+timedelta(hours=1))==()
+
+
+def test_imd_public_form_contract_and_cache(monkeypatch):
+    from src.data.station_temperature_adapters import _fetch_public_metar, _PUBLIC_METAR_CACHE
+    route=_public_route('imd_olbs_metar','VILK');body,_=_public_fixture('imd_olbs_public')
+    calls=[];_PUBLIC_METAR_CACHE.clear()
+    class Response:
+        content=body
+        def raise_for_status(self):pass
+    class Client:
+        def get(self,*a,**kw):raise AssertionError('The public query requires POST')
+        def post(self,url,**kw):
+            assert url=='https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/showopmetquery.php'
+            assert kw['data']=={'icaos':'VILK','type':'metar'}
+            assert kw['follow_redirects'] is False
+            calls.append(kw);return Response()
+    client=Client()
+    first=_fetch_public_metar(route,client);second=_fetch_public_metar(route,client)
+    assert first==second and len(calls)==1
 
 
 def test_public_metar_route_cannot_inject_host_or_path():
@@ -419,7 +441,12 @@ def test_wrh_rate_limit_is_deferred_without_secret_in_error(monkeypatch):
     adapters._WRH_BATCH_CACHE.clear()
 
 
-def test_native_fahrenheit_ingest_reseeds_after_durable_world_commit(monkeypatch,tmp_path):
+@pytest.mark.parametrize("city_name,provider,value,unit", [
+    ("Chicago","noaa_wrh",62.6,"F"),
+    ("Moscow","metaviatelecom_metar",8.0,"C"),
+    ("Lucknow","imd_olbs_metar",24.0,"C"),
+])
+def test_native_temperature_ingest_reseeds_after_durable_world_commit(monkeypatch,tmp_path,city_name,provider,value,unit):
     import threading
     from src.config import cities_by_name
     from src.data import station_temperature_adapters as adapters
@@ -429,10 +456,10 @@ def test_native_fahrenheit_ingest_reseeds_after_durable_world_commit(monkeypatch
     from src.data.day0_hourly_vectors import read_day0_current_temperature_state
     import src.ingest_main as ingest
     from zoneinfo import ZoneInfo
-    city=cities_by_name['Chicago']
-    route=next(r for r in load_physical_current_sources()[0] if r.provider=='noaa_wrh' and r.station_id==city.wu_station)
+    city=cities_by_name[city_name]
+    route=next(r for r in load_physical_current_sources()[0] if r.provider==provider and r.station_id==city.wu_station)
     now=datetime.now(timezone.utc);observed=now-timedelta(minutes=2)
-    sample=adapters._sample(route,observed,62.6,now,'a'*64)
+    sample=adapters._sample(route,observed,value,now,'a'*64)
     path=tmp_path/'world.sqlite'
     with sqlite3.connect(path) as conn:ensure_table(conn)
     class Lease:
@@ -449,16 +476,18 @@ def test_native_fahrenheit_ingest_reseeds_after_durable_world_commit(monkeypatch
     def enqueue(cfg,**kw):
         with sqlite3.connect(path) as check:
             row=check.execute('SELECT value_native,unit FROM observation_prints').fetchone()
-            assert row==(62.6,'F')
+            assert row==(value,unit)
         calls.append(kw)
         return {'status':'FUSION_UPGRADE_TRIGGER'}
     monkeypatch.setattr(production,'_enqueue_fusion_upgrade_reseeds_if_needed',enqueue)
     monkeypatch.setattr(ingest,'_physical_current_pending_wakes',set())
     result=ingest._day0_current_temperature_source_tick(city,route)
     assert result['status']=='COMMITTED' and result['advanced']
-    assert result['clock_trace']['input_identity']['value_native']==62.6
+    assert result['clock_trace']['input_identity']['value_native']==value
     assert len(calls)==1
     day=observed.astimezone(ZoneInfo(city.timezone)).date().isoformat()
     with sqlite3.connect(path) as conn:
         state=read_day0_current_temperature_state(conn=conn,city=city,target_date=day,decision_time=datetime.now(timezone.utc))
-    assert state and state.value_native==62.6
+    assert state and state.value_native==value
+    requested_day=now.astimezone(ZoneInfo(city.timezone)).date().isoformat()
+    assert set(calls[0]['scopes'])=={(city_name,requested_day,m) for m in ('high','low')}

@@ -1,0 +1,8 @@
+{
+  "channel": "imd_olbs_metar",
+  "url": "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/showopmetquery.php",
+  "request_at": "2026-09-30T23:19:27.673440+00:00",
+  "receipt_at": "2026-09-30T23:19:29.246348+00:00",
+  "status": 200,
+  "sha256": "ab21bb6c364cd941c5bc99edd07d0810cc32e7c4ad2e0c6e571de2f95cb7b848"
+}

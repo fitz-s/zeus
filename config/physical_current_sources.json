@@ -285,12 +285,10 @@
       "value_identity_proof": {
         "city": "Tokyo",
         "channel": "jma_amedas",
-        "n_pairs": 143,
-        "n_exact": 143,
+        "n_pairs": 151,
+        "n_exact": 151,
         "mismatches": [],
-        "window_start": "2026-09-27T17:30:00+00:00",
-        "window_end": "2026-09-30T16:30:00+00:00",
-        "report_path": "artifacts/fast_obs_audit/round3_window/comparison.json"
+        "report_path": "artifacts/fast_obs_audit/round4_cumulative_identity.json"
       },
       "proof_scope": "Short recorded windows under contract unit/rounding law. Exact-clock equality is admission evidence, not a guarantee for all future values or a latency ranking.",
       "authority_note": "Exact same-station/UTC-time rounded value comparison: 23/23; no separate instrument certificate required.",
@@ -359,12 +357,10 @@
       "value_identity_proof": {
         "city": "Toronto",
         "channel": "eccc_swob",
-        "n_pairs": 51,
-        "n_exact": 51,
+        "n_pairs": 57,
+        "n_exact": 57,
         "mismatches": [],
-        "window_start": "2026-09-27T18:00:00+00:00",
-        "window_end": "2026-09-30T16:00:00+00:00",
-        "report_path": "artifacts/fast_obs_audit/round3_window/comparison.json"
+        "report_path": "artifacts/fast_obs_audit/round4_cumulative_identity.json"
       },
       "proof_scope": "Short recorded windows under contract unit/rounding law. Exact-clock equality is admission evidence, not a guarantee for all future values or a latency ranking.",
       "authority_note": "Exact same-station/UTC-time rounded value comparison: 6/6; no separate instrument certificate required.",
@@ -1086,68 +1082,196 @@
       },
       "settlement_grade": true,
       "value_identity_proof": {
-        "n_pairs": 2,
-        "n_exact": 2,
-        "mismatches": [],
         "city": "Moscow",
         "channel": "metaviatelecom_display",
+        "n_pairs": 3,
+        "n_exact": 3,
+        "mismatches": [],
         "report_path": "artifacts/fast_obs_audit/round4_moscow_proof.json"
       },
       "latency_evidence": {
-        "first_proven_lead": {
-          "observation": "2026-09-30T23:00:00+00:00",
-          "candidate": {
-            "city": "Moscow",
-            "station": "UUWW",
-            "channel": "metaviatelecom_display",
-            "observed_at": "2026-09-30T23:00:00+00:00",
-            "value": 8.0,
-            "unit": "C",
-            "negative_request_at": "2026-09-30T23:00:47.069972+00:00",
-            "positive_receipt_at": "2026-09-30T23:01:47.153364+00:00",
-            "lag_lower_ms": 47069.972,
-            "lag_upper_ms": 107153.364
-          },
-          "comparators": [
-            {
-              "channel": "awc",
-              "verdict": "FASTER",
-              "interval": {
-                "city": "Moscow",
-                "station": "UUWW",
-                "channel": "awc",
-                "observed_at": "2026-09-30T23:00:00+00:00",
-                "value": 8.0,
-                "unit": "C",
-                "negative_request_at": "2026-09-30T23:03:46.209315+00:00",
-                "positive_receipt_at": "2026-09-30T23:04:51.209997+00:00",
-                "lag_lower_ms": 226209.315,
-                "lag_upper_ms": 291209.997
-              }
+        "scope": "Individual observed publication transitions, not universal dominance or percentiles.",
+        "races": [
+          {
+            "observation": "2026-09-30T23:00:00+00:00",
+            "candidate": {
+              "city": "Moscow",
+              "station": "UUWW",
+              "channel": "metaviatelecom_display",
+              "observed_at": "2026-09-30T23:00:00+00:00",
+              "value": 8.0,
+              "unit": "C",
+              "negative_request_at": "2026-09-30T23:00:47.069972+00:00",
+              "positive_receipt_at": "2026-09-30T23:01:47.153364+00:00",
+              "lag_lower_ms": 47069.972,
+              "lag_upper_ms": 107153.364
             },
-            {
-              "channel": "resolver",
-              "verdict": "FASTER",
-              "interval": {
-                "city": "Moscow",
-                "station": "UUWW",
+            "comparators": [
+              {
+                "channel": "awc",
+                "verdict": "FASTER",
+                "interval": {
+                  "city": "Moscow",
+                  "station": "UUWW",
+                  "channel": "awc",
+                  "observed_at": "2026-09-30T23:00:00+00:00",
+                  "value": 8.0,
+                  "unit": "C",
+                  "negative_request_at": "2026-09-30T23:03:46.209315+00:00",
+                  "positive_receipt_at": "2026-09-30T23:04:51.209997+00:00",
+                  "lag_lower_ms": 226209.315,
+                  "lag_upper_ms": 291209.997
+                }
+              },
+              {
                 "channel": "resolver",
-                "observed_at": "2026-09-30T23:00:00+00:00",
-                "value": 8.0,
-                "unit": "C",
-                "negative_request_at": "2026-09-30T23:04:30.899696+00:00",
-                "positive_receipt_at": "2026-09-30T23:05:30.657554+00:00",
-                "lag_lower_ms": 270899.696,
-                "lag_upper_ms": 330657.554
+                "verdict": "FASTER",
+                "interval": {
+                  "city": "Moscow",
+                  "station": "UUWW",
+                  "channel": "resolver",
+                  "observed_at": "2026-09-30T23:00:00+00:00",
+                  "value": 8.0,
+                  "unit": "C",
+                  "negative_request_at": "2026-09-30T23:04:30.899696+00:00",
+                  "positive_receipt_at": "2026-09-30T23:05:30.657554+00:00",
+                  "lag_lower_ms": 270899.696,
+                  "lag_upper_ms": 330657.554
+                }
               }
-            }
-          ]
-        },
-        "scope": "Sample-specific first-availability; not a percentile or universal dominance."
+            ]
+          },
+          {
+            "observation": "2026-09-30T23:30:00+00:00",
+            "candidate": {
+              "city": "Moscow",
+              "station": "UUWW",
+              "channel": "metaviatelecom_display",
+              "observed_at": "2026-09-30T23:30:00+00:00",
+              "value": 8.0,
+              "unit": "C",
+              "negative_request_at": "2026-09-30T23:30:32.559406+00:00",
+              "positive_receipt_at": "2026-09-30T23:31:34.673042+00:00",
+              "lag_lower_ms": 32559.406000000003,
+              "lag_upper_ms": 94673.042
+            },
+            "comparators": [
+              {
+                "channel": "awc",
+                "verdict": "FASTER",
+                "interval": {
+                  "city": "Moscow",
+                  "station": "UUWW",
+                  "channel": "awc",
+                  "observed_at": "2026-09-30T23:30:00+00:00",
+                  "value": 8.0,
+                  "unit": "C",
+                  "negative_request_at": "2026-09-30T23:33:33.894654+00:00",
+                  "positive_receipt_at": "2026-09-30T23:34:32.478405+00:00",
+                  "lag_lower_ms": 213894.654,
+                  "lag_upper_ms": 272478.405
+                }
+              },
+              {
+                "channel": "resolver",
+                "verdict": "FASTER",
+                "interval": {
+                  "city": "Moscow",
+                  "station": "UUWW",
+                  "channel": "resolver",
+                  "observed_at": "2026-09-30T23:30:00+00:00",
+                  "value": 8.0,
+                  "unit": "C",
+                  "negative_request_at": "2026-09-30T23:34:32.548369+00:00",
+                  "positive_receipt_at": "2026-09-30T23:35:30.559757+00:00",
+                  "lag_lower_ms": 272548.369,
+                  "lag_upper_ms": 330559.757
+                }
+              }
+            ]
+          }
+        ]
       },
       "access": "free_public_no_account",
       "transport_security": "PLAINTEXT_HTTP; HTTPS connection failed in this audit. Fixed host, no configured credentials, no redirects; station and source clocks are validated.",
       "evidence": "artifacts/fast_obs_audit/round4_moscow_proof.json"
+    },
+    {
+      "provider": "imd_olbs_metar",
+      "source_channel": "imd_olbs_metar_temperature",
+      "station_id": "VILK",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "VILK"
+      },
+      "access": "free_public_no_account",
+      "settlement_grade": true,
+      "value_identity_proof": {
+        "city": "Lucknow",
+        "channel": "imd_olbs_metar",
+        "n_pairs": 2,
+        "n_exact": 2,
+        "mismatches": [],
+        "report_path": "artifacts/fast_obs_audit/round4_india_proof.json"
+      },
+      "latency_evidence": {
+        "scope": "Individual observed publication transitions, not universal dominance or percentiles.",
+        "races": [
+          {
+            "observation": "2026-09-30T23:30:00+00:00",
+            "candidate": {
+              "city": "Lucknow",
+              "station": "VILK",
+              "channel": "imd_olbs_metar",
+              "observed_at": "2026-09-30T23:30:00+00:00",
+              "value": 24.0,
+              "unit": "C",
+              "negative_request_at": "2026-09-30T23:29:30.557824+00:00",
+              "positive_receipt_at": "2026-09-30T23:30:32.557084+00:00",
+              "lag_lower_ms": -29442.176,
+              "lag_upper_ms": 32557.084000000003
+            },
+            "comparators": [
+              {
+                "channel": "awc",
+                "verdict": "FASTER",
+                "interval": {
+                  "city": "Lucknow",
+                  "station": "VILK",
+                  "channel": "awc",
+                  "observed_at": "2026-09-30T23:30:00+00:00",
+                  "value": 24.0,
+                  "unit": "C",
+                  "negative_request_at": "2026-09-30T23:31:27.758211+00:00",
+                  "positive_receipt_at": "2026-09-30T23:32:34.389799+00:00",
+                  "lag_lower_ms": 87758.211,
+                  "lag_upper_ms": 154389.799
+                }
+              },
+              {
+                "channel": "resolver",
+                "verdict": "FASTER",
+                "interval": {
+                  "city": "Lucknow",
+                  "station": "VILK",
+                  "channel": "resolver",
+                  "observed_at": "2026-09-30T23:30:00+00:00",
+                  "value": 24.0,
+                  "unit": "C",
+                  "negative_request_at": "2026-09-30T23:34:32.548369+00:00",
+                  "positive_receipt_at": "2026-09-30T23:35:30.559757+00:00",
+                  "lag_lower_ms": 272548.369,
+                  "lag_upper_ms": 330559.757
+                }
+              }
+            ]
+          }
+        ]
+      }
     }
   ]
 }

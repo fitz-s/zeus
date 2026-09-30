@@ -3,8 +3,10 @@
     "city": "Moscow",
     "station": "UUWW",
     "channel": "metaviatelecom_display",
-    "n_pairs": 2,
-    "n_exact": 2,
+    "reference_channel": "resolver",
+    "comparison_role": "EXACT_RESOLVER_VALUE_COMPARISON",
+    "n_pairs": 3,
+    "n_exact": 3,
     "mismatches": [],
     "pairs": [
       {
@@ -31,6 +33,28 @@
       },
       {
         "time": "2026-09-30T23:00:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 8.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 8.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          8
+        ],
+        "resolver_contract": [
+          8
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T23:30:00+00:00",
         "candidate_raw": [
           {
             "value": 8.0,
@@ -101,7 +125,59 @@
             }
           }
         ]
+      },
+      {
+        "observation": "2026-09-30T23:30:00+00:00",
+        "candidate": {
+          "city": "Moscow",
+          "station": "UUWW",
+          "channel": "metaviatelecom_display",
+          "observed_at": "2026-09-30T23:30:00+00:00",
+          "value": 8.0,
+          "unit": "C",
+          "negative_request_at": "2026-09-30T23:30:32.559406+00:00",
+          "positive_receipt_at": "2026-09-30T23:31:34.673042+00:00",
+          "lag_lower_ms": 32559.406000000003,
+          "lag_upper_ms": 94673.042
+        },
+        "comparators": [
+          {
+            "channel": "awc",
+            "verdict": "FASTER",
+            "interval": {
+              "city": "Moscow",
+              "station": "UUWW",
+              "channel": "awc",
+              "observed_at": "2026-09-30T23:30:00+00:00",
+              "value": 8.0,
+              "unit": "C",
+              "negative_request_at": "2026-09-30T23:33:33.894654+00:00",
+              "positive_receipt_at": "2026-09-30T23:34:32.478405+00:00",
+              "lag_lower_ms": 213894.654,
+              "lag_upper_ms": 272478.405
+            }
+          },
+          {
+            "channel": "resolver",
+            "verdict": "FASTER",
+            "interval": {
+              "city": "Moscow",
+              "station": "UUWW",
+              "channel": "resolver",
+              "observed_at": "2026-09-30T23:30:00+00:00",
+              "value": 8.0,
+              "unit": "C",
+              "negative_request_at": "2026-09-30T23:34:32.548369+00:00",
+              "positive_receipt_at": "2026-09-30T23:35:30.559757+00:00",
+              "lag_lower_ms": 272548.369,
+              "lag_upper_ms": 330559.757
+            }
+          }
+        ]
       }
+    ],
+    "required_speed_comparators": [
+      "awc"
     ],
     "verdict": "VALUE_IDENTICAL_FASTER_OBSERVED"
   }

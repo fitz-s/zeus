@@ -1,0 +1,113 @@
+[
+  {
+    "city": "Lucknow",
+    "station": "VILK",
+    "channel": "imd_olbs_metar",
+    "reference_channel": "resolver",
+    "comparison_role": "EXACT_RESOLVER_VALUE_COMPARISON",
+    "n_pairs": 2,
+    "n_exact": 2,
+    "mismatches": [],
+    "pairs": [
+      {
+        "time": "2026-09-30T23:00:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 24.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 24.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          24
+        ],
+        "resolver_contract": [
+          24
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T23:30:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 24.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 24.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          24
+        ],
+        "resolver_contract": [
+          24
+        ],
+        "match": true
+      }
+    ],
+    "races": [
+      {
+        "observation": "2026-09-30T23:30:00+00:00",
+        "candidate": {
+          "city": "Lucknow",
+          "station": "VILK",
+          "channel": "imd_olbs_metar",
+          "observed_at": "2026-09-30T23:30:00+00:00",
+          "value": 24.0,
+          "unit": "C",
+          "negative_request_at": "2026-09-30T23:29:30.557824+00:00",
+          "positive_receipt_at": "2026-09-30T23:30:32.557084+00:00",
+          "lag_lower_ms": -29442.176,
+          "lag_upper_ms": 32557.084000000003
+        },
+        "comparators": [
+          {
+            "channel": "awc",
+            "verdict": "FASTER",
+            "interval": {
+              "city": "Lucknow",
+              "station": "VILK",
+              "channel": "awc",
+              "observed_at": "2026-09-30T23:30:00+00:00",
+              "value": 24.0,
+              "unit": "C",
+              "negative_request_at": "2026-09-30T23:31:27.758211+00:00",
+              "positive_receipt_at": "2026-09-30T23:32:34.389799+00:00",
+              "lag_lower_ms": 87758.211,
+              "lag_upper_ms": 154389.799
+            }
+          },
+          {
+            "channel": "resolver",
+            "verdict": "FASTER",
+            "interval": {
+              "city": "Lucknow",
+              "station": "VILK",
+              "channel": "resolver",
+              "observed_at": "2026-09-30T23:30:00+00:00",
+              "value": 24.0,
+              "unit": "C",
+              "negative_request_at": "2026-09-30T23:34:32.548369+00:00",
+              "positive_receipt_at": "2026-09-30T23:35:30.559757+00:00",
+              "lag_lower_ms": 272548.369,
+              "lag_upper_ms": 330559.757
+            }
+          }
+        ]
+      }
+    ],
+    "required_speed_comparators": [
+      "awc"
+    ],
+    "verdict": "VALUE_IDENTICAL_FASTER_OBSERVED"
+  }
+]

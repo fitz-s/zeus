@@ -38,6 +38,7 @@ CHANNELS = {
     "wu_station_history": "wu_station_history_temperature",
     "noaa_wrh": "noaa_wrh_temperature",
     "mgm_metar": "mgm_metar_temperature",
+    "imd_olbs_metar": "imd_olbs_metar_temperature",
     "metaviatelecom_metar": "metaviatelecom_metar_temperature",
 }
 
@@ -114,6 +115,7 @@ class _PublicMetarPage(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.next_data: list[str] = []
         self.report_text: list[str] = []
+        self.plain_text: list[str] = []
         self._script = False
         self._modal_depth = 0
 
@@ -129,6 +131,7 @@ class _PublicMetarPage(HTMLParser):
         if tag == "div" and self._modal_depth: self._modal_depth -= 1
 
     def handle_data(self, data):
+        self.plain_text.append(data)
         if self._script: self.next_data.append(data)
         if self._modal_depth: self.report_text.append(data)
 
@@ -177,6 +180,15 @@ def _public_metar_values(route, body: bytes, receipt: datetime):
                 # evidence. No row-order or highest-temperature authority guess.
                 raise ValueError("PUBLIC_METAR_VERSION_CONFLICT")
             values[observed] = value
+    elif route.provider == "imd_olbs_metar":
+        text = " ".join(page.plain_text)
+        for raw in re.finditer(r"(?:(?:METAR|SPECI)\s+)?(?:COR\s+)?" + re.escape(route.station_id) + r"\s+\d{6}Z[^=]+=", text):
+            sample = _public_metar_value(raw[0], route.station_id, receipt)
+            if sample is None: continue
+            observed, value = sample
+            if observed in values and values[observed] != value:
+                raise ValueError("PUBLIC_METAR_VERSION_CONFLICT")
+            values[observed] = value
     else:
         text = " ".join(page.report_text)
         raw = re.search(r"(?:METAR|SPECI)\s+(?:COR\s+)?[A-Z]{4}\s+\d{6}Z[^=]+(?:=|$)", text)
@@ -192,6 +204,7 @@ _PUBLIC_METAR_CACHE: dict[tuple, tuple[float, bytes, datetime, str | None]] = {}
 
 def _fetch_public_metar(route, client):
     from src.data.physical_current_sources import load_physical_current_sources
+    post_data = None
     if route.provider == "mgm_metar":
         ids = sorted({r.station_id for r in load_physical_current_sources()[0]
                       if r.provider == route.provider} | {route.station_id})
@@ -202,6 +215,11 @@ def _fetch_public_metar(route, client):
         url = "https://rasat.mgm.gov.tr/result"
         params = [("hours", "24"), ("obsType", "1")] + [("stations", sid) for sid in group]
         key = (route.provider, group, id(client))
+    elif route.provider == "imd_olbs_metar":
+        url = "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/showopmetquery.php"
+        params = None
+        post_data = {"icaos": route.station_id, "type": "metar"}
+        key = (route.provider, route.station_id, id(client))
     else:
         display_id = str(route.identity.get("display_id", ""))
         if not re.fullmatch(r"[0-9]{1,8}", display_id):
@@ -217,8 +235,10 @@ def _fetch_public_metar(route, client):
             if old[3]: raise ValueError("PUBLIC_METAR_TRANSPORT_DEFERRED:" + old[3])
             return old[1], old[2]
         try:
-            r = client.get(url, params=params, headers={"User-Agent": "zeus-free-public-obs/4"}, timeout=6,
-                           follow_redirects=False)
+            headers = {"User-Agent": "zeus-free-public-obs/4"}
+            r = (client.post(url, data=post_data, headers=headers, timeout=6, follow_redirects=False)
+                 if post_data is not None else
+                 client.get(url, params=params, headers=headers, timeout=6, follow_redirects=False))
             r.raise_for_status()
             if len(r.content) > 10_000_000: raise ValueError("STATION_RESPONSE_TOO_LARGE")
             received = datetime.now(UTC)
@@ -264,7 +284,7 @@ def parse_station_payload(route, body: bytes, *, received_at: datetime) -> tuple
     expected = str(route.identity["provider_station"])
     digest = hashlib.sha256(body).hexdigest()
     values = []
-    if provider in {"mgm_metar", "metaviatelecom_metar"}:
+    if provider in {"mgm_metar", "metaviatelecom_metar", "imd_olbs_metar"}:
         values = _public_metar_values(route, body, received_at)
     elif provider == "noaa_wrh":
         from src.data.noaa_wrh_timeseries import rows_from_payload
@@ -368,7 +388,7 @@ def fetch_station_temperature(route, *, start: datetime, end: datetime, client=h
     if route.provider == "fmi_wfs":
         from src.data.fmi_airport_temperature import fetch_temperature
         return fetch_temperature(start=start, end=end, station=route.station, client=client)
-    if route.provider in {"mgm_metar", "metaviatelecom_metar"}:
+    if route.provider in {"mgm_metar", "metaviatelecom_metar", "imd_olbs_metar"}:
         body, received = _fetch_public_metar(route, client)
         return tuple(s for s in parse_station_payload(route, body, received_at=received)
                      if start <= s.observed_at <= min(end, received))
