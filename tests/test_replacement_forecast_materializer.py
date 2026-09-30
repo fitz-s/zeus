@@ -1154,7 +1154,10 @@ def _hko_current_provider_inputs(request,values,*,conn,selected_cells=None):
         lat,lon = (22.25,114.125) if model=="icon_global" else (22.3125,114.1875)
         if selected_cells is not None:
             lat,lon = selected_cells[model]
-        payload = {"latitude":lat,"longitude":lon,"elevation":32.0,"timezone":city.timezone,"utc_offset_seconds":28800,
+        from zoneinfo import ZoneInfo
+        local_start = datetime.combine(request.target_date,datetime.min.time(),tzinfo=ZoneInfo(city.timezone))
+        payload = {"latitude":lat,"longitude":lon,"elevation":32.0,"timezone":city.timezone,
+            "utc_offset_seconds":int(local_start.utcoffset().total_seconds()),
             "hourly_units":{"temperature_2m":"°C"},"hourly":{"time":[f"{request.target_date}T{hour:02d}:00" for hour in range(24)],
             "temperature_2m":[value]*24}}
         if selected_cells is not None and request.temperature_metric == "low":
@@ -1233,8 +1236,8 @@ def _assert_wu_fast_pinned_contract(
     corrupted["day0_provisional_observation"]["fast_residual_likelihood"]["unknown_weight"] = 0.01
     assert reason(corrupted) == "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_IDENTITY_INVALID"
 
-    def resigned(field: str, value: object) -> dict[str, object]:
-        changed = deepcopy(provenance)
+    def resigned(field: str, value: object, *, base=None) -> dict[str, object]:
+        changed = deepcopy(provenance if base is None else base)
         likelihood = changed["day0_provisional_observation"]["fast_residual_likelihood"]
         likelihood[field] = value
         identity = {key: likelihood[key] for key in (
@@ -1270,8 +1273,15 @@ def _assert_wu_fast_pinned_contract(
     wrong_sample["day0_remaining_carrier_probability_samples"][0][0] += 0.01
     assert reason(wrong_sample) == "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_CARRIER_VALUE_MISMATCH"
     assert reason(resigned("station_id", "WRONG")) == (
-        "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_CARRIER_INVALID"
+        "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_IDENTITY_INVALID"
+        if provenance["day0_provisional_observation"]["fast_residual_likelihood"]["settlement_channel"].startswith("noaa_wrh_")
+        else "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_CARRIER_INVALID"
     )
+    # A NOAA channel embeds its station. The one-field inconsistency is
+    # rejected structurally; even a self-consistent foreign pair must fail
+    # the independent current-family carrier binding (the original intent).
+    assert reason(resigned("settlement_channel","noaa_wrh_wrong",
+        base=resigned("station_id","WRONG"))) == "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_CARRIER_INVALID"
     assert reason(resigned("settlement_channel", "noaa_wrh_wrong")) == (
         "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_IDENTITY_INVALID"
     )
@@ -1790,18 +1800,18 @@ def test_source_clock_scheme_rejects_possessed_d2_at_d2_lead_but_keeps_global(
             assert "ukmo_global_deterministic_10km" in override.used_models
 
 
-def _la_current_physical_request(conn, *, metric, cycle, decision, city_name="Los Angeles", target=None):
+def _la_current_physical_request(conn, *, metric, cycle, decision, city_name="Los Angeles", target=None, hourly_values=None):
     """TEST_ONLY external inputs with the request city's own normal ground/anchor."""
     from src.config import runtime_cities_by_name, runtime_station_geometry_for_city
     from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
     from src.data.openmeteo_ecmwf_ifs9_anchor import extract_openmeteo_ecmwf_ifs9_localday_anchor
     from zoneinfo import ZoneInfo
     city = runtime_cities_by_name()[city_name]
-    assert city_name in {"Los Angeles", "Milan", "London"}
+    assert city_name in {"Los Angeles", "Milan", "London", "Chicago"}
     station = runtime_station_geometry_for_city(city, effective_at=decision)
     assert station["ground_status"] == "VERIFIED"
     assert station["ground_elevation_m"] == pytest.approx(
-        {"Los Angeles":29.7,"Milan":234.,"London":5.8}[city_name])
+        {"Los Angeles":29.7,"Milan":234.,"London":5.8,"Chicago":204.8}[city_name])
     cell = source_cell_geometry_proof(latitude=city.lat, longitude=city.lon,
                                      target_elevation_m=station["ground_elevation_m"])
     lon = cell["selected_grid_lon"] - 360. if cell["selected_grid_lon"] > 180. else cell["selected_grid_lon"]
@@ -1812,7 +1822,8 @@ def _la_current_physical_request(conn, *, metric, cycle, decision, city_name="Lo
         "elevation": station["ground_elevation_m"], "timezone": city.timezone,
         "utc_offset_seconds": int(local_start.utcoffset().total_seconds()),
         "hourly_units": {"temperature_2m": "°C"},
-        "hourly": {"time": [f"{target}T{hour:02d}:00" for hour in range(24)], "temperature_2m": [20.]*24},
+        "hourly": {"time": [f"{target}T{hour:02d}:00" for hour in range(24)],
+                   "temperature_2m": hourly_values if hourly_values is not None else [20.]*24},
         "_zeus_current_target_scope": {"city": city.name, "target_date": str(target), "metric": metric}},
         sort_keys=True).encode()
     anchor = extract_openmeteo_ecmwf_ifs9_localday_anchor(json.loads(body), city_timezone=city.timezone,
@@ -4989,11 +5000,17 @@ def test_day0_current_path_revision_separates_old_q_cohort() -> None:
 
 
 @pytest.mark.parametrize("source", ("aviationweather_metar", "wu_api+same_station_fast_tail"))
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
     monkeypatch: pytest.MonkeyPatch, tmp_path,
     source: str,
 ) -> None:
-    """The persisted Chicago carrier must use F members, boundary, bins, and sigma."""
+    """KORD/F math component: normal physical writers, controlled conditional ENS.
+
+    Retained HOMR capture precedes this forecast condition. Whole OM bytes,
+    source body/anchor and canonical namespace are real private writer inputs;
+    observation/remaining-member readers are controlled, not native GRIB/JIT.
+    """
 
     from zoneinfo import ZoneInfo
 
@@ -5007,15 +5024,16 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
     )
     from src.signal.ensemble_signal import sigma_instrument_for_city
 
-    conn = _conn()
-    _install_pinned_ready_fusion(monkeypatch)
+    conn = _conn(archive_ground=False)
+    from src.data.station_ground_evidence import archive_station_ground_evidence, forecast_db_from_connection
+    assert archive_station_ground_evidence(forecast_db_from_connection(conn), ["Chicago"])["status"] == "GROUND_SOURCE_ARCHIVED"
     city = runtime_cities_by_name()["Chicago"]
     semantics = SettlementSemantics.for_city(city)
     assert semantics.measurement_unit == "F"
     assert semantics.rounding_rule == "wmo_half_up"
 
-    target = date(2026, 6, 7)
-    computed_at = datetime(2026, 6, 7, 18, tzinfo=UTC)
+    target = date(2026, 10, 1)
+    computed_at = datetime(2026, 10, 1, 18, tzinfo=UTC)
     native_members_f = (84.0, 88.0)
 
     def celsius(value_f: float) -> float:
@@ -5037,70 +5055,19 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
     member_values_c = tuple(celsius(value) for value in native_members_f)
     local_tz = ZoneInfo("America/Chicago")
     local_hours = tuple(
-        datetime(2026, 6, 7, hour, tzinfo=local_tz) for hour in range(24)
+        datetime(2026, 10, 1, hour, tzinfo=local_tz) for hour in range(24)
     )
-    anchor = OpenMeteoIfs9LocalDayAnchor(
-        city_timezone="America/Chicago",
-        target_local_date=target,
-        high_c=31.0,
-        low_c=22.0,
-        sample_count=24,
-        contributing_local_times=local_hours,
-        contributing_valid_times_utc=tuple(
-            item.astimezone(UTC) for item in local_hours
-        ),
-        source_cycle_time=datetime(2026, 6, 7, 6, tzinfo=UTC),
-    )
-    from src.config import runtime_station_geometry_for_city
-    from src.data.openmeteo_ecmwf_ifs9_precision_guard import _haversine_km
-    import src.data.openmeteo_ecmwf_ifs9_bucket_transport as transport
-
-    station = runtime_station_geometry_for_city(city)
-    raw = {
-        "latitude": 41.98, "longitude": -87.90, "elevation": 207.0,
-        "timezone": "America/Chicago",
-        "hourly": {
-            "time": [f"2026-06-07T{hour:02d}:00" for hour in range(24)],
-            "temperature_2m": [22.0 if hour == 0 else 31.0 if hour == 12 else 25.0 for hour in range(24)],
-        },
-        "hourly_units": {"temperature_2m": "°C"},
-        "_zeus_current_target_scope": {"city": "Chicago", "target_date": target.isoformat(), "metric": "high"},
-    }
-    raw_bytes = (json.dumps(raw, sort_keys=True, indent=2) + "\n").encode()
-    static_cell = {
-        "revision": "openmeteo_ifs9_o1280_source_cell_v1",
-        "static_hsurf_sha256": "b" * 64, "selected_flat_index": 110,
-        "selected_grid_lat": 41.98, "selected_grid_lon": -87.90,
-        "raw_grid_elevation_m": 205.0, "effective_grid_elevation_m": 207.0,
-        "target_dem_elevation_m": 207.0, "cell_is_sea": False,
-        "cell_is_center": False, "nearby_sea": False,
-    }
-    monkeypatch.setattr(transport, "source_cell_geometry_proof", lambda **_kwargs: dict(static_cell))
-    metadata = OpenMeteoIfs9PrecisionMetadata(
-        city="Chicago", station_id=station["station_id"],
-        city_lat=float(city.lat), city_lon=float(city.lon),
-        station_lat=station["lat"], station_lon=station["lon"],
-        requested_lat=station["lat"], requested_lon=station["lon"],
-        requested_coordinate_precision_decimals=4,
-        nearest_grid_lat=41.98, nearest_grid_lon=-87.90,
-        nearest_grid_distance_km=_haversine_km(station["lat"], station["lon"], 41.98, -87.90),
-        native_grid="openmeteo_ecmwf_ifs_9km", delivery_grid_resolution="9km",
-        interpolation_method="openmeteo_api_point_interpolation",
-        endpoint_mode="hourly_zeus_aggregated",
-        local_day_start_utc="2026-06-07T05:00:00+00:00",
-        local_day_end_utc="2026-06-08T05:00:00+00:00",
-        timezone_name="America/Chicago", target_local_date=target,
-        temperature_unit="C", anchor_sigma_c=3.0,
-        grid_elevation_m=205.0, station_elevation_m=station["elevation_m"],
-        land_sea_mask="land", city_class="standard",
-        station_mapping_policy="operator_verified_station",
-        source_geometry_proof={
-            **static_cell, "raw_payload_sha256": hashlib.sha256(raw_bytes).hexdigest(),
-            "station_registry_sha256": station["registry_sha256"],
-        },
-    )
-    guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(metadata, raw_payload_bytes=raw_bytes)
+    physical_request = _la_current_physical_request(conn, metric="high", city_name="Chicago",
+        target=target, cycle=datetime(2026,10,1,0,tzinfo=UTC), decision=computed_at,
+        hourly_values=[22. if hour == 0 else 31. if hour == 12 else 25. for hour in range(24)])
+    anchor = physical_request.openmeteo_anchor
+    raw_bytes = physical_request.openmeteo_raw_payload_bytes
+    guard = physical_request.openmeteo_precision_guard
     assert guard.passable_for_live_materialization
+    assert guard.metadata.station_id == "KORD" and guard.metadata.station_elevation_m == 204.8
+    assert anchor.high_c == 31. and anchor.low_c == 22. and anchor.sample_count == 24
+    assert anchor.contributing_valid_times_utc == tuple(item.astimezone(UTC) for item in local_hours)
+    assert anchor.source_cycle_time <= local_hours[0].astimezone(UTC)
     request = ReplacementForecastMaterializeRequest(
         city="Chicago",
         city_id="Chicago",
@@ -5109,10 +5076,10 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
         temperature_metric="high",
         baseline_source_run_id="b0-chicago",
         baseline_data_version=_current_baseline_data_version("high"),
-        baseline_source_available_at=datetime(2026, 6, 7, 12, tzinfo=UTC),
+        baseline_source_available_at=datetime(2026, 10, 1, 12, tzinfo=UTC),
         openmeteo_anchor=anchor,
         openmeteo_source_run_id="om-chicago",
-        openmeteo_source_available_at=datetime(2026, 6, 7, 12, 10, tzinfo=UTC),
+        openmeteo_source_available_at=datetime(2026, 10, 1, 12, 10, tzinfo=UTC),
         bins=tuple(
             _TemperatureBin(
                 bin_id,
@@ -5123,9 +5090,9 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
             )
             for bin_id, lower_f, upper_f in native_bins
         ),
-        source_cycle_time=datetime(2026, 6, 7, 6, tzinfo=UTC),
+        source_cycle_time=datetime(2026, 10, 1, 0, tzinfo=UTC),
         computed_at=computed_at,
-        expires_at=datetime(2026, 6, 7, 20, tzinfo=UTC),
+        expires_at=datetime(2026, 10, 1, 20, tzinfo=UTC),
         openmeteo_precision_guard=guard,
         openmeteo_raw_payload_bytes=raw_bytes,
         day0_observed_extreme_c=celsius(native_boundary_f),
@@ -5136,22 +5103,41 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
             "F" if source == "wu_api+same_station_fast_tail" else "C"
         ),
     )
-    times = tuple(f"{target.isoformat()}T{hour:02d}:00" for hour in range(24))
-    run = datetime(2026, 6, 7, 6, tzinfo=UTC)
-    available = datetime(2026, 6, 7, 7, tzinfo=UTC)
-    captured = datetime(2026, 6, 7, 17, 30, tzinfo=UTC)
+    from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _selected_test_cell
+    selected_cells = {model:_selected_test_cell(model,city.lat,city.lon)
+                      for model in ("icon_global","ukmo_global_deterministic_10km")}
+    request = _install_hko_live_fusion(monkeypatch,conn=conn,
+        request=replace(request,source_cycle_time=physical_request.source_cycle_time,
+            anchor_artifact_id=physical_request.anchor_artifact_id),
+        selected_cells=selected_cells)
+    remaining_hours = range(1, 24)
+    times = tuple(f"{target.isoformat()}T{hour:02d}:00" for hour in remaining_hours)
+    run = datetime(2026, 10, 1, 6, tzinfo=UTC)
+    available = datetime(2026, 10, 1, 7, tzinfo=UTC)
+    captured = datetime(2026, 10, 1, 17, 30, tzinfo=UTC)
 
     def vector_meta(model: str, *, ensemble: bool = False) -> str:
-        api_model = "ecmwf_ifs025_ensemble" if ensemble else model
-        return json.dumps({
-            "provider_source_cycle_time_utc": run.isoformat(),
-            "provider_source_available_at_utc": available.isoformat(),
-            "fetch_started_at": (captured + timedelta(seconds=1)).isoformat(),
-            "fetch_finished_at": (captured + timedelta(seconds=2)).isoformat(),
-            "request_hash": "sha256:chicago-ens" if ensemble else f"sha256:chicago-{model}",
-            "provider_run_id": f"openmeteo:{api_model}:{run.isoformat()}",
-            "request_params_json": json.dumps({"metadata_model": api_model}),
-        })
+        from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS
+        from src.data.day0_hourly_vectors import _day0_provider_run_meta, build_request_hash
+        from src.data.openmeteo_ecmwf_ifs9_anchor import SINGLE_RUNS_FORECAST_URL
+        api_model = "ecmwf_ifs025_ensemble" if ensemble else OPENMETEO_MODEL_IDS.get(model, model)
+        params = {"endpoint": SINGLE_RUNS_FORECAST_URL, "models": api_model,
+                  "metadata_model": api_model, "run": run.isoformat(),
+                  "timezone": city.timezone, "hourly": "temperature_2m"}
+        request_hash = build_request_hash(endpoint=SINGLE_RUNS_FORECAST_URL,
+            params=params, models=[api_model if ensemble else model], captured_at=captured.isoformat(),
+            payload={"hourly": {"time": times,
+                "temperature_2m_members": [
+                    [celsius(native_boundary_f) if hour <= 13 else
+                     celsius(native_boundary_f + (index - 25) * 0.02)
+                     for hour in remaining_hours] for index in range(51)]}}
+            if ensemble else {"hourly": {"time": times, "test_member_model": model}})
+        return json.dumps(_day0_provider_run_meta(model=model, model_api_id=api_model,
+            run=run, available_at=available, modified_at=available,
+            authority="run_pinned_single_runs", endpoint_mode="single_runs",
+            request_params=params, request_hash=request_hash,
+            fetch_started_at=captured + timedelta(seconds=1),
+            fetch_finished_at=captured + timedelta(seconds=2)))
 
     vectors = [
         Day0HourlyVector(
@@ -5159,11 +5145,11 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
             city="Chicago",
             target_date=target.isoformat(),
             timezone_name="America/Chicago",
-            captured_at="2026-06-07T17:30:00+00:00",
+            captured_at="2026-10-01T17:30:00+00:00",
             times=times,
             temps_c=tuple(
                 celsius(native_boundary_f) if hour <= 13 else value_c
-                for hour in range(24)
+                for hour in remaining_hours
             ),
             source_run_meta_json=vector_meta(model),
         )
@@ -5177,7 +5163,7 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
             temps_c=tuple(
                 celsius(native_boundary_f) if hour <= 13
                 else celsius(native_boundary_f + (index - 25) * 0.02)
-                for hour in range(24)
+                for hour in remaining_hours
             ),
             source_run_meta_json=vector_meta(model, ensemble=True),
         )
@@ -5231,7 +5217,7 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
 
     residual_identity = {
         "semantics_revision": FAST_RESIDUAL_LIKELIHOOD_REVISION,
-        "station_id": "KORD", "settlement_channel": "wu_icao_history",
+        "station_id": "KORD", "settlement_channel": "noaa_wrh_kord",
         "fast_channel": "aviationweather_metar", "unit": "F",
         "as_of": computed_at.isoformat(),
         "window_start": (computed_at - timedelta(days=7)).isoformat(),
@@ -5286,7 +5272,7 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
 
     ensemble[0] = replace(
         ensemble[0], source_run_meta_json=vector_meta(ensemble[0].model, ensemble=True).replace(
-            run.isoformat(), datetime(2026, 6, 7, 0, tzinfo=UTC).isoformat(),
+            run.isoformat(), datetime(2026, 10, 1, 0, tzinfo=UTC).isoformat(),
         ),
     )
     with pytest.raises(ValueError, match="DAY0_CONDITIONAL_HIGH_ENSEMBLE_CYCLE_MISMATCH"):
@@ -5421,7 +5407,7 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
         }
         event = make_opportunity_event(
             event_type="DAY0_EXTREME_UPDATED",
-            entity_key="Chicago|2026-06-07|high|KORD", source="test-current-carrier",
+            entity_key="Chicago|2026-10-01|high|KORD", source="test-current-carrier",
             observed_at=computed_at.isoformat(), available_at=computed_at.isoformat(),
             received_at=computed_at.isoformat(),
             payload={
@@ -5545,9 +5531,14 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
         "src.data.day0_hourly_vectors.read_day0_current_temperature_state",
         lambda **_kwargs: revised_state,
     )
-    revised = materialize_replacement_forecast_live(
-        conn, replace(request, computed_at=computed_at + timedelta(minutes=11)),
-    )
+    own_raw = tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id"))
+    own_artifacts = tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_forecast_artifacts ORDER BY artifact_id"))
+    revised_request = _install_hko_live_fusion(monkeypatch,conn=conn,
+        request=replace(request,computed_at=computed_at+timedelta(minutes=11)),
+        selected_cells=selected_cells)
+    assert tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id")) == own_raw
+    assert tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_forecast_artifacts ORDER BY artifact_id")) == own_artifacts
+    revised = materialize_replacement_forecast_live(conn,revised_request)
     assert revised.ok is True
     revised_row = conn.execute(
         "SELECT q_json, provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
