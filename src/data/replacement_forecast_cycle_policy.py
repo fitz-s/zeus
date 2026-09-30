@@ -300,7 +300,8 @@ def _current_evidence_shape_has_probability_authority(
         serving = payload["bayes_precision_fusion"]["current_value_serving"]
         used = payload["bayes_precision_fusion"]["used_models"]
         if not isinstance(used, (list, tuple)) or not used or any(
-            model not in geometry["providers"] and model != "ecmwf_ifs" for model in used
+            model not in geometry["providers"] and (model != "ecmwf_ifs" or model in serving)
+            for model in used
         ):
             return False
         from src.data.replacement_current_value_serving import _is_station_model, frozen_ifs9_response_has_authority
