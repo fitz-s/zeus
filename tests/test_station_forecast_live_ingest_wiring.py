@@ -449,11 +449,13 @@ def _station_grid_cohort(
         payload = {"latitude": float(str(params["latitude"]).split(",")[0]),
                    "longitude": float(str(params["longitude"]).split(",")[0]), "elevation": 32.0,
                    "timezone": str(params["timezone"]).split(",")[0],
+                   "utc_offset_seconds": int(start.replace(tzinfo=ZoneInfo(str(params["timezone"]).split(",")[0])).utcoffset().total_seconds()),
                    "hourly_units": {"temperature_2m": "°C"},
                    "hourly": {"time": [(start + timedelta(hours=i)).isoformat(timespec="minutes") for i in range(hours)],
                               "temperature_2m": [26.0 + i % 7 for i in range(hours)]}}
         body = (json.dumps(payload, indent=2) + "\n").encode()
         kwargs["capture_entity_body"](body, captured.timestamp())
+        kwargs["capture_network_response"](body, captured.timestamp(), {"content-type": "application/json"})
         return json.loads(body)
     dl._SINGLE_RUNS_PAYLOAD_CACHE.clear()
     dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEX.clear()

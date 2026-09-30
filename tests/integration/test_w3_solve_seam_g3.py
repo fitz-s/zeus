@@ -48428,7 +48428,7 @@ def test_global_batch_original_exception_is_not_masked_by_a_failing_flush(monkey
         trade_conn.close()
 
 
-def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric):
+def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, prior_hour=12):
     """Normal writers + controlled source receipts; no probability authority mock.
 
     The 51-member GRIB/land-mask input is a causal toy receipt, not a claim of
@@ -48460,10 +48460,10 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric):
     from scripts import hko_ingest_tick
     from src.data.observation_instants_writer import insert_rows
     from tests.test_replacement_forecast_materializer import _TemperatureBin
-    from tests.test_station_forecast_live_ingest_wiring import _hourly_schema_conn, _station_grid_cohort
+    from tests.test_station_forecast_live_ingest_wiring import _hourly_schema_conn
 
     utc = timezone.utc
-    cycle = datetime(2026, 9, 29, 12, tzinfo=utc)
+    cycle = datetime(2026, 9, 29, prior_hour, tzinfo=utc)
     issued, captured = cycle + timedelta(minutes=5), cycle + timedelta(minutes=10)
     cut = datetime(2026, 9, 30, 6, 20, tzinfo=utc)
     target = date(2026, 9, 30)
@@ -48536,12 +48536,41 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric):
          cycle.isoformat(),issued.isoformat(),issued.isoformat(),
          json.dumps([center+(i-25)*.02 for i in range(51)]),identity.data_version,run_id,
          cycle.isoformat(),issued.isoformat(),issued.isoformat(),json.dumps(ens_provenance),release,issued.isoformat(),city.timezone))
-    _station_grid_cohort(monkeypatch, conn, db, city.name, target_dates=(target.isoformat(),),
-                         cycle=cycle, captured=captured)
     class RawClock(datetime):
         @classmethod
         def now(cls, tz=None):
             return captured.astimezone(tz) if tz else captured.replace(tzinfo=None)
+    def write_provider_cohort(source_cycle,source_capture):
+        def provider_http(_url,params,**kwargs):
+            payload = {"latitude":float(params["latitude"]),"longitude":float(params["longitude"]),
+                "elevation":32.0,"timezone":city.timezone,"utc_offset_seconds":28800,
+                "hourly_units":{"temperature_2m":"°C"},
+                "hourly":{"time":[f"2026-09-30T{hour:02d}:00" for hour in range(24)],
+                          "temperature_2m":[26.0+hour%7 for hour in range(24)]}}
+            body = (json.dumps(payload,indent=2)+"\n").encode()
+            kwargs["capture_entity_body"](body,source_capture.timestamp())
+            kwargs["capture_network_response"](body,source_capture.timestamp(),{"content-type":"application/json"})
+            return json.loads(body)
+        class SourceClock(datetime):
+            @classmethod
+            def now(cls,tz=None):
+                return source_capture.astimezone(tz) if tz else source_capture.replace(tzinfo=None)
+        dl._SINGLE_RUNS_PAYLOAD_CACHE.clear()
+        dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEX.clear()
+        conn.commit()
+        models = ("icon_global","ukmo_global_deterministic_10km")
+        with monkeypatch.context() as fetch:
+            fetch.setattr(dl,"datetime",SourceClock)
+            fetch.setattr("src.data.openmeteo_client.fetch",provider_http)
+            downloaded = dl.download_bayes_precision_fusion_extra_raw_inputs(forecast_db=db,cycle=source_cycle,
+                targets=[dl.BayesPrecisionFusionDownloadTarget(city=city.name,target_date=target.isoformat(),
+                    metric=axis,latitude=city.lat,longitude=city.lon,timezone_name=city.timezone,
+                    lead_days=(target-source_capture.astimezone(ZoneInfo(city.timezone)).date()).days)
+                    for axis in ("high","low")],models=models,
+                frozen_source_runs={model:(source_cycle,source_capture) for model in models},
+                include_previous_runs=False,prune_after=False)
+            assert downloaded["written_row_count"] == 4
+    write_provider_cohort(cycle,captured)
     body = json.dumps({"updateTime":issued.isoformat(),"weatherForecast":[{
         "forecastDate":"20260930","forecastMaxtemp":{"value":33,"unit":"C"},
         "forecastMintemp":{"value":27,"unit":"C"}}]}, indent=2).encode()
@@ -48591,7 +48620,8 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric):
         ensemble = model in hourly.day0_source_clock_ensemble_member_models()
         api_model = "ecmwf_ifs025_ensemble" if ensemble else OPENMETEO_MODEL_IDS.get(model,model)
         values = [32.0+(i%5)*.05+(1.0 if 14<=h<=18 else -.5) for h in range(24)]
-        payload = {"hourly":{"time":times,"temperature_2m":values},"hourly_units":{"temperature_2m":"°C"}}
+        payload = {"timezone":city.timezone,"utc_offset_seconds":28800,
+            "hourly":{"time":times,"temperature_2m":values},"hourly_units":{"temperature_2m":"°C"}}
         endpoint = "https://single-runs-api.open-meteo.com/v1/forecast"
         params = {"endpoint":endpoint,"models":api_model,"timezone":city.timezone,"hourly":"temperature_2m"}
         request_hash = hourly.build_request_hash(endpoint=endpoint,params=params,models=[model],
@@ -48606,7 +48636,7 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric):
         assert hourly.persist_day0_hourly_vectors(vectors,target_date=target.isoformat(),conn=conn,
             request_hash=request_hash,endpoint=endpoint,now=cut) == 1
     raw = {"latitude":station["lat"],"longitude":station["lon"],"elevation":station["elevation_m"],
-        "timezone":city.timezone,"hourly_units":{"temperature_2m":"°C"},
+        "timezone":city.timezone,"utc_offset_seconds":28800,"hourly_units":{"temperature_2m":"°C"},
         "hourly":{"time":times,"temperature_2m":[27.0 if h<6 else 33.0 for h in range(24)]},
         "_zeus_current_target_scope":{"city":city.name,"target_date":target.isoformat(),"metric":metric}}
     raw_bytes = (json.dumps(raw,indent=2,sort_keys=True)+"\n").encode()
@@ -48629,6 +48659,7 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric):
         key:value for key,value in geometry.items() if key not in {"raw_payload_sha256","station_registry_sha256"}})
     def anchor_http(_url,params,**kwargs):
         kwargs["capture_entity_body"](raw_bytes,captured.timestamp())
+        kwargs["capture_network_response"](raw_bytes,captured.timestamp(),{"content-type":"application/json"})
         return json.loads(raw_bytes)
     monkeypatch.setattr("src.data.openmeteo_client.fetch",anchor_http)
     dl._SINGLE_RUNS_PAYLOAD_CACHE.clear()
@@ -48701,7 +48732,8 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric):
     assert producer.status == "LIVE_ELIGIBLE", producer.reason_codes
     conn.commit()
     return SimpleNamespace(conn=conn,db=db,city=city,request=request,result=result,cut=cut,bins=bins,
-                           anchor_request=anchor_request,artifact_path=artifact_path,manifest_dir=manifest_dir)
+                           anchor_request=anchor_request,artifact_path=artifact_path,manifest_dir=manifest_dir,
+                           write_provider_cohort=write_provider_cohort)
 
 
 @pytest.mark.parametrize("metric",("high","low"))
@@ -48843,7 +48875,7 @@ def test_held_point_trace_normal_adapter_preserves_selected_entry_and_exact_toke
 
 @pytest.mark.parametrize("metric",("high","low"))
 def test_hko_normal_writer_clock_proof_reaches_legal_pin_and_same_cut_consumers(tmp_path,monkeypatch,metric):
-    fixture = _hko_clock_normal_materializer_fixture(tmp_path,monkeypatch,metric)
+    fixture = _hko_clock_normal_materializer_fixture(tmp_path,monkeypatch,metric,prior_hour=6)
     try:
         from src.data import replacement_forecast_bundle_reader as reader
         row = fixture.conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_id=?",
@@ -48895,7 +48927,7 @@ def test_hko_normal_writer_clock_proof_reaches_legal_pin_and_same_cut_consumers(
         from src.data.raw_forecast_artifact_manifest import write_manifest_to_db
         capture = fixture.cut+_dt.timedelta(minutes=1)
         incomplete = build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(fixture.artifact_path,
-            request=replace(fixture.anchor_request,run=fixture.cut.replace(hour=0,minute=0)),metric=metric,
+            request=replace(fixture.anchor_request,run=fixture.request.source_cycle_time+_dt.timedelta(hours=6)),metric=metric,
             source_available_at=capture,captured_at=capture,
             product_metadata={"city":"Hong Kong","target_date":"2026-09-30"})
         incomplete_artifact_id = write_manifest_to_db(fixture.conn,incomplete)
@@ -48962,8 +48994,7 @@ def test_hko_normal_writer_clock_proof_reaches_legal_pin_and_same_cut_consumers(
         from src.state.source_run_repo import write_source_run
         from src.data import bayes_precision_fusion_download as dl
         from src.data.replacement_forecast_materializer import materialize_replacement_forecast_live
-        from tests.test_station_forecast_live_ingest_wiring import _station_grid_cohort
-        new_cycle = fixture.cut.replace(hour=0,minute=0)
+        new_cycle = fixture.request.source_cycle_time+_dt.timedelta(hours=6)
         new_capture = decision+_dt.timedelta(minutes=2)
         run = dict(fixture.conn.execute("SELECT * FROM source_run WHERE source_run_id=?",
                                        (fixture.request.baseline_source_run_id,)).fetchone())
@@ -48990,11 +49021,11 @@ def test_hko_normal_writer_clock_proof_reaches_legal_pin_and_same_cut_consumers(
         columns = tuple(snapshot)
         fixture.conn.execute("INSERT INTO ensemble_snapshots ("+",".join(columns)+") VALUES ("+
             ",".join("?" for _ in columns)+")",tuple(snapshot[name] for name in columns))
-        _station_grid_cohort(monkeypatch,fixture.conn,fixture.db,"Hong Kong",target_dates=("2026-09-30",),
-                             cycle=new_cycle,captured=new_capture)
+        fixture.write_provider_cohort(new_cycle,new_capture)
         raw_body = fixture.artifact_path.read_bytes()
         def current_anchor_http(_url,params,**kwargs):
             kwargs["capture_entity_body"](raw_body,new_capture.timestamp())
+            kwargs["capture_network_response"](raw_body,new_capture.timestamp(),{"content-type":"application/json"})
             return json.loads(raw_body)
         monkeypatch.setattr("src.data.openmeteo_client.fetch",current_anchor_http)
         assert dl.download_bayes_precision_fusion_extra_raw_inputs(forecast_db=fixture.db,cycle=new_cycle,
