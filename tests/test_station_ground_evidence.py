@@ -176,8 +176,9 @@ def test_failed_new_manifest_leaves_no_authorizing_db_reference_and_normal_retry
         writer(path, body)
 
     monkeypatch.setattr(ground, "_write_immutable", fail_manifest)
-    with pytest.raises(OSError, match="manifest disk failure"):
-        _archive(db)
+    report = ground.archive_station_ground_evidence(db, ["Hong Kong"])
+    assert report["status"] == "GROUND_SOURCE_UNPROVEN"
+    assert "manifest disk failure" in report["degraded"]["Hong Kong"]
     with sqlite3.connect(db) as conn:
         assert conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts").fetchone()[0] == 0
     assert tuple(ground._store_root().glob("*.body"))  # recoverable orphan, not authority
@@ -302,3 +303,82 @@ def test_normal_producer_archives_before_queue_discovery_cutoff(tmp_path, monkey
             "seed_processed_dir", "seed_failed_dir", "raw_manifest_dir")}}
     producer._run_replacement_forecast_live_materialization_queue_once(cfg)
     assert len(calls) == 1
+
+
+def test_corrupt_same_body_metadata_normal_archive_appends_causal_recovery_and_preserves_other_city(tmp_path, monkeypatch):
+    from tests.test_config import _official_kord_registry
+    db, _, _, _, clock = _setup(tmp_path, monkeypatch)
+    original = _archive(db)
+    _official_kord_registry(tmp_path, monkeypatch)
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE raw_forecast_artifacts SET artifact_metadata_json='{}' WHERE artifact_id=?", (original["artifact_id"],))
+        broken = conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?", (original["artifact_id"],)).fetchone()
+    assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at="2026-09-29T22:00:00Z") is None
+    clock[0] = datetime(2026, 9, 29, 23, tzinfo=UTC)
+    report = ground.archive_station_ground_evidence(db, ["Hong Kong", "Chicago"])
+    assert set(report["archived"]) == {"Hong Kong", "Chicago"}
+    recovery = report["archived"]["Hong Kong"]
+    assert recovery["revision"] == ground.MANIFEST_KIND
+    assert recovery["captured_at"] == original["captured_at"]
+    assert recovery["recorded_at"] == "2026-09-29T23:00:00+00:00"
+    assert recovery["facts_identity"] == original["facts_identity"]
+    assert recovery["recovery_of"]["artifact_id"] == original["artifact_id"]
+    assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at="2026-09-29T22:59:59Z") is None
+    assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at="2026-09-29T23:00:00Z") == recovery
+    assert ground.read_frozen_station_ground_evidence(recovery, decision_at="2026-09-29T23:00:00Z") == recovery
+    assert ground.read_current_station_ground_evidence(db, city="Chicago", decision_at="2026-09-29T23:00:00Z") is not None
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?", (original["artifact_id"],)).fetchone() == broken
+        assert conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts").fetchone()[0] == 3
+    clock[0] = datetime(2026, 9, 30, tzinfo=UTC)
+    repeat = ground.archive_station_ground_evidence(db, ["Hong Kong", "Chicago"])
+    assert repeat["archived"]["Hong Kong"] == recovery
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts").fetchone()[0] == 3
+        conn.execute("UPDATE raw_forecast_artifacts SET artifact_metadata_json='{}' WHERE artifact_id=?", (recovery["artifact_id"],))
+    assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at="2026-09-30T00:00:00Z") is None
+    # Real normal re-possession creates a later immutable manifest; an older
+    # valid manifest is never chosen to hide the damaged latest candidate.
+    healed = ground.archive_station_ground_evidence(db, ["Hong Kong"])["archived"]["Hong Kong"]
+    assert healed["artifact_id"] != recovery["artifact_id"]
+    assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at="2026-09-29T23:59:59Z") is None
+    assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at="2026-09-30T00:00:00Z") == healed
+
+
+@pytest.mark.parametrize("failed_city", ("Hong Kong", "Chicago"))
+def test_city_local_manifest_failure_does_not_rollback_another_city_progress(tmp_path, monkeypatch, failed_city):
+    from tests.test_config import _official_kord_registry
+    db, _, _, _, _ = _setup(tmp_path, monkeypatch)
+    _official_kord_registry(tmp_path, monkeypatch)
+    writer = ground._write_immutable
+    failed_station = "HKO_HQ" if failed_city == "Hong Kong" else "KORD"
+    def failed_manifest(path, body):
+        if path.name.startswith(failed_station + ".") and path.name.endswith(".manifest.json"):
+            raise OSError("city-local storage failure")
+        writer(path, body)
+    monkeypatch.setattr(ground, "_write_immutable", failed_manifest)
+    report = ground.archive_station_ground_evidence(db, ["Hong Kong", "Chicago"])
+    valid_city = "Chicago" if failed_city == "Hong Kong" else "Hong Kong"
+    assert set(report["archived"]) == {valid_city}
+    assert failed_city in report["degraded"]
+    assert ground.read_current_station_ground_evidence(db, city=valid_city, decision_at="2026-09-29T22:00:00Z") is not None
+    assert ground.read_current_station_ground_evidence(db, city=failed_city, decision_at="2026-09-29T22:00:00Z") is None
+    monkeypatch.setattr(ground, "_write_immutable", writer)
+    assert set(ground.archive_station_ground_evidence(db, [failed_city])["archived"]) == {failed_city}
+
+
+def test_real_sqlite_writer_error_remains_visible_and_rolls_back_whole_transaction(tmp_path, monkeypatch):
+    from tests.test_config import _official_kord_registry
+    from src.state import db as state_db
+    db, _, _, _, _ = _setup(tmp_path, monkeypatch)
+    _official_kord_registry(tmp_path, monkeypatch)
+    class FailedWriter(sqlite3.Connection):
+        def execute(self, statement, parameters=()):
+            if statement.strip().startswith("INSERT INTO raw_forecast_artifacts") and "station_ground::HKO_HQ" in parameters:
+                raise sqlite3.OperationalError("simulated actual DB writer failure")
+            return super().execute(statement, parameters)
+    monkeypatch.setattr(state_db, "_connect", lambda path, **_kw: sqlite3.connect(path, factory=FailedWriter))
+    with pytest.raises(sqlite3.OperationalError, match="actual DB writer failure"):
+        ground.archive_station_ground_evidence(db, ["Hong Kong", "Chicago"])
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts").fetchone()[0] == 0

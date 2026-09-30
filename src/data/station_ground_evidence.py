@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 KIND = "station_ground_source_entity_body_v1"
+MANIFEST_KIND = "station_ground_evidence_manifest_v1"
 UTC = timezone.utc
 _READ_BUDGET_SECONDS = 2.0
 
@@ -88,6 +89,137 @@ def _write_immutable(path: Path, body: bytes) -> None:
         Path(temporary).unlink(missing_ok=True)
 
 
+_BODY_FIELDS = ("source_id", "product_id", "data_version", "source_cycle_time",
+    "source_available_at", "captured_at", "recorded_at", "artifact_path", "sha256",
+    "byte_size", "request_url", "request_params_json", "training_allowed")
+
+
+def _body_dependency(conn: sqlite3.Connection, artifact_id: int) -> dict[str, object]:
+    if isinstance(artifact_id, bool) or not isinstance(artifact_id, int) or artifact_id <= 0:
+        raise ValueError("station ground body artifact identity is invalid")
+    row = conn.execute(f"SELECT {','.join(_BODY_FIELDS)},artifact_metadata_json FROM raw_forecast_artifacts WHERE artifact_id=?", (artifact_id,)).fetchone()
+    if row is None:
+        raise ValueError("station ground body artifact missing")
+    return {"artifact_id": artifact_id, **dict(zip(_BODY_FIELDS, tuple(row)[:-1], strict=True)),
+        "original_metadata_sha256": hashlib.sha256(str(row[-1]).encode()).hexdigest()}
+
+
+def _read_body_dependency(dependency: Mapping[str, object], *, conn: sqlite3.Connection, decision: datetime) -> bytes:
+    if isinstance(dependency.get("artifact_id"), bool) or not isinstance(dependency.get("artifact_id"), int):
+        raise ValueError("station ground body artifact identity is invalid")
+    if _body_dependency(conn, int(dependency["artifact_id"])) != dependency:
+        raise ValueError("station ground body DB identity differs")
+    capture, available, recorded, cycle = (_stamp(dependency[key]) for key in
+        ("captured_at", "source_available_at", "recorded_at", "source_cycle_time"))
+    if not capture == available == cycle or not capture <= recorded <= decision:
+        raise ValueError("station ground body original clocks differ")
+    path = Path(str(dependency["artifact_path"]))
+    if path.parent.resolve() != _store_root() or path.is_symlink() or not path.is_file() or path.stat().st_size > 256*1024:
+        raise ValueError("station ground body owned path differs")
+    body = path.read_bytes()
+    if len(body) != dependency["byte_size"] or hashlib.sha256(body).hexdigest() != dependency["sha256"] or dependency["training_allowed"] != 0:
+        raise ValueError("station ground body bytes differ")
+    return body
+
+
+def _archive_recovery(conn, prepared, old_id, deadline):
+    """Append actual manifest bytes; never amend a damaged body's metadata."""
+    from src.config import station_ground_facts_from_bytes
+    name, source_kind, station_id, facts, audit, digest, body, body_path, captured = prepared
+    now = datetime.now(UTC)
+    dependency = _body_dependency(conn, int(old_id))
+    original_body = _read_body_dependency(dependency, conn=conn, decision=now)
+    source_id, product_id = f"station_ground::{station_id}", f"station_ground::{source_kind}::{station_id}"
+    if (original_body != body or dependency["sha256"] != digest
+        or dependency["source_id"] != source_id or dependency["product_id"] != product_id
+        or dependency["data_version"] != KIND or dependency["request_url"] != facts["source_url"]
+        or json.loads(str(dependency["request_params_json"])) != {"source_kind": source_kind, "station_id": station_id}
+        or station_ground_facts_from_bytes(source_kind=source_kind, station_id=station_id, raw_body=original_body) != facts):
+        raise ValueError("ground recovery original entity is unbound")
+    # An existing valid recovery for this exact body/invalid-metadata/facts
+    # combination keeps its own first canonical possession on every poll.
+    for row in conn.execute("SELECT artifact_metadata_json FROM raw_forecast_artifacts WHERE source_id=? AND product_id=? AND data_version=? ORDER BY artifact_id DESC", (source_id, product_id, MANIFEST_KIND)):
+        _check(deadline)
+        try:
+            existing = json.loads(str(row[0]))["station_ground_evidence"]
+            if existing["input_bodies"] == {"ground": dependency} and existing["facts"] == facts:
+                if read_frozen_station_ground_evidence(existing, decision_at=now, deadline_monotonic=deadline) is not None:
+                    return existing
+                break  # newest matching recovery is invalid, not an older fallback
+        except (KeyError, TypeError, ValueError):
+            break
+    original = str(dependency["captured_at"])
+    payload = {"revision": MANIFEST_KIND, "source_id": source_id, "product_id": product_id,
+        "source_kind": source_kind, "station_id": station_id, "body_sha256": digest,
+        "byte_size": len(body), "body_path": str(body_path), "source_url": facts["source_url"],
+        "approved_artifact_ref": audit["artifact_ref"], "source_cycle_time": original,
+        "source_cycle_role": "ground_snapshot_capture_not_forecast_issued", "source_available_at": original,
+        "captured_at": original, "recorded_at": now.isoformat(), "facts": facts,
+        "facts_identity": ground_facts_identity(facts), "source_audit": audit,
+        "forecast_db": str(Path(conn.execute("PRAGMA database_list").fetchone()[2]).resolve()),
+        "input_bodies": {"ground": dependency}, "recovery_of": {
+            "artifact_id": int(old_id), "invalid_metadata_sha256": dependency["original_metadata_sha256"]}}
+    manifest = _encoded(payload)
+    manifest_sha = hashlib.sha256(manifest).hexdigest()
+    manifest_path = _store_root() / f"{station_id}.{manifest_sha}.manifest.json"
+    _write_immutable(manifest_path, manifest)
+    _check(deadline)
+    cursor = conn.execute("""INSERT INTO raw_forecast_artifacts
+        (source_id,product_id,data_version,source_cycle_time,source_available_at,captured_at,
+         artifact_path,sha256,byte_size,request_url,request_params_json,artifact_metadata_json,recorded_at,training_allowed)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,'{}',?,0)""", (source_id, product_id, MANIFEST_KIND,
+        original, original, original, str(manifest_path), manifest_sha, len(manifest), facts["source_url"],
+        json.dumps({"source_kind": source_kind, "station_id": station_id}, sort_keys=True), payload["recorded_at"]))
+    evidence = {**payload, "artifact_id": int(cursor.lastrowid), "manifest_path": str(manifest_path), "manifest_sha256": manifest_sha}
+    conn.execute("UPDATE raw_forecast_artifacts SET artifact_metadata_json=? WHERE artifact_id=? AND artifact_metadata_json='{}'",
+        (json.dumps({"station_ground_evidence": evidence}, sort_keys=True), cursor.lastrowid))
+    return evidence
+
+
+def _archive_entity(conn, prepared, forecast_db, deadline):
+    name, source_kind, station_id, facts, audit, digest, body, body_path, captured = prepared
+    source_id, product_id = f"station_ground::{station_id}", f"station_ground::{source_kind}::{station_id}"
+    old = conn.execute("SELECT artifact_id,artifact_metadata_json FROM raw_forecast_artifacts WHERE source_id=? AND product_id=? AND data_version=? AND sha256=? ORDER BY artifact_id LIMIT 1", (source_id, product_id, KIND, digest)).fetchone()
+    if old is not None:
+        try:
+            evidence = json.loads(str(old[1]))["station_ground_evidence"]
+            manifest = _encoded({key:value for key,value in evidence.items() if key not in {"manifest_path", "manifest_sha256"}})
+            manifest_path = Path(evidence["manifest_path"])
+            if manifest_path.parent.resolve() != _store_root() or hashlib.sha256(manifest).hexdigest() != evidence["manifest_sha256"]:
+                raise ValueError("station ground canonical manifest identity differs")
+            _write_immutable(manifest_path, manifest)
+            if read_frozen_station_ground_evidence(evidence, decision_at=datetime.now(UTC), deadline_monotonic=deadline) is None:
+                raise ValueError("station ground canonical entity is invalid")
+            return evidence
+        except (KeyError, TypeError, ValueError):
+            return _archive_recovery(conn, prepared, old[0], deadline)
+    recorded, original = datetime.now(UTC).isoformat(), captured.isoformat()
+    cursor = conn.execute("""INSERT INTO raw_forecast_artifacts
+        (source_id,product_id,data_version,source_cycle_time,source_available_at,captured_at,
+         artifact_path,sha256,byte_size,request_url,request_params_json,artifact_metadata_json,recorded_at,training_allowed)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,'{}',?,0)""", (source_id, product_id, KIND, original, original,
+        original, str(body_path), digest, len(body), facts["source_url"],
+        json.dumps({"source_kind": source_kind, "station_id": station_id}, sort_keys=True), recorded))
+    evidence = {"revision": KIND, "artifact_id": int(cursor.lastrowid), "source_id": source_id,
+        "product_id": product_id, "source_kind": source_kind, "station_id": station_id,
+        "body_sha256": digest, "byte_size": len(body), "body_path": str(body_path),
+        "source_url": facts["source_url"], "approved_artifact_ref": audit["artifact_ref"],
+        "source_cycle_time": original, "source_cycle_role": "ground_snapshot_capture_not_forecast_issued",
+        "source_available_at": original, "captured_at": original, "recorded_at": recorded,
+        "facts": facts, "facts_identity": ground_facts_identity(facts), "source_audit": audit,
+        "forecast_db": str(Path(forecast_db).resolve())}
+    manifest = _encoded(evidence)
+    manifest_sha = hashlib.sha256(manifest).hexdigest()
+    manifest_path = _store_root() / f"{station_id}.{digest}.{manifest_sha}.manifest.json"
+    _write_immutable(manifest_path, manifest)
+    evidence.update(manifest_path=str(manifest_path), manifest_sha256=manifest_sha)
+    # Only this newly inserted, still-uncommitted row is completed. Never amend
+    # an existing body, broken metadata, raw value or any source clock.
+    conn.execute("UPDATE raw_forecast_artifacts SET artifact_metadata_json=? WHERE artifact_id=? AND artifact_metadata_json='{}'",
+        (json.dumps({"station_ground_evidence": evidence}, sort_keys=True), cursor.lastrowid))
+    return evidence
+
+
 def archive_station_ground_evidence(
     forecast_db: Path, cities: Sequence[str], *, deadline_monotonic: float | None = None,
 ) -> Mapping[str, object]:
@@ -100,7 +232,7 @@ def archive_station_ground_evidence(
     from src.config import CONFIG_DIR, runtime_cities_by_name, runtime_station_geometry_for_city, station_ground_source_artifact_ref, station_ground_facts_from_bytes
     from src.state.db import _connect
     deadline = _deadline(deadline_monotonic)
-    prepared = []
+    prepared, degraded = [], {}
     roster = runtime_cities_by_name()
     for name in sorted(set(cities)):
         _check(deadline)
@@ -126,54 +258,32 @@ def archive_station_ground_evidence(
         if captured > datetime.now(UTC):
             continue
         body_path = _store_root() / f"{station_id}.{digest}.body"
-        _write_immutable(body_path, body)
+        try:
+            _write_immutable(body_path, body)
+        except (OSError, ValueError) as exc:
+            degraded[name] = f"{type(exc).__name__}:{exc}"
+            continue
         prepared.append((name, source_kind, station_id, dict(facts), dict(audit), digest, body, body_path, captured))
     if not prepared:
-        return {"archived": {}, "status": "GROUND_SOURCE_UNPROVEN"}
+        return {"archived": {}, "degraded": degraded, "status": "GROUND_SOURCE_UNPROVEN"}
     conn = _connect(Path(forecast_db), write_class="live", deadline_monotonic=deadline)
     archived = {}
     try:
         conn.execute("BEGIN IMMEDIATE")
-        for name, source_kind, station_id, facts, audit, digest, body, body_path, captured in prepared:
+        for item in prepared:
             _check(deadline)
-            source_id, product_id = f"station_ground::{station_id}", f"station_ground::{source_kind}::{station_id}"
-            old = conn.execute("SELECT artifact_id,artifact_metadata_json FROM raw_forecast_artifacts WHERE source_id=? AND product_id=? AND data_version=? AND sha256=? ORDER BY artifact_id LIMIT 1", (source_id, product_id, KIND, digest)).fetchone()
-            if old is not None:
-                evidence = json.loads(str(old[1]))["station_ground_evidence"]
-                manifest = _encoded({key:value for key,value in evidence.items()
-                    if key not in {"manifest_path", "manifest_sha256"}})
-                manifest_path = Path(evidence["manifest_path"])
-                if manifest_path.parent.resolve() != _store_root() or hashlib.sha256(manifest).hexdigest() != evidence["manifest_sha256"]:
-                    raise ValueError("station ground canonical manifest identity differs")
-                _write_immutable(manifest_path, manifest)
-                archived[name] = evidence
-                continue
-            recorded = datetime.now(UTC).isoformat()
-            original = captured.isoformat()
-            cursor = conn.execute("""INSERT INTO raw_forecast_artifacts
-                (source_id,product_id,data_version,source_cycle_time,source_available_at,captured_at,
-                 artifact_path,sha256,byte_size,request_url,request_params_json,artifact_metadata_json,recorded_at,training_allowed)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,'{}',?,0)""",
-                (source_id,product_id,KIND,original,original,original,str(body_path),digest,len(body),facts["source_url"],
-                 json.dumps({"source_kind":source_kind,"station_id":station_id},sort_keys=True),recorded))
-            evidence = {"revision":KIND,"artifact_id":int(cursor.lastrowid),"source_id":source_id,"product_id":product_id,
-                "source_kind":source_kind,"station_id":station_id,"body_sha256":digest,"byte_size":len(body),
-                "body_path":str(body_path),"source_url":facts["source_url"],"approved_artifact_ref":audit["artifact_ref"],
-                "source_cycle_time":original,"source_cycle_role":"ground_snapshot_capture_not_forecast_issued",
-                "source_available_at":original,"captured_at":original,"recorded_at":recorded,
-                "facts":facts,"facts_identity":ground_facts_identity(facts),"source_audit":audit,
-                "forecast_db":str(Path(forecast_db).resolve())}
-            manifest = _encoded(evidence)
-            manifest_sha = hashlib.sha256(manifest).hexdigest()
-            manifest_path = _store_root() / f"{station_id}.{digest}.{manifest_sha}.manifest.json"
-            _write_immutable(manifest_path, manifest)
-            evidence.update(manifest_path=str(manifest_path),manifest_sha256=manifest_sha)
-            # This row is newly inserted in this still-uncommitted transaction.
-            # No existing raw, body record or capture clock is ever updated.
-            conn.execute("UPDATE raw_forecast_artifacts SET artifact_metadata_json=? WHERE artifact_id=? AND artifact_metadata_json='{}'", (json.dumps({"station_ground_evidence":evidence},sort_keys=True),cursor.lastrowid))
-            archived[name] = evidence
+            name = item[0]
+            conn.execute("SAVEPOINT station_ground_entity")
+            try:
+                archived[name] = _archive_entity(conn, item, forecast_db, deadline)
+            except (KeyError, TypeError, ValueError, OSError) as exc:
+                conn.execute("ROLLBACK TO SAVEPOINT station_ground_entity")
+                degraded[name] = f"{type(exc).__name__}:{exc}"
+            finally:
+                conn.execute("RELEASE SAVEPOINT station_ground_entity")
         conn.commit()
-        return {"archived":archived,"status":"GROUND_SOURCE_ARCHIVED"}
+        return {"archived":archived,"degraded": degraded,
+            "status":"GROUND_SOURCE_ARCHIVED" if archived else "GROUND_SOURCE_UNPROVEN"}
     except Exception:
         conn.rollback()
         raise
@@ -186,8 +296,10 @@ def read_frozen_station_ground_evidence(evidence: object, *, decision_at: object
     from src.config import station_ground_source_artifact_ref, station_ground_facts_from_bytes
     from src.state.db import _connect_read_only
     try:
-        if not isinstance(evidence, Mapping) or evidence.get("revision") != KIND:
+        if not isinstance(evidence, Mapping) or evidence.get("revision") not in {KIND, MANIFEST_KIND}:
             return None
+        if evidence.get("revision") == MANIFEST_KIND:
+            return _read_manifest_evidence(evidence, decision_at=decision_at, deadline_monotonic=deadline_monotonic)
         deadline = _deadline(deadline_monotonic)
         decision = _stamp(decision_at)
         manifest_path, body_path = Path(str(evidence["manifest_path"])), Path(str(evidence["body_path"]))
@@ -242,6 +354,64 @@ def read_frozen_station_ground_evidence(evidence: object, *, decision_at: object
         return None
 
 
+def _read_manifest_evidence(evidence, *, decision_at, deadline_monotonic=None):
+    from src.config import station_ground_facts_from_bytes, station_ground_source_artifact_ref
+    from src.state.db import _connect_read_only
+    deadline = _deadline(deadline_monotonic)
+    decision = _stamp(decision_at)
+    path = Path(str(evidence["manifest_path"]))
+    if path.parent.resolve() != _store_root() or path.is_symlink() or not path.is_file() or path.stat().st_size > 32*1024:
+        return None
+    manifest = path.read_bytes()
+    if hashlib.sha256(manifest).hexdigest() != evidence["manifest_sha256"] or path.name != f"{evidence['station_id']}.{evidence['manifest_sha256']}.manifest.json":
+        return None
+    payload = json.loads(manifest)
+    if payload != {key:value for key,value in evidence.items() if key not in {"artifact_id", "manifest_path", "manifest_sha256"}}:
+        return None
+    if (evidence["approved_artifact_ref"] != station_ground_source_artifact_ref(source_kind=evidence["source_kind"], station_id=evidence["station_id"])
+        or _stamp(evidence["source_audit"]["checked_at"]) > _stamp(evidence["recorded_at"])
+        or not _stamp(evidence["captured_at"]) <= _stamp(evidence["recorded_at"]) <= decision
+        or evidence["source_id"] != f"station_ground::{evidence['station_id']}"
+        or evidence["product_id"] != f"station_ground::{evidence['source_kind']}::{evidence['station_id']}"
+        or evidence["source_cycle_role"] != "ground_snapshot_capture_not_forecast_issued"
+        or evidence["source_audit"]["body_sha256"] != evidence["body_sha256"]
+        or evidence["source_audit"]["artifact_ref"] != evidence["approved_artifact_ref"]
+        or isinstance(evidence["artifact_id"], bool) or not isinstance(evidence["artifact_id"], int)):
+        return None
+    _check(deadline)
+    conn = _connect_read_only(Path(str(evidence["forecast_db"])), deadline_monotonic=deadline)
+    try:
+        row = conn.execute(f"SELECT {','.join(_BODY_FIELDS)},artifact_metadata_json FROM raw_forecast_artifacts WHERE artifact_id=?", (evidence["artifact_id"],)).fetchone()
+        expected = (evidence["source_id"], evidence["product_id"], MANIFEST_KIND, evidence["source_cycle_time"],
+            evidence["source_available_at"], evidence["captured_at"], evidence["recorded_at"], str(path),
+            evidence["manifest_sha256"], len(manifest), evidence["source_url"],
+            json.dumps({"source_kind": evidence["source_kind"], "station_id": evidence["station_id"]}, sort_keys=True), 0)
+        if row is None or tuple(row)[:-1] != expected or json.loads(str(row[-1])) != {"station_ground_evidence": dict(evidence)}:
+            return None
+        bodies = evidence["input_bodies"]
+        if set(bodies) != {"ground"}:
+            return None  # WMD identity bridge has its own separately approved branch.
+        dependency = bodies["ground"]
+        body = _read_body_dependency(dependency, conn=conn, decision=decision)
+        if (dependency["source_id"] != evidence["source_id"] or dependency["product_id"] != evidence["product_id"]
+            or dependency["data_version"] != KIND or dependency["sha256"] != evidence["body_sha256"]
+            or dependency["artifact_path"] != evidence["body_path"] or dependency["byte_size"] != evidence["byte_size"]
+            or dependency["request_url"] != evidence["source_url"]
+            or _stamp(dependency["recorded_at"]) > _stamp(evidence["recorded_at"])
+            or dependency["captured_at"] != evidence["captured_at"]
+            or dependency["source_cycle_time"] != evidence["source_cycle_time"]
+            or dependency["source_available_at"] != evidence["source_available_at"]
+            or json.loads(str(dependency["request_params_json"])) != {"source_kind": evidence["source_kind"], "station_id": evidence["station_id"]}
+            or evidence["recovery_of"] != {"artifact_id": dependency["artifact_id"], "invalid_metadata_sha256": dependency["original_metadata_sha256"]}):
+            return None
+        facts = station_ground_facts_from_bytes(source_kind=evidence["source_kind"], station_id=evidence["station_id"], raw_body=body)
+        if facts != evidence["facts"] or facts is None or ground_facts_identity(facts) != evidence["facts_identity"]:
+            return None
+        return dict(evidence)
+    finally:
+        conn.close()
+
+
 def read_current_station_ground_evidence(forecast_db: Path, *, city: str, decision_at: object) -> Mapping[str, object] | None:
     """Read the latest causal canonical source entity; no network or file writes."""
     from src.config import runtime_cities_by_name
@@ -259,7 +429,7 @@ def read_current_station_ground_evidence(forecast_db: Path, *, city: str, decisi
     conn = None
     try:
         conn = _connect_read_only(Path(forecast_db), deadline_monotonic=deadline)
-        rows = conn.execute("SELECT artifact_metadata_json,recorded_at,artifact_id FROM raw_forecast_artifacts WHERE source_id=? AND data_version=? ORDER BY artifact_id DESC", (f"station_ground::{station_id}",KIND))
+        rows = conn.execute("SELECT artifact_metadata_json,recorded_at,artifact_id FROM raw_forecast_artifacts WHERE source_id=? AND data_version IN (?,?) ORDER BY artifact_id DESC", (f"station_ground::{station_id}",KIND,MANIFEST_KIND))
         latest = None
         while batch := rows.fetchmany(32):
             _check(deadline)
