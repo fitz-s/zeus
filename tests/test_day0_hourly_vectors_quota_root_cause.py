@@ -174,9 +174,14 @@ def test_incomplete_bundle_retry_reuses_cached_models_via_shared_payload_cache(
 
     def _payload() -> dict:
         return {
+            "latitude": location[0], "longitude": location[1], "elevation": 7.0,
+            "timezone": location[2], "utc_offset_seconds": 28800,
             "hourly": {
-                "time": ["2026-09-06T00:00", "2026-09-06T21:00"],
-                "temperature_2m": [24.0, 30.0],
+                "time": [
+                    (run + timedelta(hours=hour)).astimezone(ZoneInfo(location[2])).strftime("%Y-%m-%dT%H:%M")
+                    for hour in range(72)
+                ],
+                "temperature_2m": [24.0 + hour % 7 for hour in range(72)],
             },
             "hourly_units": {"temperature_2m": "°C"},
         }
@@ -190,7 +195,14 @@ def test_incomplete_bundle_retry_reuses_cached_models_via_shared_payload_cache(
         ):
             failed_already["done"] = True
             raise RuntimeError("synthetic transport failure for gem_hrdps_continental")
-        return _payload()
+        payload = _payload()
+        raw = _json.dumps(payload, sort_keys=True).encode()
+        captured = (run + timedelta(hours=7)).timestamp()
+        if "capture_entity_body" in kwargs:
+            kwargs["capture_entity_body"](raw, captured)
+        if "capture_network_response" in kwargs:
+            kwargs["capture_network_response"](raw, captured, {"content-type": "application/json"})
+        return payload
 
     monkeypatch.setattr(client, "fetch", _fetch)
 
