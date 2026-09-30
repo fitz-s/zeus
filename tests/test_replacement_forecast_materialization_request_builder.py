@@ -305,8 +305,8 @@ def test_station_ground_wmd_dual_entity_producer_request_reset(tmp_path, monkeyp
     monkeypatch.setattr(transport, "source_cell_geometry_proof", lambda **_kwargs: dict(cell))
     seed = _write_inputs(tmp_path)
     seed.update(city=city_name, target_date="2026-09-30", temperature_metric=metric,
-                source_cycle_time="2026-09-29T12:00:00+00:00", computed_at="2026-09-30T00:30:00+00:00",
-                expires_at="2026-09-30T01:30:00+00:00", baseline_source_available_at="2026-09-29T18:00:00+00:00",
+                source_cycle_time="2026-09-29T12:00:00+00:00", computed_at="2026-09-30T01:15:00+00:00",
+                expires_at="2026-09-30T02:15:00+00:00", baseline_source_available_at="2026-09-29T18:00:00+00:00",
                 openmeteo_source_available_at="2026-09-29T18:00:00+00:00")
     (tmp_path / "openmeteo_payload.json").write_bytes(raw)
 
@@ -328,7 +328,7 @@ def test_station_ground_wmd_dual_entity_producer_request_reset(tmp_path, monkeyp
     assert proof["facts"]["station_id"] == city.wu_station
     assert proof["facts"]["elevation_m"] == height
     assert proof["audit"]["bridge"]["body_sha256"] == rows[city_name]["station_ground_proof"]["bridge"]["body_sha256"]
-    assert proof["audit"]["checked_at"] == "2026-09-30T00:15:00Z"
+    assert proof["audit"]["checked_at"] == "2026-09-30T01:00:00Z"
     assert request.openmeteo_precision_guard.metadata.requested_lat == city.lat
 
 

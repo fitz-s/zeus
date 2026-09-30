@@ -1005,13 +1005,13 @@ def _official_wmd_registry(tmp_path, monkeypatch, city_name="Paris"):
     bridge_ref = config.station_ground_identity_bridge_artifact_ref(source_kind=config.OSCAR_WMD_SOURCE_KIND, station_id=station_id)
     raw = (config.PROJECT_ROOT / ref).read_bytes()
     bridge = (config.PROJECT_ROOT / bridge_ref).read_bytes()
-    expected = {"LFPB": "c673b5f8cbb19497e9ce42178ba6105280b8bc4691fee9e32651b8e442cb0e46",
-                "EFHK": "7fb0091615e7ae0535cf6854203feed190b4b56b2befa95bcfab5fb16ec69492",
+    expected = {"LFPB": "c09e6bdb0264a44557cb0151f6fc852ddac77626b195b2f98f9163519dffefc1",
+                "EFHK": "0f38efb32e22d3dcd7203fdb35c3c26d39aa8f73b44c181a4fd8ceae443ae179",
                 "CYYZ": "12de79a33312f50585d372be9baa71e18e3d6c2a980d260b58c9531154a03e19",
                 "RPLL": "88f6e2e1cc2d8bab755a8dc1b2a6e28e6e6222f59e728c5ef6b49b2d2a006e24"}
     assert hashlib.sha256(raw).hexdigest() == expected[station_id]
     assert hashlib.sha256(bridge).hexdigest() == "8eff09fce91637f1d4f52a8bdecd15eee0f05626f3c05c31f8da198829f960d1"
-    checked = "2026-09-30T00:30:00Z" if station_id in {"CYYZ", "RPLL"} else "2026-09-30T00:15:00Z"
+    checked = "2026-09-30T00:30:00Z" if station_id in {"CYYZ", "RPLL"} else "2026-09-30T01:00:00Z"
     facts = config.station_ground_facts_from_bytes(
         source_kind=config.OSCAR_WMD_SOURCE_KIND, station_id=station_id, raw_body=raw,
         identity_bridge_bytes=bridge, effective_at=datetime.fromisoformat(checked.replace("Z", "+00:00")),
@@ -1047,15 +1047,15 @@ def test_wmd_ground_is_facility_not_equipment_or_awc_height(tmp_path, monkeypatc
     assert geometry["ground_facts"]["station_id"] == city.wu_station
     assert geometry["ground_facts"]["source_station_id"].startswith("0-20000-0-")
     assert geometry["ground_audit"]["bridge"]["artifact_ref"] == "config/awc_stationinfo_53_station.json"
-    assert geometry["ground_audit"]["checked_at"] == "2026-09-30T00:15:00Z"
+    assert geometry["ground_audit"]["checked_at"] == "2026-09-30T01:00:00Z"
     assert config.station_ground_facts_from_bytes(
         source_kind=config.OSCAR_WMD_SOURCE_KIND, station_id=city.wu_station, raw_body=artifact.read_bytes(),
         effective_at=datetime(2026, 9, 30, tzinfo=timezone.utc),
     ) is None
-    rows[city_name]["station_ground_proof"]["bridge"]["checked_at"] = "2026-09-30T00:16:00Z"
+    rows[city_name]["station_ground_proof"]["bridge"]["checked_at"] = "2026-09-30T01:01:00Z"
     registry.write_text(json.dumps(rows))
     assert config.runtime_station_geometry_for_city(city)["ground_status"] == "UNPROVEN"
-    rows[city_name]["station_ground_proof"]["checked_at"] = "2026-09-30T00:16:00Z"
+    rows[city_name]["station_ground_proof"]["checked_at"] = "2026-09-30T01:01:00Z"
     registry.write_text(json.dumps(rows))
     recovered = config.runtime_station_geometry_for_city(city)
     assert recovered["ground_status"] == "VERIFIED"
