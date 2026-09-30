@@ -1566,14 +1566,14 @@ def _shanghai_reader_current_certificate(tmp_path, monkeypatch):
         next(native,None)
 
 
-def _reader_with_posterior_fault(normal, **fields):
+def _reader_with_posterior_fault(normal, *, missing=False, **fields):
     """Negative-only exact row SELECT; licensed storage and all other reads stay real."""
     class FaultCursor:
         def __init__(self,cursor): self.cursor = cursor
         def fetchone(self):
             row = self.cursor.fetchone()
             if row is not None and "posterior_id" in row.keys() and row["posterior_id"]==normal.row["posterior_id"]:
-                return {**dict(row),**fields}
+                return None if missing else {**dict(row),**fields}
             return row
         def __getattr__(self,name): return getattr(self.cursor,name)
     class FaultRead:
@@ -2646,20 +2646,11 @@ def test_public_hwm_always_validates_declared_multiday_anchor_artifact(tmp_path)
     )
 
 
-def test_replacement_bundle_reader_requires_baseline_executable_bundle() -> None:
-    conn = _conn()
-    posterior_id = _insert_posterior(conn)
-
-    result = read_replacement_forecast_bundle(
-        conn,
-        baseline_bundle=None,
-        readiness=_readiness(posterior_id=posterior_id),
-        city="Shanghai",
-        target_date=date(2026, 6, 7),
-        temperature_metric="high",
-        decision_time=_dt(4),
-        current_bin_topology_hash="topology-hash",
-    )
+def test_replacement_bundle_reader_requires_baseline_executable_bundle(
+    _shanghai_reader_current_certificate,
+) -> None:
+    normal = _shanghai_reader_current_certificate
+    result = read_replacement_forecast_bundle(normal.conn,**{**normal.kwargs,"baseline_bundle":None})
 
     assert result.ok is False
     assert result.reason_code == "REPLACEMENT_BASELINE_EXECUTABLE_FORECAST_REQUIRED"
@@ -2732,45 +2723,26 @@ def test_replacement_bundle_reader_binds_to_readiness_posterior_not_latest_scope
     assert result.bundle.posterior_config_hash == "certified-config"
 
 
-def test_replacement_bundle_reader_blocks_unready_readiness_or_mismatched_ids() -> None:
-    conn = _conn()
-    posterior_id = _insert_posterior(conn)
-
-    blocked_readiness = _readiness(posterior_id=posterior_id, posterior_available_at=_dt(5))
-    blocked = read_replacement_forecast_bundle(
-        conn,
-        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
-        readiness=blocked_readiness,
-        city="Shanghai",
-        target_date=date(2026, 6, 7),
-        temperature_metric="high",
-        decision_time=_dt(4),
-        current_bin_topology_hash="topology-hash",
-    )
+def test_replacement_bundle_reader_blocks_unready_readiness_or_mismatched_ids(
+    _shanghai_reader_current_certificate,
+) -> None:
+    from dataclasses import replace
+    normal = _shanghai_reader_current_certificate
+    # The first fault is the readiness verdict itself, not a source-license
+    # shortcut. The healthy normal producer was accepted before this fault.
+    blocked_readiness = replace(normal.readiness,status="BLOCKED")
+    blocked = read_replacement_forecast_bundle(normal.conn,**{**normal.kwargs,"readiness":blocked_readiness})
     assert blocked.reason_code == "REPLACEMENT_READINESS_NOT_READY"
 
-    mismatch = read_replacement_forecast_bundle(
-        conn,
-        baseline_bundle=_BaselineBundle(_Evidence("different-b0-run")),
-        readiness=_readiness(posterior_id=posterior_id),
-        city="Shanghai",
-        target_date=date(2026, 6, 7),
-        temperature_metric="high",
-        decision_time=_dt(4),
-        current_bin_topology_hash="topology-hash",
-    )
+    mismatch = read_replacement_forecast_bundle(normal.conn,**{**normal.kwargs,
+        "baseline_bundle":_BaselineBundle(_Evidence("different-b0-run"))})
     assert mismatch.reason_code == "REPLACEMENT_BASELINE_READINESS_MISMATCH"
 
-    posterior_mismatch = read_replacement_forecast_bundle(
-        conn,
-        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
-        readiness=_readiness(posterior_id=posterior_id + 100),
-        city="Shanghai",
-        target_date=date(2026, 6, 7),
-        temperature_metric="high",
-        decision_time=_dt(4),
-        current_bin_topology_hash="topology-hash",
-    )
+    dependency = json.loads(json.dumps(normal.readiness.dependency_json))
+    posterior = next(item for item in dependency["dependencies"] if item["role"]=="soft_anchor_posterior")
+    posterior["posterior_id"] += 100
+    posterior_mismatch = read_replacement_forecast_bundle(normal.conn,**{**normal.kwargs,
+        "readiness":replace(normal.readiness,dependency_json=dependency)})
     assert posterior_mismatch.reason_code == "REPLACEMENT_POSTERIOR_READINESS_MISMATCH"
 
 
@@ -2786,45 +2758,35 @@ def test_replacement_bundle_reader_blocks_dependency_source_run_drift(
     assert openmeteo_drift.reason_code == "REPLACEMENT_DEPENDENCY_SOURCE_RUN_MISMATCH"
 
 
-def test_replacement_bundle_reader_blocks_missing_or_late_posterior() -> None:
-    conn = _conn()
-    missing = read_replacement_forecast_bundle(
-        conn,
-        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
-        readiness=_readiness(posterior_id=1),
-        city="Shanghai",
-        target_date=date(2026, 6, 7),
-        temperature_metric="high",
-        decision_time=_dt(4),
-        current_bin_topology_hash="topology-hash",
-    )
+def test_replacement_bundle_reader_blocks_missing_or_late_posterior(
+    _shanghai_reader_current_certificate,
+) -> None:
+    from dataclasses import replace
+    normal = _shanghai_reader_current_certificate
+    missing = read_replacement_forecast_bundle(_reader_with_posterior_fault(normal,missing=True),**normal.kwargs)
     assert missing.reason_code == "REPLACEMENT_POSTERIOR_MISSING"
 
-    late_id = _insert_posterior(conn, source_available_at=_dt(5))
-    late = read_replacement_forecast_bundle(
-        conn,
-        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
-        readiness=_readiness(posterior_id=late_id),
-        city="Shanghai",
-        target_date=date(2026, 6, 7),
-        temperature_metric="high",
-        decision_time=_dt(4),
-        current_bin_topology_hash="topology-hash",
-    )
+    future = normal.request.computed_at+timedelta(hours=1)
+    late = read_replacement_forecast_bundle(_reader_with_posterior_fault(normal,
+        source_available_at=future.isoformat()),**normal.kwargs)
     assert late.reason_code == "REPLACEMENT_POSTERIOR_AFTER_DECISION_TIME"
 
-    conn = _conn()
-    computed_late_id = _insert_posterior(conn, computed_at=_dt(5))
-    computed_late = read_replacement_forecast_bundle(
-        conn,
-        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
-        readiness=_readiness(posterior_id=computed_late_id),
-        city="Shanghai",
-        target_date=date(2026, 6, 7),
-        temperature_metric="high",
-        decision_time=_dt(4),
-        current_bin_topology_hash="topology-hash",
-    )
+    # Keep the normal certificate's independent materialization/audit binding;
+    # move only the consuming decision before its actual completed computation.
+    early_cut = normal.request.computed_at-timedelta(minutes=1)
+    premature = read_replacement_forecast_bundle(normal.conn,**{**normal.kwargs,
+        "decision_time":early_cut})
+    assert premature.reason_code == "REPLACEMENT_POSTERIOR_READINESS_MISMATCH"
+
+    # Negative-only caller claim: advertise the future certificate as available
+    # at the already-possessed source cut. This is not normal READY, is never
+    # persisted, and must not bypass the independent computation-time check.
+    dependency = json.loads(json.dumps(normal.readiness.dependency_json))
+    posterior = next(item for item in dependency["dependencies"] if item["role"]=="soft_anchor_posterior")
+    posterior["source_available_at"] = normal.row["source_available_at"]
+    computed_late = read_replacement_forecast_bundle(normal.conn,**{**normal.kwargs,
+        "decision_time":early_cut,
+        "readiness":replace(normal.readiness,dependency_json=dependency)})
     assert computed_late.reason_code == "REPLACEMENT_POSTERIOR_COMPUTED_AFTER_DECISION_TIME"
 
 
