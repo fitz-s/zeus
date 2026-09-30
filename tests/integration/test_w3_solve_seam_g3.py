@@ -5490,6 +5490,9 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(
         "_prepare_current_global_probability_family",
         current_family_for_condition,
     )
+    event = _global_day0_scope_event(
+        city="Dallas", source_run_id="content-revalidation"
+    )
     conn = sqlite3.connect(":memory:")
     buy_candidate = _global_test_buy_candidate(
         family_key=str(selected.family_key),
@@ -5506,7 +5509,7 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(
         decision=SimpleNamespace(candidate=buy_candidate),
     )
     rebound, current_day0_payload = era._current_global_actuation_prepared_family(
-        SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+        event,
         global_actuation=actuation,
         forecast_conn=conn,
         topology_conn=conn,
@@ -5567,7 +5570,7 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(
         decision=SimpleNamespace(candidate=sell_candidate),
     )
     sell_rebound, _sell_payload = era._current_global_actuation_prepared_family(
-        SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+        event,
         global_actuation=sell_actuation,
         forecast_conn=conn,
         topology_conn=conn,
@@ -5593,7 +5596,7 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(
         pytest.raises(ValueError, match="GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED"),
     ):
         era._current_global_actuation_prepared_family(
-            SimpleNamespace(),
+            event,
             global_actuation=actuation,
             forecast_conn=conn,
             topology_conn=conn,
@@ -5620,7 +5623,7 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(
         pytest.raises(ValueError, match="GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED"),
     ):
         era._current_global_actuation_prepared_family(
-            SimpleNamespace(),
+            event,
             global_actuation=actuation,
             forecast_conn=conn,
             topology_conn=conn,
@@ -6392,6 +6395,8 @@ def test_day0_fast_conditioning_entry_age_boundary_is_inclusive(
         2026, 8, 18, 3, 0, tzinfo=_dt.timezone.utc
     )
     bundle = SimpleNamespace(
+        city="Paris",
+        target_date="2026-08-18",
         provenance_json={
             key: {
                 "active": True,
@@ -6404,6 +6409,33 @@ def test_day0_fast_conditioning_entry_age_boundary_is_inclusive(
             }
         }
     )
+    if provisional:
+        from src.config import runtime_cities_by_name
+        from src.contracts.settlement_semantics import SettlementSemantics
+        from src.data.day0_hourly_vectors import (
+            Day0CurrentTemperatureState,
+            build_day0_remaining_probability_carrier,
+        )
+
+        # This unit test isolates the fast-age gate, but its WU-positive
+        # certificate still carries the real conditional-path representation.
+        carrier = build_day0_remaining_probability_carrier(
+            future_extremes_c=(30.0,), boundary_scenarios=((30.0, 1.0),),
+            metric="high", path_error_sigma_c=1.0, instrument_sigma_c=0.25,
+            bin_bounds_c=((None, 29.0), (30.0, 30.0), (31.0, None)),
+            n_point=1, n_samples=1, identity_inputs={"unit": "C"},
+            settlement_semantics=SettlementSemantics.for_city(
+                runtime_cities_by_name()["Paris"]
+            ),
+        )
+        bundle.provenance_json.update(
+            day0_remaining_carrier_content_identity=carrier["content_identity"],
+            day0_remaining_carrier_operator=carrier["operator"],
+            day0_remaining_carrier_probability_vector=carrier["q"],
+            day0_current_temperature_state=Day0CurrentTemperatureState(
+                value_native=30.0, observed_at=observed_at, source=source,
+            ).identity(),
+        )
     from src.data.day0_fast_obs import FAST_LANE_ENTRY_MAX_CACHE_AGE_S
 
     at_limit = observed_at + _dt.timedelta(
@@ -10467,6 +10499,22 @@ def test_fast_residual_day0_bundle_cannot_replace_remaining_window_q(
         )
         """
     )
+    from src.state.schema.observation_prints_schema import append_print, ensure_table
+
+    ensure_table(observations)
+    # AWC is provisional current evidence. Its survival authority comes from
+    # a prior, later-confirmed same-station/report pair, not an absorbing fact
+    # or a mocked WU likelihood for a different physical product.
+    for channel, fetched in (
+        ("aviationweather_metar", "2026-07-10T06:01:00+00:00"),
+        ("ogimet_metar_zbaa", "2026-07-10T06:05:00+00:00"),
+    ):
+        append_print(
+            observations, city="Beijing", station_id="ZBAA",
+            source_channel=channel, publish_ts_utc="2026-07-10T06:00:00+00:00",
+            fetched_at_utc=fetched, value_native=28.0, unit="C",
+            raw_report="METAR ZBAA 100600Z 00000KT 9999 SKC 28/20 Q1010",
+        )
     settlement_fact = {
         "observation_source": "wu_icao_history",
         "observation_time": "2026-07-11T06:00:00+00:00",
@@ -12204,7 +12252,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     assert captured["forecast_conn"] is forecast
     assert captured["world_conn"] is not topology
     assert captured["portfolio_state_provider"] is None
-    assert captured["epoch_superseded"]() is True
+    assert captured["epoch_superseded"]() == "wake:day0_extreme_event_committed"
     urgent_reason["value"] = "market_price_advanced"
     assert captured["restrict_to_family_keys"] is None
     assert callable(captured["candidate_policy_rejection_resolver"])
@@ -12370,7 +12418,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     assert captured["epoch_superseded"]() is False
     urgent_revision["value"] = (10, 11, 12)
     urgent_reason["value"] = "day0_extreme_event_committed"
-    assert captured["epoch_superseded"]() is True
+    assert captured["epoch_superseded"]() == "wake:day0_extreme_event_committed"
     urgent_revision["value"] = (4, 5, 6)
     urgent_reason["value"] = "market_price_advanced"
     prepared_receipt = captured["prepare_event"](
@@ -12778,6 +12826,15 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     missing_exact_adapter = make_adapter(
         completion_reserved=True,
         completion_sell_keys=frozenset({("position-missing", "missing-token")}),
+        completion_requests=(SimpleNamespace(
+            schema_version=4,
+            position_id="position-missing",
+            held_token_id="missing-token",
+            family=("missing-family", "2026-07-11", "high"),
+            completion_deadline_at=(
+                _dt.datetime.now(_dt.timezone.utc)+_dt.timedelta(seconds=60)
+            ).isoformat(),
+        ),),
     )
     missing_exact_adapter.process_global_batch(
         (event,),
@@ -12826,7 +12883,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
 
     urgent_revision["value"] = (13, 14, 15)
     urgent_reason["value"] = "day0_extreme_event_committed"
-    assert captured["epoch_superseded"]() is True
+    assert captured["epoch_superseded"]() == "wake:day0_extreme_event_committed"
 
 
 def test_live_adapter_reuses_unchanged_probability_and_evicts_changed_family(
@@ -21051,7 +21108,10 @@ def test_global_preflight_jit_worse_curve_replaces_and_reauctions(monkeypatch):
     ("execution_mode", "bid_price", "bid_size", "expected_accepted"),
     (
         ("TAKER_LIMIT", "0.04", "100", False),
-        ("TAKER_LIMIT", "0.05", "100", True),
+        ("TAKER_LIMIT", "0.06", "100", True),
+        # The inclusive venue band permits .05 SELL, but new-risk BUY needs
+        # strictly greater pre-cliff liquidation capacity on its own law.
+        ("TAKER_LIMIT", "0.05", "100", False),
         # Selection admitted 20 shares on an earlier book; submit JIT sees
         # only six legal unwind shares and must force a new decision.
         ("TAKER_LIMIT", "0.05", "6", False),
