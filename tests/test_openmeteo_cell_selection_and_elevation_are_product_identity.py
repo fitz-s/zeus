@@ -490,7 +490,7 @@ def _normal_localproof_recovery(tmp_path, monkeypatch, metric):
     assert again["downloaded"]["openmeteo_transport_fetch_count"] == 0
     assert _critical_scopes_missing_current_anchor(scope["forecast_db"], [actual_family], cycle, decision_time=datetime.now(UTC)) == ()
     return SimpleNamespace(city=city, scope=scope, cycle=cycle, output=output, original=original,
-        aid=aid, original_row=original_row, before=before, report=report, bound=resolved)
+        aid=aid, original_row=original_row, before=before, report=report, bound=resolved, args=args)
 
 
 @pytest.mark.parametrize("metric", ("high", "low"))
@@ -531,6 +531,16 @@ def test_anchor_preflight_keeps_ordinary_owned_body_when_no_local_proof_is_neede
             decision_at=datetime.now(UTC)) is None
     family = (city.name,scope["target_date"],metric)
     assert _critical_scopes_missing_current_anchor(scope["forecast_db"],[family],cycle,decision_time=datetime.now(UTC)) == ()
+    assert _critical_scopes_missing_current_anchor(scope["forecast_db"],[family],cycle,
+        decision_time=manifest.captured_at-timedelta(microseconds=1)) == (family,)
+    with sqlite3.connect(scope["forecast_db"]) as conn:
+        recorded = datetime.fromisoformat(conn.execute(
+            "SELECT recorded_at FROM raw_forecast_artifacts WHERE artifact_id=?", (aid,)).fetchone()[0])
+    assert _critical_scopes_missing_current_anchor(scope["forecast_db"],[family],cycle,
+        decision_time=recorded-timedelta(microseconds=1)) == (family,)
+    from src.data.replacement_forecast_cycle_policy import replacement_readiness_expires_at
+    assert _critical_scopes_missing_current_anchor(scope["forecast_db"],[family],cycle,
+        decision_time=replacement_readiness_expires_at(cycle)) == (family,)
 
 
 @pytest.mark.parametrize("variant", ("date_objects", "utc_z", "same_offset", "different_instant", "foreign_day", "naive", "unknown_type"))
@@ -569,7 +579,8 @@ def test_frozen_precision_identity_normalizes_only_explicit_same_date_and_instan
 
 
 @pytest.mark.parametrize("metric", ("high", "low"))
-def test_same_byte_local_proof_normal_seed_materializer_and_public_reset(tmp_path, monkeypatch, metric):
+@pytest.mark.parametrize("missing_transport", (None, "precision", "manifest"))
+def test_same_byte_local_proof_normal_seed_materializer_and_public_reset(tmp_path, monkeypatch, metric, missing_transport):
     """Real local acquisition/seed/public chain; controlled 51 ENS, not GRIB."""
     from src.data import bayes_precision_fusion_download as dl
     from tests.test_replacement_forecast_materializer import _low_revision_authority_conn, _bins, _BaselineBundle, _Evidence
@@ -621,6 +632,37 @@ def test_same_byte_local_proof_normal_seed_materializer_and_public_reset(tmp_pat
         targets=[dl.BayesPrecisionFusionDownloadTarget(city=city.name,metric=metric,target_date=target.isoformat(),
             lead_days=1,latitude=city.lat,longitude=city.lon,timezone_name=city.timezone)],
         models=("icon_global","ukmo_global_deterministic_10km"),include_previous_runs=False,prune_after=False)
+    if missing_transport is not None:
+        import scripts.download_replacement_forecast_current_targets as producer
+        from src.data.replacement_forecast_production import _critical_scopes_missing_current_anchor
+        manifest_path = Path(context.report["written_manifests"][0])
+        transport = json.loads(manifest_path.read_bytes())
+        precision_path = Path(transport["product_metadata"]["precision_metadata_json"])
+        lost = precision_path if missing_transport == "precision" else manifest_path
+        lost.unlink()
+        family = (city.name,target.isoformat(),metric)
+        assert _critical_scopes_missing_current_anchor(db,[family],cycle,decision_time=datetime.now(UTC),
+            raw_manifest_dir=context.output) == (family,)
+        import src.data.replacement_forecast_production as production
+        # Only the provider cycle probe is controlled; real market-root,
+        # preflight, downloader and canonical reuse must reach restoration.
+        monkeypatch.setattr(production,"_probe_resolved_available_cycle",lambda **kwargs: cycle)
+        wrapped = production._download_replacement_forecast_current_targets_if_needed({
+            "forecast_db":db,"raw_manifest_dir":context.output,"download_release_lag_hours":.001})
+        assert wrapped["status"] != "CURRENT_TARGETS_ALREADY_COVERED", wrapped
+        assert wrapped["reused_canonical_artifact_ids"] == [context.aid]
+        assert wrapped["local_proof_artifact_ids"] == []
+        assert wrapped["downloaded"]["openmeteo_transport_fetch_count"] == 0
+        assert lost.is_file()
+        assert _critical_scopes_missing_current_anchor(db,[family],cycle,decision_time=datetime.now(UTC),
+            raw_manifest_dir=context.output) == ()
+        repeated = producer.download_current_target_raw_inputs(**context.args)
+        assert repeated["reused_canonical_artifact_ids"] == [context.aid]
+        assert repeated["local_proof_artifact_ids"] == []
+        assert repeated["downloaded"]["openmeteo_transport_fetch_count"] == 0
+        already = production._download_replacement_forecast_current_targets_if_needed({
+            "forecast_db":db,"raw_manifest_dir":context.output,"download_release_lag_hours":.001})
+        assert already["status"] == "CURRENT_TARGETS_ALREADY_COVERED", already
     cut = datetime.now(UTC)
     from src.data.replacement_current_value_serving import read_current_instrument_values
     assert {"icon_global", "ukmo_global_deterministic_10km"} <= set(read_current_instrument_values(
@@ -701,6 +743,71 @@ def test_same_byte_local_proof_normal_seed_materializer_and_public_reset(tmp_pat
     assert not any(item.ok for item in public(reset_posterior,reset_readiness,expiry+timedelta(microseconds=1)))
     assert tuple(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?",(context.aid,)).fetchone()) == context.original_row
     conn.close()
+
+
+@pytest.mark.parametrize("metric",("high","low"))
+@pytest.mark.parametrize("fault",("precision_json","manifest_json","symlink","foreign_output","old_cut","enospc","concurrent_foreign","concurrent_same"))
+def test_normal_localproof_transport_restores_only_owned_missing_complete_files(tmp_path,monkeypatch,metric,fault):
+    import errno
+    import scripts.download_replacement_forecast_current_targets as producer
+    from src.data.raw_forecast_artifact_manifest import read_anchor_local_proof
+    context = _normal_localproof_recovery(tmp_path,monkeypatch,metric)
+    manifest = Path(context.report["written_manifests"][0])
+    precision = Path(json.loads(manifest.read_bytes())["product_metadata"]["precision_metadata_json"])
+    original_manifest = manifest.read_bytes()
+    original_precision = precision.read_bytes()
+    with sqlite3.connect(context.scope["forecast_db"]) as conn:
+        original_count=conn.execute("SELECT count(*) FROM raw_forecast_artifacts").fetchone()[0]
+    if fault == "precision_json":
+        precision.write_bytes(b"{")
+    elif fault == "manifest_json":
+        manifest.write_bytes(b"{")
+    elif fault == "symlink":
+        precision.unlink()
+        precision.symlink_to(tmp_path/"foreign-precision.json")
+    elif fault in ("enospc","concurrent_foreign","concurrent_same","old_cut","foreign_output"):
+        precision.unlink()
+    if fault == "enospc":
+        monkeypatch.setattr(producer.os,"link",lambda *a: (_ for _ in ()).throw(OSError(errno.ENOSPC,"no space")))
+    elif fault in ("concurrent_foreign","concurrent_same"):
+        link = producer.os.link
+        def competing_publish(source,target):
+            Path(target).write_bytes(b"{}" if fault=="concurrent_foreign" else original_precision)
+            return link(source,target)
+        monkeypatch.setattr(producer.os,"link",competing_publish)
+    if fault in ("old_cut","foreign_output"):
+        with sqlite3.connect(context.scope["forecast_db"]) as conn:
+            evidence = read_anchor_local_proof(conn,context.aid,city=context.city.name,
+                target_date=context.scope["target_date"],metric=metric,decision_at=datetime.now(UTC))
+        raw_dir = context.output/context.cycle.strftime("%Y%m%dT%H%M%SZ")
+        if fault=="foreign_output":
+            raw_dir=tmp_path/"foreign-output"/raw_dir.name
+            raw_dir.mkdir(parents=True)
+        with pytest.raises(ValueError):
+            producer._anchor_local_proof_transport(evidence,raw_dir=raw_dir,city=context.city.name,
+                target_date=context.scope["target_date"],metric=metric,cycle=context.cycle,
+                decision_time=context.before if fault=="old_cut" else datetime.now(UTC),restore_missing=True)
+        assert not precision.exists()
+    elif fault=="concurrent_same":
+        report=producer.download_current_target_raw_inputs(**context.args)
+        assert report["reused_canonical_artifact_ids"]==[context.aid]
+        assert report["local_proof_artifact_ids"]==[]
+        assert precision.read_bytes()==original_precision
+    else:
+        with pytest.raises(RuntimeError,match="anchor transport restoration failed"):
+            producer.download_current_target_raw_inputs(**context.args)
+        if fault=="enospc":
+            assert not precision.exists()
+        elif fault=="symlink":
+            assert precision.is_symlink() and not precision.exists()
+        else:
+            assert (manifest if fault=="manifest_json" else precision).read_bytes() == (
+                b"{}" if fault=="concurrent_foreign" else b"{")
+    if fault!="manifest_json":
+        assert manifest.read_bytes()==original_manifest
+    with sqlite3.connect(context.scope["forecast_db"]) as conn:
+        assert tuple(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?",(context.aid,)).fetchone())==context.original_row
+        assert conn.execute("SELECT count(*) FROM raw_forecast_artifacts").fetchone()[0] == original_count
 
 
 @pytest.mark.parametrize("metric",("high","low"))

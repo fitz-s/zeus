@@ -708,6 +708,7 @@ def _critical_scopes_missing_current_anchor(
     scopes: Sequence[tuple[str, str, str]],
     cycle: datetime,
     *, decision_time: datetime | None = None, deadline_monotonic: float | None = None,
+    raw_manifest_dir: Path | None = None,
 ) -> tuple[tuple[str, str, str], ...] | None:
     """Return exact scoped targets without materializable canonical raw at ``cycle``."""
 
@@ -717,11 +718,15 @@ def _critical_scopes_missing_current_anchor(
     from scripts.download_replacement_forecast_current_targets import (  # noqa: PLC0415
         _current_target_artifact_source_proof,
         _current_target_payload_file_materializable,
+        _anchor_local_proof_transport,
     )
     from src.config import cities_by_name  # noqa: PLC0415
     from src.state.db import _connect_read_only  # noqa: PLC0415
     if decision_time is None or decision_time.tzinfo is None or decision_time.utcoffset() is None:
         return None
+    from src.data.replacement_forecast_cycle_policy import replacement_readiness_expires_at
+    if decision_time >= replacement_readiness_expires_at(cycle):
+        return tuple(scopes)
 
     try:
         conn = _connect_read_only(forecast_db, deadline_monotonic=deadline_monotonic)
@@ -741,7 +746,8 @@ def _critical_scopes_missing_current_anchor(
                 rows = conn.execute(
                     """
                     SELECT artifact_path, sha256, byte_size,
-                           artifact_metadata_json, artifact_id
+                           artifact_metadata_json, artifact_id,
+                           source_available_at, captured_at, recorded_at
                     FROM raw_forecast_artifacts
                     WHERE source_id = ?
                       AND product_id = ?
@@ -770,6 +776,15 @@ def _critical_scopes_missing_current_anchor(
                     _check_source_preflight_deadline(deadline_monotonic)
                     if city_config is None:
                         break
+                    try:
+                        original_clocks = [datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                            for value in row[5:8]]
+                        if (any(value.tzinfo is None or value.utcoffset() is None for value in original_clocks)
+                            or [cycle, *original_clocks] != sorted([cycle, *original_clocks])
+                            or any(value > decision_time for value in original_clocks)):
+                            continue
+                    except (TypeError, ValueError):
+                        continue
                     artifact_path = Path(str(row[0]))
                     from src.data.raw_forecast_artifact_manifest import read_anchor_local_proof
                     try:
@@ -799,6 +814,14 @@ def _critical_scopes_missing_current_anchor(
                             continue
                         if not guard.passable_for_live_materialization:
                             continue
+                        if raw_manifest_dir is not None:
+                            try:
+                                if not _anchor_local_proof_transport(local,
+                                    raw_dir=raw_manifest_dir/cycle.strftime("%Y%m%dT%H%M%SZ"), city=city,
+                                    target_date=target_date,metric=metric,cycle=cycle,decision_time=decision_time):
+                                    continue
+                            except (OSError,TypeError,ValueError,KeyError):
+                                continue
                     if not _current_target_payload_file_materializable(
                         artifact_path,
                         city_timezone=city_config.timezone,
@@ -1083,6 +1106,7 @@ def _download_replacement_forecast_current_targets_if_needed(
         required_scopes,
         available_cycle,
         decision_time=decision_time,
+        raw_manifest_dir=Path(str(output_dir)),
         **({"deadline_monotonic": deadline} if deadline is not None else {}),
     )
     _check_source_preflight_deadline(deadline)
@@ -4195,6 +4219,7 @@ def _recover_held_common_cycle_anchors_if_needed(
                 scopes,
                 cycle,
                 decision_time=now,
+                raw_manifest_dir=Path(str(output_dir)),
                 **deadline_kwargs,
             )
         except TimeoutError:
@@ -4276,6 +4301,7 @@ def _recover_held_common_cycle_anchors_if_needed(
                         missing_before,
                         cycle,
                         decision_time=datetime.now(timezone.utc),
+                        raw_manifest_dir=Path(str(output_dir)),
                         **deadline_kwargs,
                     )
                 except TimeoutError:

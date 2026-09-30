@@ -829,6 +829,115 @@ def _current_target_payload_file_materializable(
     )
 
 
+def _anchor_local_proof_transport(
+    local: object,
+    *, raw_dir: Path, city: str, target_date: str, metric: str,
+    cycle: datetime, decision_time: datetime, restore_missing: bool = False,
+) -> bool:
+    """Verify, or restore only missing producer-owned transport from sealed proof.
+
+    SCOPE: this output/cycle and exact family. DRAIN: normal producer republishes
+    missing transport, not evidence. RESET: complete transport is reused without
+    a new proof, capture or source clock; existing bad files remain explicit debt.
+    """
+    from src.data.replacement_forecast_cycle_policy import anchor_precision_metadata_identity
+
+    if raw_dir.is_symlink() or raw_dir.parent.is_symlink() or dict(local.scope) != {
+        "city": city, "target_date": target_date, "metric": metric,
+    }:
+        raise ValueError("anchor transport is not this producer's output/family")
+    body = local.original_body_artifact
+    if (datetime.fromisoformat(body["source_cycle_time"]) != cycle
+        or any(datetime.fromisoformat(body[key]) > decision_time for key in
+               ("source_available_at", "captured_at", "recorded_at"))
+        or local.recorded_at > decision_time or local.local_possessed_at > decision_time):
+        raise ValueError("anchor transport possession is after decision")
+    expected_body = raw_dir / (
+        f"openmeteo_{_safe_name(city)}_{target_date}_{metric}_{cycle.strftime('%Y%m%dT%H%M%SZ')}.json"
+    )
+    owned = Path(local.owned_body["path"])
+    suffix = owned.name.removeprefix(f"{expected_body.stem}.geometry-").removesuffix(".json")
+    if (owned.is_symlink() or owned.parent.resolve() != raw_dir.resolve()
+        or owned.name != expected_body.name and not (
+            owned.name == f"{expected_body.stem}.geometry-{suffix}.json"
+            and len(suffix) == 12 and all(c in "0123456789abcdef" for c in suffix))):
+        raise ValueError("anchor transport body is outside owned cycle path")
+    precision_path = raw_dir / f"openmeteo_precision_{_safe_name(city)}_{target_date}_{metric}.json"
+    manifest_path = raw_dir.parent / (
+        f"{OPENMETEO_SOURCE_ID}.{body['data_version']}.{cycle.strftime('%Y%m%dT%H%M%SZ')}."
+        f"{body['sha256'][:12]}.{_safe_name(city)}.manifest.json"
+    )
+    metadata = {**json.loads(body["artifact_metadata_json"]),
+        "openmeteo_payload_json": str(owned), "precision_metadata_json": str(precision_path)}
+    manifest = RawForecastArtifactManifest(
+        source_id=body["source_id"], product_id=body["product_id"], data_version=body["data_version"],
+        artifact_path=str(owned), sha256=body["sha256"], byte_size=body["byte_size"],
+        source_cycle_time=body["source_cycle_time"], source_available_at=body["source_available_at"],
+        captured_at=body["captured_at"], request_url=body["request_url"],
+        request_params=json.loads(body["request_params_json"]), product_metadata=metadata,
+    )
+    manifest.verify_artifact()
+    # Validate every existing file before publishing anything. An existing
+    # corrupt/new truth is never overwritten using an older frozen proof.
+    missing: list[tuple[Path, object]] = []
+    for path, payload in ((precision_path, dict(local.precision_metadata)), (manifest_path, manifest.to_dict())):
+        if path.is_symlink():
+            raise ValueError("anchor transport path is a symlink")
+        if not path.exists():
+            missing.append((path, payload))
+            continue
+        if not path.is_file():
+            raise ValueError("anchor transport path is not a regular file")
+        actual = json.loads(path.read_bytes())
+        if path == precision_path:
+            if anchor_precision_metadata_identity(OpenMeteoIfs9PrecisionMetadata(**actual)) != anchor_precision_metadata_identity(
+                OpenMeteoIfs9PrecisionMetadata(**local.precision_metadata)):
+                raise ValueError("anchor transport precision differs from frozen proof")
+        else:
+            existing = read_manifest(path)
+            existing.verify_artifact()
+            existing_meta = dict(existing.product_metadata)
+            if (existing.source_id != manifest.source_id or existing.product_id != manifest.product_id
+                or existing.data_version != manifest.data_version or existing.source_cycle_time != cycle
+                or existing.sha256 != manifest.sha256 or existing.byte_size != manifest.byte_size
+                or existing.request_url != manifest.request_url or dict(existing.request_params) != dict(manifest.request_params)
+                or Path(existing.artifact_path).resolve() != owned.resolve()
+                or existing.source_available_at > decision_time or existing.captured_at > decision_time
+                or any(existing_meta.get(key) != value for key, value in local.scope.items())
+                or existing_meta.get("openmeteo_payload_json") != str(owned)
+                or existing_meta.get("precision_metadata_json") != str(precision_path)):
+                raise ValueError("anchor transport manifest differs from canonical proof")
+    if missing and not restore_missing:
+        return False
+    for path, payload in missing:
+        # Publish an fsynced complete file with no replacement. A concurrent
+        # writer, symlink or ENOSPC cannot be reported as successful restoration.
+        data = (json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n").encode()
+        fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                # Re-prove a concurrent complete publication. Existence alone
+                # is not progress; partial, corrupt or foreign output is debt.
+                if _anchor_local_proof_transport(local,raw_dir=raw_dir,city=city,target_date=target_date,
+                    metric=metric,cycle=cycle,decision_time=decision_time):
+                    return True
+                raise
+            directory = os.open(str(path.parent), os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            os.unlink(temporary)
+    return True
+
+
 def _canonical_current_target_reuse(
     forecast_db: Path,
     *,
@@ -935,6 +1044,13 @@ def _canonical_current_target_reuse(
             if local is False:
                 continue
             if local is not None:
+                try:
+                    _anchor_local_proof_transport(local, raw_dir=raw_dir, city=city, target_date=target_date,
+                        metric=metric, cycle=cycle, decision_time=decision_time, restore_missing=True)
+                except (OSError, TypeError, ValueError, KeyError) as exc:
+                    # Do not turn corrupt transport or a failed atomic publish
+                    # into fresh HTTP / an overwrite by the ordinary path.
+                    raise RuntimeError(f"anchor transport restoration failed:{key}") from exc
                 reused[key] = int(row["artifact_id"])
                 continue
             expected_path = raw_dir / (
